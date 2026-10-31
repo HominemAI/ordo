@@ -12,13 +12,15 @@
 //! | Import | What it does |
 //! |---|---|
 //! | `fetch(ptr, len) -> i32` | one outbound request, as JSON; the reply length, negative for a refusal |
+//! | `mac(req, req_len, data, data_len) -> i32` | an HMAC keyed by a secret: the request as JSON, the data as bytes; the reply length, negative for a refusal |
 //! | `take_reply(ptr)` | copies the pending reply into guest memory |
 //! | `log(level, ptr, len)` | one log line; the host scrubs and caps it |
 //! | `result(ptr, len)` | the call's answer, as JSON |
 //! | `now_ms() -> f64` | the wall clock, for `Date` |
 //!
 //! There is no socket, file, environment or secret value here. A secret is a
-//! handle naming the secret; the host fills the value in on the way out.
+//! handle naming the secret; the host fills the value in on the way out, or
+//! uses it as an HMAC key and hands back only the MAC.
 
 mod web;
 
@@ -36,6 +38,7 @@ use boa_engine::{
 #[link(wasm_import_module = "ordo")]
 extern "C" {
     fn fetch(ptr: *const u8, len: usize) -> i32;
+    fn mac(req_ptr: *const u8, req_len: usize, data_ptr: *const u8, data_len: usize) -> i32;
     fn take_reply(ptr: *mut u8);
     fn log(level: i32, ptr: *const u8, len: usize);
     fn result(ptr: *const u8, len: usize);
@@ -156,7 +159,8 @@ fn boot() -> JsResult<Context> {
         .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
     let mut init = boa_engine::object::ObjectInitializer::new(&mut ctx);
     init.function(NativeFunction::from_fn_ptr(native_fetch), js_string!("fetch"), 1)
-        .function(NativeFunction::from_fn_ptr(native_log), js_string!("log"), 2);
+        .function(NativeFunction::from_fn_ptr(native_log), js_string!("log"), 2)
+        .function(NativeFunction::from_fn_ptr(native_mac), js_string!("hostMac"), 4);
     web::install(&mut init);
     let native = init.build();
     ctx.global_object().set(
@@ -211,12 +215,7 @@ fn native_fetch(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
     let req = args.get_or_undefined(0).to_string(ctx)?.to_std_string_escaped();
     // SAFETY: a pointer and length into a live string.
     let n = unsafe { fetch(req.as_ptr(), req.len()) };
-    let len = n.unsigned_abs() as usize;
-    let mut buf = vec![0u8; len];
-    if len > 0 {
-        // SAFETY: the buffer holds exactly the length the host reported.
-        unsafe { take_reply(buf.as_mut_ptr()) };
-    }
+    let buf = take(n);
     let text = String::from_utf8_lossy(&buf).into_owned();
     let o = boa_engine::object::ObjectInitializer::new(ctx).build();
     let key = if n >= 0 {
@@ -225,6 +224,44 @@ fn native_fetch(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<Js
         js_string!("refused")
     };
     o.set(key, JsValue::from(JsString::from(text)), false, ctx)?;
+    Ok(o.into())
+}
+
+/// The pending reply of `fetch` or `mac`, `n` bytes long, as a copy.
+fn take(n: i32) -> Vec<u8> {
+    let len = n.unsigned_abs() as usize;
+    let mut buf = vec![0u8; len];
+    if len > 0 {
+        // SAFETY: the buffer holds exactly the length the host reported.
+        unsafe { take_reply(buf.as_mut_ptr()) };
+    }
+    buf
+}
+
+/// `__ordo_native.hostMac(requestJson, buffer, offset, length)
+///   -> { ok: ArrayBuffer } | { refused: errorJson }`
+///
+/// An HMAC keyed by a secret. The key never enters this module: the host
+/// opens it, computes, and sends back the MAC, or one byte for a verify.
+fn native_mac(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let req = args.get_or_undefined(0).to_string(ctx)?.to_std_string_escaped();
+    let data = web::bytes(args, 1, ctx)?;
+    // SAFETY: pointers and lengths into a live string and a live vector.
+    let n = unsafe { mac(req.as_ptr(), req.len(), data.as_ptr(), data.len()) };
+    let buf = take(n);
+    let o = boa_engine::object::ObjectInitializer::new(ctx).build();
+    if n >= 0 {
+        let v = web::array_buffer(buf, ctx)?;
+        o.set(js_string!("ok"), v, false, ctx)?;
+    } else {
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        o.set(
+            js_string!("refused"),
+            JsValue::from(JsString::from(text)),
+            false,
+            ctx,
+        )?;
+    }
     Ok(o.into())
 }
 

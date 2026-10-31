@@ -13,7 +13,7 @@ description = "Runs a backend function: wasmtime, a fresh instance per call, lim
 # workspace build needs no wasm toolchain.
 [dependencies]
 # Only what a host for one JS engine needs. No `cache` (it pulls a disk cache
-# and its config parser), no `component-model`, no WASI: the guest gets six
+# and its config parser), no `component-model`, no WASI: the guest gets seven
 # imports and nothing else. `cranelift` compiles; `async` lets `fetch` await
 # the network on a fiber without blocking a thread.
 wasmtime = { version = "50", default-features = false, features = ["runtime", "cranelift", "async", "std", "parallel-compilation"] }

@@ -6,5 +6,13 @@
 //! on, so the kernel checks them again. Everything after that (the deny
 //! list, a secret's bound hosts, filling the value in, body caps, TLS,
 //! replacing a value the far end echoes back) is the kernel's.
+//!
+//! An HMAC keyed by a secret (`crypto.subtle` with an `importKey("secret",
+//! ...)` key) arrives at [`FnFetch::mac`] the same way: the function host
+//! checks the name against `secrets`, the kernel checks it again, opens the
+//! value and hands back only the MAC or a yes or no.
 
-pub use ordo_egress::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue};
+pub use ordo_egress::{
+    FetchError, FnFetch, FnFetchRequest, FnFetchResponse, FnMacAnswer, FnMacRequest, HeaderValue,
+    MacHash,
+};

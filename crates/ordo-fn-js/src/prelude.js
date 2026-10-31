@@ -103,6 +103,16 @@
     }
   }
 
+  // The host refused to use a secret as an HMAC key: not listed, not
+  // declared, or not set. `code` is the same reason word fetch gives.
+  class SecretRefused extends Error {
+    constructor(code, message) {
+      super(message);
+      this.name = "SecretRefused";
+      this.code = code;
+    }
+  }
+
   function fetch(resource, init) {
     try {
       init = init || {};
@@ -293,7 +303,8 @@
   }
 
   // A key's bytes live here, out of the function's reach. A CryptoKey
-  // object is only a handle.
+  // object is only a handle. A key imported from a secret holds only the
+  // secret's name: the host keeps the value and computes the HMAC.
   const KEYS = new WeakMap();
   class CryptoKey {
     constructor() {
@@ -311,6 +322,36 @@
     });
     KEYS.set(k, { bytes, hash });
     return Object.freeze(k);
+  }
+  function makeSecretKey(secret, hash, usages) {
+    const k = Object.create(CryptoKey.prototype);
+    const ro = (value) => ({ value, enumerable: true });
+    Object.defineProperties(k, {
+      type: ro("secret"),
+      extractable: ro(false),
+      algorithm: ro(Object.freeze({ name: "HMAC", hash: Object.freeze({ name: hash }) })),
+      usages: ro(Object.freeze(usages.slice())),
+    });
+    KEYS.set(k, { secret, hash });
+    return Object.freeze(k);
+  }
+  // The secret a key names: a name, or a handle from ctx.secret(name).
+  function secretName(keyData) {
+    if (keyData instanceof SecretHandle) return keyData[SECRET].name;
+    if (typeof keyData === "string" && keyData !== "") return keyData;
+    throw new TypeError('importKey("secret", ...): name the secret, or pass ctx.secret(name)');
+  }
+  const hexOf = (u) => Array.from(u, (x) => x.toString(16).padStart(2, "0")).join("");
+  // Sign (signature undefined) or verify with the host holding the key.
+  function hostMac(k, data, signature) {
+    const req = { secret: k.secret, hash: k.hash };
+    if (signature !== undefined) req.signature = hexOf(signature);
+    const reply = native.hostMac(JSON.stringify(req), data.buffer, data.byteOffset, data.byteLength);
+    if (reply.refused !== undefined) {
+      const e = JSON.parse(reply.refused);
+      throw new SecretRefused(e.code, e.message);
+    }
+    return reply.ok;
   }
   function checkUsages(usages) {
     if (!Array.isArray(usages) || usages.length === 0) {
@@ -339,7 +380,23 @@
       return native.digest(h, u.buffer, u.byteOffset, u.byteLength);
     },
     async importKey(format, keyData, algorithm, extractable, usages) {
-      if (format !== "raw") throw notSupported("importKey: only the raw format is supported");
+      if (format === "secret") {
+        hmacOnly(algorithm);
+        const h = hashName(algorithm.hash);
+        checkUsages(usages);
+        if (extractable) {
+          throw new DOMException(
+            "importKey: a secret's key stays in the host, so it cannot be extractable; pass false",
+            "InvalidAccessError");
+        }
+        if (algorithm.length !== undefined) {
+          throw new DOMException("importKey: a secret's key takes no length", "DataError");
+        }
+        return makeSecretKey(secretName(keyData), h, usages);
+      }
+      if (format !== "raw") {
+        throw notSupported('importKey: the raw and "secret" formats are supported');
+      }
       hmacOnly(algorithm);
       const h = hashName(algorithm.hash);
       checkUsages(usages);
@@ -364,18 +421,25 @@
       if (format !== "raw") throw notSupported("exportKey: only the raw format is supported");
       const k = KEYS.get(key);
       if (!k) throw new TypeError("expected a CryptoKey");
+      if (k.secret !== undefined) {
+        throw new DOMException(
+          "the key is secret " + k.secret + ", held by the host; its value never enters the function",
+          "InvalidAccessError");
+      }
       if (!key.extractable) throw new DOMException("the key is not extractable", "InvalidAccessError");
       return k.bytes.slice().buffer;
     },
     async sign(algorithm, key, data) {
       const k = keyFor(key, "sign", algorithm);
       const u = view(data, "sign: the data");
+      if (k.secret !== undefined) return hostMac(k, u);
       return native.hmacSign(k.hash, k.bytes.buffer, 0, k.bytes.length, u.buffer, u.byteOffset, u.byteLength);
     },
     async verify(algorithm, key, signature, data) {
       const k = keyFor(key, "verify", algorithm);
       const s = view(signature, "verify: the signature");
       const u = view(data, "verify: the data");
+      if (k.secret !== undefined) return new Uint8Array(hostMac(k, u, s))[0] === 1;
       return native.hmacVerify(
         k.hash, k.bytes.buffer, 0, k.bytes.length,
         s.buffer, s.byteOffset, s.byteLength,

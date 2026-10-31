@@ -13,9 +13,10 @@
 //! - **Limits** (plan §9): memory through a resource limiter, CPU as fuel, and
 //!   wall time through epoch interruption plus a timeout around the network
 //!   waits.
-//! - **Six imports** and nothing else: `fetch` (through [`FnFetch`]), `take_reply`, `log`,
-//!   `result`, `now_ms`, `random`. No file, socket, environment or secret
-//!   value is reachable.
+//! - **Seven imports** and nothing else: `fetch` and `mac` (both through
+//!   [`FnFetch`]), `take_reply`, `log`, `result`, `now_ms`, `random`. No
+//!   file, socket, environment or secret value is reachable. `mac` signs or
+//!   verifies an HMAC with a secret as the key; the key stays in the host.
 //!
 //! The door (`ordo-api`) does sign-in, access, quotas, idempotency and pause
 //! before a call gets here, and turns an [`FnError`] into an HTTP answer.
@@ -40,7 +41,10 @@ use wasmtime_wizer::{InstanceState, SnapshotVal, ValType, Wizer};
 
 pub use cache::{CacheOutcome, CacheWrite};
 pub use error::{BusyScope, FnError, Limit, Remedy};
-pub use seam::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue};
+pub use seam::{
+    FetchError, FnFetch, FnFetchRequest, FnFetchResponse, FnMacAnswer, FnMacRequest, HeaderValue,
+    MacHash,
+};
 
 /// The engine module, built by `scripts/build-fn-engine.sh`.
 pub const ENGINE_WASM: &[u8] = include_bytes!("../engine/ordo_fn_js.wasm");
@@ -587,6 +591,20 @@ async fn run_in(
     let raw = guest.result.take().ok_or_else(|| FnError::Engine {
         message: "the engine returned no answer".into(),
     })?;
+    // A live secret value in the answer is replaced like one in a log
+    // line. A replacement that leaves the answer unreadable refuses it.
+    let raw = match &guest.scrub {
+        Some(f) => {
+            let text = String::from_utf8_lossy(&raw);
+            let clean = f.scrub(&guest.space, &text);
+            if clean == text {
+                raw
+            } else {
+                clean.into_bytes()
+            }
+        }
+        None => raw,
+    };
     let answer: Value = serde_json::from_slice(&raw).map_err(|e| FnError::BadOutput {
         reason: format!("not JSON: {e}"),
     })?;
@@ -820,6 +838,36 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
             })
         },
     )?;
+    linker.func_wrap_async(
+        "ordo",
+        "mac",
+        |mut caller: Caller<'_, Guest>,
+         (req_ptr, req_len, data_ptr, data_len): (i32, i32, i32, i32)| {
+            Box::new(async move {
+                let req = guest_bytes(&mut caller, req_ptr, req_len).unwrap_or_default();
+                let data = guest_bytes(&mut caller, data_ptr, data_len).unwrap_or_default();
+                let reply = guest_mac(caller.data_mut(), &req, data).await;
+                let g = caller.data_mut();
+                let (bytes, refused) = match reply {
+                    Ok(b) => (b, false),
+                    Err(e) => {
+                        g.issued.push(e.code.clone());
+                        let b = serde_json::json!({ "code": e.code, "message": e.message })
+                            .to_string()
+                            .into_bytes();
+                        (b, true)
+                    }
+                };
+                let n = bytes.len() as i32;
+                g.reply = bytes;
+                if refused {
+                    -n
+                } else {
+                    n
+                }
+            })
+        },
+    )?;
     linker.func_wrap(
         "ordo",
         "take_reply",
@@ -999,6 +1047,76 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
     })
     .to_string()
     .into_bytes())
+}
+
+/// The wire shape of a guest HMAC request, as the prelude writes it. The
+/// data crosses beside it as raw bytes.
+#[derive(serde::Deserialize)]
+struct WireMac {
+    secret: String,
+    hash: String,
+    /// Lowercase hex. Absent signs; present verifies.
+    #[serde(default)]
+    signature: Option<String>,
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// One HMAC from the guest, keyed by a secret: checked against the
+/// declaration, then handed to the seam. The reply is the MAC's bytes, or
+/// one byte, 1 or 0, for a verify.
+async fn guest_mac(g: &mut Guest, raw: &[u8], data: Vec<u8>) -> Result<Vec<u8>, Refused> {
+    let req: WireMac = serde_json::from_slice(raw)
+        .map_err(|e| Refused::new("bad_request", format!("a malformed HMAC request: {e}")))?;
+    let hash = MacHash::named(&req.hash).ok_or_else(|| {
+        Refused::new(
+            "bad_request",
+            format!(
+                "unsupported hash {}; SHA-1, SHA-256, SHA-384 and SHA-512 are supported",
+                req.hash
+            ),
+        )
+    })?;
+    if !g.secrets.contains(&req.secret) {
+        let e = FetchError::SecretNotListed { name: req.secret };
+        return Err(Refused::new(e.kind(), e.to_string()));
+    }
+    let signature = match req.signature {
+        None => None,
+        Some(hex) => {
+            Some(unhex(&hex).ok_or_else(|| Refused::new("bad_request", "a malformed signature"))?)
+        }
+    };
+    let fetch = g
+        .fetch
+        .clone()
+        .ok_or_else(|| Refused::new("secret_not_listed", "no secret while booting"))?;
+    let space = g.space.clone();
+    let answer = fetch
+        .mac(
+            &space,
+            FnMacRequest {
+                secret: req.secret,
+                hash,
+                data,
+                signature,
+                secrets: g.secrets.clone(),
+            },
+        )
+        .await
+        .map_err(|e| Refused::new(e.kind(), e.to_string()))?;
+    Ok(match answer {
+        FnMacAnswer::Mac(m) => m,
+        FnMacAnswer::Verified(ok) => vec![u8::from(ok)],
+    })
 }
 
 /// The lowercased host of an `https://` URL, or `None`. A URL with user

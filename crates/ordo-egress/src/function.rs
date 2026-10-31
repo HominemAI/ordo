@@ -31,6 +31,15 @@
 //! answer's headers and body, so a host that echoes a request back cannot
 //! hand the value to the function either.
 //!
+//! # HMAC with a secret as the key
+//!
+//! A function signs or verifies an HMAC with a secret by its name
+//! ([`FnFetch::mac`], owner ruling 2026-10-31). The value is opened here,
+//! used as the key, and dropped; only the MAC bytes or a yes or no go back.
+//! The function must list the secret and the program must declare it, as
+//! for a header. A secret declared with no host (`secret hookKey`) is a
+//! signing key: it is used here and sent nowhere.
+//!
 //! # What comes back
 //!
 //! Unlike the sink doors, the answer comes back whole: status, headers and a
@@ -122,12 +131,64 @@ pub struct FnFetchResponse {
     pub body: Vec<u8>,
 }
 
-/// One outbound call from a function. Part of the seam with the function
-/// runtime, which holds an `Arc<dyn FnFetch>`.
+/// A hash for [`FnFetch::mac`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacHash {
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl MacHash {
+    /// `SHA-1`, `SHA-256`, `SHA-384` or `SHA-512`, as Web Crypto names them.
+    pub fn named(name: &str) -> Option<MacHash> {
+        match name {
+            "SHA-1" => Some(MacHash::Sha1),
+            "SHA-256" => Some(MacHash::Sha256),
+            "SHA-384" => Some(MacHash::Sha384),
+            "SHA-512" => Some(MacHash::Sha512),
+            _ => None,
+        }
+    }
+}
+
+/// One HMAC with a secret as the key.
+///
+/// **Not `Debug`.** The data can be a request body the function was given.
+pub struct FnMacRequest {
+    /// The secret whose value is the key.
+    pub secret: String,
+    pub hash: MacHash,
+    pub data: Vec<u8>,
+    /// `None` signs. `Some` verifies these bytes against the MAC.
+    pub signature: Option<Vec<u8>>,
+    /// The function's `secrets` list. A secret not on it is refused.
+    pub secrets: Vec<String>,
+}
+
+/// What [`FnFetch::mac`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FnMacAnswer {
+    /// The MAC, for a sign.
+    Mac(Vec<u8>),
+    /// Whether the signature matched, for a verify. Compared in constant
+    /// time.
+    Verified(bool),
+}
+
+/// What a function reaches outside its instance through the host: an
+/// outbound call, and an HMAC keyed by a secret. Both live here because
+/// the egress kernel is the one holder of a secret's value. Part of the
+/// seam with the function runtime, which holds an `Arc<dyn FnFetch>`.
 #[async_trait]
 pub trait FnFetch: Send + Sync {
     /// Send `req` for a function running in `space`.
     async fn fetch(&self, space: &str, req: FnFetchRequest) -> Result<FnFetchResponse, FetchError>;
+
+    /// Sign or verify `req.data` with the value of `req.secret` as the HMAC
+    /// key, for a function running in `space`. The value never leaves.
+    async fn mac(&self, space: &str, req: FnMacRequest) -> Result<FnMacAnswer, FetchError>;
 }
 
 /// A secret's value, as the host hands it to the kernel.
@@ -300,7 +361,7 @@ impl fmt::Display for FetchError {
             FetchError::SecretUnknown { name } => write!(
                 f,
                 "the program declares no secret `{name}`; declare it with \
-                 `secret {name} for <host>`"
+                 `secret {name} for <host>`, or `secret {name}` for a signing key"
             ),
             FetchError::SecretNotSet { name } => write!(
                 f,
@@ -612,6 +673,61 @@ impl FnFetch for FnEgress {
             Ok(r) => r,
             Err(_) => Err(FetchError::Timeout { after_ms: ms }),
         }
+    }
+
+    async fn mac(&self, space: &str, req: FnMacRequest) -> Result<FnMacAnswer, FetchError> {
+        let name = req.secret.as_str();
+        if !req.secrets.iter().any(|s| s == name) {
+            return Err(FetchError::SecretNotListed {
+                name: name.to_string(),
+            });
+        }
+        if self.secrets.bound_hosts(name).is_none() {
+            return Err(FetchError::SecretUnknown {
+                name: name.to_string(),
+            });
+        }
+        let ms = self.limits.timeout.as_millis() as u64;
+        let key =
+            match tokio::time::timeout(self.limits.timeout, self.secrets.open(space, name)).await {
+                Ok(r) => r?,
+                Err(_) => return Err(FetchError::Timeout { after_ms: ms }),
+            };
+        let Some(key) = key else {
+            return Err(FetchError::SecretNotSet {
+                name: name.to_string(),
+            });
+        };
+        Ok(hmac_with(
+            req.hash,
+            &key.0,
+            &req.data,
+            req.signature.as_deref(),
+        ))
+    }
+}
+
+/// The HMAC of `data` under `key`, or whether `signature` is it. The
+/// comparison is the `hmac` crate's, which takes the same time wherever
+/// the bytes differ.
+fn hmac_with(hash: MacHash, key: &[u8], data: &[u8], signature: Option<&[u8]>) -> FnMacAnswer {
+    use hmac::{Hmac, Mac};
+    macro_rules! run {
+        ($t:ty) => {{
+            // HMAC takes a key of any length, so this cannot fail.
+            let mut m = <Hmac<$t>>::new_from_slice(key).expect("HMAC takes any key length");
+            m.update(data);
+            match signature {
+                None => FnMacAnswer::Mac(m.finalize().into_bytes().to_vec()),
+                Some(sig) => FnMacAnswer::Verified(m.verify_slice(sig).is_ok()),
+            }
+        }};
+    }
+    match hash {
+        MacHash::Sha1 => run!(sha1::Sha1),
+        MacHash::Sha256 => run!(sha2::Sha256),
+        MacHash::Sha384 => run!(sha2::Sha384),
+        MacHash::Sha512 => run!(sha2::Sha512),
     }
 }
 
@@ -977,5 +1093,83 @@ mod tests {
             .filter(|l| l.contains("\"location\""))
             .count();
         assert_eq!(hits, 0);
+    }
+
+    /// `hookKey` is declared with no host and set; `unsetKey` is declared
+    /// and has no value.
+    struct Signing;
+
+    #[async_trait]
+    impl SecretSource for Signing {
+        fn bound_hosts(&self, name: &str) -> Option<Vec<String>> {
+            matches!(name, "hookKey" | "unsetKey").then(Vec::new)
+        }
+        async fn open(&self, _: &str, name: &str) -> Result<Option<SecretBytes>, FetchError> {
+            Ok((name == "hookKey").then(|| SecretBytes::new(b"Jefe".to_vec())))
+        }
+    }
+
+    fn mac_req(secret: &str, signature: Option<Vec<u8>>) -> FnMacRequest {
+        FnMacRequest {
+            secret: secret.into(),
+            hash: MacHash::Sha256,
+            data: b"what do ya want for nothing?".to_vec(),
+            signature,
+            secrets: vec!["hookKey".into(), "unsetKey".into(), "strayKey".into()],
+        }
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_mac_is_keyed_by_the_secret_and_its_value_stays_here() {
+        let e = FnEgress::new(
+            Arc::new(Signing),
+            TlsRoots::webpki(),
+            DenyList::categories_only(),
+        );
+        // RFC 4231 test case 2.
+        let want = unhex("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert_eq!(
+            e.mac("acme", mac_req("hookKey", None)).await.unwrap(),
+            FnMacAnswer::Mac(want.clone())
+        );
+        assert_eq!(
+            e.mac("acme", mac_req("hookKey", Some(want.clone())))
+                .await
+                .unwrap(),
+            FnMacAnswer::Verified(true)
+        );
+        let mut bad = want.clone();
+        bad[31] ^= 1;
+        assert_eq!(
+            e.mac("acme", mac_req("hookKey", Some(bad))).await.unwrap(),
+            FnMacAnswer::Verified(false)
+        );
+        assert_eq!(
+            e.mac("acme", mac_req("hookKey", Some(want[..16].to_vec())))
+                .await
+                .unwrap(),
+            FnMacAnswer::Verified(false)
+        );
+
+        let mut r = mac_req("hookKey", None);
+        r.secrets = vec![];
+        let err = e.mac("acme", r).await.unwrap_err();
+        assert_eq!(err.kind(), "secret_not_listed");
+        let err = e.mac("acme", mac_req("strayKey", None)).await.unwrap_err();
+        assert_eq!(err.kind(), "secret_unknown");
+        let err = e.mac("acme", mac_req("unsetKey", None)).await.unwrap_err();
+        assert_eq!(err.kind(), "secret_not_set");
+        assert!(
+            err.to_string().contains("ordo secret set unsetKey"),
+            "{err}"
+        );
+        assert_eq!(err.action(), FetchAction::Refuse);
     }
 }

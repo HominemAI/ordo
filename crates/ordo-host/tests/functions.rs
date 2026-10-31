@@ -63,6 +63,14 @@ impl FnFetch for Model {
             .into_bytes(),
         })
     }
+
+    async fn mac(
+        &self,
+        _space: &str,
+        _req: ordo_fn::FnMacRequest,
+    ) -> Result<ordo_fn::FnMacAnswer, FetchError> {
+        panic!("this double holds no secret")
+    }
 }
 
 struct Door {
@@ -79,13 +87,31 @@ async fn door(db: &str, extra: &str, extra_code: &[(&str, &str)]) -> Door {
     door_with(db, extra, extra_code, None).await
 }
 
-/// [`door`], with `far_end` set: the real egress kernel over an in-memory
-/// secret store, reaching a TLS listener at that address as [`FAR_HOST`].
+/// The real egress kernel over an in-memory secret store.
+struct Kernel {
+    /// A TLS listener the kernel reaches as [`FAR_HOST`].
+    far_end: Option<std::net::SocketAddr>,
+    /// Values set through the store before the first call.
+    secrets: &'static [(&'static str, &'static str)],
+}
+
+impl Kernel {
+    /// `probeKey` set, the far end at `addr`.
+    fn probe(addr: std::net::SocketAddr) -> Option<Kernel> {
+        Some(Kernel {
+            far_end: Some(addr),
+            secrets: &[("probeKey", VALUE)],
+        })
+    }
+}
+
+/// [`door`], with `kernel` set: the real egress kernel and secret store
+/// in place of the model double.
 async fn door_with(
     db: &str,
     extra: &str,
     extra_code: &[(&str, &str)],
-    far_end: Option<std::net::SocketAddr>,
+    kernel: Option<Kernel>,
 ) -> Door {
     let source = format!("{V2}\n{extra}");
     let f = Arc::new(Fixture::from_source(&source, "").expect("the program compiles"));
@@ -137,24 +163,28 @@ async fn door_with(
     let model = Arc::new(Model {
         seen: Mutex::new(Vec::new()),
     });
-    let (fetch, scrub): (Arc<dyn FnFetch>, Arc<dyn functions::CallScrub>) = match far_end {
+    let (fetch, scrub): (Arc<dyn FnFetch>, Arc<dyn functions::CallScrub>) = match kernel {
         None => (model.clone(), Arc::new(functions::NoCallScrub)),
-        Some(addr) => {
+        Some(k) => {
             let store = Arc::new(ordo_host::secrets::SecretStore::memory(
                 f.keys.clone(),
                 "acme",
             ));
             store.bind(&f.schema.secrets);
-            store
-                .set("probeKey", VALUE.as_bytes(), "test", 1)
-                .await
-                .expect("set");
-            let egress = ordo_egress::FnEgress::new(
+            for (name, value) in k.secrets {
+                store
+                    .set(name, value.as_bytes(), "test", 1)
+                    .await
+                    .expect("set");
+            }
+            let mut egress = ordo_egress::FnEgress::new(
                 store.clone(),
                 ordo_egress::TlsRoots::custom(&[CA.to_vec()]).expect("anchor"),
                 ordo_egress::DenyList::categories_only().permitting_loopback_for_tests(),
-            )
-            .resolving_for_tests(FAR_HOST, addr);
+            );
+            if let Some(addr) = k.far_end {
+                egress = egress.resolving_for_tests(FAR_HOST, addr);
+            }
             (Arc::new(egress), store)
         }
     };
@@ -627,7 +657,7 @@ const PROBE_CODE: &[(&str, &str)] = &[(
 async fn the_real_kernel_fills_the_secret_in_and_an_echoed_value_never_lands_in_fnruns() {
     // The far end echoes the key back, as a careless API does.
     let (addr, mut seen) = far_end(format!(r#"{{"seen":"Bearer {VALUE}"}}"#)).await;
-    let d = door_with("ordo_fn_echo", PROBE, PROBE_CODE, Some(addr)).await;
+    let d = door_with("ordo_fn_echo", PROBE, PROBE_CODE, Kernel::probe(addr)).await;
     let (st, body) = d
         .post(
             "probe",
@@ -909,7 +939,7 @@ egress egress.test.invalid, other.test.invalid\n  secrets probeKey\n}\n";
             return 1;
         } }"#,
     )];
-    let d = door_with("ordo_fn_stray", program, code, Some(addr)).await;
+    let d = door_with("ordo_fn_stray", program, code, Kernel::probe(addr)).await;
     let (st, body) = d
         .post("stray", "acme", Some("person:ana"), None, json!({}))
         .await;
@@ -917,4 +947,113 @@ egress egress.test.invalid, other.test.invalid\n  secrets probeKey\n}\n";
     assert_eq!(body["error"]["code"], "egress_refused");
     let runs = functions::runs(&d.pool, "acme").await.unwrap();
     assert_eq!(runs[0].outcome, "secret_host_mismatch");
+}
+
+// ── a webhook signature, checked with a secret the host holds ───────────
+
+/// GitHub's documented example: this secret, this payload, this header.
+const GITHUB_SECRET: &str = "It's a Secret to Everybody";
+const GITHUB_PAYLOAD: &str = "Hello, World!";
+const GITHUB_HEADER: &str =
+    "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
+
+const GITHUB: &str = "\
+secret githubHookKey\n\
+secret unsetHookKey\n\
+function checkGithubHook in notes {\n  call($key: text(40), $body: text(20000), $signature: text(200)) -> json\n  \
+code \"fn/github-hook.js\"\n  secrets githubHookKey, unsetHookKey\n}\n";
+
+/// The example in `docs/howto-functions.md`, with the key's name as input.
+const GITHUB_CODE: &[(&str, &str)] = &[(
+    "fn/github-hook.js",
+    r#"
+const unhex = (s) => new Uint8Array((s.match(/../g) || []).map((h) => parseInt(h, 16)));
+export default {
+  async call(input) {
+    const key = await crypto.subtle.importKey(
+      "secret", input.key, { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const [scheme, hex] = input.signature.split("=");
+    if (scheme !== "sha256" || !hex) return { valid: false };
+    const valid = await crypto.subtle.verify(
+      "HMAC", key, unhex(hex), new TextEncoder().encode(input.body));
+    return { valid };
+  },
+};
+"#,
+)];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_function_checks_a_github_signature_with_a_secret_it_never_holds() {
+    let kernel = Kernel {
+        far_end: None,
+        secrets: &[("githubHookKey", GITHUB_SECRET)],
+    };
+    let d = door_with("ordo_fn_github", GITHUB, GITHUB_CODE, Some(kernel)).await;
+    let call = |body: &str, signature: &str, key: &str| json!({ "key": key, "body": body, "signature": signature });
+    let (st, out) = d
+        .post(
+            "checkGithubHook",
+            "acme",
+            Some("person:ana"),
+            None,
+            call(GITHUB_PAYLOAD, GITHUB_HEADER, "githubHookKey"),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{out}");
+    assert_eq!(out["result"]["valid"], true, "{out}");
+
+    // A changed body, or a signature made with another key, is refused.
+    let (_, out) = d
+        .post(
+            "checkGithubHook",
+            "acme",
+            Some("person:ana"),
+            None,
+            call("Hello, World?", GITHUB_HEADER, "githubHookKey"),
+        )
+        .await;
+    assert_eq!(out["result"]["valid"], false, "{out}");
+
+    // A declared secret with no value refuses the call and names the command.
+    let (st, out) = d
+        .post(
+            "checkGithubHook",
+            "acme",
+            Some("person:ana"),
+            None,
+            call(GITHUB_PAYLOAD, GITHUB_HEADER, "unsetHookKey"),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{out}");
+    assert_eq!(out["error"]["code"], "egress_refused");
+    assert!(
+        out.to_string().contains("ordo secret set unsetHookKey"),
+        "{out}"
+    );
+
+    // A secret the function does not list is refused, though it is set.
+    let (st, out) = d
+        .post(
+            "checkGithubHook",
+            "acme",
+            Some("person:ana"),
+            None,
+            call(GITHUB_PAYLOAD, GITHUB_HEADER, "llmKey"),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{out}");
+
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    let mut outcomes: Vec<&str> = runs.iter().map(|r| r.outcome.as_str()).collect();
+    outcomes.sort();
+    assert_eq!(
+        outcomes,
+        ["ok", "ok", "secret_not_listed", "secret_not_set"]
+    );
+    let raw = d
+        .pool
+        .rows("SELECT \"message\", \"logs\" FROM \"$fnruns\"")
+        .await
+        .unwrap();
+    assert!(!format!("{raw:?}").contains(GITHUB_SECRET));
 }

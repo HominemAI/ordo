@@ -58,3 +58,14 @@ fn a_secret_needs_a_name_for_and_a_host() {
     let e = parse_program("secret k for a.example.com,\n").expect_err("trailing comma");
     assert!(e.message.contains("expected a host name"), "{}", e.message);
 }
+
+#[test]
+fn a_secret_with_no_host_is_a_signing_key() {
+    let p =
+        parse_program("secret hookKey\nsecret k for api.example.com\nsecret last").expect("parses");
+    assert_eq!(p.secrets.len(), 3);
+    assert_eq!(p.secrets[0].name.name, "hookKey");
+    assert!(p.secrets[0].hosts.is_empty());
+    assert_eq!(p.secrets[1].hosts, ["api.example.com"]);
+    assert!(p.secrets[2].hosts.is_empty());
+}

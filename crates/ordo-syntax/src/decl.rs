@@ -53,7 +53,8 @@ pub struct SecretDecl {
     pub name: Ident,
     /// Exact host names, lowercased, in the order written. No port, no
     /// scheme, no wildcard: a wildcard is a promise that whoever controls
-    /// one subdomain may receive the key.
+    /// one subdomain may receive the key. Empty for a signing key
+    /// (`secret hookKey`), which is sent nowhere.
     pub hosts: Vec<String>,
     pub span: Span,
 }

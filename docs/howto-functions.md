@@ -31,7 +31,7 @@ function suggestTitle in notes {
 | `by member` | Who may call it: a signed-in member of the tenant. The default. |
 | `code "fn/x.js"` | The bundled ES module, relative to the program's directory. `.js` or `.mjs`, at most 20 MB. |
 | `egress host, ...` | The hosts it may reach. Any other host is refused before DNS. A name with a hyphen goes in quotes: `"my-model.example.com"`. |
-| `secrets name, ...` | The secrets it may use, by name. Each must be a declared `secret`, bound to at least one of its `egress` hosts; `ordo check` refuses it otherwise, naming both lists. |
+| `secrets name, ...` | The secrets it may use, by name. Each must be a declared `secret`. A secret bound to hosts must be bound to at least one of its `egress` hosts; `ordo check` refuses it otherwise, naming both lists. A signing key (`secret hookKey`, no host) needs no `egress`. |
 | `limit wall 30s, cpu 2s, memory 64 mb` | Optional. Unset limits take the defaults below. Write a size with a space: `64 mb`. |
 | `nopause` | Optional. It keeps answering while the tenant is paused. |
 
@@ -87,9 +87,9 @@ Beside `fetch`, `Response`, `Headers` and `console`:
 | `crypto.getRandomValues` | Integer typed arrays, up to 65536 bytes per call. |
 | `crypto.randomUUID` | A version 4 UUID. |
 | `crypto.subtle.digest` | SHA-1, SHA-256, SHA-384, SHA-512. |
-| `crypto.subtle.importKey` | `raw` HMAC keys. |
+| `crypto.subtle.importKey` | `raw` HMAC keys, and `"secret"` keys the host holds (below). |
 | `crypto.subtle.generateKey` | HMAC keys. |
-| `crypto.subtle.exportKey` | `raw`, for a key made extractable. |
+| `crypto.subtle.exportKey` | `raw`, for a key made extractable. A `"secret"` key refuses. |
 | `crypto.subtle.sign`, `verify` | HMAC with any of the hashes above. `verify` compares in constant time. |
 
 Random bytes come from the server's operating system, fresh for every call.
@@ -115,8 +115,8 @@ export default {
 };
 ```
 
-A function cannot read a secret's value, so a key held as a secret cannot
-be imported here yet.
+That example takes the key as input. A key kept as a secret is used by
+its name instead: see [Checking a webhook's signature](#checking-a-webhooks-signature).
 
 ### Limits
 
@@ -185,6 +185,70 @@ ordo secret set openaiKey --host <h> --space <s> < openai-key.txt
 - A value may be set before the program declares the secret. It is sent
   nowhere until a declaration binds it.
 
+### A signing key
+
+A secret declared with no host is a signing key:
+
+```ordo
+secret githubHookKey
+```
+
+- It is sent to no host. A `fetch` that puts it in a header is refused
+  with `secret_host_mismatch`.
+- A function that lists it signs or verifies an HMAC with it. The host
+  does the HMAC.
+- A secret bound to hosts can be used for an HMAC too.
+
+### Checking a webhook's signature
+
+GitHub signs each delivery with HMAC-SHA256 over the body. It sends
+`X-Hub-Signature-256: sha256=<hex>`. The function checks it with a key
+the host holds:
+
+```ordo
+secret githubHookKey
+
+function checkGithubHook in repos {
+  call($body: text(20000), $signature: text(200)) -> json
+  code "fn/github-hook.js"
+  secrets githubHookKey
+}
+```
+
+```js
+const unhex = (s) => new Uint8Array((s.match(/../g) || []).map((h) => parseInt(h, 16)));
+
+export default {
+  async call(input) {
+    const key = await crypto.subtle.importKey(
+      "secret", "githubHookKey", { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const [scheme, hex] = input.signature.split("=");
+    if (scheme !== "sha256" || !hex) return { valid: false };
+    const valid = await crypto.subtle.verify(
+      "HMAC", key, unhex(hex), new TextEncoder().encode(input.body));
+    return { valid };
+  },
+};
+```
+
+- `importKey("secret", name, ...)` takes the secret's name, or
+  `ctx.secret(name)`. The hash is SHA-1, SHA-256, SHA-384 or SHA-512.
+- The key holds only the name. `sign` and `verify` go to the host, which
+  opens the value, computes, and answers the MAC or `true` or `false`.
+- `verify` compares in constant time.
+- `extractable` must be `false`. `exportKey` on the key throws
+  `InvalidAccessError`.
+- The checks are those of `fetch`. A secret the function does not list is
+  `secret_not_listed`. One the program does not declare is
+  `secret_unknown`. One with no value is `secret_not_set`, and the message
+  names `ordo secret set <name>`.
+- A refusal rejects with a `SecretRefused` error whose `code` is that word.
+  Uncaught, it ends the call as `egress_refused`, and the run's outcome is
+  the word.
+
+Until webhooks arrive (`plan-backend-functions.md` §12), the page or a
+relay passes the body and the header in as parameters.
+
 ### List and remove
 
 ```sh
@@ -236,7 +300,8 @@ another allowed host still cannot carry the key there.
 
 A redirect is returned to the function as an answer. It is never followed.
 If an answer repeats a secret's value, the value is replaced with `[secret]`
-before the function sees it.
+before the function sees it. A value in the function's own answer, log
+line or error message is replaced the same way.
 
 ## Deploying a function
 

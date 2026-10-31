@@ -75,7 +75,7 @@ fn range(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<(JsArrayBuff
 }
 
 /// A copy of the bytes at `args[i..i + 3]`.
-fn bytes(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<Vec<u8>> {
+pub(crate) fn bytes(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<Vec<u8>> {
     let (buf, off, len) = range(args, i, ctx)?;
     let data = buf
         .data()
@@ -83,7 +83,7 @@ fn bytes(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<Vec<u8>> {
     Ok(data[off..off + len].to_vec())
 }
 
-fn array_buffer(v: Vec<u8>, ctx: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn array_buffer(v: Vec<u8>, ctx: &mut Context) -> JsResult<JsValue> {
     let block = AlignedVec::from_iter(0, v);
     Ok(JsArrayBuffer::from_byte_block(block, ctx)?.into())
 }

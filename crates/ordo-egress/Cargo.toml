@@ -30,8 +30,11 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 webpki-roots = "0.26"
 # `X-Ordo-Signature`. HMAC-SHA256 is the whole cryptographic surface of this
 # crate: there is deliberately no signing key here, only a per-sink shared
-# secret, and the reasoning is in `sign.rs`.
+# secret, and the reasoning is in `sign.rs`. A function's HMAC with a secret
+# as the key (`FnFetch::mac`) uses the same crates, plus SHA-1 because some
+# webhook senders still sign with it.
 hmac = "0.12"
+sha1 = "0.10"
 sha2 = "0.10"
 # Sockets, timeouts. `net` is what gives us `lookup_host`; `io-util` the
 # `AsyncWriteExt`/`AsyncReadExt` the hand-written HTTP/1.1 writer uses.

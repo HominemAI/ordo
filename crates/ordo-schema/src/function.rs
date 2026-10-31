@@ -198,12 +198,23 @@ fn check_secrets(schema: &Schema, f: &FunctionDecl) -> Result<(), SchemaError> {
         }
         seen.push(&s.name);
     }
-    if !f.secrets.is_empty() && f.egress.is_empty() {
+    // A signing key (`secret hookKey`, no host) is used only as an HMAC key
+    // in the host. A secret with hosts is sent, so it needs one of them.
+    let sent = |name: &str| {
+        schema
+            .secrets
+            .iter()
+            .any(|d| d.name.name == name && !d.hosts.is_empty())
+    };
+    if f.egress.is_empty() && f.secrets.iter().any(|s| sent(&s.name)) {
         return Err(refuse(
-            f.secrets[0].span,
+            f.secrets
+                .iter()
+                .find(|s| sent(&s.name))
+                .map_or(f.secrets[0].span, |s| s.span),
             format!(
-                "function `{}` names secrets and no `egress` host: a secret is only ever sent \
-                 to a host, so list the hosts it calls",
+                "function `{}` names secrets bound to hosts and no `egress` host: such a \
+                 secret is only ever sent to a host, so list the hosts it calls",
                 f.name.name
             ),
         ));
@@ -214,15 +225,15 @@ fn check_secrets(schema: &Schema, f: &FunctionDecl) -> Result<(), SchemaError> {
                 s.span,
                 format!(
                     "function `{}` uses secret `{}`, and the program declares no such secret: \
-                     add `secret {} for <host>`",
-                    f.name.name, s.name, s.name
+                     add `secret {} for <host>`, or `secret {}` for a signing key",
+                    f.name.name, s.name, s.name, s.name
                 ),
             ));
         };
         // A secret goes only to its bound hosts. One the function cannot
         // reach under any of them could never be sent: a mistake in one of
         // the two lists.
-        if !f.egress.iter().any(|h| decl.hosts.contains(&h.name)) {
+        if !decl.hosts.is_empty() && !f.egress.iter().any(|h| decl.hosts.contains(&h.name)) {
             let egress: Vec<&str> = f.egress.iter().map(|h| h.name.as_str()).collect();
             return Err(refuse(
                 s.span,
@@ -303,6 +314,15 @@ mod tests {
     #[test]
     fn a_well_formed_function_is_accepted() {
         check(OK).unwrap();
+    }
+
+    #[test]
+    fn a_signing_key_needs_no_egress() {
+        let src = "domain notes\nentity notes { title: text }\n\
+            secret hookKey\n\
+            function checkHook in notes {\n  call($body: text) -> json\n  code \"fn/h.js\"\n  \
+            secrets hookKey\n}\n";
+        check(src).unwrap();
     }
 
     #[test]

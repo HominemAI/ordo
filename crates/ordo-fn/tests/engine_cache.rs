@@ -19,6 +19,14 @@ impl FnFetch for NoFetch {
     async fn fetch(&self, _: &str, _: FnFetchRequest) -> Result<FnFetchResponse, FetchError> {
         panic!("no outbound call here")
     }
+
+    async fn mac(
+        &self,
+        _space: &str,
+        _req: ordo_fn::FnMacRequest,
+    ) -> Result<ordo_fn::FnMacAnswer, FetchError> {
+        panic!("this double holds no secret")
+    }
 }
 
 async fn start(dir: Option<PathBuf>) -> FnHost {

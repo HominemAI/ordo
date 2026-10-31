@@ -1457,6 +1457,7 @@ dependencies = [
  "ordo-egress",
  "rustls",
  "rustls-pki-types",
+ "sha1",
  "sha2 0.10.9",
  "tokio",
  "tokio-rustls",

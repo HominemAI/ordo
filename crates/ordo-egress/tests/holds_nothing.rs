@@ -99,6 +99,8 @@ fn the_dependency_set_is_the_one_that_was_argued_for() {
             "hmac",
             "rustls",
             "rustls-pki-types",
+            // SHA-1 for `FnFetch::mac`: some webhook senders still sign with it.
+            "sha1",
             "sha2",
             "tokio",
             "tokio-rustls",

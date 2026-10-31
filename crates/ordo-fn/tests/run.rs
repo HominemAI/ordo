@@ -38,6 +38,14 @@ impl FnFetch for Double {
             body: self.answer.to_string().into_bytes(),
         })
     }
+
+    async fn mac(
+        &self,
+        _space: &str,
+        _req: ordo_fn::FnMacRequest,
+    ) -> Result<ordo_fn::FnMacAnswer, FetchError> {
+        panic!("this double holds no secret")
+    }
 }
 
 /// Knows one live secret value.
@@ -218,6 +226,14 @@ impl FnFetch for Hang {
         _req: FnFetchRequest,
     ) -> Result<FnFetchResponse, FetchError> {
         futures::future::pending().await
+    }
+
+    async fn mac(
+        &self,
+        _space: &str,
+        _req: ordo_fn::FnMacRequest,
+    ) -> Result<ordo_fn::FnMacAnswer, FetchError> {
+        panic!("this double holds no secret")
     }
 }
 

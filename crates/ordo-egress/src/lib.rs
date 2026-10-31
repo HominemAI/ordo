@@ -108,7 +108,8 @@
 //! [`FnEgress`], behind the [`FnFetch`] trait. It returns the whole answer,
 //! bounded, and fills in secret handles only for the hosts each secret is
 //! bound to. The value arrives per call from the host's [`SecretSource`];
-//! this crate still names no key provider.
+//! this crate still names no key provider. [`FnFetch::mac`] signs or
+//! verifies an HMAC with a secret as the key, so the value stays here.
 
 pub mod client;
 pub mod deny;
@@ -126,7 +127,7 @@ pub use deny::{Cidr, DeniedCategory, DenyList, PrivateHost, DENY_CIDRS_ENV, PRIV
 pub use dest::{resolve_and_pin, resolve_and_pin_host, Allowlist, HttpsUrl, PinnedDestination};
 pub use function::{
     BodySide, FetchAction, FetchError, FnEgress, FnFetch, FnFetchRequest, FnFetchResponse,
-    FnLimits, HeaderValue, SecretBytes, SecretSource,
+    FnLimits, FnMacAnswer, FnMacRequest, HeaderValue, MacHash, SecretBytes, SecretSource,
 };
 pub use refusal::Refusal;
 pub use sign::{SinkSecret, SIGNATURE_HEADER, SIGNATURE_VERSION, TIMESTAMP_HEADER};

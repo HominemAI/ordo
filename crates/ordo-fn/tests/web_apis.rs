@@ -17,6 +17,14 @@ impl FnFetch for NoFetch {
     async fn fetch(&self, _: &str, _: FnFetchRequest) -> Result<FnFetchResponse, FetchError> {
         panic!("these functions make no outbound call")
     }
+
+    async fn mac(
+        &self,
+        _space: &str,
+        _req: ordo_fn::FnMacRequest,
+    ) -> Result<ordo_fn::FnMacAnswer, FetchError> {
+        panic!("this double holds no secret")
+    }
 }
 
 /// Runs `body` as the function's `call(input)` and returns its answer.

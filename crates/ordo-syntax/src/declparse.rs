@@ -805,7 +805,9 @@ fn routine_decl(p: &mut Parser, src: &str) -> Result<RoutineDecl, ParseError> {
     })
 }
 
-/// `secret <name> for <host>[, <host>]...`, one line.
+/// `secret <name> for <host>[, <host>]...`, one line. `secret <name>` alone
+/// is a signing key: bound to no host, so it is never sent, and a function
+/// uses it only as an HMAC key the host holds.
 ///
 /// A host is read back from the source text between the separators, so a
 /// name like `api-v2.example.com` means what it says whatever the lexer
@@ -818,10 +820,19 @@ fn secret_decl(p: &mut Parser, src: &str) -> Result<SecretDecl, ParseError> {
         TokenKind::Ident(w) if w == "for" => {
             p.bump();
         }
+        TokenKind::Newline | TokenKind::Eof => {
+            let span = start.to(name.span);
+            return Ok(SecretDecl {
+                name,
+                hosts: Vec::new(),
+                span,
+            });
+        }
         other => {
             return Err(p.err_here(format!(
                 "expected `for` and the hosts the secret may be sent to after `secret {}`, \
-                 found {}: `secret {} for api.example.com`",
+                 or the end of the line for a signing key, found {}: \
+                 `secret {} for api.example.com`",
                 name.name,
                 describe(other),
                 name.name

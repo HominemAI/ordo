@@ -429,14 +429,25 @@ impl WrappedKeyStore for PgKeyStore {
     }
 
     fn deks(&self, space: &SpaceId) -> Result<Vec<(Epoch, Vec<u8>)>, KeyError> {
-        Ok(self
-            .deks
-            .read()
-            .expect("key store")
-            .iter()
-            .filter(|((s, _), _)| s == space)
-            .map(|((_, e), v)| (*e, v.clone()))
-            .collect())
+        let cached = |deks: &BTreeMap<(SpaceId, Epoch), Vec<u8>>| -> Vec<(Epoch, Vec<u8>)> {
+            deks.iter()
+                .filter(|((s, _), _)| s == space)
+                .map(|((_, e), v)| (*e, v.clone()))
+                .collect()
+        };
+        let found = cached(&self.deks.read().expect("key store"));
+        if !found.is_empty() {
+            return Ok(found);
+        }
+        // A miss is looked up, as `smk` looks one up. `current_epoch` is
+        // the first question `Spaces::resolve` asks, and it reads only the
+        // DEKs: answered from the cache alone, a tenant created on another
+        // replica after this one booted had "no key custody" here until
+        // something else happened to call `smk` for it. A replica that
+        // serves no request for the tenant (only its routines) never did,
+        // so every routine run it claimed failed.
+        self.load_deks(space)?;
+        Ok(cached(&self.deks.read().expect("key store")))
     }
 
     fn put_dek(&self, space: &SpaceId, epoch: Epoch, wrapped: &[u8]) -> Result<(), KeyError> {

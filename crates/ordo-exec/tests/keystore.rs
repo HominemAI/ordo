@@ -294,6 +294,39 @@ async fn custody_provisioned_by_another_process_is_found_without_a_restart() {
     );
 }
 
+/// The epoch of a space another process made is found when it is the
+/// FIRST question asked. `Spaces::resolve` asks `current_epoch` before
+/// anything calls `release`, and it reads only the DEKs. Answered from the
+/// cache, a replica that served no request for a tenant made on another
+/// replica refused every routine run for it with "no key custody"
+/// (notes v2's two-server reminder test, 2026-10-31).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_epoch_of_a_space_made_by_another_process_is_found_first() {
+    const DB: &str = "ordo_rt_keystore_late_epoch";
+    prepared(DB).await;
+    let space = SpaceId("acme".into());
+
+    let serving = LocalKeyProvider::new(MASTER, Box::new(store(DB)));
+    assert!(matches!(
+        serving.current_epoch(&space),
+        Err(KeyError::UnknownSpace)
+    ));
+
+    LocalKeyProvider::new(MASTER, Box::new(store(DB)))
+        .create_space(&space)
+        .expect("custody minted");
+
+    assert_eq!(
+        serving
+            .current_epoch(&space)
+            .expect("the late provision's epoch is visible"),
+        1
+    );
+    serving
+        .release(&space, Purpose::Write, "r2c")
+        .expect("and its keys");
+}
+
 /// The store is a `WrappedKeyStore` like the in-memory one, and the two are
 /// substitutable — including the one method whose contract is about
 /// atomicity rather than about values.

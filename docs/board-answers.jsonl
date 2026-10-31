@@ -1189,3 +1189,7 @@
 {"seq": 1189, "item": "making-the-repository-public", "ask": 12, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1190, "item": "ci-runs-each-workflow-only-when", "ask": 1, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1191, "item": "ci-runs-each-workflow-only-when", "ask": 0, "at": "2026-10-31", "status": "decided", "text": "skip filters for now", "source": "record", "read": true}
+{"seq": 1192, "item": "backend-functions", "ask": 15, "at": "2026-10-31T10:41:42Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1193, "item": "backend-functions", "ask": 15, "at": "2026-10-31", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1194, "item": "a-runtime-test-connects-before-the", "ask": 1, "at": "2026-10-31T10:52:52Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1195, "item": "a-runtime-test-connects-before-the", "ask": 1, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}

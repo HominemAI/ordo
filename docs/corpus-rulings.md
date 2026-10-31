@@ -11673,3 +11673,13 @@ work flow without a second reviewer.
   hand with an `old_ref`; whether to retire it is ask 12. Owner: *"ok"*.
   The job, its spec, its Playwright config and the 3 rehearsal scripts it
   shared are removed.
+
+## 2026-10-31: staging is always its own deployment
+
+- Owner, on backend-functions ask 15: *"yes"*. Secrets are kept per
+  deployment (`$secrets`), so each environment is its own deployment, and
+  staging is never run inside production's. There is no `--env` flag.
+- Why: staging's secret can then never be production's, and ruling 5 of
+  `plan-environments.md` already gives staging its own keys.
+- When environments are built (27e to 27h), dev, staging and production are
+  three deployments, and `ordo apply` moves a version between them.

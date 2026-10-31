@@ -251,7 +251,22 @@ fn request(
     headers: &[(&str, &str)],
     body: &str,
 ) -> (u16, String) {
-    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    // The server may still be binding when the first request goes out (seen
+    // on CI under load, 2026-10-31), so connecting retries until a deadline.
+    // A server that never listens still fails, once the 15 seconds are up.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut s = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => break s,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionRefused
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("connect: {e:?}"),
+        }
+    };
     s.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",

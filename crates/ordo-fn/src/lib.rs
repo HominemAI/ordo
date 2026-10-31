@@ -5,6 +5,8 @@
 //!   compiled once per process, booted once, and snapshotted with wizer. The
 //!   snapshot is the module every call instantiates, so a call starts with the
 //!   engine already built. Its memory comes from the snapshot copy-on-write.
+//!   The compiled snapshot is kept on disk ([`HostConfig::engine_cache`],
+//!   `src/cache.rs`), so a restart loads it instead of compiling.
 //! - **A fresh instance per call** (ruled 2026-10-11). A new store, a new
 //!   instance, the function's code evaluated in it, then all of it dropped.
 //!   Nothing survives from one call to the next.
@@ -18,10 +20,12 @@
 //! The door (`ordo-api`) does sign-in, access, quotas, idempotency and pause
 //! before a call gets here, and turns an [`FnError`] into an HTTP answer.
 
+mod cache;
 pub mod error;
 pub mod seam;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -34,6 +38,7 @@ use wasmtime::{
 };
 use wasmtime_wizer::{InstanceState, SnapshotVal, ValType, Wizer};
 
+pub use cache::{CacheOutcome, CacheWrite};
 pub use error::{BusyScope, FnError, Limit, Remedy};
 pub use seam::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue};
 
@@ -110,6 +115,10 @@ pub struct HostConfig {
     pub fuel_per_cpu_ms: u64,
     /// What a function's `limit` may reach.
     pub ceilings: Limits,
+    /// Where the compiled engine is kept between starts (`src/cache.rs`).
+    /// `None` compiles at every start. The engine is shared per process, so
+    /// the first host made decides.
+    pub engine_cache: Option<PathBuf>,
 }
 
 impl Default for HostConfig {
@@ -119,8 +128,18 @@ impl Default for HostConfig {
             per_process: 100,
             fuel_per_cpu_ms: 6_000_000,
             ceilings: Limits::ceilings(),
+            engine_cache: None,
         }
     }
+}
+
+/// How this process got its engine: loaded from the cache or compiled.
+#[derive(Debug, Clone)]
+pub struct EngineStart {
+    /// From the start of the build to an engine ready to instantiate.
+    pub took: Duration,
+    pub cache: CacheOutcome,
+    pub write: CacheWrite,
 }
 
 /// One call to run.
@@ -207,6 +226,7 @@ struct FnEngine {
     engine: Engine,
     pre: InstancePre<Guest>,
     stop: Arc<AtomicBool>,
+    start: EngineStart,
 }
 
 impl Drop for FnEngine {
@@ -218,14 +238,15 @@ impl Drop for FnEngine {
 static SHARED: OnceCell<Arc<FnEngine>> = OnceCell::const_new();
 
 impl FnEngine {
-    async fn shared() -> Result<Arc<FnEngine>, FnError> {
+    async fn shared(cache: Option<&Path>) -> Result<Arc<FnEngine>, FnError> {
         SHARED
-            .get_or_try_init(|| async { FnEngine::build().await.map(Arc::new) })
+            .get_or_try_init(|| async { FnEngine::build(cache).await.map(Arc::new) })
             .await
             .cloned()
     }
 
-    async fn build() -> Result<FnEngine, FnError> {
+    async fn build(cache_dir: Option<&Path>) -> Result<FnEngine, FnError> {
+        let started = Instant::now();
         let engine_err = |what: &str, e: wasmtime::Error| FnError::Engine {
             message: format!("{what}: {e:#}"),
         };
@@ -237,43 +258,37 @@ impl FnEngine {
         let mut linker = Linker::<Guest>::new(&engine);
         define_imports(&mut linker).map_err(|e| engine_err("imports", e))?;
 
-        // Boot once, then snapshot: the module every call starts from.
-        let mut wizer = Wizer::new();
-        wizer.init_func("ordo_init");
-        let (cx, instrumented) = wizer
-            .instrument(ENGINE_WASM)
-            .map_err(|e| engine_err("instrument", e))?;
-        let module =
-            Module::new(&engine, &instrumented).map_err(|e| engine_err("compile engine", e))?;
-        let mut store = Store::new(&engine, Guest::boot());
-        store.limiter(|g| &mut g.limiter);
-        store
-            .set_fuel(u64::MAX / 2)
-            .map_err(|e| engine_err("fuel", e))?;
-        store.set_epoch_deadline(u64::MAX / 2);
-        let instance = linker
-            .instantiate_async(&mut store, &module)
-            .await
-            .map_err(|e| engine_err("instantiate engine", e))?;
-        let init = instance
-            .get_typed_func::<(), ()>(&mut store, "ordo_init")
-            .map_err(|e| engine_err("ordo_init", e))?;
-        init.call_async(&mut store, ())
-            .await
-            .map_err(|e| engine_err("engine boot", e))?;
-        let snapshot = wizer
-            .snapshot(
-                &cx,
-                &mut Snap {
-                    store: &mut store,
-                    instance,
-                },
-            )
-            .await
-            .map_err(|e| engine_err("snapshot", e))?;
-        drop(store);
-        let module =
-            Module::new(&engine, &snapshot).map_err(|e| engine_err("compile snapshot", e))?;
+        let cache = cache_dir.map(|d| cache::EngineCache::new(d, &engine, ENGINE_WASM));
+        let found = match &cache {
+            Some(c) => c.load(&engine),
+            None => Err(CacheOutcome::Off),
+        };
+        let (module, outcome, write) = match found {
+            Ok(m) => {
+                let path = cache
+                    .as_ref()
+                    .map(|c| c.path().to_owned())
+                    .unwrap_or_default();
+                (m, CacheOutcome::Hit(path), CacheWrite::Skipped)
+            }
+            Err(outcome) => {
+                let mut m = snapshot_engine(&engine, &linker).await?;
+                let write = match &cache {
+                    Some(c) => c.store(&m),
+                    None => CacheWrite::Skipped,
+                };
+                // Run from the file just written, as a restart would: a
+                // module mapped from a file shares its memory image
+                // copy-on-write on every platform (8 µs an instance on
+                // macOS, against about 90 µs copied).
+                if let (Some(c), CacheWrite::Written(_)) = (&cache, &write) {
+                    if let Ok(loaded) = c.load(&engine) {
+                        m = loaded;
+                    }
+                }
+                (m, outcome, write)
+            }
+        };
         let pre = linker
             .instantiate_pre(&module)
             .map_err(|e| engine_err("pre-instantiate", e))?;
@@ -294,8 +309,60 @@ impl FnEngine {
                     message: format!("epoch thread: {e}"),
                 })?;
         }
-        Ok(FnEngine { engine, pre, stop })
+        let start = EngineStart {
+            took: started.elapsed(),
+            cache: outcome,
+            write,
+        };
+        Ok(FnEngine {
+            engine,
+            pre,
+            stop,
+            start,
+        })
     }
+}
+
+/// Compiles the engine, boots it once, and compiles the snapshot: the
+/// module every call starts from. About a second; the cache skips it.
+async fn snapshot_engine(engine: &Engine, linker: &Linker<Guest>) -> Result<Module, FnError> {
+    let engine_err = |what: &str, e: wasmtime::Error| FnError::Engine {
+        message: format!("{what}: {e:#}"),
+    };
+    let mut wizer = Wizer::new();
+    wizer.init_func("ordo_init");
+    let (cx, instrumented) = wizer
+        .instrument(ENGINE_WASM)
+        .map_err(|e| engine_err("instrument", e))?;
+    let module = Module::new(engine, &instrumented).map_err(|e| engine_err("compile engine", e))?;
+    let mut store = Store::new(engine, Guest::boot());
+    store.limiter(|g| &mut g.limiter);
+    store
+        .set_fuel(u64::MAX / 2)
+        .map_err(|e| engine_err("fuel", e))?;
+    store.set_epoch_deadline(u64::MAX / 2);
+    let instance = linker
+        .instantiate_async(&mut store, &module)
+        .await
+        .map_err(|e| engine_err("instantiate engine", e))?;
+    let init = instance
+        .get_typed_func::<(), ()>(&mut store, "ordo_init")
+        .map_err(|e| engine_err("ordo_init", e))?;
+    init.call_async(&mut store, ())
+        .await
+        .map_err(|e| engine_err("engine boot", e))?;
+    let snapshot = wizer
+        .snapshot(
+            &cx,
+            &mut Snap {
+                store: &mut store,
+                instance,
+            },
+        )
+        .await
+        .map_err(|e| engine_err("snapshot", e))?;
+    drop(store);
+    Module::new(engine, &snapshot).map_err(|e| engine_err("compile snapshot", e))
 }
 
 /// wizer reads the booted instance's state through this.
@@ -341,13 +408,30 @@ impl FnHost {
     /// The first host in a process compiles and snapshots the engine, which
     /// takes seconds. Every later one reuses it.
     pub async fn new(config: HostConfig) -> Result<FnHost, FnError> {
-        let engine = FnEngine::shared().await?;
-        Ok(FnHost {
+        let engine = FnEngine::shared(config.engine_cache.as_deref()).await?;
+        Ok(FnHost::with(engine, config))
+    }
+
+    /// A host with an engine of its own, built now and never shared. For
+    /// tests and measurements of the engine start; a server uses [`FnHost::new`].
+    #[doc(hidden)]
+    pub async fn unshared(config: HostConfig) -> Result<FnHost, FnError> {
+        let engine = FnEngine::build(config.engine_cache.as_deref()).await?;
+        Ok(FnHost::with(Arc::new(engine), config))
+    }
+
+    fn with(engine: Arc<FnEngine>, config: HostConfig) -> FnHost {
+        FnHost {
             engine,
             process: Arc::new(Semaphore::new(config.per_process)),
             spaces: Mutex::new(HashMap::new()),
             config,
-        })
+        }
+    }
+
+    /// How this process's engine was built or loaded.
+    pub fn engine_start(&self) -> &EngineStart {
+        &self.engine.start
     }
 
     pub fn config(&self) -> &HostConfig {

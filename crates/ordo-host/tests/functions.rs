@@ -491,6 +491,68 @@ async fn limits_and_failures_answer_their_typed_classes() {
     );
 }
 
+// ── crypto.subtle from a function ───────────────────────────────────────
+
+const HOOK: &str = "\
+function checkHook in notes {\n  call($body: text(2000), $signature: text(200)) -> json\n  code \"fn/check-hook.js\"\n}\n";
+
+/// A webhook check: HMAC-SHA256 over the body, hex, compared with
+/// `crypto.subtle.verify`.
+const HOOK_CODE: &[(&str, &str)] = &[(
+    "fn/check-hook.js",
+    r#"
+const hex = (b) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
+const unhex = (s) => new Uint8Array((s.match(/../g) || []).map((h) => parseInt(h, 16)));
+export default {
+  async call(input) {
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw", enc.encode("Jefe"), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const body = enc.encode(input.body);
+    const valid = await crypto.subtle.verify("HMAC", key, unhex(input.signature), body);
+    const expected = hex(await crypto.subtle.sign("HMAC", key, body));
+    const digest = hex(await crypto.subtle.digest("SHA-256", body));
+    return { valid, expected, digest, id: crypto.randomUUID().length };
+  },
+};
+"#,
+)];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_function_checks_a_webhook_signature_with_crypto_subtle() {
+    let d = door("ordo_fn_hook", HOOK, HOOK_CODE).await;
+    // RFC 4231 test case 2.
+    let body = "what do ya want for nothing?";
+    let good = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+    let (st, out) = d
+        .post(
+            "checkHook",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "body": body, "signature": good }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{out}");
+    assert_eq!(out["result"]["valid"], true, "{out}");
+    assert_eq!(out["result"]["expected"], good);
+    assert_eq!(out["result"]["digest"].as_str().map(str::len), Some(64));
+    assert_eq!(out["result"]["id"], 36);
+
+    let bad = format!("00{}", &good[2..]);
+    let (st, out) = d
+        .post(
+            "checkHook",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "body": body, "signature": bad }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{out}");
+    assert_eq!(out["result"]["valid"], false, "{out}");
+}
+
 // ── the real egress kernel, against a TLS listener on loopback ──────────
 
 const CA: &[u8] = include_bytes!("../../ordo-egress/tests/fixture/ca.der");

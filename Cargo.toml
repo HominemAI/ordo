@@ -76,3 +76,7 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.wasmtime]
 opt-level = 2
+# The engine cache (`crates/ordo-fn/src/cache.rs`) checks a 10 MB file with
+# SHA-256 at every start: about 270 ms unoptimized, a few ms optimized.
+[profile.dev.package.sha2]
+opt-level = 2

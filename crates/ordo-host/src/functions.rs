@@ -316,10 +316,93 @@ mod scrub_tests {
     }
 }
 
+/// Where the compiled function engine is kept between starts.
+pub const ENGINE_CACHE_ENV: &str = "ORDO_FN_CACHE_DIR";
+
+/// `ORDO_FN_CACHE_DIR`, read through `get`.
+///
+/// - `off`: no cache; every start compiles the engine (about a second).
+/// - an absolute path: that directory. Ordo makes it with mode 0700 and
+///   uses it only while this user owns it and no one else can write to it.
+/// - unset: `$XDG_CACHE_HOME/ordo/fn`, else `$HOME/.cache/ordo/fn`, else
+///   no cache.
+///
+/// A relative path refuses the boot: where compiled code is loaded from
+/// should not depend on the directory the binary was started in.
+pub fn engine_cache_from_vars(
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<std::path::PathBuf>, (&'static str, String)> {
+    use std::path::PathBuf;
+    let absolute = |v: Option<String>| {
+        v.map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.is_absolute())
+    };
+    match get(ENGINE_CACHE_ENV).map(|v| v.trim().to_owned()) {
+        Some(v) if v.eq_ignore_ascii_case("off") => Ok(None),
+        Some(v) => {
+            let p = PathBuf::from(&v);
+            if p.is_absolute() {
+                Ok(Some(p))
+            } else {
+                Err((
+                    ENGINE_CACHE_ENV,
+                    format!(
+                        "`{v}` is not an absolute path; set an absolute directory, or `off` \
+                         to compile the function engine at every start"
+                    ),
+                ))
+            }
+        }
+        None => Ok(absolute(get("XDG_CACHE_HOME"))
+            .or_else(|| absolute(get("HOME")).map(|h| h.join(".cache")))
+            .map(|base| base.join("ordo").join("fn"))),
+    }
+}
+
+#[cfg(test)]
+mod engine_cache_tests {
+    use super::engine_cache_from_vars;
+    use std::path::PathBuf;
+
+    fn read(vars: &[(&str, &str)]) -> Result<Option<PathBuf>, (&'static str, String)> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        engine_cache_from_vars(&move |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()))
+    }
+
+    #[test]
+    fn the_cache_directory_has_a_default_and_can_be_turned_off() {
+        assert_eq!(
+            read(&[("HOME", "/home/ordo")]).unwrap(),
+            Some(PathBuf::from("/home/ordo/.cache/ordo/fn"))
+        );
+        assert_eq!(
+            read(&[("HOME", "/home/ordo"), ("XDG_CACHE_HOME", "/var/cache/me")]).unwrap(),
+            Some(PathBuf::from("/var/cache/me/ordo/fn"))
+        );
+        assert_eq!(read(&[]).unwrap(), None);
+        assert_eq!(read(&[("HOME", "relative")]).unwrap(), None);
+        assert_eq!(
+            read(&[("HOME", "/home/ordo"), ("ORDO_FN_CACHE_DIR", "off")]).unwrap(),
+            None
+        );
+        assert_eq!(
+            read(&[("ORDO_FN_CACHE_DIR", "/var/cache/ordo-fn")]).unwrap(),
+            Some(PathBuf::from("/var/cache/ordo-fn"))
+        );
+        let (var, detail) = read(&[("ORDO_FN_CACHE_DIR", "cache")]).unwrap_err();
+        assert_eq!(var, "ORDO_FN_CACHE_DIR");
+        assert!(detail.contains("absolute"), "{detail}");
+    }
+}
+
 /// The door's function runner.
 pub struct HostFunctions {
     /// Made on the first call: compiling the engine takes about a second,
-    /// and a deployment that declares no function never pays it.
+    /// and a deployment that declares no function never pays it. With the
+    /// engine cache (`ORDO_FN_CACHE_DIR`) a later start loads it instead.
     host: tokio::sync::OnceCell<FnHost>,
     config: HostConfig,
     table: RwLock<Arc<FnTable>>,

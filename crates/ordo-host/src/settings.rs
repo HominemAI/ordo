@@ -1526,6 +1526,12 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_FN_CACHE_DIR",
+        "Storage and blobs",
+        r#"$XDG_CACHE_HOME/ordo/fn, else $HOME/.cache/ordo/fn"#,
+        r#"an absolute path, or off"#,
+    ),
+    s(
         "ORDO_IMPORT_BUNDLE_DIR",
         "Storage and blobs",
         r#"none"#,

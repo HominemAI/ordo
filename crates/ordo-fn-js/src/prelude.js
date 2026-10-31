@@ -206,11 +206,221 @@
     }
   }
 
+  // ---- Bytes, text and crypto. The byte work is native (`web.rs`); a range
+  // crosses as (buffer, offset, length).
+
+  class DOMException extends Error {
+    constructor(message, name) {
+      super(message === undefined ? "" : String(message));
+      Object.defineProperty(this, "name", { value: name === undefined ? "Error" : String(name) });
+    }
+  }
+
+  // A BufferSource as a Uint8Array over the same bytes.
+  function view(x, what) {
+    if (x instanceof ArrayBuffer) return new Uint8Array(x);
+    if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+    throw new TypeError(what + " must be an ArrayBuffer, a typed array or a DataView");
+  }
+
+  class TextEncoder {
+    get encoding() {
+      return "utf-8";
+    }
+    encode(input) {
+      return new Uint8Array(native.utf8Encode(input === undefined ? "" : String(input)));
+    }
+    encodeInto(source, dest) {
+      if (!(dest instanceof Uint8Array)) {
+        throw new TypeError("TextEncoder.encodeInto: the destination must be a Uint8Array");
+      }
+      const r = native.utf8EncodeInto(String(source), dest.buffer, dest.byteOffset, dest.byteLength);
+      return { read: r.read, written: r.written };
+    }
+  }
+
+  const UTF8_LABELS = ["utf-8", "utf8", "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "x-unicode20utf8"];
+
+  class TextDecoder {
+    #fatal;
+    #ignoreBOM;
+    constructor(label, options) {
+      const l = label === undefined ? "utf-8" : String(label).trim().toLowerCase();
+      if (!UTF8_LABELS.includes(l)) {
+        throw new RangeError('TextDecoder: "' + label + '" is not supported; only utf-8 is');
+      }
+      this.#fatal = !!(options && options.fatal);
+      this.#ignoreBOM = !!(options && options.ignoreBOM);
+    }
+    get encoding() {
+      return "utf-8";
+    }
+    get fatal() {
+      return this.#fatal;
+    }
+    get ignoreBOM() {
+      return this.#ignoreBOM;
+    }
+    decode(input, options) {
+      if (options && options.stream) {
+        throw new TypeError("TextDecoder: stream is not supported; decode the whole input at once");
+      }
+      if (input === undefined) return "";
+      const u = view(input, "TextDecoder.decode: the input");
+      return native.utf8Decode(u.buffer, u.byteOffset, u.byteLength, this.#fatal, this.#ignoreBOM);
+    }
+  }
+
+  function notSupported(what) {
+    return new DOMException(what, "NotSupportedError");
+  }
+  function algName(a) {
+    return String(typeof a === "string" ? a : a && a.name).toUpperCase();
+  }
+  // SHA-1 stays for HMAC: some webhook senders still sign with it.
+  const HASH_BLOCK_BITS = { "SHA-1": 512, "SHA-256": 512, "SHA-384": 1024, "SHA-512": 1024 };
+  function hashName(a) {
+    const n = algName(a);
+    if (!(n in HASH_BLOCK_BITS)) {
+      throw notSupported("unsupported hash " + n + "; SHA-1, SHA-256, SHA-384 and SHA-512 are supported");
+    }
+    return n;
+  }
+  function hmacOnly(a) {
+    if (algName(a) !== "HMAC") {
+      throw notSupported("unsupported algorithm " + algName(a) + "; HMAC is supported");
+    }
+  }
+
+  // A key's bytes live here, out of the function's reach. A CryptoKey
+  // object is only a handle.
+  const KEYS = new WeakMap();
+  class CryptoKey {
+    constructor() {
+      throw new TypeError("CryptoKey has no constructor; use crypto.subtle.importKey");
+    }
+  }
+  function makeKey(bytes, hash, extractable, usages) {
+    const k = Object.create(CryptoKey.prototype);
+    const ro = (value) => ({ value, enumerable: true });
+    Object.defineProperties(k, {
+      type: ro("secret"),
+      extractable: ro(!!extractable),
+      algorithm: ro(Object.freeze({ name: "HMAC", hash: Object.freeze({ name: hash }), length: bytes.length * 8 })),
+      usages: ro(Object.freeze(usages.slice())),
+    });
+    KEYS.set(k, { bytes, hash });
+    return Object.freeze(k);
+  }
+  function checkUsages(usages) {
+    if (!Array.isArray(usages) || usages.length === 0) {
+      throw new DOMException("key usages must name sign, verify or both", "SyntaxError");
+    }
+    for (const u of usages) {
+      if (u !== "sign" && u !== "verify") {
+        throw new DOMException("an HMAC key is for sign and verify, not " + u, "SyntaxError");
+      }
+    }
+  }
+  function keyFor(key, usage, algorithm) {
+    hmacOnly(algorithm);
+    const k = KEYS.get(key);
+    if (!k) throw new TypeError("expected a CryptoKey");
+    if (!key.usages.includes(usage)) {
+      throw new DOMException("this key's usages do not include " + usage, "InvalidAccessError");
+    }
+    return k;
+  }
+
+  const subtle = {
+    async digest(algorithm, data) {
+      const h = hashName(algorithm);
+      const u = view(data, "digest: the data");
+      return native.digest(h, u.buffer, u.byteOffset, u.byteLength);
+    },
+    async importKey(format, keyData, algorithm, extractable, usages) {
+      if (format !== "raw") throw notSupported("importKey: only the raw format is supported");
+      hmacOnly(algorithm);
+      const h = hashName(algorithm.hash);
+      checkUsages(usages);
+      const bytes = view(keyData, "importKey: the key").slice();
+      if (bytes.length === 0) throw new DOMException("importKey: the key is empty", "DataError");
+      if (algorithm.length !== undefined && algorithm.length !== bytes.length * 8) {
+        throw new DOMException("importKey: length does not match the key", "DataError");
+      }
+      return makeKey(bytes, h, extractable, usages);
+    },
+    async generateKey(algorithm, extractable, usages) {
+      hmacOnly(algorithm);
+      const h = hashName(algorithm.hash);
+      checkUsages(usages);
+      const bits = algorithm.length === undefined ? HASH_BLOCK_BITS[h] : algorithm.length;
+      if (!(bits > 0) || bits % 8 !== 0) throw notSupported("generateKey: length must be whole bytes");
+      const bytes = new Uint8Array(bits / 8);
+      native.fillRandom(bytes.buffer, 0, bytes.length);
+      return makeKey(bytes, h, extractable, usages);
+    },
+    async exportKey(format, key) {
+      if (format !== "raw") throw notSupported("exportKey: only the raw format is supported");
+      const k = KEYS.get(key);
+      if (!k) throw new TypeError("expected a CryptoKey");
+      if (!key.extractable) throw new DOMException("the key is not extractable", "InvalidAccessError");
+      return k.bytes.slice().buffer;
+    },
+    async sign(algorithm, key, data) {
+      const k = keyFor(key, "sign", algorithm);
+      const u = view(data, "sign: the data");
+      return native.hmacSign(k.hash, k.bytes.buffer, 0, k.bytes.length, u.buffer, u.byteOffset, u.byteLength);
+    },
+    async verify(algorithm, key, signature, data) {
+      const k = keyFor(key, "verify", algorithm);
+      const s = view(signature, "verify: the signature");
+      const u = view(data, "verify: the data");
+      return native.hmacVerify(
+        k.hash, k.bytes.buffer, 0, k.bytes.length,
+        s.buffer, s.byteOffset, s.byteLength,
+        u.buffer, u.byteOffset, u.byteLength
+      );
+    },
+  };
+
+  function getRandomValues(array) {
+    if (
+      !ArrayBuffer.isView(array) ||
+      array instanceof DataView ||
+      array instanceof Float32Array ||
+      array instanceof Float64Array
+    ) {
+      throw new DOMException("getRandomValues takes an integer typed array", "TypeMismatchError");
+    }
+    if (array.byteLength > 65536) {
+      throw new DOMException("getRandomValues fills at most 65536 bytes at once", "QuotaExceededError");
+    }
+    native.fillRandom(array.buffer, array.byteOffset, array.byteLength);
+    return array;
+  }
+
+  function randomUUID() {
+    const b = new Uint8Array(16);
+    native.fillRandom(b.buffer, 0, 16);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+  }
+
+  const crypto = Object.freeze({ getRandomValues, randomUUID, subtle: Object.freeze(subtle) });
+
   const define = (k, v) =>
     Object.defineProperty(globalThis, k, { value: v, writable: false, enumerable: false, configurable: false });
   define("fetch", fetch);
   define("Headers", Headers);
   define("Response", Response);
   define("console", console);
+  define("TextEncoder", TextEncoder);
+  define("TextDecoder", TextDecoder);
+  define("DOMException", DOMException);
+  define("CryptoKey", CryptoKey);
+  define("crypto", crypto);
   define("__ordo_invoke", invoke);
 })();

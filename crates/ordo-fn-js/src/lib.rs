@@ -1,7 +1,8 @@
 //! The JavaScript engine a backend function runs in.
 //!
 //! This crate compiles to one WebAssembly module: the Boa engine, a small
-//! Web-shaped prelude (`fetch`, `Response`, `Headers`, `console`) and four
+//! Web-shaped prelude (`fetch`, `Response`, `Headers`, `console`,
+//! `TextEncoder`, `TextDecoder`, `crypto`; byte work in `web.rs`) and four
 //! exports the host drives. The host (`ordo-fn`) pre-initializes it once with
 //! `ordo_init`, snapshots the result, and makes a fresh instance of that
 //! snapshot for every call. Nothing in here outlives one call.
@@ -18,6 +19,8 @@
 //!
 //! There is no socket, file, environment or secret value here. A secret is a
 //! handle naming the secret; the host fills the value in on the way out.
+
+mod web;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -151,10 +154,11 @@ fn boot() -> JsResult<Context> {
         .clock(Rc::new(HostClock))
         .build()
         .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
-    let native = boa_engine::object::ObjectInitializer::new(&mut ctx)
-        .function(NativeFunction::from_fn_ptr(native_fetch), js_string!("fetch"), 1)
-        .function(NativeFunction::from_fn_ptr(native_log), js_string!("log"), 2)
-        .build();
+    let mut init = boa_engine::object::ObjectInitializer::new(&mut ctx);
+    init.function(NativeFunction::from_fn_ptr(native_fetch), js_string!("fetch"), 1)
+        .function(NativeFunction::from_fn_ptr(native_log), js_string!("log"), 2);
+    web::install(&mut init);
+    let native = init.build();
     ctx.global_object().set(
         js_string!("__ordo_native"),
         native,

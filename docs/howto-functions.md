@@ -73,8 +73,50 @@ export default {
 
 Bundle anything you import into the one file, with esbuild or similar.
 The engine is Boa, a JavaScript engine written in Rust and compiled to
-WebAssembly. It runs ES2023 with promises and `async`. It has no Node APIs,
-no `setTimeout`, and no `TextEncoder` or `crypto.subtle` yet.
+WebAssembly. It runs ES2023 with promises and `async`. It has no Node APIs
+and no `setTimeout`.
+
+### What the engine offers
+
+Beside `fetch`, `Response`, `Headers` and `console`:
+
+| API | What works |
+|---|---|
+| `TextEncoder` | `encode` and `encodeInto`, UTF-8. A lone surrogate becomes U+FFFD. |
+| `TextDecoder` | UTF-8 only, with `fatal` and `ignoreBOM`. `stream: true` throws; decode the whole input at once. |
+| `crypto.getRandomValues` | Integer typed arrays, up to 65536 bytes per call. |
+| `crypto.randomUUID` | A version 4 UUID. |
+| `crypto.subtle.digest` | SHA-1, SHA-256, SHA-384, SHA-512. |
+| `crypto.subtle.importKey` | `raw` HMAC keys. |
+| `crypto.subtle.generateKey` | HMAC keys. |
+| `crypto.subtle.exportKey` | `raw`, for a key made extractable. |
+| `crypto.subtle.sign`, `verify` | HMAC with any of the hashes above. `verify` compares in constant time. |
+
+Random bytes come from the server's operating system, fresh for every call.
+Two calls never share a sequence. The hashing runs in Rust inside the
+engine. RSA, ECDSA, AES and other `crypto.subtle` algorithms reject with
+`NotSupportedError`.
+
+A webhook check, for a sender that signs the body with HMAC-SHA256 in hex:
+
+```js
+const unhex = (s) => new Uint8Array(s.match(/../g).map((h) => parseInt(h, 16)));
+
+export default {
+  async call(input) {
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw", enc.encode(input.signingKey), { name: "HMAC", hash: "SHA-256" },
+      false, ["verify"]);
+    const ok = await crypto.subtle.verify(
+      "HMAC", key, unhex(input.signature), enc.encode(input.body));
+    return { ok };
+  },
+};
+```
+
+A function cannot read a secret's value, so a key held as a secret cannot
+be imported here yet.
 
 ### Limits
 
@@ -92,6 +134,15 @@ no `setTimeout`, and no `TextEncoder` or `crypto.subtle` yet.
 
 CPU is counted as WebAssembly fuel. Waiting on the network counts toward
 wall time and not toward CPU.
+
+### Start time
+
+The first call after a server starts needs the engine compiled, which
+takes about a second. The server keeps the compiled engine on disk, in
+`ORDO_FN_CACHE_DIR` (`$XDG_CACHE_HOME/ordo/fn`, else
+`$HOME/.cache/ordo/fn`). A restart loads it in about 30 ms. A new Ordo
+release compiles once and replaces the file. `off` turns the cache off.
+See `docs/settings.md`.
 
 ## Secrets
 

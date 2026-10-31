@@ -5271,6 +5271,12 @@ async fn assemble_program(
         ordo_egress::DenyList::from_vars(&env)
             .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
     };
+    // `ORDO_FN_CACHE_DIR`: where the compiled function engine is kept.
+    let functions_engine_cache = {
+        let env = |k: &str| std::env::var(k).ok();
+        crate::functions::engine_cache_from_vars(&env)
+            .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
+    };
     Ok(Runtime {
         mail: cfg.mail.clone(),
         custody_label: custody_choice.label(),
@@ -5356,7 +5362,10 @@ async fn assemble_program(
         catchup,
         node_status,
         functions: Arc::new(crate::functions::HostFunctions::new(
-            ordo_fn::HostConfig::default(),
+            ordo_fn::HostConfig {
+                engine_cache: functions_engine_cache,
+                ..ordo_fn::HostConfig::default()
+            },
             crate::functions::FnTable::default(),
             spaces.clone(),
             pool_for_functions,

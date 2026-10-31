@@ -11745,8 +11745,9 @@ Items the owner has explicitly placed AFTER the first deployment. Listed so
       functions, secrets, the SDK call, the notes v2 button, upgrade tests
       (owner, 2026-10-31: "make sure we're testing upgrade of a function"),
       `ordo fn runs` and `ordo fn log` with 14-day logs, the engine cache,
-      `TextEncoder` and `crypto.subtle`. Open: asks 18 (one unsafe call for
-      the cache) and 19 (HMAC keyed by a secret). Then increments 2 and 4.
+      `TextEncoder` and `crypto.subtle`. One unsafe call loads the cached
+      engine (ask 18, ruled). Building: HMAC keyed by a secret's name (ask
+      19). Then increments 2 and 4.
       Board: `backend-functions`.
 
 - [ ] **18af · Function logs in the console (v2).** The owner,

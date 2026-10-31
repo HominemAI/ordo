@@ -1200,3 +1200,11 @@
 {"seq": 1200, "item": "backend-functions", "ask": 17, "at": "2026-10-31", "status": "decided", "text": "ok no wasm? i thought it was faster", "source": "record", "read": true}
 {"seq": 1201, "item": "backend-functions", "ask": 0, "at": "2026-10-31", "status": "decided", "text": "Yes. Also make sure we're testing upgrade of a function.", "source": "record", "read": true}
 {"seq": 1202, "item": "function-logs-in-console", "ask": 0, "at": "2026-10-31", "status": "decided", "text": "Include tool to view logs in the console as a v2 item", "source": "record", "read": true}
+{"seq": 1203, "item": "a-program-with-a-function-never", "ask": 1, "at": "2026-10-31T20:19:51Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1204, "item": "a-program-with-a-function-never", "ask": 0, "at": "2026-10-31T20:20:00Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1205, "item": "backend-functions", "ask": 18, "at": "2026-10-31T20:20:55Z", "status": "open", "text": "Yes - we can address it later if it becomes a larger concern.", "source": "page", "read": true}
+{"seq": 1206, "item": "backend-functions", "ask": 19, "at": "2026-10-31T20:21:05Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1207, "item": "backend-functions", "ask": 0, "at": "2026-10-31T20:21:24Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1208, "item": "backend-functions", "ask": 18, "at": "2026-10-31", "status": "decided", "text": "Yes - we can address it later if it becomes a larger concern.", "source": "record", "read": true}
+{"seq": 1209, "item": "backend-functions", "ask": 19, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1210, "item": "a-program-with-a-function-never", "ask": 1, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}

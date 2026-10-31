@@ -11707,3 +11707,15 @@ work flow without a second reviewer.
   a v2 item."* v1 reads function runs and logs with `ordo fn runs`. A
   console page for them is v2 (checklist 18af, board
   `function-logs-in-console`).
+
+## 2026-10-31: one unsafe call for the engine cache; HMAC keyed by a secret
+
+- **Unsafe call.** Owner, ask 18: *"Yes - we can address it later if it
+  becomes a larger concern."* `crates/ordo-fn` denies unsafe code and
+  allows one call by name: loading the cached engine. It loads only files
+  Ordo wrote, in a directory its user owns and no one else can write. The
+  rest of Ordo still forbids unsafe code.
+- **HMAC keyed by a secret.** Owner, ask 19: *"ok"*. A function signs or
+  verifies with a secret by its name, and the host does the HMAC. The key
+  never enters the function, as with `fetch`. Built before v1, since
+  checking a webhook's signature is a main use of functions.

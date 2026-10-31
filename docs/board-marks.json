@@ -11,6 +11,10 @@
   "mark": "done",
   "at": "2026-10-30T08:55:45+00:00"
  },
+ "a-program-with-a-function-never:1": {
+  "mark": "done",
+  "at": "2026-10-31T20:19:56+00:00"
+ },
  "a-runtime-test-connects-before-the:1": {
   "mark": "done",
   "at": "2026-10-31T10:52:53+00:00"
@@ -222,6 +226,14 @@
  "backend-functions:17": {
   "mark": "done",
   "at": "2026-10-31T10:57:29+00:00"
+ },
+ "backend-functions:18": {
+  "mark": "done",
+  "at": "2026-10-31T20:20:56+00:00"
+ },
+ "backend-functions:19": {
+  "mark": "done",
+  "at": "2026-10-31T20:21:03+00:00"
  },
  "backend-functions:2": {
   "mark": "done",

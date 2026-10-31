@@ -19,6 +19,7 @@ use axum::http::{Request, StatusCode};
 use ordo_api::{AccessChecker, AccessDecision, ApiState, MemoryBus, MemoryReplayCache, PageKey};
 use ordo_conformance::{Fixture, Pg};
 use ordo_fn::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue};
+use ordo_host::fn_runs;
 use ordo_host::functions::{self, FnTable, HostFunctions};
 use serde_json::{json, Value};
 use tower::util::ServiceExt;
@@ -602,6 +603,232 @@ async fn the_real_kernel_fills_the_secret_in_and_an_echoed_value_never_lands_in_
         .await
         .unwrap();
     assert!(!format!("{raw:?}").contains(VALUE));
+
+    // The owner's read of the run's log shows the line, the value as
+    // `[secret]`.
+    let ops = run_ops(&d);
+    let seq = ops
+        .execute(fn_runs::RUNS, HOME, &bound(&[]))
+        .await
+        .unwrap()
+        .rows[0]["seq"]
+        .as_u64()
+        .unwrap();
+    let one = ops
+        .execute(fn_runs::RUN, HOME, &bound(&[("seq", json!(seq))]))
+        .await
+        .unwrap();
+    let log = one.rows[0]["logs"].to_string();
+    assert!(log.contains("the far end said"), "{log}");
+    assert!(log.contains("[secret]"), "{log}");
+    assert!(!one.rows[0].to_string().contains(VALUE), "{}", one.rows[0]);
+}
+
+/// The deployment's own space, where the run ops answer.
+const HOME: &str = "ordo_home";
+
+fn run_ops(d: &Door) -> fn_runs::FnRunOps {
+    fn_runs::FnRunOps {
+        control: d.pool.clone(),
+        home: HOME.into(),
+    }
+}
+
+fn bound(pairs: &[(&str, Value)]) -> ordo_api::BoundParams {
+    ordo_api::BoundParams(
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
+}
+
+const CHATTY: &str =
+    "function chatty in notes {\n  call($n: int) -> json\n  code \"fn/chatty.js\"\n}\n";
+
+/// Logs at three levels, then `n` lines of 1000 characters.
+const CHATTY_CODE: &[(&str, &str)] = &[(
+    "fn/chatty.js",
+    r#"export default { async call(input, ctx) {
+        console.log("hello from", ctx.tenant);
+        console.warn("careful");
+        console.error("bad");
+        for (let i = 0; i < input.n; i++) console.log("x".repeat(1000));
+        return { ok: true };
+    } }"#,
+)];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_lists_runs_newest_first_and_reads_one_runs_log() {
+    let d = door("ordo_fn_runs_read", CHATTY, CHATTY_CODE).await;
+    let ops = run_ops(&d);
+    // No run yet: an empty list.
+    let none = ops.execute(fn_runs::RUNS, HOME, &bound(&[])).await.unwrap();
+    assert!(none.rows.is_empty());
+
+    for n in [0, 0, 200] {
+        let (st, body) = d
+            .post(
+                "chatty",
+                "acme",
+                Some("person:ana"),
+                None,
+                json!({ "n": n }),
+            )
+            .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+    }
+    let (st, body) = d
+        .post(
+            "suggestTitle",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "text": "milk, eggs" }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+
+    // Newest first, every function, with no log text in the list.
+    let all = ops
+        .execute(fn_runs::RUNS, HOME, &bound(&[]))
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(all.len(), 4);
+    assert_eq!(all[0]["function"], "suggestTitle");
+    assert!(all[0]["seq"].as_u64() > all[1]["seq"].as_u64());
+    assert_eq!(all[1]["tenant"], "acme");
+    assert_eq!(all[1]["outcome"], "ok");
+    assert_eq!(all[1]["wake"], "call");
+    assert!(all[1]["principal"]
+        .as_str()
+        .unwrap()
+        .ends_with("on behalf of ana"));
+    assert!(all.iter().all(|r| r.get("logs").is_none()));
+    assert!(!format!("{all:?}").contains("milk"), "{all:?}");
+
+    // By function, and by limit.
+    let chatty = ops
+        .execute(
+            fn_runs::RUNS,
+            HOME,
+            &bound(&[("function", json!("chatty")), ("limit", json!(2))]),
+        )
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(chatty.len(), 2);
+    assert!(chatty.iter().all(|r| r["function"] == "chatty"));
+
+    // One run: its log lines with their levels.
+    let quiet = all[3]["seq"].as_u64().unwrap();
+    let one = ops
+        .execute(fn_runs::RUN, HOME, &bound(&[("seq", json!(quiet))]))
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(
+        one[0]["logs"],
+        json!([
+            {"level": "info", "text": "hello from acme"},
+            {"level": "warn", "text": "careful"},
+            {"level": "error", "text": "bad"},
+        ])
+    );
+    assert_eq!(one[0]["logLines"], 3);
+
+    // The log of a call that wrote 200 KB is cut at 64 KB and marked.
+    let loud = all[1]["seq"].as_u64().unwrap();
+    let one = ops
+        .execute(fn_runs::RUN, HOME, &bound(&[("seq", json!(loud))]))
+        .await
+        .unwrap()
+        .rows;
+    let logs = one[0]["logs"].as_array().unwrap();
+    let bytes: usize = logs.iter().map(|l| l["text"].as_str().unwrap().len()).sum();
+    assert!(bytes <= 64 * 1024 + 100, "{bytes}");
+    assert!(
+        logs.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("log truncated"),
+        "{:?}",
+        logs.last()
+    );
+
+    // An unknown run names how long runs are kept.
+    let e = ops
+        .execute(fn_runs::RUN, HOME, &bound(&[("seq", json!(999_999))]))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ordo_api::ErrorCode::NotFound);
+    assert!(
+        e.message.contains("ORDO_FN_RUN_RETENTION_DAYS"),
+        "{}",
+        e.message
+    );
+
+    // A tenant's space is answered nothing.
+    let e = ops
+        .execute(fn_runs::RUNS, "acme", &bound(&[]))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ordo_api::ErrorCode::NotFound);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sweep_deletes_runs_older_than_the_retention_and_keeps_the_rest() {
+    let d = door("ordo_fn_runs_sweep", CHATTY, CHATTY_CODE).await;
+    for _ in 0..3 {
+        let (st, body) = d
+            .post(
+                "chatty",
+                "acme",
+                Some("person:ana"),
+                None,
+                json!({ "n": 0 }),
+            )
+            .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    const DAY: u64 = 86_400;
+    // The first run 15 days old, the second 13, the last today.
+    d.pool
+        .rows(&format!(
+            "UPDATE \"$fnruns\" SET \"started_at\" = CASE \
+               WHEN \"seq\" = (SELECT min(\"seq\") FROM \"$fnruns\") THEN {} \
+               WHEN \"seq\" = (SELECT max(\"seq\") FROM \"$fnruns\") THEN {now} \
+               ELSE {} END",
+            now - 15 * DAY,
+            now - 13 * DAY
+        ))
+        .await
+        .unwrap();
+
+    let gone = fn_runs::sweep(&d.pool, fn_runs::DEFAULT_RETENTION_DAYS, now)
+        .await
+        .unwrap();
+    assert_eq!(gone, 1, "only the run past 14 days goes");
+    assert_eq!(functions::runs(&d.pool, "acme").await.unwrap().len(), 2);
+    let left = d
+        .pool
+        .rows(&format!(
+            "SELECT count(*) FROM \"$fnruns\" WHERE \"started_at\" < {}",
+            now - 14 * DAY
+        ))
+        .await
+        .unwrap();
+    assert_eq!(left[0][0].as_deref(), Some("0"));
+
+    // A second pass finds nothing; a shorter setting takes the next one.
+    assert_eq!(fn_runs::sweep(&d.pool, 14, now).await.unwrap(), 0);
+    assert_eq!(fn_runs::sweep(&d.pool, 7, now).await.unwrap(), 1);
+    assert_eq!(functions::runs(&d.pool, "acme").await.unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

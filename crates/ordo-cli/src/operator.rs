@@ -376,6 +376,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "space" => rt.block_on(space_cmd(flags)),
         "console-key" => rt.block_on(console_key_cmd(flags)),
         "secret" => rt.block_on(secret_cmd(flags, input)),
+        "fn" => rt.block_on(fn_cmd(flags)),
         "import" => rt.block_on(import_cmd(flags)),
         "fleet" => rt.block_on(fleet_cmd(flags)),
         "triggers" => rt.block_on(crate::triggers::run(flags)),
@@ -2730,6 +2731,68 @@ async fn secret_cmd(flags: Flags, input: Option<Vec<u8>>) -> Outcome {
         }
         other => Outcome::usage(format!(
             "unknown `ordo secret` subcommand `{other}`; they are `set`, `ls` and `rm`\n{USAGE}"
+        )),
+    }
+}
+
+/// `ordo fn runs|log`: the deployment's function runs and one run's log
+/// (`plan-backend-functions.md` §10), over the door, as the deployment owner.
+async fn fn_cmd(flags: Flags) -> Outcome {
+    const USAGE: &str = "ordo fn runs [<name>] [--limit <n>] --host <h> --token <t> --space <s>\n\
+                         ordo fn log <seq> --host <h> --token <t> --space <s>\n";
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(USAGE.into());
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    match sub.as_str() {
+        "runs" => {
+            if let Err(e) = flags.only(&["--host", "--token", "--space", "--limit"]) {
+                return Outcome::usage(format!("{e}\n{USAGE}"));
+            }
+            let limit = match flags.named_value("--limit").map(str::parse::<u64>) {
+                None => None,
+                Some(Ok(n)) if n >= 1 => Some(n),
+                Some(_) => {
+                    return Outcome::usage(format!(
+                        "`--limit` is a whole number, 1 or more\n{USAGE}"
+                    ))
+                }
+            };
+            let name = match flags.positional.as_slice() {
+                [] => None,
+                [n] => Some(n.clone()),
+                _ => {
+                    return Outcome::usage(format!(
+                        "`ordo fn runs` takes at most one function name\n{USAGE}"
+                    ))
+                }
+            };
+            crate::wire::list_fn_runs_over_the_wire(&flags, name.as_deref(), limit).await
+        }
+        "log" => {
+            if let Err(e) = flags.only(&["--host", "--token", "--space"]) {
+                return Outcome::usage(format!("{e}\n{USAGE}"));
+            }
+            let seq = match flags.positional.as_slice() {
+                [n] => match n.parse::<u64>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return Outcome::usage(format!(
+                            "`{n}` is not a run number; `ordo fn runs` lists them\n{USAGE}"
+                        ))
+                    }
+                },
+                _ => {
+                    return Outcome::usage(format!(
+                        "`ordo fn log` takes one run number, as `ordo fn runs` lists it\n{USAGE}"
+                    ))
+                }
+            };
+            crate::wire::show_fn_run_over_the_wire(&flags, seq).await
+        }
+        other => Outcome::usage(format!(
+            "unknown `ordo fn` subcommand `{other}`; they are `runs` and `log`\n{USAGE}"
         )),
     }
 }

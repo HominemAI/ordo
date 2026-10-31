@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS \"$fnruns\" ( \
   \"message\" text NOT NULL, \
   \"logs\" text NOT NULL \
 ); \
-CREATE INDEX IF NOT EXISTS \"$fnruns_space\" ON \"$fnruns\" (\"space\", \"seq\")";
+CREATE INDEX IF NOT EXISTS \"$fnruns_space\" ON \"$fnruns\" (\"space\", \"seq\"); \
+CREATE INDEX IF NOT EXISTS \"$fnruns_started\" ON \"$fnruns\" (\"started_at\")";
 
 /// The largest code file `ordo apply` stores (§9).
 pub const MAX_CODE_BYTES: usize = 20 * 1024 * 1024;

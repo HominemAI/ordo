@@ -75,6 +75,7 @@ pub mod enrolment;
 pub mod exit_ops;
 pub mod federation;
 pub mod fleet;
+pub mod fn_runs;
 pub mod functions;
 pub mod grants;
 pub mod guess_limits;

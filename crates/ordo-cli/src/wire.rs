@@ -903,12 +903,17 @@ pub async fn revoke_console_key_over_the_wire(flags: &Flags) -> Outcome {
 /// The host, the token and the space a secret command talks to the door
 /// with, or the refusal that says which is missing.
 async fn secret_door(flags: &Flags) -> Result<(Host, String, String), Outcome> {
+    owner_door(flags, "ordo secret").await
+}
+
+/// [`secret_door`] for any owner command, named in the refusal.
+async fn owner_door(flags: &Flags, cmd: &str) -> Result<(Host, String, String), Outcome> {
     let host = match requested(flags) {
         Some(Ok(h)) => h,
         Some(Err(e)) => return Err(Outcome::usage(e)),
         None => {
             return Err(Outcome::usage(format!(
-                "`ordo secret` talks to the deployment's door: `--host <h>` or {HOST_ENV} is \
+                "`{cmd}` talks to the deployment's door: `--host <h>` or {HOST_ENV} is \
                  required\n"
             )))
         }
@@ -1033,6 +1038,145 @@ pub async fn remove_secret_over_the_wire(flags: &Flags, name: &str) -> Outcome {
         row["name"].as_str().unwrap_or(name),
         row["version"].as_u64().unwrap_or(0)
     ))
+}
+
+/// `ordo fn runs [<name>] [--limit N]`: function runs, newest first
+/// (`std.deployment.functionRuns`). Never a log line; `ordo fn log` shows one.
+pub async fn list_fn_runs_over_the_wire(
+    flags: &Flags,
+    function: Option<&str>,
+    limit: Option<u64>,
+) -> Outcome {
+    let (host, token, space) = match owner_door(flags, "ordo fn").await {
+        Ok(d) => d,
+        Err(o) => return o,
+    };
+    let mut query = Vec::new();
+    if let Some(f) = function {
+        query.push(format!("function={}", query_escape(f)));
+    }
+    if let Some(n) = limit {
+        query.push(format!("limit={n}"));
+    }
+    let mut op_path = format!("/op/{}", ordo_host::fn_runs::RUNS);
+    if !query.is_empty() {
+        op_path = format!("{op_path}?{}", query.join("&"));
+    }
+    let (status, value) = match get_json_in(&host, &op_path, &token, Some(&space)).await {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+    };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    let rows = value["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return Outcome::ok(match function {
+            Some(f) => format!("no runs of `{f}` are kept\n"),
+            None => "no function runs are kept\n".into(),
+        });
+    }
+    let mut out = String::from("RUN  WHEN  FUNCTION  VERSION  TENANT  OUTCOME  MS  LOG  WHO\n");
+    for row in &rows {
+        out.push_str(&format!(
+            "{}  {}  {}  {}  {}  {}  {}  {}  {}\n",
+            row["seq"].as_u64().unwrap_or(0),
+            crate::signin::utc(row["startedAt"].as_u64().unwrap_or(0)),
+            row["function"].as_str().unwrap_or("?"),
+            short_version(row["version"].as_str().unwrap_or("?")),
+            row["tenant"].as_str().unwrap_or("?"),
+            row["outcome"].as_str().unwrap_or("?"),
+            row["wallMs"].as_u64().unwrap_or(0),
+            row["logLines"].as_u64().unwrap_or(0),
+            row["principal"].as_str().unwrap_or("?"),
+        ));
+    }
+    Outcome::ok(out)
+}
+
+/// `ordo fn log <seq>`: one run, its measures and the lines it logged
+/// (`std.deployment.functionRun`).
+pub async fn show_fn_run_over_the_wire(flags: &Flags, seq: u64) -> Outcome {
+    let (host, token, space) = match owner_door(flags, "ordo fn").await {
+        Ok(d) => d,
+        Err(o) => return o,
+    };
+    let op_path = format!("/op/{}?seq={seq}", ordo_host::fn_runs::RUN);
+    let (status, value) = match get_json_in(&host, &op_path, &token, Some(&space)).await {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+    };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    let r = &value["rows"][0];
+    let n = |k: &str| r[k].as_u64().unwrap_or(0);
+    let t = |k: &str| r[k].as_str().unwrap_or("").to_string();
+    let hosts: Vec<&str> = r["hosts"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out = format!(
+        "run {}  {}@{}  in {}\n\
+         when     {}\n\
+         who      {}\n\
+         outcome  {}{}\n\
+         took     {} ms wall, {} ms CPU, {} bytes peak memory\n\
+         fetches  {} ({} bytes out, {} in){}\n",
+        n("seq"),
+        t("function"),
+        short_version(&t("version")),
+        t("tenant"),
+        crate::signin::utc(n("startedAt")),
+        t("principal"),
+        t("outcome"),
+        match t("message") {
+            m if m.is_empty() => String::new(),
+            m => format!(": {m}"),
+        },
+        n("wallMs"),
+        n("cpuMs"),
+        n("peakMemory"),
+        n("fetches"),
+        n("bytesOut"),
+        n("bytesIn"),
+        if hosts.is_empty() {
+            String::new()
+        } else {
+            format!(" to {}", hosts.join(", "))
+        },
+    );
+    let logs = r["logs"].as_array().cloned().unwrap_or_default();
+    if logs.is_empty() {
+        out.push_str("log      nothing logged\n");
+    } else {
+        out.push_str("log\n");
+        for l in &logs {
+            out.push_str(&format!(
+                "  {:<5}  {}\n",
+                l["level"].as_str().unwrap_or("info"),
+                l["text"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    Outcome::ok(out)
+}
+
+/// A program version cut to 12 characters for a table.
+fn short_version(v: &str) -> &str {
+    &v[..v.char_indices().nth(12).map_or(v.len(), |(i, _)| i)]
+}
+
+/// Percent-encodes everything but unreserved characters.
+fn query_escape(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[cfg(test)]

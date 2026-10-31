@@ -1016,6 +1016,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::observed_cost::specs())
     .chain(crate::console_keys::specs())
     .chain(crate::secrets::specs())
+    .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
     .chain(crate::fleet::specs())
     .chain(crate::settings::specs())
@@ -1849,6 +1850,9 @@ pub fn owner_only(name: &str) -> bool {
         // Backend functions. The app secrets are the deployment owner's, and
         // the ops answer only in the deployment's own space.
         || crate::secrets::OPS.contains(&name)
+        // Backend functions. Every function run, and its log, is the
+        // deployment owner's to read, in the deployment's own space.
+        || crate::fn_runs::OPS.contains(&name)
         // G4. The list of every tenant is the deployment owner's, and the
         // op answers only in the deployment's own space.
         || crate::fleet::OPS.contains(&name)
@@ -2203,6 +2207,9 @@ pub struct PlatformOps {
     /// The app secrets ([`crate::secrets`]). `None` is an assembly that
     /// registered the ops and wired nothing, which they refuse.
     pub secrets: Option<Arc<crate::secrets::SecretOps>>,
+    /// Function runs and their logs ([`crate::fn_runs`]). `None` is an
+    /// assembly that registered the ops and wired nothing, which they refuse.
+    pub fn_runs: Option<Arc<crate::fn_runs::FnRunOps>>,
     /// The list of tenants' state ([`crate::fleet`], G4). `None` is an
     /// assembly that registered the op and wired nothing, which it says.
     pub tenant_list: Option<Arc<crate::fleet::TenantListOps>>,
@@ -2276,6 +2283,7 @@ impl PlatformOps {
             observed_cost: None,
             console_keys: None,
             secrets: None,
+            fn_runs: None,
             tenant_list: None,
             settings: None,
             quotas: None,
@@ -2460,6 +2468,11 @@ impl PlatformOps {
 
     pub fn with_secrets(mut self, ops: Arc<crate::secrets::SecretOps>) -> PlatformOps {
         self.secrets = Some(ops);
+        self
+    }
+
+    pub fn with_fn_runs(mut self, ops: Arc<crate::fn_runs::FnRunOps>) -> PlatformOps {
+        self.fn_runs = Some(ops);
         self
     }
 
@@ -2930,6 +2943,15 @@ impl PlatformOps {
                     .map(|p| p.0.clone())
                     .unwrap_or_else(|| caller.to_string());
                 ops.execute(name, space, bound, &principal).await
+            }
+            name if crate::fn_runs::OPS.contains(&name) => {
+                let ops = self.fn_runs.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the function-run ops and wired no state for \
+                         them",
+                    )
+                })?;
+                ops.execute(name, space, bound).await
             }
             name if crate::self_serve::OPS.contains(&name) => {
                 let ops = self.self_serve.as_deref().ok_or_else(|| {

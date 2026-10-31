@@ -149,6 +149,9 @@ const READS: &[&str] = &[
     "std.deployment.consoleKeys",
     // The app secrets' names and hosts, never a value.
     "std.deployment.secrets",
+    // Function runs and one run's log: the deployment owner's to read.
+    "std.deployment.functionRuns",
+    "std.deployment.functionRun",
     "std.deployment.versions",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).

@@ -163,6 +163,15 @@ fn usage() -> ! {
          ordo secret rm <name> --host <h> --token <t> --space <s>\n      \
          remove an app secret's value. `--host`, `--token` and `--space`\n      \
          resolve as for `apply`.\n  \
+         ordo fn runs [<name>] [--limit <n>] --host <h> --token <t> --space <s>\n      \
+         list backend function runs, newest first (`std.deployment.functionRuns`):\n      \
+         run number, function, version, tenant, when, who, outcome and\n      \
+         duration. 50 by default, at most 500. Runs are kept\n      \
+         ORDO_FN_RUN_RETENTION_DAYS days, 14 by default.\n  \
+         ordo fn log <seq> --host <h> --token <t> --space <s>\n      \
+         show one run and the lines it logged (`std.deployment.functionRun`).\n      \
+         A secret's value shows as [secret]. The deployment owner's only;\n      \
+         `--host`, `--token` and `--space` resolve as for `apply`.\n  \
          ordo import --bundle <b> [--name <n>] --host <h> --token <t> --space <s>\n      \
          load a bundle an operator has staged for this space through the\n      \
          deployment's own door (`std.space.import`, 11-10a). The bundle is\n      \
@@ -437,6 +446,7 @@ fn main() {
             | "space"
             | "console-key"
             | "secret"
+            | "fn"
             | "identity"
             | "import"
             | "fleet"

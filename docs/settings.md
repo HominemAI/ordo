@@ -509,6 +509,7 @@ tighter, inside them.
 | `ORDO_SESSION_REFRESH_SECS` | Longest a replica keeps honouring an ended session | 15 s | built | sets | | | | host/workers.rs:1229-1239 |
 | `ORDO_TRIGGERS_IDLE_MAX_SECS` | Longest gap between two `triggers.drain` visits to a tenant whose chain has not moved. Zero or unreadable is the default | 10 s | built | sets | | | | host/routines.rs `idle_max_from_env` |
 | `ORDO_NODE_BEAT_SECS` | How often a node writes its row for `/health/deploy` | 5 | built | sets | | | | host/node_status.rs (BEAT_SETTING); host/runtime.rs |
+| `ORDO_FN_RUN_RETENTION_DAYS` | Days a backend function's run and its log are kept in `$fnruns`. The `functions.runs.sweep` worker deletes older runs once an hour. 1 to 3650; anything else refuses the boot and names this setting | 14 | built | sets | | | | host/fn_runs.rs (RETENTION_ENV) |
 | Supervisor timing | Backoff unit, leader tick, census period | 1 s, 5 s, 60 s | hardcoded | could be exposed | | | | host/supervisor.rs:181-183 |
 | Quarantine threshold | Failed runs before a listener is quarantined | 10 | hardcoded | could be exposed | | | | host/supervisor.rs:107 |
 | Trigger attempts | Runs before a dead letter | 5 | hardcoded | could be exposed | could be exposed | | | exec/triggers.rs:527 |

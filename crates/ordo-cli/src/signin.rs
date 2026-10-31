@@ -1536,6 +1536,12 @@ pub fn when(at: u64, now: u64) -> String {
     format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC ({rel})")
 }
 
+/// `at` as a UTC date and time to the second.
+pub fn utc(at: u64) -> String {
+    let (y, m, d, hh, mm) = civil(at);
+    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{:02}Z", at % 60)
+}
+
 fn civil(t: u64) -> (i64, u32, u32, u64, u64) {
     let days = (t / 86_400) as i64;
     let secs = t % 86_400;

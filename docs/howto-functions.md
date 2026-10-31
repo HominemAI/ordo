@@ -319,3 +319,46 @@ function, the version, the tenant, who called, the wall time, CPU, peak
 memory, the number of outbound calls and their hosts, bytes sent and
 received, the outcome class and the log. The input, the answer and request
 bodies are never recorded. The log is scrubbed of live secret values.
+
+## Runs and logs
+
+Each call is one run. The deployment owner lists them and reads each one's
+log through the door:
+
+```sh
+ordo fn runs --host <h> --space <s>
+ordo fn runs suggestTitle --limit 20 --host <h> --space <s>
+ordo fn log 412 --host <h> --space <s>
+```
+
+- `runs` lists the newest runs first: the run number, when it started, the
+  function, its version, the tenant, the outcome class, the wall time in
+  milliseconds, the number of log lines, and who it ran as.
+- A name shows only that function's runs. `--limit` is 50 by default and
+  500 at most.
+- `log <run>` shows one run: when, who, the outcome and its message, wall
+  time, CPU, peak memory, outbound calls and their hosts, then each log
+  line with its level.
+
+### What a log holds
+
+- The lines the function wrote with `console.log` (`info`),
+  `console.warn` (`warn`) and `console.error` (`error`).
+- Every live secret value is replaced with `[secret]`.
+- At most 64 KB per run. The rest is dropped, and the last line says the
+  log was truncated.
+- The input and the answer are in the log only when the function logs them
+  itself. Ordo never writes them there.
+
+### Who may read them
+
+Only the deployment owner, in the deployment's own space. Both are reads,
+so they need no passkey touch. The ops are
+`std.deployment.functionRuns($function?, $tenant?, $limit?)` and
+`std.deployment.functionRun($seq)`. A tenant cannot read its own runs yet.
+
+### How long they are kept
+
+14 days. The `functions.runs.sweep` worker deletes older runs, with their
+logs, once an hour. `ORDO_FN_RUN_RETENTION_DAYS` changes it, from 1 to 3650
+days. Any other value refuses the boot and names the setting.

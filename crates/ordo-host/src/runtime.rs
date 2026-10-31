@@ -2086,6 +2086,9 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             // Backend functions: the app secrets, in the control database
             // every assembly has.
             name if crate::secrets::OPS.contains(&name) => true,
+            // Backend functions: the runs and their logs, in the control
+            // database every assembly has.
+            name if crate::fn_runs::OPS.contains(&name) => true,
             // G4: the list of tenants, read from the registry every
             // assembly has.
             name if crate::fleet::OPS.contains(&name) => true,
@@ -3057,6 +3060,10 @@ async fn platform_ops_for(
             store: w.secrets.clone(),
             now: now.clone(),
             stream: Some(stream.clone()),
+        }));
+        ops = ops.with_fn_runs(Arc::new(crate::fn_runs::FnRunOps {
+            control: w.pool.clone(),
+            home: w.home.0.clone(),
         }));
         if let Some(keys) = w.console_keys.clone() {
             ops = ops.with_console_keys(Arc::new(crate::console_keys::ConsoleKeyOps {
@@ -6871,6 +6878,23 @@ async fn start_supervisor(rt: &Runtime) -> Result<Arc<crate::supervisor::Supervi
         Err(detail) => {
             return Err(BootRefusal::Invalid {
                 var: "ORDO_AUTH_REGISTRATION_TTL_SECS",
+                detail,
+            })
+        }
+    }
+
+    // Backend functions: runs and their logs are kept
+    // `ORDO_FN_RUN_RETENTION_DAYS` days, 14 by default (plan §10). Always
+    // started: a version switch may add a function with no restart, and a
+    // pass over a deployment with no `$fnruns` does nothing.
+    match crate::fn_runs::retention_from_env() {
+        Ok(keep_days) => workers.push(Arc::new(crate::fn_runs::FnRunSweep {
+            keep_days,
+            every: Duration::from_secs(crate::fn_runs::FnRunSweep::DEFAULT_SECS),
+        })),
+        Err(detail) => {
+            return Err(BootRefusal::Invalid {
+                var: crate::fn_runs::RETENTION_ENV,
                 detail,
             })
         }

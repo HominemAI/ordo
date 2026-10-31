@@ -1723,6 +1723,12 @@ pub static REGISTRY: &[Setting] = &[
     ),
     s("ORDO_NODE_BEAT_SECS", "Workers and periods", r#"5"#, r#""#),
     s(
+        "ORDO_FN_RUN_RETENTION_DAYS",
+        "Workers and periods",
+        r#"14"#,
+        r#"1 to 3650"#,
+    ),
+    s(
         "ORDO_MAIL_KIND",
         "Mail",
         r#"none (off)"#,

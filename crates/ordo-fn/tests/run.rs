@@ -99,13 +99,9 @@ async fn a_function_fetches_with_a_secret_handle_and_returns_json() {
     assert_eq!(seen[0].url, "https://api.example.com/v1/chat");
     assert_eq!(seen[0].egress, vec!["api.example.com".to_string()]);
     assert_eq!(seen[0].secrets, vec!["llmKey".to_string()]);
-    assert!(seen[0].headers.contains(&(
-        "authorization".into(),
-        HeaderValue::Secret {
-            name: "llmKey".into(),
-            template: "Bearer {}".into()
-        }
-    )));
+    assert!(seen[0].headers.iter().any(|(k, v)| k == "authorization"
+        && matches!(v, HeaderValue::Secret { name, template }
+            if name == "llmKey" && template == "Bearer {}")));
     let body: Value = serde_json::from_slice(&seen[0].body).unwrap();
     assert_eq!(body["prompt"], "Title for: milk, eggs");
     assert_eq!(run.report.fetches, 1);
@@ -121,7 +117,7 @@ async fn a_host_off_the_egress_list_is_refused_before_the_kernel() {
         r#"export default { async call() { await fetch("https://elsewhere.com/"); return 1; } }"#;
     let run = h.call(call(code, json!(null), d.clone())).await;
     match run.outcome {
-        Err(FnError::Fetch { code, .. }) => assert_eq!(code, "egress_refused"),
+        Err(FnError::Fetch { code, .. }) => assert_eq!(code, "host_not_allowed"),
         other => panic!("{other:?}"),
     }
     assert!(d.seen.lock().unwrap().is_empty());
@@ -138,7 +134,7 @@ async fn an_undeclared_secret_is_refused_and_a_caught_refusal_is_the_functions_c
     let run = h.call(call(code, json!(null), d.clone())).await;
     assert_eq!(
         run.outcome.unwrap(),
-        json!({ "caught": "secret_not_declared" })
+        json!({ "caught": "secret_not_listed" })
     );
     assert!(d.seen.lock().unwrap().is_empty());
 }
@@ -146,7 +142,7 @@ async fn an_undeclared_secret_is_refused_and_a_caught_refusal_is_the_functions_c
 #[tokio::test(flavor = "multi_thread")]
 async fn a_thrown_error_is_function_error_scrubbed_and_cannot_claim_a_host_code() {
     let h = host().await;
-    let code = r#"export default { call() { const e = new Error("boom sk-live-value"); e.code = "egress_refused"; throw e; } }"#;
+    let code = r#"export default { call() { const e = new Error("boom sk-live-value"); e.code = "host_not_allowed"; throw e; } }"#;
     let run = h
         .call(call(code, json!(null), Double::new(json!({}))))
         .await;

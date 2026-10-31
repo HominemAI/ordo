@@ -68,7 +68,7 @@ pub fn check(schema: &Schema, program: &Program) -> Result<(), SchemaError> {
         check_call(f)?;
         check_code(f)?;
         check_egress(f)?;
-        check_secrets(f)?;
+        check_secrets(schema, f)?;
         check_limits(f)?;
     }
     Ok(())
@@ -187,7 +187,7 @@ pub fn is_dns_name(h: &str) -> bool {
             .is_some_and(|l| l.chars().all(|c| c.is_ascii_digit()))
 }
 
-fn check_secrets(f: &FunctionDecl) -> Result<(), SchemaError> {
+fn check_secrets(schema: &Schema, f: &FunctionDecl) -> Result<(), SchemaError> {
     let mut seen: Vec<&str> = Vec::new();
     for s in &f.secrets {
         if seen.contains(&s.name.as_str()) {
@@ -207,6 +207,35 @@ fn check_secrets(f: &FunctionDecl) -> Result<(), SchemaError> {
                 f.name.name
             ),
         ));
+    }
+    for s in &f.secrets {
+        let Some(decl) = schema.secrets.iter().find(|d| d.name.name == s.name) else {
+            return Err(refuse(
+                s.span,
+                format!(
+                    "function `{}` uses secret `{}`, and the program declares no such secret: \
+                     add `secret {} for <host>`",
+                    f.name.name, s.name, s.name
+                ),
+            ));
+        };
+        // A secret goes only to its bound hosts. One the function cannot
+        // reach under any of them could never be sent: a mistake in one of
+        // the two lists.
+        if !f.egress.iter().any(|h| decl.hosts.contains(&h.name)) {
+            let egress: Vec<&str> = f.egress.iter().map(|h| h.name.as_str()).collect();
+            return Err(refuse(
+                s.span,
+                format!(
+                    "function `{}` uses secret `{}`, which is bound to {}, and its egress is {}: \
+                     no host it may call receives the secret",
+                    f.name.name,
+                    s.name,
+                    decl.hosts.join(", "),
+                    egress.join(", ")
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -267,6 +296,7 @@ mod tests {
     }
 
     const OK: &str = "domain notes\nentity notes { title: text }\n\
+        secret llmKey for api.example.com\n\
         function suggestTitle in notes {\n  call($text: text) -> json\n  code \"fn/s.js\"\n  \
         egress api.example.com\n  secrets llmKey\n  limit wall 30s, memory 64 mb\n}\n";
 
@@ -288,14 +318,25 @@ mod tests {
             (OK.replace("fn/s.js", "/abs/s.js"), "relative"),
             (OK.replace("fn/s.js", "fn/s.ts"), "`.js` or `.mjs`"),
             (
-                OK.replace("api.example.com", "api.example.com, api.example.com"),
+                OK.replace(
+                    "egress api.example.com",
+                    "egress api.example.com, api.example.com",
+                ),
                 "listed twice",
             ),
             (
-                OK.replace("api.example.com", "\"10.0.0.1\""),
+                OK.replace("egress api.example.com", "egress \"10.0.0.1\""),
                 "not a host name",
             ),
             (OK.replace("limit wall 30s", "limit wall 20m"), "ceiling"),
+            (
+                OK.replace("secrets llmKey", "secrets otherKey"),
+                "declares no such secret",
+            ),
+            (
+                OK.replace("egress api.example.com", "egress api.elsewhere.com"),
+                "no host it may call receives the secret",
+            ),
             (OK.replace("memory 64 mb", "memory 2 mb"), "under 8 mb"),
             (OK.replace("  egress api.example.com\n", ""), "no `egress`"),
             (

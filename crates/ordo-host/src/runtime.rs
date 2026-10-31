@@ -3431,7 +3431,8 @@ pub struct Runtime {
     pub spaces: Arc<crate::spaces::Spaces>,
     /// Backend functions (`POST /fn/<name>`): the serving version's table,
     /// reloaded on every deploy. The wasmtime engine is made on the first
-    /// call. Outbound calls go through [`crate::functions::NoEgress`] until
+    /// call. Outbound calls go through the egress kernel over
+    /// [`Runtime::secrets`]; logs are scrubbed of those secrets' values.
     /// the egress kernel is wired in.
     pub functions: Arc<crate::functions::HostFunctions>,
     /// Brings a tenant's database to the version this node serves
@@ -5255,6 +5256,14 @@ async fn assemble_program(
     )
     .open_to_delegated(cfg.delegable.opens(ordo_api::download::DOWNLOAD_NAME));
     let pool_for_functions = pool.clone();
+    let secrets_for_functions = secrets.clone();
+    // The deny list mail and attestation use: the categories plus
+    // `ORDO_EGRESS_DENY_CIDRS` and `ORDO_EGRESS_PRIVATE_HOSTS`.
+    let functions_deny = {
+        let env = |k: &str| std::env::var(k).ok();
+        ordo_egress::DenyList::from_vars(&env)
+            .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
+    };
     Ok(Runtime {
         mail: cfg.mail.clone(),
         custody_label: custody_choice.label(),
@@ -5344,8 +5353,13 @@ async fn assemble_program(
             crate::functions::FnTable::default(),
             spaces.clone(),
             pool_for_functions,
-            Arc::new(crate::functions::NoEgress),
-            Arc::new(ordo_fn::NoScrub),
+            crate::secrets::fn_fetch(
+                secrets_for_functions.clone(),
+                ordo_egress::TlsRoots::webpki(),
+                functions_deny,
+                ordo_egress::FnLimits::default(),
+            ),
+            secrets_for_functions,
         )),
         spaces,
         quotas,

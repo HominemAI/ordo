@@ -72,7 +72,11 @@ impl FnError {
     pub fn remedy(&self) -> Remedy {
         match self {
             FnError::Busy { .. } | FnError::Engine { .. } => Remedy::Retry,
-            FnError::Fetch { code, .. } if code == "fetch_failed" => Remedy::Retry,
+            FnError::Fetch { code, .. }
+                if code == "timed_out" || code == "secret_store_unavailable" =>
+            {
+                Remedy::Retry
+            }
             FnError::BadInput { .. } => Remedy::FixInput,
             _ => Remedy::Refuse,
         }

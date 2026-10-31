@@ -31,7 +31,7 @@ function suggestTitle in notes {
 | `by member` | Who may call it: a signed-in member of the tenant. The default. |
 | `code "fn/x.js"` | The bundled ES module, relative to the program's directory. `.js` or `.mjs`, at most 20 MB. |
 | `egress host, ...` | The hosts it may reach. Any other host is refused before DNS. A name with a hyphen goes in quotes: `"my-model.example.com"`. |
-| `secrets name, ...` | The secrets it may use, by name. A function with secrets must list at least one host. |
+| `secrets name, ...` | The secrets it may use, by name. Each must be a declared `secret`, bound to at least one of its `egress` hosts; `ordo check` refuses it otherwise, naming both lists. |
 | `limit wall 30s, cpu 2s, memory 64 mb` | Optional. Unset limits take the defaults below. Write a size with a space: `64 mb`. |
 | `nopause` | Optional. It keeps answering while the tenant is paused. |
 

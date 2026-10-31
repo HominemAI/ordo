@@ -18,7 +18,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ordo_api::{AccessChecker, AccessDecision, ApiState, MemoryBus, MemoryReplayCache, PageKey};
 use ordo_conformance::{Fixture, Pg};
-use ordo_fn::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue, NoScrub};
+use ordo_fn::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue};
 use ordo_host::functions::{self, FnTable, HostFunctions};
 use serde_json::{json, Value};
 use tower::util::ServiceExt;
@@ -75,6 +75,17 @@ struct Door {
 /// The notes v2 program, plus `extra` functions (with their code), behind a
 /// door. Each test gets its own database.
 async fn door(db: &str, extra: &str, extra_code: &[(&str, &str)]) -> Door {
+    door_with(db, extra, extra_code, None).await
+}
+
+/// [`door`], with `far_end` set: the real egress kernel over an in-memory
+/// secret store, reaching a TLS listener at that address as [`FAR_HOST`].
+async fn door_with(
+    db: &str,
+    extra: &str,
+    extra_code: &[(&str, &str)],
+    far_end: Option<std::net::SocketAddr>,
+) -> Door {
     let source = format!("{V2}\n{extra}");
     let f = Arc::new(Fixture::from_source(&source, "").expect("the program compiles"));
     let admin = Pg {
@@ -125,13 +136,34 @@ async fn door(db: &str, extra: &str, extra_code: &[(&str, &str)]) -> Door {
     let model = Arc::new(Model {
         seen: Mutex::new(Vec::new()),
     });
+    let (fetch, scrub): (Arc<dyn FnFetch>, Arc<dyn functions::CallScrub>) = match far_end {
+        None => (model.clone(), Arc::new(functions::NoCallScrub)),
+        Some(addr) => {
+            let store = Arc::new(ordo_host::secrets::SecretStore::memory(
+                f.keys.clone(),
+                "acme",
+            ));
+            store.bind(&f.schema.secrets);
+            store
+                .set("probeKey", VALUE.as_bytes(), "test", 1)
+                .await
+                .expect("set");
+            let egress = ordo_egress::FnEgress::new(
+                store.clone(),
+                ordo_egress::TlsRoots::custom(&[CA.to_vec()]).expect("anchor"),
+                ordo_egress::DenyList::categories_only().permitting_loopback_for_tests(),
+            )
+            .resolving_for_tests(FAR_HOST, addr);
+            (Arc::new(egress), store)
+        }
+    };
     let runner = Arc::new(HostFunctions::new(
         ordo_fn::HostConfig::default(),
         table,
         spaces.clone(),
         pool.clone(),
-        model.clone(),
-        Arc::new(NoScrub),
+        fetch,
+        scrub,
     ));
     let pg = Pg {
         db: db.to_string(),
@@ -218,23 +250,21 @@ async fn suggest_title_runs_as_the_signed_in_person_and_answers_json() {
 
     // What went out: one request to the declared host, the key as a handle
     // the kernel fills in, and the declaration's lists for it to check again.
-    let seen = d.model.seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].url, "https://api.anthropic.com/v1/messages");
-    assert!(seen[0].headers.contains(&(
-        "x-api-key".into(),
-        HeaderValue::Secret {
-            name: "llmKey".into(),
-            template: "{}".into()
-        }
-    )));
-    assert_eq!(seen[0].egress, vec!["api.anthropic.com".to_string()]);
-    assert_eq!(seen[0].secrets, vec!["llmKey".to_string()]);
-    let sent: Value = serde_json::from_slice(&seen[0].body).unwrap();
-    assert!(sent["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("milk, eggs"));
+    {
+        let seen = d.model.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].url, "https://api.anthropic.com/v1/messages");
+        assert!(seen[0].headers.iter().any(|(k, v)| k == "x-api-key"
+            && matches!(v, HeaderValue::Secret { name, template }
+                if name == "llmKey" && template == "{}")));
+        assert_eq!(seen[0].egress, vec!["api.anthropic.com".to_string()]);
+        assert_eq!(seen[0].secrets, vec!["llmKey".to_string()]);
+        let sent: Value = serde_json::from_slice(&seen[0].body).unwrap();
+        assert!(sent["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("milk, eggs"));
+    }
 
     // One `$fnruns` row: who, as what, the outcome, the host. No input.
     let runs = functions::runs(&d.pool, "acme").await.unwrap();
@@ -458,4 +488,144 @@ async fn limits_and_failures_answer_their_typed_classes() {
             "ok"
         ]
     );
+}
+
+// ── the real egress kernel, against a TLS listener on loopback ──────────
+
+const CA: &[u8] = include_bytes!("../../ordo-egress/tests/fixture/ca.der");
+const LEAF: &[u8] = include_bytes!("../../ordo-egress/tests/fixture/leaf.der");
+const LEAF_KEY: &[u8] = include_bytes!("../../ordo-egress/tests/fixture/leaf-key.der");
+/// The name the fixture's leaf certificate is for.
+const FAR_HOST: &str = "egress.test.invalid";
+const VALUE: &str = "sk-probe-0123456789abcdef";
+
+/// Answers `body` to every request, and sends each request it read.
+async fn far_end(body: String) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<String>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let cert = rustls::pki_types::CertificateDer::from(LEAF.to_vec());
+    let key = rustls::pki_types::PrivateKeyDer::try_from(LEAF_KEY.to_vec()).expect("key");
+    let cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .expect("server config");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = tcp.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = tcp.accept().await {
+            let (acceptor, tx, body) = (acceptor.clone(), tx.clone(), body.clone());
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(sock).await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 16 * 1024];
+                let n = tls.read(&mut buf).await.unwrap_or(0);
+                let _ = tx
+                    .send(String::from_utf8_lossy(&buf[..n]).into_owned())
+                    .await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = tls.write_all(resp.as_bytes()).await;
+                let _ = tls.flush().await;
+                let _ = tls.shutdown().await;
+            });
+        }
+    });
+    (addr, rx)
+}
+
+const PROBE: &str = "\
+secret probeKey for egress.test.invalid\n\
+function probe in notes {\n  call($port: int) -> json\n  code \"fn/probe.js\"\n  \
+egress egress.test.invalid\n  secrets probeKey\n}\n";
+
+/// Calls the far end with the key, logs what came back, and answers it.
+/// With `?throw` it throws what came back instead.
+const PROBE_CODE: &[(&str, &str)] = &[(
+    "fn/probe.js",
+    r#"export default { async call(input, ctx) {
+        const r = await fetch("https://egress.test.invalid:" + input.port + "/v1/echo", {
+          method: "POST",
+          headers: { authorization: ctx.secret("probeKey").bearer() },
+          body: "{}",
+        });
+        const t = await r.text();
+        console.log("the far end said", t);
+        return JSON.parse(t);
+    } }"#,
+)];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_real_kernel_fills_the_secret_in_and_an_echoed_value_never_lands_in_fnruns() {
+    // The far end echoes the key back, as a careless API does.
+    let (addr, mut seen) = far_end(format!(r#"{{"seen":"Bearer {VALUE}"}}"#)).await;
+    let d = door_with("ordo_fn_echo", PROBE, PROBE_CODE, Some(addr)).await;
+    let (st, body) = d
+        .post(
+            "probe",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "port": addr.port() }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+
+    // The value went out, to the bound host, in the header the code named.
+    let req = seen.recv().await.expect("a request reached the far end");
+    assert!(
+        req.to_ascii_lowercase().contains(&format!(
+            "authorization: bearer {}",
+            VALUE.to_ascii_lowercase()
+        )),
+        "{req}"
+    );
+    // It never came back into the function, the answer, or the run record.
+    assert!(!body.to_string().contains(VALUE), "{body}");
+    assert_eq!(body["result"]["seen"], "Bearer [secret]");
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].outcome, "ok");
+    assert!(runs[0].logs.contains("[secret]"), "{}", runs[0].logs);
+    for r in &runs {
+        let row = format!("{r:?}");
+        assert!(!row.contains(VALUE), "the value reached $fnruns: {row}");
+    }
+    let raw = d
+        .pool
+        .rows("SELECT \"message\", \"logs\", \"hosts\" FROM \"$fnruns\"")
+        .await
+        .unwrap();
+    assert!(!format!("{raw:?}").contains(VALUE));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_real_kernel_refuses_a_host_the_secret_is_not_bound_to() {
+    let (addr, _seen) = far_end("{}".into()).await;
+    // Two hosts allowed; the secret is bound to only one of them. The
+    // function sends it to the other.
+    let program = "\
+secret probeKey for egress.test.invalid\n\
+function stray in notes {\n  call() -> json\n  code \"fn/stray.js\"\n  \
+egress egress.test.invalid, other.test.invalid\n  secrets probeKey\n}\n";
+    let code: &[(&str, &str)] = &[(
+        "fn/stray.js",
+        r#"export default { async call(i, ctx) {
+            await fetch("https://other.test.invalid/", { headers: { authorization: ctx.secret("probeKey").bearer() } });
+            return 1;
+        } }"#,
+    )];
+    let d = door_with("ordo_fn_stray", program, code, Some(addr)).await;
+    let (st, body) = d
+        .post("stray", "acme", Some("person:ana"), None, json!({}))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "egress_refused");
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs[0].outcome, "secret_host_mismatch");
 }

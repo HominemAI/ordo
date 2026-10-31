@@ -161,8 +161,11 @@ op myFiles unbounded download =
 # A title for a note, suggested by a language model. The page sends the
 # note's text and gets `{ title }` back. It runs as the signed-in person, in
 # a fresh WebAssembly instance, and reaches one host. `llmKey` is set per
-# environment by the deployment owner; the code holds a handle to it and
-# never the value.
+# environment by the deployment owner (`ordo secret set llmKey`); the code
+# holds a handle to it and never the value, and the host sends it to
+# api.anthropic.com and nowhere else.
+secret llmKey for api.anthropic.com
+
 function suggestTitle in notes {
   call($text: text(20000)) -> json by member
   code "fn/suggest-title.js"

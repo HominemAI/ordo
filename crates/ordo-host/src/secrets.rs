@@ -446,6 +446,24 @@ impl SecretSource for SecretStore {
     }
 }
 
+/// A function's log lines and error messages are scrubbed of the values of
+/// the secrets it declares, opened here for that call only. The kernel
+/// already replaces a value the far end echoes; this covers what the code
+/// writes itself. A secret that cannot be opened has nothing to scrub: the
+/// call that needs it is refused by the kernel.
+#[async_trait]
+impl crate::functions::CallScrub for SecretStore {
+    async fn for_call(&self, space: &str, secrets: &[String]) -> Arc<dyn ordo_fn::Scrub> {
+        let mut values = Vec::new();
+        for name in secrets {
+            if let Ok(Some(v)) = self.open_value(space, name).await {
+                values.push(String::from_utf8_lossy(&v).into_owned());
+            }
+        }
+        Arc::new(crate::functions::ValueScrub::new(values))
+    }
+}
+
 /// The function runtime's `fetch`: the egress kernel over this store.
 pub fn fn_fetch(
     store: Arc<SecretStore>,

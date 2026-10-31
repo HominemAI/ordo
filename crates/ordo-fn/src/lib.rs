@@ -844,22 +844,22 @@ impl Refused {
 
 async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
     let req: WireRequest = serde_json::from_slice(raw)
-        .map_err(|e| Refused::new("egress_refused", format!("a malformed request: {e}")))?;
+        .map_err(|e| Refused::new("bad_request", format!("a malformed request: {e}")))?;
     if g.fetches >= g.max_fetches {
         return Err(Refused::new(
-            "egress_refused",
+            "fetch_limit",
             format!("more than {} outbound calls in one call", g.max_fetches),
         ));
     }
     let host = https_host(&req.url).ok_or_else(|| {
         Refused::new(
-            "egress_refused",
+            "bad_url",
             "only https://host/... URLs may be fetched".to_owned(),
         )
     })?;
     if !g.egress.contains(&host) {
         return Err(Refused::new(
-            "egress_refused",
+            "host_not_allowed",
             format!("{host} is not in this function's egress list"),
         ));
     }
@@ -870,7 +870,7 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
             WireHeader::Secret { secret, template } => {
                 if !g.secrets.contains(&secret) {
                     return Err(Refused::new(
-                        "secret_not_declared",
+                        "secret_not_listed",
                         format!("{secret} is not in this function's secrets list"),
                     ));
                 }
@@ -885,7 +885,7 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
     let fetch = g
         .fetch
         .clone()
-        .ok_or_else(|| Refused::new("egress_refused", "no egress while booting"))?;
+        .ok_or_else(|| Refused::new("host_not_allowed", "no egress while booting"))?;
     g.fetches += 1;
     if !g.hosts.contains(&host) {
         g.hosts.push(host);

@@ -251,20 +251,67 @@ fn door_spec(f: &FunctionDecl, version: &str, code_hash: &str) -> OpSpec {
     }
 }
 
-/// An egress kernel that refuses every request. What a host runs with until
-/// it is handed the real one (`ordo-egress`, part A of increment 1).
-pub struct NoEgress;
+/// What scrubs one call's log lines and error messages: a scrubber made
+/// for the call, from the values of the secrets the function declares.
+#[async_trait::async_trait]
+pub trait CallScrub: Send + Sync {
+    async fn for_call(&self, space: &str, secrets: &[String]) -> Arc<dyn Scrub>;
+}
+
+/// Scrubs nothing. For a host that holds no secrets, and for tests.
+pub struct NoCallScrub;
 
 #[async_trait::async_trait]
-impl FnFetch for NoEgress {
-    async fn fetch(
-        &self,
-        _space: &str,
-        req: ordo_fn::FnFetchRequest,
-    ) -> Result<ordo_fn::FnFetchResponse, ordo_fn::FetchError> {
-        Err(ordo_fn::FetchError::HostNotAllowed {
-            host: ordo_fn::https_host(&req.url).unwrap_or_default(),
-        })
+impl CallScrub for NoCallScrub {
+    async fn for_call(&self, _space: &str, _secrets: &[String]) -> Arc<dyn Scrub> {
+        Arc::new(ordo_fn::NoScrub)
+    }
+}
+
+/// Replaces each held value with `[secret]`.
+pub struct ValueScrub {
+    values: Vec<String>,
+}
+
+impl ValueScrub {
+    /// Values shorter than 4 bytes are not held: replacing them would
+    /// shred ordinary text and hide nothing worth hiding.
+    pub fn new(values: Vec<String>) -> ValueScrub {
+        let mut values: Vec<String> = values.into_iter().filter(|v| v.len() >= 4).collect();
+        // Longest first, so a value that contains another is replaced whole.
+        values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+        ValueScrub { values }
+    }
+}
+
+impl Scrub for ValueScrub {
+    fn scrub(&self, _space: &str, text: &str) -> String {
+        let mut out = text.to_owned();
+        for v in &self.values {
+            if out.contains(v.as_str()) {
+                out = out.replace(v.as_str(), "[secret]");
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::ValueScrub;
+    use ordo_fn::Scrub;
+
+    #[test]
+    fn every_held_value_is_replaced_and_short_ones_are_not_held() {
+        let s = ValueScrub::new(vec![
+            "sk-abcdef".into(),
+            "sk-abcdef-long".into(),
+            "ab".into(),
+        ]);
+        assert_eq!(
+            s.scrub("acme", "a sk-abcdef-long and sk-abcdef, ab"),
+            "a [secret] and [secret], ab"
+        );
     }
 }
 
@@ -278,7 +325,7 @@ pub struct HostFunctions {
     spaces: Arc<Spaces>,
     control: Pool,
     fetch: Arc<dyn FnFetch>,
-    scrub: Arc<dyn Scrub>,
+    scrub: Arc<dyn CallScrub>,
 }
 
 impl HostFunctions {
@@ -288,7 +335,7 @@ impl HostFunctions {
         spaces: Arc<Spaces>,
         control: Pool,
         fetch: Arc<dyn FnFetch>,
-        scrub: Arc<dyn Scrub>,
+        scrub: Arc<dyn CallScrub>,
     ) -> HostFunctions {
         HostFunctions {
             host: tokio::sync::OnceCell::new(),
@@ -374,6 +421,8 @@ impl FunctionRunner for HostFunctions {
                 .get_or_try_init(|| FnHost::new(self.config.clone()))
                 .await
                 .map_err(exec_error)?;
+            let secrets: Vec<String> = entry.decl.secrets.iter().map(|s| s.name.clone()).collect();
+            let scrub = self.scrub.for_call(&call.space, &secrets).await;
             let run = host
                 .call(FnCall {
                     space: call.space.clone(),
@@ -383,10 +432,10 @@ impl FunctionRunner for HostFunctions {
                     code: entry.code.clone(),
                     input: Value::Object(call.args.clone()),
                     egress: entry.decl.egress.iter().map(|h| h.name.clone()).collect(),
-                    secrets: entry.decl.secrets.iter().map(|s| s.name.clone()).collect(),
+                    secrets,
                     limits: entry.limits(),
                     fetch: self.fetch.clone(),
-                    scrub: self.scrub.clone(),
+                    scrub,
                 })
                 .await;
             let principal = match &call.agent {

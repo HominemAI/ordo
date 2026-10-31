@@ -199,6 +199,7 @@ fn route_cells(d: &Deployment, w: &World, v: &mut Verdict) {
 fn fill_route(path: &str, w: &World) -> String {
     let p = path
         .replace("{connection}", "x")
+        .replace("{name}", "zzAuthzProbe")
         .replace("{tenant}", w.var("T1"))
         .replace("{id}", "x")
         .replace("{stream}", "x")

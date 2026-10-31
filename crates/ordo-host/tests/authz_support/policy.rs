@@ -643,6 +643,12 @@ pub fn route_rule(method: &str, path: &str) -> Option<RouteRule> {
         ("GET", "/blob/{handle}" | "/blob/{handle}/meta") => Door,
         ("PUT", "/blob/{entity}/{field}/{id}") => Door,
         ("ANY", "/op/{name}") => Door,
+        // A function name the program does not declare (the matrix's
+        // program declares none): the door's uniform denial to every
+        // caller, as an unknown op gets, before any access check
+        // (`router.rs`, `fn_dispatch`). A declared function's own gate is
+        // the op door's, proved in `tests/functions.rs`.
+        ("ANY", "/fn/{name}") => Open(Expect::Denied),
         _ => return None,
     })
 }

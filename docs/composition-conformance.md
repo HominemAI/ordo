@@ -75,6 +75,8 @@ how a closed set stops being closed.
 | `unsupported_index` | `index (…)` over a `sealed` field: the stored bytes are an envelope with a fresh nonce, so an index over them orders and matches nothing |
 | `unsupported_unique_key` | a composite `unique` this slice cannot lower |
 | `unsupported_default` | a default outside the closed set the DDL can carry (only literals are lowered) |
+| `duplicate_secret` | two `secret` lines name one secret. Put every host on one line: `secret llmKey for a.example.com, b.example.com` (`howto-functions.md`) |
+| `invalid_function` | a `function` block the declaration alone can refuse: a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a code path that is absolute, climbs out with `..` or is not `.js`/`.mjs`, a host that is not a DNS name or is listed twice, a secret listed twice, or a limit outside the deployment's ceilings. The message names the line and the rule. Fix the block and apply again (`plan-backend-functions.md` §4.1) |
 
 **Binding and planning.** Raised once a source has been resolved.
 

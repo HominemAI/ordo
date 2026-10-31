@@ -21,9 +21,19 @@
 # public release (owner, 2026-10-31). Pin it to the newest release tag
 # once releases are cut.
 #
-# Settings: ORDO_UPGRADE_FROM, ORDO_UPGRADE_DIR (default ~/.ordo-upgrade),
-# ORDO_UPGRADE_KEEP, ORDO_UPGRADE_OWN_PG, ORDO_PGDATA, ORDO_PG_HOST,
-# ORDO_PG_PORT, ORDO_PGBIN.
+# Backend functions. The first commit predates them, so its binaries cannot
+# compile a program with a function. The script tells the test whether the
+# previous Ordo has them (`ORDO_UPGRADE_FUNCTIONS`, 1 or 0), read from
+# whether its source holds `crates/ordo-fn`. With 1, the previous Ordo also
+# deploys a function and a secret and the functions run once, and this build
+# must call them with the secret and the run records intact. Set
+# `ORDO_UPGRADE_FUNCTIONS=1` to insist: a previous Ordo without functions
+# then fails the run. CI runs a second previous Ordo, f9835982, the first
+# main commit with functions, beside the first commit.
+#
+# Settings: ORDO_UPGRADE_FROM, ORDO_UPGRADE_FUNCTIONS, ORDO_UPGRADE_DIR
+# (default ~/.ordo-upgrade), ORDO_UPGRADE_KEEP, ORDO_UPGRADE_OWN_PG,
+# ORDO_PGDATA, ORDO_PG_HOST, ORDO_PG_PORT, ORDO_PGBIN.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -61,6 +71,24 @@ bounded() {
 }
 
 sha=$(git -C "$repo" rev-parse --short=12 "$from^{commit}")
+has_functions=0
+if git -C "$repo" cat-file -e "$sha:crates/ordo-fn/Cargo.toml" 2>/dev/null; then
+  has_functions=1
+fi
+case "${ORDO_UPGRADE_FUNCTIONS:-auto}" in
+  auto) ;;
+  1)
+    if [ "$has_functions" != 1 ]; then
+      echo "upgrade-continuity: ORDO_UPGRADE_FUNCTIONS=1, but $from has no crates/ordo-fn" >&2
+      exit 2
+    fi
+    ;;
+  0) has_functions=0 ;;
+  *)
+    echo "upgrade-continuity: ORDO_UPGRADE_FUNCTIONS is 1, 0 or unset" >&2
+    exit 2
+    ;;
+esac
 src="$work/src-$sha"
 target="$work/target"
 old_host="$target/debug/ordo-host"
@@ -105,10 +133,11 @@ case "${1:-run}" in
     pg start
     started=$(date +%s)
     export ORDO_UPGRADE_OLD_HOST="$old_host" ORDO_UPGRADE_OLD_CLI="$old_cli"
+    export ORDO_UPGRADE_FUNCTIONS="$has_functions"
     bounded 1500 cargo test --manifest-path "$repo/Cargo.toml" -p ordo-host \
       --test upgrade_continuity -- --include-ignored --test-threads 1 --nocapture \
       a_compatible_program_update the_previous_ordo_hands_over
-    echo "upgrade continuity: passed in $(( $(date +%s) - started ))s (from $from)"
+    echo "upgrade continuity: passed in $(( $(date +%s) - started ))s (from $from, functions $has_functions)"
     ;;
   *)
     echo "usage: $0 [run|build|clean]" >&2

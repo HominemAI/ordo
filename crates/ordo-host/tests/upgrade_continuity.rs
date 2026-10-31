@@ -31,6 +31,16 @@
 //! - A **live feed** on Ada's notes, open across the upgrade.
 //! - A **page cursor** handed out on the first page of 50.
 //! - An **idempotency key** on a write that already answered.
+//! - **Backend functions** (`upgrade_fixture/functions/`): `probe`, which
+//!   uses the secret `probeKey`, and `greet`. The deployment owner sets the
+//!   secret through the door, and Ada and Kim call both in their tenants,
+//!   which leaves rows in `$fnruns`. Version 1.1 changes `probe`'s code and
+//!   renames `greet` to `hello`. After the upgrade `probe` runs the new
+//!   code in both tenants and its secret still opens; the secret is listed
+//!   but never answered, and sealed at rest; the earlier runs are kept; and
+//!   `greet` answers as a name that never existed. The program upgrade
+//!   always has them. The Ordo upgrade has them when the previous Ordo does
+//!   (`ORDO_UPGRADE_FUNCTIONS`, which the script sets).
 //!
 //! After the upgrade each item is checked by name (`Check`). A check that
 //! fails is a continuity break. A break that is known and filed goes in
@@ -172,8 +182,9 @@ impl World {
             .env("ORDO_MAIL_PORT", &relay_port)
             .env("ORDO_MAIL_TLS", "none")
             .env("ORDO_MAIL_SEND_SECS", "1")
-            .env("ORDO_EGRESS_PRIVATE_HOSTS", "localhost")
+            .env("ORDO_EGRESS_PRIVATE_HOSTS", format!("localhost,{FN_HOST}"))
             .env("ORDO_DELEGATION_AGENTS", format!("{AGENT}=Helper"))
+            .env("ORDO_DEPLOYMENT_OWNERS", DEPLOYMENT_OWNER)
             .env_remove("ORDO_PG_ROUTING")
             .env_remove("ORDO_TENANT_CREDENTIALS")
             .env_remove("ORDO_TENANT_CREDENTIALS_DIR")
@@ -1483,6 +1494,358 @@ fn v1_1_works(h: &Host, s: &Seeded) -> Vec<Check> {
     out
 }
 
+// ── Backend functions across an upgrade ──────────────────────────────────
+
+/// The principal `ORDO_DEPLOYMENT_OWNERS` names. It sets the secret.
+const DEPLOYMENT_OWNER: &str = "upgrade_owner";
+/// The host `probe` may reach and `probeKey` is bound to. It resolves to
+/// loopback where the system resolves `*.localhost`; elsewhere the fetch
+/// fails at resolution. Either way it fails after the value opens.
+const FN_HOST: &str = "upgrade.localhost";
+/// The secret's value. No answer, log, record or stored byte may hold it.
+const FN_SECRET: &str = "sk-upgrade-0123456789abcdef";
+/// The reason words a fetch gets when the secret did not open, or before
+/// the kernel tries to open it.
+const SECRET_WORDS: &[&str] = &[
+    "secret_not_set",
+    "secret_unknown",
+    "secret_not_listed",
+    "secret_host_mismatch",
+    "secret_store_unavailable",
+    "host_not_allowed",
+];
+
+/// Version `version` of the fixture with its functions: `app.ordo`, the
+/// matching `functions/<version>/functions.ordo` and its `fn/` code, put
+/// in one directory as `ordo apply` reads a program.
+fn with_functions(version: &str) -> PathBuf {
+    let src = fixture("functions").join(version);
+    let dir = std::env::temp_dir().join(format!("ordo-upg-fn-{version}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("fn")).expect("the program directory");
+    std::fs::copy(fixture(version).join("app.ordo"), dir.join("app.ordo")).expect("app.ordo");
+    std::fs::copy(src.join("functions.ordo"), dir.join("functions.ordo")).expect("functions.ordo");
+    for f in std::fs::read_dir(src.join("fn")).expect("fn/") {
+        let f = f.expect("a code file").path();
+        std::fs::copy(&f, dir.join("fn").join(f.file_name().expect("a name"))).expect("code");
+    }
+    dir
+}
+
+/// A bearer token for the deployment owner, with a passkey touch just now,
+/// minted under [`TOKEN_KEY`] as the server mints one.
+fn deployment_owner_token() -> String {
+    let raw: Vec<u8> = (0..TOKEN_KEY.len() / 2)
+        .map(|i| u8::from_str_radix(&TOKEN_KEY[2 * i..2 * i + 2], 16).expect("hex"))
+        .collect();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&raw);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    ordo_identity::mint(
+        &ordo_identity::TokenKey::from_secret(&key),
+        &ordo_identity::TokenSpec {
+            principal: ordo_identity::principal::PrincipalId(DEPLOYMENT_OWNER.into()),
+            expires: ordo_identity::principal::Timestamp(now + 3600),
+            client: None,
+            user_presence_at: Some(ordo_identity::principal::Timestamp(now)),
+            capability: None,
+            delegation: None,
+            session: None,
+        },
+    )
+}
+
+/// A listener on loopback that counts connections and closes each before
+/// TLS. `probe` dials it where `upgrade.localhost` resolves, so the
+/// secret's value is never sent.
+struct FarEnd {
+    port: u16,
+    hits: Arc<AtomicU64>,
+}
+
+impl FarEnd {
+    fn start() -> FarEnd {
+        let v6 = std::net::TcpListener::bind("[::1]:0").ok();
+        let port = v6
+            .as_ref()
+            .map_or(0, |l| l.local_addr().expect("addr").port());
+        let v4 = std::net::TcpListener::bind(("127.0.0.1", port))
+            .or_else(|_| std::net::TcpListener::bind(("127.0.0.1", 0)))
+            .expect("a loopback port");
+        let port = v4.local_addr().expect("addr").port();
+        let v6 = v6.filter(|l| l.local_addr().map(|a| a.port()).ok() == Some(port));
+        let hits = Arc::new(AtomicU64::new(0));
+        for l in [Some(v4), v6].into_iter().flatten() {
+            let hits = hits.clone();
+            std::thread::spawn(move || {
+                for c in l.incoming() {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    drop(c);
+                }
+            });
+        }
+        FarEnd { port, hits }
+    }
+}
+
+/// `POST /fn/<name>` as the page sends it: `(status, body)`.
+fn call_fn(h: &Host, s: &Session, name: &str, params: Value) -> (u16, Value) {
+    let bearer = format!("Bearer {}", s.token);
+    let headers = [
+        ("X-Ordo-Space", s.space.as_str()),
+        ("Authorization", bearer.as_str()),
+        ("Origin", PAGE),
+        ("Accept", "application/json"),
+        ("Content-Type", "application/json"),
+    ];
+    let (status, _, body) = h.send(
+        "POST",
+        &format!("/fn/{name}"),
+        &headers,
+        &params.to_string(),
+    );
+    (status, body)
+}
+
+/// What the functions left before the upgrade.
+struct FnSeed {
+    far: FarEnd,
+    /// Every `$fnruns` row before the upgrade: seq, function, version,
+    /// space and outcome.
+    runs: Vec<Vec<Option<String>>>,
+}
+
+fn fn_runs(w: &World) -> Result<Vec<Vec<Option<String>>>, String> {
+    Pg {
+        db: w.db.clone(),
+        ..Pg::default()
+    }
+    .query(
+        "SELECT \"seq\", \"function\", \"version\", \"space\", \"outcome\" FROM \"$fnruns\" \
+         ORDER BY \"seq\"",
+    )
+}
+
+/// `probe`'s answer in `s`'s tenant once it answers `code`, for at most
+/// `secs` seconds. A server takes up a new version's functions as it swaps
+/// to the version.
+fn probe_answers(
+    h: &Host,
+    s: &Session,
+    far: &FarEnd,
+    code: &str,
+    secs: u64,
+) -> Result<Value, String> {
+    let started = Instant::now();
+    loop {
+        let (status, body) = call_fn(h, s, "probe", json!({ "port": far.port }));
+        if status == 200 && body["result"]["code"] == code {
+            return Ok(body["result"].clone());
+        }
+        if started.elapsed() > Duration::from_secs(secs) {
+            return Err(format!("want code {code}, last answer {status} {body}"));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The secret opened for the call: its fetch failed past the secret step.
+fn secret_opened(answer: &Value) -> Result<String, String> {
+    let reason = answer["reason"].as_str().unwrap_or("");
+    if reason == "answered" || reason.is_empty() || SECRET_WORDS.contains(&reason) {
+        Err(format!("the fetch ended with `{reason}`: {answer}"))
+    } else {
+        Ok(format!("the fetch went on and failed with `{reason}`"))
+    }
+}
+
+/// The owner sets `probeKey` through the door, and Ada and Kim call the
+/// functions in their tenants under version 1.
+///
+/// `previous` is the previous Ordo. Up to f9835982 its door granted no
+/// role a function, so every call answered `access_denied`. Such a
+/// previous Ordo still deploys the functions and sets the secret, and no
+/// run is recorded before the upgrade.
+fn seed_functions(h: &Host, w: &World, s: &Seeded, previous: bool) -> FnSeed {
+    let (status, body) = h.op(
+        "system",
+        &deployment_owner_token(),
+        "POST",
+        "std.deployment.setSecret",
+        json!({ "name": "probeKey", "value": FN_SECRET }),
+    );
+    assert_eq!(status, 200, "set probeKey: {body}");
+    assert!(
+        !body.to_string().contains(FN_SECRET),
+        "the set answered the value"
+    );
+
+    let far = FarEnd::start();
+    if previous {
+        let (status, body) = call_fn(h, &s.ada, "probe", json!({ "port": far.port }));
+        if status == 403 && body["error"]["code"] == "access_denied" {
+            eprintln!(
+                "note: the previous Ordo refuses every function call; its functions are \
+                 deployed and its secret is set, and no run is recorded before the upgrade"
+            );
+            let runs = fn_runs(w).expect("$fnruns");
+            assert!(runs.is_empty(), "a refused call left a run: {runs:?}");
+            return FnSeed { far, runs };
+        }
+    }
+    for who in [&s.ada, &s.kim] {
+        let answer = probe_answers(h, who, &far, "one", 60).expect("probe answers under v1");
+        secret_opened(&answer).expect("the secret opens under v1");
+    }
+    let (status, body) = call_fn(h, &s.ada, "greet", json!({}));
+    assert_eq!(
+        (status, &body["result"]["name"]),
+        (200, &json!("greet")),
+        "{body}"
+    );
+    let runs = fn_runs(w).expect("$fnruns");
+    assert_eq!(runs.len(), 3, "one run row per call: {runs:?}");
+    FnSeed { far, runs }
+}
+
+/// The functions after an upgrade: `probe` answers `code` in both tenants
+/// and its secret still opens, the secret is listed and never answered,
+/// and every run from before is kept. `renamed` is version 1.1, where
+/// `greet` became `hello`.
+fn functions_after(
+    h: &Host,
+    w: &World,
+    s: &Seeded,
+    f: &FnSeed,
+    code: &str,
+    renamed: bool,
+) -> Vec<Check> {
+    let mut out = Vec::new();
+    for (runs, opens, who) in [
+        (
+            "probe runs the serving code in ada's tenant",
+            "the secret still opens in ada's tenant",
+            &s.ada,
+        ),
+        (
+            "probe runs the serving code in kim's tenant",
+            "the secret still opens in kim's tenant",
+            &s.kim,
+        ),
+    ] {
+        let answer = probe_answers(h, who, &f.far, code, 60);
+        out.push(check(runs, answer.clone().map(|a| a.to_string())));
+        out.push(check(opens, answer.and_then(|a| secret_opened(&a))));
+    }
+
+    let (greet, greet_body) = call_fn(h, &s.ada, "greet", json!({}));
+    if renamed {
+        // A removed function answers as a name the program never had.
+        let (none, none_body) = call_fn(h, &s.ada, "neverDeclared", json!({}));
+        let code_of = |b: &Value| b["error"]["code"].clone();
+        out.push(check(
+            "a removed function answers as an unknown one",
+            if greet != 200 && (greet, code_of(&greet_body)) == (none, code_of(&none_body)) {
+                Ok(format!("{greet} {}", code_of(&greet_body)))
+            } else {
+                Err(format!(
+                    "greet: {greet} {greet_body}; never declared: {none} {none_body}"
+                ))
+            },
+        ));
+        let (status, body) = call_fn(h, &s.ada, "hello", json!({}));
+        out.push(check(
+            "the renamed function answers under its new name",
+            expect_eq(
+                (status, body["result"]["name"].clone()),
+                (200, json!("hello")),
+            )
+            .map_err(|e| format!("{e}: {body}")),
+        ));
+    } else {
+        out.push(check(
+            "greet still answers",
+            expect_eq(
+                (greet, greet_body["result"]["name"].clone()),
+                (200, json!("greet")),
+            )
+            .map_err(|e| format!("{e}: {greet_body}")),
+        ));
+    }
+
+    let (status, listed) = h.op(
+        "system",
+        &deployment_owner_token(),
+        "GET",
+        "std.deployment.secrets",
+        json!({}),
+    );
+    out.push(check(
+        "the secret is listed by name and version, never by value",
+        if status != 200 {
+            Err(format!("{status} {listed}"))
+        } else if listed.to_string().contains(FN_SECRET) {
+            Err("the listing holds the value".into())
+        } else {
+            let rows = listed["rows"].as_array().cloned().unwrap_or_default();
+            match rows.iter().find(|r| r["name"] == "probeKey") {
+                Some(r) => expect_eq(
+                    (r["version"].clone(), r["setBy"].clone()),
+                    (json!(1), json!(DEPLOYMENT_OWNER)),
+                ),
+                None => Err(format!("probeKey is not listed: {listed}")),
+            }
+        },
+    ));
+    let control = Pg {
+        db: w.db.clone(),
+        ..Pg::default()
+    };
+    out.push(check(
+        "the secret is sealed at rest",
+        control
+            .query("SELECT encode(\"value\", 'escape') FROM \"$secrets\"")
+            .and_then(|rows| {
+                if rows.is_empty() {
+                    Err("no row in $secrets".into())
+                } else if format!("{rows:?}").contains(FN_SECRET) {
+                    Err("$secrets holds the value in the clear".into())
+                } else {
+                    Ok(String::new())
+                }
+            }),
+    ));
+    out.push(check(
+        "no run record holds the secret",
+        control
+            .query("SELECT \"principal\", \"message\", \"logs\" FROM \"$fnruns\"")
+            .and_then(|rows| {
+                if format!("{rows:?}").contains(FN_SECRET) {
+                    Err("a $fnruns row holds the value".into())
+                } else {
+                    Ok(format!(
+                        "{} connection(s) reached the listener",
+                        f.far.hits.load(Ordering::SeqCst)
+                    ))
+                }
+            }),
+    ));
+    out.push(check(
+        "the run records from before are kept",
+        fn_runs(w).and_then(|now| {
+            if now.len() < f.runs.len() {
+                return Err(format!("{} rows, {} before", now.len(), f.runs.len()));
+            }
+            expect_eq(&now[..f.runs.len()], &f.runs[..])
+                .map(|_| format!("{} before, {} now", f.runs.len(), now.len()))
+        }),
+    ));
+    out
+}
+
 /// Print every check, and fail on any that is not in `known`. A known break
 /// that now holds fails too, so the list is kept true.
 fn judge(what: &str, checks: &[Check], known: &[(&str, &str)]) {
@@ -1527,11 +1890,14 @@ async fn program_upgrade(known: &[(&str, &str)]) {
     let w = World::new("ordo_upg_program").await;
     let host = env!("CARGO_BIN_EXE_ordo-host");
     let h = w.boot(Path::new(host), "v1");
-    w.apply_current(&fixture("v1")).await;
+    // Each version with its backend functions: 1.1 changes `probe`'s code
+    // and renames `greet` to `hello`.
+    w.apply_current(&with_functions("v1")).await;
     let s = seed(&h, &w);
+    let fns = seed_functions(&h, &w, &s, false);
     let feed = Feed::open(&h, &s.ada, "myNotes");
 
-    w.apply_current(&fixture("v1_1")).await;
+    w.apply_current(&with_functions("v1_1")).await;
     // The running server serves 1.1 once a new op answers.
     within(60, "the server serves 1.1", || {
         let (status, _) = h.op(&s.ada.space, &s.ada.token, "GET", "myLabels", json!({}));
@@ -1548,6 +1914,7 @@ async fn program_upgrade(known: &[(&str, &str)]) {
     );
     checks.extend(verify(&h, &w, &s).await);
     checks.extend(v1_1_works(&h, &s));
+    checks.extend(functions_after(&h, &w, &s, &fns, "two", true));
     let log = h.log();
     checks.push(check(
         "no tenant was left closed",
@@ -1584,16 +1951,39 @@ fn previous(var: &str) -> PathBuf {
     p
 }
 
+/// `ORDO_UPGRADE_FUNCTIONS`: `1` when the previous Ordo has backend
+/// functions, `0` when it predates them. `scripts/upgrade-continuity.sh`
+/// sets it from the previous Ordo's source. Unset is refused, so a run
+/// never skips the functions without saying so.
+fn previous_has_functions() -> bool {
+    match std::env::var("ORDO_UPGRADE_FUNCTIONS").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        other => panic!(
+            "ORDO_UPGRADE_FUNCTIONS is {other:?}; set it to 1 or 0, or run \
+             scripts/upgrade-continuity.sh, which sets it"
+        ),
+    }
+}
+
 async fn binary_upgrade(known: &[(&str, &str)]) {
     let old_host = previous("ORDO_UPGRADE_OLD_HOST");
     let old_cli = previous("ORDO_UPGRADE_OLD_CLI");
+    let functions = previous_has_functions();
     let _serial = SERIAL.lock().await;
     let w = World::new("ordo_upg_binary").await;
 
     // The previous Ordo serves version 1, and the state is made under it.
+    // With functions when the previous Ordo has them.
+    let (v1, v1_1) = if functions {
+        (with_functions("v1"), with_functions("v1_1"))
+    } else {
+        (fixture("v1"), fixture("v1_1"))
+    };
     let mut old = w.boot(&old_host, "old");
-    w.apply_with(&old_cli, &fixture("v1"));
+    w.apply_with(&old_cli, &v1);
     let s = seed(&old, &w);
+    let fns = functions.then(|| seed_functions(&old, &w, &s, true));
     let feed = Feed::open(&old, &s.ada, "myNotes");
     old.stop();
     let old_log = old.log();
@@ -1624,14 +2014,21 @@ async fn binary_upgrade(known: &[(&str, &str)]) {
             .expect("myNotes"),
     );
     checks.extend(verify(&h, &w, &s).await);
+    // The previous Ordo's function and secret, called on this build.
+    if let Some(fns) = &fns {
+        checks.extend(functions_after(&h, &w, &s, fns, "one", false));
+    }
 
     // And version 1.1 applied by this build over data the previous made.
-    w.apply_current(&fixture("v1_1")).await;
+    w.apply_current(&v1_1).await;
     within(60, "the server serves 1.1", || {
         let (status, _) = h.op(&s.ada.space, &s.ada.token, "GET", "myLabels", json!({}));
         (status == 200).then_some(())
     });
     checks.extend(v1_1_works(&h, &s));
+    if let Some(fns) = &fns {
+        checks.extend(functions_after(&h, &w, &s, fns, "two", true));
+    }
     let mut h = h;
     h.stop();
     checks.extend(chains(&w, &s).await);

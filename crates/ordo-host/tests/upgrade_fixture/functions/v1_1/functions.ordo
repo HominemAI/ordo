@@ -1,0 +1,19 @@
+# Backend functions for the upgrade continuity fixture, version 1.1, put
+# beside `../../v1_1/app.ordo` as version 1's are. Two changes:
+#
+#   probe   new code: it answers `two` where version 1 answered `one`
+#   greet   renamed `hello`, with the same code file
+
+secret probeKey for upgrade.localhost
+
+function probe in upgrade {
+  call($port: int) -> json by member
+  code "fn/probe.js"
+  egress upgrade.localhost
+  secrets probeKey
+}
+
+function hello in upgrade {
+  call() -> json by member
+  code "fn/greet.js"
+}

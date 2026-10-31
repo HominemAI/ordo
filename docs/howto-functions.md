@@ -219,6 +219,30 @@ An apply over `--host` does the same through the door:
 A secret with no value does not block an apply, on either path. The
 function answers `secret_not_set` until `ordo secret set` runs.
 
+### A new version of the program
+
+What an apply of a new version does to the functions:
+
+- A changed code file is a new hash. Every tenant runs the new code once
+  the version is served.
+- A secret's value is the deployment's, not the version's. It stays set
+  and keeps its version number. It is never read back.
+- `$fnruns` keeps every run from earlier versions. Each row names the
+  version it ran under.
+- A function the new version no longer declares answers `access_denied`
+  (403), the same answer as a name that never existed. The apply does not
+  refuse the removal. Pages that still call it get that refusal.
+- Renaming a function is a removal and a new function. The old name
+  answers `access_denied`. The new name answers once the version is
+  served. Its runs start under the new name; the old runs keep the old one.
+- A rollback brings the old names and the old code back, because each
+  version's code stays stored by hash.
+
+Upgrading Ordo itself changes none of this. The new binary serves the
+functions, secrets and run records the old one left.
+`crates/ordo-host/tests/upgrade_continuity.rs` checks both kinds of
+upgrade.
+
 ## Calling a function
 
 The page calls `POST /fn/<name>` with the parameters as JSON, the same
@@ -261,7 +285,10 @@ interface descriptor does not list functions yet, so the generated code has
 no typed call per function. You give the name and the result type.
 
 The door runs the op door's steps first: sign-in, the access check, quotas,
-the tenant binding and parameter types. An unknown function name gets the
+the tenant binding and parameter types. `by member` lets every role in the
+tenant call it: viewer, editor, manager and owner. A guest, who holds no
+role, may not. `ORDO_ACCESS_TEMPLATE` may name a function as it names an
+op. An unknown function name gets the
 same `access_denied` as a function the caller may not call. A paused tenant
 answers `space_paused` with its pause answer, unless the function says
 `nopause`.

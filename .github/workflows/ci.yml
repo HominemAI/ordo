@@ -339,18 +339,44 @@ jobs:
   # `scripts/upgrade-continuity.sh`, makes people, sign-ins, shares, a file,
   # a delegation and a page cursor. This build starts on the same databases
   # and keys and must serve all of it. The program-update half of the same
-  # test file already runs inside `cargo test --workspace` above.
+  # test file already runs inside `cargo test --workspace` above, backend
+  # functions included: new code, a renamed function, the secret and the
+  # run records across `ordo apply`.
+  #
+  # Two previous Ordos, one matrix entry each:
+  #
+  # - `first-commit`: the repository's first commit (owner, 2026-10-31). It
+  #   predates backend functions, so the program it serves has none.
+  # - `functions`: f9835982, the first main commit with functions. It
+  #   deploys a function and sets a secret, and this build must call the
+  #   function with the secret intact. `ORDO_UPGRADE_FUNCTIONS: '1'` makes
+  #   the script fail if that commit ever stops having functions. Its door
+  #   granted no role a function, so no run is recorded before the upgrade.
+  #   Move it to the first main commit after that was fixed, so the old
+  #   Ordo's run records are carried too.
   #
   # Its own job, so it runs beside `test` rather than after it. Measured
   # locally 2026-10-27: 73 s in all, the previous build from cold 26 s and
   # both tests 45 s. Here the previous build is from cold on every run (its
   # crates come from the registry cache) and this build's target comes warm
-  # from the `rust-gates` cache. If it nears its 20 minutes, move it to a
-  # nightly schedule.
+  # from the `rust-gates` cache. The `functions` entry builds wasmtime and
+  # the function engine from cold too, so each entry has 30 minutes. If one
+  # nears it, move that entry to a nightly schedule.
   upgrade:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - previous: first-commit
+            from: ''
+            functions: ''
+          - previous: functions
+            from: f9835982
+            functions: '1'
+    name: upgrade (${{ matrix.previous }})
     services:
       postgres:
         image: postgres:17
@@ -390,8 +416,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Upgrade continuity
         # `runner` is not readable in a job's `env`, only in a step's.
+        # An empty `from` is the script's default, the first commit; an
+        # empty `functions` lets the script read it from the source.
         env:
           ORDO_UPGRADE_DIR: ${{ runner.temp }}/ordo-upgrade
+          ORDO_UPGRADE_FROM: ${{ matrix.from }}
+          ORDO_UPGRADE_FUNCTIONS: ${{ matrix.functions }}
         run: bash scripts/upgrade-continuity.sh
 
   # The JavaScript packages, which nothing in CI ran until 2026-09-16.

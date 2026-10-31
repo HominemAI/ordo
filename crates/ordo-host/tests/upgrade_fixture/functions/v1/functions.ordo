@@ -1,0 +1,25 @@
+# Backend functions for the upgrade continuity fixture, version 1
+# (`tests/upgrade_continuity.rs`). The test puts this file and `fn/` beside
+# `../../v1/app.ordo` and applies them as one program. They are kept apart
+# because the binary upgrade's default previous Ordo predates functions and
+# must still compile `v1` alone.
+#
+# `probe` fetches from upgrade.localhost with `probeKey` in a header. The
+# kernel opens the value before it resolves the host, so the fetch fails
+# with `secret_not_set` only when the value is gone. The test's listener on
+# loopback closes each connection before TLS, so the value is never sent.
+# `greet` is renamed `hello` in version 1.1.
+
+secret probeKey for upgrade.localhost
+
+function probe in upgrade {
+  call($port: int) -> json by member
+  code "fn/probe.js"
+  egress upgrade.localhost
+  secrets probeKey
+}
+
+function greet in upgrade {
+  call() -> json by member
+  code "fn/greet.js"
+}

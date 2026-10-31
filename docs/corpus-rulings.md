@@ -11696,3 +11696,14 @@ work flow without a second reviewer.
   apply. Boa suits short glue code; a swap later changes no declaration or
   call. Code compiled straight to Wasm (Rust, increment 10) is the fastest
   kind of function.
+
+## 2026-10-31: function upgrades are tested; function logs in the console are v2
+
+- **Upgrade tests.** Owner: *"Also make sure we're testing upgrade of a
+  function."* The program upgrade changes and renames functions on every
+  CI round. The Ordo upgrade runs from two previous Ordos: the first
+  commit, and 556ecc2c, the first whose functions members can call.
+- **Console logs.** Owner: *"Include tool to view logs in the console as
+  a v2 item."* v1 reads function runs and logs with `ordo fn runs`. A
+  console page for them is v2 (checklist 18af, board
+  `function-logs-in-console`).

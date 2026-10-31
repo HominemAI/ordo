@@ -11748,6 +11748,12 @@ Items the owner has explicitly placed AFTER the first deployment. Listed so
       testing upgrade of a function"). Then increments 2 and 4. Board:
       `backend-functions`.
 
+- [ ] **18af · Function logs in the console (v2).** The owner,
+      2026-10-31: *"Include tool to view logs in the console as a v2
+      item."* A console page that lists a deployment's function runs and
+      shows each run's log, reading what `ordo fn runs` reads (14 days).
+      v1 has the command line alone. Board: `function-logs-in-console`.
+
 - [ ] **18ab · A guest who can write.** The owner, 2026-09-29: *"Add
       planning for writing for post-deploy."* A sharer may let a guest write,
       only through ops that check guards, never through an open share link.

@@ -336,6 +336,9 @@ secret llmKey for api.anthropic.com
 - `secret name for host, host` binds a value to exact hosts. The deployment
   owner sets it with `ordo secret set`. `secrets name` on a function must
   name a declared secret bound to one of its `egress` hosts.
+- `secret name` alone is a signing key, never sent. The function signs or
+  verifies with it through `crypto.subtle.importKey("secret", "name", ...)`
+  and needs no `egress`.
 - The code is `export default { async call(input, ctx) { ... } }`. It
   gets `ctx.secret("llmKey")` as a handle to put in a header. It never
   reads the value.

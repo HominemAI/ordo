@@ -3208,9 +3208,9 @@ narrowing changes the hash.
 **Tier 2: heavy intelligence lives outside the platform.** LLM categorizers,
 vision analysis, model retraining are **external service-principals** calling
 the generated API: capability tokens, registered queries in, registered writes
-out, egress declared on the consent page. The platform hosts no foreign code in
-v1 (in-process WASM hosting deferred until third-party in-process logic is
-actually wanted).
+out, egress declared on the consent page. Short code the deployment owns runs
+in the platform as backend functions (next section). Long-running services
+stay outside it until v2.
 
 ### Functions and secrets [built, increment 1]
 
@@ -3243,6 +3243,7 @@ clause = call(<param>, ...) -> json [by member]
        | limit <wall|cpu> <duration> | memory <size>, ...
        | nopause
 secret <name> for <host>, <host>, ...
+secret <name>
 ```
 
 - `function` and `secret` head a declaration only at the start of a top-level
@@ -3258,15 +3259,19 @@ secret <name> for <host>, <host>, ...
 - `egress` lists the hosts `fetch` may reach. A host with a hyphen goes in
   quotes: `"my-model.example.com"`. Any other host is refused before DNS.
 - `secrets` lists the secrets the code may use, by name. Each must be a
-  declared `secret` bound to at least one `egress` host.
+  declared `secret`. A secret bound to hosts must share one with the
+  function's `egress`.
 - `limit` takes `wall` and `cpu` (durations such as `30s` or `500ms`) and
   `memory` (a size with a space, `64 mb`). Defaults: wall 60 s, cpu 10 s,
   memory 128 MB. Ceilings: 15 min, 60 s, 512 MB. Memory under 8 mb and a
   zero `wall` or `cpu` are refused.
 - `nopause` keeps the function answering while the tenant is paused.
-- `secret name for host, host` binds the value to exact host names, and at
-  least one is required. A URL, a port or a wildcard is
-  `invalid_secret_host`. A host whose first label starts with a digit is
+- `secret name for host, host` binds the value to exact host names. A
+  URL, a port or a wildcard is `invalid_secret_host`.
+- `secret name` alone is a signing key. It is bound to no host and is
+  never sent. A function uses it only as an HMAC key the host holds
+  (`crypto.subtle.importKey("secret", ...)`), so it needs no `egress`.
+  `secret name host` without `for` is refused. A host whose first label starts with a digit is
   quoted. The value is never in the program. The deployment owner sets it
   with `ordo secret set`, from standard input.
 - `trigger`, `uses` and `webhook` on a function are not built. The parser

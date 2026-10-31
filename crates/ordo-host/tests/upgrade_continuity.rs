@@ -1684,6 +1684,9 @@ fn seed_functions(h: &Host, w: &World, s: &Seeded, previous: bool) -> FnSeed {
     );
 
     let far = FarEnd::start();
+    // A previous Ordo is first asked whether members may call a function.
+    // When it answers, that call is a run of its own.
+    let mut calls = 0;
     if previous {
         let (status, body) = call_fn(h, &s.ada, "probe", json!({ "port": far.port }));
         if status == 403 && body["error"]["code"] == "access_denied" {
@@ -1695,6 +1698,7 @@ fn seed_functions(h: &Host, w: &World, s: &Seeded, previous: bool) -> FnSeed {
             assert!(runs.is_empty(), "a refused call left a run: {runs:?}");
             return FnSeed { far, runs };
         }
+        calls += 1;
     }
     for who in [&s.ada, &s.kim] {
         let answer = probe_answers(h, who, &far, "one", 60).expect("probe answers under v1");
@@ -1707,7 +1711,8 @@ fn seed_functions(h: &Host, w: &World, s: &Seeded, previous: bool) -> FnSeed {
         "{body}"
     );
     let runs = fn_runs(w).expect("$fnruns");
-    assert_eq!(runs.len(), 3, "one run row per call: {runs:?}");
+    calls += 3;
+    assert_eq!(runs.len(), calls, "one run row per call: {runs:?}");
     FnSeed { far, runs }
 }
 

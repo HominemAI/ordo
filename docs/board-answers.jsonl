@@ -1193,3 +1193,8 @@
 {"seq": 1193, "item": "backend-functions", "ask": 15, "at": "2026-10-31", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1194, "item": "a-runtime-test-connects-before-the", "ask": 1, "at": "2026-10-31T10:52:52Z", "status": "open", "text": "ok", "source": "page", "read": true}
 {"seq": 1195, "item": "a-runtime-test-connects-before-the", "ask": 1, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1196, "item": "backend-functions", "ask": 16, "at": "2026-10-31T10:56:56Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1197, "item": "backend-functions", "ask": 17, "at": "2026-10-31T10:57:40Z", "status": "open", "text": "ok no wasm? i thought it was faster", "source": "page", "read": true}
+{"seq": 1198, "item": "backend-functions", "ask": 0, "at": "2026-10-31T10:57:43Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1199, "item": "backend-functions", "ask": 16, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1200, "item": "backend-functions", "ask": 17, "at": "2026-10-31", "status": "decided", "text": "ok no wasm? i thought it was faster", "source": "record", "read": true}

@@ -11683,3 +11683,16 @@ work flow without a second reviewer.
   `plan-environments.md` already gives staging its own keys.
 - When environments are built (27e to 27h), dev, staging and production are
   three deployments, and `ordo apply` moves a version between them.
+
+## 2026-10-31: functions at /fn/<name>, and Boa as the JS engine for v1
+
+- **Route.** Owner, ask 16: *"ok"*. Functions are served at `/fn/<name>`,
+  beside `/op/<name>`. Versioning lives in each function's code hash.
+- **Engine.** Owner, ask 17: *"ok no wasm? i thought it was faster"*. It is
+  WebAssembly: Boa, a JS engine in Rust, is compiled to Wasm and runs in a
+  fresh wasmtime instance per call (about 80 µs to make one, 0.2 to 0.3 ms
+  for a small call). StarlingMonkey is SpiderMonkey compiled to Wasm; it
+  interprets heavy JS faster but needs Node, jco and a C toolchain at
+  apply. Boa suits short glue code; a swap later changes no declaration or
+  call. Code compiled straight to Wasm (Rust, increment 10) is the fastest
+  kind of function.

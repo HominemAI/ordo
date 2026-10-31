@@ -95,6 +95,7 @@ fn the_dependency_set_is_the_one_that_was_argued_for() {
     assert_eq!(
         deps,
         vec![
+            "async-trait",
             "hmac",
             "rustls",
             "rustls-pki-types",

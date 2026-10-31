@@ -62,7 +62,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 /// discarded; never decoded, never returned.
 pub const DEFAULT_BODY_CAP: usize = 8 * 1024;
 /// The status line plus all headers must fit here.
-const HEAD_CAP: usize = 16 * 1024;
+pub(crate) const HEAD_CAP: usize = 16 * 1024;
 
 /// The trust anchors deliveries are validated against.
 ///
@@ -243,7 +243,7 @@ pub(crate) async fn handshake(
         })
 }
 
-async fn send(tls: &mut Tls, request: &[u8]) -> Result<(), Refusal> {
+pub(crate) async fn send(tls: &mut Tls, request: &[u8]) -> Result<(), Refusal> {
     tls.write_all(request)
         .await
         .map_err(|e| Refusal::ConnectFailed {
@@ -303,7 +303,7 @@ pub(crate) fn build_request(
 }
 
 /// The `Host:` value: the name, with the port when it is not 443.
-fn host_header(dest: &PinnedDestination) -> String {
+pub(crate) fn host_header(dest: &PinnedDestination) -> String {
     if dest.host().contains(':') {
         format!("[{}]:{}", dest.host(), dest.port())
     } else if dest.port() == crate::dest::HTTPS_PORT {
@@ -313,13 +313,13 @@ fn host_header(dest: &PinnedDestination) -> String {
     }
 }
 
-fn header_token_ok(s: &str) -> bool {
+pub(crate) fn header_token_ok(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
-fn header_value_ok(s: &str) -> bool {
+pub(crate) fn header_value_ok(s: &str) -> bool {
     // Printable ASCII and horizontal tab. No CR, no LF, no NUL — those three
     // are the whole of header injection.
     s.bytes().all(|b| b == b'\t' || (0x20..0x7f).contains(&b))
@@ -550,7 +550,13 @@ async fn fetch_attempt(
     }
     let framing = framing_of(&head)?;
     let max_age = max_age_of(&head);
-    let body = reader.body(framing, cap).await?;
+    let body = reader
+        .body(framing, cap, MAX_CHUNKS)
+        .await
+        .map_err(|f| match f {
+            BodyFault::OverCap => over_cap(cap),
+            BodyFault::Refused(r) => r,
+        })?;
     let _ = tls.shutdown().await;
     Ok(Fetched {
         status,
@@ -760,8 +766,22 @@ fn over_cap(cap: usize) -> Refusal {
     }
 }
 
+/// Why [`Reader::body`] stopped short.
+pub(crate) enum BodyFault {
+    /// The body passed its cap.
+    OverCap,
+    /// Anything else, as the kernel's refusal.
+    Refused(Refusal),
+}
+
+impl From<Refusal> for BodyFault {
+    fn from(r: Refusal) -> BodyFault {
+        BodyFault::Refused(r)
+    }
+}
+
 /// A bounded buffered reader over one response.
-struct Reader<'s, S> {
+pub(crate) struct Reader<'s, S> {
     s: &'s mut S,
     buf: Vec<u8>,
 }
@@ -770,7 +790,7 @@ impl<'s, S> Reader<'s, S>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
-    fn new(s: &'s mut S) -> Self {
+    pub(crate) fn new(s: &'s mut S) -> Self {
         Reader {
             s,
             buf: Vec::with_capacity(4096),
@@ -786,7 +806,7 @@ where
     }
 
     /// The status line and headers, through the blank line, bounded.
-    async fn head(&mut self) -> Result<Vec<u8>, Refusal> {
+    pub(crate) async fn head(&mut self) -> Result<Vec<u8>, Refusal> {
         loop {
             if let Some(i) = self.buf.windows(4).position(|w| w == b"\r\n\r\n") {
                 let rest = self.buf.split_off(i + 4);
@@ -841,25 +861,33 @@ where
         Ok(std::mem::replace(&mut self.buf, rest))
     }
 
-    async fn body(&mut self, framing: Framing, cap: usize) -> Result<Vec<u8>, Refusal> {
+    /// The body, decoded from its framing. `max_chunks` bounds a chunked
+    /// body's chunk count; [`BodyFault::OverCap`] is a body past `cap`,
+    /// told apart so each door can name it in its own words.
+    pub(crate) async fn body(
+        &mut self,
+        framing: Framing,
+        cap: usize,
+        max_chunks: usize,
+    ) -> Result<Vec<u8>, BodyFault> {
         match framing {
             // Refused on the declaration, before a byte is held.
-            Framing::Length(n) if n > cap => Err(over_cap(cap)),
-            Framing::Length(n) => self.exactly(n).await,
+            Framing::Length(n) if n > cap => Err(BodyFault::OverCap),
+            Framing::Length(n) => Ok(self.exactly(n).await?),
             Framing::UntilClose => {
                 while self.more().await? {
                     if self.buf.len() > cap {
-                        return Err(over_cap(cap));
+                        return Err(BodyFault::OverCap);
                     }
                 }
                 if self.buf.len() > cap {
-                    return Err(over_cap(cap));
+                    return Err(BodyFault::OverCap);
                 }
                 Ok(std::mem::take(&mut self.buf))
             }
             Framing::Chunked => {
                 let mut out = Vec::new();
-                for _ in 0..=MAX_CHUNKS {
+                for _ in 0..=max_chunks {
                     let line = self.line().await?;
                     let size = chunk_size(&line)?;
                     if size == 0 {
@@ -871,22 +899,25 @@ where
                         }
                         return Err(Refusal::MalformedResponse {
                             detail: "too many trailers".into(),
-                        });
+                        }
+                        .into());
                     }
                     if out.len().saturating_add(size) > cap {
-                        return Err(over_cap(cap));
+                        return Err(BodyFault::OverCap);
                     }
                     let data = self.exactly(size).await?;
                     out.extend_from_slice(&data);
                     if !self.line().await?.is_empty() {
                         return Err(Refusal::MalformedResponse {
                             detail: "a chunk did not end where it said".into(),
-                        });
+                        }
+                        .into());
                     }
                 }
                 Err(Refusal::MalformedResponse {
-                    detail: format!("more than {MAX_CHUNKS} chunks"),
-                })
+                    detail: format!("more than {max_chunks} chunks"),
+                }
+                .into())
             }
         }
     }

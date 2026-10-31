@@ -99,12 +99,21 @@
 //! far end chose beyond a status or a reply code.
 //!
 //! The request side ([`FetchRequest`]) is general on purpose: a backend
-//! function's `fetch` (`plan-backend-functions.md` §6, after the first
-//! deployment) is the same dialler and reader with a different front door.
+//! function's `fetch` is the same dialler and reader with a different front
+//! door.
+//!
+//! # Functions: [`function`]
+//!
+//! A backend function's outbound call (`plan-backend-functions.md` §6) is
+//! [`FnEgress`], behind the [`FnFetch`] trait. It returns the whole answer,
+//! bounded, and fills in secret handles only for the hosts each secret is
+//! bound to. The value arrives per call from the host's [`SecretSource`];
+//! this crate still names no key provider.
 
 pub mod client;
 pub mod deny;
 pub mod dest;
+pub mod function;
 pub mod refusal;
 pub mod sign;
 pub mod smtp;
@@ -115,5 +124,9 @@ pub use client::{
 };
 pub use deny::{Cidr, DeniedCategory, DenyList, PrivateHost, DENY_CIDRS_ENV, PRIVATE_HOSTS_ENV};
 pub use dest::{resolve_and_pin, resolve_and_pin_host, Allowlist, HttpsUrl, PinnedDestination};
+pub use function::{
+    BodySide, FetchAction, FetchError, FnEgress, FnFetch, FnFetchRequest, FnFetchResponse,
+    FnLimits, HeaderValue, SecretBytes, SecretSource,
+};
 pub use refusal::Refusal;
 pub use sign::{SinkSecret, SIGNATURE_HEADER, SIGNATURE_VERSION, TIMESTAMP_HEADER};

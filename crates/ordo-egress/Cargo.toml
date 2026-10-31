@@ -36,6 +36,11 @@ sha2 = "0.10"
 # Sockets, timeouts. `net` is what gives us `lookup_host`; `io-util` the
 # `AsyncWriteExt`/`AsyncReadExt` the hand-written HTTP/1.1 writer uses.
 tokio = { version = "1", features = ["io-util", "net", "time", "rt", "macros"] }
+# `FnFetch` and `SecretSource` are object-safe async traits: the function
+# runtime holds an `Arc<dyn FnFetch>` and the host implements
+# `SecretSource` over its sealed store. A macro with no runtime and no I/O,
+# the same one `ordo-api` and `ordo-exec` use for their async traits.
+async-trait = "0.1.92"
 
 [dev-dependencies]
 ordo-egress = { path = ".", features = ["test-pin"] }

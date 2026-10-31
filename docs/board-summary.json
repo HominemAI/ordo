@@ -1,6 +1,6 @@
 {
- "date": "2026-10-24",
- "text": "The console is built: all 11 steps of [[console-operator]] plus owner succession as ruled ([[owner-succession-what-the-app-developer]]). Images, CI and console e2e green. Open: a held store connection that blocked emailed sign-in once in CI ([[store-pool-held-blocks-signin]]); logging now names the holder. Next for the owner: the usability session.",
+ "date": "2026-10-31",
+ "text": "The repository is public as HominemAI/ordo, from 1 commit, after all 5 workflows passed: [[making-the-repository-public]]. CI's test job runs as 5 shards. Backend functions are v1 work, increment 1 next: [[backend-functions]].",
  "tiles": [
   [
    "3,454",
@@ -35,12 +35,8 @@
  ],
  "look": [
   {
-   "id": "console-operator",
-   "why": "built; usability session next"
-  },
-  {
-   "id": "store-pool-held-blocks-signin",
-   "why": "cause still open"
+   "id": "backend-functions",
+   "why": "increment 1 next"
   }
  ]
 }

@@ -13117,8 +13117,12 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       secrets; scratch files and local paths untracked (commit 18576ad7).
       **Public 2026-10-30**, with its history, after main passed all 5
       checks. The CLI has no default host; self-hosted CI jobs skip fork
-      pull requests and outside contributors need approval. Board:
-      `making-the-repository-public`.
+      pull requests and outside contributors need approval. **Restarted
+      2026-10-31** (owner): the old repository is private as
+      `HominemAI/ordo-history`, and the public `HominemAI/ordo` begins
+      from 1 commit, made public after all 5 workflows passed. `main` has
+      the ruleset `Protect` (pull request, linear history, no delete or
+      force-push, admin bypass). Board: `making-the-repository-public`.
 - [ ] **27r · A data generation module.** After first deployment.
       `plan-environments.md` §5. Board: `data-generation`.
 - [x] **27s · One live stream per client, shared by every hook.** The

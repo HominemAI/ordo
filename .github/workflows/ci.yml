@@ -347,13 +347,11 @@ jobs:
   #
   # - `first-commit`: the repository's first commit (owner, 2026-10-31). It
   #   predates backend functions, so the program it serves has none.
-  # - `functions`: f9835982, the first main commit with functions. It
-  #   deploys a function and sets a secret, and this build must call the
-  #   function with the secret intact. `ORDO_UPGRADE_FUNCTIONS: '1'` makes
-  #   the script fail if that commit ever stops having functions. Its door
-  #   granted no role a function, so no run is recorded before the upgrade.
-  #   Move it to the first main commit after that was fixed, so the old
-  #   Ordo's run records are carried too.
+  # - `functions`: 556ecc2c, the first main commit whose door lets members
+  #   call functions. It deploys functions, sets a secret and records runs,
+  #   and this build must call the functions with the secret and the run
+  #   records intact. `ORDO_UPGRADE_FUNCTIONS: '1'` makes the script fail
+  #   if that commit ever stops having functions.
   #
   # Its own job, so it runs beside `test` rather than after it. Measured
   # locally 2026-10-27: 73 s in all, the previous build from cold 26 s and
@@ -374,7 +372,7 @@ jobs:
             from: ''
             functions: ''
           - previous: functions
-            from: f9835982
+            from: 556ecc2c
             functions: '1'
     name: upgrade (${{ matrix.previous }})
     services:

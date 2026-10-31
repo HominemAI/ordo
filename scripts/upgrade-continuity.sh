@@ -28,8 +28,8 @@
 # deploys a function and a secret and the functions run once, and this build
 # must call them with the secret and the run records intact. Set
 # `ORDO_UPGRADE_FUNCTIONS=1` to insist: a previous Ordo without functions
-# then fails the run. CI runs a second previous Ordo, f9835982, the first
-# main commit with functions, beside the first commit.
+# then fails the run. CI runs a second previous Ordo, 556ecc2c, the first
+# main commit whose functions members can call, beside the first commit.
 #
 # Settings: ORDO_UPGRADE_FROM, ORDO_UPGRADE_FUNCTIONS, ORDO_UPGRADE_DIR
 # (default ~/.ordo-upgrade), ORDO_UPGRADE_KEEP, ORDO_UPGRADE_OWN_PG,

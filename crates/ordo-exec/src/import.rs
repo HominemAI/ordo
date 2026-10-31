@@ -1164,6 +1164,7 @@ fn import_ops(schema: &Schema) -> ordo_syntax::decl::Program {
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
+        functions: Vec::new(),
     }
 }
 

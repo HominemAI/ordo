@@ -160,6 +160,10 @@ pub fn program_artifact(schema: &Schema, registry: &Registry) -> Result<Value, S
     if !schema.secrets.is_empty() {
         doc["secrets"] = Value::Array(secret_artifacts(schema));
     }
+    // The same for functions: absent when there are none.
+    if !schema.functions.is_empty() {
+        doc["functions"] = Value::Array(function_artifacts(schema));
+    }
     Ok(doc)
 }
 
@@ -176,6 +180,74 @@ fn secret_artifacts(schema: &Schema) -> Vec<Value> {
             json!({ "name": s.name.name, "hosts": hosts })
         })
         .collect()
+}
+
+/// Every backend function, in name order: its manifest
+/// (`plan-backend-functions.md` §4.3). `code_hash` is `null` until
+/// [`bind_function_code`] fills it in at apply, from the file the
+/// declaration names.
+fn function_artifacts(schema: &Schema) -> Vec<Value> {
+    let mut fns: Vec<&ordo_syntax::FunctionDecl> = schema.functions.iter().collect();
+    fns.sort_by(|a, b| a.name.name.cmp(&b.name.name));
+    fns.into_iter()
+        .map(|f| {
+            let params: Vec<Value> = f
+                .params
+                .iter()
+                .map(|p| json!({ "name": p.name.name, "type": p.ty.spelled() }))
+                .collect();
+            json!({
+                "name": f.name.name,
+                "wake": "call",
+                "params": params,
+                "returns": f.returns.name,
+                "by": f.by.name,
+                "code": f.code,
+                "code_hash": Value::Null,
+                "egress": f.egress.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
+                "secrets": f.secrets.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                "limits": {
+                    "wall_ms": f.limits.wall_ms,
+                    "cpu_ms": f.limits.cpu_ms,
+                    "memory_bytes": f.limits.memory_bytes,
+                },
+                "nopause": f.nopause,
+            })
+        })
+        .collect()
+}
+
+/// The SHA-256 of a function's code, as the manifest records it.
+pub fn code_hash(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("sha256:{}", hex(&h.finalize()))
+}
+
+/// Fills in each function's `code_hash` from `hashes` (code path to
+/// [`code_hash`]). Done before [`program_version`], so a change to a
+/// function's code alone is a new version. Answers the path of any function
+/// whose code is missing from `hashes`.
+pub fn bind_function_code(
+    doc: &mut Value,
+    hashes: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some(fns) = doc.get_mut("functions").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for f in fns {
+        let path = f["code"].as_str().unwrap_or("").to_string();
+        match hashes.get(&path) {
+            Some(h) => f["code_hash"] = Value::String(h.clone()),
+            None => {
+                return Err(format!(
+                    "function `{}`: no code was read for `{path}`",
+                    f["name"].as_str().unwrap_or("")
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every routine, in name order: what it is declared as, and what it

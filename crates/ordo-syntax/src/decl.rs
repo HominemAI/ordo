@@ -32,6 +32,10 @@ pub struct Program {
     /// `routine name { trigger … run: … }`: scheduled and on-change work the
     /// platform runs in every tenant (DL §7, §8; checklist 12a).
     pub routines: Vec<RoutineDecl>,
+    /// `function name { call(…) -> json  code "fn/x.js" … }`: the app
+    /// developer's own code, run by the deployment in a fresh WebAssembly
+    /// instance per call (`plan-backend-functions.md` §4.1, increment 1).
+    pub functions: Vec<FunctionDecl>,
     /// `secret name for host[, host]`: an app secret the deployment owner
     /// sets, and the hosts a function may send it to
     /// (`plan-backend-functions.md` §5).
@@ -941,4 +945,65 @@ pub struct RoutineNotify {
     pub level: Ident,
     pub text: String,
     pub span: Span,
+}
+
+// ── backend functions ────────────────────────────────────────────────────
+
+/// `function name [in domain] { … }` (`plan-backend-functions.md` §4.1).
+///
+/// Increment 1 builds one wake-up, `call`: the page calls the function
+/// through `POST /v1/fn/<name>`, and it runs as the signed-in person.
+///
+/// ```text
+/// function suggestTitle in notes {
+///   call($text: text) -> json by member
+///   code "fn/suggest-title.js"
+///   egress api.anthropic.com
+///   secrets llmKey
+///   limit wall 30s, memory 64 mb
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionDecl {
+    pub name: Ident,
+    /// `in <domain>`, as written. When present it must name the program's
+    /// domain.
+    pub domain: Option<Ident>,
+    /// The `call(...)` parameters, typed like an op's.
+    pub params: Vec<ParamDecl>,
+    /// What it answers. `json` only in increment 1.
+    pub returns: Ident,
+    /// Who may call it. `member` (the default): a signed-in member of the
+    /// tenant.
+    pub by: Ident,
+    /// The bundled ES module, relative to the program's root.
+    pub code: String,
+    pub code_span: Span,
+    /// Hosts it may reach. A host not listed is refused before any DNS.
+    pub egress: Vec<FunctionHost>,
+    /// Secrets it may use, by name. It holds a handle, never the value.
+    pub secrets: Vec<Ident>,
+    pub limits: FunctionLimits,
+    /// Runs in a paused tenant, as `nopause` does on an op.
+    pub nopause: bool,
+    /// The `call` clause, for diagnostics.
+    pub call_span: Span,
+    pub span: Span,
+}
+
+/// One `egress` host, lowercased.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionHost {
+    pub name: String,
+    pub span: Span,
+}
+
+/// `limit wall 30s, cpu 2s, memory 64 mb`. Unset is the deployment's
+/// default (`plan-backend-functions.md` §9).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FunctionLimits {
+    pub wall_ms: Option<u64>,
+    pub cpu_ms: Option<u64>,
+    pub memory_bytes: Option<u64>,
+    pub span: Option<Span>,
 }

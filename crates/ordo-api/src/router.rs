@@ -188,6 +188,133 @@ pub fn router_with_blobs(state: ApiState, blobs: crate::blob::BlobState) -> Rout
     ops.merge(blob)
 }
 
+// ── backend functions ───────────────────────────────────────────────────
+
+/// A function's JSON input, at most (`plan-backend-functions.md` §7).
+pub const FN_BODY_LIMIT: usize = 1024 * 1024;
+
+/// `POST /fn/<name>`, merged into the door by a host that runs functions
+/// (`crate::functions`). Its own `Router` for the same reason the blob
+/// routes are: its body limit is its own.
+pub fn function_routes(
+    state: ApiState,
+    functions: Arc<dyn crate::functions::FunctionRunner>,
+) -> Router {
+    Router::new()
+        .route("/fn/{name}", any(fn_dispatch))
+        .layer(axum::extract::DefaultBodyLimit::max(FN_BODY_LIMIT))
+        .with_state((state, functions))
+}
+
+/// The op door's steps, in its order, for a function: the token gate, the
+/// lookup that answers an unknown name as a forbidden one, the gate (method,
+/// envelope, space, access, quota), typed parameters, and the idempotency
+/// reservation. Then the runner. Its refusals are an [`ExecError`] and are
+/// mapped by [`ApiError::from_exec`], as an op's are.
+async fn fn_dispatch(
+    State((state, functions)): State<(ApiState, Arc<dyn crate::functions::FunctionRunner>)>,
+    Path(name): Path<String>,
+    method: Method,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(refusal) = token_refusal(&state, &headers, &name).await {
+        return refusal.into_response();
+    }
+    let Some(spec) = functions.spec(&name) else {
+        let token = bearer(&headers);
+        let why = match token {
+            None => DoorRefusal::TokenMissing,
+            Some(_) => DoorRefusal::UnregisteredOp,
+        };
+        return door_refusal(&state, &name, token, named_space(&headers), why).into_response();
+    };
+    let gate = match gate(&state, &spec, &method, &query, &headers, &body) {
+        Ok(g) => g,
+        Err(e) => return e.into_response(),
+    };
+    match run_function(&state, functions.as_ref(), &spec, &headers, gate).await {
+        Ok((status, body)) => (status, Json(body)).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn run_function(
+    state: &ApiState,
+    functions: &dyn crate::functions::FunctionRunner,
+    spec: &OpSpec,
+    headers: &HeaderMap,
+    gate: Gate,
+) -> Result<(StatusCode, Value), ApiError> {
+    let space = gate.approved_space(spec)?.to_string();
+    let keyed_as = gate.keyed_as();
+    let bound = bind::bind_params(spec, &gate.params)?;
+    let idem_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let slot = idem_key.clone().map(|key| {
+        let replay_key = ReplayKey {
+            space: space.clone(),
+            principal: keyed_as.clone(),
+            op: spec.name.clone(),
+            key,
+        };
+        let fingerprint =
+            RequestFingerprint::compute(&space, &spec.name, &spec.version_hash, &bound, None, None);
+        (replay_key, fingerprint)
+    });
+    if let Some((replay_key, fingerprint)) = &slot {
+        if let Some(outcome) = reserve_or_replay(
+            state,
+            spec,
+            replay_key,
+            fingerprint,
+            KeyBinding::UntilExpiry,
+        )
+        .await?
+        {
+            return Ok((outcome.status, outcome.body));
+        }
+    }
+    let call = crate::functions::FnInvocation {
+        name: spec.name.clone(),
+        space,
+        principal: gate.principal.clone(),
+        agent: gate.agent.clone(),
+        args: bound.0,
+        idempotency_key: idem_key,
+    };
+    match functions.call(call).await {
+        Ok(result) => {
+            let body = serde_json::json!({ "result": result });
+            if let Some((replay_key, fingerprint)) = slot {
+                state
+                    .replay
+                    .put(
+                        replay_key,
+                        fingerprint,
+                        StoredResponse {
+                            status: StatusCode::OK.as_u16(),
+                            body: body.clone(),
+                        },
+                        KeyBinding::UntilExpiry,
+                    )
+                    .await;
+            }
+            Ok((StatusCode::OK, body))
+        }
+        Err(e) => {
+            // A failed run is decided again on a retry: the key is freed.
+            if let Some((replay_key, _)) = &slot {
+                state.replay.abandon(replay_key).await;
+            }
+            Err(ApiError::from_exec(spec, e))
+        }
+    }
+}
+
 // ── the blob door ────────────────────────────────────────────────────────
 //
 // Two handlers, sharing the op door's access check, its error inventory

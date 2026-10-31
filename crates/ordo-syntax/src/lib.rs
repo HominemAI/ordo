@@ -15,13 +15,16 @@ pub mod text;
 pub mod token;
 pub mod trigger;
 
+#[cfg(test)]
+mod function_tests;
+
 pub use ast::{BinOp, CmpOp, CondArm, Condition, Expr, Ident, TextOp};
 pub use decl::{
-    AggDecl, DomainDecl, EntityDecl, FieldDecl, FieldKind, GuardAtom, GuardClause, GuardExpr,
-    OpBody, OpDecl, OpFlags, ParamDecl, Pipeline, Program, ProjItem, ReassignTarget, ReleaseAtom,
-    ReleaseCond, ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineNotify,
-    RoutineTrigger, ScalarTy, SecretDecl, SortKey, Source, SourceArg, Step, TakeCount, WriteStmt,
-    DIVISION_SCALE,
+    AggDecl, DomainDecl, EntityDecl, FieldDecl, FieldKind, FunctionDecl, FunctionHost,
+    FunctionLimits, GuardAtom, GuardClause, GuardExpr, OpBody, OpDecl, OpFlags, ParamDecl,
+    Pipeline, Program, ProjItem, ReassignTarget, ReleaseAtom, ReleaseCond, ReleaseDecl,
+    ReleaseEffect, ReleaseMode, RoutineDecl, RoutineNotify, RoutineTrigger, ScalarTy, SecretDecl,
+    SortKey, Source, SourceArg, Step, TakeCount, WriteStmt, DIVISION_SCALE,
 };
 pub use declparse::{
     bare_money_sites, parse_pipeline, parse_program, parse_whole, AggShape, AGGREGATE_NAMES,

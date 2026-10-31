@@ -646,6 +646,22 @@ pub enum ErrorCode {
     /// lands. Ops the app marks `nopause`, and the platform ops listed in
     /// `ordo_host::pause`, keep answering.
     SpacePaused,
+    /// **A backend function threw**, or answered something that is not JSON
+    /// (`plan-backend-functions.md` §10, `function_error`). The app
+    /// developer's code failed; the message is the function's own, scrubbed
+    /// of secret values. 500: the same call fails again until the code
+    /// changes.
+    FunctionError,
+    /// **A backend function ran past its wall time or its CPU limit**
+    /// (`function_timeout`). 504.
+    FunctionTimeout,
+    /// **A backend function needed more memory than its limit**
+    /// (`function_oom`). 500.
+    FunctionOom,
+    /// **Too many function calls are running** for this tenant or this
+    /// server (`function_busy`, §9). 429 with `Retry-After`: the identical
+    /// call lands once one finishes. Nothing ran.
+    FunctionBusy,
     /// **The person's own tenant is still being set up** (owner, 2026-10-21:
     /// "nothing can be written to the tenant"). Its registry row is
     /// `provisioning`, so nothing in it can run yet. Nothing ran.
@@ -779,6 +795,10 @@ impl ErrorCode {
             ErrorCode::SpaceUnavailable => "space_unavailable",
             ErrorCode::ServerBusy => "server_busy",
             ErrorCode::SpacePaused => "space_paused",
+            ErrorCode::FunctionError => "function_error",
+            ErrorCode::FunctionTimeout => "function_timeout",
+            ErrorCode::FunctionOom => "function_oom",
+            ErrorCode::FunctionBusy => "function_busy",
             ErrorCode::TenantNotReady => "tenant_not_ready",
             ErrorCode::EmailRequired => "email_required",
             ErrorCode::PresenceRequired => "presence_required",
@@ -853,6 +873,10 @@ impl ErrorCode {
         ErrorCode::SpaceUnavailable,
         ErrorCode::ServerBusy,
         ErrorCode::SpacePaused,
+        ErrorCode::FunctionError,
+        ErrorCode::FunctionTimeout,
+        ErrorCode::FunctionOom,
+        ErrorCode::FunctionBusy,
         ErrorCode::TenantNotReady,
         ErrorCode::EmailRequired,
         ErrorCode::PresenceRequired,
@@ -982,6 +1006,12 @@ impl ErrorCode {
             // 27ar. The pause gate sits below the door, in the platform
             // executor, after the access check has opened.
             | ErrorCode::SpacePaused
+            // The function host's, below the door: only a run knows how it
+            // ended.
+            | ErrorCode::FunctionError
+            | ErrorCode::FunctionTimeout
+            | ErrorCode::FunctionOom
+            | ErrorCode::FunctionBusy
             // 18l's three. `std.deployment.apply` is a platform op, and a
             // platform op runs as an executor; it is their only producer.
             | ErrorCode::ApplyRefused
@@ -1093,6 +1123,9 @@ impl ErrorCode {
             // 27ar. Held still on purpose; see the variant for why not 503
             // and not 403.
             ErrorCode::SpacePaused => StatusCode::LOCKED,
+            ErrorCode::FunctionError | ErrorCode::FunctionOom => StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::FunctionTimeout => StatusCode::GATEWAY_TIMEOUT,
+            ErrorCode::FunctionBusy => StatusCode::TOO_MANY_REQUESTS,
             // The three 503s, and they are the same claim about different
             // resources: the work was not done, nothing broke, and the
             // identical call lands once the resource is back. See each
@@ -1380,7 +1413,7 @@ impl IntoResponse for ApiError {
                 .headers_mut()
                 .insert(header::ALLOW, HeaderValue::from_static(allow));
         }
-        if self.code == ErrorCode::ServerBusy {
+        if matches!(self.code, ErrorCode::ServerBusy | ErrorCode::FunctionBusy) {
             response.headers_mut().insert(
                 header::RETRY_AFTER,
                 HeaderValue::from_static(SERVER_BUSY_RETRY_AFTER),

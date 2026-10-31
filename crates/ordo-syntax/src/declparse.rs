@@ -76,6 +76,9 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `secret` is contextual too: it heads a declaration only at the
             // start of a top-level line (`plan-backend-functions.md` §5).
             TokenKind::Ident(w) if w == "secret" => prog.secrets.push(secret_decl(&mut p, src)?),
+            // `function` is contextual the same way: a declaration head
+            // only here, so a field or an expression function keeps it.
+            TokenKind::Ident(w) if w == "function" => prog.functions.push(function_decl(&mut p)?),
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -392,6 +395,296 @@ fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
         }
         other => Err(p.err_here(format!("expected {what}, found {}", describe(&other)))),
     }
+}
+
+// ── backend functions ────────────────────────────────────────────────────
+
+/// `function name [in domain] { call(...) -> json [by member]  code "..."
+/// [egress host, …] [secrets name, …] [limit …] [nopause] }`
+/// (`plan-backend-functions.md` §4.1). Inside the braces the lexer emits no
+/// line breaks, so each clause is found by its leading word.
+fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError> {
+    use crate::decl::{FunctionDecl, FunctionHost, FunctionLimits};
+    let start = p.bump().span; // `function`
+    let name = ident(p, "a function name")?;
+    let domain = if p.eat_kw(Keyword::In) {
+        Some(ident(p, "the domain the function runs in")?)
+    } else {
+        None
+    };
+    p.expect(&TokenKind::LBrace, "`{` opening the function")?;
+
+    let mut call: Option<(Vec<ParamDecl>, Ident, Ident, Span)> = None;
+    let mut code: Option<(String, Span)> = None;
+    let mut egress: Vec<FunctionHost> = Vec::new();
+    let mut secrets: Vec<Ident> = Vec::new();
+    let mut limits = FunctionLimits::default();
+    let mut nopause = false;
+
+    loop {
+        let here = p.tok().span;
+        match p.peek().clone() {
+            TokenKind::RBrace => break,
+            TokenKind::Keyword(Keyword::Nopause) => {
+                p.bump();
+                nopause = true;
+            }
+            TokenKind::Keyword(Keyword::Trigger) => {
+                return Err(p.err_here(
+                    "a function woken by a schedule or a change is not built yet; \
+                     increment 1 builds `call(...) -> json`, called from the page",
+                ));
+            }
+            TokenKind::Ident(w) => match w.as_str() {
+                "call" => {
+                    p.bump();
+                    if call.is_some() {
+                        return Err(p.err_at(here, "a function has one `call` clause"));
+                    }
+                    p.expect(&TokenKind::LParen, "`(` after `call`")?;
+                    let mut params = Vec::new();
+                    if !matches!(p.peek(), TokenKind::RParen) {
+                        loop {
+                            params.push(param_decl(p)?);
+                            if matches!(p.peek(), TokenKind::Comma) {
+                                p.bump();
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    p.expect(&TokenKind::RParen, "`)` to close the parameter list")?;
+                    p.expect(&TokenKind::Arrow, "`->` and what the function answers")?;
+                    let returns = ident(p, "what the function answers (`json`)")?;
+                    let by = match p.peek() {
+                        TokenKind::Ident(w) if w == "by" => {
+                            p.bump();
+                            match p.peek().clone() {
+                                TokenKind::Keyword(Keyword::Public) => {
+                                    let t = p.bump();
+                                    Ident {
+                                        name: "public".into(),
+                                        span: t.span,
+                                    }
+                                }
+                                _ => ident(p, "who may call it (`member`)")?,
+                            }
+                        }
+                        _ => Ident {
+                            name: "member".into(),
+                            span: returns.span,
+                        },
+                    };
+                    call = Some((params, returns, by, here));
+                }
+                "code" => {
+                    p.bump();
+                    if code.is_some() {
+                        return Err(p.err_at(here, "a function has one `code` clause"));
+                    }
+                    match p.peek().clone() {
+                        TokenKind::Str(path) => {
+                            let t = p.bump();
+                            code = Some((path, t.span));
+                        }
+                        other => {
+                            return Err(p.err_here(format!(
+                                "`code` names the bundled file in quotes, \
+                                 `code \"fn/suggest-title.js\"`; found {}",
+                                describe(&other)
+                            )))
+                        }
+                    }
+                }
+                "egress" => {
+                    p.bump();
+                    loop {
+                        egress.push(function_host(p)?);
+                        if matches!(p.peek(), TokenKind::Comma) {
+                            p.bump();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "secrets" => {
+                    p.bump();
+                    loop {
+                        secrets.push(ident(p, "a secret name")?);
+                        if matches!(p.peek(), TokenKind::Comma) {
+                            p.bump();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "limit" => {
+                    p.bump();
+                    limits.span = Some(here);
+                    loop {
+                        let which = ident(p, "a limit: `wall`, `cpu` or `memory`")?;
+                        match which.name.as_str() {
+                            "wall" => limits.wall_ms = Some(limit_duration(p, "wall")?),
+                            "cpu" => limits.cpu_ms = Some(limit_duration(p, "cpu")?),
+                            "memory" => limits.memory_bytes = Some(limit_size(p)?),
+                            other => {
+                                return Err(p.err_at(
+                                    which.span,
+                                    format!(
+                                        "unknown limit `{other}`: a function's limits are \
+                                         `wall`, `cpu` and `memory`"
+                                    ),
+                                ))
+                            }
+                        }
+                        if matches!(p.peek(), TokenKind::Comma) {
+                            p.bump();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "uses" | "webhook" => {
+                    return Err(p.err_here(format!(
+                        "`{w}` on a function is not built yet; increment 1 builds `call`, \
+                         `code`, `egress`, `secrets`, `limit` and `nopause`"
+                    )));
+                }
+                _ => {
+                    return Err(p.err_here(format!(
+                        "expected a function clause (`call`, `code`, `egress`, `secrets`, \
+                         `limit`, `nopause`), found `{w}`"
+                    )))
+                }
+            },
+            other => {
+                return Err(p.err_here(format!(
+                    "expected a function clause (`call`, `code`, `egress`, `secrets`, \
+                     `limit`, `nopause`), found {}",
+                    describe(&other)
+                )))
+            }
+        }
+    }
+    let end = p.expect(&TokenKind::RBrace, "`}` closing the function")?;
+    let Some((params, returns, by, call_span)) = call else {
+        return Err(p.err_at(
+            start.to(end.span),
+            format!(
+                "function `{}` has no `call(...) -> json` clause: increment 1 functions \
+                 are called from the page",
+                name.name
+            ),
+        ));
+    };
+    let Some((code, code_span)) = code else {
+        return Err(p.err_at(
+            start.to(end.span),
+            format!(
+                "function `{}` has no `code \"fn/....js\"` clause naming its bundled file",
+                name.name
+            ),
+        ));
+    };
+    Ok(FunctionDecl {
+        name,
+        domain,
+        params,
+        returns,
+        by,
+        code,
+        code_span,
+        egress,
+        secrets,
+        limits,
+        nopause,
+        call_span,
+        span: start.to(end.span),
+    })
+}
+
+/// One `egress` host: `api.openai.com` as dotted words, or in quotes for a
+/// name with a hyphen, `"my-model.example.com"`.
+fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
+    if let TokenKind::Str(h) = p.peek().clone() {
+        let t = p.bump();
+        return Ok(crate::decl::FunctionHost {
+            name: h.to_ascii_lowercase(),
+            span: t.span,
+        });
+    }
+    let first = segment(p, "a host, such as `api.openai.com`")?;
+    let mut name = first.name;
+    let mut span = first.span;
+    while matches!(p.peek(), TokenKind::Dot) {
+        p.bump();
+        let s = segment(p, "the rest of the host name")?;
+        name.push('.');
+        name.push_str(&s.name);
+        span = span.to(s.span);
+    }
+    Ok(crate::decl::FunctionHost {
+        name: name.to_ascii_lowercase(),
+        span,
+    })
+}
+
+fn limit_duration(p: &mut Parser, which: &str) -> Result<u64, ParseError> {
+    use crate::token::DurationUnit;
+    match p.peek().clone() {
+        TokenKind::Duration { n, unit } => {
+            let ms = match unit {
+                DurationUnit::Ms => Some(n),
+                DurationUnit::S => n.checked_mul(1_000),
+                DurationUnit::M => n.checked_mul(60_000),
+                DurationUnit::H => n.checked_mul(3_600_000),
+                _ => None,
+            };
+            match ms {
+                Some(ms) => {
+                    p.bump();
+                    Ok(ms)
+                }
+                None => Err(p.err_here(format!(
+                    "a `{which}` limit is in ms, s, m or h, such as `{which} 30s`"
+                ))),
+            }
+        }
+        other => Err(p.err_here(format!(
+            "a `{which}` limit is a duration, such as `{which} 30s`; found {}",
+            describe(&other)
+        ))),
+    }
+}
+
+/// `memory 64 mb`: a number, a space, then `kb`, `mb` or `gb`.
+fn limit_size(p: &mut Parser) -> Result<u64, ParseError> {
+    let n = match p.peek().clone() {
+        TokenKind::Int(n) if n > 0 => {
+            p.bump();
+            n as u64
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "a `memory` limit is a size, such as `memory 64 mb`; found {}",
+                describe(&other)
+            )))
+        }
+    };
+    let unit = ident(p, "a size unit: `kb`, `mb` or `gb`")?;
+    let mult: u64 = match unit.name.as_str() {
+        "kb" => 1024,
+        "mb" => 1024 * 1024,
+        "gb" => 1024 * 1024 * 1024,
+        other => {
+            return Err(p.err_at(
+                unit.span,
+                format!("unknown size unit `{other}`: write `kb`, `mb` or `gb`"),
+            ))
+        }
+    };
+    n.checked_mul(mult)
+        .ok_or_else(|| p.err_at(unit.span, "that memory limit is too large"))
 }
 
 // ── routines ─────────────────────────────────────────────────────────────

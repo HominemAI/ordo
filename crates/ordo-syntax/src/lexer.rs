@@ -361,6 +361,17 @@ impl<'s> Lexer<'s> {
             }
             let unit_text = &self.src[unit_start..self.pos];
             let Some(unit) = DurationUnit::parse(unit_text) else {
+                if matches!(unit_text, "kb" | "mb" | "gb") {
+                    return Err(self.err_at(
+                        format!(
+                            "a size is written with a space: `{digits} {unit_text}` \
+                             (a number glued to letters is a duration)"
+                        ),
+                        start,
+                        line,
+                        col,
+                    ));
+                }
                 return Err(self.err_at(
                     format!("unknown duration unit `{unit_text}` — units are ms s m h d w mo y"),
                     start,

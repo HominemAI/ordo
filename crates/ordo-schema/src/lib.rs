@@ -34,6 +34,7 @@ use ordo_syntax::Expr;
 pub mod check;
 pub mod ddl;
 pub mod diff;
+pub mod function;
 pub mod image;
 pub mod json;
 pub mod routine;
@@ -351,6 +352,9 @@ pub struct Schema {
     /// The program's `secret` declarations (`plan-backend-functions.md`
     /// §5): each name and the hosts it may be sent to. One per name.
     pub secrets: Vec<ordo_syntax::SecretDecl>,
+    /// The program's backend functions, checked by [`function::check`].
+    /// Called through `POST /v1/fn/<name>`, never as ops.
+    pub functions: Vec<ordo_syntax::FunctionDecl>,
 }
 
 impl Schema {
@@ -907,8 +911,10 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         release: program.release.clone(),
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
+        functions: program.functions.clone(),
     };
     routine::check(&schema, program)?;
+    function::check(&schema, program)?;
     Ok(schema)
 }
 
@@ -1864,6 +1870,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
+        functions: Vec::new(),
     }
 }
 
@@ -2344,6 +2351,7 @@ pub fn std_ops(schema: &Schema) -> Program {
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
+        functions: Vec::new(),
     }
 }
 

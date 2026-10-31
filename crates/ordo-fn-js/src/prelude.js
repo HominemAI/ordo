@@ -16,12 +16,12 @@
       Object.freeze(this);
     }
     bearer() {
-      return new SecretHandle(this[SECRET].name, "Bearer {secret}");
+      return new SecretHandle(this[SECRET].name, "Bearer {}");
     }
     template(t) {
       t = String(t);
-      if (!t.includes("{secret}")) {
-        throw new TypeError("a secret template must contain {secret}");
+      if (t.split("{}").length !== 2) {
+        throw new TypeError("a secret template holds {} exactly once, where the value goes");
       }
       return new SecretHandle(this[SECRET].name, t);
     }
@@ -168,7 +168,7 @@
       runId: c.runId,
       trigger: "call",
       secret(name) {
-        return new SecretHandle(name, "{secret}");
+        return new SecretHandle(name, "{}");
       },
       log: console.log,
     };

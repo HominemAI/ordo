@@ -140,6 +140,24 @@ pub struct FnCall {
     pub secrets: Vec<String>,
     pub limits: Limits,
     pub fetch: Arc<dyn FnFetch>,
+    /// Removes live secret values from log lines and error messages.
+    pub scrub: Arc<dyn Scrub>,
+}
+
+/// Removes every live secret value of a tenant from text the function
+/// wrote. The egress kernel already replaces a value an outside API echoes
+/// back, so this is the second line, for logs and thrown messages.
+pub trait Scrub: Send + Sync {
+    fn scrub(&self, space: &str, text: &str) -> String;
+}
+
+/// Scrubs nothing: for a host with no secret store.
+pub struct NoScrub;
+
+impl Scrub for NoScrub {
+    fn scrub(&self, _space: &str, text: &str) -> String {
+        text.to_owned()
+    }
 }
 
 /// One log line the function wrote, already scrubbed.
@@ -377,7 +395,7 @@ impl FnHost {
         let wall = limits.wall;
         let fuel_per_ms = self.config.fuel_per_cpu_ms.max(1);
         let fuel = (limits.cpu.as_millis() as u64).saturating_mul(fuel_per_ms);
-        let fetch = call.fetch.clone();
+        let scrub = call.scrub.clone();
         let space = call.space.clone();
 
         let mut store = Store::new(&self.engine.engine, Guest::for_call(&call, &limits));
@@ -411,8 +429,8 @@ impl FnHost {
                 after: limits.cpu,
             },
             FnError::Threw { message, stack } => FnError::Threw {
-                message: fetch.scrub(&space, &message),
-                stack: fetch.scrub(&space, &stack),
+                message: scrub.scrub(&space, &message),
+                stack: scrub.scrub(&space, &stack),
             },
             other => other,
         });
@@ -597,6 +615,7 @@ struct Guest {
     egress: Vec<String>,
     secrets: Vec<String>,
     fetch: Option<Arc<dyn FnFetch>>,
+    scrub: Option<Arc<dyn Scrub>>,
     max_fetches: u32,
     fetches: u32,
     hosts: Vec<String>,
@@ -628,6 +647,7 @@ impl Guest {
             egress: Vec::new(),
             secrets: Vec::new(),
             fetch: None,
+            scrub: None,
             max_fetches: 0,
             fetches: 0,
             hosts: Vec::new(),
@@ -652,6 +672,7 @@ impl Guest {
         g.egress = call.egress.iter().map(|h| h.to_ascii_lowercase()).collect();
         g.secrets = call.secrets.clone();
         g.fetch = Some(call.fetch.clone());
+        g.scrub = Some(call.scrub.clone());
         g.max_fetches = limits.max_fetches;
         g.limits_output = limits.output_bytes;
         g.log_limit = limits.log_bytes;
@@ -698,8 +719,8 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
                 let (bytes, refused) = match reply {
                     Ok(b) => (b, false),
                     Err(e) => {
-                        g.issued.push(e.code().to_owned());
-                        let b = serde_json::json!({ "code": e.code(), "message": e.message })
+                        g.issued.push(e.code.clone());
+                        let b = serde_json::json!({ "code": e.code, "message": e.message })
                             .to_string()
                             .into_bytes();
                         (b, true)
@@ -735,7 +756,7 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
             let bytes = guest_bytes(&mut caller, ptr, len).unwrap_or_default();
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let g = caller.data_mut();
-            let text = match &g.fetch {
+            let text = match &g.scrub {
                 Some(f) => f.scrub(&g.space, &text),
                 None => text,
             };
@@ -806,23 +827,38 @@ enum WireHeader {
 
 /// One `fetch` from the guest: checked against the declaration, then handed
 /// to the egress seam. The reply is the JSON the prelude reads.
-async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, FetchError> {
+/// A fetch the host refused, or the kernel's refusal as the guest sees it.
+struct Refused {
+    code: String,
+    message: String,
+}
+
+impl Refused {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Refused {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
     let req: WireRequest = serde_json::from_slice(raw)
-        .map_err(|e| FetchError::new("egress_refused", format!("a malformed request: {e}")))?;
+        .map_err(|e| Refused::new("egress_refused", format!("a malformed request: {e}")))?;
     if g.fetches >= g.max_fetches {
-        return Err(FetchError::new(
+        return Err(Refused::new(
             "egress_refused",
             format!("more than {} outbound calls in one call", g.max_fetches),
         ));
     }
     let host = https_host(&req.url).ok_or_else(|| {
-        FetchError::new(
+        Refused::new(
             "egress_refused",
             "only https://host/... URLs may be fetched".to_owned(),
         )
     })?;
     if !g.egress.contains(&host) {
-        return Err(FetchError::new(
+        return Err(Refused::new(
             "egress_refused",
             format!("{host} is not in this function's egress list"),
         ));
@@ -833,7 +869,7 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, FetchError> {
             WireHeader::Plain { plain } => HeaderValue::Plain(plain),
             WireHeader::Secret { secret, template } => {
                 if !g.secrets.contains(&secret) {
-                    return Err(FetchError::new(
+                    return Err(Refused::new(
                         "secret_not_declared",
                         format!("{secret} is not in this function's secrets list"),
                     ));
@@ -849,7 +885,7 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, FetchError> {
     let fetch = g
         .fetch
         .clone()
-        .ok_or_else(|| FetchError::new("egress_refused", "no egress while booting"))?;
+        .ok_or_else(|| Refused::new("egress_refused", "no egress while booting"))?;
     g.fetches += 1;
     if !g.hosts.contains(&host) {
         g.hosts.push(host);
@@ -865,9 +901,12 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, FetchError> {
                 url: req.url,
                 headers,
                 body,
+                egress: g.egress.clone(),
+                secrets: g.secrets.clone(),
             },
         )
-        .await?;
+        .await
+        .map_err(|e| Refused::new(e.kind(), e.to_string()))?;
     g.bytes_in += resp.body.len() as u64;
     Ok(serde_json::json!({
         "status": resp.status,

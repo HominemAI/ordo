@@ -32,6 +32,7 @@ pub mod bus;
 pub mod cors;
 pub mod download;
 pub mod error;
+pub mod functions;
 pub mod idempotency;
 pub use ordo_schema::json;
 pub mod live;
@@ -62,7 +63,8 @@ pub use public::{
 pub use refine::{RefineCond, RefineLimits, RefineOp, Refinement};
 pub use registry::{MapRegistry, RegistryHandle};
 pub use router::{
-    method_for, router, router_with_blobs, well_formed_space, ApiState, AGENT_PARAM, OP_BODY_LIMIT,
+    function_routes, method_for, router, router_with_blobs, well_formed_space, ApiState,
+    AGENT_PARAM, FN_BODY_LIMIT, OP_BODY_LIMIT,
 };
 pub use spec::{
     AccessChecker, AccessDecision, BoundParams, Bounds, CallerKind, CostClass, DoorRefusal,

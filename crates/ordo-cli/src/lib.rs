@@ -577,6 +577,15 @@ pub fn check_sources(src: &Sources) -> Result<String, String> {
         }
     }
 
+    // Backend functions (plan-backend-functions.md §4.3): the app
+    // developer's code, called through `POST /v1/fn/<name>`.
+    if !schema.functions.is_empty() {
+        out.push_str("\nFUNCTIONS\n");
+        for f in &schema.functions {
+            out.push_str(&format!("  {}\n", describe_function(f)));
+        }
+    }
+
     out.push_str("\nOPS\n");
     let doc = program_artifact(&schema, &registry)?;
     for op in doc["ops"].as_array().expect("`ops` is an array") {
@@ -701,6 +710,36 @@ pub fn check_sources(src: &Sources) -> Result<String, String> {
 /// program allows. What a request is refused for at run time (the size
 /// limits, the cost gate on an unbounded op) is `docs/howto-cost.md`'s. A
 /// read with no refinable surface prints nothing. It never fails the check.
+/// One function on one line, for `ordo check`: how it is called, its code,
+/// and what it may reach.
+pub fn describe_function(f: &ordo_syntax::FunctionDecl) -> String {
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| format!("${}: {}", p.name.name, p.ty.spelled()))
+        .collect();
+    let mut s = format!(
+        "{}({}) -> {} by {}  code {}",
+        f.name.name,
+        params.join(", "),
+        f.returns.name,
+        f.by.name,
+        f.code
+    );
+    if !f.egress.is_empty() {
+        let hosts: Vec<&str> = f.egress.iter().map(|h| h.name.as_str()).collect();
+        s.push_str(&format!("  egress {}", hosts.join(", ")));
+    }
+    if !f.secrets.is_empty() {
+        let names: Vec<&str> = f.secrets.iter().map(|n| n.name.as_str()).collect();
+        s.push_str(&format!("  secrets {}", names.join(", ")));
+    }
+    if f.nopause {
+        s.push_str("  (nopause)");
+    }
+    s
+}
+
 pub fn refinable_line(op: &serde_json::Value, doc: &serde_json::Value) -> Option<String> {
     use ordo_plan::interface::{refinable_fields, FieldRefine};
     let empty = Vec::new();

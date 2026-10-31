@@ -20,6 +20,7 @@ wasmtime = { version = "50", default-features = false, features = ["runtime", "c
 # Pre-initializes the engine once (boot plus prelude) and rewrites the module
 # with that memory as its data, so each call's fresh instance starts booted.
 wasmtime-wizer = { version = "50", default-features = false }
+async-trait = "0.1.92"
 futures = "0.3"
 getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }

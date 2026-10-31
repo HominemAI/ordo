@@ -3,10 +3,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
 use ordo_fn::{
     FetchError, FnCall, FnError, FnFetch, FnFetchRequest, FnFetchResponse, FnHost, HeaderValue,
-    HostConfig, Limit, Limits,
+    HostConfig, Limit, Limits, Scrub,
 };
 use serde_json::{json, Value};
 
@@ -25,22 +24,26 @@ impl Double {
     }
 }
 
+#[async_trait::async_trait]
 impl FnFetch for Double {
-    fn fetch<'a>(
-        &'a self,
-        _space: &'a str,
+    async fn fetch(
+        &self,
+        _space: &str,
         req: FnFetchRequest,
-    ) -> BoxFuture<'a, Result<FnFetchResponse, FetchError>> {
-        Box::pin(async move {
-            self.seen.lock().unwrap().push(req);
-            Ok(FnFetchResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body: self.answer.to_string().into_bytes(),
-            })
+    ) -> Result<FnFetchResponse, FetchError> {
+        self.seen.lock().unwrap().push(req);
+        Ok(FnFetchResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: self.answer.to_string().into_bytes(),
         })
     }
+}
 
+/// Knows one live secret value.
+struct OneSecret;
+
+impl Scrub for OneSecret {
     fn scrub(&self, _space: &str, text: &str) -> String {
         text.replace("sk-live-value", "[secret]")
     }
@@ -58,6 +61,7 @@ fn call(code: &str, input: Value, fetch: Arc<dyn FnFetch>) -> FnCall {
         secrets: vec!["llmKey".into()],
         limits: Limits::default(),
         fetch,
+        scrub: Arc::new(OneSecret),
     }
 }
 
@@ -93,11 +97,13 @@ async fn a_function_fetches_with_a_secret_handle_and_returns_json() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].method, "POST");
     assert_eq!(seen[0].url, "https://api.example.com/v1/chat");
+    assert_eq!(seen[0].egress, vec!["api.example.com".to_string()]);
+    assert_eq!(seen[0].secrets, vec!["llmKey".to_string()]);
     assert!(seen[0].headers.contains(&(
         "authorization".into(),
         HeaderValue::Secret {
             name: "llmKey".into(),
-            template: "Bearer {secret}".into()
+            template: "Bearer {}".into()
         }
     )));
     let body: Value = serde_json::from_slice(&seen[0].body).unwrap();
@@ -208,13 +214,14 @@ async fn a_busy_loop_stops_at_the_cpu_limit() {
 /// A fetch that never answers: only the wall limit can end the call.
 struct Hang;
 
+#[async_trait::async_trait]
 impl FnFetch for Hang {
-    fn fetch<'a>(
-        &'a self,
-        _space: &'a str,
+    async fn fetch(
+        &self,
+        _space: &str,
         _req: FnFetchRequest,
-    ) -> BoxFuture<'a, Result<FnFetchResponse, FetchError>> {
-        Box::pin(futures::future::pending())
+    ) -> Result<FnFetchResponse, FetchError> {
+        futures::future::pending().await
     }
 }
 

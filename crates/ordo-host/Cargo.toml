@@ -26,6 +26,7 @@ ordo-conformance = { path = "../ordo-conformance" }
 ordo-egress = { path = "../ordo-egress" }
 ordo-crypto = { path = "../ordo-crypto" }
 ordo-exec = { path = "../ordo-exec" }
+ordo-fn = { path = "../ordo-fn" }
 ordo-fault = { path = "../ordo-fault" }
 ordo-env = { path = "../ordo-env" }
 ordo-identity = { path = "../ordo-identity" }

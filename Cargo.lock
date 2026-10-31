@@ -1538,6 +1538,7 @@ dependencies = [
  "ordo-env",
  "ordo-exec",
  "ordo-fault",
+ "ordo-fn",
  "ordo-identity",
  "ordo-plan",
  "ordo-schema",

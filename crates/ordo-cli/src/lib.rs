@@ -710,6 +710,57 @@ pub fn check_sources(src: &Sources) -> Result<String, String> {
 /// program allows. What a request is refused for at run time (the size
 /// limits, the cost gate on an unbounded op) is `docs/howto-cost.md`'s. A
 /// read with no refinable surface prints nothing. It never fails the check.
+/// Each function's code, read for `ordo apply`: by path, and its hash.
+#[derive(Debug, Default)]
+pub struct FunctionCode {
+    pub files: std::collections::BTreeMap<String, Vec<u8>>,
+    pub hashes: std::collections::BTreeMap<String, String>,
+}
+
+/// Reads every `code "..."` file the program names, relative to the
+/// program's directory (the directory given, or a single file's parent).
+/// Refuses a missing file and one over 20 MB (plan-backend-functions.md §9).
+pub fn function_code(program: &std::path::Path, schema: &Schema) -> Result<FunctionCode, String> {
+    let mut out = FunctionCode::default();
+    if schema.functions.is_empty() {
+        return Ok(out);
+    }
+    let root = if program.is_dir() {
+        program.to_path_buf()
+    } else {
+        program
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default()
+    };
+    for f in &schema.functions {
+        if out.files.contains_key(&f.code) {
+            continue;
+        }
+        let full = root.join(&f.code);
+        let bytes = std::fs::read(&full).map_err(|e| {
+            format!(
+                "function `{}`: cannot read its code {}: {e}",
+                f.name.name,
+                full.display()
+            )
+        })?;
+        if bytes.len() > ordo_host::functions::MAX_CODE_BYTES {
+            return Err(format!(
+                "function `{}`: {} is {} bytes, over the limit of {}",
+                f.name.name,
+                full.display(),
+                bytes.len(),
+                ordo_host::functions::MAX_CODE_BYTES
+            ));
+        }
+        out.hashes
+            .insert(f.code.clone(), ordo_plan::artifact::code_hash(&bytes));
+        out.files.insert(f.code.clone(), bytes);
+    }
+    Ok(out)
+}
+
 /// One function on one line, for `ordo check`: how it is called, its code,
 /// and what it may reach.
 pub fn describe_function(f: &ordo_syntax::FunctionDecl) -> String {

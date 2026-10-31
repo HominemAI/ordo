@@ -1841,6 +1841,16 @@ async fn apply(flags: Flags) -> Outcome {
             Ok(h) => h,
             Err(e) => return Outcome::usage(e),
         };
+        // The door's apply carries the program text and no code files yet.
+        if let Ok((schema, _)) = crate::load_sources(&src) {
+            if !schema.functions.is_empty() {
+                return Outcome::failed(
+                    "REFUSED  this program declares backend functions, and an apply over \
+                     `--host` cannot carry their code yet. Apply it with `--db`.\n"
+                        .into(),
+                );
+            }
+        }
         return crate::wire::apply_over_the_wire(
             &host,
             &flags,
@@ -1864,10 +1874,20 @@ async fn apply(flags: Flags) -> Outcome {
         Ok(v) => v,
         Err(e) => return Outcome::failed(format!("{e}\n")),
     };
-    let doc = match ordo_plan::artifact::program_artifact(&schema, &registry) {
+    let mut doc = match ordo_plan::artifact::program_artifact(&schema, &registry) {
         Ok(d) => d,
         Err(e) => return Outcome::failed(format!("artifact: {e}\n")),
     };
+    // Backend functions: each code file is read, size-checked and hashed
+    // into the manifest before the version is taken, so a change to the
+    // code alone is a new version (plan-backend-functions.md §4.3).
+    let code = match crate::function_code(std::path::Path::new(&path), &schema) {
+        Ok(c) => c,
+        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    };
+    if let Err(e) = ordo_plan::artifact::bind_function_code(&mut doc, &code.hashes) {
+        return Outcome::failed(format!("REFUSED  {e}\n"));
+    }
     let (broken, notes) = ordo_host::apply_op::triage_errors(&doc, &schema, &registry);
     if !broken.is_empty() {
         return Outcome::failed(format!(
@@ -1905,6 +1925,13 @@ async fn apply(flags: Flags) -> Outcome {
     // that caller is the deployment acting on itself.
     let pools: std::sync::Arc<dyn ordo_exec::route::PoolResolver> =
         std::sync::Arc::new(ordo_exec::route::SinglePool::new(pool.clone()));
+    // The code goes in before the version that names it, so a node that
+    // loads the version always finds its code.
+    for bytes in code.files.values() {
+        if let Err(e) = ordo_host::functions::store_code(&pool, bytes).await {
+            return Outcome::failed(format!("REFUSED  storing function code: {e}\n"));
+        }
+    }
     match ordo_host::apply_op::run_program(
         &pool,
         pools.as_ref(),

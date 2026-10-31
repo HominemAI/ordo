@@ -75,6 +75,7 @@ pub mod enrolment;
 pub mod exit_ops;
 pub mod federation;
 pub mod fleet;
+pub mod functions;
 pub mod grants;
 pub mod guess_limits;
 pub mod identity_keys;
@@ -712,6 +713,10 @@ fn param_bounds(op: &ordo_syntax::OpDecl, p: &ordo_syntax::ParamDecl) -> Option<
 ///   refuses `$f: blob` with class `blob_parameter`, so reaching `None`
 ///   here would mean that refusal regressed — which the caller treats as
 ///   the invariant violation it is rather than defaulting to text.
+pub(crate) fn param_ty_of(p: &ordo_syntax::ParamDecl) -> Option<ParamTy> {
+    param_ty(p)
+}
+
 fn param_ty(p: &ordo_syntax::ParamDecl) -> Option<ParamTy> {
     Some(match &p.ty {
         // `$payee: text(64)` — the declared length bound rides to the

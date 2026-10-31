@@ -3429,6 +3429,11 @@ pub struct Runtime {
     /// it able to reach every target, not only the space this process
     /// booted with.
     pub spaces: Arc<crate::spaces::Spaces>,
+    /// Backend functions (`POST /fn/<name>`): the serving version's table,
+    /// reloaded on every deploy. The wasmtime engine is made on the first
+    /// call. Outbound calls go through [`crate::functions::NoEgress`] until
+    /// the egress kernel is wired in.
+    pub functions: Arc<crate::functions::HostFunctions>,
     /// Brings a tenant's database to the version this node serves
     /// (25i). Shared by the `tenant.catchup` worker and the deploy
     /// listener, which nudges it when this node swaps to a new version.
@@ -5249,6 +5254,7 @@ async fn assemble_program(
         ordo_api::download::DownloadLimits::from_env(),
     )
     .open_to_delegated(cfg.delegable.opens(ordo_api::download::DOWNLOAD_NAME));
+    let pool_for_functions = pool.clone();
     Ok(Runtime {
         mail: cfg.mail.clone(),
         custody_label: custody_choice.label(),
@@ -5333,6 +5339,14 @@ async fn assemble_program(
         usage_rollup,
         catchup,
         node_status,
+        functions: Arc::new(crate::functions::HostFunctions::new(
+            ordo_fn::HostConfig::default(),
+            crate::functions::FnTable::default(),
+            spaces.clone(),
+            pool_for_functions,
+            Arc::new(crate::functions::NoEgress),
+            Arc::new(ordo_fn::NoScrub),
+        )),
         spaces,
         quotas,
         secrets,
@@ -6287,7 +6301,12 @@ pub fn door(rt: &Runtime) -> axum::Router {
         rt.blobs.clone(),
         rt.download.clone(),
     ))
-    .merge(crate::serve::platform_router(rt.platform.clone()));
+    .merge(crate::serve::platform_router(rt.platform.clone()))
+    // `POST /fn/<name>`: backend functions, through the same door.
+    .merge(ordo_api::function_routes(
+        rt.api.clone(),
+        rt.functions.clone(),
+    ));
     // Proxy mode's pacer, inside the CORS layer so a preflight is never
     // slowed. `None` changes nothing.
     let app = crate::proxy::apply(app, rt.pacer.clone());
@@ -6367,6 +6386,22 @@ async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<(
     let node_status = rt.node_status.clone();
     let routines = rt.routines.clone();
     let spaces = rt.spaces.clone();
+    let functions = rt.functions.clone();
+    // The serving version's functions, read before the first call can come.
+    {
+        let current = deployment.current();
+        match functions
+            .reload(&pool, &current.version, &current.fixture.schema)
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => println!("functions: {n} loaded for version {}", current.version),
+            Err(e) => eprintln!(
+                "functions: none served for version {} — {e}",
+                current.version
+            ),
+        }
+    }
     // The boot's sweep: a tenant whose database was left behind while this
     // node was down is brought forward now rather than when it is asked for.
     catchup.nudge();
@@ -6473,6 +6508,12 @@ async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<(
                 }
                 Swapped::Installed { from, to } => {
                     println!("deploy: {from} -> {to}");
+                    // New calls run the new version's code; calls in flight
+                    // finish on the entry they started with.
+                    let schema = deployment.current().fixture.schema.clone();
+                    if let Err(e) = functions.reload(&pool, &to, &schema).await {
+                        eprintln!("deploy {to}: no functions served — {e}");
+                    }
                     // The bus learns the new version's ops and entities, and
                     // the public cache drops everything: a deploy may move
                     // rows, and one rule is easier to trust than a per-op

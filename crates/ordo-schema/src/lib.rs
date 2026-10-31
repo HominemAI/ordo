@@ -23,7 +23,7 @@
 //! - Per-space columns. `UNIQUE (space, hmac)` degrades to `UNIQUE (hmac)`
 //!   here because spaces are an F-track concept this crate cannot see.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ordo_syntax::decl::{
     EntityDecl, FieldKind, GuardAtom, GuardClause, GuardExpr, Program, ScalarTy,
@@ -348,6 +348,9 @@ pub struct Schema {
     /// entities by [`routine::check`]. Not ops: nothing registers them where
     /// a caller can reach them.
     pub routines: Vec<ordo_syntax::RoutineDecl>,
+    /// The program's `secret` declarations (`plan-backend-functions.md`
+    /// §5): each name and the hosts it may be sent to. One per name.
+    pub secrets: Vec<ordo_syntax::SecretDecl>,
 }
 
 impl Schema {
@@ -882,12 +885,28 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         resolve_release(&entities, &by_name, r)?;
     }
 
+    let mut secret_names = HashSet::new();
+    for s in &program.secrets {
+        if !secret_names.insert(s.name.name.as_str()) {
+            return Err(SchemaError {
+                code: "duplicate_secret",
+                message: format!(
+                    "secret `{}` is declared twice; list every host on one line: \
+                     `secret {} for a.example.com, b.example.com`",
+                    s.name.name, s.name.name
+                ),
+                span: s.span,
+            });
+        }
+    }
+
     let schema = Schema {
         domain: program.domain.as_ref().map(|d| d.name.name.clone()),
         entities,
         by_name,
         release: program.release.clone(),
         routines: program.routines.clone(),
+        secrets: program.secrets.clone(),
     };
     routine::check(&schema, program)?;
     Ok(schema)
@@ -1844,6 +1863,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         ops,
         release: None,
         routines: Vec::new(),
+        secrets: Vec::new(),
     }
 }
 
@@ -2323,6 +2343,7 @@ pub fn std_ops(schema: &Schema) -> Program {
         ops,
         release: None,
         routines: Vec::new(),
+        secrets: Vec::new(),
     }
 }
 

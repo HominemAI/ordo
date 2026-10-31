@@ -91,6 +91,14 @@ const IMPORTABLE: &[&str] = &[
 /// under — a relative path inside the package's own tests, the package name
 /// outside it.
 pub fn emit_program(program: &Program, import_from: &str) -> Result<String, String> {
+    // The CDK has no `secret` builder yet (`plan-backend-functions.md` §12,
+    // increment 9). Refused, so a round trip never drops a binding.
+    if let Some(s) = program.secrets.first() {
+        return Err(format!(
+            "`secret {}` has no CDK form yet; keep secret declarations in the .ordo text",
+            s.name.name
+        ));
+    }
     let mut e = Emitter::default();
     let mut body = String::new();
     let mut synth_args: Vec<String> = Vec::new();

@@ -20,7 +20,7 @@ pub use decl::{
     AggDecl, DomainDecl, EntityDecl, FieldDecl, FieldKind, GuardAtom, GuardClause, GuardExpr,
     OpBody, OpDecl, OpFlags, ParamDecl, Pipeline, Program, ProjItem, ReassignTarget, ReleaseAtom,
     ReleaseCond, ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineNotify,
-    RoutineTrigger, ScalarTy, SortKey, Source, SourceArg, Step, TakeCount, WriteStmt,
+    RoutineTrigger, ScalarTy, SecretDecl, SortKey, Source, SourceArg, Step, TakeCount, WriteStmt,
     DIVISION_SCALE,
 };
 pub use declparse::{
@@ -30,7 +30,8 @@ pub use declparse::{
 pub use lexer::{lex, LexError};
 pub use parser::{
     function_names, functions, parse_condition, parse_expr, ParseError, Parser, ALLOCATE_MODES,
-    BARE_FIELD_IN_GROUP, DUPLICATE_RELEASE, INVALID_GUARD_WALK, PARSE_ERROR, RELEASE_SUBJECT,
+    BARE_FIELD_IN_GROUP, DUPLICATE_RELEASE, INVALID_GUARD_WALK, INVALID_SECRET_HOST, PARSE_ERROR,
+    RELEASE_SUBJECT,
 };
 pub use span::Span;
 pub use text::{is_nfc, nfc};

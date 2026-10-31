@@ -542,3 +542,29 @@ fn a_change_to_only_a_routine_changes_the_programs_version() {
     let (_, _, v) = deployable(&spaced);
     assert_eq!(v, base, "a comment and spacing leave the version alone");
 }
+
+// ── secrets ──────────────────────────────────────────────────────────────
+
+/// A secret's binding is part of the program: moving a host decides where
+/// the egress kernel will send the key, so it must be a new version. A
+/// program with no secrets keeps the version it had before secrets existed.
+#[test]
+fn a_secret_binding_is_part_of_the_programs_version() {
+    let (_, _, base) = deployable(BASE);
+    let with = format!("secret openaiKey for api.openai.com\n{BASE}");
+    let (doc, _, bound) = deployable(&with);
+    assert_ne!(bound, base, "declaring a secret is a new version");
+    assert_eq!(
+        doc["secrets"],
+        serde_json::json!([{ "name": "openaiKey", "hosts": ["api.openai.com"] }])
+    );
+    let moved = with.replace("api.openai.com", "api.openai.com, eu.openai.com");
+    let (_, _, v) = deployable(&moved);
+    assert_ne!(v, bound, "adding a host is a new version");
+    let (doc, _, _) = deployable(BASE);
+    assert!(doc.get("secrets").is_none(), "no secrets, no key");
+
+    let twice = format!("secret k for a.example.com\nsecret k for b.example.com\n{BASE}");
+    let err = load_sources(&one(&twice)).err().expect("refused");
+    assert!(format!("{err:?}").contains("duplicate_secret"), "{err:?}");
+}

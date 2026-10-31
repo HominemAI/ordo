@@ -155,7 +155,27 @@ pub fn program_artifact(schema: &Schema, registry: &Registry) -> Result<Value, S
     if !schema.routines.is_empty() {
         doc["routines"] = Value::Array(routine_artifacts(schema, registry));
     }
+    // The same rule for secrets: a program with none keeps its version. A
+    // binding is part of the program, so moving a host is a new version.
+    if !schema.secrets.is_empty() {
+        doc["secrets"] = Value::Array(secret_artifacts(schema));
+    }
     Ok(doc)
+}
+
+/// Every secret, in name order: its name and the hosts it is bound to,
+/// sorted. Never a value: the program holds none.
+fn secret_artifacts(schema: &Schema) -> Vec<Value> {
+    let mut secrets: Vec<&ordo_syntax::SecretDecl> = schema.secrets.iter().collect();
+    secrets.sort_by(|a, b| a.name.name.cmp(&b.name.name));
+    secrets
+        .into_iter()
+        .map(|s| {
+            let mut hosts = s.hosts.clone();
+            hosts.sort();
+            json!({ "name": s.name.name, "hosts": hosts })
+        })
+        .collect()
 }
 
 /// Every routine, in name order: what it is declared as, and what it

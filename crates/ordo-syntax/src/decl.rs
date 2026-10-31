@@ -32,6 +32,26 @@ pub struct Program {
     /// `routine name { trigger … run: … }`: scheduled and on-change work the
     /// platform runs in every tenant (DL §7, §8; checklist 12a).
     pub routines: Vec<RoutineDecl>,
+    /// `secret name for host[, host]`: an app secret the deployment owner
+    /// sets, and the hosts a function may send it to
+    /// (`plan-backend-functions.md` §5).
+    pub secrets: Vec<SecretDecl>,
+}
+
+/// `secret openaiKey for api.openai.com`.
+///
+/// The value is never in the program. The deployment owner sets it with
+/// `ordo secret set`, sealed under the deployment's keys. The hosts are
+/// the only places the egress kernel will send it: a function that puts the
+/// secret's handle in a request to any other host is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretDecl {
+    pub name: Ident,
+    /// Exact host names, lowercased, in the order written. No port, no
+    /// scheme, no wildcard: a wildcard is a promise that whoever controls
+    /// one subdomain may receive the key.
+    pub hosts: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

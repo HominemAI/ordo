@@ -73,6 +73,9 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `release` is contextual: it heads a declaration only here, at
             // the start of a line, so a field or an op named `release` keeps
             // working and no example has to change (27aq).
+            // `secret` is contextual too: it heads a declaration only at the
+            // start of a top-level line (`plan-backend-functions.md` §5).
+            TokenKind::Ident(w) if w == "secret" => prog.secrets.push(secret_decl(&mut p, src)?),
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -93,7 +96,8 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                 // stops being a keyword must not silently stop being refused.
                 reject_unbuilt(&p, &w, span)?;
                 return Err(p.err_here(format!(
-                    "expected a declaration (`domain`, `entity`, `op`, `release`), found `{w}`"
+                    "expected a declaration (`domain`, `entity`, `op`, `release`, `secret`), \
+                     found `{w}`"
                 )));
             }
             // **Every reserved-and-unbuilt declaration arrives here**, not in
@@ -506,6 +510,100 @@ fn routine_decl(p: &mut Parser, src: &str) -> Result<RoutineDecl, ParseError> {
         notify,
         span: start.to(end.span),
     })
+}
+
+/// `secret <name> for <host>[, <host>]...`, one line.
+///
+/// A host is read back from the source text between the separators, so a
+/// name like `api-v2.example.com` means what it says whatever the lexer
+/// made of its pieces. A host the lexer cannot read bare, such as one whose
+/// label starts with a digit, is written in quotes: `"1password.example"`.
+fn secret_decl(p: &mut Parser, src: &str) -> Result<SecretDecl, ParseError> {
+    let start = p.bump().span; // `secret`
+    let name = ident(p, "a secret name")?;
+    match p.peek() {
+        TokenKind::Ident(w) if w == "for" => {
+            p.bump();
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "expected `for` and the hosts the secret may be sent to after `secret {}`, \
+                 found {}: `secret {} for api.example.com`",
+                name.name,
+                describe(other),
+                name.name
+            )))
+        }
+    }
+    let mut hosts = Vec::new();
+    let end = loop {
+        let first = p.tok().span;
+        let mut last = None;
+        while !matches!(
+            p.peek(),
+            TokenKind::Comma | TokenKind::Newline | TokenKind::Eof
+        ) {
+            last = Some(p.bump().span);
+        }
+        let Some(last) = last else {
+            return Err(p.err_here(format!(
+                "expected a host name for secret `{}`, such as `api.example.com`",
+                name.name
+            )));
+        };
+        let span = first.to(last);
+        let raw = src.get(span.start..span.end).unwrap_or_default();
+        let text = raw
+            .strip_prefix('"')
+            .and_then(|t| t.strip_suffix('"'))
+            .unwrap_or(raw);
+        let host = secret_host(text).map_err(|why| {
+            p.err_class_at(
+                parser::INVALID_SECRET_HOST,
+                span,
+                format!("secret `{}`: `{text}` {why}", name.name),
+            )
+        })?;
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+        if matches!(p.peek(), TokenKind::Comma) {
+            p.bump();
+            continue;
+        }
+        break last;
+    };
+    Ok(SecretDecl {
+        name,
+        hosts,
+        span: start.to(end),
+    })
+}
+
+/// One host a secret is bound to: an exact DNS name, lowercased.
+pub(crate) fn secret_host(text: &str) -> Result<String, &'static str> {
+    if text.contains("://") || text.contains('/') {
+        return Err("is a URL; a secret is bound to a host name such as `api.example.com`");
+    }
+    if text.contains('*') {
+        return Err("is a wildcard; a secret is bound to exact host names only");
+    }
+    if text.contains(':') {
+        return Err("names a port; a secret is bound to a host name, on any port");
+    }
+    let host = text.to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    let label_ok = |l: &&str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    if host.len() > 253 || labels.len() < 2 || !labels.iter().all(label_ok) {
+        return Err("is not a host name such as `api.example.com`");
+    }
+    Ok(host)
 }
 
 /// `notify <level> "<text>"`, between the trigger and `run`. Absent is

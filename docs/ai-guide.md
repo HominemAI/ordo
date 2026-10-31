@@ -1133,9 +1133,13 @@ await setLead(client, { id: p.id, lead: member }).commit(); // sets or keeps it
 ## Calling a function
 
 ```ts
+import { OrdoClient } from '@hominemai/ordo-sdk/core/client.js';
+import { auth } from './auth';
+
+const client = new OrdoClient({ ...auth.clientOptions(), space });
 const { result } = await client.callFunction<{ title: string }>(
   'suggestTitle',
-  { text: note.body },
+  { text: body },
 );
 ```
 

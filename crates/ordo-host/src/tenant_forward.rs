@@ -165,8 +165,22 @@ impl CatchUp {
         if artifact.version != serving {
             return None;
         }
-        let program = Arc::new(Program::compile(&artifact.source).ok()?);
+        // From the artifact and not from its source alone: a function's
+        // code hash is in the stored document, and without it the version
+        // differs and no tenant is ever brought forward.
+        let program = match Program::from_artifact(&artifact) {
+            Ok(p) => Arc::new(p),
+            Err(e) => {
+                eprintln!("tenant catch-up: the serving program {serving} does not compile: {e}");
+                return None;
+            }
+        };
         if program.version != serving {
+            eprintln!(
+                "tenant catch-up: the serving artifact {serving} compiles to {} with this \
+                 build, so no tenant database is brought forward",
+                program.version
+            );
             return None;
         }
         *self.program.lock().expect("program cache is not poisoned") = Some(program.clone());

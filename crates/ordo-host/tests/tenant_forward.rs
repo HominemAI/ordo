@@ -375,6 +375,58 @@ async fn a_sweep_brings_a_tenant_nobody_has_asked_for() {
     assert!(w.serves("spc_a").await);
 }
 
+/// V2 with a backend function and its secret.
+const V2_FN: &str = "domain tf @ 0.1.0\n\n\
+                     entity task {\n  title: text\n  done:  bool\n  note:  text?\n}\n\n\
+                     op openTasks unbounded =\n  task[title, done]\n\n\
+                     secret k for api.example.com\n\n\
+                     function hello in tf {\n  call($text: text(100)) -> json by member\n  \
+                     code \"fn/hello.js\"\n  egress api.example.com\n  secrets k\n}\n";
+
+/// **A program with a function reaches tenants by the catch-up.**
+///
+/// Seen 2026-10-31 in the notes upgrade test: the catch-up compiled the
+/// serving artifact from its source alone, which has no code hash, so the
+/// version it got was not the one served and no tenant was ever brought
+/// forward. `ordo apply` waited 240 s on "the tenant catch-up is running".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_program_with_a_function_reaches_tenants_by_the_catch_up() {
+    let _serial = SERIAL.lock().await;
+    let v1 = Program::compile(V1).expect("v1");
+    let mut v2 = Program::compile(V2_FN).expect("v2");
+    let source_only = v2.version.clone();
+    let code = b"export default { async call() { return {}; } };\n";
+    let hashes = [(
+        "fn/hello.js".to_string(),
+        ordo_plan::artifact::code_hash(code),
+    )]
+    .into_iter()
+    .collect();
+    v2.bind_code(&hashes).expect("the code binds");
+    assert_ne!(v2.version, source_only, "the code hash is in the version");
+
+    let w = World::new("withfn", &v1, &v2, V2_FN).await;
+    let a = tenant_db_at("ordo_tf_withfn_a", &v1).await;
+    w.attach("spc_a", "ordo_tf_withfn_a").await;
+    migrate(&w.control, &v2).await;
+    ordo_host::apply_op::run_program(
+        &w.control,
+        &SinglePool::new(w.control.clone()),
+        &v2,
+        vec![],
+        "test",
+        "ordo apply",
+        true,
+    )
+    .await
+    .expect("the direct apply");
+
+    let swept = w.catchup.sweep().await;
+    assert_eq!((swept.advanced, swept.held.len()), (1, 0), "{swept:?}");
+    assert_eq!(version_of(&a).await, v2.version);
+    assert!(w.serves("spc_a").await);
+}
+
 // ── several at once, under the dial cap ─────────────────────────────────
 
 /// **A sweep moves several databases at once and never more than the cap.**

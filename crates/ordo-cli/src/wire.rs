@@ -217,10 +217,40 @@ fn space(flags: &Flags) -> Result<String, String> {
 }
 
 /// `ordo apply --host …`: POST the program, render what comes back.
+/// The `code` parameter of `std.deployment.apply`
+/// ([`ordo_host::apply_op::CodeFiles`]): each code file's hash and text,
+/// as JSON text. `None` for a program with no functions, so its request is
+/// what it was before functions existed.
+pub fn code_param(code: &crate::FunctionCode) -> Result<Option<String>, String> {
+    if code.files.is_empty() {
+        return Ok(None);
+    }
+    let mut files = ordo_host::apply_op::CodeFiles::new();
+    for (path, bytes) in &code.files {
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|_| format!("`{path}` is not UTF-8 text: bundle it as one ES module"))?;
+        let hash = code.hashes.get(path).cloned().unwrap_or_default();
+        files.insert(path.clone(), ordo_host::apply_op::CodeFile { hash, text });
+    }
+    let text = ordo_host::apply_op::code_text(&files);
+    let max = ordo_host::apply_op::MAX_DOOR_CODE;
+    if text.chars().count() > max {
+        return Err(format!(
+            "the functions' code is {} characters, and an apply over `--host` carries at \
+             most {max}. Apply it with `--db`, which takes each file up to {} bytes",
+            text.chars().count(),
+            ordo_host::functions::MAX_CODE_BYTES
+        ));
+    }
+    Ok(Some(text))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_over_the_wire(
     host: &Host,
     flags: &Flags,
     source: &str,
+    code: Option<String>,
     activate: bool,
     path: &str,
     db: &str,
@@ -238,12 +268,15 @@ pub async fn apply_over_the_wire(
     // `$space` beside them. `activate` is sent explicitly rather than
     // omitted when true, so the request says what it means and a default
     // that ever moved would not silently change what a stored script does.
-    let body = json!({
+    let mut body = json!({
         "$space": space,
         "program": source,
         "activate": activate,
-    })
-    .to_string();
+    });
+    if let Some(code) = code {
+        body["code"] = Value::String(code);
+    }
+    let body = body.to_string();
 
     let (status, value) = match post_touching(
         host,

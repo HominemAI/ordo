@@ -115,6 +115,107 @@ pub const APPLY: &str = "std.deployment.apply";
 /// password.
 pub const APPLY_OP_LABEL: &str = "std.deployment.apply";
 
+// ── function code over the door ─────────────────────────────────────────
+
+/// The most characters the door's apply takes as function code, all files
+/// together. The op route's body is capped at 2 MB
+/// (`ordo_api::OP_BODY_LIMIT`) and the program text may take half of it.
+/// A larger bundle is applied with `ordo apply --db`, which reads the files
+/// itself and takes each up to [`crate::functions::MAX_CODE_BYTES`].
+pub const MAX_DOOR_CODE: usize = 1024 * 1024;
+
+/// One function's code as the door's apply carries it: the hash the caller
+/// read and the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeFile {
+    pub hash: String,
+    pub text: String,
+}
+
+/// The `code` parameter of `std.deployment.apply`: each `code "..."` path
+/// the program names, to its file.
+pub type CodeFiles = std::collections::BTreeMap<String, CodeFile>;
+
+/// The `code` parameter's text for `files`, as `ordo apply --host` sends it.
+pub fn code_text(files: &CodeFiles) -> String {
+    let map: serde_json::Map<String, Value> = files
+        .iter()
+        .map(|(path, f)| (path.clone(), json!({ "hash": f.hash, "text": f.text })))
+        .collect();
+    Value::Object(map).to_string()
+}
+
+/// Reads the `code` parameter. Absent is no code, which is right for a
+/// program with no functions.
+pub fn parse_code(raw: Option<&str>) -> Result<CodeFiles, ApplyRefused> {
+    let Some(raw) = raw else {
+        return Ok(CodeFiles::new());
+    };
+    let shape = || {
+        ApplyRefused::Code(
+            "`code` is not a JSON object from each code path to {\"hash\", \"text\"}".into(),
+        )
+    };
+    let value: Value = serde_json::from_str(raw).map_err(|_| shape())?;
+    let map = value.as_object().ok_or_else(shape)?;
+    let mut out = CodeFiles::new();
+    for (path, f) in map {
+        let (Some(hash), Some(text)) = (f["hash"].as_str(), f["text"].as_str()) else {
+            return Err(shape());
+        };
+        out.insert(
+            path.clone(),
+            CodeFile {
+                hash: hash.to_string(),
+                text: text.to_string(),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Binds each function's code into `program`, as the local apply does:
+/// every declared `code` path must be carried, and each text must hash to
+/// the hash the caller read. Answers the texts to store, by hash.
+fn bind_code(
+    program: &mut Program,
+    code: &CodeFiles,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>, ApplyRefused> {
+    let mut hashes = std::collections::BTreeMap::new();
+    let mut store = std::collections::BTreeMap::new();
+    for f in &program.schema.functions {
+        let Some(file) = code.get(&f.code) else {
+            return Err(ApplyRefused::Code(format!(
+                "function `{}`: its code `{}` was not sent. `ordo apply --host` reads it \
+                 from beside the program; check the file is there",
+                f.name.name, f.code
+            )));
+        };
+        let bytes = file.text.as_bytes();
+        if bytes.len() > crate::functions::MAX_CODE_BYTES {
+            return Err(ApplyRefused::Code(format!(
+                "function `{}`: `{}` is {} bytes, over the limit of {}",
+                f.name.name,
+                f.code,
+                bytes.len(),
+                crate::functions::MAX_CODE_BYTES
+            )));
+        }
+        let hash = ordo_plan::artifact::code_hash(bytes);
+        if hash != file.hash {
+            return Err(ApplyRefused::Code(format!(
+                "function `{}`: `{}` hashes to {hash} at the door and the caller read {}. \
+                 The file changed or was cut short on the way; apply again",
+                f.name.name, f.code, file.hash
+            )));
+        }
+        hashes.insert(f.code.clone(), hash.clone());
+        store.insert(hash, bytes.to_vec());
+    }
+    program.bind_code(&hashes).map_err(ApplyRefused::Code)?;
+    Ok(store)
+}
+
 // ── the lock ────────────────────────────────────────────────────────────
 
 /// The advisory-lock key two applies contend on.
@@ -343,6 +444,9 @@ pub enum ApplyRefused {
     /// An activation named a version the registry does not hold
     /// (`std.deployment.activate`, `ordo rollback`).
     UnknownVersion(String),
+    /// A function's code is missing from the apply, does not match the
+    /// hash the caller read, or is over the size limit. The caller's to fix.
+    Code(String),
     /// A step before the decision failed: a count, a DDL rendering, the
     /// registry.
     Internal(String),
@@ -358,6 +462,7 @@ impl ApplyRefused {
             ApplyRefused::NotActivated { .. } => "not_activated",
             ApplyRefused::InProgress => "apply_in_progress",
             ApplyRefused::UnknownVersion(_) => "unknown_version",
+            ApplyRefused::Code(_) => "function_code_refused",
             ApplyRefused::Internal(_) => "internal",
         }
     }
@@ -369,9 +474,9 @@ impl ApplyRefused {
             // name for on the wire. Same fact, reached from the deploy
             // path rather than from the export.
             ApplyRefused::Ghost { .. } => ErrorCode::SchemaDrift,
-            ApplyRefused::Broken { .. } | ApplyRefused::DoesNotCompile(_) => {
-                ErrorCode::ApplyRefused
-            }
+            ApplyRefused::Broken { .. }
+            | ApplyRefused::DoesNotCompile(_)
+            | ApplyRefused::Code(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -426,6 +531,7 @@ impl std::fmt::Display for ApplyRefused {
                  versions are listed by `std.deployment.versions` (`ordo deploys`); apply \
                  the program to store it first."
             ),
+            ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Internal(e) => write!(f, "{e}"),
         }
     }
@@ -437,17 +543,30 @@ impl std::fmt::Display for ApplyRefused {
 ///
 /// `activate: false` is `--no-activate` — store the artifact and leave the
 /// deployment pointing where it does.
+///
+/// `code` is each function's code (see [`CodeFiles`]). It is checked and
+/// bound into the manifest before the version is taken, and stored by hash
+/// before the version that names it, so a node that loads the version
+/// always finds its code. A secret with no value does not block this: the
+/// function answers `secret_not_set` until `ordo secret set` runs.
 pub async fn run(
     pool: &Pool,
     pools: &dyn ordo_exec::route::PoolResolver,
     source: &str,
+    code: &CodeFiles,
     actor: &str,
     op: &str,
     activate: bool,
 ) -> Result<Report, ApplyRefused> {
-    let (program, broken, notes) = compile_checked(source)?;
+    let (mut program, broken, notes) = compile_checked(source)?;
     if !broken.is_empty() {
         return Err(ApplyRefused::Broken { ops: broken });
+    }
+    let store = bind_code(&mut program, code)?;
+    for bytes in store.values() {
+        crate::functions::store_code(pool, bytes)
+            .await
+            .map_err(|e| ApplyRefused::Internal(format!("storing function code: {e}")))?;
     }
     run_program(pool, pools, &program, notes, actor, op, activate).await
 }
@@ -1353,11 +1472,14 @@ impl ApplyOps {
             .get("activate")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let code = parse_code(bound.0.get("code").and_then(|v| v.as_str()))
+            .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?;
 
         match run(
             &self.pool,
             self.pools.as_ref(),
             source,
+            &code,
             caller,
             APPLY_OP_LABEL,
             activate,
@@ -1393,6 +1515,48 @@ impl ApplyOps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WITH_FN: &str = "domain fx @ 0.1.0\n\nentity a {\n  n: int\n}\n\n\
+                           op listA unbounded =\n  a[n]\n\n\
+                           function hello in fx {\n  call($t: text(10)) -> json by member\n  \
+                           code \"fn/hello.js\"\n}\n";
+
+    fn file(text: &str) -> CodeFile {
+        CodeFile {
+            hash: ordo_plan::artifact::code_hash(text.as_bytes()),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_doors_code_binds_as_the_local_apply_does() {
+        let code: CodeFiles = [("fn/hello.js".to_string(), file("export default {};"))].into();
+        let parsed = parse_code(Some(&code_text(&code))).expect("round trips");
+        assert_eq!(parsed, code);
+        let mut program = Program::compile(WITH_FN).expect("compiles");
+        let before = program.version.clone();
+        let store = bind_code(&mut program, &parsed).expect("binds");
+        assert_eq!(store.len(), 1);
+        assert_ne!(program.version, before, "the code hash is in the version");
+    }
+
+    #[test]
+    fn missing_or_altered_code_is_refused_by_name() {
+        let mut program = Program::compile(WITH_FN).expect("compiles");
+        let missing = bind_code(&mut program, &CodeFiles::new()).unwrap_err();
+        assert_eq!(missing.class(), "function_code_refused");
+        assert!(missing.to_string().contains("fn/hello.js"), "{missing}");
+
+        let mut altered = file("export default {};");
+        altered.text.push(' ');
+        let code: CodeFiles = [("fn/hello.js".to_string(), altered)].into();
+        let refused = bind_code(&mut program, &code).unwrap_err();
+        assert_eq!(refused.code(), ErrorCode::ApplyRefused);
+        assert!(refused.to_string().contains("apply again"), "{refused}");
+
+        let shape = parse_code(Some("[1]")).unwrap_err();
+        assert_eq!(shape.class(), "function_code_refused");
+    }
 
     #[test]
     fn the_lock_key_is_the_migrations_table_and_is_positive() {

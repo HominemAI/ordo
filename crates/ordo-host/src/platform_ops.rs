@@ -769,6 +769,23 @@ pub fn specs() -> Vec<OpSpec> {
                     required: false,
                     bounds: None,
                 },
+                ParamSpec {
+                    // Backend functions' code (`plan-backend-functions.md`
+                    // §4.3): a JSON object from each `code "..."` path to
+                    // `{"hash", "text"}`. The door hashes each text itself,
+                    // refuses one that does not match the hash the caller
+                    // read, and stores it by hash before the version that
+                    // names it ([`crate::apply_op::CodeFiles`]). Text and
+                    // not `json`, because `ORDO_JSON_MAX_BYTES` is the app's
+                    // field limit and a bundle is not app data. Required
+                    // only for a program that declares functions.
+                    name: "code".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(crate::apply_op::MAX_DOOR_CODE as u32),
+                    },
+                    required: false,
+                    bounds: None,
+                },
             ],
             output_fields: vec![
                 FieldSpec::new("version"),

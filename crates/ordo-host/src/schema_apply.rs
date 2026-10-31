@@ -133,6 +133,44 @@ impl Program {
             source: source.to_string(),
         })
     }
+
+    /// Fills in each function's `code_hash` from `hashes` (code path to
+    /// hash) and takes the version again, so a change to a function's code
+    /// alone is a new version (`plan-backend-functions.md` §4.3). A program
+    /// with no functions is unchanged.
+    pub fn bind_code(&mut self, hashes: &BTreeMap<String, String>) -> Result<(), String> {
+        if self.schema.functions.is_empty() {
+            return Ok(());
+        }
+        ordo_plan::artifact::bind_function_code(&mut self.doc, hashes)?;
+        self.version = ordo_plan::artifact::program_version(&self.doc, &self.ddl);
+        Ok(())
+    }
+
+    /// The program a stored artifact holds: its source compiled, with each
+    /// function's code hash read back from the stored document. Compiling
+    /// the source alone loses the hashes, and with them the version.
+    pub fn from_artifact(a: &ordo_exec::registry::Artifact) -> Result<Program, String> {
+        let mut program = Program::compile(&a.source)?;
+        if program.schema.functions.is_empty() {
+            return Ok(program);
+        }
+        let stored: serde_json::Value = serde_json::from_str(&a.artifact)
+            .map_err(|e| format!("the stored artifact {} is not JSON: {e}", a.version))?;
+        let hashes: BTreeMap<String, String> = stored["functions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| {
+                Some((
+                    f["code"].as_str()?.to_string(),
+                    f["code_hash"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        program.bind_code(&hashes)?;
+        Ok(program)
+    }
 }
 
 /// The artifact the deployment is serving, or `None` when there is no

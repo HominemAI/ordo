@@ -147,6 +147,7 @@ async fn a_declared_blind_index_lookup_applies_and_returns_the_opened_value() {
         &pool,
         &ordo_exec::route::SinglePool::new(pool.clone()),
         LOOKUP,
+        &Default::default(),
         "sealed-reads-test",
         "ordo apply",
         true,

@@ -1841,20 +1841,27 @@ async fn apply(flags: Flags) -> Outcome {
             Ok(h) => h,
             Err(e) => return Outcome::usage(e),
         };
-        // The door's apply carries the program text and no code files yet.
-        if let Ok((schema, _)) = crate::load_sources(&src) {
-            if !schema.functions.is_empty() {
-                return Outcome::failed(
-                    "REFUSED  this program declares backend functions, and an apply over \
-                     `--host` cannot carry their code yet. Apply it with `--db`.\n"
-                        .into(),
-                );
-            }
-        }
+        // Backend functions: each code file is read and hashed here, as the
+        // local path does, and carried with the program. The door hashes
+        // each again, refuses a mismatch, and stores it by hash. A program
+        // the CLI cannot compile goes as it is: the door's refusal names
+        // the error.
+        let code = match crate::load_sources(&src) {
+            Ok((schema, _)) => match crate::function_code(std::path::Path::new(&path), &schema) {
+                Ok(c) => c,
+                Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+            },
+            Err(_) => crate::FunctionCode::default(),
+        };
+        let code = match crate::wire::code_param(&code) {
+            Ok(c) => c,
+            Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+        };
         return crate::wire::apply_over_the_wire(
             &host,
             &flags,
             src.text(),
+            code,
             activate,
             &path,
             &db,

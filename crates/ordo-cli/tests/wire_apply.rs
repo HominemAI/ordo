@@ -461,3 +461,99 @@ fn without_a_host_the_command_still_talks_to_the_database() {
     assert_eq!(out.code, 0, "{}", out.report);
     assert!(out.report.contains("schema     created"), "{}", out.report);
 }
+
+// ── backend functions ────────────────────────────────────────────────────
+
+/// V1 with a function and its secret (`plan-backend-functions.md` §4.3).
+const WITH_FN: &str = r#"
+domain fx @ 0.1.0
+
+entity b {
+  title: text
+}
+
+entity a {
+  name:  text?
+  n:     int
+}
+
+op listA unbounded =
+  a[name, n]
+
+secret k for api.example.com
+
+function hello in fx {
+  call($text: text(100)) -> json by member
+  code "fn/hello.js"
+  egress api.example.com
+  secrets k
+}
+"#;
+
+const HELLO_JS: &str = "export default { async call(input) { return { said: input.text }; } };\n";
+
+/// A program with a function, beside its code file.
+fn program_with_fn(tag: &str, js: &str) -> String {
+    let path = program(tag, WITH_FN);
+    let dir = std::path::Path::new(&path).parent().unwrap().join("fn");
+    std::fs::create_dir_all(&dir).expect("fn dir");
+    std::fs::write(dir.join("hello.js"), js).expect("write code");
+    path
+}
+
+/// A program with a function applies over the door as it does against the
+/// database: the same report, so the same version, and the code is stored
+/// by its hash. The secret has no value, and that does not block the apply.
+#[test]
+fn a_function_applies_over_the_wire_with_its_code() {
+    let wire_db = "ordo_wire_fn_a";
+    let direct_db = "ordo_wire_fn_b";
+    empty(wire_db);
+    empty(direct_db);
+    let path = program_with_fn("fn", HELLO_JS);
+
+    let rt = runtime();
+    let addr = rt.block_on(serve(wire_db));
+
+    let over = over_the_wire(&path, addr, &token(DEP_OWNER));
+    assert_eq!(over.code, 0, "{}", over.report);
+    let direct = against_the_database(&path, direct_db, DEP_OWNER);
+    assert_eq!(direct.code, 0, "{}", direct.report);
+    assert_eq!(
+        over.report, direct.report,
+        "--- over the wire ---\n{}\n--- against the database ---\n{}",
+        over.report, direct.report
+    );
+
+    let hash = ordo_plan::artifact::code_hash(HELLO_JS.as_bytes());
+    let rows = Pg::named(wire_db)
+        .query(&format!(
+            "SELECT \"code\" FROM \"$fncode\" WHERE \"hash\" = '{hash}'"
+        ))
+        .expect("$fncode");
+    // `psql` trims the trailing newline it prints; the hash above is of
+    // the exact bytes.
+    assert_eq!(
+        rows,
+        vec![vec![Some(HELLO_JS.trim_end().to_string())]],
+        "the door stores the code by hash"
+    );
+}
+
+/// A change to the code alone is a new version over the door too.
+#[test]
+fn a_code_change_alone_is_a_new_version_over_the_wire() {
+    let db = "ordo_wire_fn_change";
+    empty(db);
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let first = over_the_wire(&program_with_fn("fn_v1", HELLO_JS), addr, &token(DEP_OWNER));
+    assert_eq!(first.code, 0, "{}", first.report);
+    let changed = HELLO_JS.replace("said", "heard");
+    let second = over_the_wire(&program_with_fn("fn_v2", &changed), addr, &token(DEP_OWNER));
+    assert_eq!(second.code, 0, "{}", second.report);
+    assert_ne!(
+        first.report, second.report,
+        "a change to the code alone stores a new version"
+    );
+}

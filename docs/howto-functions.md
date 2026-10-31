@@ -205,8 +205,19 @@ deploy. New calls run the new code; calls already running finish on the
 old one. A rollback brings its own code back, because the old version's
 code is still stored by hash.
 
-An apply over `--host` refuses a program with functions for now: the
-door's apply does not carry code files yet. Use `--db`.
+An apply over `--host` does the same through the door:
+
+- The CLI reads and hashes each code file and sends it with the program.
+- The door hashes each file again. A file that is missing or hashes to
+  something else is refused as `function_code_refused`, naming the file.
+  Apply again.
+- The door stores each file by hash before the version that names it.
+- Over `--host` all code files together may be at most 1,048,576
+  characters, because the door takes a body of at most 2 MB. A larger
+  bundle goes through `ordo apply --db`.
+
+A secret with no value does not block an apply, on either path. The
+function answers `secret_not_set` until `ordo secret set` runs.
 
 ## Calling a function
 

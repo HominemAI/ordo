@@ -297,3 +297,40 @@ async fn a_response_moved_to_another_record_does_not_replay() {
         ReplayClaim::Hit(_)
     ));
 }
+
+/// **A cache whose database is gone says so; it does not say "in flight".**
+/// The authz matrix's Postgres crashed mid-run (a backend exited with code
+/// 2 and the cluster restarted into recovery), and a key the client had
+/// sent once was answered `idempotency_in_flight`, because every failed
+/// claim statement was reported as somebody else holding the key (reported
+/// fix `replay-down-reads-as-in-flight`). Here the database is dropped
+/// under a working cache, which fails the claim the same way: no
+/// reservation, and the class of the database's own error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_on_a_database_that_is_gone_is_unavailable_not_in_flight() {
+    let pg = Pg::scoped("ordo_idem_gone");
+    let c = PgReplayCache::new(pool(&pg.db).await, keys());
+    c.ensure_table().await.expect("platform table");
+    assert_eq!(
+        c.claim(&key("k-before"), &fp(1), KeyBinding::UntilExpiry)
+            .await,
+        ReplayClaim::Reserved,
+        "the cache works before the database goes"
+    );
+
+    let admin = Pg {
+        db: "postgres".into(),
+        ..Pg::default()
+    };
+    admin
+        .exec(&format!("DROP DATABASE {} WITH (FORCE)", pg.db))
+        .expect("drop the cache's database");
+
+    let claim = c
+        .claim(&key("k-once"), &fp(1), KeyBinding::UntilExpiry)
+        .await;
+    assert!(
+        matches!(claim, ReplayClaim::Unavailable(_)),
+        "a key nobody holds, on a database that cannot answer, is not in flight: {claim:?}"
+    );
+}

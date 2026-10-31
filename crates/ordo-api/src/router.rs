@@ -2012,8 +2012,38 @@ async fn reserve_or_replay(
                 }
                 tokio::time::sleep(REPLAY_POLL_INTERVAL).await;
             }
+            // The cache's database failed the claim. Asked again within the
+            // same budget, because a blip clears; past it, the answer is the
+            // database's own fault class, never `idempotency_in_flight`:
+            // nobody holds this key, and that class promises somebody does.
+            ReplayClaim::Unavailable(class) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(replay_unavailable(op, class));
+                }
+                tokio::time::sleep(REPLAY_POLL_INTERVAL).await;
+            }
         }
     }
+}
+
+/// What a caller hears when the replay cache could not be asked for the
+/// whole wait budget. Nothing ran and nothing was reserved, so the same
+/// request may be sent again: a full or starting database is `server_busy`
+/// as everywhere else, and any other database fault is `space_unavailable`,
+/// both 503 with `Retry-After`.
+fn replay_unavailable(op: &OpSpec, class: ordo_fault::FaultClass) -> ApiError {
+    let mut down = ApiError::for_op(
+        ErrorCode::SpaceUnavailable,
+        op,
+        "the idempotency record for this request could not be reached, so nothing ran. \
+         Send the same request, with the same Idempotency-Key, again after the Retry-After wait",
+    );
+    down.retry_after = Some(5);
+    ApiError::by_fault(
+        class,
+        ApiError::server_busy().with_op(op.name.clone()),
+        down,
+    )
 }
 
 /// The request envelope, split from whichever transport carried it.

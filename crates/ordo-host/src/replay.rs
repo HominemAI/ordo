@@ -101,7 +101,7 @@ use ordo_api::idempotency::{
 };
 use ordo_crypto::custody::{KeyProvider, Purpose, SpaceId};
 use ordo_exec::route::{PoolResolver, SinglePool};
-use ordo_exec::Pool;
+use ordo_exec::{FaultClass, Pool, PoolError};
 
 /// DDL for the store. A platform table, like `$commandlog` and
 /// `$sealedpayload`, so it is created at boot rather than generated.
@@ -182,7 +182,7 @@ impl PgReplayCache {
         let targets = self.pools.targets().await.map_err(|e| e.to_string())?;
         for (n, t) in targets.into_iter().enumerate() {
             let ensured = match t.pool {
-                Ok(pool) => self.ensure_on(&pool).await,
+                Ok(pool) => self.ensure_on(&pool).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e),
             };
             match ensured {
@@ -199,7 +199,7 @@ impl PgReplayCache {
         Ok(())
     }
 
-    async fn ensure_on(&self, pool: &Pool) -> Result<(), String> {
+    async fn ensure_on(&self, pool: &Pool) -> Result<(), PoolError> {
         if self
             .ensured
             .lock()
@@ -212,9 +212,7 @@ impl PgReplayCache {
         // Retried once for `Pool::ensure_platform_tables`' reason: two
         // requests creating the table at once can collide on the catalog.
         if pool.rows(IDEMPOTENCY_DDL).await.is_err() {
-            pool.rows(IDEMPOTENCY_DDL)
-                .await
-                .map_err(|e| e.to_string())?;
+            pool.rows(IDEMPOTENCY_DDL).await?;
         }
         self.ensured
             .lock()
@@ -223,17 +221,16 @@ impl PgReplayCache {
         Ok(())
     }
 
-    /// The database `space`'s records live in, with the table present.
-    /// `None` when it cannot be reached, which every caller answers the way
-    /// it answers an unreachable cache.
-    async fn pool_for(&self, space: &str) -> Option<Pool> {
+    /// The database `space`'s records live in, with the table present, or
+    /// the fault class of why it cannot be reached.
+    async fn pool_for(&self, space: &str) -> Result<Pool, FaultClass> {
         let pool = self
             .pools
             .resolve(&ordo_crypto::SpaceId(space.to_string()))
             .await
-            .ok()?;
-        self.ensure_on(&pool).await.ok()?;
-        Some(pool)
+            .map_err(|e| e.class())?;
+        self.ensure_on(&pool).await.map_err(|e| e.class())?;
+        Ok(pool)
     }
 
     fn seal_body(&self, key: &ReplayKey, body: &serde_json::Value) -> Option<Vec<u8>> {
@@ -311,10 +308,11 @@ impl ReplayCache for PgReplayCache {
         _binding: KeyBinding,
     ) -> ReplayClaim {
         let fp = fingerprint.hex();
-        let Some(pool) = self.pool_for(&key.space).await else {
-            // The space's database cannot be reached, which is an unreachable
-            // cache: in flight, never reserved (see below).
-            return ReplayClaim::InFlight;
+        let pool = match self.pool_for(&key.space).await {
+            Ok(pool) => pool,
+            // The space's database cannot be reached: never reserved (see
+            // below), and never in flight, because nobody holds the key.
+            Err(class) => return ReplayClaim::Unavailable(class),
         };
         // One statement. The unique constraint decides who reserves, and the
         // stale-takeover test is a predicate on the conflicting row so the
@@ -341,10 +339,12 @@ impl ReplayCache for PgReplayCache {
             Ok(rows) if !rows.is_empty() => return ReplayClaim::Reserved,
             Ok(_) => {}
             // A cache that cannot be reached must not silently become no
-            // cache at all: reporting the key as in flight makes the caller
-            // retry, where falling through to `Reserved` would execute a
-            // request whose idempotency nothing is enforcing.
-            Err(_) => return ReplayClaim::InFlight,
+            // cache at all: falling through to `Reserved` would execute a
+            // request whose idempotency nothing is enforcing. It is not
+            // `InFlight` either. That answer says an identical request is
+            // still running, and a crashed database made the door say it to
+            // a key sent once (reported fix `replay-down-reads-as-in-flight`).
+            Err(e) => return ReplayClaim::Unavailable(e.class()),
         }
 
         // Somebody else holds it. Only now is a read correct, and it cannot
@@ -361,8 +361,9 @@ impl ReplayCache for PgReplayCache {
             op = lit(&key.op),
             k = lit(&key.key),
         );
-        let Ok(rows) = pool.rows(&select).await else {
-            return ReplayClaim::InFlight;
+        let rows = match pool.rows(&select).await {
+            Ok(rows) => rows,
+            Err(e) => return ReplayClaim::Unavailable(e.class()),
         };
         let Some(row) = rows.first() else {
             // It vanished between the two statements — an `abandon` landing
@@ -436,7 +437,7 @@ impl ReplayCache for PgReplayCache {
             op = lit(&key.op),
             k = lit(&key.key),
         );
-        if let Some(pool) = self.pool_for(&key.space).await {
+        if let Ok(pool) = self.pool_for(&key.space).await {
             let _ = pool.rows(&sql).await;
         }
     }
@@ -450,7 +451,7 @@ impl ReplayCache for PgReplayCache {
             op = lit(&key.op),
             k = lit(&key.key),
         );
-        if let Some(pool) = self.pool_for(&key.space).await {
+        if let Ok(pool) = self.pool_for(&key.space).await {
             let _ = pool.rows(sql.as_str()).await;
         }
     }

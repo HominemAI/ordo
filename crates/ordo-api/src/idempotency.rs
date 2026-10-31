@@ -251,6 +251,17 @@ pub enum ReplayClaim {
     InFlight,
     /// Same key, different payload — `idempotency_mismatch` (409).
     Mismatch,
+    /// **The cache could not be asked**: its database failed the claim's
+    /// statement (down, restarting, full). Nothing was reserved and nobody
+    /// else holds the key, so it must not execute (no idempotency would be
+    /// enforced) and must not read as [`ReplayClaim::InFlight`] either. That
+    /// told a caller "an identical request is still running" when none
+    /// was: a crashed database during the authz matrix answered
+    /// `idempotency_in_flight` to a key sent once (reported fix
+    /// `replay-down-reads-as-in-flight`). The class is the database
+    /// error's own, so the door answers it as it answers that error
+    /// anywhere else.
+    Unavailable(ordo_fault::FaultClass),
 }
 
 /// # Why this trait is async

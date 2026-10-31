@@ -908,7 +908,7 @@ fn harness_live(settings: ordo_api::LiveSettings) -> Harness {
 
 fn harness_full(
     exec: FakeExecutor,
-    replay: Arc<MemoryReplayCache>,
+    replay: Arc<dyn ordo_api::idempotency::ReplayCache>,
     live: ordo_api::LiveStreams,
     pacing: ordo_api::SyncPacing,
 ) -> Harness {
@@ -1951,6 +1951,73 @@ async fn a_loser_that_outwaits_its_budget_never_executes_a_second_copy() {
     gate.add_permits(16);
     assert_eq!(winner.await.unwrap().0, StatusCode::OK);
     assert_eq!(h.exec.calls.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// A replay cache whose database fails every statement, as the authz
+/// matrix's Postgres did when one of its backends crashed (reported fix
+/// `replay-down-reads-as-in-flight`).
+struct DownReplayCache(ordo_fault::FaultClass);
+
+#[async_trait::async_trait]
+impl ordo_api::idempotency::ReplayCache for DownReplayCache {
+    async fn claim(
+        &self,
+        _: &ordo_api::idempotency::ReplayKey,
+        _: &ordo_api::idempotency::RequestFingerprint,
+        _: ordo_api::idempotency::KeyBinding,
+    ) -> ordo_api::idempotency::ReplayClaim {
+        ordo_api::idempotency::ReplayClaim::Unavailable(self.0)
+    }
+    async fn put(
+        &self,
+        _: ordo_api::idempotency::ReplayKey,
+        _: ordo_api::idempotency::RequestFingerprint,
+        _: ordo_api::idempotency::StoredResponse,
+        _: ordo_api::idempotency::KeyBinding,
+    ) {
+    }
+    async fn abandon(&self, _: &ordo_api::idempotency::ReplayKey) {}
+}
+
+/// **A replay cache that cannot be reached is not an identical request in
+/// flight.** A key sent once, while the cache's database is down or
+/// restarting, answered `idempotency_in_flight` ("an identical request is
+/// still running"): no such request existed. Now it answers the database's
+/// own fault, 503 with `Retry-After`, and still never executes.
+#[tokio::test(start_paused = true)]
+async fn an_unreachable_replay_cache_is_not_an_identical_request_in_flight() {
+    use ordo_fault::FaultClass;
+    for (class, code) in [
+        (FaultClass::Busy, "server_busy"),
+        (FaultClass::Broken, "space_unavailable"),
+    ] {
+        let h = harness_full(
+            FakeExecutor::default(),
+            Arc::new(DownReplayCache(class)),
+            ordo_api::LiveStreams::default(),
+            paced(PAGE_SIZE, Duration::from_millis(50)),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/op/addNote")
+            .header("authorization", "Bearer tok-ok")
+            .header("x-ordo-space", SPACE)
+            .header("idempotency-key", "k-once")
+            .body(Body::from(
+                json!({"txn": "txn_01J8ZK", "body": "once"}).to_string(),
+            ))
+            .unwrap();
+        let (status, headers, body) = send(&h.app, request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{class:?}: {body}");
+        assert_eq!(error_code(&body), code, "{class:?}: {body}");
+        assert_eq!(body["error"]["op"], "addNote");
+        assert!(headers.get("retry-after").is_some(), "{class:?}: retryable");
+        assert_eq!(
+            h.exec.entered.load(AtomicOrdering::SeqCst),
+            0,
+            "an unenforced key never executes"
+        );
+    }
 }
 
 /// Z-018: a creating op's key stays bound to the payload that created the row

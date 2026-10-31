@@ -1,0 +1,19 @@
+[package]
+name = "ordo-decompile"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# SQL → Ordo, the v0 reverse compiler. It lived in `ordo-playground`, whose
+# other half is an axum/tokio web server — which meant nothing could use the
+# decompiler without also pulling in a runtime and a socket. It reads a
+# `Schema` and emits Ordo source text; those two crates are its whole world,
+# and both build for `wasm32-unknown-unknown`. `ordo-playground` re-exports
+# it as `ordo_playground::decompile`, so every existing caller is unchanged.
+
+[dependencies]
+ordo-schema = { path = "../ordo-schema" }
+ordo-syntax = { path = "../ordo-syntax" }
+
+[lints]
+workspace = true

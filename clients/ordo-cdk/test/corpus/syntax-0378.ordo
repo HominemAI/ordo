@@ -1,0 +1,7 @@
+op orders =                                      # pagination is call-time, not syntax:
+  workOrders(status != "void")[opened, priority, descr]
+  sort -opened, priority                         # callers page via envelope token;
+                                                 # keyset derived from this sort.
+                                                 # `status` is write-mutable, so the
+                                                 # artifact would carry `cursor:
+                                                 # drifting` if it were the sort key

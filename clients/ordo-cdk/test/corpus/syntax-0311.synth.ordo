@@ -1,0 +1,6 @@
+op anomalousReadings($meter: id) =
+  let baseline =
+    readings(meter == $meter)
+      reduce { a: avg value }
+  readings(meter == $meter and value > 3 * baseline.a)[at, value]
+    sort -at

@@ -1,0 +1,127 @@
+# One organisation's shop, served by one deployment to three pages:
+# `login` signs people in, `shop` is for customers, `admin` is for staff.
+#
+# Everyone is a member of one tenant, the deployment's own. Customers are
+# admitted by the tenant's `open` way in at the role `editor`, so they may call
+# the ops that write (placing an order is a write). Roles are the door's
+# question: may this person call this op at all. Guards are the rows'
+# question: which rows may this person see and change.
+#
+# Staff are the people who hold a level on the shop (`acl (staff, admin)`).
+# `staff` reads and writes the catalogue and the orders. `admin` also adds and
+# removes staff (`grantShopsAccess`, `revokeShopsAccess`). Whoever opens the
+# shop holds `admin` on it from that moment.
+#
+# A customer sees the catalogue and their own orders. Every staff-only write
+# is refused to them by a guard: `access_guard` on a row they can read,
+# `not_found` on a row they cannot.
+#
+# `attributes` is a JSON object, `{"color": "red", "size": "M"}`.
+# `productsWhere` filters on a path inside it.
+
+domain shopfront @ 0.1.0
+
+entity shops {
+  name: text
+  acl (staff, admin)
+}
+
+# Everyone may read the catalogue. Only staff may change it.
+entity products {
+  shop -> shops
+  sku: text unique
+  name: text
+  category: text
+  price: money(2)
+  stock: int = 0
+  active: bool = true
+  attributes: json = {}
+  check stock >= 0
+  access read open
+  access write shop.shopsAccess(member == $caller)
+}
+
+# A customer reads and places their own orders. Staff read them all.
+entity orders {
+  customer -> members
+  product -> products
+  quantity: int
+  placed: datetime
+  note: text = ""
+  check quantity >= 1
+  access read customer == $caller or product.shop.shopsAccess(member == $caller)
+  access write customer == $caller or product.shop.shopsAccess(member == $caller)
+}
+
+# Shipping is its own row, so a customer who may write their order still
+# cannot say it shipped.
+entity shipments {
+  order -> orders unique
+  shipped: datetime
+  carrier: text = ""
+  access read order.customer == $caller or order.product.shop.shopsAccess(member == $caller)
+  access write order.product.shop.shopsAccess(member == $caller)
+}
+
+# ── Anyone signed in ────────────────────────────────────────────────────────
+
+# The caller's own member row: their id, name and role in the tenant.
+op me =
+  members(id == $caller)[id, displayName, role]
+
+# The shops the caller holds a level on. Empty for a customer, which is how
+# the admin page knows to turn them away.
+op myShops unbounded =
+  shops[id, name]
+
+op catalogue unbounded =
+  products(active)[id, sku, name, category, price, stock, attributes]
+  sort category, name
+
+# A path into the JSON document: the products whose `attributes.color` is
+# `$color`. A product with no colour, or a colour that is not text, does
+# not match.
+op productsWhere($color: text) unbounded =
+  products(active and attributes.color == $color)[id, sku, name, category, price, stock, attributes]
+  sort name
+
+# ── Customers ───────────────────────────────────────────────────────────────
+
+op placeOrder($product: id, $quantity: int, $placed: datetime, $note: text) =
+  set orders { customer: $caller, product: $product, quantity: $quantity, placed: $placed, note: $note }
+
+# The total is read at the catalogue's current price.
+op myOrders unbounded =
+  orders(customer == $caller)[id, quantity, placed, note, productName: product.name, price: product.price, total: quantity * product.price]  shipments[shipped, carrier]
+  sort -placed
+
+# ── Staff ───────────────────────────────────────────────────────────────────
+
+op openShop($name: text) =
+  set shops { name: $name }
+
+# Every order the caller may read: all of them for staff, a customer's own
+# for a customer.
+op allOrders unbounded =
+  orders[id, quantity, placed, note, product, customer: customer.displayName, productName: product.name, price: product.price, total: quantity * product.price]  shipments[shipped, carrier]
+  sort -placed
+
+# Converges on `sku`, so adding the same product twice changes it in place.
+op addProduct($shop: id, $sku: text, $name: text, $category: text, $price: money(2), $stock: int, $attributes: json) =
+  set products { shop: $shop, sku: $sku, name: $name, category: $category, price: $price, stock: $stock, attributes: $attributes }
+
+op editProduct($id: id, $rev: int, $name: text, $category: text, $price: money(2), $active: bool, $attributes: json) =
+  set products { id: $id, rev: $rev, name: $name, category: $category, price: $price, active: $active, attributes: $attributes }
+
+op restock($product: id, $by: int) =
+  set products(id == $product) { stock: stock + $by }
+
+# Ship once: `rev: null` refuses a second shipment for the same order, so the
+# stock is taken once. `check stock >= 0` refuses shipping more than is held.
+op markShipped($order: id, $product: id, $quantity: int, $shipped: datetime, $carrier: text) =
+  set shipments { order: $order, shipped: $shipped, carrier: $carrier, rev: null }
+  set products(id == $product) { stock: stock - $quantity }
+
+# Who works in the shop. Only people who hold a level on it see any rows.
+op staffOf($shop: id) unbounded =
+  shopsAccess(shop == $shop)[id, member, name: member.displayName, level]

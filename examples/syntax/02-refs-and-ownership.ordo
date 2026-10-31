@@ -1,0 +1,57 @@
+# 02 Refs and ownership
+#
+# Shows how rows point at each other.
+#   - `field -> entity` is a ref. It is declared once, on the child.
+#   - A plain ref is an association: deleting the target is refused while
+#     rows still point at it (`has_referrers`).
+#   - `owned` marks the ref that makes the row PART OF its parent. Owned
+#     rows are deleted with the parent.
+#   - A link entity has two `owned` refs and is how many-to-many is written.
+#   - `?` after the entity makes a ref optional.
+#
+# Reference: docs/definition-language.md section 3 "Refs", "Ownership".
+
+domain shop @ 1.0.0
+
+entity customers {
+  name: text
+}
+
+entity categories {
+  name: text
+}
+
+entity products {
+  name:     text
+  price:    money
+  category -> categories?              # association, optional
+}
+
+entity orders {
+  customer -> customers                # association: required
+  placed:   date
+  status:   text = "open"
+}
+
+entity orderLines {
+  order   -> orders  owned             # part of its order, dies with it
+  product -> products
+  qty:    int
+  amount: money
+}
+
+# A link entity: exactly two owned refs, to different entities.
+entity wishlist {
+  customer -> customers owned
+  product  -> products  owned
+  note:    text = ""
+}
+
+# Dot-paths follow refs toward "exactly one". Each hop is a join.
+op orderLinesWithNames unbounded =
+  orderLines[qty, amount, product.name, order.status, order.customer.name]
+  sort -amount
+
+# The cascade: removing an order also removes its lines, in one command group.
+op cancelOrder($order: id) =
+  del orders { id: $order }

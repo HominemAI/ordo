@@ -1,0 +1,16 @@
+{
+  "name": "ordo-assistant-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The manager's side of the consent ceremony: read, approve, decline, list and revoke.",
+  "type": "module",
+  "scripts": {
+    "start": "node approve.mjs"
+  },
+  "dependencies": {
+    "@hominemai/ordo-sdk": "file:../../../clients/ordo-sdk"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

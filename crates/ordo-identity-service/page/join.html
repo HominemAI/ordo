@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="ordo-base" content="__ORDO_BASE__">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Join this deployment · Ordo</title>
+<link rel="stylesheet" href="/page/identity.css">
+<script type="module" src="/page/join.js"></script>
+</head>
+<body>
+<header class="brand"><span class="mark">Ordo</span> deployment sign-in</header>
+<main>
+  <p id="problem" class="problem" role="alert"></p>
+
+  <section data-step="loading">
+    <h1>Join this deployment</h1>
+    <p>Loading.</p>
+  </section>
+
+  <section data-step="no-link" hidden>
+    <h1>This link is not complete</h1>
+    <p>Open the whole link you were sent. If it still does not work, ask the person who sent it for a new one.</p>
+  </section>
+
+  <section data-step="name" hidden>
+    <h1>Join this deployment</h1>
+    <p>You were invited to help run this Ordo deployment. You sign in with a passkey: your fingerprint, face, screen lock or a security key. There is no password.</p>
+    <form id="join-form" novalidate>
+      <div class="field">
+        <label for="display-name">Your name</label>
+        <input id="display-name" name="name" type="text" autocomplete="name" maxlength="100" required aria-describedby="name-help" aria-errormessage="name-error">
+        <p id="name-help" class="help">Other admins see this name in the people list and the audit log.</p>
+        <p id="name-error" class="field-error">Type your name.</p>
+      </div>
+      <button type="submit" data-passkey>Create a passkey</button>
+    </form>
+  </section>
+
+  <section data-step="codes" hidden>
+    <h1>Save your recovery codes</h1>
+    <p>You have joined, and your passkey works. Each code below works once. Use one if you lose every passkey.</p>
+    <p class="warn"><strong>This is the only time these codes are shown.</strong> Keep them somewhere safe, away from this device.</p>
+    <ol class="codes" data-codes aria-label="Recovery codes"></ol>
+    <div class="row">
+      <button type="button" class="secondary" data-copy>Copy codes</button>
+      <button type="button" class="secondary" data-download>Download as a file</button>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="saved" data-saved>
+      <label for="saved">I saved these codes somewhere safe</label>
+    </div>
+    <button type="button" data-continue disabled>Continue</button>
+  </section>
+
+  <p id="status" class="status" role="status"></p>
+</main>
+</body>
+</html>

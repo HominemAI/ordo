@@ -1,0 +1,19 @@
+op vendorsBillingLag =                           # TWO independently grouped
+  let orderCount   = vendors[id]  workOrders(status == "done")[wo: id]  # aggregates,
+                     group vendors.id { done: count }               # compared;
+                                                                    # one many-
+  let invoiceCount = vendors[id]  invoices[inv: id]              # path per let
+                     group vendors.id { billed: count }
+
+  vendors[name]  orderCount[done]  invoiceCount[billed]
+  | coalesce(billed, 0) * 2 < coalesce(done, 0)  # invoiced for fewer than half
+  sort name                                      #   the completed orders
+# one pipeline listing both many-sides is a FAN-OUT COMPILE ERROR. Each let is
+# its own pipeline (one many-path each); the join back is by group-key
+# provenance (`vendors.id`), so no join condition is written; each let yields at
+# most one row per vendor, so the final pipeline has no many-path at all.
+# Each let starts at vendors[id], which is outer-preserving: no invoices reads
+# billed = 0, not null. coalesce is defensive here, needed if a let starts from
+# the child side (no row, null). Compare by multiplying, never by dividing:
+# `billed / done < 0.5` divides (decimal) and errors on done == 0.
+# Worked out in full: modeling-guidance.md §C7.

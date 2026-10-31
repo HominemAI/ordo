@@ -1,0 +1,6 @@
+# planned: an aggregate over a sealed value is refused today (sealed_unsupported);
+# host-side folding is not built. `count` over sealed rows is built.
+op monthlyMaintenance unbounded =                # time bucketing (sealed sum
+  invoices[total]                                   #   over all history: acknowledged)
+  group month(issued) { spent: sum total }
+  sort -month

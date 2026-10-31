@@ -1,0 +1,1375 @@
+<meta charset="utf-8">
+<title>The Ordo Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,450;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* light reading surface */
+    --bg: #ffffff;
+    --bg-soft: #f6f8fa;
+    --ink: #1a1f36;
+    --ink-dim: #5b6b83;
+    --ink-faint: #8792a8;
+    --hairline: #e6eaf1;
+    --accent: #4a63d8;
+    --accent-ink: #3b50b8;
+    --accent-wash: #eef1fd;
+    --good: #1a9c6b;
+    --good-wash: #e7f6ef;
+    --warn: #b7791f;
+    --warn-wash: #fdf6ec;
+    --shadow: rgba(26, 31, 54, 0.16);
+    /* dark panels — the brand palette from the animation pages */
+    --panel: #12161e;
+    --panel-2: #1a1f29;
+    --panel-stroke: #3b4453;
+    --panel-hairline: #1d2330;
+    --panel-text: #e8ecf3;
+    --panel-dim: #9aa4b5;
+    --panel-accent: #6aa9ff;
+    --kw: #c792ea; --str: #c3e88d; --vr: #f2b96b; --cmt: #5b6474;
+    --pgood: #8de88d; --pwarn: #f2b96b; --pbad: #f26d6d;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  /* dark reading surface — the guide joins the animation pages' world.
+     System-dark unless the viewer explicitly chose light; explicit dark always wins. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --bg-soft: #1a1f29;
+      --ink: #e8ecf3; --ink-dim: #9aa4b5; --ink-faint: #6b7688;
+      --hairline: #1d2330;
+      --accent: #6aa9ff; --accent-ink: #8ebcff;
+      --accent-wash: rgba(106, 169, 255, 0.13);
+      --good: #8de88d; --good-wash: rgba(141, 232, 141, 0.12);
+      --warn: #f2b96b; --warn-wash: rgba(242, 185, 107, 0.1);
+      --shadow: rgba(0, 0, 0, 0.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --bg-soft: #1a1f29;
+    --ink: #e8ecf3; --ink-dim: #9aa4b5; --ink-faint: #6b7688;
+    --hairline: #1d2330;
+    --accent: #6aa9ff; --accent-ink: #8ebcff;
+    --accent-wash: rgba(106, 169, 255, 0.13);
+    --good: #8de88d; --good-wash: rgba(141, 232, 141, 0.12);
+    --warn: #f2b96b; --warn-wash: rgba(242, 185, 107, 0.1);
+    --shadow: rgba(0, 0, 0, 0.45);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Inter", -apple-system, sans-serif;
+    font-size: 15.5px; line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── layout ── */
+  .layout { display: flex; max-width: 1240px; margin: 0 auto; }
+  #sidenav {
+    width: 240px; flex: 0 0 240px;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    padding: 36px 8px 60px 24px; scrollbar-width: thin;
+    border-right: 1px solid var(--hairline);
+  }
+  #sidenav .brand { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  #sidenav .brand span { color: var(--accent); }
+  #sidenav .brand-sub { font-size: 11.5px; color: var(--ink-faint); margin-bottom: 22px; }
+  #sidenav a {
+    display: block; padding: 5px 10px; border-radius: 6px;
+    font-size: 13px; color: var(--ink-dim); text-decoration: none;
+    border-left: 2px solid transparent;
+  }
+  #sidenav a:hover { color: var(--ink); background: var(--bg-soft); }
+  #sidenav a.h2lnk { font-weight: 600; margin-top: 10px; color: var(--ink); }
+  #sidenav a.h3lnk { padding-left: 22px; font-size: 12.5px; }
+  #sidenav a.active { color: var(--accent-ink); border-left-color: var(--accent);
+                      background: var(--accent-wash); border-radius: 0 6px 6px 0; }
+  main { flex: 1; min-width: 0; padding: 44px clamp(20px, 5vw, 64px) 140px; }
+  @media (max-width: 900px) { #sidenav { display: none; } }
+
+  /* ── hero ── */
+  .eyebrow { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase;
+             color: var(--accent); font-weight: 700; margin-bottom: 10px; }
+  h1 { font-size: clamp(30px, 4vw, 42px); line-height: 1.15; margin: 0 0 14px;
+       font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; }
+  .lede { font-size: 17.5px; color: var(--ink-dim); max-width: 62ch;
+          line-height: 1.65; margin: 0 0 28px; }
+
+  /* companions strip */
+  .companions { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 12px; margin: 26px 0 10px; }
+  .companion {
+    display: block; padding: 13px 15px; border: 1px solid var(--hairline);
+    border-radius: 10px; text-decoration: none; background: var(--bg);
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .companion:hover { border-color: var(--accent); text-decoration: none;
+                     box-shadow: 0 4px 18px var(--accent-wash); }
+  .companion b { display: block; color: var(--ink); font-size: 13.5px; margin-bottom: 3px; }
+  .companion span { font-size: 12px; color: var(--ink-dim); line-height: 1.45; display: block; }
+
+  /* ── section skeleton ── */
+  .doc-section { margin-top: 64px; scroll-margin-top: 24px; }
+  .doc-section > h2 {
+    font-size: 26px; font-weight: 700; letter-spacing: -0.015em;
+    margin: 0 0 6px; padding-top: 18px; border-top: 1px solid var(--hairline);
+    scroll-margin-top: 24px; text-wrap: balance;
+  }
+  .doc-section h3 { font-size: 18px; font-weight: 650; margin: 34px 0 8px;
+                    scroll-margin-top: 24px; }
+  .doc-section p { max-width: 68ch; margin: 12px 0; }
+  .doc-section ul, .doc-section ol { max-width: 66ch; padding-left: 22px; }
+  .doc-section li { margin: 5px 0; }
+  .kicker { font-size: 13px; color: var(--ink-faint); margin: 0 0 14px; }
+  strong { font-weight: 650; }
+  .doc-section code:not(.code code) {
+    font-family: var(--mono); font-size: 0.86em;
+    background: var(--bg-soft); border: 1px solid var(--hairline);
+    border-radius: 5px; padding: 1px 5px; color: var(--accent-ink);
+  }
+
+  /* two-column prose|panel split */
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+           gap: 28px; align-items: start; margin: 20px 0; }
+  @media (max-width: 1020px) { .split { grid-template-columns: 1fr; } }
+
+  /* ── dark code panel ── */
+  .code-panel {
+    background: var(--panel); border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--panel-stroke);
+    box-shadow: 0 14px 40px var(--shadow);
+    margin: 18px 0;
+  }
+  .code-panel .bar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 8px 14px; background: var(--panel-2);
+    border-bottom: 1px solid var(--panel-hairline);
+  }
+  .code-panel .bar b { font-family: var(--mono); font-size: 11px; font-weight: 500;
+                       color: var(--panel-dim); margin-right: auto; }
+  .langtabs { display: flex; gap: 4px; }
+  .ltab {
+    font-family: var(--mono); font-size: 10.5px; padding: 2px 10px;
+    border-radius: 5px; border: 1px solid transparent; background: transparent;
+    color: var(--panel-dim); cursor: pointer;
+  }
+  .ltab:hover { color: var(--panel-text); }
+  .ltab.act { color: var(--panel-accent); border-color: var(--panel-stroke);
+              background: rgba(106, 169, 255, 0.08); }
+  .code-panel .copy {
+    font-size: 10.5px; color: var(--panel-dim); cursor: pointer;
+    border: 1px solid var(--panel-stroke); border-radius: 5px; padding: 2px 9px;
+    background: transparent; font-family: "Inter", sans-serif;
+  }
+  .code-panel .copy:hover { color: var(--panel-text); border-color: var(--panel-accent); }
+  pre.code {
+    margin: 0; padding: 14px 18px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+    color: var(--panel-text); scrollbar-width: thin;
+  }
+  .kw { color: var(--kw); } .str { color: var(--str); }
+  .vr { color: var(--vr); } .cmt { color: var(--cmt); font-style: italic; }
+  .hl-line { background: rgba(106, 169, 255, 0.09); display: inline-block; width: 100%; }
+
+  /* ── figures (diagrams live on dark cards too) ── */
+  figure.fig {
+    margin: 22px 0; background: var(--panel); border-radius: 12px;
+    border: 1px solid var(--panel-stroke); padding: 22px 20px 14px;
+    box-shadow: 0 14px 40px var(--shadow);
+  }
+  figure.fig svg { width: 100%; height: auto; display: block; }
+  figure.fig figcaption {
+    font-size: 12.5px; color: var(--panel-dim); text-align: center;
+    padding-top: 12px; font-style: italic;
+  }
+  /* diagram helper classes for inline SVG */
+  .d-box { fill: var(--panel-2); stroke: var(--panel-stroke); stroke-width: 1.2; }
+  .d-box-hi { fill: var(--panel-2); stroke: var(--panel-accent); stroke-width: 1.4; }
+  .d-text { fill: var(--panel-text); font-size: 12px; font-weight: 600;
+            font-family: "Inter", sans-serif; text-anchor: middle;
+            dominant-baseline: middle; }
+  .d-sub { fill: var(--panel-dim); font-size: 10px; font-weight: 400; }
+  .d-mono { fill: var(--panel-dim); font-size: 10px; font-family: var(--mono); }
+  .d-mono-hi { fill: var(--panel-accent); font-size: 10px; font-family: var(--mono); }
+  .d-line { stroke: var(--panel-accent); stroke-width: 2; fill: none;
+            stroke-linecap: round; }
+  .d-line-dim { stroke: var(--panel-stroke); stroke-width: 1.5; fill: none; }
+  .d-line-bad { stroke: var(--pbad); stroke-width: 2; fill: none; stroke-linecap: round; }
+  .d-good { fill: var(--pgood); } .d-warn { fill: var(--pwarn); } .d-bad { fill: var(--pbad); }
+
+  /* ── callouts, tags, tables ── */
+  /* "Visualize this" — jump from a section to its interactive companion */
+  a.viz {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin: 2px 0 8px; padding: 6px 14px 6px 11px;
+    border: 1px solid var(--hairline); border-radius: 999px;
+    background: var(--accent-wash); color: var(--accent-ink);
+    font-size: 12.5px; font-weight: 600; text-decoration: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  a.viz:hover { border-color: var(--accent); box-shadow: 0 4px 16px var(--accent-wash);
+                text-decoration: none; }
+  a.viz svg { width: 15px; height: 15px; flex: 0 0 auto; }
+  a.viz span { color: var(--ink-dim); font-weight: 450; }
+
+  .callout {
+    max-width: 68ch; margin: 18px 0; padding: 13px 16px;
+    border: 1px solid var(--hairline); border-left: 3px solid var(--accent);
+    border-radius: 0 10px 10px 0; background: var(--bg-soft); font-size: 14px;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-wash); }
+  .callout b { font-weight: 650; }
+  .tag {
+    display: inline-block; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.8px; text-transform: uppercase;
+    padding: 2px 9px; border-radius: 99px; vertical-align: 2px; margin-left: 6px;
+  }
+  .tag.built { background: var(--good-wash); color: var(--good); }
+  .tag.spec { background: var(--warn-wash); color: var(--warn); }
+  table.tbl { border-collapse: collapse; margin: 16px 0; font-size: 13.5px;
+              max-width: 100%; }
+  table.tbl th { text-align: left; font-size: 11.5px; letter-spacing: 0.6px;
+                 text-transform: uppercase; color: var(--ink-faint);
+                 padding: 6px 16px 6px 0; border-bottom: 1px solid var(--hairline); }
+  table.tbl td { padding: 8px 16px 8px 0; border-bottom: 1px solid var(--hairline);
+                 vertical-align: top; }
+  table.tbl code { font-family: var(--mono); font-size: 12px; color: var(--accent-ink); }
+  .tblwrap { overflow-x: auto; }
+
+  /* reveal-on-scroll (respects reduced motion) */
+  .reveal { opacity: 0; transform: translateY(14px);
+            transition: opacity 0.6s ease, transform 0.6s ease; }
+  .reveal.seen { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .reveal { opacity: 1; transform: none; transition: none; }
+  }
+
+  /* ── theme toggle ── */
+  #theme-toggle {
+    position: fixed; bottom: 22px; right: 22px; z-index: 50;
+    width: 42px; height: 42px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-soft); border: 1px solid var(--hairline);
+    color: var(--ink-dim); box-shadow: 0 4px 18px var(--shadow);
+    cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
+  }
+  #theme-toggle:hover { border-color: var(--accent); color: var(--ink); }
+  #theme-toggle svg { width: 19px; height: 19px; }
+  #theme-toggle svg[hidden] { display: none; }
+</style>
+<script>
+/* no-flash theme restore — stamp before body content renders */
+(function () {
+  var stored = null;
+  try { stored = localStorage.getItem('ordo-guide-theme'); } catch (e) {}
+  if (stored === 'dark' || stored === 'light') document.documentElement.dataset.theme = stored;
+})();
+</script>
+
+<div class="layout">
+  <nav id="sidenav" aria-label="Contents">
+    <div class="brand">ordo <span>·</span> guide</div>
+    <div class="brand-sub">the whole platform, one artifact</div>
+    <div id="navlinks"></div>
+  </nav>
+
+  <main>
+    <header>
+      <div class="eyebrow">Documentation</div>
+      <h1>The Ordo Guide</h1>
+      <p class="lede">Ordo is a self-hostable data platform: a stateless service
+      you run in front of your own Postgres, carrying a registered API, built-in
+      identity with passkeys, per-space custody and audit, scheduled automation,
+      and a generated interface. At its
+      center sits a grammar. You declare shapes, queries, writes, and routines
+      once, and the compiler derives everything the platform serves. This guide
+      walks the platform first, then the language beneath it, marking what runs
+      today and what is settled spec.</p>
+      <div class="companions">
+        <a class="companion" href="https://claude.ai/code/artifact/7fb33553-5814-47b2-9f47-525b49e1da92">
+          <b>💧 The Ordo Flow</b><span>The developer experience, animated end to end</span></a>
+        <a class="companion" href="https://claude.ai/code/artifact/0665ad88-8c55-4603-9c91-a12773c730c7">
+          <b>✍️ Writing Ordo</b><span>Shapes, watchable pipelines, and write modes</span></a>
+        <a class="companion" href="https://claude.ai/code/artifact/233d1ad4-2e03-4b53-92ac-73071f6f4141">
+          <b>🗝️ Sovereign Spaces</b><span>Custody, the command log, consented sharing</span></a>
+        <a class="companion" href="https://claude.ai/code/artifact/0cce8132-60fa-462a-987b-e37b250674a1">
+          <b>🗄️ Where Rows Live</b><span>DDL lowering, tenancy, and provable history</span></a>
+      </div>
+    </header>
+
+        <section class="doc-section" id="sec-platform">
+      <h2>The platform</h2>
+      <p class="kicker">A stateless service over your own Postgres: registered API, built-in identity, custody, audit, automation, and interface, all served from one compiled artifact.</p>
+      <p>A running Ordo deployment is a small stack with one job per layer. Requests
+      enter through <code>ordo-api</code>, which owns the envelope, the access check,
+      idempotency, and page tokens, with no per-op code anywhere. <code>ordo-host</code>
+      wires the compiled program to identity and execution. <code>ordo-exec</code> owns
+      connections, transactions, and the venue gate. Beneath all of it sits Postgres,
+      and the database is yours: Ordo brings no storage engine of its own.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 330">
+          <rect class="d-box-hi" x="230" y="14" width="240" height="38" rx="10"/>
+          <text class="d-text" x="350" y="33">HTTP</text>
+          <path class="d-line" d="M350 52 V72"/>
+          <rect class="d-box" x="160" y="76" width="380" height="44" rx="10"/>
+          <text class="d-text" x="350" y="92">ordo-api</text>
+          <text class="d-sub" x="350" y="108" text-anchor="middle">the door: envelope, access check, idempotency, page tokens</text>
+          <path class="d-line" d="M350 120 V138"/>
+          <rect class="d-box" x="160" y="142" width="380" height="44" rx="10"/>
+          <text class="d-text" x="350" y="158">ordo-host</text>
+          <text class="d-sub" x="350" y="174" text-anchor="middle">the wiring: program specs, identity at the door, executor beneath</text>
+          <path class="d-line" d="M350 186 V204"/>
+          <rect class="d-box" x="160" y="208" width="380" height="44" rx="10"/>
+          <text class="d-text" x="350" y="224">ordo-exec</text>
+          <text class="d-sub" x="350" y="240" text-anchor="middle">connections, transactions, the venue gate</text>
+          <path class="d-line" d="M350 252 V270"/>
+          <rect class="d-box-hi" x="160" y="274" width="380" height="44" rx="10"/>
+          <text class="d-text" x="350" y="290">Postgres</text>
+          <text class="d-sub" x="350" y="306" text-anchor="middle">yours: bring your own database</text>
+        </svg>
+        <figcaption>One deployment: stateless nodes over the database you already run.</figcaption>
+      </figure>
+
+      <h3 id="platform-map">What the platform carries</h3>
+      <p>Everything below is served from one compiled artifact, and each part has its
+      own section later in this guide.</p>
+      <div class="tblwrap"><table class="tbl">
+        <thead><tr><th>Part</th><th>Status</th><th>What it gives you</th></tr></thead>
+        <tbody>
+          <tr><td>Registered API &amp; catalog</td><td><span class="tag built">runs today</span></td><td>every declared op as a typed, versioned endpoint; a caller-scoped catalog</td></tr>
+          <tr><td>Spaces, custody, audit</td><td><span class="tag built">runs today</span></td><td>per-space membership, keys, and a hash-chained command log under every write</td></tr>
+          <tr><td>Identity &amp; auth</td><td><span class="tag built">runs today</span></td><td>passkeys as the sole step-up source, passwords (argon2id), email OTP, OIDC federation, dual-proof authenticator linking</td></tr>
+          <tr><td>Automation runtime</td><td><span class="tag built">runs today</span></td><td>listeners and schedules with debounce, coalesce, and dead-letter, three seams from full wiring</td></tr>
+          <tr><td>Interface Descriptor + headless React</td><td><span class="tag built">runs today</span></td><td>a caller-scoped description of every screen; you supply the components</td></tr>
+          <tr><td>TypeScript CDK</td><td><span class="tag built">runs today</span></td><td>a typed builder that emits canonical <code>.ordo</code> text</td></tr>
+          <tr><td>Playground</td><td><span class="tag built">runs today</span></td><td>a local sandbox at <code>127.0.0.1:7878</code></td></tr>
+          <tr><td>Operator dashboards</td><td><span class="tag spec">settled spec</span></td><td>queue depth, trigger cursors, chain verification, key-provider status</td></tr>
+          <tr><td>Migration-in (<code>ordo introspect</code>)</td><td><span class="tag spec">settled spec</span></td><td>import from Postgres, Supabase, Firestore, Convex, CSV/JSON</td></tr>
+          <tr><td>Plan tiers</td><td><span class="tag spec">settled spec</span></td><td>queries that get faster over time, only when someone approves the new plan</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="identity-built-in">Users and identity, built in</h3>
+      <p>Ordo ships its own credentialing. The <code>AuthProvider</code> registry lives
+      at the deployment level and covers passkeys (WebAuthn), passwords hashed with
+      argon2id, email one-time codes, and OIDC, SAML, and OAuth2 federation. One
+      deployment has one issuer and one method registry, declared in an
+      <code>auth</code> block; a space never defines its own login methods, it uses
+      the deployment's.</p>
+      <p>A user authenticates once, to the deployment. What they can touch after that
+      is decided per space: membership says whether they are inside a given world at
+      all, and role→op access profiles say which ops they may call there. Sign-in
+      resists enumeration, since <code>begin</code> issues a challenge whether or not
+      the identifier exists.</p>
+      <p>Passkeys carry extra weight in this design: they are the platform's only
+      source of user presence. Sensitive paths (operator mode, self-serve space
+      creation, linking a new authenticator) demand a fresh WebAuthn user-presence
+      proof, and presence cannot be delegated, so an agent acting on someone's behalf
+      can never mint one. Ordo owns the verification (challenge, RP-id, origin,
+      presence flag, signature, clone counter, all tested) while the browser ceremony
+      belongs to your frontend. The relying-party apex domain is chosen once per
+      deployment; changing it strands every passkey, so it is treated as permanent.</p>
+      <div class="callout">
+        <b>This is the backend-as-a-service surface.</b> Auth, data, API, automation,
+        audit, and interface come from one compiled artifact, on infrastructure you
+        run yourself.
+      </div>
+
+      <h3 id="one-deployment">One deployment</h3>
+      <p>A running deployment is a stateless HTTP service fronting a Postgres database
+      you bring yourself. Each node loads independently and holds no persistent state:
+      your database holds the state, and the nodes translate requests into registered
+      operations against it. Postgres is yours to run, scale, and back up.</p>
+
+      <h3 id="run-it-yourself">Run it yourself</h3>
+      <p>To deploy, run <code>ordo apply ./myprogram.ordo --as my-service</code>. The
+      command compiles your program, stores the artifact in Postgres under a content
+      hash, and points the live deployment at it. Every node independently loads the
+      new version, verifies it against the database, and either begins serving or
+      keeps serving the old one.</p>
+      <p>The load gate performs three checks before any node serves a new version: the
+      artifact's ops compile to valid SQL, every op's inferred shape matches what
+      Postgres reports, and the database schema matches the artifact's DDL exactly.
+      A failure names which ops failed and why, and the node keeps serving the
+      previous version.</p>
+      <p>Rolling back is <code>ordo rollback --version &lt;hash&gt;</code>, a re-point
+      to a version already stored and verified. The audit chain records every
+      transition, so you can trace when each version was live.</p>
+      <p>Operating it stays plain. Connections dial at boot, so a wrong host fails at
+      startup instead of on the first customer request. The connection pool (available
+      parallelism, clamped to 2 through 8) is the concurrency bound: nothing executes
+      without a checkout, so request concurrency can never exceed database
+      concurrency. Reads page by keyset, never <code>OFFSET</code>, which skips and
+      repeats rows under concurrent writes; page size is a deployment-wide setting.</p>
+
+      <h3 id="small-door">A small door for embedding</h3>
+      <p>The public surface is small by design. <code>ordo-api</code> depends on no
+      sibling crate, and five traits define the whole contract:
+      <code>OpRegistry</code>, <code>OpExecutor</code>, <code>AccessChecker</code>,
+      <code>InvalidationBus</code>, and <code>ReplayCache</code>. Implement them and
+      you control how ops execute, who may call them, and how results propagate.</p>
+      <p><code>ordo-host</code> is a worked example of fulfilling those traits rather
+      than a framework you must adopt, so Ordo can sit inside a larger system on that
+      seam alone.</p>
+    </section>
+
+    <section class="doc-section" id="sec-pitch">
+      <h2>The grammar: a whole app in one file</h2>
+      <p class="kicker">The language at the platform's center: closed, deterministic, one spelling per concept.</p>
+      <a class="viz" href="https://claude.ai/code/artifact/7fb33553-5814-47b2-9f47-525b49e1da92" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.6v6.8l5.6-3.4z" fill="currentColor" stroke="none"/></svg>Visualize this <span>&middot; The Ordo Flow</span></a>
+      <p>Everything the platform serves comes from one compiled artifact, and the
+      artifact comes from a grammar with <strong>one spelling per concept</strong>:
+      one way to declare a shape, one way to read, one way to write. You author a
+      <code>.ordo</code> file; the compiler derives the schema, the typed API, the
+      permissions surface, the audit log, and the scheduled jobs from it. Nothing
+      about the running app is hand-wired; it all falls out of the source.</p>
+      <p>The bet behind that rigidity is specific: <strong>a grammar strict enough that an LLM either emits it correctly or fails loudly is also the grammar humans can trust</strong>. There is no partial credit for a program that almost parses, and no silent fallback when a statement is ambiguous. The compiler stops and names the problem.</p>
+      <p>Here is a complete, working single-user app: a plant-watering tracker, start to finish.</p>
+      <div class="code-panel">
+        <div class="bar"><b>plantcare.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+        <pre class="code" data-lang="ordo"><code><span class="kw">domain</span> plantcare @ 0.1.0
+
+<span class="kw">entity</span> plants {
+  name:      text
+  room:      text?
+  everyDays: duration(ms) = 7d      <span class="cmt"># watering cadence</span>
+}
+
+<span class="kw">entity</span> waterings {
+  plant -&gt; plants   <span class="kw">owned</span>
+  at:    date
+  by:    text = <span class="str">""</span>
+}
+
+<span class="kw">entity</span> alerts {
+  key:      text <span class="kw">unique</span>             <span class="cmt"># upsert-by-key lifecycle</span>
+  severity: text = <span class="str">"warning"</span>
+  title:    text
+  status:   text = <span class="str">"active"</span>
+}
+
+<span class="hl-line"><span class="kw">op</span> thirsty(<span class="vr">$today</span>: date) =</span>
+  plants[name, room, everyDays]  waterings[at]
+  <span class="kw">sort</span> -waterings.at
+  <span class="kw">take</span>[plants.id] 1
+  | (at &lt;= <span class="vr">$today</span> - everyDays) <span class="kw">or</span> at <span class="kw">is</span> <span class="kw">null</span>
+
+<span class="kw">op</span> history(<span class="vr">$plant</span>: id) =
+  waterings(plant == <span class="vr">$plant</span>)[at, by]
+  <span class="kw">sort</span> -at
+  <span class="kw">take</span> 30
+
+<span class="hl-line"><span class="kw">op</span> water(<span class="vr">$plant</span>: id, <span class="vr">$by</span>: text, <span class="vr">$today</span>: date) =</span>
+  <span class="kw">set</span> waterings { plant: <span class="vr">$plant</span>, at: <span class="vr">$today</span>, by: <span class="vr">$by</span> }
+  <span class="kw">set</span> alerts(key == <span class="str">"thirsty:"</span> + <span class="vr">$plant</span>) { status: <span class="str">"resolved"</span> }
+
+<span class="kw">op</span> addPlant(<span class="vr">$name</span>: text, <span class="vr">$room</span>: text) =
+  <span class="kw">set</span> plants { name: <span class="vr">$name</span>, room: <span class="vr">$room</span> }
+
+<span class="kw">op</span> pruneLogs(<span class="vr">$before</span>: date) =
+  <span class="kw">del</span> waterings(at &lt;= <span class="vr">$before</span>)
+
+<span class="cmt"># routine &amp; route: settled in spec, source spelling being finalized</span>
+
+<span class="kw">routine</span> thirstCheck <span class="kw">in</span> plantcare {
+  <span class="kw">trigger</span> <span class="kw">every</span> <span class="kw">day</span> 09:00Z
+  <span class="kw">run</span>(<span class="vr">$today</span>: date):
+    <span class="kw">each</span> -&gt; <span class="kw">set</span> alerts { key: <span class="str">"thirsty:"</span> + plants.id,
+                         title: name + <span class="str">" needs water"</span>,
+                         status: <span class="str">"active"</span> }   <span class="cmt"># restate so resolved alerts re-raise</span>
+}
+
+<span class="kw">route</span> alerts.warning -&gt; [push] <span class="kw">fallback</span> email</code></pre>
+        <pre class="code" data-lang="ts" hidden><code><span class="kw">import</span> { domain, entity, op, synth, t, f, src, lit, desc, or, durationLit } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> plants = entity(<span class="str">'plants'</span>, {
+  name: t.text(),
+  room: t.text().optional(),
+  everyDays: t.duration(<span class="str">'ms'</span>).default(durationLit(7, <span class="str">'d'</span>)),
+});
+
+<span class="kw">const</span> waterings = entity(<span class="str">'waterings'</span>, {
+  plant: t.ref(<span class="str">'plants'</span>).owned(),
+  at: t.date(),
+  by: t.text().default(lit(<span class="str">''</span>)),
+});
+
+<span class="kw">const</span> alerts = entity(<span class="str">'alerts'</span>, {
+  key: t.text().unique(),
+  severity: t.text().default(lit(<span class="str">'warning'</span>)),
+  title: t.text(),
+  status: t.text().default(lit(<span class="str">'active'</span>)),
+});
+
+<span class="hl-line"><span class="kw">const</span> thirsty = op(<span class="str">'thirsty'</span>, { today: t.date() }, (b, p) =&gt;</span>
+  b
+    .source(src(<span class="str">'plants'</span>).pick(<span class="str">'name'</span>, <span class="str">'room'</span>, <span class="str">'everyDays'</span>), src(<span class="str">'waterings'</span>).pick(<span class="str">'at'</span>))
+    .sort(desc(f.waterings.at))
+    .take([f.plants.id], 1)
+    .where(or(f.at.le(p.today.sub(f.everyDays)), f.at.isNull())));
+
+<span class="kw">const</span> history = op(<span class="str">'history'</span>, { plant: t.id() }, (b, p) =&gt;
+  b
+    .source(src(<span class="str">'waterings'</span>).args(f.plant.eq(p.plant)).pick(<span class="str">'at'</span>, <span class="str">'by'</span>))
+    .sort(desc(f.at))
+    .take(30));
+
+<span class="hl-line"><span class="kw">const</span> water = op(<span class="str">'water'</span>, { plant: t.id(), by: t.text(), today: t.date() }, (b, p) =&gt;</span>
+  [
+    b.set(<span class="str">'waterings'</span>, { plant: p.plant, at: p.today, by: p.by }),
+    b.set(<span class="str">'alerts'</span>, { status: lit(<span class="str">'resolved'</span>) }).where(f.key.eq(lit(<span class="str">'thirsty:'</span>).add(p.plant))),
+  ]);
+
+<span class="kw">const</span> addPlant = op(<span class="str">'addPlant'</span>, { name: t.text(), room: t.text() }, (b, p) =&gt;
+  [
+    b.set(<span class="str">'plants'</span>, { name: p.name, room: p.room }),
+  ]);
+
+<span class="kw">const</span> pruneLogs = op(<span class="str">'pruneLogs'</span>, { before: t.date() }, (b, p) =&gt;
+  [
+    b.del(<span class="str">'waterings'</span>, f.at.le(p.before)),
+  ]);
+
+<span class="cmt">// routine &amp; route: not yet offered by the builder — authored in .ordo</span>
+
+<span class="kw">export</span> <span class="kw">const</span> ordo = synth(
+  domain(<span class="str">'plantcare'</span>, <span class="str">'0.1.0'</span>),
+  plants, waterings, alerts,
+  thirsty, history, water, addPlant, pruneLogs,
+);</code></pre>
+      </div>
+      <p>That single file is the whole app description. Two commands turn it into a running system. <code>ordo plan</code> shows you the derived diff before anything happens, and <code>ordo apply</code> registers it.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 190">
+          <rect class="d-box" x="10" y="70" width="110" height="50" rx="10"/>
+          <text class="d-text" x="65" y="90">write</text>
+          <text class="d-sub" x="65" y="106" text-anchor="middle">plantcare.ordo</text>
+          <path class="d-line" d="M120 95 H165" marker-end="url(#arrow-a)"/>
+          <rect class="d-box" x="165" y="70" width="110" height="50" rx="10"/>
+          <text class="d-text" x="220" y="90">ordo plan</text>
+          <text class="d-sub" x="220" y="106" text-anchor="middle">shows the diff</text>
+          <path class="d-line" d="M275 95 H320" marker-end="url(#arrow-a)"/>
+          <rect class="d-box-hi" x="320" y="70" width="120" height="50" rx="10"/>
+          <text class="d-text" x="380" y="90">ordo apply</text>
+          <text class="d-mono-hi" x="380" y="106" text-anchor="middle">artifact stored · versioned</text>
+          <path class="d-line" d="M440 95 H485" marker-end="url(#arrow-a)"/>
+          <rect class="d-box" x="485" y="18" width="205" height="154" rx="10"/>
+          <text class="d-text" x="587" y="42">registered surface</text>
+          <text class="d-mono" x="587" y="66" text-anchor="middle">schema</text>
+          <text class="d-mono" x="587" y="86" text-anchor="middle">api</text>
+          <text class="d-mono" x="587" y="106" text-anchor="middle">access</text>
+          <text class="d-mono" x="587" y="126" text-anchor="middle">audit</text>
+          <text class="d-mono" x="587" y="146" text-anchor="middle">routines</text>
+          <text class="d-sub" x="587" y="165" text-anchor="middle">→ running app</text>
+          <defs>
+            <marker id="arrow-a" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>write → plan → apply → one registered surface, all derived from the same source</figcaption>
+      </figure>
+
+      <h3 id="what-you-get">What you get</h3>
+      <ul>
+        <li>Typed API ops, one per declared <code>op</code>; nothing else is callable</li>
+        <li>A derived Postgres schema, with your identifiers surviving verbatim</li>
+        <li>A generated UI descriptor from shapes and ops, which is headless and renders nothing</li>
+        <li>A runtime permissions surface with role→op profiles, changeable without a redeploy</li>
+        <li>Audit machinery, which is a hash-chained command log under every write</li>
+        <li>Scheduled routines and event routing, once <code>routine</code>/<code>route</code> land</li>
+      </ul>
+      <div class="callout warn">
+        <b>Pre-alpha, spec-first.</b> The parser, DDL lowering, API surface, and command log run today. <code>routine</code>/<code>route</code> source spelling, the always-on worker that fires them, and outbound egress (push/email/SMS) are the named seams still being closed. Nothing here is installable yet.
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-language">
+      <h2>The language</h2>
+      <p class="kicker">Shapes, typed ids, pipelines you can watch, and two write verbs with one spelling each.</p>
+      <a class="viz" href="https://claude.ai/code/artifact/0665ad88-8c55-4603-9c91-a12773c730c7" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.6v6.8l5.6-3.4z" fill="currentColor" stroke="none"/></svg>Visualize this <span>&middot; Writing Ordo</span></a>
+      <p>Ordo's grammar covers four things: how you declare a shape, how a row gets its id, how you read, and how you write. Each has exactly one spelling, and each refuses rather than guesses when a statement doesn't fit.</p>
+
+      <h3 id="shapes">Shapes</h3>
+      <p>A shape is the whole story of a row: type, default, optionality, even custody, all declared once in place.</p>
+      <div class="split">
+        <div>
+          <p><code>text?</code> marks a field optional; anything without a <code>?</code> is required. Defaults are written as literals, so <code>tier: text = "basic"</code> is the entire default, with nothing computed at read time. <code>customer -&gt; customers</code> is a foreign key the grammar guarantees and the database enforces, riding with the space. <code>sealed</code> on <code>memo</code> means that field is ciphertext at rest.</p>
+          <p><strong>Every entity declares sealed and unique constraints alongside the type</strong>, keeping constraint and field always in sync.</p>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>market.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+          <pre class="code" data-lang="ordo"><code><span class="kw">entity</span> customers {
+  name:  text
+  email: text?  <span class="kw">sealed</span> <span class="kw">indexed</span> <span class="kw">unique</span> <span class="kw">normalize</span>(lower)
+  tier:  text = <span class="str">"basic"</span>
+}
+
+<span class="kw">entity</span> orders {
+  customer -&gt; customers
+  placed: date
+  status: text = <span class="str">"open"</span>
+  total:  money
+  memo:   text = <span class="str">""</span>   <span class="kw">sealed</span>
+}</code></pre>
+          <pre class="code" data-lang="ts" hidden><code><span class="kw">import</span> { entity, t, lit } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> customers = entity(<span class="str">'customers'</span>, {
+  name: t.text(),
+  email: t.text().optional().unique().sealed().indexed().normalize(<span class="str">'lower'</span>),
+  tier: t.text().default(lit(<span class="str">'basic'</span>)),
+});
+
+<span class="kw">const</span> orders = entity(<span class="str">'orders'</span>, {
+  customer: t.ref(<span class="str">'customers'</span>),
+  placed: t.date(),
+  status: t.text().default(lit(<span class="str">'open'</span>)),
+  total: t.money(),
+  memo: t.text().sealed().default(lit(<span class="str">''</span>)),
+});</code></pre>
+        </div>
+      </div>
+
+      <h3 id="typed-ids">Typed ids</h3>
+      <p>Every row's id is entity-prefixed and time-ordered (like <code>plnt_01J8…</code>), and the server generates it; nothing in Ordo lets an author choose one. The prefix is derived from the entity name so that any id you see anywhere, in a log line or an audit entry, is self-describing without a lookup.</p>
+      <p>Derivation splits the name at camelCase boundaries, abbreviates each word, and joins with a hyphen (so <code>orderItems</code> becomes <code>orde-item</code>). Two entities may never land on the same prefix; a collision is a compile error naming both offenders:</p>
+      <div class="code-panel">
+        <div class="bar"><b>compiler</b><button class="copy">copy</button></div>
+        <pre class="code"><code>[id_key_collision] `orders` and `orderings` both derive id key `orde`
+— give one an explicit key: `entity orderings (key: …)`</code></pre>
+      </div>
+
+      <h3 id="reads-pipelines">Reads are pipelines</h3>
+      <p>A read is a pipeline you can watch: filter, shape, sort, cut, evaluated in exactly the order written. There's no free-form SQL underneath it; what you spell is what runs.</p>
+      <div class="split">
+        <div class="code-panel">
+          <div class="bar"><b>market.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+          <pre class="code" data-lang="ordo"><code><span class="kw">op</span> openOrders(<span class="vr">$cust</span>: id) =
+  orders(customer == <span class="vr">$cust</span>
+         <span class="kw">and</span> status == <span class="str">"open"</span>)[placed, total]
+  <span class="kw">sort</span> -placed
+  <span class="kw">take</span> 3</code></pre>
+          <pre class="code" data-lang="ts" hidden><code><span class="kw">import</span> { and, desc, f, lit, op, src, t } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> openOrders = op(<span class="str">'openOrders'</span>, { cust: t.id() }, (b, p) =&gt;
+  b
+    .source(src(<span class="str">'orders'</span>).args(and(f.customer.eq(p.cust), f.status.eq(lit(<span class="str">'open'</span>)))).pick(<span class="str">'placed'</span>, <span class="str">'total'</span>))
+    .sort(desc(f.placed))
+    .take(3));</code></pre>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 210">
+            <rect class="d-box" x="10" y="16" width="130" height="44" rx="10"/>
+            <text class="d-text" x="75" y="38">source</text>
+            <text class="d-mono" x="75" y="76" text-anchor="middle">orders</text>
+            <path class="d-line-dim" d="M75 60 V190" />
+            <rect class="d-box" x="10" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="75" y="116">filter</text>
+            <text class="d-mono" x="75" y="152" text-anchor="middle">6 rows</text>
+            <rect class="d-box" x="185" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="250" y="116">shape</text>
+            <text class="d-mono" x="250" y="152" text-anchor="middle">4 rows</text>
+            <rect class="d-box" x="360" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="425" y="116">sort -placed</text>
+            <text class="d-mono" x="425" y="152" text-anchor="middle">4 rows</text>
+            <rect class="d-box-hi" x="535" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="600" y="116">take 3</text>
+            <text class="d-mono-hi" x="600" y="152" text-anchor="middle">3 rows</text>
+            <path class="d-line" d="M140 116 H185" marker-end="url(#arrow-b)"/>
+            <path class="d-line" d="M315 116 H360" marker-end="url(#arrow-b)"/>
+            <path class="d-line" d="M490 116 H535" marker-end="url(#arrow-b)"/>
+            <text class="d-sub" x="350" y="188" text-anchor="middle">the cut is part of the sentence — no hidden SQL, no N+1 surprise</text>
+            <defs>
+              <marker id="arrow-b" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+              </marker>
+            </defs>
+          </svg>
+          <figcaption>filter → shape → sort → take, in the order written, row count shrinking at each stage</figcaption>
+        </figure>
+      </div>
+
+      <h3 id="writes-modes">Writes: two verbs, derived modes</h3>
+      <p>There is no <code>insert</code>, <code>update</code>, or <code>delete</code> keyword. There are two verbs, <code>set</code> and <code>del</code>, and <strong>the write mode is derived from the statement's condition, never spelled separately</strong>:</p>
+      <div class="code-panel">
+        <div class="bar"><b>tasks.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+        <pre class="code" data-lang="ordo"><code><span class="kw">op</span> addTask(<span class="vr">$project</span>: id, <span class="vr">$title</span>: text) =
+  <span class="kw">set</span> tasks { project: <span class="vr">$project</span>, title: <span class="vr">$title</span> }
+
+<span class="kw">op</span> renameTask(<span class="vr">$task</span>: id, <span class="vr">$title</span>: text) =
+  <span class="kw">set</span> tasks(id == <span class="vr">$task</span>) { title: <span class="vr">$title</span> }
+
+<span class="kw">op</span> purgeDone(<span class="vr">$project</span>: id) =
+  <span class="kw">del</span> tasks(project == <span class="vr">$project</span>
+            <span class="kw">and</span> status == <span class="str">"done"</span>)</code></pre>
+        <pre class="code" data-lang="ts" hidden><code><span class="kw">import</span> { and, f, lit, op, t } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> addTask = op(<span class="str">'addTask'</span>, { project: t.id(), title: t.text() }, (b, p) =&gt;
+  [
+    b.set(<span class="str">'tasks'</span>, { project: p.project, title: p.title }),
+  ]);
+
+<span class="kw">const</span> renameTask = op(<span class="str">'renameTask'</span>, { task: t.id(), title: t.text() }, (b, p) =&gt;
+  [
+    b.set(<span class="str">'tasks'</span>, { title: p.title }).where(f.id.eq(p.task)),
+  ]);
+
+<span class="kw">const</span> purgeDone = op(<span class="str">'purgeDone'</span>, { project: t.id() }, (b, p) =&gt;
+  [
+    b.del(<span class="str">'tasks'</span>, and(f.project.eq(p.project), f.status.eq(lit(<span class="str">'done'</span>)))),
+  ]);</code></pre>
+      </div>
+      <div class="tblwrap">
+        <table class="tbl">
+          <tr><th>Mode</th><th>What triggers it</th><th>Example</th></tr>
+          <tr><td>Create</td><td>no condition, so nothing to address and this makes a row</td><td><code>set tasks { project: $project, title: $title }</code></td></tr>
+          <tr><td>Addressed</td><td><code>id == …</code>, which specifies exactly one row that is named</td><td><code>set tasks(id == $task) { title: $title }</code></td></tr>
+          <tr><td>Bulk</td><td>any other condition, which is a range matching however many rows that is</td><td><code>del tasks(project == $project and status == "done")</code></td></tr>
+        </table>
+      </div>
+      <div class="callout">
+        A delete always states its target: <strong>bare <code>del tasks</code> does not parse.</strong> Delete-everything is spelled <code>del tasks(true)</code>, the same statement said on purpose so a reviewer greps for it rather than having a dropped condition quietly become the fallback.
+      </div>
+
+      <h3 id="refusals">Refusals are the feature</h3>
+      <p>When a statement can't be honored honestly, the compiler stops and names the problem; it never approximates or falls back to something close:</p>
+      <div class="code-panel">
+        <div class="bar"><b>compiler (messages abridged for illustration)</b><button class="copy">copy</button></div>
+        <pre class="code"><code>del tasks
+  → [parse_error] a delete always states its target — delete-everything
+    is del tasks(true), said on purpose
+
+orders(customer == $cust) sort memo
+  → [sealed_unsupported] `memo` is sealed — the blind index answers
+    equality only, not sort
+
+entity orderings { … }
+  → [id_key_collision] `orders` and `orderings` both derive id key
+    `orde` — give one an explicit key</code></pre>
+      </div>
+      <p>Every one of these failures stops the compiler, so you find out before shipping instead of from a support ticket.</p>
+    </section>
+
+    <section class="doc-section" id="sec-lowering">
+      <h2>From source to Postgres</h2>
+      <p class="kicker">A two-command contract, exact DDL, and tenancy carried in every primary and foreign key.</p>
+      <a class="viz" href="https://claude.ai/code/artifact/0cce8132-60fa-462a-987b-e37b250674a1" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.6v6.8l5.6-3.4z" fill="currentColor" stroke="none"/></svg>Visualize this <span>&middot; Where Rows Live</span></a>
+      <p>Ordo derives the database from your source and shows you exactly what will be built, before it builds it. Every entity you declare becomes a real Postgres table.</p>
+
+      <h3 id="plan-apply">plan, then apply</h3>
+      <p><code>ordo plan</code> derives the schema, the API, and the access surface from your source and shows the exact diff (additions, drops, and everything in between) before anything happens. <code>ordo apply</code> takes that plan and stores it as a <strong>versioned artifact</strong> in the registry.</p>
+      <div class="callout warn">
+        <b><code>apply</code> does not run DDL against your database.</b> It registers a versioned, compiled program. What turns that artifact into running schema and endpoints is a separate concern from the language itself; <code>apply</code>'s job stops at "this program is now the registered one."
+      </div>
+
+      <h3 id="the-lowering">The lowering</h3>
+      <p>Every field lowers to a typed column, with your identifiers surviving <strong>verbatim and double-quoted</strong>: the same spelling in source, schema, and the command log. A <code>duration(ms)</code> literal like <code>7d</code> becomes a plain integer of milliseconds, so there's no unit bug waiting in a join.</p>
+      <div class="split">
+        <div class="code-panel">
+          <div class="bar"><b>plantcare.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+          <pre class="code" data-lang="ordo"><code><span class="kw">entity</span> plants {
+  name:      text
+  room:      text?
+  everyDays: duration(ms) = 7d
+}</code></pre>
+          <pre class="code" data-lang="ts" hidden><code><span class="kw">import</span> { entity, t, durationLit } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> plants = entity(<span class="str">'plants'</span>, {
+  name: t.text(),
+  room: t.text().optional(),
+  everyDays: t.duration(<span class="str">'ms'</span>).default(durationLit(7, <span class="str">'d'</span>)),
+});</code></pre>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>derived DDL</b><button class="copy">copy</button></div>
+          <pre class="code"><code>CREATE TABLE "plants" (
+  "$space"    text   NOT NULL,
+  "id"        text   NOT NULL,
+  "name"      text   NOT NULL,
+  "room"      text,
+  <span class="hl-line">"everyDays" bigint NOT NULL DEFAULT 604800000,</span>
+  PRIMARY KEY ("$space","id")
+);</code></pre>
+        </div>
+      </div>
+      <p>Two columns appear on every table whether or not you declared them: <code>"id"</code> and <code>"$space"</code>. The primary key is always the pair <code>("$space","id")</code>, which is what makes tenancy structural rather than a convention someone has to remember to apply.</p>
+
+      <h3 id="tenancy-physics">Tenancy is structural</h3>
+      <p><code>"$space"</code> rides in every primary key <em>and</em> every foreign key. A row in one space cannot reference a row in another, because the reference itself carries the space it was made in, so there's no query path that lets it happen by accident.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 240">
+          <rect class="d-box" x="20" y="16" width="290" height="90" rx="10"/>
+          <text class="d-sub" x="40" y="34">space: acme</text>
+          <rect class="d-box-hi" x="40" y="46" width="110" height="40" rx="8"/>
+          <text class="d-text" x="95" y="66">orders row</text>
+          <rect class="d-box-hi" x="180" y="46" width="110" height="40" rx="8"/>
+          <text class="d-text" x="235" y="66">customers row</text>
+          <path class="d-line" d="M150 66 H180" marker-end="url(#arrow-c)"/>
+          <text class="d-mono" x="165" y="100" text-anchor="middle">FK carries $space</text>
+
+          <rect class="d-box" x="390" y="16" width="290" height="90" rx="10"/>
+          <text class="d-sub" x="410" y="34">space: studio</text>
+          <rect class="d-box-hi" x="410" y="46" width="110" height="40" rx="8"/>
+          <text class="d-text" x="465" y="66">orders row</text>
+
+          <path class="d-line-bad" d="M465 86 C 465 150, 235 150, 235 86" marker-end="url(#arrow-bad)"/>
+          <text class="d-text" x="350" y="168" fill="var(--pbad)">✕</text>
+          <text class="d-mono" x="350" y="188" text-anchor="middle">[cross_space_ref] refused at write time</text>
+
+          <text class="d-sub" x="350" y="222" text-anchor="middle">isolation is structural — not a WHERE clause someone remembered to add</text>
+          <defs>
+            <marker id="arrow-c" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+            </marker>
+            <marker id="arrow-bad" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--pbad)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>an in-lane reference carries $space and is allowed; a cross-lane reference is refused at write time</figcaption>
+      </figure>
+    </section>
+
+    <section class="doc-section" id="sec-api">
+      <h2>The API</h2>
+      <p class="kicker">Ops are the only callable surface, which are typed and versioned with nothing else existing to call.</p>
+      <p>There is no free-form query endpoint. Every callable thing in an Ordo app is an <code>op</code> you declared, and each one compiles to exactly one route.</p>
+
+      <h3 id="ops-only-surface">Ops are the only surface</h3>
+      <p>Each op becomes <code>/op/{name}</code>, singular, never <code>/ops/</code>. Reads use <code>GET</code>; writes use <code>POST</code>. Params are validated at the door, and the response is shaped exactly the way the op's query says.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <tr><th>Op</th><th>Method &amp; path</th><th>Params</th></tr>
+          <tr><td><code>thirsty</code></td><td><code>GET</code> <code>/op/thirsty</code></td><td><code>$today: date</code></td></tr>
+          <tr><td><code>history</code></td><td><code>GET</code> <code>/op/history</code></td><td><code>$plant: id</code></td></tr>
+          <tr><td><code>water</code></td><td><code>POST</code> <code>/op/water</code></td><td><code>$plant: id, $by: text, $today: date</code></td></tr>
+          <tr><td><code>addPlant</code></td><td><code>POST</code> <code>/op/addPlant</code></td><td><code>$name: text, $room: text</code></td></tr>
+          <tr><td><code>pruneLogs</code></td><td><code>POST</code> <code>/op/pruneLogs</code></td><td><code>$before: date</code></td></tr>
+        </table>
+      </div>
+      <p>Nothing you didn't declare is reachable; there is no ORM escape hatch and no admin query console sitting next to it.</p>
+
+      <h3 id="calling-an-op">Calling an op</h3>
+      <p>Parameters travel as a bare-keyed JSON body, with no envelope and no wrapper object:</p>
+      <div class="code-panel">
+        <div class="bar"><b>request</b><button class="copy">copy</button></div>
+        <pre class="code"><code>POST /op/water
+{"plant":"plnt_01J8…","by":"adam"}</code></pre>
+      </div>
+      <p>Every response carries a per-op version header. If the client's compiled understanding of an op has drifted from what's currently registered, the response comes back flagged rather than silently mismatched. That includes <code>x-ordo-version-skew</code> for callers paging through a result set whose shape changed underneath them.</p>
+
+      <h3 id="cant-see-cant-hurt">What you can't see can't hurt you</h3>
+      <p>Authorization lives as runtime platform data: role→op access profiles plus capability allowlists, looked up on every call. Changing who can call what is a data change, live immediately, with no recompile of the domain.</p>
+      <div class="callout">
+        <b>A refused call and a call to an op that was never declared return the same 403 <code>access_denied</code>, byte-identical.</b> There is no signal in the response that distinguishes "you're not allowed" from "that doesn't exist." And the per-caller catalog doesn't mark what you can't reach; it simply <strong>omits</strong> it, so probing the catalog itself leaks nothing about what exists elsewhere in the app.
+      </div>
+      <figure class="fig">
+        <svg viewBox="0 0 700 150">
+          <rect class="d-box" x="20" y="20" width="200" height="50" rx="10"/>
+          <text class="d-text" x="120" y="40">call an undeclared op</text>
+          <text class="d-mono" x="120" y="58" text-anchor="middle">/op/deletePlant</text>
+          <rect class="d-box" x="20" y="90" width="200" height="50" rx="10"/>
+          <text class="d-text" x="120" y="110">call a real op, wrong role</text>
+          <text class="d-mono" x="120" y="128" text-anchor="middle">viewer → /op/water</text>
+          <path class="d-line" d="M220 45 C 320 45, 320 75, 420 75" marker-end="url(#arrow-d)"/>
+          <path class="d-line" d="M220 115 C 320 115, 320 85, 420 85" marker-end="url(#arrow-d)"/>
+          <rect class="d-box-hi" x="420" y="55" width="240" height="50" rx="10"/>
+          <text class="d-text" x="540" y="75">403 access_denied</text>
+          <text class="d-mono-hi" x="540" y="93" text-anchor="middle">byte-identical either way</text>
+          <defs>
+            <marker id="arrow-d" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>two very different requests, one indistinguishable refusal</figcaption>
+      </figure>
+
+      <h3 id="access-profiles">Access profiles <span class="tag built">runs today</span></h3>
+      <p>Profiles map roles to the ops they can call. For plantcare, a natural progression looks like this:</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <tr><th>Role</th><th>Can call</th></tr>
+          <tr><td>viewer</td><td><code>thirsty</code>, <code>history</code></td></tr>
+          <tr><td>editor</td><td>+ <code>water</code></td></tr>
+          <tr><td>manager</td><td>+ <code>addPlant</code></td></tr>
+          <tr><td>owner</td><td>+ <code>pruneLogs</code></td></tr>
+        </table>
+      </div>
+      <p>These four roles are <strong>owner, manager, editor, viewer</strong>, the complete set with nothing in the language letting you invent an "admin" or a "member" role. Because profiles are runtime data rather than compiled syntax, you can widen or narrow who calls what without a redeploy. The source that declared <code>pruneLogs</code> never has to change for an owner to be promoted to a manager, or the reverse.</p>
+    </section>
+
+        <section class="doc-section" id="sec-sovereignty">
+      <h2>Sovereignty</h2>
+      <p class="kicker">Custody is set per space, and what can be read is decided by the keys themselves at write time.</p>
+      <a class="viz" href="https://claude.ai/code/artifact/233d1ad4-2e03-4b53-92ac-73071f6f4141" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.6v6.8l5.6-3.4z" fill="currentColor" stroke="none"/></svg>Visualize this <span>&middot; Sovereign Spaces</span></a>
+
+      <h3 id="spaces">Spaces</h3>
+      <div class="split">
+        <div>
+          <p>Every Ordo deployment divides into <strong>spaces</strong>. A space is one world of data: its own membership, its own keys, its own command history. Nothing is global by accident: a row, a key, and a chain all belong to exactly one space, and everything else in this section is a property of one space at a time.</p>
+          <p>A single deployment can host spaces with completely different custody postures side by side. One team's data can sit under platform-managed keys while another's sits fully client-held, in the same database, on the same compiled schema.</p>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 210">
+            <rect x="20" y="18" width="660" height="168" rx="16" class="d-box" style="fill:none" stroke-dasharray="5 5"/>
+            <text x="46" y="36" class="d-sub" text-anchor="start">one deployment</text>
+
+            <rect x="48" y="54" width="180" height="110" rx="10" class="d-box"/>
+            <text x="138" y="78" class="d-text">space: acme</text>
+            <text x="138" y="100" class="d-sub" text-anchor="middle">custody: managed</text>
+            <text x="138" y="120" class="d-mono" text-anchor="middle">epoch e2</text>
+            <text x="138" y="138" class="d-mono" text-anchor="middle">chain #841</text>
+
+            <rect x="260" y="54" width="180" height="110" rx="10" class="d-box-hi"/>
+            <text x="350" y="78" class="d-text">space: studio-b</text>
+            <text x="350" y="100" class="d-sub" text-anchor="middle">custody: client-held</text>
+            <text x="350" y="120" class="d-mono-hi" text-anchor="middle">epoch e7</text>
+            <text x="350" y="138" class="d-mono" text-anchor="middle">chain #212</text>
+
+            <rect x="472" y="54" width="180" height="110" rx="10" class="d-box"/>
+            <text x="562" y="78" class="d-text">space: maya</text>
+            <text x="562" y="100" class="d-sub" text-anchor="middle">custody: managed</text>
+            <text x="562" y="120" class="d-mono" text-anchor="middle">epoch e1</text>
+            <text x="562" y="138" class="d-mono" text-anchor="middle">chain #38</text>
+          </svg>
+          <figcaption>Three spaces in one deployment, each with its own keys, epoch, and hash chain.</figcaption>
+        </figure>
+      </div>
+
+      <h3 id="custody-dial">The custody dial</h3>
+      <p>Within a space, custody is a dial with three stops. Moving the dial keeps your schema and queries intact; it changes what the database is physically capable of reading.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Dial position</th><th>The database holds</th><th>The platform can read</th></tr></thead>
+          <tbody>
+            <tr><td><code>custody: managed</code></td><td>plaintext rows, indexed and sortable normally</td><td>everything (the default, and the common case)</td></tr>
+            <tr><td>sealed fields</td><td>ciphertext under the space's DEK, plus a blind-index digest per indexed field</td><td>open fields freely; sealed fields only by decrypting at query time, one row at a time</td></tr>
+            <tr><td>client-held keys</td><td>ciphertext only; the wrapping key never reaches the platform</td><td>nothing sealed, ever, even to service the account</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Each stop builds on the previous one: a space runs under <code>custody: managed</code> by default, individual fields opt into <code>sealed</code>, and at the far stop the DEK itself is wrapped by a key the platform never holds.</p>
+
+      <h3 id="sealed-fields">Sealed fields and blind indexes</h3>
+      <div class="split">
+        <div>
+          <p>A sealed field lives in the space's encrypted payload instead of a plaintext column. Add <code>indexed</code> and the write also computes an HMAC digest, keyed per space and per field, into a <code>field$bidx</code> column, so equality lookups run at ordinary SQL speed without the key ever touching the database.</p>
+          <p><code>normalize(lower)</code> decides what "the same value" means before any of that happens: lowercase plus Unicode NFC, applied on write and on every query term, so <code>Alice@Example.com</code> and <code>alice@example.com</code> seal to the same digest.</p>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>market.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+          <pre class="code" data-lang="ordo"><code><span class="kw">entity</span> customers {
+  name:  text
+<span class="hl-line">  email: text?  <span class="kw">sealed</span> <span class="kw">indexed</span> <span class="kw">unique</span> <span class="kw">normalize</span>(lower)</span>
+}</code></pre>
+          <pre class="code" data-lang="ts" hidden><code><span class="kw">import</span> { entity, t } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> customers = entity(<span class="str">'customers'</span>, {
+  name: t.text(),
+<span class="hl-line">  email: t.text().optional().unique().sealed().indexed().normalize(<span class="str">'lower'</span>),</span>
+});</code></pre>
+        </div>
+      </div>
+      <div class="split">
+        <div>
+          <p><strong>Enables:</strong></p>
+          <ul>
+            <li><code>==</code> and <code>in</code> comparisons at SQL speed, with no key material touching the database</li>
+            <li><code>unique</code> constraints on a sealed field, checked against the digest</li>
+            <li>converge-or-create writes that address a row by a sealed key, such as upserting a customer by email</li>
+          </ul>
+        </div>
+        <div>
+          <p><strong>Refuses to compile:</strong></p>
+          <ul>
+            <li>range queries like <code>email &gt; "a@"</code></li>
+            <li>substring search: <code>email contains "example"</code> runs post-decrypt only, at unbounded cost</li>
+            <li>sorting: <code>sort email</code> refuses, because a hash carries no order to leak</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        <b>The NULL sentinel.</b> A nullable <code>sealed indexed unique</code> field can't just store SQL <code>NULL</code> in the blind-index column because Postgres treats every <code>NULL</code> as distinct, so a unique constraint would admit unlimited nulls. Ordo stores a reserved, deliberately non-UTF-8 sentinel instead, so at most one null row is admitted, exactly as the language spec requires.
+      </div>
+
+      <h3 id="crypto-erasure">Crypto-erasure</h3>
+      <p>Every sealed value is wrapped under its space's current epoch key. Destroy that epoch's key, and every value sealed under it becomes unreadable everywhere at once (in the primary, in replicas, in backups) because the ciphertext was never anything but noise without it. There is no row to hunt down and no copy to chase; the key is simply gone.</p>
+      <div class="callout">
+        <b>Crypto-erasure makes deletion provable.</b> Destroy the epoch key and every value sealed under it becomes unreadable everywhere at once, and the absence of the key is something you can show.
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-log">
+      <h2>The command log</h2>
+      <p class="kicker">Under every write sits a per-space hash chain (SHA-256, from a genesis of zeros), and the chain is what makes the rest of this guide's claims checkable rather than asserted.</p>
+      <a class="viz" href="https://claude.ai/code/artifact/233d1ad4-2e03-4b53-92ac-73071f6f4141" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M10 8.6v6.8l5.6-3.4z" fill="currentColor" stroke="none"/></svg>Visualize this <span>&middot; tamper with the chain</span></a>
+
+      <figure class="fig">
+        <svg viewBox="0 0 700 170">
+          <path d="M160,85 H190" class="d-line-dim"/>
+          <path d="M330,85 H360" class="d-line-dim"/>
+          <path d="M500,85 H530" class="d-line-dim"/>
+
+          <rect x="20" y="50" width="140" height="70" rx="10" class="d-box"/>
+          <text x="90" y="75" class="d-text">genesis</text>
+          <text x="90" y="95" class="d-mono" text-anchor="middle">0x0000…</text>
+
+          <rect x="190" y="50" width="140" height="70" rx="10" class="d-box"/>
+          <text x="260" y="70" class="d-text">addPlant(Fern)</text>
+          <text x="260" y="90" class="d-mono" text-anchor="middle">0x3f2a…</text>
+          <text x="260" y="106" class="d-sub" text-anchor="middle">prev 0x0000…</text>
+
+          <text x="430" y="24" class="d-mono-hi" text-anchor="middle">⭑ signed checkpoint</text>
+          <rect x="360" y="50" width="140" height="70" rx="10" class="d-box-hi"/>
+          <text x="430" y="70" class="d-text">water(Fern)</text>
+          <text x="430" y="90" class="d-mono-hi" text-anchor="middle">0x9c11…</text>
+          <text x="430" y="106" class="d-sub" text-anchor="middle">prev 0x3f2a…</text>
+
+          <rect x="530" y="50" width="140" height="70" rx="10" class="d-box"/>
+          <text x="600" y="70" class="d-text">water(Fern)</text>
+          <text x="600" y="90" class="d-mono" text-anchor="middle">0x5b7e…</text>
+          <text x="600" y="106" class="d-sub" text-anchor="middle">prev 0x9c11…</text>
+        </svg>
+        <figcaption>Each block's hash covers its own command and the hash before it. An Ed25519-signed checkpoint lets verification start mid-chain.</figcaption>
+      </figure>
+
+      <h3 id="append-converge">Append, then converge</h3>
+      <p>A command is attributed to a principal and versioned before it ever becomes a row. It lands on the space's chain first (appended after the previous block's hash), and only then is it applied to produce the row you read back. The row is a projection of the chain, not the other way around.</p>
+
+      <h3 id="verify-checkpoints">Verify and checkpoints</h3>
+      <p>Verification replays the chain and confirms every hash matches the command before it. An edit made behind the platform's back cannot hide because it would break the chain at the point it was inserted. Periodically, a checkpoint is signed with Ed25519, so a verifier doesn't have to replay from genesis every time: it can start from the last trusted checkpoint and only walk forward.</p>
+
+      <h3 id="no-update">No raw UPDATE path</h3>
+      <p>Ordo's grammar has no <code>UPDATE</code> keyword; the parser simply doesn't recognize the token, so the path is closed before any runtime enforcement could be needed. A write is either <code>set</code> (create-or-converge) or <code>del</code>, with no third shape that mutates a row in place without going through the chain.</p>
+      <div class="code-panel">
+        <div class="bar"><b>refused at parse time</b><button class="copy">copy</button></div>
+        <pre class="code"><code><span class="cmt"># Ordo's grammar has no UPDATE statement</span>
+update customers set tier = <span class="str">"gold"</span> where id == <span class="str">"cust_01J9K2QW"</span>
+
+<span class="cmt"># [parse_error] unexpected token `update` — writes are `set` or `del`</span></code></pre>
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-automation">
+      <h2>Automation</h2>
+      <p class="kicker">Every trigger in Ordo reduces to two primitives, and both see only shape and time, never the envelope or the values inside.</p>
+
+      <h3 id="two-primitives">Two primitives</h3>
+      <div class="split">
+        <div>
+          <p>A <strong>listener</strong> matches the command envelope only (event kind, space, entity, actor), fields that sit outside the encryption boundary by construction. A <strong>clock</strong> fires on a cron-grade schedule. Nothing else exists; there is no "if amount &gt; 500" trigger clause, because a trigger never sees a value.</p>
+          <p>Modifiers attach to either primitive without needing data: <code>debounce &lt;duration&gt;</code>, <code>coalesce</code>, and rate caps.</p>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>triggers.ordo</b><div class="langtabs"><button class="ltab act" data-lang="ordo">ordo</button><button class="ltab" data-lang="ts">ts</button></div><button class="copy">copy</button></div>
+          <pre class="code" data-lang="ordo"><code><span class="kw">when</span> finance.transactions.ingested -&gt; <span class="kw">run</span> spendWatch    debounce 60s
+<span class="kw">every</span> <span class="kw">day</span> 02:00Z                   -&gt; <span class="kw">run</span> nightlySweep
+
+<span class="cmt"># listener pattern: &lt;domain&gt;.&lt;entity&gt;.&lt;kind&gt; — shape, never values</span></code></pre>
+          <pre class="code" data-lang="ts" hidden><code><span class="cmt">// when / every / trigger: not yet offered by the builder — authored in .ordo</span></code></pre>
+        </div>
+      </div>
+
+      <h3 id="everything-event">Everything is an event</h3>
+      <p>Webhooks, cron, inbound email, SMS, and a user's click are none of them special cases in the trigger layer. An outsider is just a write-only <code>source:</code> principal, and its append fires <code>ingested</code> like any other create. Five very different rivers, one bed: they all resolve into a listener or a clock before a routine ever runs.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 260">
+          <rect x="30" y="14" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="31" class="d-text">webhook</text>
+          <rect x="30" y="62" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="79" class="d-text">cron</text>
+          <rect x="30" y="110" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="127" class="d-text">email</text>
+          <rect x="30" y="158" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="175" class="d-text">SMS</text>
+          <rect x="30" y="206" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="223" class="d-text">user click</text>
+
+          <path d="M170,79 C 235,79 235,76 300,76" class="d-line-dim"/>
+          <path d="M170,31 C 235,31 235,182 300,182" class="d-line-dim"/>
+          <path d="M170,127 C 235,127 235,182 300,182" class="d-line-dim"/>
+          <path d="M170,175 C 235,175 235,182 300,182" class="d-line-dim"/>
+          <path d="M170,223 C 235,223 235,182 300,182" class="d-line-dim"/>
+
+          <rect x="300" y="44" width="150" height="64" rx="10" class="d-box"/>
+          <text x="375" y="68" class="d-text">clock</text>
+          <text x="375" y="88" class="d-mono" text-anchor="middle">every day 02:00Z</text>
+
+          <rect x="300" y="150" width="150" height="64" rx="10" class="d-box-hi"/>
+          <text x="375" y="174" class="d-text">listener</text>
+          <text x="375" y="194" class="d-mono-hi" text-anchor="middle">*.*.ingested</text>
+
+          <path d="M450,76 C 490,76 490,150 530,150" class="d-line"/>
+          <path d="M450,182 C 490,182 490,150 530,150" class="d-line"/>
+
+          <rect x="530" y="118" width="150" height="64" rx="10" class="d-box"/>
+          <text x="605" y="142" class="d-text">routine</text>
+          <text x="605" y="162" class="d-sub" text-anchor="middle">runs under a grant</text>
+        </svg>
+        <figcaption>Five inputs, two primitives, one routine. The trigger layer never inspects a value on the way in.</figcaption>
+      </figure>
+
+      <h3 id="event-vocab">The event vocabulary</h3>
+      <p>A listener pattern is <code>&lt;domain&gt;.&lt;entity&gt;.&lt;kind&gt;</code>, and <code>&lt;kind&gt;</code> comes from a closed vocabulary; an unrecognized kind is a compile error, not a pattern that silently never fires.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Kind</th><th>Fires on</th></tr></thead>
+          <tbody>
+            <tr><td><code>created</code></td><td>a command whose mode created the row</td></tr>
+            <tr><td><code>converged</code></td><td>a command that changed an existing row</td></tr>
+            <tr><td><code>deleted</code></td><td>a row removal, including a <code>subtree</code> cascade's per-row commands</td></tr>
+            <tr><td><code>written</code></td><td>the union of created, converged, and deleted, the common case and one word</td></tr>
+            <tr><td><code>ingested</code></td><td>a create attributed to a <code>source:</code> principal (a webhook, a sensor, a mail slot)</td></tr>
+            <tr><td><code>fed</code></td><td>a write attributed to <code>source:feed-*</code>, which is an inter-space feed copy landing</td></tr>
+            <tr><td><code>reverted</code></td><td>a group revert touching the entity</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="taming-stream">Taming the stream <span class="tag built">runs today</span></h3>
+      <p><strong>Debounce</strong> is trailing-edge: the run fires a fixed duration after the last matching event in a burst, with a declared maximum wait so a continuously noisy source still eventually runs.</p>
+      <p><strong>Coalesce</strong> caps pending runs at one, so a burst of matching events collapses into a single queued run instead of one per event.</p>
+      <p><strong>Dead-letter</strong> catches a run that keeps failing and sets it aside instead of retrying forever or dropping it silently, so a broken or noisy source can't take the routine layer down with it.</p>
+
+      <h3 id="provenance-bound">The provenance bound</h3>
+      <p>A routine woken by a listener may only touch rows reachable from <code>$trigger.ids</code>, the identifiers of whatever actually matched, unless it separately declares broader scope. This is R-G20: being woken by an event is not, by itself, a grant to read or write anything else in the space.</p>
+
+      <div class="callout warn">
+        <b>Status.</b> The trigger runtime (event derivation, envelope matching, batching, debounce/coalesce, dead-letter, and the provenance bound) is built and Postgres-tested today. Three named seams remain before it runs end to end without hand-holding: the source-level declaration spelling (how a listener's source is written down), the always-on worker that keeps the runtime running continuously, and the outsider-attribution producers that stamp <code>source:</code> on inbound webhook, email, and SMS writes. Routes, the push, SMS, and email fallback chains, have no code yet <span class="tag spec">settled spec · not yet built</span>.
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-sharing">
+      <h2>Sharing &amp; the interface</h2>
+      <p class="kicker">Data leaves a space in exactly two ways: a consented feed between spaces, or a caller-scoped API described by a descriptor the compiler emits.</p>
+
+      <h3 id="consented-feeds">Consented feeds <span class="tag spec">settled spec · not yet built</span></h3>
+      <div class="split">
+        <div>
+          <p>A feed is one-way standing replication of a named query from one space into another. Both spaces have to consent, the sender to send and the receiver to receive, before a single row moves. Copies land as ordinary writes, attributed to <code>source:feed-&lt;name&gt;</code>, which is what lets the receiving space's own triggers fire on the arriving data exactly as they would on a local write.</p>
+          <p>Withdraw consent on either side and the river simply stops; nothing is deleted, no history is rewritten, the copies just stop arriving.</p>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 140">
+            <rect x="50" y="30" width="220" height="80" rx="12" class="d-box"/>
+            <text x="160" y="60" class="d-text">space: acme</text>
+            <text x="160" y="82" class="d-sub" text-anchor="middle">feed: spend</text>
+            <text x="160" y="98" class="d-sub" text-anchor="middle">a named query</text>
+
+            <path d="M270,70 H430" class="d-line"/>
+            <text x="350" y="55" class="d-mono-hi" text-anchor="middle">source:feed-spend</text>
+
+            <rect x="430" y="30" width="220" height="80" rx="12" class="d-box"/>
+            <text x="540" y="60" class="d-text">space: studio-b</text>
+            <text x="540" y="82" class="d-sub" text-anchor="middle">copies land as writes</text>
+            <text x="540" y="98" class="d-sub" text-anchor="middle">local triggers fire</text>
+          </svg>
+          <figcaption>One-way, both consenting, attributed: a feed copy is indistinguishable from a local write to the receiver's own triggers.</figcaption>
+        </figure>
+      </div>
+
+      <h3 id="interface-descriptor">The Interface Descriptor <span class="tag built">runs today</span></h3>
+      <div class="split">
+        <div>
+          <p>The compiler emits an Interface Descriptor alongside the schema and the API: a golden-tested, caller-scoped artifact describing exactly which ops a given caller can see, their parameters, and their output shape. Nothing about it is hand-written or guessed at by a client; it is a direct projection of what the compiler already proved about your definitions.</p>
+          <p><code>@hominemai/ordo-react</code> is the first consumer, and it's <strong>headless</strong>: everything is wired (fetching, paging, live updates, the typed calls themselves) and nothing is rendered. You bring your own components; the descriptor and the runtime just make sure they're never guessing about what's callable.</p>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 130">
+            <rect x="20" y="34" width="150" height="60" rx="10" class="d-box"/>
+            <text x="95" y="64" class="d-text">compiler</text>
+
+            <path d="M170,64 H250" class="d-line"/>
+
+            <rect x="250" y="34" width="180" height="60" rx="10" class="d-box-hi"/>
+            <text x="340" y="58" class="d-text">interface descriptor</text>
+            <text x="340" y="78" class="d-sub" text-anchor="middle">caller-scoped, golden-tested</text>
+
+            <path d="M430,64 H510" class="d-line"/>
+
+            <rect x="510" y="34" width="170" height="60" rx="10" class="d-box"/>
+            <text x="595" y="52" class="d-text">@hominemai/ordo-react</text>
+            <text x="595" y="70" class="d-sub" text-anchor="middle">headless: wired, unrendered</text>
+            <text x="595" y="86" class="d-sub" text-anchor="middle">your components attach</text>
+          </svg>
+          <figcaption>Compiler → descriptor → headless bindings. The renderer is always yours.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-typescript">
+      <h2>TypeScript &amp; the comparison</h2>
+      <p class="kicker">A typed door into the same grammar, and an honest look at what that costs and buys against a save-and-it's-live baseline.</p>
+
+      <h3 id="the-cdk">Two doors into one room <span class="tag built">runs today</span></h3>
+      <p><code>@hominemai/ordo-cdk</code> is a typed TypeScript builder for the same grammar this guide has been showing in <code>.ordo</code> text. You call <code>entity()</code>, <code>op()</code>, and the rest of the builder from ordinary TypeScript, and <code>synth()</code> emits canonical <code>.ordo</code> text. That text, not the TypeScript that produced it, is the artifact that is reviewed, diffed, committed, and deployed.</p>
+      <p>Everything downstream of that emitted text is unchanged: same compiler, same manifests, same cost classes, same registry. The platform never knows which door a definition came in through. <code>.ordo</code> text and the builder are two doors into one room: one grammar, one compiler, one meaning.</p>
+      <div class="code-panel">
+        <div class="bar"><b>vendors.ts</b><div class="langtabs"><button class="ltab act" data-lang="ts">ts</button><button class="ltab" data-lang="ordo">ordo</button></div><button class="copy">copy</button></div>
+        <pre class="code" data-lang="ts"><code><span class="kw">import</span> { domain, entity, op, synth, t, f, lit, src } <span class="kw">from</span> <span class="str">'@hominemai/ordo-cdk'</span>;
+
+<span class="kw">const</span> vendors = entity(<span class="str">'vendors'</span>, {
+  name: t.text(),
+  region: t.text(),
+  active: t.bool().default(lit(true)),
+});
+
+<span class="kw">const</span> activeProducts = op(<span class="str">'activeProducts'</span>, {}, (b) =&gt;
+  b.source(src(<span class="str">'products'</span>).args(f.active.eq(lit(true))).pick(<span class="str">'name'</span>, <span class="str">'price'</span>)),
+).unbounded();
+
+console.log(synth(domain(<span class="str">'market'</span>, <span class="str">'1.1.0'</span>), vendors, activeProducts));</code></pre>
+        <pre class="code" data-lang="ordo" hidden><code><span class="kw">domain</span> market @ 1.1.0
+
+<span class="kw">entity</span> vendors {
+  name: text
+  region: text
+  active: bool = true
+}
+
+<span class="kw">op</span> activeProducts unbounded =
+  products(active == true)[name, price]</code></pre>
+      </div>
+      <p>The package keeps a hard boundary between two halves: a hand-written <strong>skeleton</strong> (the chaining shape, the argument order, the IR) and a generated <strong>vocabulary</strong>, every word regenerated straight from the parser's own tables whenever the language changes. A shape is a human decision; a word is the generator's. That split is what keeps the builder from quietly drifting out from under the grammar it fronts.</p>
+      <div class="callout">
+        <b>Three gates, one ratchet.</b> A new keyword has to clear all three before anything ships: <code>cargo build</code> fails if a word added to the lexer has no builder decision recorded against it; <code>npm run check</code> fails if a decision has no implementation; and the isomorphism corpus fails if an implementation says something the parser refuses. The corpus translation is machine-written rather than hand-picked: it walks every AST node the grammar can produce, so a builder that can say more or less than <code>.ordo</code> can fails the build instead of shipping quietly. Score today: 31 of 31 corpus programs round-trip clean.
+      </div>
+
+      <h3 id="vs-convex">Compared to Convex</h3>
+      <p>Convex's loop is real, and it's the right bar to name honestly: edit TypeScript, save, and the change is live in under a second, with errors inline in the editor. That loop is the developer-experience bar for this category, and Ordo doesn't pretend otherwise.</p>
+      <p>What Ordo charges that Convex doesn't is a registration ceremony: a definition is <code>plan</code>ned and <code>apply</code>'d rather than just saved, and every write is a named, versioned <code>op</code> instead of a query assembled at the call site. What that ceremony buys is a deterministic, closed surface: per-space custody and an audit chain under every write, no free-form query for a caller to construct at runtime, and a grammar narrow enough that an LLM either emits it correctly or fails loudly against a rule it can read and repair, rather than drifting into something that quietly keeps running.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Arrival idiom</th><th>Ordo answer</th></tr></thead>
+          <tbody>
+            <tr><td>JOIN … ON</td><td>declared refs + dot-paths; <code>match</code> only when it carries information</td></tr>
+            <tr><td>INSERT … ON CONFLICT</td><td>unique-key converge-or-create, the one upsert</td></tr>
+            <tr><td>Convex mutation</td><td>registered write op, mode-labeled, atomic group</td></tr>
+            <tr><td>Supabase RLS policy</td><td>two layers, not one: row-level rules are <code>access read</code> / <code>access write</code> guards (and <code>acl</code>) in the shape; which ops exist for a role is the access profile, runtime data. A policy that composes permissively across several policies has no equivalent; guards replace, never compose</td></tr>
+            <tr><td>Firebase "system user" service account</td><td>no equivalent, deliberately: a routine is bounded by its trigger (clock ⇒ guards pass; listener ⇒ <code>$trigger.ids</code>) and its derived scope manifest, so there is no principal to grant everything to</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>With the CDK, the authoring language is the same TypeScript either way; the difference is what happens after you hit save.</p>
+    </section>
+
+    <section class="doc-section" id="sec-status">
+      <h2>What runs today</h2>
+      <p class="kicker">Ordo is spec-first, and this table is meant to be honest about it: what's checkable against the repo right now, and what's still a written-down decision waiting to be built.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Area</th><th>Status</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td>Parser &amp; DDL lowering</td><td>Runs today</td><td>the grammar compiles to schema deterministically</td></tr>
+            <tr><td>API router &amp; catalog</td><td>Runs today</td><td>ops are the only surface, with a byte-identical 403 for "not allowed" and "never existed"</td></tr>
+            <tr><td>Access profiles</td><td>Runs today</td><td>owner/manager/editor/viewer, changeable without recompiling</td></tr>
+            <tr><td>Command log + verify/checkpoints</td><td>Runs today</td><td>hash chain, replayable verification, Ed25519 checkpoints</td></tr>
+            <tr><td>Sealed fields + blind indexes</td><td>Runs today</td><td>equality and unique at SQL speed; sort and range refuse to compile</td></tr>
+            <tr><td>Trigger runtime</td><td>Runs today</td><td>Postgres-tested end to end; three named seams remain to full wiring</td></tr>
+            <tr><td>Routine / route source spelling</td><td>Settled spec</td><td>one of the three trigger seams above</td></tr>
+            <tr><td>Routes &amp; egress</td><td>Settled spec</td><td>push, SMS, email fallback chains; no code yet</td></tr>
+            <tr><td>Consented feeds</td><td>Settled spec</td><td>one-way, both-consent replication between spaces</td></tr>
+            <tr><td><code>@hominemai/ordo-cdk</code> TypeScript builder</td><td>Runs today</td><td>typed builder, generated vocabulary, and isomorphism corpus exist (<code>clients/ordo-cdk</code>); it emits <code>.ordo</code> text and is not itself a runtime</td></tr>
+            <tr><td>UI renderer</td><td>None</td><td>by design: the descriptor and headless bindings replace it, and you supply components</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The design is written down before the software is. Every claim in this guide is meant to be checkable against the repo, through a fixture, a test, or a named gap, rather than taken on faith.</p>
+    </section>
+
+
+  </main>
+</div>
+
+<button id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+  <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>
+  <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2.5 12h3M18.5 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+</button>
+
+<script>
+/* sidebar: auto-built from h2/h3; scrollspy via IntersectionObserver */
+const navBox = document.getElementById('navlinks');
+const heads = [...document.querySelectorAll('.doc-section > h2, .doc-section h3')];
+heads.forEach(h => {
+  if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const a = document.createElement('a');
+  a.href = '#' + h.id;
+  a.textContent = h.textContent;
+  a.className = h.tagName === 'H2' ? 'h2lnk' : 'h3lnk';
+  a.dataset.for = h.id;
+  navBox.appendChild(a);
+});
+const spy = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (!e.isIntersecting) return;
+    document.querySelectorAll('#navlinks a').forEach(a =>
+      a.classList.toggle('active', a.dataset.for === e.target.id));
+  });
+}, { rootMargin: '0px 0px -75% 0px', threshold: 0 });
+heads.forEach(h => spy.observe(h));
+
+/* copy buttons on code panels — copies whichever language is showing */
+document.querySelectorAll('.code-panel').forEach(p => {
+  const btn = p.querySelector('.copy');
+  if (btn) btn.addEventListener('click', () => {
+    const pre = p.querySelector('pre.code:not([hidden])');
+    if (!pre || !navigator.clipboard) return;
+    navigator.clipboard.writeText(pre.textContent).then(() => {
+      btn.textContent = 'copied';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1400);
+    });
+  });
+});
+
+/* ordo ⇄ ts language tabs on code panels */
+document.querySelectorAll('.code-panel .ltab').forEach(tab =>
+  tab.addEventListener('click', () => {
+    const panel = tab.closest('.code-panel');
+    panel.querySelectorAll('.ltab').forEach(t =>
+      t.classList.toggle('act', t === tab));
+    panel.querySelectorAll('pre.code').forEach(pre =>
+      pre.hidden = pre.dataset.lang !== tab.dataset.lang);
+  }));
+
+/* gentle reveal for figures and code panels */
+document.querySelectorAll('figure.fig, .code-panel, .callout').forEach(el =>
+  el.classList.add('reveal'));
+const rev = new IntersectionObserver(entries => entries.forEach(e => {
+  if (e.isIntersecting) { e.target.classList.add('seen'); rev.unobserve(e.target); }
+}), { rootMargin: '0px 0px -8% 0px' });
+document.querySelectorAll('.reveal').forEach(el => rev.observe(el));
+
+/* theme toggle — explicit stamp wins, else follow OS scheme */
+function currentTheme() {
+  const stamped = document.documentElement.dataset.theme;
+  if (stamped === 'dark' || stamped === 'light') return stamped;
+  return (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+}
+const themeBtn = document.getElementById('theme-toggle');
+function updateThemeIcon() {
+  const dark = currentTheme() === 'dark';
+  /* toggleAttribute, not .hidden — SVG elements have no hidden property */
+  themeBtn.querySelector('.icon-moon').toggleAttribute('hidden', dark);
+  themeBtn.querySelector('.icon-sun').toggleAttribute('hidden', !dark);
+}
+themeBtn.addEventListener('click', () => {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('ordo-guide-theme', next); } catch (e) {}
+  updateThemeIcon();
+});
+if (window.matchMedia) {
+  const mq = matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) {
+    mq.addEventListener('change', () => {
+      if (!document.documentElement.dataset.theme) updateThemeIcon();
+    });
+  }
+}
+updateThemeIcon();
+</script>

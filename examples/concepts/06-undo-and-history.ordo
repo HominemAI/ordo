@@ -1,0 +1,44 @@
+# Concept: the command log, undo and restore
+#
+# Every accepted write is recorded. One op call is one command group: one
+# transaction, one actor, one correlation id.
+#   - A group holds one command per row touched, with before and after images.
+#   - Groups form a hash chain per tenant (hash = SHA-256(prev || body)).
+#   - Nothing is ever edited. Undo appends the inverse as NEW history.
+#
+# `transfer` below writes two rows, so its group has two commands. Reverting
+# the group undoes both together.
+#
+#   ordo revert examples/concepts/06-undo-and-history.ordo \
+#       --space spc_acme --group <correlation id> --as ops:ada --dry-run
+#
+# `ordo restore --record` is a different act: it records that the whole database
+# was restored from a backup, so the platform serves the tenant again.
+#
+# Read next: docs/howto-audit.md, docs/howto-operating.md "Backup and Restore".
+
+domain bank @ 1.0.0
+
+entity accounts {
+  holder:  text
+  balance: money = 0
+  check balance >= 0
+}
+
+entity transfers {
+  fromAccount -> accounts
+  toAccount   -> accounts
+  amount:     money
+  note:       text = ""
+}
+
+# One atomic group: a ledger row and two balance changes. All three land
+# or none does, and one revert takes all three back.
+op transfer($from: id, $to: id, $amount: money) =
+  set transfers { fromAccount: $from, toAccount: $to, amount: $amount }
+  set accounts(id == $from) { balance: balance - $amount }
+  set accounts(id == $to) { balance: balance + $amount }
+
+op ledger unbounded =
+  transfers[amount, note, fromAccount.holder, toAccount.holder]
+  sort -id

@@ -1,0 +1,58 @@
+# 07 Aggregates: group and reduce
+#
+# Shows how rows are summarised.
+#   - `group key { name: aggregate }` makes one row per key.
+#   - `reduce { ... }` makes exactly one row (a group with no key).
+#   - Aggregates: count, sum, avg, min, max, median, percentile(f, p),
+#     distinct f, joined(f, ", "). They are legal only inside the braces.
+#   - `count(cond)` and the other aggregates take a condition-free form;
+#     `count(cond)` counts only matching rows.
+#   - A `|` bar AFTER a group filters the groups (SQL's HAVING, by position).
+#   - `month(date)` and friends bucket dates: year, month, week, day, hour.
+#   - `take[key] 1` is a grouped limit: the first row of each key.
+#
+# Reference: docs/definition-language.md section 5 "Aggregation".
+
+domain shop @ 1.0.0
+
+entity customers {
+  name:   text
+  region: text
+}
+
+entity orders {
+  customer -> customers
+  placed:  date
+  total:   money
+  status:  text = "open"
+}
+
+# One row for the whole table.
+op orderStats unbounded =
+  orders[total]
+  reduce { n: count, revenue: sum total, biggest: max total, typical: median total, p90: percentile(total, 0.9) }
+
+# One row per customer, with a conditional count and a bucket filter.
+op spendByCustomer unbounded =
+  customers[name]  orders[total, status]
+  group customers.name { orders: count, done: count(status == "done"), spent: sum total }
+  | orders >= 2
+  sort -spent
+
+# Bucket dates: one row per month.
+op revenueByMonth unbounded =
+  orders[placed, total]
+  group month(placed) { revenue: sum total, n: count }
+  sort month
+
+# Text aggregation: `joined` follows the pipeline's sort order.
+op statusesByCustomer unbounded =
+  orders[status, customer.name]
+  sort status
+  group customer.name { statuses: joined(status, ", "), kinds: distinct status }
+
+# Latest order per customer: sort, then `take[key] 1`.
+op latestPerCustomer unbounded =
+  customers[name]  orders[placed, total]
+  sort -orders.placed
+  take[customers.id] 1

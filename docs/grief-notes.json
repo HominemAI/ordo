@@ -1,0 +1,82 @@
+{
+ "g3": {
+  "text": "Not sure what this means.",
+  "at": "2026-10-01T07:41:20+00:00"
+ },
+ "g7": {
+  "text": "So - we are supposed to be keeping atleast one rollback version - but nothing is stopping customer from keeping previous snapshots, and previous ordo schemas are just .ordo.  But we should consider keeping migration files N versions back from the earliest tenant. \n\nSo if everyone is at version 11 except one tenant is at version 6. Version 5 would still be available for that tenant to rollback to. Is there a reason we don't keep more versions - I remember we had a chat about it but I don't remember WHY it is it's any issue to kee around older schemas / migrations. They should be a method - the ordo is declarative.\n\nHow does evolution work? If I have an existing ordo deployment on my first version of schema - and now I want v2 I just ordo apply agains the same dpeloyment - ordo recognizes its supposed to be a change ---> how is the migration here planned? How is the migration generated? Does it happen at compile time? \n\nHow migrations are created is a big determining factor in most of this.",
+  "at": "2026-10-01T07:04:19+00:00"
+ },
+ "g8": {
+  "text": "Activation only? I guess this doesn't cover devolution",
+  "at": "2026-10-01T06:58:05+00:00"
+ },
+ "g11": {
+  "text": "So as it stands we don't have a rollback ? this expands on the other migration questions and what exactly is the migration/evolution setup because it will define how we can rollback",
+  "at": "2026-10-01T07:40:42+00:00"
+ },
+ "g16": {
+  "text": "worth planning.",
+  "at": "2026-10-01T07:40:02+00:00"
+ },
+ "g18": {
+  "text": "Okay seems reasonable. A more efficient way to do this would make sense - our tables are more complicated.",
+  "at": "2026-10-01T07:39:26+00:00"
+ },
+ "g19": {
+  "text": "We need to flesh this out more. Generating change is important to stop schema drift and evolution issues. State to State - declarative. At-least having a system that flags the deltas and provides options for each type. Also reverts need to be kept in mind.",
+  "at": "2026-10-01T07:38:17+00:00"
+ },
+ "g22": {
+  "text": "We need to overall discover away for the inter-system dependent workloads - allowing users to consolidate their external usage into the same database makes sense. A connector could be a good way to go about this.\n\nThings to think about here -\nCan we use our SQL -> Ordo converter /compilation to produce basically ordo code and abstracts away the connectivity or how those relations align. The table is provided a translation so things are ID'd accross similar to our same setup except there's a layer of translation that interacts with the specific schema that table has - this should be generateable. entity Prefixes are mapped at query time and ordo just sees another ordo entity.\n\nOnly concern here is migrations - Do we migrate old \"projection\" to a new \"projection\"? These tables are added out of the ordo cycle so it would need to be generated as an \"import\" basically - it compiles some ordo relation translation, and is assigned to a specific table name. If it does not exist next apply/evolution it makes a note of it. If the schema has changed, it is noted as well because that would require a new translation - translation gets generated and the only question is how do the delta's get adjusted?",
+  "at": "2026-10-01T07:36:05+00:00"
+ },
+ "g24": {
+  "text": "Yeah - if things exist that aren't in schema don't wipe whats not yours. Just make a note of it - sinsible.",
+  "at": "2026-10-01T07:27:26+00:00"
+ },
+ "g25": {
+  "text": "a per tenant prefix should be standard requirement. probably random- it should avoid 99% of collisions unless someone is purposely being dense. But this does require a reworking on the fact that apply generates and creates it on the server but actual tenants need to evolve. \n\n\nAlso we haven't talked about evolution for the ordo deployment. Tenants migrate but does the deployment support all active versions?",
+  "at": "2026-10-01T07:25:45+00:00"
+ },
+ "g26": {
+  "text": "We need to build an external table connector situation - a way to ingest foreign table schema into an ordo format in a way that can translate. We should also have a way to detect that these other schemas exist so that they're not ignored or forgotten about. But this just made me realize that because we discourage DB access - the application jsut wouldnt be able to interact with our DB. This is something to look at.",
+  "at": "2026-10-01T07:23:40+00:00"
+ },
+ "g27": {
+  "text": "Direct DB access is discouraged - it seems expensive to monitor integrity of data source. This should be handled at the permission and access level - security. If someone needs some special fedramp level then we can address it.",
+  "at": "2026-10-01T07:21:21+00:00"
+ },
+ "g28": {
+  "text": "Are there other roles? What's a real parallel? Is the role here the role of the user applying? Can 2 people apply different migrations in supabase and each individual person is an owner of those items?",
+  "at": "2026-10-01T07:18:06+00:00"
+ },
+ "g30": {
+  "text": "I think this mostly can be addresses with  prefixing - but also deployment lives in a different db schema (or even cluster) than tenants - deserves an audit.",
+  "at": "2026-10-01T07:16:53+00:00"
+ },
+ "g33": {
+  "text": "I wasn't aware we had an ordo dev - but yes dev staging prod should be all thigns ordo supports.\n\nI envision a dev environment - simply applying ordo implicitly creates a dev environment - because the schema is declarative, it is identical to prod without data.\n\nThen staging similar setup except it can run against a clone of a production environment (defined tenants) - then for production  updates are per tenant so, blue green should simply be possible - and that can be a setting that is defined in the ordo manifest/config language.\n\nordo apply should probably default to dev, then --staging, and then --prod  --  staging will not allow running until dev already reflects the new evolution, and production won't apply until staging is at the new evolution.\n\nHow does this play into permissions and security?\n\n\nExpanding on the dec sli apply - along with below - apply dev could have a branch name associated. We may also consider adding a github integration that allows connecting a repo and running automatic migrations. \n\nOh also an apply - compiles/renders and then after - it can be applied when ready - that makes sense.",
+  "at": "2026-10-01T07:19:40+00:00"
+ },
+ "g35": {
+  "text": "branches could possibly just be tenants in dev - since schema is per tenant. ",
+  "at": "2026-10-01T07:11:42+00:00"
+ },
+ "g36": {
+  "text": "We'll me this declarative with our ticket on putting all configuration in ordo lang",
+  "at": "2026-10-01T07:12:14+00:00"
+ },
+ "g37": {
+  "text": "There could be a data generation module possibly? Prod to staging cloning is possible. This will require extra thinking including starting witha. list of under what circumstances seeding is needed.",
+  "at": "2026-10-01T07:13:55+00:00"
+ },
+ "g38": {
+  "text": "this will need to be detailed out with the dev/stg roll out",
+  "at": "2026-10-01T07:14:29+00:00"
+ },
+ "g39": {
+  "text": "it would be sense that a failing one would revert. I don't completely understand we'll need to discuss this.",
+  "at": "2026-10-01T07:15:19+00:00"
+ }
+}

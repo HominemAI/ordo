@@ -1,0 +1,106 @@
+[package]
+name = "ordo-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ordo"
+path = "src/main.rs"
+
+[dependencies]
+ordo-syntax = { path = "../ordo-syntax" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-sema = { path = "../ordo-sema" }
+ordo-plan = { path = "../ordo-plan" }
+# The one generator behind `ordo gen ts`: both TypeScript packages are
+# generated from this implementation's own tables, never hand-maintained.
+ordo-gen = { path = "../ordo-gen" }
+# The operator commands (`verify`, `checkpoint`, `revert`) act on a running
+# deployment's database, and `ordo-exec` is the crate that owns the driver,
+# the pool and the transaction seam. This is what makes `ordo-cli` a
+# deployment tool rather than only a compiler front end.
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-exec = { path = "../ordo-exec" }
+# `ordo keys`: the sealed-master file format and the wrapped-key store.
+ordo-crypto = { path = "../ordo-crypto" }
+# `ordo keys init` records a `custody-action` — a decision about a space
+# belongs in the security-event stream, which is the exit ops' precedent.
+ordo-secevent = { path = "../ordo-secevent" }
+# `ordo verify --proof` calls straight into the published verifier rather
+# than reimplementing it. One routine, two front doors: this one, where an
+# operator looks for verification, and the `ordo-verify-proof` binary, which
+# links no driver and is what a third party is handed. A second
+# implementation of a verifier is the one place where a disagreement between
+# two correct-looking programs would read as tampering.
+ordo-verify-proof = { path = "../ordo-verify-proof" }
+# `ordo dev` (D3, `plan-dev-loop.md`) reaches the server's own assembly and
+# gate — `ordo_host::runtime::assemble_embedded` — rather than standing up
+# a second serving path. This is what makes `ordo-cli` a serving process as
+# well as a compiler front end, per the plan's §1.1(b).
+ordo-host = { path = "../ordo-host" }
+# `PageKey` for D3's own `RuntimeConfig` (`dev_runtime_config` in `dev.rs`).
+ordo-api = { path = "../ordo-api" }
+# `Fixture` (schema + DDL + registry, one compiled unit) is what
+# `assemble_embedded` and the D2 schema delta both need; the harness's
+# market fixture and seeded-database helpers stay dev-only (used by tests
+# alone).
+ordo-conformance = { path = "../ordo-conformance" }
+# 17u's HTTP client, and it is deliberately not a new dependency: the
+# workspace already owns a minimal HTTP/1.1 client over `tokio-rustls`
+# (`ordo_blob::http`, hand-rolled for the S3 surface), and `ordo-cli`
+# already builds `ordo-blob` transitively through `ordo-exec`. A full
+# client would put connection pooling, redirect following, cookie jars,
+# proxy discovery and a middleware stack into the `ordo` binary and three
+# Docker images to send one POST. See `src/wire.rs`.
+ordo-blob = { path = "../ordo-blob" }
+# `ordo console recover`, the console's lockout failsafe.
+ordo-console = { path = "../ordo-console" }
+# `ordo_blob::ByteStream` is a `futures::Stream`, so reading one response
+# body needs the trait. Already in the workspace's tree via `ordo-host`.
+futures = "0.3"
+serde_json = "1"
+# `ordo dev` (D3) binds a socket and serves concurrently with the watch
+# loop — a real structural change from "one runtime built per command",
+# made here deliberately rather than by accretion (§1.1(b)).
+tokio = { version = "1", features = [
+  "rt",
+  "rt-multi-thread",
+  "macros",
+  "time",
+  "sync",
+  "net",
+  "signal",
+] }
+# `ordo dev`'s watch set (`plan-dev-loop.md` D1) — the crate this plan names
+# as having no shared workspace table to extend, so it lands here rather
+# than in `[workspace.dependencies]`.
+notify = "6"
+# D2's per-project socket directory name, and D3's per-save version label
+# (a content digest, so an unchanged save is `AlreadyServing` rather than a
+# no-op swap under a fresh name every time) — both in `dev_db.rs`/`dev.rs`.
+sha2 = "0.10"
+# 17w: `ordo dev` mints the ready-to-paste dev token it prints at startup
+# (`dev.rs`), and reads `ORDO_TOKEN_KEY` the same way a server's
+# `RuntimeConfig::from_env` does when a script wants to mint its own. Was
+# dev-only (`tests/wire_apply.rs`'s own token minting); promoted because
+# minting is now something `ordo dev` itself does, not only its tests.
+ordo-identity = { path = "../ordo-identity" }
+# `ordo login`'s machine key sign-in signs the service's challenge with the
+# key's Ed25519 seed (`signin.rs`). Already in the tree through ordo-identity.
+ed25519-dalek = "2"
+
+[dev-dependencies]
+# The harness's market fixture and its golden-file helper, for
+# ordo-host/tests/dev_loop.rs.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `tests/wire_apply.rs` stands a real deployment up on a loopback port, so
+# the `--host` mode is tested against a socket rather than against a
+# `Service`. Dev-only: the shipped binary links no server.
+axum = "0.8"
+# `tests/login.rs` runs the real identity service on a loopback port and
+# drives `ordo login` against it with a fake browser.
+ordo-identity-service = { path = "../ordo-identity-service" }
+
+[lints]
+workspace = true

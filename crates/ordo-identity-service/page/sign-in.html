@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="ordo-base" content="__ORDO_BASE__">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="ordo-return-origins" content="__ORDO_RETURN_ORIGINS__">
+<title>Sign in · Ordo</title>
+<link rel="stylesheet" href="/page/identity.css">
+<script type="module" src="/page/sign-in.js"></script>
+</head>
+<body>
+<header class="brand"><span class="mark">Ordo</span> deployment sign-in</header>
+<main>
+  <p id="problem" class="problem" role="alert"></p>
+
+  <section data-step="loading">
+    <h1>Sign in</h1>
+    <p>Loading.</p>
+  </section>
+
+  <section data-step="sign-in" hidden>
+    <h1>Sign in</h1>
+    <p>Sign in to run this Ordo deployment. Use the passkey you made when you joined.</p>
+    <div id="passkey-area">
+      <button type="button" id="passkey" data-passkey>Sign in with a passkey</button>
+    </div>
+    <details id="recover-area">
+      <summary>Lost your passkey? Use a recovery code</summary>
+      <form id="recover-form" novalidate>
+        <p>A recovery code lets you make a new passkey on this device. When you do, your old passkeys stop working and you get 10 new codes.</p>
+        <div class="field">
+          <label for="code">Recovery code</label>
+          <input id="code" name="code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" required aria-describedby="code-help" aria-errormessage="code-error">
+          <p id="code-help" class="help">It looks like 7K2M-Q9PX-4RTW-H8NC-3VBZ-6DJE. Capitals or small letters both work.</p>
+          <p id="code-error" class="field-error">Type one of your recovery codes.</p>
+        </div>
+        <button type="submit" class="secondary">Use this code</button>
+      </form>
+    </details>
+  </section>
+
+  <section data-step="enrol" hidden>
+    <h1>Make a new passkey</h1>
+    <p>You signed in with a recovery code. That code is now used up.</p>
+    <p class="warn">Make a new passkey on this device now. Your old passkeys stop working, and you get 10 new recovery codes.</p>
+    <div id="enrol-area">
+      <button type="button" id="enrol" data-passkey>Make a new passkey</button>
+    </div>
+  </section>
+
+  <section data-step="codes" hidden>
+    <h1>Save your new recovery codes</h1>
+    <p>Your new passkey works. Your old recovery codes no longer work. Each code below works once.</p>
+    <p class="warn"><strong>This is the only time these codes are shown.</strong> Keep them somewhere safe, away from this device.</p>
+    <ol class="codes" data-codes aria-label="Recovery codes"></ol>
+    <div class="row">
+      <button type="button" class="secondary" data-copy>Copy codes</button>
+      <button type="button" class="secondary" data-download>Download as a file</button>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="saved" data-saved>
+      <label for="saved">I saved these codes somewhere safe</label>
+    </div>
+    <button type="button" data-continue disabled>Continue</button>
+  </section>
+
+  <p id="status" class="status" role="status"></p>
+</main>
+</body>
+</html>

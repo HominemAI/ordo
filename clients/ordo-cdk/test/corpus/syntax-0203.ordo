@@ -1,0 +1,9 @@
+# planned: not built. `ordo check` answers check_beyond_row.
+entity inspections {
+  unit      -> units
+  workOrder -> workOrders
+  at:        date
+  check workOrder.location.property == unit.property
+  # `check` would walk OUTGOING refs from the row being written, any depth,
+  # and abort the whole command group on a violation, like any other check.
+}

@@ -1,0 +1,16 @@
+[package]
+name = "ordo-plan"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ordo-syntax = { path = "../ordo-syntax" }
+ordo-crypto = { path = "../ordo-crypto" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-sema = { path = "../ordo-sema" }
+serde_json = "1"
+sha2 = "0.10"
+
+[lints]
+workspace = true

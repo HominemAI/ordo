@@ -1,0 +1,89 @@
+# Built by `images.yml`: `amd64` on every push to `main`, `amd64`+`arm64`
+# on a `v*` tag. See `docs/plan-ci-images.md` §3.
+#
+# The operator image: the `ordo` binary from `crates/ordo-cli`.
+#
+# Runtime base is distroless/cc rather than debian-slim because the whole
+# dependency graph is pure Rust: `ordo-crypto` is chacha20poly1305 + sha2,
+# `ordo-identity` is ed25519-dalek/p256/argon2, and `ordo-exec` speaks the
+# Postgres wire protocol through `tokio-postgres` with no TLS feature. There
+# is no OpenSSL to link and no `psql` to invoke on this path — the CLI's
+# operator commands go through the driver in `ordo-exec`, not through the
+# conformance harness's `psql` shell-out. So the runtime needs glibc and
+# libgcc_s and nothing else, which is exactly `cc-debian12`.
+#
+#   docker build -f docker/Dockerfile.cli -t ordo-cli:dev .
+#   docker run --rm -v "$PWD/crates/ordo-conformance/fixtures:/fx:ro" \
+#     ordo-cli:dev check /fx/market.ordo
+
+ARG RUST_VERSION=1.97
+ARG DEBIAN_RELEASE=bookworm
+
+# ── planner: compute the dependency recipe ───────────────────────────────
+#
+# cargo-chef exists here for one reason: `cargo build` re-downloads and
+# re-compiles every dependency whenever ANY file in the tree changes,
+# because the whole tree is one COPY layer. `chef prepare` reduces the
+# workspace to a manifest-only skeleton, so the expensive layer is keyed on
+# the manifests alone and survives a source edit.
+#
+# `Cargo.lock` is committed (increment 0b, `docs/plan-ci-images.md` §1.2),
+# so `chef prepare` captures it into the recipe and both `cook` and the
+# final `build` below run `--locked`: a drifting dependency fails the build
+# instead of silently entering the image, and two builds of one commit
+# produce the same bytes — which is what the digest-as-identity tagging
+# below depends on.
+
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS chef
+RUN cargo install cargo-chef --locked --version ^0.1
+WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ── builder ──────────────────────────────────────────────────────────────
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+# The cached layer: dependencies only, no first-party source in scope.
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked -p ordo-cli --bin ordo \
+ && strip target/release/ordo
+
+# ── smoke: the binary compiles a real program, inside a runtime-alike ────
+#
+# Run as its own stage so `docker build --target smoke` fails the build
+# rather than publishing an image that links but cannot compile anything.
+# The fixture is the market program the conformance corpus is built on, so
+# this is not a `--help` that proves only that the loader worked.
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS smoke
+COPY --from=builder /build/target/release/ordo /usr/local/bin/ordo
+COPY crates/ordo-conformance/fixtures/market.ordo /fixtures/market.ordo
+# `ordo check` touches no database: it parses, binds and reports. A non-zero
+# exit here means the binary cannot do its offline half in this base image.
+RUN ["/usr/local/bin/ordo", "check", "/fixtures/market.ordo"]
+
+# ── runtime ──────────────────────────────────────────────────────────────
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+
+# uid 65532, baked into the `:nonroot` tag. Stated explicitly so a
+# Kubernetes `runAsUser` and this agree without anyone reading the tag.
+USER 65532:65532
+
+COPY --from=builder /build/target/release/ordo /usr/local/bin/ordo
+
+# The operator commands read these; `deploying.md` §9 says to point them at
+# the database. No defaults are baked in — a CLI image that ships a default
+# database host is a CLI image that talks to the wrong database once.
+ENV ORDO_PG_HOST="" \
+    ORDO_PG_PORT="" \
+    ORDO_PG_USER="" \
+    ORDO_PG_DB=""
+
+ENTRYPOINT ["/usr/local/bin/ordo"]
+# No CMD: `ordo` with no argument prints usage and exits 2, which is the
+# right behaviour for an image someone ran without saying what they wanted.

@@ -1,0 +1,205 @@
+# The one image (`docs/plan-identity-service.md` 3.3, `docs/howto-console.md`):
+# `ordo-supervisor` runs the identity service, the console and the
+# deployment (`ordo-host`) as siblings, each its own unix user, in one
+# container. Two Postgres clusters, on purpose: the deployment's, and the
+# console's, which also holds the identity service's own database (ruled
+# 2026-10-27, Q1). A copy of either cluster yields no secrets. Separate
+# deployment-only and console-only images are no longer provided.
+#
+# Build the image from this repository first:
+#   docker build -f docker/Dockerfile -t ordo:dev .
+# or set ORDO_IMAGE to the published one.
+#
+# Secrets: run `scripts/make-secrets.sh one` once (it makes docker/secrets/).
+# On a deployment made before the identity service, run it again: it adds
+# the identity service's 2 files and leaves every other one as it is.
+# First run, step by step: `docs/first-deployment.md`.
+#   docker compose -f docker/compose.one.yml up -d
+#   docker compose -f docker/compose.one.yml logs ordo | grep -i invite
+# and open the first invite link. The deployment's own door is on 8080 and
+# the console on 8081. The identity service is reached through the
+# console, at http://localhost:8081/identity: the console passes that path
+# through, so its passkeys belong to the console's host and no third port
+# is published (ORDO_SUPERVISOR_IDENTITY_ADDRESS=console-path, the
+# default). To give it an address of its own, set ORDO_IDENTITY_ORIGIN (or
+# ORDO_SUPERVISOR_IDENTITY_ADDRESS=own-port) and publish 8082.
+#
+# An upgrade needs nothing new. A compose file from before this image
+# keeps working as it is: the supervisor takes its old run folder, reads
+# the console's database URL as the console, and the console carries its
+# live revision over. With no identity database named, the identity
+# service is not started and the console keeps its own sign-in; the log
+# names the 2 ways to start it: ORDO_IDENTITY_DATABASE_URL(_FILE), or
+# ORDO_IDENTITY_SHARE_CONSOLE_DB_SERVER=true to make its database on the
+# console's server (owner, 2026-10-30; a later, announced release will
+# require one). Then the
+# console's owners move in and sign in with the passkeys they already
+# have. This file names the identity service's own role and database, and
+# the volumes to back up. Keep ORDO_CONSOLE_ORIGIN exactly as it was (plan
+# 6.2).
+#
+# First boot only: the ORDO_* variables below that belong to the deployment
+# become revision 1 of its settings. After that the supervisor's volume holds
+# them. A variable you edit here later is named in the log as ignored.
+#
+# Published ports bind 127.0.0.1 only. This file speaks plain HTTP, so put a
+# TLS proxy in front (Caddy, nginx, a cloud load balancer) that terminates
+# HTTPS and forwards to these ports. Never publish them on 0.0.0.0.
+
+name: ordo-one
+
+services:
+  deployment-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ordo
+      POSTGRES_DB: ordo
+      POSTGRES_PASSWORD_FILE: /run/secrets/deployment-db-password
+    secrets: [deployment-db-password]
+    volumes: [deployment-db:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ordo", "-d", "ordo"]
+      interval: 5s
+      retries: 20
+
+  console-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: console
+      POSTGRES_DB: ordo_console
+      POSTGRES_PASSWORD_FILE: /run/secrets/console-db-password
+    secrets: [console-db-password]
+    volumes: [console-db:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "console", "-d", "ordo_console"]
+      interval: 5s
+      retries: 20
+
+  # Makes the identity service's role and database on the console's
+  # cluster, once, and sets the role's password from its secret file each
+  # time. Idempotent, so an upgraded deployment gets it with no step of its
+  # own: Postgres runs init scripts only on an empty volume.
+  identity-db-setup:
+    image: postgres:17
+    depends_on:
+      console-db: { condition: service_healthy }
+    secrets: [console-db-password, identity-db-password]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        export PGPASSWORD="$$(cat /run/secrets/console-db-password)"
+        psql -v ON_ERROR_STOP=1 -h console-db -U console -d ordo_console \
+          -v pw="$$(cat /run/secrets/identity-db-password)" <<'SQL'
+        SELECT 'CREATE ROLE identity LOGIN'
+          WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'identity')\gexec
+        ALTER ROLE identity PASSWORD :'pw';
+        SELECT 'CREATE DATABASE ordo_identity OWNER identity'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'ordo_identity')\gexec
+        SQL
+    restart: "no"
+
+  ordo:
+    image: ${ORDO_IMAGE:-ordo:dev}
+    depends_on:
+      deployment-db: { condition: service_healthy }
+      console-db: { condition: service_healthy }
+      identity-db-setup: { condition: service_completed_successfully }
+    # The least the image needs: four capabilities, no more. The supervisor
+    # raises SETUID and SETGID to run each child as its own unix user, and
+    # CHOWN to give each child its secret files. It needs no KILL: a child
+    # of another user is stopped through its launcher, which runs as that
+    # user.
+    cap_drop: [ALL]
+    # SETPCAP lets the launcher empty the bounding set before it starts a
+    # child; without it the supervisor refuses to start, naming the child's
+    # ORDO_SUPERVISOR_*_USER.
+    cap_add: [SETUID, SETGID, CHOWN, SETPCAP]
+    # Shutdown stops the deployment, then the console, then the identity
+    # service. Each gets ORDO_SUPERVISOR_GRACE_SECS (30) after SIGTERM and
+    # as long again after SIGKILL: at worst 3 x 60 s. Docker's own 10 s
+    # would cut that short.
+    stop_grace_period: 200s
+    # The image's root is read-only. no-new-privileges is NOT set: the
+    # supervisor relies on file capabilities to raise the four above.
+    read_only: true
+    # The supervisor's socket and each child's secret files live here and
+    # never reach a disk. /tmp is noexec: no child can write a program or a
+    # library there and run it.
+    tmpfs:
+      - /run/ordo:uid=65530,mode=0711
+      - /tmp:noexec,nosuid,nodev
+    environment:
+      # The console. The URL holds the role's password, so it is a file.
+      ORDO_CONSOLE_DATABASE_URL_FILE: /run/secrets/console-database-url
+      ORDO_CONSOLE_ORIGIN: http://localhost:8081
+      ORDO_CONSOLE_DOOR_SPACE: system
+      # The identity service: its own database, on the console's cluster.
+      # Its address (the console's origin, under /identity), relying party
+      # (localhost) and the import of the console's owners are filled by
+      # the supervisor.
+      ORDO_IDENTITY_DATABASE_URL_FILE: /run/secrets/identity-database-url
+      # The deployment, revision 1. Every setting is in docs/deploying.md.
+      ORDO_PG_HOST: deployment-db
+      ORDO_PG_PORT: "5432"
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo
+      ORDO_PG_PASSWORD_FILE: /run/secrets/deployment-db-password-app
+      ORDO_SPACE: system
+      ORDO_KEY_PROVIDER: sealed-master
+      ORDO_MASTER_KEY_FILE: /run/secrets/master-key
+      ORDO_MASTER_KEY_PASSPHRASE_FILE: /run/secrets/master-passphrase
+      ORDO_TOKEN_KEY_FILE: /run/secrets/token-key
+      ORDO_PAGE_KEY_FILE: /run/secrets/page-key
+    secrets:
+      - deployment-db-password-app
+      - master-key
+      - master-passphrase
+      - token-key
+      - page-key
+      # Long form: the supervisor (65530) reads each and gives its child a
+      # private copy; the console's group (65532) may read its own too.
+      # Compose applies `uid`, `gid` and `mode` only where the engine
+      # supports them (Swarm); on a plain host it bind-mounts the file as it
+      # is and ignores them, so the setup above sets the owner and mode on
+      # the host file.
+      - source: console-database-url
+        target: console-database-url
+        uid: "65530"
+        gid: "65532"
+        mode: 0440
+      - source: identity-database-url
+        target: identity-database-url
+        uid: "65530"
+        gid: "65530"
+        mode: 0400
+    # One volume per child that keeps state, and the supervisor's. Back
+    # each up with the databases: the identity service's holds the key its
+    # signing keys are sealed with (ORDO_IDENTITY_DATA_DIR,
+    # ORDO_IDENTITY_KEY_FILE), the console's its own key, the supervisor's
+    # the deployment's live settings.
+    volumes:
+      - identity-data:/var/lib/ordo-identity
+      - console-data:/var/lib/ordo-console
+      - supervisor-data:/var/lib/ordo-supervisor
+    ports: ["127.0.0.1:8081:8081", "127.0.0.1:8080:8080"]
+    restart: unless-stopped
+
+secrets:
+  deployment-db-password: { file: ./secrets/deployment-db-password }
+  deployment-db-password-app: { file: ./secrets/deployment-db-password-app }
+  console-db-password: { file: ./secrets/console-db-password }
+  console-database-url: { file: ./secrets/console-database-url }
+  identity-db-password: { file: ./secrets/identity-db-password }
+  identity-database-url: { file: ./secrets/identity-database-url }
+  master-key: { file: ./secrets/master.key }
+  master-passphrase: { file: ./secrets/master-passphrase }
+  token-key: { file: ./secrets/token-key }
+  page-key: { file: ./secrets/page-key }
+
+volumes:
+  deployment-db:
+  console-db:
+  console-data:
+  identity-data:
+  supervisor-data:

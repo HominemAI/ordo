@@ -1,0 +1,84 @@
+# 17 Members and groups
+#
+# Shows the platform-provided principal entities.
+#   - `members` exists in every tenant and cannot be declared. One row per
+#     person admitted. A domain REFERS to it: `owner -> members`.
+#   - Fields you can read: displayName, role, kind, status, joined,
+#     memberCount. They are read-only.
+#   - `$caller` is the caller's own members row. `== $caller` never expands
+#     groups.
+#   - A guard can test a fact on a members row it reaches: `owner.role == "manager"`.
+#   - A group is a members row with `kind == "group"`. `groupMembers` links a
+#     group to its people. `acl` rows and access profiles that name a group
+#     apply to its members; that expansion is built into the derived guards.
+#   - `memberCount` is 1 for a person and the headcount for a group.
+#   - A hand-written group walk: `member.groupMembers.group(member == $caller)`
+#     reaches the groupMembers rows whose `group` is this member and whose
+#     `member` is the caller. `group` is a reserved word, and after a dot it
+#     is read as the field name, because nothing else can follow a dot.
+#
+# Reference: docs/definition-language.md section 3 "members", "Groups".
+
+domain projects @ 1.0.0
+
+entity projects {
+  name:  text
+  owner  -> members
+  access read   owner == $caller
+                or owner.role == "manager"
+                or projectTeams(member == $caller)
+                or projectTeams(member.groupMembers.group(member == $caller))
+  access write  owner == $caller
+}
+
+# Link a project to a person or to a group (a group is a members row).
+entity projectTeams {
+  project -> projects owned
+  member  -> members  owned
+  access read   project.owner == $caller or member == $caller
+  access write  project.owner == $caller
+}
+
+entity notes {
+  author -> members
+  body:   text
+  access read   open
+  access write  author == $caller
+}
+
+# Names come from the platform, never copied into your own entity.
+op notesWithAuthors unbounded =
+  notes[body, author.displayName, author.role]
+  sort author.displayName
+
+# A member who left keeps their name and reads `status == "left"`, or
+# "deleted" once they deleted their account. Show them your own way, such as
+# "Bram (Deactivated)".
+op notesWithAuthorStatus unbounded =
+  notes[body, author.displayName, author.status]
+  sort author.displayName
+
+# Count people, not rows: a group counts as its headcount.
+op seats($project: id) unbounded =
+  projectTeams(project == $project)[member]
+  reduce { seats: sum member.memberCount }
+
+# Every person and group the platform knows in this tenant.
+op roster unbounded =
+  members[displayName, kind, role, status, memberCount]
+  sort displayName
+
+# Groups only.
+op groups unbounded =
+  members(kind == "group")[displayName, memberCount]
+  sort displayName
+
+# Who is in which group. `group.displayName` walks the platform ref named
+# `group`; `match groupMembers.group` keeps the rows whose group exists.
+op groupRoster unbounded =
+  groupMembers[member.displayName, group.displayName]
+  match groupMembers.group
+  sort group.displayName, member.displayName
+
+op addNote($body: text) =
+  set notes { author: $caller, body: $body }

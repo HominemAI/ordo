@@ -1,0 +1,59 @@
+# 09 Composition: ops that read other ops
+#
+# Shows how one read builds on another. There is no "view" construct.
+#   - A registered read op can be a source anywhere an entity can.
+#   - In the parens, `$param: expr` binds a callee parameter and any other
+#     entry is a condition on the callee's OUTPUT fields.
+#   - Defaulted callee parameters may be left out. Required ones must be bound.
+#   - The callee finishes first: its own sort and take run, then the
+#     caller's conditions filter that result.
+#   - Composition flattens to one SQL plan at compile time. A cycle is a
+#     compile error. Write ops are called, never composed.
+#
+# Reference: docs/definition-language.md section 5 "Named-query composition".
+
+domain shop @ 1.0.0
+
+entity vendors {
+  name: text
+}
+
+entity products {
+  vendor -> vendors
+  name:   text
+  price:  money
+  listed: date
+  active: bool = true
+}
+
+# The base read. Soft-delete style scoping lives here, once.
+op activeProducts unbounded =
+  products(active)[name, price, vendor]
+
+# Bind a parameter and filter the callee's output fields.
+op cheapActive($cap: money) unbounded =
+  activeProducts(price < $cap)[name, price, vendor]
+
+# Parameters flow through and ref outputs keep walking: `vendor.name`.
+op cheapByVendor($cap: money) unbounded =
+  cheapActive($cap: $cap)[price, vendor.name]
+  group vendor.name { n: count, lowest: min price }
+  sort -n
+
+# Defaults need no binding. Here `$since` has one.
+op recentPrices($since: date = 2026-01-01) unbounded =
+  products(listed >= $since)[name, price]
+  sort -price
+
+op recentCheap =
+  recentPrices[name, price]
+  take 10
+
+# Top 10 first, then filter that result. Order of steps is the meaning.
+op topTen =
+  activeProducts[name, price]
+  sort -price
+  take 10
+
+op topTenUnder($cap: money) =
+  topTen(price < $cap)[name, price]

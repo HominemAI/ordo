@@ -1,0 +1,264 @@
+name: Notes end-to-end
+
+# The notes app end to end (owner ruling, 2026-10-19): a throwaway stack on
+# every push, browser flows with a virtual passkey, Discord through a local
+# stand-in provider. How to run it and read it: docs/howto-e2e.md.
+#
+# Phase 2, not built: a nightly run against a staging deployment with real
+# credentials. The `staging` target below only says so. When it is built,
+# add the schedule here:
+#
+#   schedule:
+#     - cron: '17 3 * * *'
+
+on:
+  push:
+    branches: [main, bleeding]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Where to run: throwaway (a stack built from this commit) or staging (phase 2, not built yet)'
+        type: choice
+        options: [throwaway, staging]
+        default: throwaway
+      browser:
+        description: 'Run the browser flows (Playwright, Chromium, virtual passkey). Off runs the request-level tests alone.'
+        type: boolean
+        default: true
+      update-screenshots:
+        description: 'Make the screenshot pictures again (--update-snapshots=changed) and upload them as the artifact notes-e2e-screenshots. Nothing is committed; a person commits them.'
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_BACKTRACE: '1'
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  throwaway:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.target == 'throwaway') }}
+    # The same runner as ci.yml. Service containers run on its Docker sidecar
+    # and share the pod's network, so Postgres is at localhost:5432.
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --shm-size=1g
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CI: '1'
+      # stack.sh uses this Postgres instead of starting its own. The door
+      # reads ORDO_PG_PASSWORD; psql reads PGPASSWORD (stack.sh sets it).
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_PASSWORD: ordo
+      ORDO_PSQL: psql
+      # The screenshot projects run in their own step below, never here.
+      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2' }}
+      BROWSERS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && 'off' || 'on' }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: e2e-host
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            examples/notes/web/package-lock.json
+            examples/notes/e2e/package-lock.json
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Runner disk noise only; the product fix is the store pool's size
+      # and wait (board task `store-pool-held-blocks-signin`). See the script.
+      - name: Postgres without durable commits (CI only)
+        run: bash scripts/ci-pg-fast-commits.sh
+
+      - name: Build ordo-host and ordo
+        run: cargo build -p ordo-host -p ordo-cli
+
+      - name: Install the page and the tests
+        run: |
+          (cd examples/notes/web && npm ci)
+          (cd examples/notes/e2e && npm ci)
+
+      # Chromium for the passkey flows and the phone, WebKit (Safari) and
+      # Firefox for the notes flows. --with-deps installs their system
+      # libraries with sudo apt, as the psql step above does.
+      - name: Install the browsers
+        if: ${{ env.BROWSERS == 'on' }}
+        working-directory: examples/notes/e2e
+        run: npx playwright install --with-deps chromium webkit firefox
+
+      # Playwright starts the stack (stack.sh) and stops it at the end.
+      - name: Run the use cases
+        working-directory: examples/notes/e2e
+        run: npx playwright test $PROJECTS
+
+      # Postgres's view after a failed run, beside the door's log in the
+      # report (store-pool-held-blocks-signin). The stack also writes one as
+      # it stops, while the door still runs (.stack/pg-at-stop.log).
+      - name: Postgres activity and locks
+        if: failure()
+        continue-on-error: true
+        run: bash scripts/pg-snapshot.sh examples/notes/e2e/.stack/pg-after-failure.log "after the failed run"
+
+      # Screenshots of key screens (owner ruling, 2026-10-21). Report only:
+      # the step may fail and the job stays green. Its own stack, report and
+      # results, so it cannot hide the run above. The pictures are made and
+      # checked here, in this container, and nowhere else.
+      - name: Screenshots (report only)
+        id: screenshots
+        if: ${{ env.BROWSERS == 'on' }}
+        continue-on-error: true
+        working-directory: examples/notes/e2e
+        env:
+          E2E_SCREENSHOTS: '1'
+          E2E_REPORT: report-screenshots
+          E2E_OUTPUT: test-results-screenshots
+          E2E_STATE: ${{ github.workspace }}/examples/notes/e2e/.stack-screenshots
+          UPDATING: ${{ inputs.update-screenshots && '--update-snapshots=changed' || '' }}
+          E2E_UPDATING_SCREENSHOTS: ${{ inputs.update-screenshots && '1' || '' }}
+        run: npx playwright test --project=screenshots --project=screenshots-phone $UPDATING
+
+      - name: Job summary
+        if: always()
+        working-directory: examples/notes/e2e
+        run: node summary.mjs
+
+      - name: Screenshots summary (report only)
+        if: ${{ always() && env.BROWSERS == 'on' }}
+        continue-on-error: true
+        working-directory: examples/notes/e2e
+        env:
+          E2E_UPDATING_SCREENSHOTS: ${{ inputs.update-screenshots && '1' || '' }}
+        run: node summary.mjs --screenshots
+
+      - name: Upload the pictures and what changed
+        if: ${{ always() && env.BROWSERS == 'on' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: notes-e2e-screenshots
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true
+          # screenshots/ holds the pictures (new ones after an update run).
+          # test-results-screenshots/ holds expected, actual and diff of a change.
+          path: |
+            examples/notes/e2e/screenshots/
+            examples/notes/e2e/test-results-screenshots/
+            examples/notes/e2e/report-screenshots/
+            examples/notes/e2e/.stack-screenshots/*.log
+
+      - name: Upload the report, traces and stack logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: notes-e2e-report
+          retention-days: 14
+          if-no-files-found: ignore
+          # The stack's logs live in `.stack/`, and upload-artifact skips
+          # hidden paths unless told otherwise. Without this the server's side
+          # of a failure never reaches the report.
+          include-hidden-files: true
+          path: |
+            examples/notes/e2e/report/
+            examples/notes/e2e/test-results/
+            examples/notes/e2e/.stack/*.log
+            examples/notes/e2e/.stack/stack.json
+
+  # The authorization matrix (`crates/ordo-host/tests/authz_matrix.rs`): every
+  # door route times every actor times every object, against the real binary
+  # and real Postgres. It is `#[ignore]` in the ordinary suite because it
+  # boots a deployment, so it runs here, by `scripts/authz-matrix.sh`, which
+  # on CI uses the service Postgres below.
+  authz-matrix:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.target == 'throwaway') }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --shm-size=1g
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CI: '1'
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_PASSWORD: ordo
+      ORDO_PSQL: psql
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: e2e-host
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Build ordo-host and ordo
+        run: cargo build -p ordo-host -p ordo-cli
+      - name: Run the authorization matrix
+        # The suite's own setup runs psql, which reads PGPASSWORD.
+        env:
+          PGPASSWORD: ordo
+        run: bash scripts/authz-matrix.sh
+
+  staging:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'workflow_dispatch' && inputs.target == 'staging') }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 2
+    steps:
+      - name: Staging is phase 2
+        run: |
+          msg="The staging target is not built yet (phase 2 of the owner's 2026-10-19 ruling). Nothing ran. Choose target 'throwaway'."
+          echo "### Notes end-to-end: staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::$msg"
+          exit 1

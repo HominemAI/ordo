@@ -1,0 +1,16 @@
+# Ordo's guidance for a trial: repository paths, one per line.
+#
+# One file: docs/ai-guide.md, Ordo's short guide for AI agents (the
+# "grammar as a prompt" of definition-language.md §10). About 23 KB,
+# against Supabase's 5 prompts at about 25 KB. It is Ordo's general guide,
+# not written for this app. `crates/ordo-cli/tests/ai_guide_check.rs` runs
+# `ordo check` on every example in it and holds it under 25,000 bytes.
+#
+# Until 2026-10-29 this listed 5 docs, about 240 KB: quickstart, tutorial,
+# traps, howto-sign-in and howto-roles.
+#
+# The runner copies each file from the repository at the commit it runs
+# from, into the workspace's guidance/ folder, and records the commit and
+# each file's sha256 in the trial's record. So the docs always match the
+# `ordo` binary the trial uses.
+docs/ai-guide.md

@@ -1,0 +1,201 @@
+:root {
+  --bg: #fafaf7;
+  --fg: #1c1c1a;
+  --muted: #6b6b66;
+  --card: #ffffff;
+  --line: #dcdcd4;
+  --accent: #2b59c3;
+  --accent-fg: #ffffff;
+  --danger: #b3261e;
+  --tag: #eceae0;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  line-height: 1.45;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --fg: #ecece6;
+    --muted: #a0a099;
+    --card: #1f1f1d;
+    --line: #34342f;
+    --accent: #8fb0ff;
+    --accent-fg: #101010;
+    --danger: #ff8a80;
+    --tag: #2a2a27;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+main {
+  max-width: 56rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0.5rem 0;
+}
+
+h2,
+h3,
+h4 {
+  margin: 0.5rem 0;
+}
+
+h4 {
+  font-size: 1rem;
+}
+
+nav {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+}
+
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  padding: 1rem;
+  margin: 0.75rem 0;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+label.check {
+  font-weight: normal;
+}
+
+input,
+select {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+}
+
+input[type='checkbox'] {
+  width: auto;
+}
+
+.row select {
+  width: auto;
+}
+
+.row label {
+  margin-top: 0;
+  align-self: center;
+}
+
+button {
+  font: inherit;
+  padding: 0.45rem 0.8rem;
+  color: inherit;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  cursor: pointer;
+}
+
+button.primary,
+button.tab.on {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.4rem 0;
+}
+
+.or {
+  color: var(--muted);
+  text-align: center;
+}
+
+.error {
+  color: var(--danger);
+  margin: 0.5rem 0;
+}
+
+.plain {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0;
+}
+
+.grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.75rem;
+}
+
+.grid .card {
+  margin: 0;
+}
+
+.price {
+  font-weight: 600;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.4rem 0;
+}
+
+.tag {
+  background: var(--tag);
+  border-radius: 0.8rem;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.85rem;
+}

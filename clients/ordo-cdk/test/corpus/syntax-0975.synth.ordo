@@ -1,0 +1,55 @@
+domain plantcare @ 0.1.0
+
+entity plants {
+  name: text
+  room: text?
+  everyDays: duration(ms) = 7d
+  notes: text sealed = ""
+}
+
+entity waterings {
+  plant -> plants owned
+  at: date
+  by: text = ""
+}
+
+entity alerts {
+  key: text unique
+  severity: text = "warning"
+  title: text
+  status: text = "active"
+  raised: date
+}
+
+op thirsty($today: date) unbounded =
+  plants[name, room, everyDays]  waterings[at]
+    sort -waterings.at
+    take[plants.id] 1
+    | at <= $today - everyDays or at is null
+    sort cond(at is null -> 0, 1), at
+
+op history($plant: id) =
+  waterings(plant == $plant)[at, by]
+    sort -at
+    take 30
+
+op water($plant: id, $by: text, $today: date) =
+  set waterings { plant: $plant, by: $by, at: $today }
+  set alerts(key == "thirsty:" + $plant and status == "active") { status: "resolved" }
+
+op addPlant($name: text, $room: text, $everyDays: duration(ms)) =
+  set plants { name: $name, room: $room, everyDays: $everyDays }
+
+op pruneLogs($before: date) =
+  del waterings(at <= $before)
+
+routine thirstCheck in plantcare {
+  trigger every day 09:00Z
+  run($today: date):
+    plants[id, name, everyDays]  waterings[at]
+      sort -waterings.at
+      take[plants.id] 1
+      | at <= $today - everyDays or at is null
+    each ->
+      set alerts { key: "thirsty:" + plants.id, title: name + " needs water", raised: $today, status: "active" }
+}

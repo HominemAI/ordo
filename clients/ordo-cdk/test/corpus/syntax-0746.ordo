@@ -1,0 +1,10 @@
+entity leaseParties {
+  lease  -> leases    owned
+  person -> people    owned
+  role:   text = "tenant"
+  unique (lease, person)
+
+  access read   lease.unit.property.propertiesAccess(member == $caller)
+  access write  lease.unit.property.propertiesAccess(
+                  member == $caller and (level == "write" or level == "admin"))
+}

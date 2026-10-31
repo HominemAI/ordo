@@ -1,0 +1,80 @@
+name: Coverage
+
+# Run by hand: which lines the Rust suite never executes. The same suite,
+# database and runner as CI's `test` job, built with coverage instrumentation.
+# It answers "what has no test", so a red test here still writes the report.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 90
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: ordo_conformance
+        ports: ['5432:5432']
+        options: >-
+          --shm-size=1g
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      ORDO_PSQL: psql
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Runner disk noise only; the product fix is the store pool's size
+      # and wait (board task `store-pool-held-blocks-signin`). See the script.
+      - name: Postgres without durable commits (CI only)
+        run: bash scripts/ci-pg-fast-commits.sh
+
+      - name: Test with coverage
+        continue-on-error: true
+        run: cargo llvm-cov --workspace --no-fail-fast --no-report
+
+      - name: Report
+        run: |
+          cargo llvm-cov report --summary-only > coverage-summary.txt
+          cargo llvm-cov report --lcov --output-path lcov.info
+          tail -n 1 coverage-summary.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-coverage
+          path: |
+            coverage-summary.txt
+            lcov.info

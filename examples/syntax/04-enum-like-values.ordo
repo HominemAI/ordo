@@ -1,0 +1,39 @@
+# 04 A field with a closed set of values
+#
+# Shows the idiom that compiles today for "one of a few words".
+#   - `enum("open", "done")` as a field type is [lean] in the reference and
+#     the compiler rejects it: "unknown type `enum`".
+#   - Use a defaulted `text` field and a `check` that lists the allowed words.
+#   - The database enforces the check on every write, so no op can store a
+#     value outside the set.
+#   - (`acl (read, write, admin)` does derive a real enum for its level field.
+#     That is the compiler's own use of it, not a spelling you can write.)
+#
+# Reference: docs/definition-language.md section 2 "Types" ([lean] enum),
+# section 3 "Row invariants: check".
+
+domain projects @ 1.0.0
+
+entity projects {
+  name: text
+}
+
+entity tasks {
+  project  -> projects owned
+  title:   text
+  status:  text = "open"
+  priority: text = "normal"
+  check status == "open" or status == "doing" or status == "done"
+  check priority == "low" or priority == "normal" or priority == "high"
+}
+
+op addTask($project: id, $title: text, $priority: text = "normal") =
+  set tasks { project: $project, title: $title, priority: $priority }
+
+# A value outside the set is refused by the database with `check_violation`.
+op setStatus($task: id, $status: text) =
+  set tasks(id == $task) { status: $status }
+
+op openTasks unbounded =
+  tasks(status == "open")[title, priority, project.name]
+  sort title

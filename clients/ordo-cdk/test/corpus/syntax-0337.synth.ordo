@@ -1,0 +1,10 @@
+op vendorsBillingLag =
+  let orderCount =
+    vendors[id]  workOrders(status == "done")[wo: id]
+      group vendors.id { done: count }
+  let invoiceCount =
+    vendors[id]  invoices[inv: id]
+      group vendors.id { billed: count }
+  vendors[name]  orderCount[done]  invoiceCount[billed]
+    | coalesce(billed, 0) * 2 < coalesce(done, 0)
+    sort name

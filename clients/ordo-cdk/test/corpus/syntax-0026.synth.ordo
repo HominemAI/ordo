@@ -1,0 +1,150 @@
+domain estate @ 1.0.0
+
+entity properties {
+  name: text
+  address: text sealed
+  acquired: date
+}
+
+entity locations {
+  property -> properties owned
+  parent -> locations? owned tree
+  name: text
+  kind: text
+  index (property, kind)
+}
+
+entity units {
+  property -> properties owned
+  location -> locations?
+  name: text
+  unique (property, name)
+}
+
+entity people {
+  name: text sealed
+  email: text? unique sealed indexed
+  phone: text? sealed
+}
+
+entity leases {
+  unit -> units
+  start: date
+  end: date?
+  rent: money sealed
+  status: text = "active"
+}
+
+entity leaseParties {
+  lease -> leases owned
+  person -> people owned
+  role: text = "tenant"
+  unique (lease, person)
+}
+
+entity trades {
+  name: text unique
+}
+
+entity vendors {
+  name: text
+  email: text? sealed
+  active: bool = true
+}
+
+entity vendorTrades {
+  vendor -> vendors owned
+  trade -> trades owned
+  unique (vendor, trade)
+}
+
+entity workOrders {
+  location -> locations
+  vendor -> vendors?
+  opened: date
+  status: text = "open"
+  priority: int = 3
+  descr: text sealed
+}
+
+entity workItems {
+  workOrder -> workOrders owned
+  descr: text sealed
+  cost: money? sealed
+  done: bool = false
+}
+
+entity inspections {
+  unit -> units
+  workOrder -> workOrders
+  at: date
+}
+
+entity buildings {
+  property -> properties owned
+  name: text
+  seats: int
+  used: int = 0
+  check used <= seats
+  check used >= 0
+}
+
+entity invoices {
+  vendor -> vendors
+  number: text
+  issued: date
+  total: money sealed
+  unique (vendor, number)
+}
+
+entity invoiceLines {
+  invoice -> invoices owned
+  workItem -> workItems?
+  amount: money sealed
+}
+
+entity payments {
+  invoice -> invoices
+  paid: date
+  amount: money sealed
+}
+
+entity meters {
+  unit -> units owned
+  kind: text
+}
+
+entity readings {
+  meter -> meters
+  at: datetime
+  value: int
+  unique (meter, at)
+}
+
+entity devices {
+  location -> locations
+  kind: text
+  externalId: text unique
+  armed: bool = false
+}
+
+entity events {
+  device -> devices
+  at: datetime
+  kind: text
+}
+
+entity alerts {
+  kind: text
+  key: text unique
+  severity: text = "warning"
+  title: text sealed
+  status: text = "active"
+  raised: date
+}
+
+entity pages {
+  title: text
+  settings: json = "{}"
+  draft: json?
+}

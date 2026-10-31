@@ -1,0 +1,73 @@
+# 11 Computed writes
+#
+# Shows values on the right-hand side of `set`.
+#   - A field name on the right means the row's CURRENT value, read and
+#     written in one atomic update: `used: used + 1`.
+#   - `$caller` is the signed-in member. No spelling exists for "someone else".
+#   - `cond(c1 -> v1, c2 -> v2, else)` picks a value per row. The last bare
+#     value is the mandatory else.
+#   - Text joins with `+`. Numbers compute exactly; division needs `round`,
+#     `floor` or `ceil` before it can land in an int or money field.
+#   - `let x = set ...` names a freshly created row so a later statement in
+#     the same op can use `x.id`. Only a create can be bound.
+#   - A field reference is refused in a statement that can create, and may
+#     not reach another row (`owner.name`).
+#
+# Reference: docs/writing-data.md section 2, docs/definition-language.md
+# section 3 "Naming a freshly created row", section 2 "Types" (rounding).
+
+domain projects @ 1.0.0
+
+entity teams {
+  name:  text
+  seats: int
+  used:  int = 0
+  check used <= seats
+}
+
+entity members2 {
+  team -> teams owned
+  who:  text
+}
+
+entity tasks {
+  title:    text
+  owner     -> members
+  points:   int = 1
+  priority: text = "normal"
+  note:     text = ""
+}
+
+entity invoices {
+  total: money
+  share: money = 0
+  label: text = ""
+}
+
+# Atomic counter, capped by the `check` on the entity.
+op claimSeat($team: id) =
+  set teams(id == $team) { used: used + 1 }
+
+# `$caller` as a value.
+op claimTask($task: id) =
+  set tasks(id == $task) { owner: $caller }
+
+op addTask($title: text) =
+  set tasks { title: $title, owner: $caller }
+
+# `cond` per row, in a bulk write: every task is bumped by its size.
+op bumpPriorities =
+  set tasks(true) { priority: cond(points >= 8 -> "high", points >= 3 -> "normal", "low") }
+
+# Text concatenation with the row's own fields.
+op labelInvoice($invoice: id, $prefix: text) =
+  set invoices(id == $invoice) { label: $prefix + ": " + label }
+
+# Explicit rounding: money divided by an int is a decimal, so it is rounded.
+op splitEvenly($invoice: id, $heads: int) =
+  set invoices(id == $invoice) { share: round(total / $heads, 2) }
+
+# Bind the new row's id and use it in the next statement.
+op startTeam($name: text, $seats: int, $first: text) =
+  let team = set teams { name: $name, seats: $seats }
+  set members2 { team: team.id, who: $first }

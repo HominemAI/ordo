@@ -1,0 +1,71 @@
+domain plantcare @ 0.1.0
+
+entity plants {
+  name:      text
+  room:      text?
+  everyDays: duration(ms) = 7d               # watering cadence, a first-class duration
+  notes:     text = ""     sealed
+}
+
+entity waterings {
+  plant -> plants   owned
+  at:    date
+  by:    text = ""
+}
+
+entity alerts {                        # the routine's nags are ordinary rows
+  key:      text unique                #   upsert-by-key lifecycle
+  severity: text = "warning"
+  title:    text
+  status:   text = "active"
+  raised:   date
+}
+
+op thirsty($today: date) unbounded =  # execution-relative date passed in (SDK fills)
+  plants[name, room, everyDays]  waterings[at]
+  sort -waterings.at
+  take[plants.id] 1
+  | (at <= $today - everyDays) or at is null   # never-watered has null at.
+  sort cond(at is null -> 0, 1), at            # Nulls sort LAST always, so the
+                                               #   never-watered plants need an
+                                               #   explicit key to reach the top
+
+op history($plant: id) =
+  waterings(plant == $plant)[at, by]
+  sort -at
+  take 30
+
+op water($plant: id, $by: text, $today: date) =
+  set waterings { plant: $plant, by: $by, at: $today }
+  set alerts(key == "thirsty:" + $plant and status == "active") { status: "resolved" }
+
+op addPlant($name: text, $room: text, $everyDays: duration(ms)) =
+  set plants { name: $name, room: $room, everyDays: $everyDays }
+
+op pruneLogs($before: date) =            # maintenance op: prune old logs
+  del waterings(at <= $before)
+
+routine thirstCheck in plantcare {
+  trigger every day 09:00Z
+  run($today: date):
+    plants[id, name, everyDays]  waterings[at]
+    sort -waterings.at
+    take[plants.id] 1
+    | (at <= $today - everyDays) or at is null
+    each ->
+      set alerts { key: "thirsty:" + plants.id,
+                   title: name + " needs water",
+                   raised: $today,
+                   status: "active" }   # converge touches only described fields:
+                                        #   without this, a resolved alert never
+                                        #   re-raises
+}
+
+# Deploy: `ordo check`, then `ordo apply` → API ops (thirsty, history, water,
+# addPlant, pruneLogs), the daily check, auth, permissions and audit. The
+# generated list/detail/form UI and push notifications are planned (`app`,
+# `page`, `channel` and `route` are refused today).
+#
+# Note what this app is NOT: multi-tenant. plantcare has one user, so it
+# declares no guards. The moment a second person shares the data, §8's
+# authorization constructs stop being optional (see `tutorial.md` Part 2).

@@ -1,0 +1,13 @@
+[package]
+name = "ordo-commandlog"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ordo-env = { path = "../ordo-env" }
+ed25519-dalek = "2"
+sha2 = "0.10"
+
+[lints]
+workspace = true

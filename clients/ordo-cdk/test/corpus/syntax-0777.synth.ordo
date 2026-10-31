@@ -1,0 +1,3 @@
+op allLeases unbounded unguarded =
+  leases[start, end, status, unit.name]
+    sort -start

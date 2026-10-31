@@ -1,0 +1,81 @@
+# 08 Joins, let and append
+#
+# Shows how several entities meet in one read. No JOIN keyword exists.
+#   - List sources side by side: `customers[name] orders[total]`. The match
+#     is inferred from declared refs. Parents without children are kept.
+#   - `match any o` keeps parents that have at least one child, `match none o`
+#     keeps parents that have none. Nothing is projected from `o`.
+#   - `match <ref>` picks one ref when two refs link the same pair.
+#   - `let name = pipeline` names an intermediate result. It can be listed
+#     as a source and joined back through the key it grouped on.
+#   - `append source` stacks two sources by column name (UNION ALL).
+#   - A pipeline may contain at most one many-path (the fan-out guard).
+#
+# Reference: docs/definition-language.md section 5 "Match", "Multi-source
+# join semantics", "Let outputs as sources", "Fan-out guard", "Other steps".
+
+domain shop @ 1.0.0
+
+entity customers {
+  name: text
+}
+
+entity orders {
+  customer -> customers
+  placed:   date
+  total:    money
+  memo:     text = ""
+}
+
+entity reviews {
+  customer -> customers
+  stars:    int
+  comment:  text = ""
+  posted:   date
+}
+
+entity accounts {
+  name: text
+}
+
+entity transfers {
+  fromAccount -> accounts
+  toAccount   -> accounts
+  amount:     money
+}
+
+# Inferred join, outer-preserving: customers with no orders still appear
+# with 0 orders and a 0 sum.
+op ordersPerCustomer unbounded =
+  customers[name]  orders[total]
+  group customers.name { n: count, spent: sum total }
+
+# Anti-join: customers who never ordered.
+op neverOrdered unbounded =
+  customers[name]
+  match none orders
+
+# Semi-join: customers with at least one review.
+op reviewers unbounded =
+  customers[name]
+  match any reviews
+
+# Two refs link transfers to accounts, so the author chooses one.
+op incomingByAccount unbounded =
+  transfers[amount]  accounts[name]
+  match transfers.toAccount
+  group accounts.name { received: sum amount }
+
+# A let result is a source. It joins back to customers through the group key.
+op bigSpenders($floor: money) unbounded =
+  let spent = orders[total] group customer { s: sum total }
+  customers[name]  spent[s]
+  | s >= $floor
+  sort -s
+
+# Append: one feed from two shapes. Columns line up by name and type.
+op activity unbounded =
+  orders[who: customer.name, what: memo, at: placed]
+  append reviews[who: customer.name, what: comment, at: posted]
+  sort -at
+  take 20

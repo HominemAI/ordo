@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What a blob upload writes into the chain</title>
+<style>
+:root{
+  --ink:#14161a; --paper:#fbfaf7; --line:#e3ded4; --mut:#7a756b;
+  --chain:#2e4f8a; --chain-bg:#e8edf6; --chain-bd:#c2cfe6;
+  --row:#2e7d5b; --row-bg:#e6f2ec; --row-bd:#bcdccd;
+  --store:#b07a2a; --store-bg:#f7ecd9; --store-bd:#e8d3ab;
+  --gap:#a23b3b; --gap-bg:#f8e9e7; --gap-bd:#e6bdb7;
+  --propose:#2e7d5b; --decline:#a23b3b; --open:#8a5fb0;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:48px 24px 90px}
+h1{font-size:clamp(26px,4.5vw,38px);line-height:1.15;margin:0 0 8px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--mut);margin:0 0 36px;max-width:65ch}
+h2{font-size:21px;margin:46px 0 10px;letter-spacing:-.01em}
+h3{font-size:16px;margin:22px 0 8px}
+p{max-width:70ch;margin:0 0 14px}
+li{max-width:66ch}
+code{font-family:var(--mono);font-size:.87em;background:#f1ede4;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.tag{font-family:var(--mono);font-weight:600;border-radius:5px;padding:1px 8px;font-size:.82em;white-space:nowrap}
+.t-propose{color:var(--propose);background:#e6f2ec;border:1px solid #bcdccd}
+.t-decline{color:var(--decline);background:#f8e9e7;border:1px solid #e6bdb7}
+.t-open{color:var(--open);background:#efe7f6;border:1px solid #d8c5ea}
+figure{margin:22px 0;border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px;overflow-x:auto}
+figcaption{font-size:13px;color:var(--mut);margin-top:10px;max-width:74ch}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--mut);margin:10px 0 28px;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:18px 0}
+.card{border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:15px}
+.card p{font-size:14.5px;color:#3c3a35;margin:0}
+.callout{border:1px solid var(--gap-bd);background:var(--gap-bg);border-radius:10px;padding:14px 18px;margin:18px 0;max-width:74ch}
+.callout.ok{border-color:var(--row-bd);background:var(--row-bg)}
+.callout > b:first-child{display:block;margin-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.pull{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:24px 0;max-width:74ch}
+.pull b{display:block;margin-bottom:4px}
+.twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0}
+@media (max-width:600px){.twocol{grid-template-columns:1fr}}
+.col h4{margin:0 0 8px;font-size:14.5px;letter-spacing:.03em;text-transform:uppercase}
+.col ul{margin:0;padding-left:20px;font-size:14.5px}
+.col li{margin-bottom:6px}
+.foot{color:var(--mut);font-size:13.5px;margin-top:44px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>What a blob upload writes into the chain</h1>
+<p class="sub">This is the one ruling left in blob custody. Everything else in the
+blob plan (<code>docs/plan-blob.md</code>) is built and shipped; this is the
+question the build surfaced and did not answer (<code>plan-blob.md</code> §8).</p>
+
+<div class="legend">
+  <span><i style="background:var(--chain-bg);border-color:var(--chain-bd)"></i> the chain / <code>$commandlog</code></span>
+  <span><i style="background:var(--row-bg);border-color:var(--row-bd)"></i> the row table</span>
+  <span><i style="background:var(--store-bg);border-color:var(--store-bd)"></i> the object store</span>
+  <span><i style="background:var(--gap-bg);border-color:var(--gap-bd)"></i> missing / gap</span>
+</div>
+
+<h2>1 &middot; What the chain is, in one picture</h2>
+<p>An ordinary write (a normal field update on a row) runs the write
+protocol. It reads the row before the change (the <b>before-image</b>) and
+after the change (the <b>after-image</b>), where an <b>image</b> is just the
+full set of the row's field values at that moment. It packages both images
+into a <b>command group</b> (one or more row changes made by one caller
+action) and appends the group to <code>$commandlog</code>, the append-only
+table that <i>is</i> the chain. Appending hashes the new group together with
+the previous hash, so the chain is a running, tamper-evident ledger of every
+group ever appended.</p>
+<p>From that one appended record, three things become possible:</p>
+<ul>
+<li><b>Undo / revert</b> can compute the inverse of the group and apply it,
+because the before-image says what to put back.</li>
+<li><b>Triggers fire.</b> <code>converged</code> and <code>written</code> events
+are derived from command groups, so a listener sees the change.</li>
+<li>The row's <code>rev</code> (its version counter) moves, so a caller holding
+an old <code>rev</code> knows it is stale.</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 820 300" width="100%" role="img" aria-label="the write protocol, ordinary write">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <rect x="20" y="40" width="120" height="50" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="80" y="70" text-anchor="middle" font-size="13" font-weight="600">op runs</text>
+  <path d="M140 65 h50" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="190" y="30" width="170" height="70" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="275" y="60" text-anchor="middle" font-size="13" font-weight="600">write protocol</text>
+  <text x="275" y="78" text-anchor="middle" font-size="11.5" fill="#7a756b">before-image, then write, then after-image</text>
+  <path d="M360 55 h35" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="395" y="10" width="140" height="46" rx="8" fill="var(--row-bg)" stroke="var(--row-bd)"/>
+  <text x="465" y="38" text-anchor="middle" font-size="13" font-weight="600" fill="#2e7d5b">row table</text>
+  <path d="M360 70 h35" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="395" y="65" width="220" height="70" rx="8" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="505" y="88" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2e4f8a">command group</text>
+  <text x="505" y="105" text-anchor="middle" font-size="11" fill="#2e4f8a">before-image + after-image</text>
+  <text x="505" y="121" text-anchor="middle" font-size="11" fill="#2e4f8a">(full row, both sides)</text>
+  <path d="M615 100 h35" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="650" y="65" width="150" height="70" rx="8" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="725" y="94" text-anchor="middle" font-size="13" font-weight="600" fill="#2e4f8a">chain hash</text>
+  <text x="725" y="112" text-anchor="middle" font-size="11" fill="#2e4f8a">$commandlog</text>
+  <path d="M505 135 v25 h220 v10" stroke="#7a756b" fill="none"/>
+  <path d="M725 135 v50" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="30" y="200" width="220" height="70" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="140" y="228" text-anchor="middle" font-size="12.5" font-weight="600">undo / revert</text>
+  <text x="140" y="245" text-anchor="middle" font-size="11" fill="#7a756b">before-image gives the inverse</text>
+  <rect x="300" y="200" width="220" height="70" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="410" y="228" text-anchor="middle" font-size="12.5" font-weight="600">triggers fire</text>
+  <text x="410" y="245" text-anchor="middle" font-size="11" fill="#7a756b">converged / written events</text>
+  <rect x="570" y="200" width="220" height="70" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="680" y="228" text-anchor="middle" font-size="12.5" font-weight="600">rev moves</text>
+  <text x="680" y="245" text-anchor="middle" font-size="11" fill="#7a756b">stale-token detection works</text>
+  <path d="M725 185 L140 185 L140 200" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <path d="M725 185 L410 185 L410 200" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <path d="M725 185 L680 185 L680 200" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+</svg>
+<figcaption>The ordinary path: an op runs the write protocol, which updates
+the <b>row table</b> and appends a <b>command group</b> carrying full
+before/after images to the <b>chain</b>. The append is what makes revert,
+triggers, and <code>rev</code> possible. All three read the chain, not the
+row. Verified: <code>crates/ordo-conformance/src/write.rs:2852</code>
+(<code>row_image</code>, builds the full-row image), <code>write.rs:713</code>
+(the group is assembled from before/after images and appended),
+<code>crates/ordo-exec/src/commandlog.rs:183</code> (<code>TxConn::append_group</code>,
+the call that hashes a group into the chain), <code>crates/ordo-syntax/src/trigger.rs:94</code>
+and <code>:96</code> (<code>EventKind::Converged</code>, <code>EventKind::Written</code>,
+derived from command groups).</figcaption>
+</figure>
+
+<h2>2 &middot; What a blob upload does today</h2>
+<p><code>PUT /blob/&lt;entity&gt;/&lt;field&gt;/&lt;id&gt;</code> streams the uploaded
+bytes through the sealing pipeline into the object store, inserts a
+<code>$blobref</code> row (a reference table row holding the <b>handle</b>, which is a
+128-bit opaque id minted for the upload, plus the sealed mime, size, and
+integrity digest), and then <code>UPDATE</code>s the entity row's column with that
+handle. All three steps run in one database transaction. <b>It appends no
+command group.</b></p>
+
+<figure>
+<svg viewBox="0 0 820 300" width="100%" role="img" aria-label="blob upload today">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <rect x="20" y="40" width="120" height="50" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="80" y="70" text-anchor="middle" font-size="13" font-weight="600">PUT /blob/…</text>
+  <path d="M140 65 h50" stroke="#7a756b" fill="none" marker-end="url(#a2)"/>
+  <rect x="190" y="30" width="170" height="70" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="275" y="55" text-anchor="middle" font-size="13" font-weight="600">seal, store bytes,</text>
+  <text x="275" y="72" text-anchor="middle" font-size="13" font-weight="600">then attach()</text>
+  <text x="275" y="88" text-anchor="middle" font-size="10.5" fill="#7a756b">blob.rs:128</text>
+  <path d="M360 55 h35" stroke="#7a756b" fill="none" marker-end="url(#a2)"/>
+  <rect x="395" y="10" width="140" height="46" rx="8" fill="var(--row-bg)" stroke="var(--row-bd)"/>
+  <text x="465" y="30" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2e7d5b">$blobref insert</text>
+  <text x="465" y="45" text-anchor="middle" font-size="10.5" fill="#2e7d5b">+ entity column UPDATE</text>
+  <path d="M360 70 h35" stroke="#7a756b" fill="none" marker-end="url(#a2)"/>
+  <rect x="395" y="65" width="220" height="70" rx="8" fill="none" stroke="var(--gap)" stroke-dasharray="5 4"/>
+  <text x="505" y="95" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--gap)">no command group</text>
+  <text x="505" y="112" text-anchor="middle" font-size="11" fill="var(--gap)">append_group is never called</text>
+  <path d="M615 100 h35" stroke="var(--gap)" stroke-dasharray="3 3" fill="none" marker-end="url(#a2)"/>
+  <rect x="650" y="65" width="150" height="70" rx="8" fill="#f4f3ef" stroke="#d8d3c8"/>
+  <text x="725" y="94" text-anchor="middle" font-size="13" fill="#9d998e">nothing hashed</text>
+  <text x="725" y="112" text-anchor="middle" font-size="11" fill="#9d998e">chain unchanged</text>
+  <rect x="30" y="200" width="220" height="70" rx="8" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="140" y="228" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--gap)">cannot be reverted</text>
+  <text x="140" y="245" text-anchor="middle" font-size="10.5" fill="var(--gap)">no image, no inverse to compute</text>
+  <rect x="300" y="200" width="220" height="70" rx="8" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="410" y="228" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--gap)">no trigger fires</text>
+  <text x="410" y="245" text-anchor="middle" font-size="10.5" fill="var(--gap)">converged/written never see it</text>
+  <rect x="570" y="200" width="220" height="70" rx="8" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="680" y="228" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--gap)">rev does not move</text>
+  <text x="680" y="245" text-anchor="middle" font-size="10.5" fill="var(--gap)">a held rev looks fresh but is stale</text>
+  <path d="M725 135 v25 h-585 v20" stroke="#c8c3b8" stroke-dasharray="3 3" fill="none" marker-end="url(#a2)"/>
+  <path d="M410 180 v20" stroke="#c8c3b8" stroke-dasharray="3 3" fill="none" marker-end="url(#a2)"/>
+  <path d="M680 180 v20" stroke="#c8c3b8" stroke-dasharray="3 3" fill="none" marker-end="url(#a2)"/>
+</svg>
+<figcaption>Same picture as §1, but the command-group box is an empty dashed
+outline: the row table is still written, but nothing is appended to the
+chain, so the three downstream consumers get nothing. Verified:
+<code>crates/ordo-exec/src/blob.rs:128</code> (<code>attach</code>), <code>:138</code>
+(the <code>$blobref</code> insert), <code>:162</code> (the entity column
+<code>UPDATE</code>). Both statements run inside the caller's transaction, and
+there is no call to <code>append_group</code> anywhere on this path.</figcaption>
+</figure>
+
+<h2>3 &middot; What is not broken</h2>
+<div class="callout ok">
+<b>The garbage-collection floor is still correct.</b>
+A row's <i>delete</i> does go through the ordinary write protocol, and its
+before-image is a full-row image, so it carries the blob handle that was in
+the column at the time of the delete. That before-image sits in the chain,
+inside the reference set the blob sweep checks before it deletes an object.
+The gap described in §2 is the record of the <b>upload</b>, not the record
+that could <b>resurrect</b> a deleted row's file. Deleting a row with a blob
+field, and reverting that delete, both work correctly today.
+</div>
+<p>What is missing is narrower than "blobs are unaudited": it is specifically
+that <i>attaching or replacing</i> a file leaves no trace, while a row's
+deletion (and its later revert) still does.</p>
+
+<h2>4 &middot; Why it was not simply fixed: the image</h2>
+<p>Appending a group is one call: <code>TxConn::append_group</code>
+(<code>crates/ordo-exec/src/commandlog.rs:183</code>) already takes the same
+transaction <code>attach</code> holds. The hard part is building the
+<b>image</b> to append. <code>row_image</code>
+(<code>crates/ordo-conformance/src/write.rs:2852</code>) is the one function
+that builds a full-row before/after image today: for a sealed field it also
+mints a <code>SealedHandle</code> and stores the payload, so the image builder
+and the payload-minting logic are the same code. It is <code>pub(crate)</code>
+inside <code>ordo-conformance</code>, so it is not visible to <code>ordo-exec</code>, where
+the blob door lives.</p>
+<p>Writing a second image builder inside <code>ordo-exec</code> would mean two
+functions independently deciding what "the image of this row" means. If they
+ever disagree (a field ordering difference, a sealing edge case, a NULL
+handled differently), the result is not a crash. It is a chain that still
+verifies (the hash math does not know what a correct image looks like) and a
+revert that restores the wrong row state.</p>
+
+<figure>
+<svg viewBox="0 0 820 260" width="100%" role="img" aria-label="two builders hazard vs one builder two callers">
+  <text x="205" y="26" text-anchor="middle" font-size="13" font-weight="600" fill="var(--gap)">two builders (rejected)</text>
+  <rect x="20" y="40" width="150" height="44" rx="7" fill="#fff" stroke="#e3ded4"/>
+  <text x="95" y="66" text-anchor="middle" font-size="12">write protocol</text>
+  <rect x="240" y="40" width="150" height="44" rx="7" fill="#fff" stroke="#e3ded4"/>
+  <text x="315" y="66" text-anchor="middle" font-size="12">blob door</text>
+  <text x="95" y="105" text-anchor="middle" font-size="11" fill="#7a756b">builder A</text>
+  <text x="315" y="105" text-anchor="middle" font-size="11" fill="#7a756b">builder B</text>
+  <path d="M95 84 v25" stroke="#7a756b" fill="none"/>
+  <path d="M315 84 v25" stroke="#7a756b" fill="none"/>
+  <rect x="30" y="115" width="130" height="34" rx="6" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="95" y="136" text-anchor="middle" font-size="11" fill="#2e4f8a">image A</text>
+  <rect x="250" y="115" width="130" height="34" rx="6" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="315" y="136" text-anchor="middle" font-size="11" fill="#2e4f8a">image B</text>
+  <path d="M95 149 v20 h220 v-20" stroke="var(--gap)" fill="none" stroke-dasharray="4 3"/>
+  <rect x="115" y="169" width="200" height="50" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="215" y="190" text-anchor="middle" font-size="11.5" fill="var(--gap)" font-weight="600">one chain, if A &ne; B:</text>
+  <text x="215" y="206" text-anchor="middle" font-size="11" fill="var(--gap)">verifies, reverts wrong row</text>
+
+  <line x1="460" y1="10" x2="460" y2="250" stroke="#e3ded4"/>
+
+  <text x="640" y="26" text-anchor="middle" font-size="13" font-weight="600" fill="var(--propose)">one builder, two callers (proposed)</text>
+  <rect x="500" y="40" width="150" height="44" rx="7" fill="#fff" stroke="#e3ded4"/>
+  <text x="575" y="66" text-anchor="middle" font-size="12">write protocol</text>
+  <rect x="720" y="40" width="90" height="44" rx="7" fill="#fff" stroke="#e3ded4"/>
+  <text x="765" y="66" text-anchor="middle" font-size="12">blob door</text>
+  <path d="M575 84 v55" stroke="#7a756b" fill="none"/>
+  <path d="M765 84 v20 h-190 v35" stroke="#7a756b" fill="none"/>
+  <rect x="505" y="139" width="260" height="40" rx="7" fill="var(--row-bg)" stroke="var(--row-bd)"/>
+  <text x="635" y="164" text-anchor="middle" font-size="11.5" fill="#2e7d5b" font-weight="600">one image builder (row_image)</text>
+  <path d="M635 179 v20" stroke="#7a756b" fill="none"/>
+  <rect x="535" y="199" width="200" height="40" rx="7" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="635" y="223" text-anchor="middle" font-size="11.5" fill="#2e4f8a" font-weight="600">one chain, always agrees</text>
+</svg>
+<figcaption>Left: two independent image builders can silently disagree, which
+would let the chain verify while describing the wrong row. Right: the same shape is
+already used for the guard predicate. <code>guard_filter_query</code>
+(<code>crates/ordo-sema/src/lib.rs:728</code>) is one function called by the write
+protocol, by undo (<code>crates/ordo-exec/src/undo.rs:1294</code>), and by the
+blob door (<code>crates/ordo-exec/src/blob.rs:88</code>). Candidate (a) below is
+the same pattern applied to <code>row_image</code>.</figcaption>
+</figure>
+
+<h2>5 &middot; The three candidates</h2>
+
+<div class="cards">
+  <div class="card">
+    <h4><span class="tag t-propose">proposed</span> (a) the door builds the group itself</h4>
+    <p>The blob door builds a converge group in the transaction it already
+    holds, using the shared image builder. Nothing in the current code has
+    to be undone, because <code>attach</code> already writes the column in the
+    right transaction with the guard already checked; it needs to also build
+    images and append.</p>
+  </div>
+  <div class="card">
+    <h4><span class="tag t-decline">declined</span> (b) return a handle, assign later</h4>
+    <p>Upload returns a handle; a later ordinary write op assigns it to the
+    column. Refused today: <code>blob</code> is not a legal parameter type
+    (<code>blob_parameter</code>, <code>crates/ordo-sema/src/lib.rs:192</code>):
+    "an op parameter cannot name an object the caller did not put there."</p>
+  </div>
+  <div class="card">
+    <h4><span class="tag t-open">open</span> (c) the door calls the write protocol</h4>
+    <p>Instead of reimplementing a slice of the write protocol, the upload
+    compiles to a converge that the ordinary executor runs, with the handle
+    supplied by the platform rather than by caller-written expression.</p>
+  </div>
+</div>
+
+<table>
+<tr><th>Candidate</th><th>Needs</th><th>Costs</th><th>Undoes</th></tr>
+<tr><td>(a) door builds the group</td>
+    <td><code>row_image</code> lifted out of <code>ordo-conformance</code> into
+    something both the write protocol and the blob door call (one
+    builder, two callers)</td>
+    <td>a crate-dependency inversion: <code>ordo-exec</code> currently depends on
+    <code>ordo-conformance</code>; the builder's natural home is
+    <code>ordo-exec</code>, with conformance calling in</td>
+    <td>nothing</td></tr>
+<tr><td>(b) return-and-assign</td>
+    <td>a scoped, expiring, revocable handle: proof the platform minted
+    it, for this <code>(entity, field, row)</code>, recently</td>
+    <td>more machinery than (a): a second capability-like artifact, similar
+    in shape to a share link but pointing inward</td>
+    <td>the language: <code>blob</code> becomes a legal parameter type, which
+    is the rule <code>blob_parameter</code> currently enforces</td></tr>
+<tr><td>(c) door calls the write protocol</td>
+    <td>the write path must accept a platform-supplied value that has no
+    caller-written source expression</td>
+    <td>opens a new seam in the executor for exactly one caller (the blob
+    door)</td>
+    <td>nothing</td></tr>
+</table>
+
+<h2>6 &middot; The dependent question (§8.2): does the digest ride the image?</h2>
+<p>The digest already exists. <code>$blobref</code> carries a <b>sealed</b>
+<code>integrity</code> column (<code>crates/ordo-crypto/src/blobref.rs:111</code>),
+computed over the plaintext bytes as they stream past and sealed under the
+space's data-encryption key. <code>BlobPipeline::verify</code>
+(<code>crates/ordo-blob/src/pipeline.rs:445</code>) opens it and checks a fetched
+object against it, on every read. The open part is narrower than "should we
+hash uploads": it is only whether a <b>converge image</b> (the record §8.1
+would start writing) carries a copy of that digest.</p>
+<p>Timing matters here specifically: adding the digest to the image when §8.1
+lands is free, because §8.1 is the commit that first writes a blob image at
+all. Adding it later is a migration. It moves every chain hash that
+carries one, because the image is part of what gets hashed.</p>
+
+<figure>
+<svg viewBox="0 0 820 260" width="100%" role="img" aria-label="digest in the image, and the revert-time check">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <rect x="30" y="20" width="240" height="120" rx="8" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="150" y="44" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2e4f8a">converge image</text>
+  <text x="150" y="66" text-anchor="middle" font-size="11" fill="#2e4f8a">handle</text>
+  <text x="150" y="84" text-anchor="middle" font-size="11" fill="#2e4f8a">mime, size (sealed)</text>
+  <rect x="55" y="94" width="190" height="34" rx="6" fill="none" stroke="var(--open)" stroke-dasharray="4 3"/>
+  <text x="150" y="115" text-anchor="middle" font-size="11" fill="var(--open)">digest? (§8.2 open)</text>
+  <path d="M270 80 h50" stroke="#7a756b" fill="none" marker-end="url(#a3)"/>
+  <rect x="330" y="20" width="180" height="120" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="420" y="46" text-anchor="middle" font-size="12.5" font-weight="600">revert of a</text>
+  <text x="420" y="63" text-anchor="middle" font-size="12.5" font-weight="600">blob converge</text>
+  <text x="420" y="88" text-anchor="middle" font-size="11" fill="#7a756b">restores the handle;</text>
+  <text x="420" y="104" text-anchor="middle" font-size="11" fill="#7a756b">if carried, can check</text>
+  <text x="420" y="120" text-anchor="middle" font-size="11" fill="#7a756b">the object before success</text>
+  <path d="M420 140 v20" stroke="#7a756b" fill="none" marker-end="url(#a3)"/>
+  <rect x="310" y="170" width="200" height="70" rx="8" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="410" y="192" text-anchor="middle" font-size="12" font-weight="600" fill="var(--gap)">mismatch</text>
+  <text x="410" y="210" text-anchor="middle" font-size="11" fill="var(--gap)">refuse: consistent with</text>
+  <text x="410" y="225" text-anchor="middle" font-size="11" fill="var(--gap)">undo.rs:783's posture</text>
+  <path d="M420 170 h190" stroke="#7a756b" fill="none"/>
+  <rect x="530" y="170" width="230" height="70" rx="8" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="645" y="192" text-anchor="middle" font-size="12" font-weight="600" fill="var(--store)">store unreachable</text>
+  <text x="645" y="210" text-anchor="middle" font-size="11" fill="var(--store)">restore-and-warn, because the chain</text>
+  <text x="645" y="225" text-anchor="middle" font-size="11" fill="var(--store)">must not depend on the store</text>
+</svg>
+<figcaption>The image map gains an optional <code>digest</code> field, sealed
+like <code>mime</code>/<code>size</code>. If carried, a revert can check the
+restored handle against the digest before declaring success. But the two
+failure kinds need different answers: a <b>mismatch</b> is a real
+inconsistency and should refuse, the way <code>undo.rs:783</code> already
+refuses before any write when a sealed handle will not resolve; an
+<b>unreachable object store</b> is an outage, not a corruption, and refusing
+on it would make the undo horizon depend on the object store's uptime (a
+dependency the chain has never had before).</figcaption>
+</figure>
+
+<h2>7 &middot; What is safe to ship without the ruling</h2>
+<div class="twocol">
+  <div class="col">
+    <h4 style="color:var(--propose)">Safe, and already shipped</h4>
+    <ul>
+      <li>the store tier and both bindings (filesystem, S3-compatible)</li>
+      <li>the language change (<code>blob</code>, <code>uri</code>, <code>inline</code>)</li>
+      <li>the sealing pipeline and chunked STREAM</li>
+      <li>caps (body limit, max object size)</li>
+      <li>reference GC and its undo-horizon floor</li>
+      <li>BYO bucket</li>
+      <li>export</li>
+    </ul>
+  </div>
+  <div class="col">
+    <h4 style="color:var(--gap)">Not safe to build until ruled</h4>
+    <ul>
+      <li>a trigger on file arrival</li>
+      <li>an un-attach surface in undo/redo</li>
+      <li>a history view of file changes</li>
+      <li>log replay that reconstructs blob references</li>
+    </ul>
+  </div>
+</div>
+<p>Everything on the left does not depend on the upload being visible in the
+chain. Everything on the right assumes it is, and none of it exists yet,
+so building any of it now would build against an assumption §8.1 has not
+settled.</p>
+
+<h2>8 &middot; The decision being asked</h2>
+<div class="pull">
+<b>Rule between (a) and (c).</b>
+(b) is declined above, with reasons. Deferring the whole question is
+legitimate: §7 already fences off what would be built on the wrong
+assumption, and nothing shipped depends on this ruling landing on any
+particular schedule.
+</div>
+<p>The builder's recommendation is <b>(a)</b>, for three reasons:</p>
+<ol>
+<li>it extends what is already shipped: <code>attach</code> keeps its shape
+and gains an append, rather than being replaced;</li>
+<li>the one-builder-two-callers precedent already exists and already works
+(<code>guard_filter_query</code>, shared by the write protocol, undo, and the
+blob door);</li>
+<li>(c) opens a new executor seam (the write path accepting a
+platform-supplied value with no caller expression) for exactly one
+caller, which is a wider change for a narrower benefit.</li>
+</ol>
+
+<p class="foot">Companion to <code>docs/plan-blob.md</code> §8. Every claim on
+this page cites a file and the line verified against the tree on 2026-09-08.
+Where this page's wording differs slightly from the plan's line numbers (for
+example the entity-column <code>UPDATE</code> in <code>blob.rs</code>, cited here
+at line 162), the number given is the one read directly from the current
+source.</p>
+
+</div>
+</body>
+</html>

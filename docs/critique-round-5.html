@@ -1,0 +1,375 @@
+<title>Critique Round Five</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --ground:   #F3F4F7;
+    --raised:   #FFFFFF;
+    --ink:      #14161C;
+    --muted:    #545B6B;
+    --rule:     #D7DAE3;
+    --brass:    #8A5E14;
+    --brass-bg: #F2E7CE;
+    --danger:   #97291A;
+    --danger-bg:#F8E6E2;
+    --good:     #1A6144;
+    --good-bg:  #E3F0E9;
+    --mono-bg:  #1A1D24;
+    --mono-ink: #E6E8EE;
+    --focus:    #2B5FD9;
+    --gutter: max(16px, 5%);
+    --step: 25px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#12141A; --raised:#1A1D25; --ink:#E9EBF1; --muted:#A0A7B8;
+      --rule:#2A2F3A; --brass:#DBA94E; --brass-bg:#2B2317; --danger:#E79483;
+      --danger-bg:#2E1B17; --good:#63C398; --good-bg:#16271F;
+      --mono-bg:#0D0F14; --mono-ink:#DDE0E8; --focus:#7CA0FF;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#12141A; --raised:#1A1D25; --ink:#E9EBF1; --muted:#A0A7B8;
+    --rule:#2A2F3A; --brass:#DBA94E; --brass-bg:#2B2317; --danger:#E79483;
+    --danger-bg:#2E1B17; --good:#63C398; --good-bg:#16271F;
+    --mono-bg:#0D0F14; --mono-ink:#DDE0E8; --focus:#7CA0FF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: var(--step); line-height: 1.7;
+    padding-inline: var(--gutter); padding-block: 0 5rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { width: auto; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+  .bar {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--rule);
+    margin-inline: calc(-1 * var(--gutter)); padding: .55rem var(--gutter);
+    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+  }
+  .bar span {
+    font-family: Archivo, system-ui, sans-serif; font-size: .8rem;
+    font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .sizes { display: flex; gap: .4rem; }
+  .sizes button {
+    font-family: Archivo, system-ui, sans-serif; font-size: .95rem;
+    font-weight: 600; padding: .3rem .75rem; border: 1px solid var(--rule);
+    border-radius: 999px; background: var(--raised); color: var(--ink);
+    cursor: pointer;
+  }
+  .sizes button[aria-pressed="true"] {
+    background: var(--brass-bg); border-color: var(--brass); color: var(--brass);
+  }
+
+  header.top { padding-block: 3rem 1rem; }
+  h1 {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 800;
+    font-size: 2.4em; line-height: 1.06; letter-spacing: -.02em;
+    margin: 0 0 .6rem; text-wrap: balance;
+  }
+  .standfirst { font-size: 1.05em; color: var(--muted); margin: 0; text-wrap: pretty; }
+  h2 {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 800;
+    font-size: 1.4em; line-height: 1.2; margin: 3rem 0 1rem;
+    text-wrap: balance; border-top: 1px solid var(--rule); padding-top: 2rem;
+  }
+  p { margin: 0 0 1.05rem; text-wrap: pretty; }
+  a { color: var(--brass); text-underline-offset: .2em; }
+
+  .scoreboard {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+    border-radius: 10px; overflow: hidden; margin: 2rem 0;
+  }
+  .cell { background: var(--raised); padding: 1.1rem 1.2rem; }
+  .cell .n {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 800;
+    font-size: 2.1em; line-height: 1; display: block; margin-bottom: .25rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .cell .l { font-size: .82em; color: var(--muted); line-height: 1.4; display: block; }
+  .cell.good .n { color: var(--good); }
+  .cell.bad .n  { color: var(--danger); }
+
+  .finding {
+    border: 1px solid var(--rule); border-radius: 10px;
+    background: var(--raised); padding: 1.3rem 1.4rem; margin: 0 0 1.1rem;
+  }
+  .finding.new { border-color: var(--danger); border-width: 2px; }
+  .finding > :last-child { margin-bottom: 0; }
+  .fid {
+    display: flex; gap: .7rem; align-items: baseline; flex-wrap: wrap;
+    margin-bottom: .6rem;
+  }
+  .fid code {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .8em;
+    font-weight: 700; color: var(--muted); background: none; padding: 0;
+  }
+  .fid h3 {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 600;
+    font-size: 1em; margin: 0; flex: 1 1 14ch;
+  }
+  .tag {
+    font-family: Archivo, system-ui, sans-serif; font-size: .68em;
+    font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    padding: .25em .7em; border-radius: 999px; white-space: nowrap;
+  }
+  .t-closed  { background: var(--good-bg);   color: var(--good); }
+  .t-open    { background: var(--danger-bg); color: var(--danger); }
+  .t-partial { background: var(--brass-bg);  color: var(--brass); }
+
+  pre {
+    background: var(--mono-bg); color: var(--mono-ink);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: .74em; line-height: 1.6; padding: 1rem 1.1rem;
+    border-radius: 8px; overflow-x: auto; margin: 0 0 1.05rem;
+  }
+  pre b { color: #E79483; font-weight: 700; }
+  code {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .82em;
+    background: var(--brass-bg); color: var(--brass);
+    padding: .12em .38em; border-radius: 4px; overflow-wrap: anywhere;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: 1em; }
+  ul { margin: 0 0 1.05rem; padding-left: 1.3em; }
+  li { margin-bottom: .5rem; }
+  li::marker { color: var(--brass); }
+  footer { border-top: 1px solid var(--rule); margin-top: 3rem; padding-top: 2rem; color: var(--muted); font-size: .92em; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="wrap">
+  <div class="bar">
+    <span>Text size</span>
+    <div class="sizes" role="group" aria-label="Text size">
+      <button type="button" id="cr-1" data-px="25" aria-pressed="true">Large</button>
+      <button type="button" id="cr-2" data-px="30" aria-pressed="false">Larger</button>
+      <button type="button" id="cr-3" data-px="36" aria-pressed="false">Largest</button>
+      <button type="button" id="cr-4" data-px="44" aria-pressed="false">Huge</button>
+    </div>
+  </div>
+
+  <header class="top">
+    <h1>Critique Round Five</h1>
+    <p class="standfirst">The original five expert reviews, re-run across the
+    documentation as it stands. Every finding checked against the code or the
+    running binary, not against a status table.</p>
+  </header>
+
+  <p>The last formal re-run was <strong>22 days ago</strong>, and every engine
+  in this repository was built after it. So its verdicts were stale, and the
+  right way to answer the question was to run the checks again rather than
+  read the last answer.</p>
+
+  <div class="scoreboard">
+    <div class="cell good"><span class="n">8</span><span class="l">usability findings closed, with evidence</span></div>
+    <div class="cell"><span class="n">1</span><span class="l">closed in the docs, unbuilt in the engine</span></div>
+    <div class="cell"><span class="n">1</span><span class="l">still carried, and narrower than it was</span></div>
+    <div class="cell good"><span class="n">1</span><span class="l">new finding, Major — fixed the same day</span></div>
+  </div>
+
+  <p><strong>The documentation is in materially better shape than the review
+  that produced these findings described.</strong> The one new finding is the
+  same pattern that review kept identifying — a developer stopped by what the
+  documents say rather than by the language being hard — and it is the
+  sharpest instance of it so far.</p>
+
+  <h2>The new finding</h2>
+
+  <div class="finding new">
+    <div class="fid">
+      <code>W-001</code>
+      <h3>The tutorial teaches a declaration the compiler cannot parse</h3>
+      <span class="tag t-closed">Major · fixed</span>
+    </div>
+
+    <p>Section 13 of the tutorial introduces a <code>routine</code> block as
+    ordinary syntax and spends a page on what is right and wrong about it.
+    The shipping binary cannot read the word at all:</p>
+
+    <pre><code>$ ordo check routine.ordo
+routine.ordo:1:1: parse error [parse_error]:
+    expected a declaration (<b>`domain`, `entity`, `op`</b>), found `routine`</code></pre>
+
+    <p><strong>The refusal is the defect, not the absence.</strong> The
+    feature being unbuilt was a deliberate decision and a correct one: two of
+    our own documents spell that declaration two different ways, so building
+    either would have picked between them by accident. What the decision
+    missed was a pass over the pages that teach the spelling nobody picked.</p>
+
+    <p>The message names three alternatives and stops, so it reads as
+    <em>you made a typo</em> or <em>your copy is out of date</em>. Someone who
+    has followed twelve sections correctly now believes they mistyped
+    something the page told them to write. Searching the tutorial for any
+    warning — <em>not yet</em>, <em>unbuilt</em>, <em>does not compile</em> —
+    returns nothing.</p>
+
+    <p><strong>Six documents teach it as working syntax</strong>, and the same
+    wall waits behind six other declarations that are reserved and unbuilt.
+    Each will produce the same misleading message the first time somebody
+    writes one.</p>
+
+    <h3 style="font-family:Archivo,system-ui,sans-serif;font-size:1em;margin:1.6rem 0 .5rem;">Fixed, both halves</h3>
+
+    <p><strong>The refusal now says what state the word is in.</strong> Nine
+    reserved-but-unbuilt declarations refuse by name, each saying what it is
+    and where it is specified, rather than listing the three that work:</p>
+
+    <pre><code>$ ordo check routine.ordo
+routine.ordo:1:1: parse error [parse_error]: `routine` is reserved
+    and not implemented: scheduled and reactive rules are specified
+    in `definition-language.md` §7 and §8 and no compiler accepts
+    one yet — the declaration's spelling is deliberately unsettled
+    (checklist 12a, 19c)</code></pre>
+
+    <p><strong>And the documents say so.</strong> The tutorial carries a
+    notice separating what is settled — the rules about what such a routine
+    may see, which is the point of the section — from the spelling, which is
+    what is actually waiting. Three other documents carry a short form above
+    their first block.</p>
+
+    <p><strong>The fix found out why this survived four rounds of review.</strong>
+    The first version was written into the wrong branch of the parser. It
+    compiled, it read correctly, and it changed nothing — because the branch
+    it should have been in produces a message that looks identical, character
+    for character. No amount of reading the output could have told the two
+    apart. A unit test caught it.</p>
+  </div>
+
+  <h2>How the tutorial was tested</h2>
+
+  <p>Round three closed the old capstone finding by reading the tutorial. This
+  pass compiled it instead. All 24 blocks that look like source were extracted
+  and run through <code>ordo check</code>:</p>
+
+  <ul>
+    <li><strong>8 compile standing alone.</strong></li>
+    <li><strong>13 fail only because they are fragments</strong>, naming an
+    entity or op an earlier block declares. That is a tutorial building up a
+    program, which is what a tutorial does.</li>
+    <li><strong>2 are grammar notation</strong>, not programs
+    (<code>op name($params) flags = body</code>), and correctly do not
+    compile.</li>
+    <li><strong>1 fails on purpose</strong> — the section titled
+    <em>The compile error that saves you</em>.</li>
+    <li><strong>1 is W-001.</strong></li>
+  </ul>
+
+  <p>So the old capstone defect is genuinely repaired, and the method that
+  found this one is now cheap to run again.</p>
+
+  <h2>The usability findings, one by one</h2>
+
+  <div class="finding">
+    <div class="fid"><code>X-074</code><h3><code>let</code> was in no onboarding document</h3><span class="tag t-closed">Closed</span></div>
+    <p>It cost an earlier build its central business rule. It now appears 12
+    times in the tutorial and 13 times in the syntax examples, which are the
+    two documents the finding named as silent.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-075</code><h3>The reserved-word list was incomplete and labeled closed</h3><span class="tag t-closed">Closed</span></div>
+    <p>There is no hand-written list any more. There is a rule — a word is
+    reserved if it can begin a declaration or a clause — with the words
+    derived under it.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-076</code><h3>Routine names in every example broke the identifier rule</h3><span class="tag t-closed">Closed</span></div>
+    <p>The hyphenated names are gone. The one surviving <code>lease-expiry</code>
+    in the specification is the rule that forbids it, explaining that the
+    hyphen reads as minus.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-077</code><h3>Parameter bounds were upper-bound only</h3><span class="tag t-closed">Closed</span></div>
+    <p>Bounds now carry both a minimum and a maximum, so one constraint no
+    longer has to be written twice and raise two different errors at two
+    different times.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-078</code><h3>The app manifest grammar was illustrative</h3><span class="tag t-partial">Carried, narrower</span></div>
+    <p>The half that failing builds actually tripped on — how a page binds its
+    data — was promoted to normative, and the section now opens by telling the
+    reader its two halves have different status. What stays illustrative is
+    how a metric or a table renders.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-081</code><h3>No syntax existed to emit a notification</h3><span class="tag t-partial">Docs closed, engine unbuilt</span></div>
+    <p>The specification now names the mechanism. The engine has none of it.
+    Two facts rather than one verdict, because a reader of the spec and a
+    reader of the binary would otherwise get different answers.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-082</code><h3>The trigger event vocabulary was never enumerated</h3><span class="tag t-closed">Closed</span></div>
+    <p>It is a closed set now, and an unrecognised kind is a compile error
+    rather than a pattern that silently never fires.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-083</code><h3>Far more documentation than code</h3><span class="tag t-closed">Inverted</span></div>
+    <p>71,108 lines of documentation against 228,646 lines of Rust, roughly
+    one to three. The concern does not describe this repository any more.</p>
+  </div>
+
+  <h2>The two the last round left open</h2>
+
+  <div class="finding">
+    <div class="fid"><code>X-001</code><h3>Authorization was specified but did not execute</h3><span class="tag t-closed">Closed</span></div>
+    <p>The headline finding of every round until now. Guards are compiled into
+    the query itself, and five conformance suites exercise them.</p>
+  </div>
+
+  <div class="finding">
+    <div class="fid"><code>X-068</code><h3>A row limit counted as proof of a bounded query</h3><span class="tag t-partial">Half closed</span></div>
+    <p>A limit now bounds at the parameter's declared ceiling rather than at
+    whatever number reaches the plan, refused at registration if the parameter
+    has no ceiling and refused at the door if a caller exceeds it. The other
+    half — admitting a limit only where the planner can prove the work stops
+    early — is not done, and is recorded rather than assumed covered.</p>
+  </div>
+
+  <h2>What this pass did not cover</h2>
+
+  <p>The last round also carried a dozen findings about correctness,
+  distributed systems and operability. Those are not usability, and usability
+  was the question. They are still carried and still three weeks stale, and a
+  round six over them is worth doing before a first deployment carries data
+  that matters.</p>
+
+  <footer>
+    <p>Full working, with the evidence for every verdict and the commands
+    behind it, is in <code>docs/critique-consolidated-5.md</code>. The new
+    finding was filed as checklist <code>17af</code> and
+    <code>routine-taught-unbuilt</code> on the decisions board, and both
+    halves were built the same day, with the test falsified by removing the
+    check and watching it fail.</p>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var KEY = "ordo-critique5-size";
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".sizes button"));
+    function apply(px, persist) {
+      document.documentElement.style.setProperty("--step", px + "px");
+      buttons.forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.px === String(px))); });
+      if (persist) { try { localStorage.setItem(KEY, String(px)); } catch (e) {} }
+    }
+    buttons.forEach(function (b) { b.addEventListener("click", function () { apply(b.dataset.px, true); }); });
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
+    if (saved && buttons.some(function (b) { return b.dataset.px === saved; })) { apply(saved, false); }
+  })();
+</script>

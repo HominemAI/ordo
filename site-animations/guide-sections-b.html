@@ -1,0 +1,313 @@
+    <section class="doc-section" id="sec-sovereignty">
+      <h2>Sovereignty</h2>
+      <p class="kicker">Custody is a per-space dial, not a platform-wide setting — and every claim about who can read what is enforced at write time, not asserted in a policy document.</p>
+
+      <h3 id="spaces">Spaces</h3>
+      <div class="split">
+        <div>
+          <p>Every Ordo deployment divides into <strong>spaces</strong>. A space is one world of data — its own membership, its own keys, its own command history. Nothing is global by accident: a row, a key, and a chain all belong to exactly one space, and everything else in this section is a property of one space at a time.</p>
+          <p>A single deployment can host spaces with completely different custody postures side by side. One team's data can sit under platform-managed keys while another's sits fully client-held, in the same database, on the same compiled schema.</p>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 210">
+            <rect x="20" y="18" width="660" height="168" rx="16" class="d-box" style="fill:none" stroke-dasharray="5 5"/>
+            <text x="46" y="36" class="d-sub" text-anchor="start">one deployment</text>
+
+            <rect x="48" y="54" width="180" height="110" rx="10" class="d-box"/>
+            <text x="138" y="78" class="d-text">space: acme</text>
+            <text x="138" y="100" class="d-sub" text-anchor="middle">custody: managed</text>
+            <text x="138" y="120" class="d-mono" text-anchor="middle">epoch e2</text>
+            <text x="138" y="138" class="d-mono" text-anchor="middle">chain #841</text>
+
+            <rect x="260" y="54" width="180" height="110" rx="10" class="d-box-hi"/>
+            <text x="350" y="78" class="d-text">space: studio-b</text>
+            <text x="350" y="100" class="d-sub" text-anchor="middle">custody: client-held</text>
+            <text x="350" y="120" class="d-mono-hi" text-anchor="middle">epoch e7</text>
+            <text x="350" y="138" class="d-mono" text-anchor="middle">chain #212</text>
+
+            <rect x="472" y="54" width="180" height="110" rx="10" class="d-box"/>
+            <text x="562" y="78" class="d-text">space: maya</text>
+            <text x="562" y="100" class="d-sub" text-anchor="middle">custody: managed</text>
+            <text x="562" y="120" class="d-mono" text-anchor="middle">epoch e1</text>
+            <text x="562" y="138" class="d-mono" text-anchor="middle">chain #38</text>
+          </svg>
+          <figcaption>Three spaces, one deployment — each with its own keys, epoch, and hash chain.</figcaption>
+        </figure>
+      </div>
+
+      <h3 id="custody-dial">The custody dial</h3>
+      <p>Within a space, custody is a dial with three stops. Moving it doesn't change your schema or your queries — it changes what the database is physically capable of reading.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Dial position</th><th>The database holds</th><th>The platform can read</th></tr></thead>
+          <tbody>
+            <tr><td><code>custody: managed</code></td><td>plaintext rows, indexed and sortable normally</td><td>everything — the default, and the common case</td></tr>
+            <tr><td>sealed fields</td><td>ciphertext under the space's DEK, plus a blind-index digest per indexed field</td><td>open fields freely; sealed fields only by decrypting at query time, one row at a time</td></tr>
+            <tr><td>client-held keys</td><td>ciphertext only — the wrapping key never reaches the platform</td><td>nothing sealed, ever, even to service the account</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The three stops are additive, not exclusive: a space runs under <code>custody: managed</code> by default, and individual fields opt into <code>sealed</code> — up to and including a space where the DEK itself is wrapped by a key the platform never holds.</p>
+
+      <h3 id="sealed-fields">Sealed fields and blind indexes</h3>
+      <div class="split">
+        <div>
+          <p>A sealed field lives in the space's encrypted payload instead of a plaintext column. Add <code>indexed</code> and the write also computes an HMAC digest — keyed per space, per field — into a <code>field$bidx</code> column, so equality lookups run at ordinary SQL speed without the key ever touching the database.</p>
+          <p><code>normalize(lower)</code> decides what "the same value" means before any of that happens: lowercase plus Unicode NFC, applied on write and on every query term, so <code>Alice@Example.com</code> and <code>alice@example.com</code> seal to the same digest.</p>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>market.ordo</b><button class="copy">copy</button></div>
+          <pre class="code"><code><span class="kw">entity</span> customers {
+  name:  text
+<span class="hl-line">  email: text?  <span class="kw">sealed</span> <span class="kw">indexed</span> <span class="kw">unique</span> <span class="kw">normalize</span>(lower)</span>
+}</code></pre>
+        </div>
+      </div>
+      <div class="split">
+        <div>
+          <p><strong>Enables:</strong></p>
+          <ul>
+            <li><code>==</code> and <code>in</code> comparisons at SQL speed, with no key material touching the database</li>
+            <li><code>unique</code> constraints on a sealed field, checked against the digest</li>
+            <li>converge-or-create writes that address a row by a sealed key — upsert a customer by email</li>
+          </ul>
+        </div>
+        <div>
+          <p><strong>Refuses to compile:</strong></p>
+          <ul>
+            <li>range queries — <code>email &gt; "a@"</code></li>
+            <li>substring search — <code>email contains "example"</code> is post-decrypt only, at unbounded cost</li>
+            <li>sort — <code>sort email</code> refuses; a hash carries no order to leak</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout">
+        <b>The NULL sentinel.</b> A nullable <code>sealed indexed unique</code> field can't just store SQL <code>NULL</code> in the blind-index column — Postgres treats every <code>NULL</code> as distinct, so a unique constraint would admit unlimited nulls. Ordo stores a reserved, deliberately non-UTF-8 sentinel instead, so at most one null row is admitted, exactly as the language spec requires.
+      </div>
+
+      <h3 id="crypto-erasure">Crypto-erasure</h3>
+      <p>Every sealed value is wrapped under its space's current epoch key. Destroy that epoch's key, and every value sealed under it becomes unreadable everywhere at once — in the primary, in replicas, in backups — because the ciphertext was never anything but noise without it. There is no row to hunt down and no copy to chase; the key is simply gone.</p>
+      <div class="callout">
+        <b>Deletion you can demonstrate, not promise.</b> Crypto-erasure is a provable act, not a policy commitment — you can show the key no longer exists, rather than asserting that every copy of the data was found and scrubbed.
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-log">
+      <h2>The command log</h2>
+      <p class="kicker">Under every write sits a per-space hash chain — SHA-256, from a genesis of zeros — and the chain is what makes the rest of this guide's claims checkable rather than asserted.</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 700 170">
+          <path d="M160,85 H190" class="d-line-dim"/>
+          <path d="M330,85 H360" class="d-line-dim"/>
+          <path d="M500,85 H530" class="d-line-dim"/>
+
+          <rect x="20" y="50" width="140" height="70" rx="10" class="d-box"/>
+          <text x="90" y="75" class="d-text">genesis</text>
+          <text x="90" y="95" class="d-mono" text-anchor="middle">0x0000…</text>
+
+          <rect x="190" y="50" width="140" height="70" rx="10" class="d-box"/>
+          <text x="260" y="70" class="d-text">addPlant(Fern)</text>
+          <text x="260" y="90" class="d-mono" text-anchor="middle">0x3f2a…</text>
+          <text x="260" y="106" class="d-sub" text-anchor="middle">prev 0x0000…</text>
+
+          <text x="430" y="24" class="d-mono-hi" text-anchor="middle">⭑ signed checkpoint</text>
+          <rect x="360" y="50" width="140" height="70" rx="10" class="d-box-hi"/>
+          <text x="430" y="70" class="d-text">water(Fern)</text>
+          <text x="430" y="90" class="d-mono-hi" text-anchor="middle">0x9c11…</text>
+          <text x="430" y="106" class="d-sub" text-anchor="middle">prev 0x3f2a…</text>
+
+          <rect x="530" y="50" width="140" height="70" rx="10" class="d-box"/>
+          <text x="600" y="70" class="d-text">water(Fern)</text>
+          <text x="600" y="90" class="d-mono" text-anchor="middle">0x5b7e…</text>
+          <text x="600" y="106" class="d-sub" text-anchor="middle">prev 0x9c11…</text>
+        </svg>
+        <figcaption>Each block's hash covers its own command and the hash before it — an Ed25519-signed checkpoint lets verification start mid-chain.</figcaption>
+      </figure>
+
+      <h3 id="append-converge">Append, then converge</h3>
+      <p>A command is attributed to a principal and versioned before it ever becomes a row. It lands on the space's chain first — appended after the previous block's hash — and only then is it applied to produce the row you read back. The row is a projection of the chain, not the other way around.</p>
+
+      <h3 id="verify-checkpoints">Verify and checkpoints</h3>
+      <p>Verification replays the chain and confirms every hash matches the command before it — an edit made behind the platform's back cannot hide, because it would break the chain at the point it was inserted. Periodically, a checkpoint is signed with Ed25519, so a verifier doesn't have to replay from genesis every time: it can start from the last trusted checkpoint and only walk forward.</p>
+
+      <h3 id="no-update">No raw UPDATE path</h3>
+      <p>Ordo's grammar has no <code>UPDATE</code> statement. This isn't a policy the platform enforces at runtime — it's a token the parser doesn't recognize. A write is either <code>set</code> (create-or-converge) or <code>del</code>; there is no third shape that mutates a row in place without going through the chain.</p>
+      <div class="code-panel">
+        <div class="bar"><b>refused at parse time</b><button class="copy">copy</button></div>
+        <pre class="code"><code><span class="cmt"># Ordo's grammar has no UPDATE statement</span>
+update customers set tier = <span class="str">"gold"</span> where id == <span class="str">"cust_01J9K2QW"</span>
+
+<span class="cmt"># [parse_error] unexpected token `update` — writes are `set` or `del`</span></code></pre>
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-automation">
+      <h2>Automation</h2>
+      <p class="kicker">Every trigger in Ordo reduces to two primitives, and both of them are blind to the values that changed — they see shape and time, never data.</p>
+
+      <h3 id="two-primitives">Two primitives</h3>
+      <div class="split">
+        <div>
+          <p>A <strong>listener</strong> matches the command envelope only — event kind, space, entity, actor — fields that sit outside the encryption boundary by construction. A <strong>clock</strong> fires on a cron-grade schedule. Nothing else exists; there is no "if amount &gt; 500" trigger clause, because a trigger never sees a value.</p>
+          <p>Modifiers attach to either primitive without needing data: <code>debounce &lt;duration&gt;</code>, <code>coalesce</code>, and rate caps.</p>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>triggers.ordo</b><button class="copy">copy</button></div>
+          <pre class="code"><code><span class="kw">when</span> finance.transactions.ingested -&gt; <span class="kw">run</span> spendWatch    debounce 60s
+<span class="kw">every</span> <span class="kw">day</span> 02:00Z                   -&gt; <span class="kw">run</span> nightlySweep
+
+<span class="cmt"># listener pattern: &lt;domain&gt;.&lt;entity&gt;.&lt;kind&gt; — shape, never values</span></code></pre>
+        </div>
+      </div>
+
+      <h3 id="everything-event">Everything is an event</h3>
+      <p>Webhooks, cron, inbound email, SMS, a user's click — none of these are special cases in the trigger layer. An outsider is just a write-only <code>source:</code> principal, and its append fires <code>ingested</code> like any other create. Five very different rivers, one bed: they all resolve into a listener or a clock before a routine ever runs.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 260">
+          <rect x="30" y="14" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="31" class="d-text">webhook</text>
+          <rect x="30" y="62" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="79" class="d-text">cron</text>
+          <rect x="30" y="110" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="127" class="d-text">email</text>
+          <rect x="30" y="158" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="175" class="d-text">SMS</text>
+          <rect x="30" y="206" width="140" height="34" rx="8" class="d-box"/>
+          <text x="100" y="223" class="d-text">user click</text>
+
+          <path d="M170,79 C 235,79 235,76 300,76" class="d-line-dim"/>
+          <path d="M170,31 C 235,31 235,182 300,182" class="d-line-dim"/>
+          <path d="M170,127 C 235,127 235,182 300,182" class="d-line-dim"/>
+          <path d="M170,175 C 235,175 235,182 300,182" class="d-line-dim"/>
+          <path d="M170,223 C 235,223 235,182 300,182" class="d-line-dim"/>
+
+          <rect x="300" y="44" width="150" height="64" rx="10" class="d-box"/>
+          <text x="375" y="68" class="d-text">clock</text>
+          <text x="375" y="88" class="d-mono" text-anchor="middle">every day 02:00Z</text>
+
+          <rect x="300" y="150" width="150" height="64" rx="10" class="d-box-hi"/>
+          <text x="375" y="174" class="d-text">listener</text>
+          <text x="375" y="194" class="d-mono-hi" text-anchor="middle">*.*.ingested</text>
+
+          <path d="M450,76 C 490,76 490,150 530,150" class="d-line"/>
+          <path d="M450,182 C 490,182 490,150 530,150" class="d-line"/>
+
+          <rect x="530" y="118" width="150" height="64" rx="10" class="d-box"/>
+          <text x="605" y="142" class="d-text">routine</text>
+          <text x="605" y="162" class="d-sub" text-anchor="middle">runs under a grant</text>
+        </svg>
+        <figcaption>Five inputs, two primitives, one routine — the trigger layer never inspects a value on the way in.</figcaption>
+      </figure>
+
+      <h3 id="event-vocab">The event vocabulary</h3>
+      <p>A listener pattern is <code>&lt;domain&gt;.&lt;entity&gt;.&lt;kind&gt;</code>, and <code>&lt;kind&gt;</code> comes from a closed vocabulary — an unrecognized kind is a compile error, not a pattern that silently never fires.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Kind</th><th>Fires on</th></tr></thead>
+          <tbody>
+            <tr><td><code>created</code></td><td>a command whose mode created the row</td></tr>
+            <tr><td><code>converged</code></td><td>a command that changed an existing row</td></tr>
+            <tr><td><code>deleted</code></td><td>a row removal, including a <code>subtree</code> cascade's per-row commands</td></tr>
+            <tr><td><code>written</code></td><td>the union of created, converged, and deleted — the common case, one word</td></tr>
+            <tr><td><code>ingested</code></td><td>a create attributed to a <code>source:</code> principal — a webhook, a sensor, a mail slot</td></tr>
+            <tr><td><code>fed</code></td><td>a write attributed to <code>source:feed-*</code> — an inter-space feed copy landing</td></tr>
+            <tr><td><code>reverted</code></td><td>a group revert touching the entity</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="taming-stream">Taming the stream <span class="tag built">runs today</span></h3>
+      <p><strong>Debounce</strong> is trailing-edge: the run fires a fixed duration after the last matching event in a burst, with a declared maximum wait so a continuously noisy source still eventually runs.</p>
+      <p><strong>Coalesce</strong> caps pending runs at one — a burst of matching events collapses into a single queued run instead of one per event.</p>
+      <p><strong>Dead-letter</strong> catches a run that keeps failing and sets it aside instead of retrying forever or dropping it silently, so a broken or noisy source can't take the routine layer down with it.</p>
+
+      <h3 id="provenance-bound">The provenance bound</h3>
+      <p>A routine woken by a listener may only touch rows reachable from <code>$trigger.ids</code> — the identifiers of whatever actually matched — unless it separately declares broader scope. This is R-G20: being woken by an event is not, by itself, a grant to read or write anything else in the space.</p>
+
+      <div class="callout warn">
+        <b>Status.</b> The trigger runtime — event derivation, envelope matching, batching, debounce/coalesce, dead-letter, and the provenance bound — is built and Postgres-tested today. Three named seams remain before it runs end to end without hand-holding: the source-level declaration spelling (how a listener's source is written down), the always-on worker that keeps the runtime running continuously, and the outsider-attribution producers that stamp <code>source:</code> on inbound webhook, email, and SMS writes. Routes — push, SMS, email fallback chains <span class="tag spec">settled spec · not yet built</span> — have no code yet.
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-sharing">
+      <h2>Sharing &amp; the interface</h2>
+      <p class="kicker">Data leaves a space in exactly two ways: a consented feed between spaces, or a caller-scoped API described by a descriptor the compiler emits.</p>
+
+      <h3 id="consented-feeds">Consented feeds <span class="tag spec">settled spec · not yet built</span></h3>
+      <div class="split">
+        <div>
+          <p>A feed is one-way standing replication of a named query from one space into another. Both spaces have to consent — the sender to send, the receiver to receive — before a single row moves. Copies land as ordinary writes, attributed to <code>source:feed-&lt;name&gt;</code>, which is what lets the receiving space's own triggers fire on the arriving data exactly as they would on a local write.</p>
+          <p>Withdraw consent on either side and the river simply stops; nothing is deleted, no history is rewritten, the copies just stop arriving.</p>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 140">
+            <rect x="50" y="30" width="220" height="80" rx="12" class="d-box"/>
+            <text x="160" y="60" class="d-text">space: acme</text>
+            <text x="160" y="82" class="d-sub" text-anchor="middle">feed: spend</text>
+            <text x="160" y="98" class="d-sub" text-anchor="middle">a named query</text>
+
+            <path d="M270,70 H430" class="d-line"/>
+            <text x="350" y="55" class="d-mono-hi" text-anchor="middle">source:feed-spend</text>
+
+            <rect x="430" y="30" width="220" height="80" rx="12" class="d-box"/>
+            <text x="540" y="60" class="d-text">space: studio-b</text>
+            <text x="540" y="82" class="d-sub" text-anchor="middle">copies land as writes</text>
+            <text x="540" y="98" class="d-sub" text-anchor="middle">local triggers fire</text>
+          </svg>
+          <figcaption>One-way, both consent, attributed — a feed copy is indistinguishable from a local write to the receiver's own triggers.</figcaption>
+        </figure>
+      </div>
+
+      <h3 id="interface-descriptor">The Interface Descriptor <span class="tag built">runs today</span></h3>
+      <div class="split">
+        <div>
+          <p>The compiler emits an Interface Descriptor alongside the schema and the API: a golden-tested, caller-scoped artifact describing exactly which ops a given caller can see, their parameters, and their output shape. Nothing about it is hand-written or guessed at by a client — it's a direct projection of what the compiler already proved about your definitions.</p>
+          <p><code>@hominemai/ordo-react</code> is the first consumer, and it's <strong>headless</strong>: everything is wired — fetching, paging, live updates, the typed calls themselves — and nothing is rendered. You bring your own components; the descriptor and the runtime just make sure they're never guessing about what's callable.</p>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 130">
+            <rect x="20" y="34" width="150" height="60" rx="10" class="d-box"/>
+            <text x="95" y="64" class="d-text">compiler</text>
+
+            <path d="M170,64 H250" class="d-line"/>
+
+            <rect x="250" y="34" width="180" height="60" rx="10" class="d-box-hi"/>
+            <text x="340" y="58" class="d-text">interface descriptor</text>
+            <text x="340" y="78" class="d-sub" text-anchor="middle">caller-scoped, golden-tested</text>
+
+            <path d="M430,64 H510" class="d-line"/>
+
+            <rect x="510" y="34" width="170" height="60" rx="10" class="d-box"/>
+            <text x="595" y="52" class="d-text">@hominemai/ordo-react</text>
+            <text x="595" y="70" class="d-sub" text-anchor="middle">headless: wired, unrendered</text>
+            <text x="595" y="86" class="d-sub" text-anchor="middle">your components attach</text>
+          </svg>
+          <figcaption>Compiler → descriptor → headless bindings — the renderer is always yours.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-status">
+      <h2>What runs today</h2>
+      <p class="kicker">Ordo is spec-first, and this table is meant to be honest about it: what's checkable against the repo right now, and what's still a written-down decision waiting to be built.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>Area</th><th>Status</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td>Parser &amp; DDL lowering</td><td>Runs today</td><td>the grammar compiles to schema deterministically</td></tr>
+            <tr><td>API router &amp; catalog</td><td>Runs today</td><td>ops are the only surface — a byte-identical 403 for "not allowed" and "never existed"</td></tr>
+            <tr><td>Access profiles</td><td>Runs today</td><td>owner/manager/editor/viewer, changeable without recompiling</td></tr>
+            <tr><td>Command log + verify/checkpoints</td><td>Runs today</td><td>hash chain, replayable verification, Ed25519 checkpoints</td></tr>
+            <tr><td>Sealed fields + blind indexes</td><td>Runs today</td><td>equality and unique at SQL speed; sort and range refuse to compile</td></tr>
+            <tr><td>Trigger runtime</td><td>Runs today</td><td>Postgres-tested end to end — three named seams remain to full wiring</td></tr>
+            <tr><td>Routine / route source spelling</td><td>Settled spec</td><td>one of the three trigger seams above</td></tr>
+            <tr><td>Routes &amp; egress</td><td>Settled spec</td><td>push, SMS, email fallback chains — no code yet</td></tr>
+            <tr><td>Consented feeds</td><td>Settled spec</td><td>one-way, both-consent replication between spaces</td></tr>
+            <tr><td><code>@hominemai/ordo-cdk</code> TypeScript flavor</td><td>Settled spec / planned</td><td>a typed alternative surface over the same grammar</td></tr>
+            <tr><td>UI renderer</td><td>None</td><td>by design — the descriptor and headless bindings replace it; you supply components</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The design is written down before the software is. Every claim in this guide is meant to be checkable against the repo — a fixture, a test, or a named gap — rather than taken on faith.</p>
+    </section>

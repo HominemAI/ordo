@@ -1,0 +1,26 @@
+op createOrder($loc: id, $opened: date, $descr: text, $priority: int <= 5) =
+  set workOrders { location: $loc, opened: $opened, descr: $descr, priority: $priority }
+# mode: CREATES (no identity; required fields covered; defaults fill the rest)
+
+op assignVendor($order: id, $rev: int, $vendor: id) =
+  set workOrders { id: $order, rev: $rev, vendor: $vendor, status: "scheduled" }
+# mode: CONVERGES (id) with compare-and-set (rev)
+
+op ingestReading($meter: id, $at: datetime, $value: int) =
+  set readings { meter: $meter, at: $at, value: $value }
+# mode: CREATES-OR-CONVERGES (covers unique (meter, at)): idempotent ingestion;
+# webhook redelivery is a no-op by construction
+
+op closeStale =
+  set workOrders(status == "open" and opened <= 2025-12-31) { status: "void" }
+# mode: BULK. The condition is the entire specification
+
+op completeItem($item: id) =
+  set workItems { id: $item, done: true }
+
+op raiseAlert($kind: text, $key: text, $title: text, $sev: text, $today: date) =
+  set alerts { kind: $kind, key: $key, title: $title, severity: $sev,
+               status: "active", raised: $today }
+# creates-or-converges on alerts.key: the alert lifecycle upsert. Creation-
+# capable, so every required field is covered; `status` restated so a resolved
+# alert re-raises (converge touches only the fields you describe)

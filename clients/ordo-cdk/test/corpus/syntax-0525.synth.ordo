@@ -1,0 +1,14 @@
+op removeItem($item: id) =
+  del workItems(id == $item)
+
+op pruneTelemetry($before: date) =
+  del events(at <= $before)
+
+op removeOrder($id: id) =
+  del workOrders(id == $id)
+
+op removeBuilding($bldg: id) =
+  del locations { id: $bldg } subtree
+
+op purgeEvents =
+  del events(true)

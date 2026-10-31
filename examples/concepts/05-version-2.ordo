@@ -1,0 +1,41 @@
+# Concept: versions and deploys, version 2
+#
+# Compared with version 1:
+#   + `isbn` is an optional field         additive (class A): applies in place
+#   + `loans` is a new entity             additive (class A)
+#   + `lent` has a constant default       additive: a backfill-free column
+#   - `shelf` is no longer declared       ORPHANED, not dropped. The column and
+#                                         its data stay, unserved, and the plan
+#                                         lists it. Dropping is a plan choice.
+#
+# A rename would show as a drop plus an add. `prev` (Proposed, not built) is
+# the planned way to say "this is the old field", see the README.
+#
+# The old version keeps serving until the new one passes the load gate.
+# `ordo rollback` points back at version 1 at any time.
+
+domain library @ 1.1.0
+
+entity books {
+  title:  text
+  author: text
+  isbn:   text?
+  lent:   bool = false
+}
+
+entity loans {
+  book    -> books owned
+  borrower -> members
+  due:    date
+}
+
+op addBook($title: text, $author: text) =
+  set books { title: $title, author: $author }
+
+op allBooks unbounded =
+  books[title, author, isbn, lent]
+  sort title
+
+op lend($book: id, $borrower: id, $due: date) =
+  set loans { book: $book, borrower: $borrower, due: $due }
+  set books(id == $book) { lent: true }

@@ -1,0 +1,17 @@
+routine staleAlerts in estate {                  # CLOCK-woken: guards pass
+  trigger every 15m
+  run($today: date):
+    set alerts(status == "active" and raised < $today - 30d) { status: "dismissed" }
+}
+
+routine dailyResolve in estate {                 # once a day, 02:00 UTC
+  trigger every day 02:00Z
+  run:
+    del alerts(status == "dismissed")
+}
+
+routine motionSeen in estate {                   # LISTENER-woken: bounded to
+  trigger when estate.events.created debounce 30s  #   the new events and rows
+  run:                                           #   one ref away
+    set events(kind == "motion") { kind: "motion-seen" }
+}

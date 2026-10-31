@@ -1,0 +1,34 @@
+# Concept: versions and deploys, version 1
+#
+# Each `ordo apply` compiles the program into an artifact. The hash of the
+# artifact is the version. Every artifact is kept. This file and
+# 05-version-2.ordo are two versions of one program.
+#
+#   ordo plan  examples/concepts/05-version-2.ordo --against prod
+#       what changes between the live database and version 2, classified
+#   ordo migrate examples/concepts/05-version-2.ordo --apply --db prod
+#       sends the additive part
+#   ordo apply examples/concepts/05-version-2.ordo --db prod
+#       stores and activates version 2; nodes swap with no restart
+#   ordo deploys
+#       what is stored, what is serving, every re-point in order
+#   ordo rollback --version <hash>
+#       re-point at a stored version
+#
+# Read next: docs/howto-operating.md, docs/plan-evolution-plans.md,
+# docs/plan-schema-evolution.md.
+
+domain library @ 1.0.0
+
+entity books {
+  title:  text
+  author: text
+  shelf:  text?
+}
+
+op addBook($title: text, $author: text) =
+  set books { title: $title, author: $author }
+
+op allBooks unbounded =
+  books[title, author, shelf]
+  sort title

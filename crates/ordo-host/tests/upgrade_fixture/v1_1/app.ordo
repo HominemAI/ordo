@@ -1,0 +1,82 @@
+# The upgrade continuity fixture, version 1.1 (`tests/upgrade_continuity.rs`).
+#
+# Version 1 with the ordinary, compatible changes an app makes between
+# releases, each additive:
+#
+#   notes.color       an optional field: every v1 note reads null
+#   notes.created     now `index`, for the paged list
+#   labels            a new entity, its foreign key to notes inline
+#   colorNote, labelNote, myLabels   new ops
+#   journal.shared    a field with a constant default, and a guard clause
+#                     that reads it: `or shared`. Every v1 row reads false,
+#                     so nobody gains or loses a row.
+#
+# `myNotes` and `notesPage` are kept exactly as they were.
+
+domain upgrade @ 1.1.0
+
+entity notes {
+  title: text
+  body:  text = ""
+  created: datetime index
+  color: text?
+  acl (read, write, admin)
+}
+
+entity attachments {
+  note -> notes owned
+  name: text
+  created: datetime
+  file: blob?
+}
+
+entity journal {
+  author -> members
+  body: text
+  shared: bool = false
+  access read   author == $caller or shared
+  access write  author == $caller
+}
+
+entity labels {
+  note -> notes owned
+  name: text
+}
+
+op createNote($title: text, $body: text, $created: datetime) =
+  set notes { title: $title, body: $body, created: $created }
+
+op editNote($id: id, $rev: int, $title: text, $body: text) =
+  set notes { id: $id, rev: $rev, title: $title, body: $body }
+
+op myNotes unbounded =
+  notes[id, rev, title, body, created]
+  sort -created
+
+op notesPage =
+  notes[id, title, created]
+  sort -created
+
+op addAttachment($note: id, $name: text, $created: datetime) =
+  set attachments { note: $note, name: $name, created: $created }
+
+op myFiles unbounded =
+  attachments[id, note, name, file]
+  sort created
+
+op writeJournal($body: text) =
+  set journal { author: $caller, body: $body }
+
+op myJournal unbounded =
+  journal[id, body]
+  sort body
+
+op colorNote($id: id, $rev: int, $color: text) =
+  set notes { id: $id, rev: $rev, color: $color }
+
+op labelNote($note: id, $name: text) =
+  set labels { note: $note, name: $name }
+
+op myLabels unbounded =
+  labels[id, note, name]
+  sort name

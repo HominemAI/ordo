@@ -1,0 +1,136 @@
+/* The Usage screen (step 7). Tables turn into one card a row when their own
+   width is small, so a phone never scrolls sideways. */
+
+.usage-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 16px;
+}
+
+.usage-controls > div {
+  display: grid;
+  min-inline-size: 0;
+}
+
+.usage-totals {
+  margin-block: 8px 12px;
+}
+
+.usage-chart {
+  margin: 0 0 12px;
+}
+
+.usage-chart svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 120px;
+  border-block-end: 1px solid var(--line);
+}
+
+.usage-chart rect {
+  fill: var(--accent, currentColor);
+}
+
+.usage-table {
+  container-type: inline-size;
+  max-inline-size: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.usage-table table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+
+.usage-table caption {
+  text-align: start;
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding-block-end: 4px;
+}
+
+.usage-table th,
+.usage-table td {
+  text-align: start;
+  vertical-align: top;
+  padding: 8px;
+  border-block-end: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.usage-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.usage-table button.sort {
+  all: unset;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.usage-table button.sort:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.usage-name {
+  display: block;
+  font-weight: 650;
+}
+
+.usage-table .mono.small {
+  display: block;
+}
+
+.usage-over {
+  color: var(--danger);
+  border-color: var(--danger);
+  margin-inline-start: 6px;
+}
+
+@container (width < 640px) {
+  .usage-table table,
+  .usage-table tbody,
+  .usage-table tr,
+  .usage-table th,
+  .usage-table td {
+    display: block;
+  }
+
+  .usage-table thead {
+    display: none;
+  }
+
+  .usage-table tr {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-block-end: 12px;
+  }
+
+  .usage-table th,
+  .usage-table td {
+    border-block-end: 0;
+    padding: 4px 12px;
+  }
+
+  .usage-table tbody th {
+    padding-block-start: 10px;
+  }
+
+  .usage-table td::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+  }
+
+  .usage-table td[data-label='Edit']::before {
+    content: none;
+  }
+
+  .usage-table td[data-label='Edit'] {
+    padding-block-end: 12px;
+  }
+}

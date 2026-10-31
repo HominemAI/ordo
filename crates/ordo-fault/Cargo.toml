@@ -1,0 +1,14 @@
+[package]
+name = "ordo-fault"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# What kind of failure a service had, shared by every layer above it
+# (AGENTS.md rule 9, owner 2026-10-23). No dependencies, so the database
+# client (`ordo-exec`) and the identity stores (`ordo-identity`) both use it
+# and neither depends on the other.
+[dependencies]
+
+[lints]
+workspace = true

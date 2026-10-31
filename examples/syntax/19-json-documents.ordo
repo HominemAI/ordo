@@ -1,0 +1,60 @@
+# 19 JSON documents
+#
+# Shows the `json` field type: one field that holds a JSON document.
+#   - `json` is stored as Postgres `jsonb` and travels on the wire as JSON
+#     itself: an object, an array, a string, a number, a boolean.
+#   - The default is `{}`, `[]`, or `null` on a `json?` field.
+#   - A document is read and written whole. A condition can look inside
+#     it with a path: `settings.theme == "dark"`. The path takes its type
+#     from the other side. A key that is not a name goes in brackets,
+#     `settings["font size"]`, and so does an array position, `blocks[0]`.
+#   - Sort, group, aggregate and function still refuse a document and a
+#     path into one (`json_opaque`). `is null` on a path is true when the
+#     key is missing or holds JSON null.
+#   - `sealed` works as it does on `text`: the database holds ciphertext.
+#   - The door refuses a document over the deployment's size or depth
+#     limit (`ORDO_JSON_MAX_BYTES`, `ORDO_JSON_MAX_DEPTH`) as
+#     `bound_violation`.
+#
+# Reference: docs/definition-language.md section 2 "JSON documents".
+
+domain notebook @ 1.0.0
+
+entity pages {
+  title:    text
+  settings: json = {}                    # an object, empty by default
+  blocks:   json = []                    # an array, empty by default
+  draft:    json?                        # absent until written
+  secret:   json?   sealed               # encrypted, like a sealed text
+}
+
+op addPage($title: text, $blocks: json) =
+  set pages { title: $title, blocks: $blocks }
+
+# A write replaces the whole document. `rev` makes it a compare-and-swap,
+# as on any field.
+op saveDraft($p: id, $rev: int, $draft: json) =
+  set pages { id: $p, rev: $rev, draft: $draft }
+
+op savePrivate($p: id, $doc: json) =
+  set pages { id: $p, secret: $doc }
+
+# Projecting a document returns it as JSON.
+op onePage($p: id) =
+  pages(id == $p)[title, settings, blocks, draft]
+
+# A condition walks into a document. Text compares as text, a number
+# exactly, a bool as a bool. A value of another JSON type does not match.
+op darkPages($size: int) unbounded =
+  pages(settings.theme == "dark" and settings["font size"] > $size)[title]
+  sort title
+
+# `contains` asks an array for an element, and a string for a substring.
+op pagesTagged($tag: text) unbounded =
+  pages(settings.tags contains $tag)[title]
+  sort title
+
+# `is null` asks whether a document is there.
+op drafts unbounded =
+  pages(draft is not null)[title, draft]
+  sort title

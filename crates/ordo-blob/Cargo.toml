@@ -1,0 +1,40 @@
+[package]
+name = "ordo-blob"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The dependency blast radius of an HTTP client and a TLS stack, contained
+# to one crate on purpose. Before this crate the workspace had **no** HTTP
+# client and no TLS at all — Postgres is dialled `NoTls` and the only wire
+# format anywhere is axum's — so `rustls` and its roots are a genuinely new
+# dependency axis. Keeping them here means none of the compiler crates
+# (`ordo-syntax`, `ordo-schema`, `ordo-sema`, `ordo-plan`) can ever reach
+# them, and `ordo-wasm`, which builds the compiler for the browser, is
+# unaffected by construction rather than by a feature flag someone has to
+# remember to leave off.
+#
+# `rustls` is taken with the `ring` provider rather than the default
+# `aws-lc-rs`: `ring` is pure Rust plus vendored assembly and needs no
+# cmake and no system OpenSSL, which is the same reason every other crypto
+# dependency in this workspace (`chacha20poly1305`, `sha2`, `p256`,
+# `ed25519-dalek`) is a RustCrypto crate. A self-host that has to install a
+# C toolchain to serve a file is a self-host nobody completes.
+[dependencies]
+ordo-crypto = { path = "../ordo-crypto" }
+# `StoreFault`: an upload intent that could not be recorded keeps its class
+# (busy or broken) and its cause.
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+async-trait = "0.1.92"
+futures = "0.3"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "net", "sync", "time"] }
+
+[lints]
+workspace = true

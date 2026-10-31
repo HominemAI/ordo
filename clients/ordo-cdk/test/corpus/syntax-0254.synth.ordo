@@ -1,0 +1,3 @@
+op ordersUnderBuilding($loc: id) unbounded =
+  workOrders(location under $loc and status != "done")[opened, status, descr]
+    sort -opened

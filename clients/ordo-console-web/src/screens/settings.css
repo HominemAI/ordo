@@ -1,0 +1,138 @@
+/* The settings screens (step 6). One table a group, inside a <details>, that
+   turns into one card a setting when its own width is small, so a phone
+   never scrolls sideways. */
+
+.settings .visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.settings-find {
+  margin-block: 12px;
+}
+
+.drift-summary {
+  border-inline-start: 4px solid var(--danger);
+  padding-inline-start: 10px;
+}
+
+.settings-group {
+  border-block-start: 1px solid var(--line);
+  padding-block: 8px;
+}
+
+.settings-group summary {
+  cursor: pointer;
+  font-weight: 650;
+  padding-block: 6px;
+}
+
+.tag-drift {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.settings-table {
+  container-type: inline-size;
+  max-inline-size: 100%;
+  overflow-x: auto;
+  margin-block: 8px;
+}
+
+.settings-table table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+
+.settings-table th,
+.settings-table td {
+  text-align: start;
+  vertical-align: top;
+  padding: 8px;
+  border-block-end: 1px solid var(--line);
+}
+
+.settings-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.setting-name,
+.setting-value {
+  overflow-wrap: anywhere;
+}
+
+.setting-name {
+  font-weight: 650;
+}
+
+.setting-family {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.settings-table tr[data-drift] {
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+}
+
+.drift {
+  color: var(--danger);
+  margin-block-start: 4px;
+}
+
+.setting-edit td {
+  background: var(--bg);
+}
+
+.setting-preview {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+@container (width < 720px) {
+  .settings-table table,
+  .settings-table tbody,
+  .settings-table tr,
+  .settings-table th,
+  .settings-table td {
+    display: block;
+  }
+
+  .settings-table thead {
+    display: none;
+  }
+
+  .settings-table tbody tr {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-block-end: 12px;
+  }
+
+  .settings-table th,
+  .settings-table td {
+    border-block-end: 0;
+    padding: 4px 12px;
+  }
+
+  .settings-table tbody th {
+    padding-block-start: 10px;
+  }
+
+  .settings-table td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+  }
+
+  .settings-table td[data-label='Actions']::before {
+    content: none;
+  }
+
+  .settings-table td[data-label='Actions'] {
+    padding-block-end: 12px;
+  }
+}

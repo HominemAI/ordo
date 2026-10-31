@@ -1,0 +1,81 @@
+[package]
+name = "ordo-host"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The server. A library plus one binary: `plan-ci-images.md` §3.1 builds
+# the operator tool and the serving process as separate images with
+# different bases, because they have different blast radii.
+[[bin]]
+name = "ordo-host"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1.92"
+axum = "0.8"
+futures = "0.3"
+ordo-api = { path = "../ordo-api" }
+ordo-blob = { path = "../ordo-blob" }
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-conformance = { path = "../ordo-conformance" }
+# The egress kernel. `ordo-host` may depend on it; the reverse is what
+# `ordo-egress/tests/holds_nothing.rs` forbids, and the asymmetry *is* §7b's
+# fifth pin — this crate holds the `KeyProvider` and the pool, and the crate
+# that opens sockets to customer-named hosts must not be able to name either.
+ordo-egress = { path = "../ordo-egress" }
+ordo-crypto = { path = "../ordo-crypto" }
+ordo-exec = { path = "../ordo-exec" }
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+ordo-identity = { path = "../ordo-identity" }
+ordo-plan = { path = "../ordo-plan" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-secevent = { path = "../ordo-secevent" }
+ordo-sema = { path = "../ordo-sema" }
+ordo-syntax = { path = "../ordo-syntax" }
+serde_json = "1"
+sha2 = "0.10"
+# The console key (G14): verifying a console's signed sign-in challenge, and
+# minting the key ids and challenges. Both already in the tree.
+ed25519-dalek = "2"
+getrandom = "0.2"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+# The one client to the identity service's keys (`identity_keys.rs`):
+# HTTP/1.1 over a plain socket to loopback, or TLS (rustls, the web PKI
+# roots) to anywhere else. All already in the tree, as the console's door
+# client uses them.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+# `tests/dev_loop.rs` drives `ordo dev`'s own journal
+# (`plan-dev-loop.md`) to assert its budget. A dev-only cycle back to a
+# crate this one does not depend on normally — `ordo-cli` has no dependency
+# on `ordo-host` yet, so there is nothing here for Cargo to reject.
+ordo-cli = { path = "../ordo-cli" }
+# `test-support`: the software authenticator, so a host test can sign a real
+# passkey assertion. A dev-dependency, so it is never in a deployment.
+ordo-identity = { path = "../ordo-identity", features = ["test-support"] }
+# `test-pin` for the attestation suite: it permits loopback so a delivery can
+# be pointed at a listener on 127.0.0.1. A **dev**-dependency, and
+# `ordo-egress/tests/holds_nothing.rs` asserts no crate in the workspace
+# enables it as a real one.
+ordo-egress = { path = "../ordo-egress", features = ["test-pin"] }
+# The published verifier, run against a proof this crate produced. The whole
+# claim of layer 4 is that a third party can check a chain with a binary that
+# cannot reach the deployment, and this is where that is exercised rather
+# than asserted.
+ordo-verify-proof = { path = "../ordo-verify-proof" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util"] }
+tower = { version = "0.5", features = ["util"] }
+# The server half of the same TLS stack the client uses, for a real listener.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+
+[lints]
+workspace = true

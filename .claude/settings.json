@@ -1,0 +1,6 @@
+{
+  "skillOverrides": {
+    "modern-web-guidance:modern-web-guidance": "name-only",
+    "modern-web-guidance:chrome-extensions": "name-only"
+  }
+}

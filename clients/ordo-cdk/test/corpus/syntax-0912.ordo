@@ -1,0 +1,21 @@
+# standalone program: these entities replace the estate ones
+entity invoices {
+  number: text unique
+  status: text = "open"
+  total:  int
+}
+
+op openInvoices nopause =                    # still answers while paused
+  invoices(status == "open")[number, total]
+  sort number
+  take 50
+
+op markPaid($number: text) nopause =         # so a paused tenant can pay up
+  set invoices(number == $number) { status: "paid" }
+
+op addInvoice($number: text, $total: int) =  # refused `space_paused`
+  set invoices { number: $number, total: $total }
+# A paused tenant refuses every op with `space_paused`, except the ones the
+# app marks `nopause`. The word sits beside `unguarded` and `unbounded` and is
+# flagged in the manifest. Export, resume and delete answer regardless. See
+# howto-pause.md.

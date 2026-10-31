@@ -1,0 +1,9 @@
+entity leases {
+  unit -> units
+  start: date
+  end: date?
+  rent: money sealed
+  status: text = "active"
+  access read unit.property.propertiesAccess(member == $caller)
+  access write unit.property.propertiesAccess((member == $caller and level == "write") or (member == $caller and level == "admin"))
+}

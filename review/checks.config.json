@@ -1,0 +1,352 @@
+{
+  "subject": "Ordo",
+  "root": ".",
+  "paths": {
+    "docs": [
+      "docs/*.md",
+      "README.md",
+      "CONTRIBUTING.md"
+    ],
+    "docs_exclude": [
+      "critique-consolidated.md",
+      "critique-consolidated-3.md",
+      "critique-consolidated-4.md",
+      "security-hardening-review.md",
+      "security-hardening-review-2.md",
+      "security-hardening-review-3.md",
+      "security-hardening-review-4.md"
+    ],
+    "code": [
+      "crates/*/src/*.rs"
+    ]
+  },
+  "scoring": {
+    "weights": {
+      "fatal": 40,
+      "critical": 25,
+      "major": 10,
+      "minor": 3,
+      "info": 0
+    },
+    "max_deduction": 100
+  },
+  "external_findings": {
+    "markdown_file": "docs/critique-consolidated-4.md",
+    "entry_regex": "^#{3,4}\\s+((?:X|Y|Z|AA)-\\d+)\\s+\u2014\\s+(.*?)\\s+\u00b7\\s+\\*\\*(Fatal|Critical|Major|Minor|Info)\\*\\*(.*)$",
+    "area_keywords": {
+      "security": [
+        "sealed",
+        "encrypt",
+        "key",
+        "token",
+        "leak",
+        "oracle",
+        "custody",
+        "attack",
+        "replay",
+        "dek"
+      ],
+      "authorization": [
+        "guard",
+        "acl",
+        "$caller",
+        "permission",
+        "access",
+        "grant",
+        "member"
+      ],
+      "language-semantics": [
+        "null",
+        "decimal",
+        "duration",
+        "ordering",
+        "path",
+        "rollup",
+        "equality",
+        "cursor"
+      ],
+      "distributed": [
+        "client-first",
+        "merge",
+        "isolation",
+        "chain",
+        "feed",
+        "liveness",
+        "concurren"
+      ],
+      "cost-ops": [
+        "cost class",
+        "throughput",
+        "rollback",
+        "observability",
+        "backup",
+        "unbounded"
+      ],
+      "docs-integrity": [
+        "contradict",
+        "example",
+        "tutorial",
+        "onboarding",
+        "doc"
+      ],
+      "positioning": [
+        "licence",
+        "license",
+        "claim",
+        "business model",
+        "roadmap"
+      ]
+    },
+    "json_file": "review/findings.json"
+  },
+  "checks": {
+    "code-lexical": {
+      "enabled": true,
+      "severity": "major",
+      "langs": [
+        "ordo",
+        ""
+      ],
+      "invalid_tag": "ordo-invalid",
+      "identifier_regex": "[a-z][A-Za-z0-9]*",
+      "declaration_regex": "\\b(?:entity|op|routine|domain|app)\\s+(?P<name>[A-Za-z][\\w-]*)"
+    },
+    "links": {
+      "enabled": true,
+      "severity": "major"
+    },
+    "lexicon": {
+      "enabled": true,
+      "severity": "major",
+      "exempt_files": [
+        "critique-consolidated.md",
+        "engine-plan.md",
+        "traps.md",
+        "licensing.md"
+      ],
+      "line_exemptions": [
+        "retired",
+        "formerly",
+        "no longer",
+        "used to",
+        "~~"
+      ],
+      "retired": [
+        {
+          "pattern": "\\buniq\\b",
+          "replacement": "distinct"
+        },
+        {
+          "pattern": "^\\s*query\\s+[a-z][A-Za-z0-9]*\\s*[(=]",
+          "replacement": "op"
+        }
+      ]
+    },
+    "markers": {
+      "enabled": true,
+      "severity": "minor",
+      "files": [
+        "definition-language.md",
+        "implementation.md"
+      ],
+      "heading_depth": 3,
+      "markers": [
+        "[settled]",
+        "[lean]",
+        "[open]",
+        "[proposed]",
+        "[engine-pinned]",
+        "[pinned]",
+        "[settled as goal]",
+        "[lean \u2014 draft, needs legal review]"
+      ]
+    },
+    "keyword-parity": {
+      "enabled": true,
+      "severity": "critical",
+      "spec_file": "docs/engine-plan.md",
+      "code_file": "crates/ordo-syntax/src/token.rs",
+      "spec_list_regex": "### G3\\. Reserved words.*?(?=\\n### G4\\.)",
+      "code_entry_regex": "\"([a-z][a-zA-Z]*)\"\\s*=>\\s*Keyword::",
+      "ignore": [],
+      "spec_bullet_filter": "Fully reserved"
+    },
+    "error-parity": {
+      "enabled": true,
+      "severity": "major",
+      "doc_files": [
+        "docs/api-engine-design.md",
+        "docs/std-library.md",
+        "docs/definition-language.md"
+      ],
+      "doc_code_regex": "`(access_guard|access_denied|not_found|unknown_op|unknown_param|missing_param|bound_violation|invalid_refinement|invalid_cursor|not_live|version_skew|conflicting_identity|duplicate|cas_miss|method_mismatch|missing_space|idempotency_mismatch|null_key_address|refinement_unbounded)`",
+      "code_files": [
+        "crates/ordo-api/src/error.rs"
+      ],
+      "code_code_regex": "\"([a-z_]+)\"",
+      "ignore": [
+        "null_key_address",
+        "refinement_unbounded"
+      ]
+    },
+    "rule-coverage": {
+      "enabled": true,
+      "severity": "major",
+      "spec_files": [
+        "docs/definition-language.md",
+        "docs/implementation.md",
+        "docs/std-library.md"
+      ],
+      "corpora": [
+        {
+          "file": "docs/guards-conformance.md",
+          "ruling_regex": "\\b(R-G\\d+)\\b"
+        },
+        {
+          "file": "docs/composition-conformance.md",
+          "ruling_regex": "\\b(R-C\\d+)\\b",
+          "severity": "minor"
+        }
+      ]
+    },
+    "plan-coverage": {
+      "enabled": true,
+      "severity": "critical",
+      "plan_file": "docs/engine-plan.md",
+      "pillars": [
+        {
+          "name": "access guards",
+          "terms": [
+            "access guard",
+            "acl",
+            "guard inlining"
+          ]
+        },
+        {
+          "name": "$caller binding",
+          "terms": [
+            "$caller",
+            "caller binding"
+          ]
+        },
+        {
+          "name": "groups",
+          "terms": [
+            "group resolution",
+            "groups"
+          ]
+        },
+        {
+          "name": "sealed fields",
+          "terms": [
+            "sealed"
+          ]
+        },
+        {
+          "name": "blind index",
+          "terms": [
+            "blind index"
+          ]
+        },
+        {
+          "name": "cost classes",
+          "terms": [
+            "cost class",
+            "cost-class"
+          ]
+        },
+        {
+          "name": "composition inlining",
+          "terms": [
+            "composition",
+            "inlin"
+          ]
+        },
+        {
+          "name": "command log",
+          "terms": [
+            "command log",
+            "commandlog"
+          ]
+        },
+        {
+          "name": "trees",
+          "terms": [
+            "tree"
+          ]
+        },
+        {
+          "name": "ownership",
+          "terms": [
+            "owned",
+            "ownership"
+          ]
+        }
+      ]
+    },
+    "glossary": {
+      "enabled": true,
+      "severity": "major",
+      "glossary_file": "docs/glossary.md",
+      "min_uses": 15,
+      "terms": [
+        "space",
+        "principal",
+        "domain",
+        "op",
+        "grant",
+        "guard",
+        "acl",
+        "sealed",
+        "custody",
+        "command log",
+        "routine",
+        "trigger",
+        "feed",
+        "capability token",
+        "manifest",
+        "cost class",
+        "blind index",
+        "group",
+        "profile",
+        "std",
+        "surface descriptor"
+      ]
+    },
+    "absolutes": {
+      "enabled": true,
+      "severity": "minor",
+      "pattern": "\\b(impossible|guaranteed|nobody|cannot ever|no one can|zero chance)\\b",
+      "register_file": "review/claims-register.md",
+      "exempt_files": [
+        "critique-consolidated.md",
+        "security-hardening-review.md",
+        "traps.md"
+      ]
+    },
+    "constants": {
+      "enabled": true,
+      "severity": "major",
+      "constants": [
+        {
+          "name": "decimal scale",
+          "regex": "(\\d+)\\s+significant digits"
+        },
+        {
+          "name": "inline blob cap",
+          "regex": "inline[^.\\n]{0,40}?(\\d+\\s*[KM]B)"
+        },
+        {
+          "name": "identifier max length",
+          "regex": "[Mm]ax (\\d+) chars"
+        }
+      ]
+    },
+    "site": {
+      "enabled": true,
+      "severity": "major",
+      "dir": "../ordo-site",
+      "require_themes": true
+    }
+  }
+}

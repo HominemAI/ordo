@@ -1,0 +1,5 @@
+op vendorSpend($from: date) unbounded =
+  vendors[name]  invoices(issued >= $from)[total]
+    group vendors.id, vendors.name { n: count, billed: sum total, large: count(total > 100000) }
+    | billed > 0
+    sort -billed

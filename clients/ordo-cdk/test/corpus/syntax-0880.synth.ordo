@@ -1,0 +1,19 @@
+entity people {
+  member -> members unique
+  manager -> members?
+}
+
+entity invoices {
+  owner -> members
+  status: text = "open"
+}
+
+entity drafts {
+  author -> members
+  body: text
+}
+
+release member when not invoices(owner == $member and status == "open") {
+  remove drafts.author
+  reassign invoices.owner to people(member == $member).manager or owner
+}

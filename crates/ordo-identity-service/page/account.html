@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="ordo-base" content="__ORDO_BASE__">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Your account · Ordo</title>
+<link rel="stylesheet" href="/page/identity.css">
+<script type="module" src="/page/account.js"></script>
+</head>
+<body>
+<header class="brand"><span class="mark">Ordo</span> deployment sign-in</header>
+<main>
+  <p id="problem" class="problem" role="alert"></p>
+
+  <section data-step="loading">
+    <h1>Your account</h1>
+    <p>Loading.</p>
+  </section>
+
+  <section data-step="account" hidden>
+    <h1>Your account</h1>
+    <div class="row spread" id="signed-in">
+      <p>Signed in as <strong id="name"></strong> <span class="quiet" id="person"></span></p>
+      <button type="button" id="sign-out" class="secondary">Sign out</button>
+    </div>
+
+    <h2 id="passkeys-heading">Passkeys</h2>
+    <p class="help">Changes here ask you to confirm with a passkey you already have.</p>
+    <ul class="items" id="passkeys" aria-labelledby="passkeys-heading"></ul>
+    <p id="only-one" class="help" hidden>This is your only passkey. Add another before you can remove it.</p>
+    <div id="add-area">
+      <button type="button" id="add" data-passkey>Add a passkey</button>
+    </div>
+
+    <h2 id="codes-heading">Recovery codes</h2>
+    <p id="codes-left"></p>
+    <p class="help">New codes replace the old ones. The old ones stop working at once.</p>
+    <div id="renew-area">
+      <button type="button" id="renew" class="secondary" data-passkey>Make new recovery codes</button>
+    </div>
+  </section>
+
+  <section data-step="codes" hidden>
+    <h1>Save your new recovery codes</h1>
+    <p>Your old recovery codes no longer work. Each code below works once.</p>
+    <p class="warn"><strong>This is the only time these codes are shown.</strong> Keep them somewhere safe, away from this device.</p>
+    <ol class="codes" data-codes aria-label="Recovery codes"></ol>
+    <div class="row">
+      <button type="button" class="secondary" data-copy>Copy codes</button>
+      <button type="button" class="secondary" data-download>Download as a file</button>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="saved" data-saved>
+      <label for="saved">I saved these codes somewhere safe</label>
+    </div>
+    <button type="button" data-continue disabled>Continue</button>
+  </section>
+
+  <dialog id="confirm-remove" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title">Remove this passkey?</h2>
+      <p id="confirm-which"></p>
+      <p>It stops working at once. Keep at least one passkey you can reach.</p>
+      <div class="row">
+        <button type="submit" value="remove" class="danger">Remove</button>
+        <button type="submit" value="keep" class="secondary" autofocus>Keep it</button>
+      </div>
+    </form>
+  </dialog>
+
+  <p id="status" class="status" role="status"></p>
+</main>
+</body>
+</html>

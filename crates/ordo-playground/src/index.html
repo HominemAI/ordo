@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ordo Playground</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: #1a1d26; --edge: #2b2f3d; --text: #d8dce6;
+    --dim: #8b93a7; --accent: #7aa2f7; --ok: #9ece6a; --warn: #e0af68; --err: #f7768e;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 14px 20px;
+           border-bottom: 1px solid var(--edge); }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  header select { margin-left: auto; background: var(--panel); color: var(--text);
+                  border: 1px solid var(--edge); border-radius: 6px; padding: 4px 8px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px;
+         max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+          padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .card h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--accent);
+             text-transform: uppercase; letter-spacing: .8px; }
+  .card h2 .tag { color: var(--dim); font-weight: 400; text-transform: none;
+                  letter-spacing: 0; margin-left: 8px; font-size: 12px; }
+  textarea { width: 100%; min-height: 130px; resize: vertical; background: var(--bg);
+             color: var(--text); border: 1px solid var(--edge); border-radius: 8px;
+             padding: 10px; font: 13px/1.5 var(--mono); }
+  textarea:focus { outline: 1px solid var(--accent); }
+  .row { display: flex; gap: 10px; align-items: center; }
+  button { background: var(--accent); color: #0d1117; font-weight: 600; border: 0;
+           border-radius: 7px; padding: 7px 16px; cursor: pointer; font-size: 13px; }
+  button:hover { filter: brightness(1.1); }
+  label.chk { color: var(--dim); font-size: 12px; display: flex; gap: 5px; align-items: center; }
+  pre { background: var(--bg); border: 1px solid var(--edge); border-radius: 8px;
+        padding: 10px; margin: 0; font: 12.5px/1.5 var(--mono); overflow-x: auto;
+        white-space: pre-wrap; }
+  .out-label { font-size: 11px; color: var(--dim); text-transform: uppercase;
+               letter-spacing: .7px; margin-bottom: -4px; }
+  .err { color: var(--err); } .note { color: var(--warn); font-size: 12px; }
+  .rows-table { border-collapse: collapse; font: 12px var(--mono); }
+  .rows-table th, .rows-table td { border: 1px solid var(--edge); padding: 3px 10px;
+                                   text-align: left; }
+  .rows-table th { color: var(--accent); font-weight: 600; }
+  .rows-wrap { overflow-x: auto; }
+  #schema, #reference { grid-column: 1 / -1; }
+  .ref-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 22px; }
+  @media (max-width: 900px) { .ref-grid { grid-template-columns: 1fr; } }
+  .ref-grid h3 { font-size: 11px; color: var(--accent); text-transform: uppercase;
+                 letter-spacing: .7px; margin: 12px 0 4px; }
+  .ref-grid pre i { color: var(--dim); font-style: normal; }
+  #schema .cols { display: flex; flex-wrap: wrap; gap: 18px; font: 12px var(--mono);
+                  color: var(--dim); }
+  #schema b { color: var(--text); }
+  details summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ordo Playground</h1>
+  <span class="sub">forward = the real compiler &middot; reverse = v0 subset, round-trip-verified</span>
+  <select id="fixture">
+    <option value="market">fixture: market</option>
+    <option value="wide">fixture: wide</option>
+  </select>
+  <select id="caller" title="reads and writes run as this member">
+    <option value="">as: anonymous</option>
+    <option value="mem_1" selected>as: Ana (mem_1)</option>
+    <option value="mem_2">as: Bram (mem_2)</option>
+    <option value="mem_3">as: Cleo (mem_3)</option>
+    <option value="mem_4">as: Dov (mem_4)</option>
+  </select>
+  <select id="pagesize" title="rows per keyset page">
+    <option value="">unpaged</option>
+    <option value="2">page 2</option>
+    <option value="3">page 3</option>
+    <option value="5">page 5</option>
+  </select>
+</header>
+<main>
+  <section class="card">
+    <h2>Ordo &rarr; SQL <span class="tag">parse &middot; bind &middot; plan</span></h2>
+    <textarea id="ordo-in" spellcheck="false" placeholder="activeProducts[name, price]
+sort price"></textarea>
+    <div class="row">
+      <button id="btn-fwd">Compile</button>
+      <button id="btn-next" class="hidden">Next page &rarr;</button>
+      <label class="chk"><input type="checkbox" id="run-fwd" checked> run against seeded Postgres</label>
+    </div>
+    <div id="fwd-out"></div>
+  </section>
+
+  <section class="card">
+    <h2>SQL &rarr; Ordo <span class="tag">reverse compiler v0</span></h2>
+    <textarea id="sql-in" spellcheck="false" placeholder='SELECT "name", "price" FROM "products" WHERE "active" = true ORDER BY "price"'></textarea>
+    <div class="row">
+      <button id="btn-rev">Decompile</button>
+      <label class="chk"><input type="checkbox" id="run-rev" checked> run against seeded Postgres</label>
+    </div>
+    <div id="rev-out"></div>
+  </section>
+
+  <section class="card">
+    <h2>Write <span class="tag">real protocol &middot; own database</span></h2>
+    <textarea id="write-in" spellcheck="false" style="min-height:60px"
+      placeholder='renameTask($task: "task_1", $title: "new title")'></textarea>
+    <div class="row">
+      <button id="btn-write">Run write</button>
+      <span class="note">as the member chosen above &middot; guards decide</span>
+    </div>
+    <div id="write-out"></div>
+  </section>
+
+  <section class="card">
+    <h2>Manifest <span class="tag">what the catalog publishes</span></h2>
+    <div class="row">
+      <input id="man-op" placeholder="op name, e.g. noteFeed" spellcheck="false"
+        style="flex:1; background:var(--bg); color:var(--text);
+               border:1px solid var(--edge); border-radius:8px; padding:8px;
+               font:13px var(--mono)">
+      <button id="btn-man">Show</button>
+    </div>
+    <div id="man-out"></div>
+  </section>
+
+  <section class="card" id="reference">
+    <details>
+      <summary>ordo reference</summary>
+      <div class="ref-grid" style="margin-top:10px">
+        <div>
+          <h3>sources &amp; projection</h3>
+          <pre>customers              <i># whole entity: declared open fields</i>
+customers[*]           <i># same; no id/rev, sealed omitted</i>
+customers[name, tier]  <i># subset, in this order</i>
+customers[*, -tier]    <i># everything minus</i>
+orders[when: placed]   <i># rename</i>
+orders[net: total - 500]  <i># computed</i>
+tasks[org: project.org.name]  <i># dot through refs (LEFT-preserving)</i></pre>
+          <h3>filters</h3>
+          <pre>orders(status == "done")           <i># in the source parens…</i>
+orders[total]
+| total > 5000                     <i># …or as a bar step</i>
+doneOrders($from: 2026-01-01)      <i># bind an op's params</i></pre>
+          <h3>conditions</h3>
+          <pre>==  !=  &lt;  &lt;=  &gt;  &gt;=          and · or (parens to mix)
+x is null · x is not null      not x
+x in ($a, $b)                  active        <i># bare bool field</i>
+name contains "a" · starts · matches
+placed since 90d               <i># trailing window of the execution clock</i>
+
+<i>== and != are TWO-valued: they compile to IS [NOT] DISTINCT FROM,
+so null == null is TRUE and null != "a" is TRUE. SQL's = and &lt;&gt;
+drop a null row; Ordo's keep it. Ordering (&lt; &lt;= &gt; &gt;=) matches SQL:
+a null operand is false. There is no precedence table — mixing
+and/or without parentheses is a parse error, not a default.</i></pre>
+          <h3>trees</h3>
+          <pre>categories(id under $root)       <i># the tree's OWN subtree, anchor included</i>
+products(category under $root)   <i># rows whose ref lands in the subtree</i>
+categories(id above $node)       <i># ancestors, inclusive</i>
+categories(depth &lt;= 2)           <i># implicit depth is an ordinary field</i>
+whole projects("prj_1")          <i># one row + its OWNED closure + shallow
+                                 #   signposts up; incoming assocs never expand</i></pre>
+        </div>
+        <div>
+          <h3>steps</h3>
+          <pre>sort price, -placed        <i># asc default, - is desc; id tiebreak automatic</i>
+take 3                     <i># first n of current order</i>
+take[customer] 1           <i># per-bucket window (keys: fields, dots, exprs)</i>
+group tier { n: count, rev: sum total }
+group teams.id, name { … } <i># multi-key; dots legal in keys</i>
+reduce { n: count }        <i># keyless group → exactly one row</i>
+distinct
+| catRev > 10000           <i># bar after group filters buckets (HAVING)</i></pre>
+          <h3>aggregates</h3>
+          <pre>count · count(total > 5000) · sum x · avg x · min x · max x · median x
+<i>count counts rows; “count non-null” is</i> sum cond(x is null -> 0, 1)</pre>
+          <h3>multi-source · match · let · append</h3>
+          <pre>teams[team: name]  people[]   <i># join inferred from refs; outer-preserving</i>
+group team { n: count }       <i># empty teams count 0 — masked aggregates</i>
+
+customers[name]
+match any doneOrders($from: 2026-03-01)   <i># semi-join</i>
+match none …                              <i># anti-join</i>
+match products.vendor                     <i># pick a parallel edge</i>
+
+let cap = orders[total] reduce { m: max total }
+cheapActive($cap: cap.m)[name]            <i># reduce-let = scalar</i>
+
+orders(status == "open")[at: placed, total]
+append recentOrders[at: placed, total]    <i># UNION ALL: names + exact types</i>
+sort at</pre>
+          <h3>sharp rules</h3>
+          <pre><i>· bare source in a MULTI-source list contributes nothing (= [])
+· sort keys need not be projected (source row scope; dies at group/distinct)
+· a caller's sort replaces a callee's; caller filters run AFTER a callee's take
+· sealed fields: omitted by *, refused by name
+· 3+ sources DO join — the failure you will see is `ambiguous_match`,
+  which names every minimal join it found; pick one with `match <ref>`
+· `match on <col>` is still unimplemented</i></pre>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section class="card" id="schema">
+    <details>
+      <summary>fixture schema &amp; registered ops</summary>
+      <div class="cols" id="schema-body" style="margin-top:10px"></div>
+    </details>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fixture = () => $("fixture").value;
+const caller = () => $("caller").value;
+const pageSize = () => { const v = $("pagesize").value; return v ? Number(v) : null; };
+let cursor = null;   // the last page's keys, or null
+
+function block(label, text, cls) {
+  return `<div class="out-label">${label}</div><pre class="${cls||""}">${esc(text)}</pre>`;
+}
+function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+
+function rowsTable(rows) {
+  if (!rows.length) return `<div class="out-label">rows</div><pre>(0 rows)</pre>`;
+  const cols = Object.keys(rows[0]);
+  let h = `<div class="out-label">rows (${rows.length})</div><div class="rows-wrap"><table class="rows-table"><tr>`;
+  h += cols.map(c=>`<th>${esc(c)}</th>`).join("") + "</tr>";
+  for (const r of rows)
+    h += "<tr>" + cols.map(c=>`<td>${r[c]===null?"<i>null</i>":esc(JSON.stringify(r[c]))}</td>`).join("") + "</tr>";
+  return h + "</table></div>";
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST",
+    headers: {"content-type":"application/json"}, body: JSON.stringify(body) });
+  return r.json();
+}
+
+async function runForward(after) {
+  const out = $("fwd-out");
+  out.innerHTML = `<pre>compiling…</pre>`;
+  const d = await post("/api/forward", {
+    fixture: fixture(), source: $("ordo-in").value, run: $("run-fwd").checked,
+    caller: caller() || null, page_size: pageSize(), after: after || null,
+  });
+  let h = "";
+  if (d.error) h += block("error", d.error, "err");
+  else if (d.whole !== undefined) {
+    h += block("whole document", JSON.stringify(d.whole, null, 2));
+  }
+  else {
+    h += block("planned sql", d.sql);
+    h += block("output shape", d.outputs.join("  ·  "));
+    if (d.cost) h += block("cost", `class ${d.cost}  ·  rows ${d.rows_bound}`);
+    if (d.clock) h += `<div class="note">execution clock pinned to ${esc(d.clock)} &mdash; <code>since</code> windows anchor there, not to today, so the seeded rows stay reachable</div>`;
+    if (d.rows) h += rowsTable(d.rows);
+    if (d.run_error) h += block("run error", d.run_error, "err");
+    cursor = d.next || null;
+    $("btn-next").className = cursor ? "" : "hidden";
+    if (pageSize() && !cursor && d.rows)
+      h += `<div class="note">end of the order &mdash; a partial page mints no cursor</div>`;
+  }
+  out.innerHTML = h;
+}
+
+$("btn-fwd").onclick = () => { cursor = null; runForward(null); };
+$("btn-next").onclick = () => runForward(cursor);
+$("caller").onchange = () => { cursor = null; };
+
+$("btn-write").onclick = async () => {
+  const out = $("write-out");
+  if (!caller()) { out.innerHTML = block("refused", "anonymous callers cannot write", "err"); return; }
+  out.innerHTML = `<pre>writing…</pre>`;
+  const d = await post("/api/write", { call: $("write-in").value, caller: caller() });
+  let h = "";
+  if (d.error) h += block("refused", d.error, "err");
+  else {
+    h += block("result", JSON.stringify(d.summary));
+    if (d.group) h += block("command group appended", JSON.stringify(d.group, null, 2));
+  }
+  out.innerHTML = h;
+};
+
+$("btn-man").onclick = async () => {
+  const out = $("man-out");
+  out.innerHTML = `<pre>reading…</pre>`;
+  const d = await post("/api/manifest", { fixture: fixture(), op: $("man-op").value.trim() });
+  if (d.error) { out.innerHTML = block("error", d.error, "err"); return; }
+  let h = d.cost.class ? block("cost", `class ${d.cost.class}  ·  rows ${d.cost.rows}`) : "";
+  if (d.error) h += block("does not compile", `${d.error.code}: ${d.error.message}`, "err");
+  h += block("kind", d.kind + (d.mode ? ` (${d.mode})` : "") +
+    (d.unbounded ? "  ·  unbounded" : "") + (d.unguarded ? "  ·  UNGUARDED" : ""));
+  if (d.bypassed_guards && d.bypassed_guards.length)
+    h += block("bypasses", d.bypassed_guards.join(", "), "err");
+  // 9l: WHICH FIELDS, not which entities — the entity list could not say
+  // what a caller is actually consenting to.
+  h += block("fields reached", d.scope.map(s => {
+    const bits = [];
+    if (s.read.length) bits.push(`{${s.read.join(", ")}}`);
+    if (s.written.length) bits.push(`writes {${s.written.join(", ")}}`);
+    if (s.tree_structure) bits.push("(tree structure)");
+    if (!bits.length) bits.push("(rows examined, no fields)");
+    const via = s.via === "body" ? "" : `   ← ${s.via}`;
+    return `${s.entity}${s.read.length ? "." : " "}${bits.join(" ")}${via}`;
+  }).join("\n"));
+  if (d.release.purpose)
+    h += block(`key release (${d.release.purpose})`,
+      d.release.keys.map(k => `${k.entity}.${k.field}  ${k.key} key, ${k.stage} stage`).join("\n"));
+  for (const g of d.guards)
+    h += block(`guard: ${g.entity} (${g.source})`, `read   ${g.read}\nwrite  ${g.write}`);
+  out.innerHTML = h;
+};
+
+$("btn-rev").onclick = async () => {
+  const out = $("rev-out");
+  out.innerHTML = `<pre>decompiling…</pre>`;
+  const d = await post("/api/reverse",
+    { fixture: fixture(), sql: $("sql-in").value, run: $("run-rev").checked });
+  let h = "";
+  if (d.error) h += block("refused", d.error, "err");
+  else {
+    h += block("ordo", d.ordo);
+    for (const n of (d.notes||[])) h += `<div class="note">note: ${esc(n)}</div>`;
+    if (d.verify_error) h += block("round-trip FAILED", d.verify_error, "err");
+    else {
+      h += block("round-trip sql (the ordo above, recompiled)", d.roundtrip_sql);
+      // Both sides, and the verdict. Showing only the decompilation's rows
+      // made every divergence invisible on the one page built to expose it.
+      if (d.divergence) h += block("ROWS DIVERGE", d.divergence, "err");
+      if (d.rows) h += rowsTable(d.rows);
+      if (d.sql_rows) h += block("your sql's rows", JSON.stringify(d.sql_rows));
+      if (d.sql_error) h += block("your sql did not run", d.sql_error, "err");
+      if (d.run_error) h += block("run error", d.run_error, "err");
+    }
+  }
+  out.innerHTML = h;
+};
+
+async function loadSchema() {
+  const d = await post("/api/schema", { fixture: fixture() });
+  let h = d.entities.map(e =>
+    `<div><b>${esc(e.name)}</b>${e.platform ? ' <span class="tag">platform</span>' : ""}` +
+    `<br>${e.fields.map(esc).join("<br>")}</div>`).join("");
+  h += `<div><b>registered ops</b><br>${d.ops.map(esc).join("<br>")}</div>`;
+  $("schema-body").innerHTML = h;
+}
+$("fixture").onchange = loadSchema;
+loadSchema();
+</script>
+</body>
+</html>

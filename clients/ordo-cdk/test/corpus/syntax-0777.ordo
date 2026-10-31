@@ -1,0 +1,7 @@
+op allLeases unguarded unbounded =           # admin/reporting op: guards skipped
+  leases[start, end, status, unit.name]      #   the skip is flagged in the manifest, and
+  sort -start                                #   any op composing it must carry
+                                             #   its own `unguarded` marker.
+                                             # TWO markers, two decisions: one
+                                             #   about authority, one about work.
+                                             #   Neither implies the other.

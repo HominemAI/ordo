@@ -1,0 +1,1371 @@
+{
+  "_README": [
+    "FROZEN WANTS — stage one of the corpus protocol.",
+    "",
+    "Each entry states what we want to know and what would satisfy it. Every",
+    "expectation here was derived by reading fixtures/wide-seed.sql and reasoning",
+    "about the data. NO QUERY EXISTS YET, in SQL or in Ordo, and none may be",
+    "written into this file.",
+    "",
+    "THE RULE: a want may be RETIRED, never EDITED. If a want turns out to be",
+    "wrong it is moved to `retired` with a reason and stops counting. Rewriting an",
+    "expectation to match a result that came back is the one move that would make",
+    "this corpus worthless, because the expectation is the only thing standing",
+    "between us and 'whatever the query did is correct'.",
+    "",
+    "TWO LAYERS, ADDITIVE. A want carries `expect`, `judge`, or both, and needs",
+    "at least one:",
+    "",
+    "  expect  MECHANICAL. Code decides, with no judgement involved.",
+    "            rows      exact result set; `ordered` says whether row order is",
+    "                      part of the want. When false, both sides are sorted",
+    "                      before comparison.",
+    "            count     row count only, when identities are not the point.",
+    "            relation  a relation between other wants (partition, sum_is,",
+    "                      stable_across_runs).",
+    "",
+    "  judge   NOT MECHANICAL. Questions no comparison can answer: whether an",
+    "          error is actionable, whether the language can express the intent",
+    "          without a workaround, whether a plan is doing something silly.",
+    "          Each carries `asks`, and later a `verdict` and a `because`.",
+    "",
+    "Judged wants are the reason this file is not just a fixture. Most of what is",
+    "worth knowing about a language is not a row count. But they must never be",
+    "counted alongside mechanical passes as if they carried the same weight: any",
+    "coverage report states the two totals separately, because a judged pass is",
+    "an opinion with a rationale attached and a mechanical pass is not.",
+    "",
+    "Nulls are written as null and are NOT interchangeable with 0 or \"\"."
+  ],
+  "fixture": "wide",
+  "wants": [
+    {
+      "id": "W001",
+      "probes": [
+        "filter:equality",
+        "type:bool"
+      ],
+      "intent": "A plain boolean filter selects exactly the rows whose flag is set, and no others.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Bo"
+          ],
+          [
+            "Di"
+          ],
+          [
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W002",
+      "probes": [
+        "null:is-null",
+        "ref:optional"
+      ],
+      "intent": "An optional ref that was never set is selectable as absent.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Di"
+          ],
+          [
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W003",
+      "probes": [
+        "null:is-not-null",
+        "null:completeness"
+      ],
+      "intent": "The complement of W002. Together they must account for every person exactly once — if they do not, null handling is losing rows.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Bo"
+          ],
+          [
+            "Cy"
+          ],
+          [
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W004",
+      "probes": [
+        "null:completeness",
+        "relation:partition"
+      ],
+      "intent": "W002 and W003 partition the six people. This is the check that `is null` and `is not null` are exhaustive over a nullable column.",
+      "expect": {
+        "kind": "relation",
+        "op": "partition",
+        "of": 6,
+        "parts": [
+          "W002",
+          "W003"
+        ]
+      }
+    },
+    {
+      "id": "W005",
+      "probes": [
+        "null:zero-vs-null",
+        "type:money"
+      ],
+      "intent": "Zero is a value and null is not. A salary of 0 must be found by an equality test on 0, and a null age must not be.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W006",
+      "probes": [
+        "null:is-null",
+        "type:int"
+      ],
+      "intent": "A null integer is found only by a null test, never by comparison.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Bo"
+          ],
+          [
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W007",
+      "probes": [
+        "null:three-valued-logic",
+        "filter:comparison"
+      ],
+      "intent": "THE null want. Over six people, `age > 30` and `age <= 30` must together return four rows, not six: the two null ages satisfy neither. A total of six would mean nulls are being coerced.",
+      "expect": {
+        "kind": "relation",
+        "op": "sum_is",
+        "n": 4,
+        "parts": [
+          "W008",
+          "W009"
+        ]
+      }
+    },
+    {
+      "id": "W008",
+      "probes": [
+        "filter:comparison",
+        "type:int"
+      ],
+      "intent": "Ages strictly above thirty.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Cy"
+          ],
+          [
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W009",
+      "probes": [
+        "filter:comparison",
+        "type:int"
+      ],
+      "intent": "Ages at or below thirty.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Di"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W010",
+      "probes": [
+        "sort:desc",
+        "type:money",
+        "order:total"
+      ],
+      "intent": "Descending order over a money column, every person present, highest first.",
+      "expect": {
+        "kind": "rows",
+        "ordered": true,
+        "columns": [
+          "name",
+          "salary"
+        ],
+        "rows": [
+          [
+            "Eli",
+            200000
+          ],
+          [
+            "Cy",
+            150000
+          ],
+          [
+            "Ada",
+            120000
+          ],
+          [
+            "Bo",
+            90000
+          ],
+          [
+            "Di",
+            80000
+          ],
+          [
+            "Fay",
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W011",
+      "probes": [
+        "take",
+        "sort:desc"
+      ],
+      "intent": "Taking the first three of a descending order yields the three largest, in order.",
+      "expect": {
+        "kind": "rows",
+        "ordered": true,
+        "columns": [
+          "name",
+          "salary"
+        ],
+        "rows": [
+          [
+            "Eli",
+            200000
+          ],
+          [
+            "Cy",
+            150000
+          ],
+          [
+            "Ada",
+            120000
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W013",
+      "probes": [
+        "group:count",
+        "group:by-ref"
+      ],
+      "intent": "Counting rows per group over a ref column.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "org",
+          "n"
+        ],
+        "rows": [
+          [
+            "org_1",
+            4
+          ],
+          [
+            "org_2",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W014",
+      "probes": [
+        "group:sum",
+        "type:money"
+      ],
+      "intent": "Summing money per group, including a zero-valued member which must contribute 0 rather than be skipped.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "org",
+          "total"
+        ],
+        "rows": [
+          [
+            "org_1",
+            440000
+          ],
+          [
+            "org_2",
+            200000
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W015",
+      "probes": [
+        "group:count",
+        "null:aggregate"
+      ],
+      "intent": "Counting rows and counting a nullable column are different numbers. For org_1: four people, three of whom have an age.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "org",
+          "people",
+          "withAge"
+        ],
+        "rows": [
+          [
+            "org_1",
+            4,
+            3
+          ],
+          [
+            "org_2",
+            2,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W018",
+      "probes": [
+        "join:one-hop",
+        "ref:required"
+      ],
+      "intent": "Dotting through a required ref reaches the target's field.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name",
+          "lead"
+        ],
+        "rows": [
+          [
+            "Apollo",
+            "Ada"
+          ],
+          [
+            "Borealis",
+            "Bo"
+          ],
+          [
+            "Cinder",
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W019",
+      "probes": [
+        "join:one-hop",
+        "ref:optional",
+        "join:outer-preserving"
+      ],
+      "intent": "Dotting through an OPTIONAL ref must not drop the row whose ref is null. Borealis has no sponsor and must still appear, with a null sponsor name. Two rows here instead of three would mean an inner join.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name",
+          "sponsor"
+        ],
+        "rows": [
+          [
+            "Apollo",
+            "Cy"
+          ],
+          [
+            "Borealis",
+            null
+          ],
+          [
+            "Cinder",
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W020",
+      "probes": [
+        "join:parallel-edges"
+      ],
+      "intent": "THE parallel-edge want. `lead` and `sponsor` both point at people. Reaching both in one row must produce two independent joins, not one shared one. Cinder has the same person in both, which is the case a collapsed join would still get right — Apollo, with different people, is the one that catches it.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name",
+          "lead",
+          "sponsor"
+        ],
+        "rows": [
+          [
+            "Apollo",
+            "Ada",
+            "Cy"
+          ],
+          [
+            "Borealis",
+            "Bo",
+            null
+          ],
+          [
+            "Cinder",
+            "Eli",
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W023",
+      "probes": [
+        "tree:self-ref",
+        "join:self"
+      ],
+      "intent": "A tree's parent link is an ordinary ref to the same entity; a root's parent is null and must not drop the root.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name",
+          "parent"
+        ],
+        "rows": [
+          [
+            "Platform",
+            null
+          ],
+          [
+            "Core",
+            "Platform"
+          ],
+          [
+            "Infra",
+            "Core"
+          ],
+          [
+            "Ops",
+            null
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W025",
+      "probes": [
+        "link-entity",
+        "many-to-many",
+        "distinct"
+      ],
+      "intent": "Tasks carrying at least one tag, counted once each despite tsk_2 having two tags. Four link rows, three distinct tasks — a result of four would mean the duplicate leaked.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "title"
+        ],
+        "rows": [
+          [
+            "Design"
+          ],
+          [
+            "Build"
+          ],
+          [
+            "Spike"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W026",
+      "probes": [
+        "link-entity",
+        "group:count"
+      ],
+      "intent": "Tag count per tagged task.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "title",
+          "tags"
+        ],
+        "rows": [
+          [
+            "Design",
+            1
+          ],
+          [
+            "Build",
+            2
+          ],
+          [
+            "Spike",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W027",
+      "probes": [
+        "text:contains",
+        "case-sensitivity"
+      ],
+      "intent": "Text matching is case-sensitive. Lowercase 'a' appears in Ada and Fay but not in Bo, Cy, Di or Eli.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W028",
+      "probes": [
+        "text:starts",
+        "case-sensitivity"
+      ],
+      "intent": "A prefix test on an uppercase letter matches only the exact case.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W030",
+      "probes": [
+        "type:datetime",
+        "null:is-not-null"
+      ],
+      "intent": "A nullable timestamp distinguishes seen-never from seen-at.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Cy"
+          ],
+          [
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W031",
+      "probes": [
+        "type:duration",
+        "filter:inequality"
+      ],
+      "intent": "A duration column holds its declared unit and compares as a number in that unit. One person works a four-hour shift where everyone else works eight.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Di"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W033",
+      "probes": [
+        "expr:coalesce",
+        "null:fallback"
+      ],
+      "intent": "Falling back from a null nickname to the name, without changing the non-null ones.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name",
+          "shown"
+        ],
+        "rows": [
+          [
+            "Ada",
+            "Ada"
+          ],
+          [
+            "Bo",
+            "B"
+          ],
+          [
+            "Cy",
+            "Cy"
+          ],
+          [
+            "Di",
+            "Dee"
+          ],
+          [
+            "Eli",
+            "Eli"
+          ],
+          [
+            "Fay",
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W034",
+      "probes": [
+        "filter:not",
+        "type:bool"
+      ],
+      "intent": "Negating a boolean filter selects exactly the rows the positive filter did not.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Cy"
+          ],
+          [
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W038",
+      "probes": [
+        "result:empty"
+      ],
+      "intent": "A filter nothing satisfies returns an empty result, not an error and not a null row.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": []
+      }
+    },
+    {
+      "id": "W039",
+      "probes": [
+        "group:count-distinct"
+      ],
+      "intent": "Every tag is used by at least one task, so the count of distinct tags in use equals the count of tags.",
+      "expect": {
+        "kind": "count",
+        "n": 3
+      }
+    },
+    {
+      "id": "W041",
+      "probes": [
+        "error:actionable",
+        "security:sealed"
+      ],
+      "intent": "Refusing to read a sealed field is correct, but a refusal that does not say which field or why sends the author looking in the wrong place.",
+      "judge": [
+        {
+          "asks": "Does the error name the specific field that was sealed, rather than the entity or the query?"
+        },
+        {
+          "asks": "Does it say why the read cannot be served, rather than only that it cannot?"
+        },
+        {
+          "asks": "Would an author who has never read the spec know what to do next?"
+        }
+      ]
+    },
+    {
+      "id": "W042",
+      "probes": [
+        "ergonomics",
+        "join:parallel-edges",
+        "expressibility"
+      ],
+      "intent": "W020 asks whether parallel edges produce the right rows. This asks whether saying it is pleasant: reaching two refs at one target should not need a disambiguation the author has to invent.",
+      "judge": [
+        {
+          "asks": "Can both refs be reached in one projection without naming a join, an alias, or a hint?"
+        },
+        {
+          "asks": "If the language cannot express it, is the failure a clear message about ambiguity, or an unrelated error?"
+        }
+      ]
+    },
+    {
+      "id": "W043",
+      "probes": [
+        "design:ordering",
+        "error:timing"
+      ],
+      "intent": "An ordering that is not total returns different rows on different runs. Whether that is a compile-time refusal or a runtime surprise is a language design decision, not an implementation detail.",
+      "judge": [
+        {
+          "asks": "Is a non-total ordering caught before the query runs?"
+        },
+        {
+          "asks": "If the engine silently adds a tiebreak, is the added key visible to the author anywhere?"
+        },
+        {
+          "asks": "Is the choice of tiebreak defensible for grouped pipelines, which have no row identity?"
+        }
+      ]
+    },
+    {
+      "id": "W044",
+      "probes": [
+        "expressibility",
+        "group:empty"
+      ],
+      "intent": "W017 wants a team with no people to appear with a count of zero. Whether Ordo can say that at all is the question — an empty group is where most query languages quietly lose the row.",
+      "judge": [
+        {
+          "asks": "Can the intent be expressed in Ordo without a workaround?"
+        },
+        {
+          "asks": "If not, is that a compiler gap, a spec gap, or a deliberate exclusion?"
+        },
+        {
+          "asks": "Does the language give the author any way to tell which of the two behaviours they are getting?"
+        }
+      ]
+    },
+    {
+      "id": "W045",
+      "probes": [
+        "cost",
+        "design:unbounded"
+      ],
+      "intent": "W011 takes the three highest salaries. The compiler should not need to read every person to answer it, and if it does, the author should be told rather than surprised.",
+      "judge": [
+        {
+          "asks": "Does the plan bound the rows it reads, or does it read the table and discard?"
+        },
+        {
+          "asks": "Is the cost class of this operation stated anywhere the author can see it before deploying?"
+        }
+      ]
+    },
+    {
+      "id": "W046",
+      "probes": [
+        "error:actionable",
+        "closedness"
+      ],
+      "intent": "A closed grammar's value is entirely in its refusals. Rejecting a borrowed spelling is table stakes; naming the Ordo spelling instead is the thing that makes closedness usable rather than merely strict.",
+      "judge": [
+        {
+          "asks": "For each rejected foreign spelling, does the message name what to write instead?"
+        },
+        {
+          "asks": "Is the rejection at the borrowed word itself, or somewhere downstream of it?"
+        },
+        {
+          "asks": "Are there borrowed spellings that still parse into something else?"
+        }
+      ]
+    },
+    {
+      "id": "W047",
+      "probes": [
+        "design:sort-scope",
+        "expressibility"
+      ],
+      "intent": "The binder resolves steps against the source's output fields, so sorting by a field the projection dropped is currently unknown_field. SQL allows ORDER BY over a non-selected column and people expect to. Whether Ordo should is a language decision, and it is not obviously the same answer for a sort as for a filter.",
+      "judge": [
+        {
+          "asks": "Is `products[name] sort price` intended to be legal?",
+          "verdict": "yes",
+          "because": "Ruled 2026-08-11: a step key does not need to be projected. Steps resolve against outputs first, then the pre-projection source scope, so the key is inferred from the source row. Nothing the author did not output is added to the result."
+        },
+        {
+          "asks": "If it is illegal, does the error explain that the field was dropped by the projection, rather than saying it does not exist?",
+          "verdict": "moot",
+          "because": "It is legal where a source row exists. Where it does not (after group/distinct, or a field the callee never output), the error lists what IS available rather than narrating what was dropped."
+        },
+        {
+          "asks": "Does the same rule apply to a `| condition` step, and should it?",
+          "verdict": "yes",
+          "because": "The layered scope is the step-resolution rule, so `| condition`, sort keys, group keys and aggregate arguments all infer identically. One rule, not four."
+        },
+        {
+          "asks": "If a sort may reach dropped fields, what stops it reaching a sealed one?",
+          "verdict": "sealed stays refused",
+          "because": "The fallback widens visibility to the source row, never to secrets: a sealed field reached through inference is sealed_unsupported, because sorting by a secret is an ordering oracle for it. Covered by a regression test."
+        }
+      ]
+    },
+    {
+      "id": "W048",
+      "probes": [
+        "sort:ties",
+        "order:total"
+      ],
+      "intent": "Every task, ordered by priority ascending and, where priorities tie, by title ascending. Three tasks share priority 1, so without the second key the result is not reproducible. Columns: the task's title, then its priority.",
+      "expect": {
+        "kind": "rows",
+        "ordered": true,
+        "columns": [
+          "title",
+          "priority"
+        ],
+        "rows": [
+          [
+            "Design",
+            1
+          ],
+          [
+            "Ship",
+            1
+          ],
+          [
+            "Spike",
+            1
+          ],
+          [
+            "Build",
+            2
+          ],
+          [
+            "Review",
+            3
+          ],
+          [
+            "Retro",
+            5
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W049",
+      "probes": [
+        "group:avg",
+        "null:aggregate"
+      ],
+      "intent": "For each org, identified by its id, the mean age of its people as an INTEGER, computed by dividing the sum of the non-null ages by the count of non-null ages. org_1 has ages 34, null, 45 and 29, so the divisor is 3 and not 4.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "org",
+          "avgAge"
+        ],
+        "rows": [
+          [
+            "org_1",
+            36
+          ],
+          [
+            "org_2",
+            51
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W050",
+      "probes": [
+        "group:empty",
+        "join:outer-preserving"
+      ],
+      "intent": "For every team, the team's NAME and the number of people whose team is that team — including teams nobody belongs to, which must appear with a count of 0 rather than vanish. team_1 has no people.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "team",
+          "n"
+        ],
+        "rows": [
+          [
+            "Platform",
+            0
+          ],
+          [
+            "Core",
+            2
+          ],
+          [
+            "Infra",
+            1
+          ],
+          [
+            "Ops",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W051",
+      "probes": [
+        "join:two-hop"
+      ],
+      "intent": "Every task with the NAME of the org that owns it, reached by two hops: task to project to org.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "title",
+          "org"
+        ],
+        "rows": [
+          [
+            "Design",
+            "Acme"
+          ],
+          [
+            "Build",
+            "Acme"
+          ],
+          [
+            "Review",
+            "Acme"
+          ],
+          [
+            "Spike",
+            "Acme"
+          ],
+          [
+            "Ship",
+            "Bolt"
+          ],
+          [
+            "Retro",
+            "Bolt"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W052",
+      "probes": [
+        "join:two-hop",
+        "group:sum"
+      ],
+      "intent": "For each org, identified by its NAME, the sum of the points of every task belonging to that org's projects. Note the deliberate contrast with W013 and W049, which label groups by id: both labellings appear in this corpus on purpose, and each want says which it means.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "org",
+          "points"
+        ],
+        "rows": [
+          [
+            "Acme",
+            2900
+          ],
+          [
+            "Bolt",
+            1000
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W053",
+      "probes": [
+        "tree:depth"
+      ],
+      "intent": "Every team whose implicit depth is exactly 2, with the team's name and that depth. The implicit column must be queryable like any other.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name",
+          "depth"
+        ],
+        "rows": [
+          [
+            "Infra",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W054",
+      "probes": [
+        "type:date",
+        "filter:comparison"
+      ],
+      "intent": "Every person hired on or after 2021-01-01, inclusive of that date. Nobody in the seed was hired exactly on it, so the boundary is not itself under test — the comparison direction is.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Bo"
+          ],
+          [
+            "Di"
+          ],
+          [
+            "Fay"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W055",
+      "probes": [
+        "expr:arithmetic",
+        "type:money"
+      ],
+      "intent": "Every person's name and their salary after a 5 percent raise, computed in exact integer minor units as salary * 105 / 100 with no rounding and no float. Ordered by the raised amount descending, ties broken by id ascending.",
+      "expect": {
+        "kind": "rows",
+        "ordered": true,
+        "columns": [
+          "name",
+          "raise"
+        ],
+        "rows": [
+          [
+            "Eli",
+            210000
+          ],
+          [
+            "Cy",
+            157500
+          ],
+          [
+            "Ada",
+            126000
+          ],
+          [
+            "Bo",
+            94500
+          ],
+          [
+            "Di",
+            84000
+          ],
+          [
+            "Fay",
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W056",
+      "probes": [
+        "filter:in",
+        "type:id"
+      ],
+      "intent": "Every person whose id is one of ppl_1, ppl_2, ppl_3 or ppl_4, tested as membership of an explicit list rather than as a chain of equalities.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Bo"
+          ],
+          [
+            "Cy"
+          ],
+          [
+            "Di"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W057",
+      "probes": [
+        "filter:and",
+        "filter:compound"
+      ],
+      "intent": "Every person who is BOTH active AND in org_1. Each condition alone admits more people than the pair does: active alone admits Eli, and org_1 alone admits Cy.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Bo"
+          ],
+          [
+            "Di"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W058",
+      "probes": [
+        "filter:or",
+        "filter:compound"
+      ],
+      "intent": "Every person who is older than 40 OR has a non-null lastSeen. Cy and Eli satisfy both and must appear exactly once each.",
+      "expect": {
+        "kind": "rows",
+        "ordered": false,
+        "columns": [
+          "name"
+        ],
+        "rows": [
+          [
+            "Ada"
+          ],
+          [
+            "Cy"
+          ],
+          [
+            "Eli"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "W059",
+      "probes": [
+        "determinism",
+        "order:total"
+      ],
+      "intent": "Every want whose expectation is ordered must return byte-identical rows on two consecutive executions. This is the check that an ordering is total rather than incidentally stable.",
+      "expect": {
+        "kind": "relation",
+        "op": "stable_across_runs",
+        "parts": [
+          "W010",
+          "W011",
+          "W048",
+          "W055"
+        ]
+      }
+    }
+  ],
+  "retired": [
+    {
+      "id": "W012",
+      "intent": "Three tasks share priority 1. Sorting by priority alone leaves their relative order undetermined, so a second key is required for the result to be reproducible at all. Run twice, byte-identical.",
+      "retired_because": "names no tiebreaker key, only that one is required. Both independent authors chose `id` (Design, Spike, Ship); the expectation was written from `title` (Design, Ship, Spike). A coin flip on a want where order is compared.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W048"
+    },
+    {
+      "id": "W016",
+      "intent": "An average over a column containing nulls must divide by the non-null count. For org_1 that is (34+45+29)/3 = 36, not /4.",
+      "retired_because": "fixes the semantics but not the representation. `avg` returns numeric 36.0000000000000000; the intent writes `= 36` without saying the result is an integer.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W049"
+    },
+    {
+      "id": "W017",
+      "intent": "team_1 has no people. Grouping people by team must decide whether team_1 appears with a count of zero or vanishes. The want is that it appears — a team with nobody in it is a fact about the team.",
+      "retired_because": "does not say whether the group is labelled by the team's name or its id, nor the column order.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W050"
+    },
+    {
+      "id": "W021",
+      "intent": "Two hops: task to project to org.",
+      "retired_because": "says `org` without saying whether that is the org's id or its name. One author read each way.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W051"
+    },
+    {
+      "id": "W022",
+      "intent": "Aggregating across two hops: points per org. org_1 = 500+2000+100+300, org_2 = 1000+0.",
+      "retired_because": "same id-or-name ambiguity as W021, and the corpus is not even self-consistent: W013 labels groups by id while this one expects names.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W052"
+    },
+    {
+      "id": "W024",
+      "intent": "The implicit depth column is real and queryable; the deepest team is three levels down.",
+      "retired_because": "does not pin which depth value or which columns; `the deepest team is three levels down` describes the data rather than specifying the question.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W053"
+    },
+    {
+      "id": "W029",
+      "intent": "Date comparison against a literal, inclusive of the boundary being on the far side of every kept row.",
+      "retired_because": "gives neither the date literal nor the direction. `inclusive of the boundary being on the far side of every kept row` was read as an upper bound by both authors and written as a lower bound.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W054"
+    },
+    {
+      "id": "W032",
+      "intent": "Arithmetic in a projection is exact on minor units — no rounding, no float.",
+      "retired_because": "never says what the raise is. Both authors read 10 percent; the expectation is 5. The ordering is also unstated.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W055"
+    },
+    {
+      "id": "W035",
+      "intent": "Membership over an explicit list of ids.",
+      "retired_because": "says `an explicit list of ids` and then does not give the list.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W056"
+    },
+    {
+      "id": "W036",
+      "intent": "Two conditions joined by and, both of which individually admit more rows than the pair does.",
+      "retired_because": "says `two conditions` without naming either of them.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W057"
+    },
+    {
+      "id": "W037",
+      "intent": "Two conditions joined by or, admitting the union without duplicating a row that satisfies both.",
+      "retired_because": "says `two conditions` without naming either of them.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W058"
+    },
+    {
+      "id": "W040",
+      "intent": "Any want whose expectation is ordered must return byte-identical rows on two consecutive executions. This is the check that every ordering is total rather than incidentally stable.",
+      "retired_because": "collateral: its parts list names W012 and W032, both retired above.",
+      "evidence": "Two authors who saw the intent, the schema and the seed — but not the expected values and not each other's work — did not satisfy this want. The author who wrote it satisfied all 37, which is the tell.",
+      "replaced_by": "W059"
+    }
+  ],
+  "latent": [
+    {
+      "want": "W053",
+      "found_by": "blind author C",
+      "gap": "'implicit depth' does not distinguish reading the stored depth column from deriving depth recursively via the parent chain. The seed's stored values agree with the chain, so both readings return (Infra, 2). If the point is recursive derivation, the wording still does not say so.",
+      "resolution": "Resolved 2026-08-11 (ruling 5): depth is a stored column the write path maintains, never derived at query time; stored-vs-chain divergence is corruption for runtime shape verification (F6) to catch."
+    },
+    {
+      "want": "W049",
+      "found_by": "blind author C",
+      "gap": "behaviour for a group with zero non-null ages is unstated (NULL row / 0 / no row), and truncation vs rounding is unexercised because both quotients are exact. A seed with an all-null-age org would split honest authors.",
+      "resolution": "Resolved 2026-08-11 (ruling 3, amendment 2): empty bucket pins count=0, sum=0, avg=null; masked from every aggregate including count(cond)."
+    },
+    {
+      "want": "W052",
+      "found_by": "blind author C",
+      "gap": "whether an org with no projects or no tasks appears with 0 or vanishes is unstated; every org currently has tasks so it is unobservable. Also SUM(bigint) is numeric in Postgres — the intent should state the integer result type as W049's now does.",
+      "resolution": "Resolved 2026-08-11 (ruling 3, amendment 3): preservation is per-edge and explicit in the source list; integer result types stated per ruling 2."
+    }
+  ]
+}

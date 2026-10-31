@@ -1,0 +1,94 @@
+# Publishes the three TypeScript client packages, `@hominemai/ordo-sdk`,
+# `@hominemai/ordo-react` and `@hominemai/ordo-cdk`, to GitHub Packages (owner ruling, 2026-10-06,
+# board task `client-packages`: private, under the HominemAI organization).
+#
+# Secrets required: NONE. The registry authenticates with the automatic
+# `GITHUB_TOKEN`, which is why `packages: write` is the only permission
+# beyond `contents: read`. A package published from a private repository
+# is private by default, and nothing here sets it public; an app outside
+# the repo installs it with a personal token that holds `read:packages`
+# (see each package README).
+#
+# A push without a version bump is a no-op: each package is published only
+# when its exact `name@version` is not already in the registry, so a
+# docs-only change under `clients/` never fails this workflow. To release,
+# bump `version` in the package's `package.json` and merge to `main`.
+
+name: Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/ordo-sdk/**'
+      - 'clients/ordo-react/**'
+      - 'clients/ordo-cdk/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: ${{ matrix.package }}
+    # `workflow_dispatch` can be started from any branch, and a feature
+    # branch with a bumped `version` would then publish it under the real
+    # name. Only `main` publishes (audit 2026-10-08); a dispatch from
+    # anywhere else is skipped rather than failed.
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.ref == 'refs/heads/main' && github.repository_owner == 'HominemAI') }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+    strategy:
+      # One package's failure should not stop the other from publishing.
+      fail-fast: false
+      matrix:
+        package: [ordo-sdk, ordo-react, ordo-cdk]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: clients/${{ matrix.package }}/package-lock.json
+          # Writes an `.npmrc` that points the `@hominemai` scope at GitHub
+          # Packages and reads its token from `NODE_AUTH_TOKEN`.
+          registry-url: https://npm.pkg.github.com
+          scope: '@hominemai'
+
+      # ordo-react imports ordo-sdk (a `file:` dependency), whose exports
+      # point at its built files, so the SDK is built first.
+      - name: Build ordo-sdk for ordo-react
+        if: matrix.package == 'ordo-react'
+        working-directory: clients/ordo-sdk
+        run: npm ci && npm run build
+
+      - name: Install
+        working-directory: clients/${{ matrix.package }}
+        run: npm ci
+
+      - name: Build
+        working-directory: clients/${{ matrix.package }}
+        run: npm run build
+
+      - name: Test
+        working-directory: clients/${{ matrix.package }}
+        run: npm run check
+
+      - name: Publish unless this version is already in the registry
+        working-directory: clients/${{ matrix.package }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          # `npm view` prints the version when it exists and exits non-zero
+          # (E404) when it does not.
+          if found=$(npm view "${name}@${version}" version 2>/dev/null) && [ -n "$found" ]; then
+            echo "${name}@${version} is already published; nothing to do."
+          else
+            echo "Publishing ${name}@${version}."
+            npm publish
+          fi

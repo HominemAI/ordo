@@ -1,0 +1,7 @@
+node_modules/
+.stack/
+report/
+test-results/
+report-screenshots/
+test-results-screenshots/
+.stack-screenshots/

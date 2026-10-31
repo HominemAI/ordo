@@ -1,0 +1,538 @@
+name: CI
+
+on:
+  push:
+    branches: [main, bleeding]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Debug info is most of a debug build's size, and this job reads panics,
+  # not a debugger. Incremental state is never reused on a fresh runner.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  # The failure this pipeline exists to catch is an execution-tier panic
+  # several frames inside the harness; `psql failed (exit 1)` with no frame
+  # is a bug report nobody can act on.
+  RUST_BACKTRACE: '1'
+
+# A superseded run holds a runner and a Postgres container for a full
+# compile. Pushes to `main` are never cancelled: that run's result is the
+# one that gets recorded.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # **A self-hosted runner in the SMG cluster**, not a GitHub-hosted one.
+    #
+    # GitHub-hosted runners have refused every job since 2026-09-21 on an
+    # account billing block: 60 of the last 60 runs failed in about five
+    # seconds with zero steps executed. The suite had no home but a
+    # laptop for three days.
+    #
+    # **Both labels, deliberately.** `self-hosted` alone would match any
+    # self-hosted runner this organisation ever registers; `ordo-k8s`
+    # names the one with this workspace's warm `target/` on a volume.
+    # Asking for both means a future runner cannot silently inherit this
+    # job.
+    #
+    # Reverting is this line: put `ubuntu-latest` back and the workflow
+    # runs on GitHub's hardware again, unchanged. Nothing else here knows
+    # where it is running, which is the property to preserve when editing
+    # the steps below.
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    # The default is six hours; the failure shape here is a wait on a
+    # service container that never became healthy.
+    timeout-minutes: 30
+    # The suite runs as 5 shards at once (`scripts/ci-test-shard.sh`).
+    # `rest` is every crate but ordo-host, and also runs the once-only
+    # gates: format, clippy, the S3 contract and the inventories. The
+    # `host` shards split ordo-host's test files, 76% of the run time, by
+    # measured seconds. fail-fast is off so every shard reports.
+    name: test (${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [rest, host 1 4, host 2 4, host 3 4, host 4 4]
+
+    # The conformance harness executes planned SQL against a real server.
+    # A run without one would silently degrade to compile-only coverage,
+    # which is the failure mode the harness exists to prevent.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: ordo_conformance
+        ports: ['5432:5432']
+        # **This runs at the image's default `max_connections = 100`, and
+        # one suite alone needs 99.** Measured 2026-09-24:
+        # `crates/ordo-host/tests/runtime.rs` peaks at 99 client backends
+        # by itself, because its ~22 tests run in parallel and each stand
+        # up a real deployment with several pools. Cargo runs test binaries
+        # one at a time, so this is one suite against the ceiling rather
+        # than many suites overlapping. `scripts/conformance-pg.sh` was
+        # raised to 300 for exactly this; at 100 that suite fails four
+        # tests with `FATAL: sorry, too many clients already` even on a
+        # freshly started cluster.
+        #
+        # **It is not fixed here**, and the fix is not a one-line option: a
+        # GitHub Actions service container takes no `command:`, and
+        # `max_connections` needs a restart rather than a reload, so
+        # changing it means dropping this service block and starting
+        # Postgres from a step instead. On the self-hosted runner that
+        # still means Docker — the pod runs a privileged `docker:27-dind`
+        # sidecar, which is the only reason service containers work here at
+        # all, and containers it starts share the pod's network namespace
+        # so a published port is still reachable at `localhost`. Nothing
+        # about it becomes a k3s object.
+        #
+        # Raised rather than made, because it changes how this job gets its
+        # database on a runner that has only just moved. If CI fails with
+        # `too many clients`, this is why.
+        #
+        # **Shared memory is 1 GB.** Docker gives a container 64 MB of
+        # `/dev/shm` by default. On 2026-10-21 (run 39577145887) Postgres ran
+        # out of it mid-suite ("could not resize shared memory segment ... No
+        # space left on device"), crashed into recovery, and 71 tests after
+        # it failed. `--shm-size` is accepted here, unlike `command:`.
+        options: >-
+          --shm-size=1g
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      ORDO_PSQL: psql
+      # Two readers of one password. `psql` (the harness's schema and seed
+      # steps) reads PGPASSWORD; the Rust pool reads ORDO_PG_PASSWORD. With
+      # only the first set, every pool connection was refused over TCP here
+      # while the local socket, which asks for no password, passed.
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The workspace's build and the Postgres container share the runner's
+      # disk. On 2026-09-15 it filled mid-suite and Postgres panicked writing
+      # WAL ("No space left on device"), failing every test after it. These
+      # are preinstalled SDKs this job never uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      # Distinct shared-key from the image workflow's buildx cache scopes
+      # (`image-cli`/`image-host`/`image-playground`), so a Docker build and
+      # a test run cannot evict each other's cache entries.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Runner disk noise only; the product fix is the store pool's size
+      # and wait (board task `store-pool-held-blocks-signin`). See the script.
+      - name: Postgres without durable commits (CI only)
+        run: bash scripts/ci-pg-fast-commits.sh
+
+      # `crates/ordo-host/tests/dev_loop.rs` starts its own Postgres with
+      # `initdb` and `pg_ctl`, and skipped without them (the service container
+      # above gives psql and no server binaries). The server package puts them
+      # in /usr/lib/postgresql/<n>/bin, which `ordo dev` searches by itself.
+      # `create_main_cluster = false` stops Debian creating and starting a
+      # cluster on 5432, where the service container already listens.
+      # `initdb` refuses to run as root, so the next step fails early and
+      # plainly if this runner ever does; the test would otherwise fail
+      # with initdb's own message.
+      - name: Install the Postgres server binaries
+        run: |
+          sudo mkdir -p /etc/postgresql-common
+          echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.conf
+          sudo apt-get install -y postgresql
+          ls -d /usr/lib/postgresql/*/bin/initdb
+          if [ "$(id -u)" = 0 ]; then
+            echo "The runner user is root and initdb refuses root: run the job as a non-root user."
+            exit 1
+          fi
+
+      # ORDO_UPDATE_GOLDEN=1 rewrites goldens instead of comparing them
+      # (`crates/ordo-conformance/src/golden.rs`), so a run with it set is
+      # green by construction and proves nothing. Its absence is currently
+      # a property of nobody having set it; asserting it closes that hole
+      # for good, including against a repository variable someone adds
+      # later for a reason that made sense at the time.
+      - name: The golden update switch must be off
+        run: |
+          if [ -n "${ORDO_UPDATE_GOLDEN:-}" ]; then
+            echo "ORDO_UPDATE_GOLDEN is set. CI must COMPARE goldens, never rewrite them:"
+            echo "a run that regenerates is green by construction. Unset it."
+            exit 1
+          fi
+          echo "ORDO_UPDATE_GOLDEN unset — goldens will be compared."
+
+      - name: Format
+        if: matrix.shard == 'rest'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: matrix.shard == 'rest'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # `crates/ordo-host/tests/notes_app.rs` runs the notes page's vitest
+      # (`examples/notes/web/test/live.test.ts`) against a real door, and
+      # skipped with a printed line when the page had no `node_modules`. That
+      # was always so here, so the test never ran on CI. The page installs
+      # with its own `npm ci` (its SDK imports are aliases to `clients/*/src`),
+      # and ORDO_REQUIRE_WEB_TESTS makes a missing install a failure.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: examples/notes/web/package-lock.json
+
+      - name: Install the notes page's packages
+        working-directory: examples/notes/web
+        run: npm ci
+
+      - name: Test
+        env:
+          ORDO_REQUIRE_WEB_TESTS: '1'
+          ORDO_REQUIRE_OWNED_PG: '1'
+        # --no-fail-fast: without it the run stops at the first failing test
+        # binary, and every crate after it goes unreported. That hid all of
+        # ordo-exec, ordo-host and the corpus behind one ordo-cli failure.
+        run: bash scripts/ci-test-shard.sh ${{ matrix.shard }}
+
+      # `crates/ordo-blob/tests/contract.rs` runs the S3 contract only when
+      # ORDO_BLOB_S3_* are set. The stand-in is SeaweedFS (`weed server -s3`),
+      # started with docker from a step: a service container takes no
+      # `command:` (see the Postgres note above). The pod's docker sidecar
+      # shares its network, so the port is reachable at localhost. The keys
+      # guard nothing: the server lives for this job only and listens on
+      # loopback. SeaweedFS reads its one access key from AWS_ACCESS_KEY_ID
+      # and AWS_SECRET_ACCESS_KEY, so no config file is mounted.
+      # After the suite, so a stand-in that will not start never blocks the
+      # Rust tests; `!cancelled()` runs it even when the suite failed.
+      # MinIO is not used: it left Docker Hub and quay.io refuses these
+      # runners (run 39868104415 and its successor).
+      - name: Start a local S3 (SeaweedFS) and create the bucket
+        if: ${{ !cancelled() && matrix.shard == 'rest' }}
+        run: |
+          docker run -d --name ordo-s3 -p 8333:8333 -p 9333:9333 \
+            -e AWS_ACCESS_KEY_ID=ordo-ci-key \
+            -e AWS_SECRET_ACCESS_KEY=ordo-ci-secret-not-a-secret \
+            chrislusf/seaweedfs:4.09 server -s3 -dir=/data
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:9333/cluster/status && break
+            sleep 1
+          done
+          curl -fsS http://localhost:9333/cluster/status
+          # The S3 gateway and the volume server start a moment after the
+          # master, so the bucket is created with retries.
+          for i in $(seq 1 30); do
+            docker run --rm --network host \
+              -e AWS_ACCESS_KEY_ID=ordo-ci-key \
+              -e AWS_SECRET_ACCESS_KEY=ordo-ci-secret-not-a-secret \
+              -e AWS_DEFAULT_REGION=us-east-1 \
+              amazon/aws-cli:2.32.29 --endpoint-url http://localhost:8333 \
+              s3api create-bucket --bucket ordo-contract && break
+            sleep 2
+          done
+          docker run --rm --network host \
+            -e AWS_ACCESS_KEY_ID=ordo-ci-key \
+            -e AWS_SECRET_ACCESS_KEY=ordo-ci-secret-not-a-secret \
+            -e AWS_DEFAULT_REGION=us-east-1 \
+            amazon/aws-cli:2.32.29 --endpoint-url http://localhost:8333 \
+            s3api head-bucket --bucket ordo-contract
+
+      # The S3 contract in a step of its own: ordo-host, ordo-exec and
+      # ordo-cli read ORDO_BLOB_S3_* too, and setting them for the whole
+      # suite would change what those tests boot. The keys guard only the
+      # throwaway SeaweedFS above. s3.rs picks path-style addressing by
+      # itself for a loopback endpoint, so no extra variable is needed.
+      - name: S3 contract
+        if: ${{ !cancelled() && matrix.shard == 'rest' }}
+        env:
+          ORDO_REQUIRE_S3_TESTS: '1'
+          ORDO_BLOB_S3_ENDPOINT: http://localhost:8333
+          ORDO_BLOB_S3_REGION: us-east-1
+          ORDO_BLOB_S3_BUCKET: ordo-contract
+          ORDO_BLOB_S3_ACCESS_KEY_ID: ordo-ci-key
+          ORDO_BLOB_S3_SECRET_ACCESS_KEY: ordo-ci-secret-not-a-secret
+        run: cargo test -p ordo-blob --test contract -- --nocapture
+
+      - name: Disk after the suite
+        if: always()
+        run: df -h /
+
+      # A green run that never reached Postgres would prove nothing, so the
+      # execution tier asserts its own presence rather than trusting the
+      # log — and it names the test exactly, in its own binary, rather than
+      # trusting a substring filter.
+      #
+      # The earlier version here ran `cargo test -p ordo-conformance c001`
+      # and grepped for `test result: ok. 1 passed`. Two defects that
+      # compose: `c001` is a substring filter that also matches
+      # `gc001_to_gc004_one_op_four_principals_four_answers` in
+      # `guards_corpus.rs`, so two binaries each report "1 passed" — and
+      # "1 passed" says *some* single test passed, not *which*. If the
+      # corpus case were renamed or deleted, the guards case alone would
+      # keep the assertion green. Naming the test with `--exact` and
+      # grepping for that name's own ok-line fixes both
+      # (`docs/plan-ci-images.md` §2.3).
+      - name: Prove the execution tier actually ran
+        if: matrix.shard == 'rest'
+        run: |
+          set -o pipefail
+          cargo test -p ordo-conformance --test corpus \
+            c001_projection_subset_over_a_composed_source -- --exact --nocapture \
+            2>&1 | tee /tmp/c001.log
+          grep -qE '^test c001_projection_subset_over_a_composed_source \.\.\. ok$' /tmp/c001.log \
+            || { echo "C001 did not report a pass line — the execution tier did not run."; exit 1; }
+          grep -q 'test result: ok. 1 passed' /tmp/c001.log
+
+      # The two-directional inventory, named individually so a red run says
+      # WHICH direction broke in the job list, without anyone opening a log.
+      # Both already run inside `cargo test --workspace`; re-running them
+      # costs nothing (everything is built) and buys a legible failure.
+      - name: Inventory — engine to document
+        if: matrix.shard == 'rest'
+        run: |
+          cargo test -p ordo-api --test inventory_is_closed \
+            every_class_the_engine_can_emit_is_in_the_document -- --exact
+
+      - name: Inventory — document to engine
+        if: matrix.shard == 'rest'
+        run: |
+          cargo test -p ordo-api --test inventory_is_closed \
+            every_documented_class_is_one_the_engine_has -- --exact
+
+      # The third leg of the same triangle, in the CLI's interface
+      # descriptor: every refusal class an op advertises must be a class the
+      # wire inventory contains.
+      - name: Inventory — descriptor to wire
+        if: matrix.shard == 'rest'
+        run: |
+          cargo test -p ordo-cli --test interface \
+            every_refusal_class_named_is_in_the_wire_inventory -- --exact
+
+  # **Ordo upgraded under a live deployment** (owner, 2026-10-27: users are
+  # still there and logins have not changed). The previous Ordo, pinned in
+  # `scripts/upgrade-continuity.sh`, makes people, sign-ins, shares, a file,
+  # a delegation and a page cursor. This build starts on the same databases
+  # and keys and must serve all of it. The program-update half of the same
+  # test file already runs inside `cargo test --workspace` above.
+  #
+  # Its own job, so it runs beside `test` rather than after it. Measured
+  # locally 2026-10-27: 73 s in all, the previous build from cold 26 s and
+  # both tests 45 s. Here the previous build is from cold on every run (its
+  # crates come from the registry cache) and this build's target comes warm
+  # from the `rust-gates` cache. If it nears its 20 minutes, move it to a
+  # nightly schedule.
+  upgrade:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: ordo_conformance
+        ports: ['5432:5432']
+        options: >-
+          --shm-size=1g
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+      ORDO_PSQL: psql
+      # The service container is the database; the script starts none.
+      ORDO_UPGRADE_OWN_PG: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The previous Ordo is a commit in this history.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates
+          # The `test` job saves this cache; this one only reads it.
+          save-if: false
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Upgrade continuity
+        # `runner` is not readable in a job's `env`, only in a step's.
+        env:
+          ORDO_UPGRADE_DIR: ${{ runner.temp }}/ordo-upgrade
+        run: bash scripts/upgrade-continuity.sh
+
+  # The JavaScript packages, which nothing in CI ran until 2026-09-16.
+  #
+  # Two things went unverified on every push. The SDK's device half — the
+  # replica, the sync feed's client, the sync manager and local refinement —
+  # ran only on the author's machine. And `ordo-gen`'s isomorphism ratchet
+  # has three legs, of which leg B (`synth()` reproducing the checked-in
+  # `.synth.ordo`) runs inside `npm run check` in `clients/ordo-cdk`: the
+  # Rust side asserts the round trip against node's recorded output, so
+  # without this job nothing re-checks that today's TypeScript still emits
+  # it.
+  #
+  # A separate job rather than steps on `test`: these need no database and
+  # finish in seconds, so they should not wait on a Postgres container they
+  # never touch, and a Rust failure should not hide them.
+  clients:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+    strategy:
+      # One package's failure should not mask another's.
+      fail-fast: false
+      matrix:
+        package: [ordo-sdk, ordo-cdk, ordo-react]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # Every package declares `node >=18`; 20 is the supported LTS above
+          # that floor. `npm ci` needs the lockfile each package carries.
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: clients/${{ matrix.package }}/package-lock.json
+
+      # ordo-react imports ordo-sdk (a `file:` dependency), whose exports
+      # point at its built files, so the SDK is built first.
+      - name: Build ordo-sdk for ordo-react
+        if: matrix.package == 'ordo-react'
+        working-directory: clients/ordo-sdk
+        run: npm ci && npm run build
+
+      - name: Install
+        working-directory: clients/${{ matrix.package }}
+        run: npm ci
+
+      # `check` is typecheck plus vitest. The packages ship zero runtime
+      # dependencies, and their generated halves are checked in, so this
+      # needs no cargo build first — what guards the generated files being
+      # current is `ordo-gen`'s ratchet in the `test` job.
+      - name: Check
+        working-directory: clients/${{ matrix.package }}
+        run: npm run check
+
+      # The agent skill's ts/tsx examples (`skills/ordo/*.md`) typecheck
+      # against the real clients/ordo-sdk and clients/ordo-react sources.
+      - name: Typecheck the skill's examples
+        if: matrix.package == 'ordo-react'
+        run: node scripts/check-skill-examples.mjs
+
+  # The example apps' pages, which CI did not run until 2026-10-19. A job of
+  # its own beside `clients`, so the check names `clients (...)` stay as they
+  # were. Each page imports `@hominemai/ordo-sdk` and `@hominemai/ordo-react`
+  # from `clients/*/src` through aliases in its own vite.config.ts and
+  # tsconfig.json, and both packages have no runtime dependencies, so the
+  # page's own `npm ci` is the whole install. The notes page's live test
+  # (`test/live.test.ts`) skips without a server; `e2e.yml` runs the notes
+  # app against a real one.
+  examples:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [notes, notes-v2, teamspace, shopfront]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: examples/${{ matrix.app }}/web/package-lock.json
+
+      - name: Install
+        working-directory: examples/${{ matrix.app }}/web
+        run: npm ci
+
+      # Typecheck plus vitest.
+      - name: Check
+        working-directory: examples/${{ matrix.app }}/web
+        run: npm run check
+
+  # Supply-chain audit (audit F4, F5, F9). Rust advisories come from
+  # RustSec through cargo-audit, with the ignores and their reasons in
+  # `.cargo/audit.toml`. Every npm lockfile is audited twice at "high":
+  # once for runtime dependencies, which ship to users, and once with dev
+  # dependencies, which run in CI and on developer machines.
+  audit:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: npm audit, runtime dependencies
+        run: |
+          set -u
+          fail=0
+          for lock in $(git ls-files '*package-lock.json'); do
+            dir=$(dirname "$lock")
+            echo "== $dir (runtime)"
+            (cd "$dir" && npm audit --audit-level=high --omit=dev) || fail=1
+          done
+          exit $fail
+
+      - name: npm audit, dev dependencies
+        run: |
+          set -u
+          fail=0
+          for lock in $(git ls-files '*package-lock.json'); do
+            dir=$(dirname "$lock")
+            echo "== $dir (all)"
+            (cd "$dir" && npm audit --audit-level=high) || fail=1
+          done
+          exit $fail

@@ -1,0 +1,94 @@
+Ordo
+Copyright (c) 2026 Hominem
+Ordo and Hominem are trademarks of Hominem.
+
+"Hominem" is the holder of record for this project. Contributors retain
+copyright in their own contributions; see CLA.md and CONTRIBUTING.md.
+
+
+LICENSING
+=========
+
+Ordo is dual-licensed by path. Both licences are real open-source licences.
+There is no registration, no click-through, no redistribution restriction,
+and no "source available" tier.
+
+  crates/                  AGPL-3.0-only          see LICENSE
+  the server / engine      AGPL-3.0-only          see LICENSE
+
+  docs/                    Apache-2.0             see LICENSE-APACHE
+    (the language specification, the conformance corpora, and the
+     accompanying reference material)
+
+  clients/ordo-sdk         Apache-2.0             see LICENSE-APACHE
+  clients/ordo-react       Apache-2.0             see LICENSE-APACHE
+  clients/ordo-cdk         Apache-2.0             see LICENSE-APACHE
+    (the client SDK, its React bindings, and the CDK/builder frontend; each
+     package.json says Apache-2.0)
+
+  skills/ordo              Apache-2.0             see LICENSE-APACHE
+    (the agent skill, which `ordo skill install` copies into an app's
+     repository; SKILL.md says Apache-2.0)
+
+  clients/ordo-console-web follows the default for the rest of the
+    repository, stated below. Its package.json carries no licence field.
+
+Governance files at the repository root — CLA.md, CODE_OF_CONDUCT.md,
+CONTRIBUTING.md and this NOTICE — carry no licence assertion of their own:
+quote, fork and adapt them freely. (CLA.md is the Apache ICLA v2.0, which
+carries its own terms.)
+
+Anything else not listed above defaults to AGPL-3.0-only. New top-level paths
+should be added to this map when they are created.
+
+Why the split: the engine is a service you run, so AGPL applies — modify it
+and offer it to others as a service, and your modifications must be published.
+The specification, corpora, SDKs and builder frontends are things developers
+link into their own code, so they are permissive: a copyleft client SDK would
+be unusable, and an encumbered specification would not be a specification.
+
+Rationale in full: docs/licensing.md
+Contributing (including the CLA): CONTRIBUTING.md
+The CLA itself:                   CLA.md
+Code of conduct:                  CODE_OF_CONDUCT.md
+
+
+YOUR OUTPUT IS YOURS
+====================
+
+Everything Ordo produces from your definitions — SQL, DDL, migration and
+deployment plans, registry and interface artifacts, generated SDK and UI
+code, and exports — belongs to you, and this project claims no licence over
+it. Running Ordo, or compiling your definitions with it, places no licence
+obligation of any kind on those outputs, on your definitions, or on the
+applications you build with them.
+
+
+COMMERCIAL LICENSING
+====================
+
+A commercial licence to the engine is available for organizations that cannot
+accept AGPL terms, alongside a hosted Ordo platform. Neither removes anything
+from the open-source project; the AGPL grant above stands on its own and is
+not conditioned on any commercial relationship.
+
+Enquiries: secobs@hominem.ai
+
+
+DEPLOYMENT IDENTITY
+===================
+
+A deployment's apex domain is configuration, supplied by the environment, not
+a value baked into this project. It is also load-bearing: the passkey relying-
+party id is derived from it, so changing the apex strands every passkey already
+registered against the old one. Pick it once per deployment.
+
+See docs/licensing.md, "Deployment identity", for the detail.
+
+
+CONTACT
+=======
+
+Security reports, conduct reports, CLA questions and commercial-licensing
+enquiries all go to secobs@hominem.ai. Do not report security issues in a
+public issue tracker.

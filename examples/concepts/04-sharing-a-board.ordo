@@ -1,0 +1,54 @@
+# Concept: share links and guests
+#
+# Nothing in the program says "shareable". A board owner mints a share at
+# runtime, and the platform checks the ops the share lists against this file:
+#   - an op listed in a share must be a READ
+#   - it must not be `unguarded`
+#   - it must touch at least one guarded entity (or restrict rows to $caller),
+#     otherwise a guest would see everything the op can reach
+#       (`guest_exposure_unguarded`)
+#   - the sharer must be able to call it themselves
+#
+# Two ways in, both read-only:
+#   guest        a signed-in person from outside holds a seat (a members row
+#                with no role). The sharer calls std.space.share.
+#   share link   a secret URL, no sign-in. The sharer calls std.space.shareLink.
+#                Files of a shared row follow if the link lists std.<entity>.get.
+#
+# `boardView` and `cardsOnBoard` below are the ops a share would list.
+# `boardSummary` is unguarded and would be refused.
+#
+# Read next: docs/howto-sharing.md, docs/plan-sharing.md.
+
+domain boards @ 1.0.0
+
+entity boards {
+  name: text
+  acl (read, write, admin)
+}
+
+entity cards {
+  board -> boards owned
+  title: text
+  done:  bool = false
+  cover: blob?                     # a file that follows its row
+}
+
+# Guard-bearing reads: legal to share.
+op boardView unbounded =
+  boards[id, name]
+
+op cardsOnBoard($board: id) unbounded =
+  cards(board == $board)[id, title, done, cover]
+  sort title
+
+# Bypasses guards, so a share that lists it is refused.
+op boardSummary unbounded unguarded =
+  cards[board.name, done]
+  group board.name { n: count, finished: count(done) }
+
+op addBoard($name: text) =
+  set boards { name: $name }
+
+op addCard($board: id, $title: text) =
+  set cards { board: $board, title: $title }

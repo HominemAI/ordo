@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="ordo-base" content="__ORDO_BASE__">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Sign in the command line · Ordo</title>
+<link rel="stylesheet" href="/page/identity.css">
+<script type="module" src="/page/cli.js"></script>
+</head>
+<body>
+<header class="brand"><span class="mark">Ordo</span> deployment sign-in</header>
+<main>
+  <p id="problem" class="problem" role="alert"></p>
+
+  <section data-step="loading">
+    <h1>Sign in the command line</h1>
+    <p>Loading.</p>
+  </section>
+
+  <section data-step="bad" hidden>
+    <h1>This request is not complete</h1>
+    <p>Nothing was signed in. Run <code>ordo login</code> again on your computer. It opens this page with a fresh request.</p>
+  </section>
+
+  <section data-step="must-enrol" hidden>
+    <h1>Make a new passkey first</h1>
+    <p>You signed in with a recovery code. Make a new passkey, then run <code>ordo login</code> again.</p>
+    <p><a href="/sign-in">Make a new passkey</a></p>
+  </section>
+
+  <section data-step="ask" hidden>
+    <h1>Sign in the <code>ordo</code> command?</h1>
+    <div class="warn" id="warning">
+      <p><strong>Only approve a request you just started.</strong></p>
+      <p>Approve only if you ran <code>ordo login</code> yourself, on this computer, in the last few minutes. If you did not, or you are not sure, choose Deny. Someone who sent you this link could be trying to get in as you.</p>
+    </div>
+    <dl class="facts">
+      <dt>What asks</dt>
+      <dd>The <code>ordo</code> command line, waiting on this computer</dd>
+      <dt>Answer goes to</dt>
+      <dd>This computer only, port <span id="port"></span> (127.0.0.1)</dd>
+      <dt>Signs in as</dt>
+      <dd id="who">You, after you confirm with your passkey</dd>
+      <dt>What approving does</dt>
+      <dd id="grant">The command can run deployment commands as you until you run <code>ordo logout</code>, or until its session ends.</dd>
+    </dl>
+    <div class="row" id="answer">
+      <button type="button" id="approve" data-passkey>Approve with my passkey</button>
+      <button type="button" id="deny" class="secondary">Deny</button>
+    </div>
+  </section>
+
+  <section data-step="approved" hidden>
+    <h1>Approved</h1>
+    <p>Go back to your terminal. The <code>ordo</code> command is signed in. You can close this tab.</p>
+  </section>
+
+  <section data-step="denied" hidden>
+    <h1>Denied</h1>
+    <p>Nothing was signed in. If you started <code>ordo login</code>, stop it with Ctrl+C. You can close this tab.</p>
+    <p>If you did not start this request, someone may have sent you the link on purpose. Tell the deployment owner.</p>
+  </section>
+
+  <p id="status" class="status" role="status"></p>
+</main>
+</body>
+</html>

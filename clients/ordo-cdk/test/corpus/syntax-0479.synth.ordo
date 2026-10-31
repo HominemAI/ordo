@@ -1,0 +1,2 @@
+op setRent($lease: id, $rev: int, $annual: money) =
+  set leases { id: $lease, rev: $rev, rent: round($annual / 12, 0) }

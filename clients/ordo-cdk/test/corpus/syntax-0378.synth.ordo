@@ -1,0 +1,3 @@
+op orders =
+  workOrders(status != "void")[opened, priority, descr]
+    sort -opened, priority

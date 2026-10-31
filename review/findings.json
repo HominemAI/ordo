@@ -1,0 +1,1758 @@
+[
+  {
+    "id": "X-001",
+    "title": "Authorization is specified but acl/access still do not parse, bind, or execute",
+    "severity": "fatal",
+    "area": "authorization",
+    "origin": "panel FATAL-1; strong #5/#13; skeptic-panel round-3; skeptic-panel round-4",
+    "status": "open"
+  },
+  {
+    "id": "X-002",
+    "title": "Licence absence and unsafe categorical AGPL guidance are repaired",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "panel FATAL-2; skeptic-panel R3-LIC-1",
+    "status": "closed"
+  },
+  {
+    "id": "X-003",
+    "title": "No performance numbers or executed restore/DR evidence exist",
+    "severity": "fatal",
+    "area": "cost-ops",
+    "origin": "panel FATAL-3; C3; skeptic-panel round-3; skeptic-panel round-4",
+    "status": "carried"
+  },
+  {
+    "id": "X-004",
+    "title": "Routine identity and acknowledgment slot are specified",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "strong #1; panel mini-app judgment",
+    "status": "closed"
+  },
+  {
+    "id": "X-005",
+    "title": "ACL bootstrap availability and owner-confidentiality product contract are specified",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "strong #2; cheap-build; SH3-004",
+    "status": "closed"
+  },
+  {
+    "id": "X-006",
+    "title": "Null-safe uniqueness and null-key addressing are specified",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M1; M2 prior retest",
+    "status": "closed"
+  },
+  {
+    "id": "X-007",
+    "title": "The unimplementable significant-digit division rule was withdrawn",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M2; M2-001; M4-001",
+    "status": "closed"
+  },
+  {
+    "id": "X-008",
+    "title": "Duration equality is fixed but application typing remains elsewhere",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M3; M2-002; M2-003; M2-004",
+    "status": "relocated"
+  },
+  {
+    "id": "X-009",
+    "title": "Match plan parity is fixed but semantic consistency and complexity remain",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M4; M2-011; C2-010",
+    "status": "relocated"
+  },
+  {
+    "id": "X-010",
+    "title": "Rollup closure is fixed in the language spec but contradicted by the std owner",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M5; M2-010; M4-013",
+    "status": "carried"
+  },
+  {
+    "id": "X-011",
+    "title": "Null-safe equality and membership compilation are specified",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M7; M2-006; M4-006",
+    "status": "closed"
+  },
+  {
+    "id": "X-012",
+    "title": "Null arithmetic remains explicitly unruled",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "strong #8; M2-005; M4-007",
+    "status": "carried"
+  },
+  {
+    "id": "X-018",
+    "title": "The platform-members authorization fixture is repaired",
+    "severity": "info",
+    "area": "coverage",
+    "origin": "panel; strong #13; C2-011",
+    "status": "closed"
+  },
+  {
+    "id": "X-019",
+    "title": "Both access verbs are required on explicitly guarded entities",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "panel top-8 #4; cheap build; Y-100",
+    "status": "closed"
+  },
+  {
+    "id": "X-022",
+    "title": "A multi-tenant onboarding path exists",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "panel top-8 #2; tutorial Part 2",
+    "status": "closed"
+  },
+  {
+    "id": "X-023",
+    "title": "Std operations default to the open skeleton on sealed entities",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH Part D; current std design",
+    "status": "closed"
+  },
+  {
+    "id": "X-026",
+    "title": "DEK epochs and rotation are designed",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-9; Y-105",
+    "status": "closed"
+  },
+  {
+    "id": "X-029",
+    "title": "Manifest hashing uses domain-separated SHA-256 instead of FNV-1a",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-27; SH2 review",
+    "status": "closed"
+  },
+  {
+    "id": "X-031",
+    "title": "Per-field sealed refinement metadata and door checks exist",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-4; C4; SH2 crates audit",
+    "status": "closed"
+  },
+  {
+    "id": "X-032",
+    "title": "Non-enumerating guarded-row errors are synchronized",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "SH-5; C2-011",
+    "status": "closed"
+  },
+  {
+    "id": "X-039",
+    "title": "Replay scope/fingerprint are fixed but atomic completion moved to the transaction boundary",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-17; C2-005; C4-004; SH4-002",
+    "status": "relocated"
+  },
+  {
+    "id": "X-040",
+    "title": "Space binds before the access decision at the API door",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-19; C2 prior retest",
+    "status": "closed"
+  },
+  {
+    "id": "X-051",
+    "title": "Owner-verifiable chain claims remain unimplemented and maturity-marked inconsistently",
+    "severity": "major",
+    "area": "security",
+    "origin": "SH-13; M6",
+    "status": "carried"
+  },
+  {
+    "id": "X-058",
+    "title": "Client-first ordering is stated but signed-record and semantic folds moved to narrower failures",
+    "severity": "info",
+    "area": "distributed",
+    "origin": "C1; C2-001; C2-002; SH3-001; SH3-007",
+    "status": "relocated"
+  },
+  {
+    "id": "X-059",
+    "title": "Cursor drift examples are repaired but the stable-cursor theorem excludes real writers and membership drift",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C2; M2-008; M2-009; C2-008; C2-012; M4-009",
+    "status": "carried"
+  },
+  {
+    "id": "X-060",
+    "title": "Write isolation prose improved but transaction and exact-read boundaries remain",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "C3; C2-006; C4-004; C4-007",
+    "status": "relocated"
+  },
+  {
+    "id": "X-066",
+    "title": "Sealed RHS locking and DEK-independent uniqueness are specified",
+    "severity": "info",
+    "area": "distributed",
+    "origin": "C7b; C2-004",
+    "status": "closed"
+  },
+  {
+    "id": "X-068",
+    "title": "The global row-work gate still admits take as evidence for examined-row bounds",
+    "severity": "major",
+    "area": "cost-ops",
+    "origin": "strong #12; M2-007; C2-007; M4-010",
+    "status": "open"
+  },
+  {
+    "id": "X-070",
+    "title": "Effective refinement cost remains unenforceable with current operation metadata",
+    "severity": "major",
+    "area": "cost-ops",
+    "origin": "SH-4/C4; SH2 crates audit",
+    "status": "carried"
+  },
+  {
+    "id": "X-071",
+    "title": "Migration phases exist but transforming backfill still lacks write capture",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "panel FATAL-3a; C2-003; C4-008",
+    "status": "closed",
+    "resolution": "Ruled: v1 quiesces writes to the entity being transformed, scan start through verified swap, with the freeze and its estimated duration in `ordo plan` output before the operator accepts. Dual-write-from-a-watermark named as the deferred upgrade. DR drill asserts a write behind the cursor is rejected, not dropped.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "X-072",
+    "title": "No executed backup/restore/chain reconciliation drill exists",
+    "severity": "critical",
+    "area": "cost-ops",
+    "origin": "panel FATAL-3b; skeptic-panel round-3; skeptic-panel round-4",
+    "status": "carried"
+  },
+  {
+    "id": "X-073",
+    "title": "Observability remains proposed and unexercised",
+    "severity": "major",
+    "area": "cost-ops",
+    "origin": "panel FATAL-3c; skeptic-panel round-3",
+    "status": "carried"
+  },
+  {
+    "id": "X-074",
+    "title": "Let syntax is findable",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "cheap-note 1; Y-103",
+    "status": "closed"
+  },
+  {
+    "id": "X-075",
+    "title": "Reserved-word parity is repaired",
+    "severity": "info",
+    "area": "spec-code-parity",
+    "origin": "strong #5; pre-review-round-3 keyword parity",
+    "status": "closed"
+  },
+  {
+    "id": "X-078",
+    "title": "App manifest grammar remains illustrative and under-specified",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "strong #17; BJ3-008; BJ3-009; BJ4-004",
+    "status": "carried"
+  },
+  {
+    "id": "X-079",
+    "title": "Filled operation parameters are specified and lexed",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "strong #18; Y-025",
+    "status": "closed"
+  },
+  {
+    "id": "X-080",
+    "title": "Tutorial capstone defects were repaired",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "tutorial ambiguities 1/2/4/5",
+    "status": "closed"
+  },
+  {
+    "id": "X-084",
+    "title": "No runnable end-to-end product exists despite broad platform outcome claims",
+    "severity": "fatal",
+    "area": "claim-discipline",
+    "origin": "panel stop-claiming list; skeptic-panel round-3; skeptic-panel round-4 4/4",
+    "status": "carried"
+  },
+  {
+    "id": "X-085",
+    "title": "Exit direction is credible but executable round-trip evidence is absent",
+    "severity": "major",
+    "area": "claim-discipline",
+    "origin": "panel FATAL-2; skeptic-panel round-3; skeptic-panel round-4",
+    "status": "carried"
+  },
+  {
+    "id": "X-086",
+    "title": "The AI-authoring authority wedge remains unverifiable at runtime",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "panel AI-wedge verdict; round-3 AI builds; BJ4",
+    "status": "carried"
+  },
+  {
+    "id": "Y-001",
+    "title": "Sink SSRF controls are architecturally pinned",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH2-3; skeptic-panel round-4",
+    "status": "closed"
+  },
+  {
+    "id": "Y-002",
+    "title": "Ordinary capability grants are space-bound; deployment scope moved elsewhere",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH2-2; BJ3-016; C4-010; SH4-012",
+    "status": "closed"
+  },
+  {
+    "id": "Y-003",
+    "title": "ACL-root creation exception resolves the creator-grant deadlock",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "expert #10; strong-build; BJ3-013; C4 prior retest",
+    "status": "closed"
+  },
+  {
+    "id": "Y-004",
+    "title": "Listener routines are trigger-id bounded and wider access is explicit",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "expert #9; SH2-10; skeptic-panel round-4",
+    "status": "closed"
+  },
+  {
+    "id": "Y-005",
+    "title": "The grant manifest is still not an authority-complete semantic contract",
+    "severity": "fatal",
+    "area": "authorization",
+    "origin": "expert #7; SH3-002; SH4-001; skeptic-panel round-4 independent reproduction",
+    "status": "carried"
+  },
+  {
+    "id": "Y-006",
+    "title": "The significant-digit division pin was withdrawn",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "expert #2; M2-001; M4-001",
+    "status": "closed"
+  },
+  {
+    "id": "Y-007",
+    "title": "Denials no longer append attacker-controlled entries to a victim command chain",
+    "severity": "info",
+    "area": "security",
+    "origin": "expert F1; SH2-7",
+    "status": "closed"
+  },
+  {
+    "id": "Y-008",
+    "title": "Denial-event ownership is settled in owner documents but contradicted by the glossary",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "expert F2; SH2-8",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-009",
+    "title": "DEK-epoch blind-index uniqueness is fixed by SMK-derived index keys",
+    "severity": "info",
+    "area": "security",
+    "origin": "expert F3; C2-004; C4-015",
+    "status": "closed"
+  },
+  {
+    "id": "Y-010",
+    "title": "DEK rotation and undo-horizon image handling are settled in owner documents but contradicted by the glossary",
+    "severity": "major",
+    "area": "security",
+    "origin": "expert F4",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-011",
+    "title": "Explicit open guards and guest-bearing checks are spellable",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "expert F5",
+    "status": "closed"
+  },
+  {
+    "id": "Y-012",
+    "title": "Random SealedRef representation exists but enforcement moved to append",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH2-22; SH4-006",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-013",
+    "title": "Direct/group combination and revocation are settled in owner documents but contradicted by the glossary",
+    "severity": "major",
+    "area": "authorization",
+    "origin": "expert F6; SH2-11",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-014",
+    "title": "Caller equality is exact and group expansion is explicitly spelled",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "expert F7; BJ4-009",
+    "status": "closed"
+  },
+  {
+    "id": "Y-015",
+    "title": "The approved space is threaded into the executor",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH2-1; BJ3-016; C4 prior retest",
+    "status": "closed"
+  },
+  {
+    "id": "Y-016",
+    "title": "Duration ordering uses reproducible declaration-site type classes",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "expert #3; M2-004; M4-005",
+    "status": "closed"
+  },
+  {
+    "id": "Y-017",
+    "title": "Cursor stability analysis still excludes executable std writers and eligibility drift",
+    "severity": "critical",
+    "area": "language-semantics",
+    "origin": "expert #6; M2-009; C2-012; BJ3-019; M4-009",
+    "status": "carried"
+  },
+  {
+    "id": "Y-018",
+    "title": "Larger-source match inference moved into contradictory and intractable rules",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "expert #4; M4-014; M4-015; C4-014",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-019",
+    "title": "The std rollup owner retains the withdrawn display-closure proof",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "expert #5; M2-010; M4-013",
+    "status": "carried"
+  },
+  {
+    "id": "Y-020",
+    "title": "Platform-derived unbounded acknowledgment remains inconsistent",
+    "severity": "major",
+    "area": "cost-ops",
+    "origin": "expert F9; M4-011; M4-012",
+    "status": "carried"
+  },
+  {
+    "id": "Y-021",
+    "title": "Refinement ordering is specified",
+    "severity": "info",
+    "area": "cost-ops",
+    "origin": "expert F10",
+    "status": "closed"
+  },
+  {
+    "id": "Y-022",
+    "title": "Guest creators do not receive ACL bootstrap administration",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "expert F11",
+    "status": "closed"
+  },
+  {
+    "id": "Y-023",
+    "title": "Uniqueness is explicitly space-scoped",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "expert F8; strong build round-3",
+    "status": "closed"
+  },
+  {
+    "id": "Y-024",
+    "title": "Create-and-seed can bind a statically creating write",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "strong-build",
+    "status": "closed"
+  },
+  {
+    "id": "Y-025",
+    "title": "SDK-filled operation parameters are settled",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "strong-build; BJ3 prior-fix audit",
+    "status": "closed"
+  },
+  {
+    "id": "Y-026",
+    "title": "Members exposes displayName",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "strong-build; BJ3-006",
+    "status": "closed"
+  },
+  {
+    "id": "Y-027",
+    "title": "Independently grouped aggregate comparison has a worked recipe",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "cheap-build r2",
+    "status": "closed"
+  },
+  {
+    "id": "Y-028",
+    "title": "ACL human-count guidance exposes memberCount and its approximation",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "strong-build",
+    "status": "closed"
+  },
+  {
+    "id": "Y-029",
+    "title": "Routine trigger-provenance rationale is synchronized",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "strong-build; BJ3-023",
+    "status": "closed"
+  },
+  {
+    "id": "Y-030",
+    "title": "Door-denial error codes are synchronized",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "SH2 crates audit; expert F12; BJ3-022",
+    "status": "closed"
+  },
+  {
+    "id": "Y-031",
+    "title": "Client-first commitment/CAS ambiguity moved into signed-record and fold findings",
+    "severity": "info",
+    "area": "distributed",
+    "origin": "expert #8; C2-001; C2-002; SH3-007; C4-001; C4-002",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-032",
+    "title": "Command-log image lookup is scoped but cross-space existence moved to an oracle",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-12/13/14; C4-013; SH4-007",
+    "status": "relocated"
+  },
+  {
+    "id": "Y-033",
+    "title": "FieldSpec carries sealed/refinable metadata",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH2 crates audit",
+    "status": "closed"
+  },
+  {
+    "id": "Y-034",
+    "title": "Space-negative and executor disagreement tests exist",
+    "severity": "info",
+    "area": "coverage",
+    "origin": "SH2 crates audit",
+    "status": "closed"
+  },
+  {
+    "id": "Y-035",
+    "title": "Transaction-scoped advisory-lock guidance replaces session-lock ambiguity",
+    "severity": "info",
+    "area": "cost-ops",
+    "origin": "expert F14",
+    "status": "closed"
+  },
+  {
+    "id": "Y-036",
+    "title": "Blind-index nullness leakage is disclosed",
+    "severity": "info",
+    "area": "security",
+    "origin": "expert F17",
+    "status": "closed"
+  },
+  {
+    "id": "Y-037",
+    "title": "Group operations and semantics are specified",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "expert F18",
+    "status": "closed"
+  },
+  {
+    "id": "Y-038",
+    "title": "Engine-plan guard, routine, and match parity is repaired",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "expert F16; C2-010",
+    "status": "closed"
+  },
+  {
+    "id": "Y-100",
+    "title": "Missing access write is a compile error",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "cheap-build r2 vs r1; BJ3 round-3",
+    "status": "closed"
+  },
+  {
+    "id": "Y-101",
+    "title": "Routine acknowledgment flags are expressible",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "strong-build r2 and round-3",
+    "status": "closed"
+  },
+  {
+    "id": "Y-102",
+    "title": "G10a is synchronized across owner and conformance documents",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "strong-build r2; Y-003; BJ3-013",
+    "status": "closed"
+  },
+  {
+    "id": "Y-103",
+    "title": "Let syntax is findable",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "cheap-build r2",
+    "status": "closed"
+  },
+  {
+    "id": "Y-104",
+    "title": "Transport replay keys are scoped and fingerprinted",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-17; C2 prior retest",
+    "status": "closed"
+  },
+  {
+    "id": "Y-105",
+    "title": "DEK epochs are designed with stated limits",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-9",
+    "status": "closed"
+  },
+  {
+    "id": "Y-106",
+    "title": "Space is bound before the door access check",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH-19; C2 prior retest",
+    "status": "closed"
+  },
+  {
+    "id": "Z-001",
+    "title": "Client-first hostile-member row confidentiality was withdrawn and disclosed",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH3-001; formal-CS round-4; skeptic-panel round-4",
+    "status": "closed"
+  },
+  {
+    "id": "Z-002",
+    "title": "Blind-server pre-acceptance validation was withdrawn; narrower fold claims remain",
+    "severity": "info",
+    "area": "distributed",
+    "origin": "C2-001; C2-002; SH3-007; skeptic-panel round-3; C4-001; C4-002",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-003",
+    "title": "Step-up minimum is intrinsic to protected operations",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH3-003",
+    "status": "closed"
+  },
+  {
+    "id": "Z-004",
+    "title": "Owner reach into every ACL row is an explicit disclosed product contract",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "SH3-004",
+    "status": "closed"
+  },
+  {
+    "id": "Z-005",
+    "title": "Door suspension checks exist but live/session lifecycle moved downstream",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "SH3-005; SH4-004",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-006",
+    "title": "Authenticator linking freshness exists but ceremony proof moved to a narrower failure",
+    "severity": "info",
+    "area": "security",
+    "origin": "SH3-006; SH4-003",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-007",
+    "title": "Mixed duration application and date-duration arithmetic lack one result type and order",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M2-002; M2-003; M4-003",
+    "status": "carried"
+  },
+  {
+    "id": "Z-008",
+    "title": "Nullable and empty membership compilation is specified",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M2-006; M4-006",
+    "status": "closed"
+  },
+  {
+    "id": "Z-009",
+    "title": "Match plan parity is fixed but normative semantics and complexity moved elsewhere",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M2-011; C2-010; M4-014; M4-015",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-010",
+    "title": "Gregorian date and datetime literals are validated",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "M2-012; M4 retest",
+    "status": "closed"
+  },
+  {
+    "id": "Z-011",
+    "title": "Online transforming backfill loses writes behind the cursor or verify/swap barrier",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C2-003; C4-008 independent reproduction",
+    "status": "closed",
+    "resolution": "Same write-barrier ruling as X-071.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "Z-012",
+    "title": "Atomic first claim is fixed but replay atomicity and fencing moved to new boundaries",
+    "severity": "info",
+    "area": "distributed",
+    "origin": "SH2-15; C2-005; C4-004; C4-005; SH4-002",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-013",
+    "title": "Exact log-positioned reads have no snapshot or API carrier",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C2-006; C4-007; SH4-011 independent reproduction",
+    "status": "carried"
+  },
+  {
+    "id": "Z-014",
+    "title": "Genesis rerun convergence is not invertible from a minted-id summary",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "SH2-6; C2-009; C4-009; SH4-009",
+    "status": "carried"
+  },
+  {
+    "id": "Z-015",
+    "title": "Categorical AGPL internal-use guidance is corrected",
+    "severity": "info",
+    "area": "docs-integrity",
+    "origin": "skeptic-panel R3-LIC-1",
+    "status": "closed"
+  },
+  {
+    "id": "Z-016",
+    "title": "Client-first old-artifact proposals moved to an explicit artifact-pin failure",
+    "severity": "info",
+    "area": "distributed",
+    "origin": "skeptic-panel persona 5; C4-003",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-017",
+    "title": "Cost class is not a hard per-space budget or fairness control",
+    "severity": "major",
+    "area": "cost-ops",
+    "origin": "skeptic-panel personas 2-4",
+    "status": "carried"
+  },
+  {
+    "id": "Z-018",
+    "title": "Create-once semantics reject changed payload reuse in the language",
+    "severity": "info",
+    "area": "language-semantics",
+    "origin": "BJ3-017; cheap+strong round-3",
+    "status": "closed"
+  },
+  {
+    "id": "Z-019",
+    "title": "Organization-qualified assignees are expressible through ACL-derived membership refs",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "BJ3-015; cheap+strong round-3; BJ4-011",
+    "status": "closed"
+  },
+  {
+    "id": "Z-020",
+    "title": "Whole-tenant bootstrap has a design surface but engine scope/identity moved elsewhere",
+    "severity": "info",
+    "area": "authorization",
+    "origin": "BJ3-012; cheap+strong round-3; C4-010; SH4-012",
+    "status": "relocated"
+  },
+  {
+    "id": "Z-021",
+    "title": "Nullable operation parameters needed by generated forms have no settled syntax",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "BJ3-004; BJ4",
+    "status": "carried"
+  },
+  {
+    "id": "Z-022",
+    "title": "App form/detail/live/profile/guest-exposure grammar is not spec-compilable",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "BJ3-008; BJ3-009; BJ4-004",
+    "status": "carried"
+  },
+  {
+    "id": "Z-023",
+    "title": "Display guidance is fixed but onboarding still contradicts unbounded registration",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "BJ3-005; BJ3-006; BJ4-002",
+    "status": "relocated"
+  },
+  {
+    "id": "AA-001",
+    "title": "Client-first signs incompatible proposal headers",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C4-001; Y-031; Z-002",
+    "status": "open"
+  },
+  {
+    "id": "AA-002",
+    "title": "Client-first caught-and-undoable claims lack an authoritative validator and truthful inverse",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C4-002; Z-002; SH4 round-4 disagreement",
+    "status": "open"
+  },
+  {
+    "id": "AA-003",
+    "title": "Client-first proposals do not pin the evaluator artifact or schema",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C4-003; Z-016; skeptic-panel round-4",
+    "status": "open"
+  },
+  {
+    "id": "AA-004",
+    "title": "Domain mutation, command append, and replay completion cannot share one current transaction",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C4-004; SH4-002 independent reproduction; Z-012",
+    "status": "open"
+  },
+  {
+    "id": "AA-005",
+    "title": "Replay lease takeover lacks fencing and lets stale holders mutate successor state",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "C4-005; SH4-002 independent reproduction; Z-012",
+    "status": "open"
+  },
+  {
+    "id": "AA-006",
+    "title": "Permanent create binding neither preserves the first outcome nor survives crash and eviction",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "C4-006; Z-018 implementation retest",
+    "status": "open"
+  },
+  {
+    "id": "AA-007",
+    "title": "Deployment-scoped space creation is unrepresentable in current API, grant, and replay types",
+    "severity": "fatal",
+    "area": "authorization",
+    "origin": "C4-010; SH4-012 independent reproduction; skeptic-panel round-4 4/4",
+    "status": "open"
+  },
+  {
+    "id": "AA-008",
+    "title": "Bootstrap actor and intended owner contradict the normative ACL creator rule",
+    "severity": "critical",
+    "area": "authorization",
+    "origin": "SH4-012; skeptic-panel round-4; BJ4 bootstrap audit",
+    "status": "open"
+  },
+  {
+    "id": "AA-009",
+    "title": "A KMS crash can create a key unreachable from the bootstrap registry",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "C4-011",
+    "status": "open"
+  },
+  {
+    "id": "AA-010",
+    "title": "Cross-space correlation lookup is an intentional tenant existence oracle",
+    "severity": "major",
+    "area": "security",
+    "origin": "C4-013; SH4-007 independent reproduction; Y-032",
+    "status": "open"
+  },
+  {
+    "id": "AA-011",
+    "title": "Settled match rules disagree on uniqueness and assert false bridge monotonicity",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M4-014; Z-009; X-009",
+    "status": "open"
+  },
+  {
+    "id": "AA-012",
+    "title": "Match inference mandates unbounded diagnostics and an NP-hard general case",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M4-015; C4-014 independent reproduction; Y-018",
+    "status": "open"
+  },
+  {
+    "id": "AA-013",
+    "title": "SMK blind-index rotation has no write linearization through scan and swap",
+    "severity": "critical",
+    "area": "security",
+    "origin": "C4-015; security-hardening round-4 rotation analysis",
+    "status": "open"
+  },
+  {
+    "id": "AA-014",
+    "title": "Authors must choose a rounding mode the language cannot spell",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M4-002",
+    "status": "open"
+  },
+  {
+    "id": "AA-015",
+    "title": "Settled month and week bucket functions have no result types or wire encoding",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M4-004",
+    "status": "open"
+  },
+  {
+    "id": "AA-016",
+    "title": "Duration guidance contradicts the settled declaration-site ordering rule",
+    "severity": "minor",
+    "area": "docs-integrity",
+    "origin": "M4-005; Y-016",
+    "status": "open"
+  },
+  {
+    "id": "AA-017",
+    "title": "Appending only the anchor id does not total-order multi-source rows",
+    "severity": "critical",
+    "area": "language-semantics",
+    "origin": "M4-008",
+    "status": "open"
+  },
+  {
+    "id": "AA-018",
+    "title": "Automatically derived std.E.count violates the universal unbounded-work gate",
+    "severity": "critical",
+    "area": "cost-ops",
+    "origin": "M4-011; Y-020",
+    "status": "open"
+  },
+  {
+    "id": "AA-019",
+    "title": "std.E.whole has incompatible paged and truncated collection contracts",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M4-012; Y-020",
+    "status": "open"
+  },
+  {
+    "id": "AA-020",
+    "title": "allocate is undefined for empty, negative, and zero-sum weights",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "M4-016",
+    "status": "open"
+  },
+  {
+    "id": "AA-021",
+    "title": "Authenticator linking freshness is not ceremony-bound proof from the named old factor",
+    "severity": "critical",
+    "area": "security",
+    "origin": "SH4-003; Z-006",
+    "status": "open"
+  },
+  {
+    "id": "AA-022",
+    "title": "Live invalidation crosses spaces and survives suspension or revocation",
+    "severity": "critical",
+    "area": "security",
+    "origin": "SH4-004; Z-005",
+    "status": "open"
+  },
+  {
+    "id": "AA-023",
+    "title": "SealedRef is a convention rather than an artifact-enforced append type",
+    "severity": "critical",
+    "area": "security",
+    "origin": "SH4-006; Y-012",
+    "status": "open"
+  },
+  {
+    "id": "AA-024",
+    "title": "Genesis import exposes a writer-selectable trigger bypass without an authority ceremony",
+    "severity": "critical",
+    "area": "security",
+    "origin": "SH4-008",
+    "status": "open"
+  },
+  {
+    "id": "AA-025",
+    "title": "Pre-door method and space errors enumerate registered operation names",
+    "severity": "minor",
+    "area": "security",
+    "origin": "SH4-013",
+    "status": "open"
+  },
+  {
+    "id": "AA-026",
+    "title": "Enum is lean for fields and unspecified for operation parameters",
+    "severity": "major",
+    "area": "language-semantics",
+    "origin": "BJ4-003",
+    "status": "open"
+  },
+  {
+    "id": "AA-027",
+    "title": "acl plus explicit guards on the same root has no combination rule",
+    "severity": "major",
+    "area": "authorization",
+    "origin": "BJ4-005",
+    "status": "open"
+  },
+  {
+    "id": "AA-028",
+    "title": "Bootstrap route, app/client binding, genesis mode, and default rules contradict across owners",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "BJ4-006; BJ4 unresolved conflicts; skeptic-panel round-4",
+    "status": "open"
+  },
+  {
+    "id": "AA-029",
+    "title": "Broad group-aware guard wording causes explicit guards to silently deny group-backed members",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "BJ4-009; cheap+strong independent tier reproduction",
+    "status": "open"
+  },
+  {
+    "id": "AA-030",
+    "title": "Managed custody has no specified durable offline mutation queue",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "BJ4-017; cheap+strong independent tier reproduction",
+    "status": "open"
+  },
+  {
+    "id": "AA-031",
+    "title": "Stalled-consumer eviction silently voids settled at-least-once trigger delivery",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "V-002 validation pass",
+    "status": "open"
+  },
+  {
+    "id": "AA-032",
+    "title": "Client-first authoritative segment storage has no compaction rule",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "V-008 validation pass",
+    "status": "open"
+  },
+  {
+    "id": "AA-033",
+    "title": "Unreadable-parent create errors contradict between the spec and guard corpus",
+    "severity": "major",
+    "area": "authorization",
+    "origin": "V-010 validation pass",
+    "status": "open"
+  },
+  {
+    "id": "C4-001",
+    "title": "Client-first signs two incompatible notions of \u201cthe header\u201d",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Ruled: two immutable signed records \u2014 device-signed proposal P (payload_digest, device_id, counter, believed_prev, artifact_hash, schema_hash) and server-signed receipt R (hash(P), canonical_position, canonical_prev). The chain commits to both; P is signed once and never re-signed; adoption replaces re-anchoring. Closes the crash-after-upload window.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-002",
+    "title": "\u201cCaught and undoable\u201d has neither an authoritative validator nor trustworthy inverse data",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Ruled: every invariant class resolves to a canonical no-op with a deterministic recorded outcome under the artifact the proposal names, and revert images are recomputed from the canonical prefix with the proposal-supplied image treated as a checkable claim whose mismatch is signed evidence. Promise restated without inflation.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-003",
+    "title": "Client-first proposals do not pin the artifact/schema that defines their fold",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Ruled: artifact_hash and schema_hash live in the device-signed proposal; receivers fetch and verify the named retained artifact before folding; sequencing refuses proposals naming non-retained artifacts; retirement is an announced deprecation window.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-004",
+    "title": "The current interfaces cannot realize the promised atomic domain/log/replay commit",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "partial",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "engine-plan F5 now names the transactional unit of work, states that three independent calls cannot express it, and adds a kill-injection acceptance criterion. The refactor is unbuilt.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-005",
+    "title": "Stale replay takeover has no fencing and lets an old holder destroy its successor",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "partial",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Same F5 update adds the fencing generation on the replay lease, with a rejected stale-holder finalize as acceptance. Unbuilt.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-006",
+    "title": "\u201cPermanent\u201d create binding neither preserves the original outcome nor survives all current crash/eviction paths",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-007",
+    "title": "Exact log-positioned reads are absent, and the cross-request snapshot claim needs a read-at-position mechanism",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-008",
+    "title": "Transforming backfill can still lose a committed old-shape write after scan or verification",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Same write-barrier ruling as X-071 \u2014 the verify-to-swap window is inside the freeze.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-009",
+    "title": "Genesis rerun convergence is still not invertible from the summarized batch",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-010",
+    "title": "`scope deployment` and idempotent space creation are not representable in the current engine",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-011",
+    "title": "Bootstrap's KMS crash creates exactly the orphan its invariant says cannot exist",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-012",
+    "title": "Page-token authentication omits the space, so a cursor is valid in another tenant context",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Space bound into the page-token authenticator, threaded from the approved space; api-engine-design \u00a78 now documents the MAC it never described; test `cursor_is_bound_to_its_space` uses one principal in two spaces.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-013",
+    "title": "`is_logged_elsewhere` intentionally implements a cross-space correlation oracle",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-014",
+    "title": "Join inference mandates exponential output and invokes an NP-hard general case",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "open",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "C4-015",
+    "title": "SMK blind-index rotation has no stated write linearization through scan and swap",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Ruled: 'offline' in the SMK re-index means a write barrier over the entity's blind-indexed fields, scan start through verified swap. implementation.md and engine-plan F1 state it; F1 acceptance now includes a scanned-past write and a post-swap duplicate retry.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "C4-016",
+    "title": "The glossary simultaneously states both sides of the blind-index ruling",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-cs r4",
+    "status": "closed",
+    "evidence": "review/formal-cs-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "glossary.md's trailing 'open gaps' paragraph replaced with the genuinely open master-key rotation window; engine-plan's owed-elsewhere note updated.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "M4-001",
+    "title": "The replacement division pin still overflows in SQL for valid arbitrary-precision expressions",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "closed",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Division/average pin respelled to unconstrained numeric plus explicit round(value, 12), replacing the NUMERIC(38,12) cast whose 26 integer digits bounded a magnitude the algebra does not.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "M4-002",
+    "title": "The author is required to choose a rounding mode that the language cannot spell",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "closed",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Ruled: round is half-up (away from zero), globally and unconfigurably, matching division's scale-reduction tie-break. The 'author states the mode' obligation is withdrawn \u2014 the closed function list had no slot for it. Four documents resynced; goldens owed.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "M4-003",
+    "title": "Z-007 remains open: mixed durations have neither an application order nor a total date result type",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-004",
+    "title": "The closed type algebra has no result types for settled month/week buckets",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-005",
+    "title": "Y-016's static type repair is contradicted by the duration trap",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-006",
+    "title": "Z-008's nullable/empty `in` repair is contradicted by the SQL corpus and rejected by the parser",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "closed",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "sql-translation-corpus A4 resynced: null-safe OR-chain of IS NOT DISTINCT FROM for possibly-null lists, FALSE for empty. Empty is reachable via a list parameter, so the parser's rejection of literal `x in ()` is consistent; no grammar change. Goldens owed.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "M4-007",
+    "title": "Null arithmetic remains an explicitly admitted partial algebra",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-008",
+    "title": "Appending only the anchor id does not make multi-source row order total",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-009",
+    "title": "X-059 is still open: `cursor: stable` promises an unconditional theorem after excluding real writers",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-010",
+    "title": "X-068 remains open because `take` is still admitted as row-work evidence",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-011",
+    "title": "Automatically derived `std.E.count` is the O(space) operation the gate says cannot register silently",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-012",
+    "title": "`std.E.whole` has two incompatible collection contracts and no settled bound",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-013",
+    "title": "The std rollup owner still uses the display closure that the normative proof excludes",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-014",
+    "title": "The settled match rules disagree on what is unique and assert false monotonicity",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-015",
+    "title": "Match inference is finite but has uncapped exponential diagnostics and an NP-hard general case",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "M4-016",
+    "title": "`allocate` promises total conservation over a weight domain containing undefined cases",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "formal-math r4",
+    "status": "open",
+    "evidence": "review/formal-math-round-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-001",
+    "title": "the hashed manifest is not an authority-complete grant contract",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-002",
+    "title": "atomic replay has no shared transaction or fencing generation",
+    "severity": "critical",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "partial",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Converged with C4-004/C4-005; same F5 plan update.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "SH4-003",
+    "title": "authenticator linking does not prove an old factor specifically authorized this link",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-004",
+    "title": "live invalidation crosses spaces and outlives authorization",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-005",
+    "title": "cursor authentication omits the space security context",
+    "severity": "minor",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "closed",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Converged with C4-012; same repair.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "SH4-006",
+    "title": "`SealedRef` is a convention at append, not an enforced redaction type",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-007",
+    "title": "the \u201cloud\u201d cross-space revert error is a tenant existence oracle",
+    "severity": "minor",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-008",
+    "title": "genesis import has a writer-selectable trigger bypass without a pinned authority ceremony",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-009",
+    "title": "import rerun rollback can delete a row the import did not create",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-010",
+    "title": "the glossary still instructs the unsafe per-epoch blind-index design it says was withdrawn",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "closed",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel",
+    "resolution": "Converged with C4-016; same repair.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "SH4-011",
+    "title": "signed-head and exact read-position claims have no API or snapshot carrier",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-012",
+    "title": "deployment-scoped bootstrap is unrepresentable and its creator identity is contradictory",
+    "severity": "major",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "SH4-013",
+    "title": "unauthenticated and unauthorized callers can enumerate registered op names before the door",
+    "severity": "minor",
+    "area": "round-4",
+    "origin": "security-hardening r4",
+    "status": "open",
+    "evidence": "docs/security-hardening-review-4.md \u2014 citations, trace and smallest-fix in the finding itself.",
+    "verified": "2026-08-09 round-4 panel"
+  },
+  {
+    "id": "V-001",
+    "title": "C10's converge-image claim was false: converge records FULL before and after images",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "modeling-guidance.md \u00a7C10 rewritten: converge records both full images, so a counter bump on a wide row writes the body twice. The guidance is strengthened, not weakened.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-002",
+    "title": "Stalled-consumer eviction voided the [settled] at-least-once trigger delivery guarantee",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Ruled: eviction applies to mirror cursors only. Listener cursors and archive sinks are never evicted, and a client-first mirror is non-evictable because the device is the authoritative store. A stalled listener dead-letters (lossless, already specified); one that should stop pinning the floor is deregistered. Spec \u00a77 and engine-plan's acceptance criterion amended so at-least-once and the floor rule stay one sentence.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-003",
+    "title": "Eviction floor formula treated a checkpoint as a competing bound and min()'d a duration against positions",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Floor corrected to `greatest checkpoint position <= min(live consumer positions, position at now - undoHorizon)`; the ill-typed duration/position min() resolved to positions first.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-004",
+    "title": "`policy commandlog` grammar drift: consumerStall and attest existed in no grammar",
+    "severity": "major",
+    "area": "docs-integrity",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "`policy commandlog` in definition-language.md now carries attest and consumerStall and declares itself the closed key list with an owner per key.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-005",
+    "title": "Eviction records were routed to a stream whose schema is a denial and whose audience is members-only",
+    "severity": "minor",
+    "area": "security",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Eviction records routed to the deployment operational log.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-006",
+    "title": "'A mirror is an evictable cache' is false at the client-first stop, where the device is authoritative",
+    "severity": "major",
+    "area": "distributed",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Mirror evictability now follows the custody dial; client-first mirrors are non-evictable like archives.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-007",
+    "title": "Log weight view names `image bytes`, a metric nothing in the platform produces",
+    "severity": "minor",
+    "area": "dashboard",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "dashboard-plan.md declares the missing metric per \u00a71's own rule: per-entity counters advanced at append time, pane blocked until they exist, sealed-value understatement recorded.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-008",
+    "title": "Client-first has no compaction rule: snapshots named once, no cadence, no load-from-snapshot, no discard",
+    "severity": "critical",
+    "area": "distributed",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Ruled: `policy vault { snapshot every 5000 commands or 7d, keep 3 }`. Snapshots sealed client-side, chained and server-sequenced like proposals, so verifiable rather than trusted; cold start loads the newest openable snapshot and folds forward; segments below the newest snapshot every enrolled device acknowledged may be discarded, with enrolled devices non-evictable and un-enrolment the remedy. Added as F7 (ordo-vault) in engine-plan.md.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-009",
+    "title": "verify_chain started from GENESIS unconditionally, so a lawful prune reported tampering at index 0",
+    "severity": "major",
+    "area": "correctness",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "chain.rs gained verify_chain_from(space, chain, anchor, base_index); Store gained verify_from. Test `pruned_suffix_verifies_against_its_checkpoint` pins that a genesis anchor fails at index 0, a checkpoint anchor verifies, and reported indices stay absolute.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-010",
+    "title": "Create naming an unreadable parent: definition-language.md and guards-conformance GC016 contradicted, both [settled]",
+    "severity": "major",
+    "area": "security",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Ruled not_found: a create resolves its parent under the ordinary read view first, and only a readable parent lets the would-be row's guard produce access_guard. GC016 re-ruled, R-G10 and the summary table extended, api-engine-design \u00a74.1 gained both create rows, ownership pinned across the three documents.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-011",
+    "title": "`filled` was settled in the spec but absent from the reserved-word list, the lexer, and ui-gen's status text",
+    "severity": "minor",
+    "area": "docs-integrity",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "`filled` added to the reserved list in definition-language.md and engine-plan G3 and to the lexer; ui-gen.md's status paragraph rewritten and its filled+reproducible bullet corrected to the spec's compile error.",
+    "resolved": "2026-08-09 owner rulings"
+  },
+  {
+    "id": "V-012",
+    "title": "C10's derived-state row mis-stated the mechanism: `policy retention` prunes state rows, never the log",
+    "severity": "minor",
+    "area": "docs-integrity",
+    "origin": "final validation pass",
+    "status": "closed",
+    "evidence": "See the validation pass report; each finding cites file:line in the corpus and crates.",
+    "verified": "2026-08-09 validation pass",
+    "resolution": "Derived-state row corrected: `policy retention` prunes state rows, never the log; the saving is that churn stops riding a wide business row.",
+    "resolved": "2026-08-09 owner rulings"
+  }
+]

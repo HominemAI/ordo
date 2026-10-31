@@ -1,0 +1,63 @@
+# The upgrade continuity fixture, version 1 (`tests/upgrade_continuity.rs`).
+#
+# A small app with every kind of state a live deployment holds: notes
+# shared one at a time (`acl`), a file on a note (a blob), a journal under a
+# hand-written guard, and a list long enough to page. Version 1.1 beside it
+# makes only compatible changes. Both must compile under the previous Ordo
+# too, because the binary upgrade test applies this one with it.
+
+domain upgrade @ 1.0.0
+
+entity notes {
+  title: text
+  body:  text = ""
+  created: datetime
+  acl (read, write, admin)
+}
+
+# A file on a note. The row first, then the bytes through the blob door.
+entity attachments {
+  note -> notes owned
+  name: text
+  created: datetime
+  file: blob?
+}
+
+# Read and written by its author alone.
+entity journal {
+  author -> members
+  body: text
+  access read   author == $caller
+  access write  author == $caller
+}
+
+op createNote($title: text, $body: text, $created: datetime) =
+  set notes { title: $title, body: $body, created: $created }
+
+op editNote($id: id, $rev: int, $title: text, $body: text) =
+  set notes { id: $id, rev: $rev, title: $title, body: $body }
+
+# The list a share names. It does not change in 1.1, because a share pins
+# the columns of the ops it lists.
+op myNotes unbounded =
+  notes[id, rev, title, body, created]
+  sort -created
+
+# The paged list: 50 rows a page, so a cursor is handed out past 50 notes.
+op notesPage =
+  notes[id, title, created]
+  sort -created
+
+op addAttachment($note: id, $name: text, $created: datetime) =
+  set attachments { note: $note, name: $name, created: $created }
+
+op myFiles unbounded =
+  attachments[id, note, name, file]
+  sort created
+
+op writeJournal($body: text) =
+  set journal { author: $caller, body: $body }
+
+op myJournal unbounded =
+  journal[id, body]
+  sort body

@@ -1,0 +1,159 @@
+# Notes v2. Notes owned by their author, shared read-only one note at a time,
+# now with pins, an archive and files.
+#
+# `acl` derives the link entity `notesAccess`, the guards on `notes`,
+# `grantNotesAccess` and `revokeNotesAccess`, and the creator's admin
+# row in the same command group as the create.
+#
+# `deleteNote` is a plain `del`. A note owns its access rows and its
+# attachments, so they go with it (owner ruling 2026-09-29, `owned-delete`).
+# A file whose row is gone is collected by the blob worker.
+#
+# `tags` is a JSON array of words, `["work", "ideas"]`. `notesTagged` asks
+# the array for one word with `contains`, inside the document.
+#
+# What v2 changes over a live v1, by change class (`ordo plan` codes):
+#
+#   notes.pinned      A  a field with a constant default: every v1 note reads false
+#   notes.archived    A  an optional field: every v1 note reads null, not archived
+#   attachments       A  a new entity, its foreign key to notes inline
+#   reminders         A  a new entity, its foreign key to notes inline
+#
+# All four are additive, so `ordo apply` makes them itself
+# (ORDO_APPLY_SAFE_CHANGES, on by default) and no v1 row is touched.
+
+domain notes @ 0.2.0
+
+entity notes {
+  title: text
+  body:  text = ""
+  tags:  json = []
+  created: datetime
+  pinned: bool = false
+  # When the note was archived. Null is a note in the list.
+  archived: datetime?
+  acl (read, write, admin)
+}
+
+# A file on a note. The row comes first and the bytes follow through the
+# blob door: `PUT /blob/attachments/file/{id}`. A blob is never an op
+# parameter. `kind` is the file's media type, kept on the row because the
+# blob's own `mime` is not readable from an op yet. The row inherits the
+# note's acl, so a guest who reads a note reads its files.
+entity attachments {
+  note -> notes owned
+  name: text
+  kind: text = ""
+  size: int = 0
+  created: datetime
+  file: blob?
+}
+
+op createNote($title: text, $body: text, $tags: json, $created: datetime) =
+  set notes { title: $title, body: $body, tags: $tags, created: $created }
+
+op editNote($id: id, $rev: int, $title: text, $body: text, $tags: json) =
+  set notes { id: $id, rev: $rev, title: $title, body: $body, tags: $tags }
+
+op deleteNote($id: id) =
+  del notes { id: $id }
+
+op pinNote($id: id, $rev: int, $pinned: bool) =
+  set notes { id: $id, rev: $rev, pinned: $pinned }
+
+op archiveNote($id: id, $rev: int, $at: datetime) =
+  set notes { id: $id, rev: $rev, archived: $at }
+
+op unarchiveNote($id: id, $rev: int) =
+  set notes { id: $id, rev: $rev, archived: null }
+
+# Take one note back from one guest. `revokeNotesAccess` is the derived form;
+# this one names the note and the guest and so needs no access row id.
+op unshareNote($note: id, $member: id) =
+  del notesAccess(note == $note and member == $member)
+
+# A reminder on a note: when it is due, and when it fired. One per note.
+# It is a row of its own and not a field on the note, so setting it or
+# firing it leaves the note's revision alone and an open editor never sees
+# a conflict for it. It inherits the note's acl, and no share lists
+# `myReminders`, so a guest who reads the note never sees its reminder.
+entity reminders {
+  note -> notes owned unique
+  due: datetime
+  # When the routine below fired it. Null is a reminder still to come.
+  fired: datetime?
+}
+
+# Set or move a note's reminder. The unique `note` makes this a create the
+# first time and a change after, and a moved reminder fires again.
+op setReminder($note: id, $due: datetime) =
+  set reminders { note: $note, due: $due, fired: null }
+
+# Take a note's reminder off, or dismiss one that fired.
+op clearReminder($note: id) =
+  del reminders(note == $note)
+
+# Every reminder on the caller's notes, with whether it fired.
+op myReminders unbounded =
+  reminders[id, rev, note, due, fired]
+  sort due
+
+# Fire what is due. Each run marks a due reminder fired, so the next run no
+# longer matches it: a reminder fires once, across restarts and servers (a
+# schedule fires once for the deployment). `notify admin` then emails the
+# note's owner, the one person who holds `admin` on it, through the
+# deployment's mail. A guest holds `read` and is not told. The mail carries
+# only this text; the note itself stays in the app.
+#
+# Every 30 seconds, in every tenant. A shorter period costs a run per tenant
+# that often.
+routine fireReminders in notes {
+  trigger every 30s
+  notify admin "A reminder on one of your notes is due"
+  run($now: datetime):
+    reminders(due <= $now and fired == null)[id]
+    each ->
+      set reminders { id: id, fired: $now }
+}
+
+# v1's list, kept exactly as it was. A share pins the columns of the ops it
+# lists, and an op that answers more columns than were pinned closes every
+# share that lists it until the sharer shares again. So the shares people
+# accepted under v1 keep working because this op does not change.
+op myNotes unbounded =
+  notes[id, rev, title, body, tags, created]
+  sort -created
+
+# Every note with its pin and archive state, archived ones too. The page
+# shows pinned first and hides the archived behind a filter, from the device
+# copy, so both work offline. Shares made under v2 list this op.
+#
+# `download` puts these rows in a person's own download (`GET /download`,
+# "Download all my notes"): `notes.json` holds every note this person may
+# read, with these fields. Reminders are not marked, so they stay out.
+op allNotes unbounded download =
+  notes[id, rev, title, body, tags, created, pinned, archived]
+  sort -created
+
+# The notes that carry one tag. `contains` on a JSON array matches an
+# element equal to `$tag`.
+op notesTagged($tag: text) unbounded =
+  notes(tags contains $tag)[id, rev, title, body, tags, created, pinned, archived]
+  sort -created
+
+# A file's row, made before its bytes are sent.
+op addAttachment($note: id, $name: text, $kind: text, $size: int, $created: datetime) =
+  set attachments { note: $note, name: $name, kind: $kind, size: $size, created: $created }
+
+# Taking a file off a note. Its bytes are collected once no row names them.
+op removeAttachment($id: id) =
+  del attachments { id: $id }
+
+# Every file on every note this caller may read. `file` answers the handle
+# the blob door serves the bytes by.
+#
+# `download`: `attachments.json` in a person's own download, and because
+# `file` is a blob field, each file's bytes under `files/attachments/`.
+op myFiles unbounded download =
+  attachments[id, rev, note, name, kind, size, created, file]
+  sort created

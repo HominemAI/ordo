@@ -1,0 +1,79 @@
+# 20 Routines: scheduled and on-change work
+#
+# A routine is work the platform runs by itself, in every tenant, as
+# `routine:<name>@<version>`. Nobody calls it.
+#   - `trigger every 5m`               every five minutes (s m h d w)
+#   - `trigger every day 09:00Z`       once a day, at a UTC time. The `Z` is
+#                                      required: UTC is never implied.
+#   - `trigger when shop.orders.created`
+#                                      after a change. Kinds: created,
+#                                      converged, deleted, written (any of
+#                                      the three), ingested, fed, reverted.
+#   - `debounce 60s`, `coalesce`       after `when`: wait for a quiet minute;
+#                                      at most one run waiting.
+#   - `run($now: datetime, $today: date):`
+#                                      the platform fills both from the run's
+#                                      own instant. No other parameters.
+#   - The body is write statements, as in a write op. All of them land as
+#     one command group.
+#   - A body may read rows and write once per row: a pipeline, then `each ->`
+#     and write statements. Inside the braces the row's fields are in scope.
+#     A run handles at most ORDO_ROUTINE_EACH_MAX_ROWS rows (500 by default).
+#   - Guards pass for a scheduled routine. A routine woken by a change may
+#     touch only the changed rows and rows one ref away, unless its `run`
+#     header says `unguarded`.
+#   - A paused tenant's runs are skipped and recorded. `nopause` on the
+#     `run` header runs them anyway.
+#
+# Reference: docs/definition-language.md sections 7 and 8, docs/howto-routines.md.
+
+domain shop @ 1.0.0
+
+entity orders {
+  placed:   datetime
+  status:   text = "new"
+  reviewed: bool = false
+  archived: bool = false
+}
+
+entity lines {
+  order -> orders owned
+  qty:    int
+  stale:  bool = false
+}
+
+op placeOrder($placed: datetime) =
+  set orders { placed: $placed }
+
+# Every 15 minutes: archive orders that finished more than 30 days ago.
+routine archiveOld in shop {
+  trigger every 15m
+  run($now: datetime):
+    set orders(status == "done" and archived == false and placed < $now - 30d) { archived: true }
+}
+
+# Every day at 09:00 UTC: close out orders nobody touched.
+routine morningSweep {
+  trigger every day 09:00Z
+  run($now: datetime):
+    set orders(status == "new" and placed < $now - 7d) { status: "expired" }
+}
+
+# After an order is created: mark it and its lines. Only the new orders and
+# the lines that point at them are reachable.
+routine reviewNew {
+  trigger when shop.orders.created debounce 5s
+  run:
+    set orders(reviewed == false) { reviewed: true }
+    set lines(stale == true) { stale: false }
+}
+
+# Every day at 08:00 UTC: read the done orders and mark each one archived.
+# The row's `id` is in scope inside the braces. A run handles at most 500 rows.
+routine archiveDone in shop {
+  trigger every day 08:00Z
+  run:
+    orders(status == "done" and archived == false)[id]
+    each ->
+      set orders { id: id, archived: true }
+}

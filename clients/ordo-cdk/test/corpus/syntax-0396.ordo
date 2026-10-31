@@ -1,0 +1,5 @@
+# planned: an aggregate over a sealed value is refused today (sealed_unsupported);
+# host-side folding is not built. `count` over sealed rows is built.
+op orderCostRollup($order: id) =                 # computed projection + coalesce
+  workItems(workOrder == $order)[descr, cost: coalesce(cost, 0)]
+  reduce { items: count, est: sum cost }

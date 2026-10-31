@@ -1,0 +1,83 @@
+# 06 Reads: filter, project, sort, take
+#
+# Shows the core read form `entity(conditions)[projection]` and the steps
+# that follow it, one per line.
+#   - `( )` after the source filters that entity's rows.
+#   - `[ ]` picks fields: plain, dotted (`project.name`), renamed
+#     (`out: expr`), everything (`*`) or everything minus (`-field`).
+#   - `| cond` is a filter step on the stream as it stands at that line.
+#   - `sort -a, b`: a leading minus means descending. The id is always the
+#     last key, so order is total.
+#   - `take 5` or `take $n` (the parameter needs a bound).
+#   - Conditions: == != < <= > >=, in, contains, starts, matches, is null,
+#     is not null, since <duration>. `and` and `or` never mix without parens.
+#   - A parameter may have a default and, for int, money and date, a `<=` bound.
+#   - `$today: date filled`: the generated client fills the value when the
+#     caller leaves it out. It is still required on the wire and it is not a
+#     default. An op body never reads the clock; `filled` is how today's date
+#     arrives.
+#
+# Reference: docs/definition-language.md sections 2 "Parameters", 4 and 5.
+
+domain projects @ 1.0.0
+
+entity projects {
+  name: text
+}
+
+entity tasks {
+  project  -> projects owned
+  title:   text
+  status:  text = "open"
+  points:  int = 1
+  due:     date?
+  note:    text?
+}
+
+# Filter, project through a ref, sort descending, then limit.
+op biggestOpen =
+  tasks(status == "open")[title, points, project.name]
+  sort -points, title
+  take 5
+
+# Parameters with a default and a bound; `take $n` needs the bound.
+op topTasks($n: int <= 50, $min: int = 1) =
+  tasks(points >= $min)[title, points]
+  sort -points
+  take $n
+
+# Parens group a mix of `and` and `or`. Without them the op does not compile.
+op search($text: text) unbounded =
+  tasks((title contains $text or note contains $text) and status != "done")[title, status]
+  sort title
+
+op byPattern unbounded =
+  tasks(title starts "Fix" or title matches "^[A-Z]+-[0-9]+")[title]
+
+op membership unbounded =
+  tasks(status in ("open", "doing"))[title, status]
+
+# Null tests are their own words. `due <= $d` is false for a null due date.
+op undated unbounded =
+  tasks(due is null)[title]
+
+# The client fills `$today` from its clock unless the caller supplies it.
+op dueSoon($today: date filled) unbounded =
+  tasks(due is not null and due <= $today + 7d)[title, due]
+  sort due
+
+# `since` is the one time-relative condition: a trailing window from now.
+op recentlyDue unbounded =
+  tasks(due since 30d)[title, due]
+
+# Projection forms: rename, computed field, everything minus a field.
+op taskCards unbounded =
+  tasks[label: title, effort: points * 2]
+
+op withoutNote unbounded =
+  tasks[*, -note]
+
+# A bar filters the stream at that point. Same result as the parens form.
+op openByBar unbounded =
+  tasks[title, status]
+  | status == "open"

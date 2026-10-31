@@ -1,0 +1,142 @@
+{
+  "_README": [
+    "STAGE THREE — the wants expressed in Ordo.",
+    "",
+    "Each entry was written FROM THE WANT, not translated from the stage-two",
+    "SQL: the point is whether the language can say the intent, not whether it",
+    "can transliterate a SELECT. The compiler and the seeded database decide",
+    "which of four verdicts each attempt earns:",
+    "",
+    "  equivalent            compiles, and returns exactly the want's rows",
+    "  compile_error         the compiler refused it — my Ordo is wrong, or",
+    "                        the compiler has a gap; the runner fails loudly",
+    "                        so a human decides which",
+    "  semantic_divergence   compiles and returns DIFFERENT rows — the most",
+    "                        serious class, and the runner fails on it",
+    "  inexpressible         no Ordo spelling exists for the intent; recorded",
+    "                        with the reason, because these feed the spec",
+    "",
+    "An entry is either {\"ordo\": \"...\"} — which the runner requires to be",
+    "equivalent — or {\"inexpressible\": \"reason\"}. If a claimed inexpressible",
+    "later compiles, the runner fails: progress must force reclassification,",
+    "not slip by."
+  ],
+  "cases": {
+    "W001": {
+      "ordo": "people(active)[name]"
+    },
+    "W002": {
+      "ordo": "people(team is null)[name]"
+    },
+    "W003": {
+      "ordo": "people(team is not null)[name]"
+    },
+    "W005": {
+      "ordo": "people(salary == 0)[name]"
+    },
+    "W006": {
+      "ordo": "people(age is null)[name]"
+    },
+    "W008": {
+      "ordo": "people(age > 30)[name]"
+    },
+    "W009": {
+      "ordo": "people(age <= 30)[name]"
+    },
+    "W010": {
+      "ordo": "people[name, salary]\nsort -salary"
+    },
+    "W011": {
+      "ordo": "people[name, salary]\nsort -salary\ntake 3"
+    },
+    "W013": {
+      "ordo": "people[org]\ngroup org { n: count }"
+    },
+    "W014": {
+      "ordo": "people[org, salary]\ngroup org { total: sum salary }"
+    },
+    "W015": {
+      "ordo": "people[org, age]\ngroup org { people: count, withAge: sum cond(age is null -> 0, 1) }",
+      "note": "Ordo's count takes no argument — counting the non-null values of a column has no direct spelling and needs the sum-of-cond workaround. Expressible, but the ergonomic gap is real and is exactly what judged wants exist to weigh."
+    },
+    "W018": {
+      "ordo": "projects[name, lead: lead.name]"
+    },
+    "W019": {
+      "ordo": "projects[name, sponsor: sponsor.name]"
+    },
+    "W020": {
+      "ordo": "projects[name, lead: lead.name, sponsor: sponsor.name]"
+    },
+    "W023": {
+      "ordo": "teams[name, parent: parent.name]"
+    },
+    "W025": {
+      "ordo": "taskTags[title: task.title]\ndistinct"
+    },
+    "W026": {
+      "ordo": "taskTags[title: task.title]\ngroup title { tags: count }"
+    },
+    "W027": {
+      "ordo": "people(name contains \"a\")[name]"
+    },
+    "W028": {
+      "ordo": "people(name starts \"A\")[name]"
+    },
+    "W030": {
+      "ordo": "people(lastSeen is not null)[name]"
+    },
+    "W031": {
+      "ordo": "people(shift != 8h)[name]"
+    },
+    "W033": {
+      "ordo": "people[name, shown: coalesce(nickname, name)]"
+    },
+    "W034": {
+      "ordo": "people(not active)[name]"
+    },
+    "W038": {
+      "ordo": "people(salary > 500000)[name]"
+    },
+    "W039": {
+      "ordo": "taskTags[tag]\ndistinct\nreduce { n: count }",
+      "note": "Reclassified 2026-08-12: ruling 1's spelling now compiles and runs — distinct settles the rows, reduce counts them. Was inexpressible while reduce did not exist."
+    },
+    "W048": {
+      "ordo": "tasks[title, priority]\nsort priority, title"
+    },
+    "W049": {
+      "inexpressible": "The want demands the mean as an INTEGER, computed as sum of non-null over count of non-null. Ordo has `avg`, but avg's result type is a decimal, and the grammar has no arithmetic OVER aggregates — `sum age / count` is not a spelling. So the integer mean is unreachable: avg gives 36.0000000000000000-shaped output and nothing can divide two aggregates. A language question the spec owes an answer: what is the declared result type of avg over int, and is aggregate arithmetic ever legal?",
+      "ruling": "Ruled 2026-08-11: avg returns exact decimal; there is no arithmetic over aggregates. The integer mean is inexpressible BY DESIGN, not by gap — this entry stays in the pinned set permanently."
+    },
+    "W050": {
+      "ordo": "teams[team: name]  people[]\ngroup team { n: count }",
+      "note": "Reclassified 2026-08-12: ruling 3's settled multi-source spelling compiles and runs — teams anchor, people joined outer-preserving on the inferred people.team edge, bare count masked to the many side so Platform counts 0. Was inexpressible while multi-source did not exist."
+    },
+    "W051": {
+      "ordo": "tasks[title, org: project.org.name]"
+    },
+    "W052": {
+      "ordo": "tasks[points, org: project.org.name]\ngroup org { points: sum points }"
+    },
+    "W053": {
+      "ordo": "teams(depth == 2)[name, depth]"
+    },
+    "W054": {
+      "ordo": "people(hired >= 2021-01-01)[name]"
+    },
+    "W055": {
+      "ordo": "people[name, raise: round(salary * 105 / 100, 0)]\nsort -raise",
+      "note": "The want asks for the raise in exact integer minor units. `/` yields decimal at a fixed fractional scale of 12 (definition-language.md §2, Division), so the bare `salary * 105 / 100` is a decimal and does not land in an integer projection on its own — `round(x, 0)` is where the attempt states its boundary. The earlier spelling read as integer arithmetic and was lowered to `bigint / bigint`, which truncates; it happened to agree here only because every salary in the fixture divides exactly."
+    },
+    "W056": {
+      "ordo": "people(id in (\"ppl_1\", \"ppl_2\", \"ppl_3\", \"ppl_4\"))[name]"
+    },
+    "W057": {
+      "ordo": "people(active and org == \"org_1\")[name]"
+    },
+    "W058": {
+      "ordo": "people(age > 40 or lastSeen is not null)[name]"
+    }
+  }
+}

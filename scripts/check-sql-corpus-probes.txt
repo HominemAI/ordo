@@ -1,0 +1,248 @@
+# Probes for scripts/check-sql-corpus.py.
+#
+# The Ordo behind entries whose doc text carries only a short inline fragment,
+# or none. One probe is a line `## ID` and the lines below it, up to the next
+# `##`. An ID may have several probes. A probe must compile when the entry's
+# verdict is direct or problematic. It must be refused when the verdict is
+# not possible, so a stale "not possible" shows up the day the language
+# grows the feature.
+#
+# Wrapper rules are the same as for snippets in the docs (see the script).
+
+## C10
+productTags[product, tag.name]
+group product { tagList: joined(tag.name, ", ") }
+## C12
+orders reduce { m: median total, p: percentile(total, 0.5) }
+## E4
+customers[*]
+match none orders(status == "open")
+## E6
+let a = orders[total]
+  group customer.country { r: sum total }
+let b = a(r > 10)[country, r]
+b[*]
+## E7
+let s = orders[total]
+  group customer.country { r: sum total }
+s(r > 10)[country]
+append s(r < 0)[country]
+## E12
+customers[id]
+match none orders
+## F3
+employees(id under $x)[name, depth]
+## G1
+orders(status == "open")[customer]
+append orders(status == "held")[customer]
+## G2
+orders(status == "open")[customer]
+append orders(status == "held")[customer]
+distinct
+## G4
+customers[id]
+match any orders
+match none reviews
+## G5
+let a = customers[id]
+  match any orders
+  match none reviews
+let b = customers[id]
+  match any reviews
+  match none orders
+a[id]
+append b[id]
+## H2
+orders[total]
+group month(placed) { n: count }
+## H3
+orders[total]
+group week(placed) { n: count }
+## H6
+orders[*]
+sort placed
+take[customer, month(placed)] 1
+## H7
+orders[d: dow(placed)]
+## H8
+sessions(ended is not null and ended - started > 30m)[*]
+## I2
+products(name starts "usb")[*]
+## I3
+products(lower(name) == lower($q))[*]
+## J4
+orders[*]
+sort -placed
+take[customer] 1
+## J8
+set orders { id: $c, status: "done" }
+## K5
+set products { id: $p, price: price + 1 }
+## K8
+set customers { email: $e, name: $n, country: "x", joined: $a }
+## L2
+let minCost = partSupp
+  group part { m: min cost }
+partSupp[part, cost]  minCost[m]
+| cost == m
+## L3
+orders[customer]
+match any lineitems(commitDate < receiptDate)
+## L4
+orderItems[price, qty]
+group order.customer.country { revenue: sum (price * qty) }
+## L6
+let rev = orderItems[price, qty]
+  group product { revenue: sum (price * qty) }
+rev[*]
+sort -revenue
+take 1
+## L7
+orders[customer.name]
+match any orderItems(qty > 300)
+## M3
+orders(placed - customer.joined <= 7d)[*]
+## M9
+orders[total]
+group floor(total / 100) { n: count }
+## M12
+orders[total]
+group customer.country { avgOrder: avg total }
+## M13
+customers[id, joined]  orders[placed]
+sort placed
+take[id] 1
+group id { med: median (placed - joined) }
+## N2
+let activePosts = posts(deleted is null)
+activePosts[*]
+## N4
+customers[*]
+sort lower(name)
+## N5
+shipments[*]
+sort -shipped
+## N8
+set accounts { id: $a, status: cond(paid >= total -> "done", "partial") }
+## N9
+reviews[g: cond(stars >= 4 -> "good", stars >= 2 -> "ok", "bad")]
+## N10
+customers[country]
+group country { n: count }
+| n > 1
+## N11
+routine cleanCustomers in corpus {
+  trigger every day 02:00Z
+  run:
+    customers[id]
+    match none orders
+    each -> del customers { id: id }
+}
+## N14
+set orders { id: $c, rev: $n, status: "done" }
+## N17
+customers(mod(hash(id), 100) < $pct)[*]
+## O1
+orderItems[price]
+group product.name {
+  jan: sum (cond(month(order.placed) == 1 -> price, 0)),
+  feb: sum (cond(month(order.placed) == 2 -> price, 0)) }
+## O6
+let t = orderItems reduce { w: sum (price * qty), q: sum qty }
+t[avgPrice: round(w / q, 2)]
+## O8
+let tot = orders reduce { t: sum total }
+orders[total]
+group customer.country { s: sum total }
+| s > 0
+## O9
+orders reduce { lo: min total, hi: max total, m: median total, p90: percentile(total, 0.9) }
+## O10
+orders[customer, status]
+distinct
+## P1
+customers[*]
+sort joined
+take[name] 1
+## P4
+bookings(end < start)[*]
+## P6
+categories[*]
+match none products
+## P7
+customers[n: trim(name)]
+## Q1
+prices(to is null)[*]
+## Q3
+revisions[*]
+sort -created
+take[doc] 1
+## R4
+categories[*]
+match none categories
+## S1
+products[x: round(price, 2)]
+## S2
+products[f: floor(price), c: ceil(price)]
+## S3
+products[x: abs(price)]
+## S4
+orderItems[x: mod(qty, 2)]
+## S6
+accounts[x: least(credit, limit), y: greatest(credit, limit)]
+## S7
+customers[x: cond(name == "x" -> null, name)]
+## S8
+sessions[x: coalesce(ended, coalesce(ended, started))]
+## S11
+orders(placed since 7d)[*]
+## S12
+sessions[h: hour(started), d: dow(started)]
+## S14
+customers(length(name) > 200)[*]
+## S15
+customers[full: name + " " + country]
+## T1
+set orders { id: $c, status: "done" }
+## T3
+set orderItems(order == $c) { order: $new }
+del orders { id: $c }
+## T4
+set products { id: $p, active: cond(active -> false, true) }
+## T8
+set counters { id: $c, n: n + 1 }
+set counters { key: $k, n: n + 1 }
+## S5
+orders[x: sqrt(total)]
+## S13
+customers[x: split(name, " ")]
+## D3
+products[name, r: rank]
+sort -price
+## N3
+orders[*]
+sort -placed
+take 25 offset 100
+## K6
+set orderItems { price: product.price }
+## N12
+policy retention { logs keep 100 per user }
+## K2
+op addTags($names: list of { name: text }) =
+  set tags each $names { name: item.name }
+## T2
+entity teams {
+  seats: int
+  used: int = 0
+  check used <= seats
+}
+entity seats {
+  team -> teams
+  who: text
+}
+op joinTeam($t: id, $w: text) =
+  set teams { id: $t, used: used + 1 }
+  set seats { team: $t, who: $w }
+## N16
+events(actor == $a and at >= $since)
+reduce { n: count }

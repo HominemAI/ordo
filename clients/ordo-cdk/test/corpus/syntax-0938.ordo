@@ -1,0 +1,30 @@
+entity notices {                             # unguarded: no `access`, no `acl`
+  title:    text        public               # one field marked
+  body:     text        public
+  postedBy: text                             # private: no public op may read it
+}
+
+entity noticeFiles {
+  notice -> notices owned
+  file:     blob?       public               # served with no token, on a public row
+  public                                     # this entity line marks every field
+}
+
+op noticeBoard public =                      # a visitor calls it with no token
+  notices[title, body]
+  sort title
+  take 50
+
+op noticeAuthors =                           # not public: it reads `postedBy`
+  notices[title, postedBy]
+  sort title
+  take 50
+# A tokenless call to a public op runs as `$anonymous` in the deployment's
+# space. A public op reads public fields only, in a projection, a condition or
+# a sort (`public_reads_private`). Refused: `public` on a sealed field
+# (`public_sealed`), on an entity with `access read` or `acl`
+# (`public_guarded`), `$caller` in a public op (`public_caller`), and a public
+# write that is not a plain create (`public_write_not_create`), that writes into
+# a guarded entity (`public_write_guarded`) or that aims a ref at a private row
+# (`public_write_ref`). `public*` on an entity line also marks the
+# entities it owns. See howto-public.md.

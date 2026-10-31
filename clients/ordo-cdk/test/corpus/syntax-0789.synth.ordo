@@ -1,0 +1,3 @@
+op myUnits unbounded =
+  leaseParties(person == $caller)[lease.unit.name, lease.unit.property.name]
+    sort name

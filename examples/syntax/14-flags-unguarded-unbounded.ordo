@@ -1,0 +1,76 @@
+# 14 Op flags: unbounded, unguarded, reproducible
+#
+# Shows the three acknowledgments an op can carry between its parameters
+# and the `=`. Each one is a greppable word that a reviewer sees in the
+# deploy diff.
+#   - `unbounded`: the op's work grows with the size of the tenant. An op
+#     with no provable row bound fails registration without the word. The
+#     bounds the compiler accepts: a unique address, `take`, a bounded
+#     parameter, a `reduce`, and a keyset page over a total order (ruling
+#     2026-09-05). A plain listing is paged, so it is bounded and the word
+#     is optional on it. A many-side join breaks the page's total order, so
+#     it needs the word. A projection that a `group` or `reduce` folds away
+#     opens payloads the page never sees, so sealed work there needs it too.
+#     The files here write the word on every op that scans, so a reader sees
+#     the scan.
+#   - `unguarded`: bypass the row guards for the entity sources written in
+#     THIS op's body. Used for admin and report ops. It does not strip a
+#     callee's own guards.
+#   - `reproducible`: the same call gives the same answer later. It forbids
+#     the clock: a `since` window anywhere in the op's own pipeline, or a
+#     `filled` parameter. Either answers `reproducible_clock`. Bound the
+#     window with a date parameter instead, as `closedBefore` does.
+#   - An op that composes an unguarded callee must repeat `unguarded`.
+#     An op that composes an unbounded callee must repeat `unbounded`.
+#   - Marking `unguarded` on an op that touches no guarded entity is an error.
+#
+# Reference: docs/definition-language.md section 3 G14, section 5 "Cost
+# classes", section 13 "Open items" (op wrapper).
+
+domain projects @ 1.0.0
+
+entity projects {
+  name:  text
+  owner  -> members
+  access read   owner == $caller
+  access write  owner == $caller
+}
+
+entity tasks {
+  project -> projects owned
+  title:  text
+  status: text = "open"
+  closed: date?
+}
+
+# Bounded by `take`, so it needs no flag.
+op firstFive =
+  tasks[title]
+  sort title
+  take 5
+
+# Scans every row the caller may see, so it says so.
+op allMine unbounded =
+  tasks[title, status]
+
+# An admin report over every project, whoever owns it. Both words are loud.
+op allTasksEverywhere unbounded unguarded =
+  tasks[title, status, project.name]
+  sort project.name, title
+
+op openCountsPerProject unbounded unguarded =
+  tasks(status == "open")[project.name]
+  group project.name { open: count }
+  sort -open
+
+# Composing an unguarded op means saying so again.
+op worstProject unbounded unguarded =
+  openCountsPerProject[name, open]
+  sort -open
+  take 1
+
+# `reproducible` forbids `since` and `filled`. This one cannot drift with the
+# clock: `$day` is supplied, never filled.
+op closedBefore($day: date) unbounded reproducible =
+  tasks(closed < $day)[title, closed]
+  sort closed

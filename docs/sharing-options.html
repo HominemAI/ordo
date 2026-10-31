@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inter-space sharing: the consent surface and three designs</title>
+<style>
+  :root{
+    --ink:#1c1a17;
+    --ink-2:#4a463f;
+    --ink-3:#6f6a60;
+    --bg:#fbfaf7;
+    --panel:#ffffff;
+    --rule:#ddd8ce;
+    --rule-2:#c9c2b4;
+    --accent:#9c3b12;
+    --accent-soft:#fbeee7;
+    --silent:#7a5a00;
+    --silent-soft:#fdf5df;
+    --ok:#2f5d3a;
+    --ok-soft:#eaf2ec;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:56rem;margin:0 auto;padding:3.5rem 1.5rem 6rem}
+  h1{font-size:1.95rem;line-height:1.24;letter-spacing:-.015em;margin:0 0 .5rem;font-weight:650}
+  h2{font-size:1.35rem;line-height:1.3;letter-spacing:-.01em;margin:3.25rem 0 .75rem;font-weight:650;
+     padding-top:1.1rem;border-top:1px solid var(--rule)}
+  h3{font-size:1.06rem;margin:2rem 0 .5rem;font-weight:650}
+  h4{font-size:.95rem;margin:1.4rem 0 .35rem;font-weight:650;color:var(--ink-2)}
+  p{margin:.7rem 0}
+  a{color:var(--accent)}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}
+  code{background:#f2efe8;padding:.08em .32em;border-radius:3px}
+  .lede{font-size:1.06rem;color:var(--ink-2);margin:0 0 1.4rem}
+  .meta{font-size:.85rem;color:var(--ink-3);margin:0 0 2rem;padding-bottom:1.4rem;border-bottom:1px solid var(--rule)}
+  .meta b{color:var(--ink-2);font-weight:600}
+
+  .note{background:var(--panel);border:1px solid var(--rule);border-left:3px solid var(--rule-2);
+        padding:.9rem 1.1rem;margin:1.2rem 0;font-size:.94rem}
+  .note.warn{border-left-color:var(--silent);background:var(--silent-soft)}
+  .note.rec{border-left-color:var(--ok);background:var(--ok-soft)}
+
+  /* consent items */
+  .item{background:var(--panel);border:1px solid var(--rule);border-radius:5px;
+        padding:.85rem 1.05rem;margin:.7rem 0}
+  .item > .hdr{display:flex;gap:.6rem;align-items:baseline;margin-bottom:.45rem}
+  .tag{flex:none;font:600 .78rem/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:#efece4;color:var(--ink-2);padding:.05rem .45rem;border-radius:3px}
+  .item.silent .tag{background:var(--silent-soft);color:var(--silent);border:1px solid #e6d49a}
+  .item.silent{border-color:#e6d49a;background:#fffdf6}
+  .name{font-weight:650;font-size:.99rem}
+  dl.f{margin:0;display:grid;grid-template-columns:9.5rem 1fr;gap:.18rem .9rem;font-size:.92rem}
+  dl.f dt{color:var(--ink-3);font-weight:600}
+  dl.f dd{margin:0;color:var(--ink-2)}
+  dl.f dd b{color:var(--ink);font-weight:600}
+  .src{margin-top:.5rem;font-size:.82rem;color:var(--ink-3);font-style:italic}
+
+  /* option cards */
+  .opt{background:var(--panel);border:1px solid var(--rule-2);border-radius:6px;
+       padding:1.4rem 1.5rem;margin:1.5rem 0 2.5rem}
+  .opt > h3{margin-top:0}
+  .eli2{background:#f6f3ec;border-radius:5px;padding:.85rem 1.05rem;margin:.8rem 0 1.2rem;
+        font-size:1rem;color:var(--ink-2)}
+  .eli2 b{display:block;font-size:.75rem;letter-spacing:.09em;text-transform:uppercase;
+          color:var(--ink-3);margin-bottom:.3rem}
+  figure{margin:1.3rem 0;padding:0}
+  figure svg{display:block;width:100%;height:auto;background:#fff;
+             border:1px solid var(--rule);border-radius:5px}
+  figcaption{font-size:.83rem;color:var(--ink-3);margin-top:.45rem}
+
+  .cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1.1rem;margin:1.2rem 0}
+  .cols > div > h4{margin-top:0}
+  .cols ul{margin:.2rem 0;padding-left:1.05rem}
+  .cols li{font-size:.9rem;margin:.3rem 0;color:var(--ink-2)}
+  @media (max-width:720px){.cols{grid-template-columns:1fr} dl.f{grid-template-columns:1fr}
+    dl.f dt{margin-top:.4rem}}
+
+  .scroll{overflow-x:auto;margin:1.2rem 0}
+  table{border-collapse:collapse;width:100%;font-size:.9rem;min-width:34rem}
+  th,td{text-align:left;vertical-align:top;padding:.5rem .7rem;border-bottom:1px solid var(--rule)}
+  th{font-weight:650;font-size:.82rem;letter-spacing:.02em;color:var(--ink-3);
+     border-bottom:1px solid var(--rule-2)}
+  td:first-child{font-weight:600}
+
+  ul.plain{padding-left:1.15rem}
+  ul.plain li{margin:.45rem 0}
+  .cost{display:inline-block;font:600 .78rem/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+        padding:.05rem .5rem;border-radius:3px;background:#efece4;color:var(--ink-2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Inter-space sharing: the consent surface, and three designs</h1>
+<p class="meta"><b>Superseded for the build, 2026-09-29:</b> the plan is <span class="mono">docs/plan-sharing.md</span> (guests, the window as default, and share links). This page stays the reference for the 22 consent points and the three designs.</p>
+<p class="lede">Guest windows and consented feeds are settled in the language and specified in the
+conformance corpus. Neither exists in code. Before either gets built, the question that actually
+decides the architecture is <em>where a human says yes</em>. That is itemized first, and the
+three designs are three different answers to it.</p>
+<p class="meta">
+<b>Status:</b> options for a decision. Nothing here is settled.&emsp;
+<b>Sources read:</b> <span class="mono">definition-language.md</span> §3 (members, acl, sealed), §7 (triggers), §8 (access model, inter-space sharing, bootstrap, exit ops);
+<span class="mono">guards-conformance.md</span> R-G11a, R-G12, R-G13, R-G18, R-G20, R-G21, GC059–GC066, GC092;
+<span class="mono">audit-board-coverage.md</span> findings 2–3;
+<span class="mono">bootstrap.md</span> §5, §8; <span class="mono">deploying.md</span> §5;
+<span class="mono">implementation.md</span> (outbound egress, client delivery, mirrors);
+<span class="mono">security-logging-design.md</span> §5; <span class="mono">glossary.md</span> (feed vs window);
+<span class="mono">crates/ordo-identity/src/{pins,grants}.rs</span>;
+<span class="mono">crates/ordo-conformance/tests/guards_corpus.rs</span>.
+</p>
+
+<h2>0 · Where this starts from</h2>
+
+<p><span class="mono">definition-language.md</span> §8 settles two doors and calls them
+complementary: <b>window vs copy</b>:</p>
+
+<div class="scroll"><table>
+<thead><tr><th>Door</th><th>What it is</th><th>Where the data lives</th><th>Revocation</th></tr></thead>
+<tbody>
+<tr><td>Window (guest access)</td><td>An <code>acl</code> row naming an outside principal; the guest calls
+the granting space's guard-bearing ops under their own identity, attributed in that space's chain</td>
+<td>Only in the sharer's space</td><td>Closes at the next call</td></tr>
+<tr><td>Copy (consented feed)</td><td>A standing routine replicating a named query's output one-way into
+the receiving space, landing as ordinary writes attributed <code>source:feed-&lt;name&gt;</code></td>
+<td>In both spaces, independently owned</td><td>Stops future copies; already-copied data stays</td></tr>
+</tbody></table></div>
+
+<p>What is already true in the tree, and it matters for the recommendation: the window's
+<em>runtime</em> semantics are conformance-tested and passing. GC059, GC060, GC061, GC062 and GC066
+are in <span class="mono">guards_corpus.rs</span>'s <code>EXECUTED</code> list: a guest reaching
+exactly their ACL row's guard, no role fallback, write refused at read level, and the window closing
+on revoke. The corpus does that by making the guest an ordinary members row with a null
+<code>role</code> and one grant. What is <em>missing</em> is the registration and the consent record:
+GC063, GC064 and GC065 sit in <code>NOT_RUN</code> with the reason stated outright:
+<em>"share/exposure registration does not exist: there is no <code>share to guest:…</code>
+declaration and no guest principal kind."</em></p>
+
+<p>So this is not a missing enforcement engine. It is a missing consent surface with an enforcement
+engine already behind it. That framing is why the itemization comes first.</p>
+
+<h2>1 · The consent surface, itemized</h2>
+
+<p>Twenty-two points where a human says yes, or is owed a disclosure. Each names <b>who</b>,
+<b>to what</b> (disclosed and pinned), <b>revocation</b>, and <b>what revocation takes effect on</b>.
+Items in <span style="background:var(--silent-soft);border:1px solid #e6d49a;padding:0 .3em;border-radius:3px">amber</span>
+are <b>spec-silent</b>. The settled documents do not answer them, and the three options answer them
+differently.</p>
+
+<h3>A · Guest window: sharer side</h3>
+
+<div class="item">
+  <div class="hdr"><span class="tag">A1</span><span class="name">Registering the exposure: which ops a guest may call</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>Someone in the granting space with authority over exposure. <b>Which
+      authority is not stated.</b> DL §8's access model gives the space owner acl administration at
+      the door and nothing else names exposure.</dd>
+    <dt>To exactly what</dt><dd>A named list of ops. What is disclosed is each op's <em>manifest</em>:
+      the field-grain read set, the written set, and the row-scope shape. This is the same pair
+      <span class="mono">pins.rs</span> already carries for a capability grant
+      (<code>EntityPin{read, written, structure, read_guard, write_guard, caller_restricted}</code>).</dd>
+    <dt>What is pinned</dt><dd>Per R-G18 and GC065, the registration records the <b>guard-bearing
+      basis per op</b>: entity guard, inherited acl guard, or <code>$caller</code> condition. An op
+      with no reachable guard and no <code>$caller</code> condition is refused at registration with
+      <code>guest_exposure_unguarded</code>; so is an <code>unguarded</code>-marked op (GC064) and one
+      over an <code>access read open</code> entity (R-G21, GC099/GC100).</dd>
+    <dt>Revocable</dt><dd>Yes, by deregistering the exposure.</dd>
+    <dt>Takes effect on</dt><dd>Future calls. Nothing already returned is retracted.</dd>
+  </dl>
+  <p class="src">DL §8 Inter-space sharing; guards-conformance R-G18, GC063–GC065.</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">A2</span><span class="name">The ACL row naming the guest: which rows</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The holder of the top level on the acl root row, or the space owner via
+      the door-checked acl-administration capability (DL §8 layer 1; R-G13).</dd>
+    <dt>To exactly what</dt><dd>The rows that one acl row's guard admits, at that level. Level
+      ordering is total: read ⊂ write ⊂ admin (R-G14). Nothing else in the space becomes visible.
+      GC059 is exactly this assertion, and GC060 is its complement (no role fallback; guards over
+      entities where the guest holds nothing return <em>empty</em>, never an error and never a
+      default view).</dd>
+    <dt>What is pinned</dt><dd>Nothing, today. The acl row is live mutable data; widening it later is
+      an ordinary write, not a re-consent event.</dd>
+    <dt>Revocable</dt><dd>Yes. It is <code>revokeBoardsAccess</code>-shaped, an addressed delete by
+      <code>unique(root, member)</code> (R-G17).</dd>
+    <dt>Takes effect on</dt><dd><b>The next call</b> (GC066: revoke, then the guest's next
+      <code>boardList</code> returns 0 rows). It stops access, not memory. DL §8 states this without
+      euphemism. <span class="mono">implementation.md</span> adds a control §8 does not mention: a
+      revoked space is marked <b>poisoned at next contact</b> and the client purges before serving any
+      read, best-effort against an offline device.</dd>
+  </dl>
+  <p class="src">DL §8; guards-conformance R-G14, R-G17, GC059, GC060, GC066; implementation.md client delivery.</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">A3</span><span class="name">The custody acknowledgement: is this window even possible</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The sharer, at share time.</dd>
+    <dt>To exactly what</dt><dd>DL §8: <em>"shareability is computed from custody and shown at share
+      time"</em>. A window requires the granting space's <b>key-release path</b>, because the guest's
+      read executes in the sharer's space and any sealed field in the op's manifest must be opened
+      there. User-keyed and client-first content is therefore <b>unsharable by window</b>. The
+      platform offers a copy instead.</dd>
+    <dt>What is pinned</dt><dd>Which sealed fields the exposed ops' manifests contain. Key release is
+      derived from op access (DL §7): a caller allowed to invoke an op whose manifest includes sealed
+      fields thereby, and only thereby, triggers release for exactly those fields, logged with
+      principal, op, fields, space and instant.</dd>
+    <dt>Revocable</dt><dd>By revoking A1 or A2. There is no separate key-release grant to revoke.</dd>
+    <dt>Takes effect on</dt><dd>The next call; releases already logged stand as history.</dd>
+  </dl>
+  <p class="src">DL §8 (shareability), §7 (key release), §3 (sealed fields, <code>std sealed</code>).</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">A4</span><span class="name">Accepting the guest into the space's own audit and roster</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The sharer, implicitly, by doing A1+A2, but it is a disclosure the
+      sharer's <em>other members</em> receive and do not give.</dd>
+    <dt>To exactly what</dt><dd>The guest's calls land in the sharer's command log attributed to the
+      guest as themselves; <code>callersOf</code> answers with them; and the guest's
+      <code>displayName</code> is plaintext skeleton visible to the space (DL §3 pins it as not
+      sealed, because bylines and <code>sort displayName</code> have to work in SQL).</dd>
+    <dt>What is pinned</dt><dd>Nothing.</dd>
+    <dt>Revocable</dt><dd>The membership row can be suspended or removed; the chain entries cannot.</dd>
+    <dt>Takes effect on</dt><dd>Future calls only. The chain is append-only.</dd>
+  </dl>
+  <p class="src">DL §8 (attribution), §3 (<code>members</code>, <code>displayName</code>).</p>
+</div>
+
+<h3>B · Guest window: receiver (guest) side</h3>
+
+<div class="item">
+  <div class="hdr"><span class="tag">B1</span><span class="name">Accepting the invitation: principal binding</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The guest, personally.</dd>
+    <dt>To exactly what</dt><dd>Their deployment principal is bound into a space they do not own; the
+      platform mints them a <code>members</code> row with a null <code>role</code>, as an ordinary
+      attributed command in that space's chain (DL §3, minting path iv). DL §8 pins the flow as
+      <b>invitation, never enumeration</b>: link/invite → accept → principal binding; ids are
+      exchanged only on accept; there is no cross-space principal lookup.</dd>
+    <dt>What is pinned</dt><dd>Should be the ops' manifests, by symmetry with a capability grant.
+      Nothing says it is.</dd>
+    <dt>Revocable</dt><dd><b>Not stated.</b> See C3.</dd>
+    <dt>Takes effect on</dt><dd>Not applicable.</dd>
+  </dl>
+  <p class="src">DL §8 (invitation, never enumeration); DL §3 (who creates the members row).</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">B2</span><span class="name">Disclosing their own name across the boundary</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The guest.</dd>
+    <dt>To exactly what</dt><dd>DL §3 is unusually precise here: <em>"guest binding takes the name the
+      guest consented to disclose at accept time, which is the only cross-space disclosure and is
+      therefore a consent decision, not a lookup."</em> This is the single piece of the guest's own
+      identity that crosses.</dd>
+    <dt>What is pinned</dt><dd>The disclosed string. Later renames propagate as ordinary attributed
+      platform commands in every space the principal belongs to.</dd>
+    <dt>Revocable</dt><dd>Only by leaving (see C3).</dd>
+    <dt>Takes effect on</dt><dd>Not applicable.</dd>
+  </dl>
+  <p class="src">DL §3 (<code>displayName</code> and where it comes from).</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">B3</span><span class="name">The owner-reach disclosure</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The guest. They are joining a space they do not own, so
+      <span class="mono">bootstrap.md</span> §8's obligation applies to them at full strength.</dd>
+    <dt>To exactly what</dt><dd>The sentence the corpus asks be said in the invitee's own language,
+      not a policy link: <em>"the owner of this space can reach anything in it, and every time they do
+      it is logged."</em> Z-004 is settled the way that makes this a disclosure and not a fix: no
+      acl row is private from the space owner, because an owner who can administer acl rows can grant
+      themselves any level on any row. The corollary belongs beside it: members who need rows the
+      owner cannot reach need a different space, not a different rule.</dd>
+    <dt>What is pinned</dt><dd>Nothing. It is a disclosure, not a grant.</dd>
+    <dt>Revocable</dt><dd>n/a.</dd>
+    <dt>Takes effect on</dt><dd>n/a.</dd>
+  </dl>
+  <p class="src">DL §8 access model (Z-004); bootstrap.md §8 obligation 2; deploying.md §5.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">B4 · silent</span><span class="name">The guest's device now mirrors someone else's space</span></div>
+  <dl class="f">
+    <dt>Who should consent</dt><dd>The guest.</dd>
+    <dt>To exactly what</dt><dd><span class="mono">implementation.md</span> pins mirrors as
+      per-space, separately keyed, sealed at rest under a device key, auto-locking, with
+      <code>policy mirror { keep 90d | keep &lt;n&gt; rows | full }</code> <b>surfaced on the space's
+      consent page</b>, because <em>"a mirror is a copy, and copies are consent-relevant."</em> A
+      guest's device holds such a mirror of the <em>sharer's</em> space. DL §8 never says whose
+      consent page carries that policy, or that the guest sees it at all.</dd>
+    <dt>Why it matters</dt><dd>It is the concrete mechanism behind "revocation stops access, not
+      memory". The mirror-scope dial is the control that actually bounds how much memory there is.</dd>
+  </dl>
+  <p class="src">Derived: implementation.md (client delivery, "the local store is a database"); DL §8 is silent.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">B5 · silent</span><span class="name">The guest's app needs its own grant in the sharer's space</span></div>
+  <dl class="f">
+    <dt>Who should consent</dt><dd>The guest, again, on a second consent page.</dd>
+    <dt>To exactly what</dt><dd><span class="mono">security-logging-design.md</span> §5 pins <em>"a
+      grant is scoped to exactly one space"</em> and <em>"a grant spanning two spaces is two grants,
+      consented twice."</em> So a guest who reaches the sharer's space through any client other than a
+      raw human session needs a capability grant <em>in the sharer's space</em>, with its own op
+      allowlist, its own per-op pins and its own mandatory expiry. Nothing in §8 mentions this second
+      consent, and a user experiencing it will meet two prompts for what feels like one act.</dd>
+    <dt>Why it matters</dt><dd>It is where the <em>existing</em> consent machinery already lives, and
+      option A below proposes making it the <em>only</em> consent record rather than a second one.</dd>
+  </dl>
+  <p class="src">Derived: security-logging-design.md §5; ordo-identity/src/{grants,pins}.rs. DL §8 is silent.</p>
+</div>
+
+<h3>C · Consented feed: sharer side</h3>
+
+<div class="item">
+  <div class="hdr"><span class="tag">C1</span><span class="name">Consenting to the slice</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The sharing space's owner or manager. DL §8 says only "both ends consent".</dd>
+    <dt>To exactly what</dt><dd>A <b>named query's output</b>, chosen deliberately so the shared
+      surface <em>has a manifest</em>. That is the whole disclosure: the query's output shape and its
+      row scope, applied not to today's rows but to <b>every row it will ever admit</b>, for as long
+      as the feed stands.</dd>
+    <dt>What is pinned</dt><dd>Should be the named query's manifest hash and row-scope shape. Not stated.</dd>
+    <dt>Revocable</dt><dd>Yes.</dd>
+    <dt>Takes effect on</dt><dd><b>Future copies only.</b> Everything already sent stays, and stays
+      the receiver's. DL requires this be stated at consent time, not discovered at revocation time.</dd>
+  </dl>
+  <p class="src">DL §8 Consented feeds; glossary.md "feed vs window".</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">C2 · silent</span><span class="name">Key release for sealed fields in the slice</span></div>
+  <dl class="f">
+    <dt>Who should consent</dt><dd>The sharer.</dd>
+    <dt>To exactly what</dt><dd>Custody keys are per space. <b>The receiver cannot decrypt the
+      sharer's sealed fields, ever.</b> So a feed carrying a sealed field is not a byte transfer: it
+      is unseal-in-S, transport, re-seal-under-R's-key, repeated per batch, for the life of the feed.
+      Each unseal is a key release under DL §7's derived rule and must be logged. §8 says nothing
+      about sealed data in feeds; §7's release rule is written for op access by a caller, and a
+      standing routine is not a caller in that sense.</dd>
+    <dt>Why it matters</dt><dd>This is the single largest hidden cost in the feed design, and the
+      option that ignores it ships a plaintext hop nobody consented to.</dd>
+  </dl>
+  <p class="src">Derived: DL §3 (sealed), §7 (key release), §8 (feeds). The composition is stated nowhere.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">C3 · silent</span><span class="name">The egress destination, when the receiver is elsewhere</span></div>
+  <dl class="f">
+    <dt>Who should consent</dt><dd>The sharing space's owner.</dd>
+    <dt>To exactly what</dt><dd><span class="mono">implementation.md</span> is <em>pinned</em> that
+      feed delivery uses the same egress path as every other outbound fetcher: https-only,
+      resolve-then-pin with connect-to-resolved-address, no redirects, signed deliveries, a
+      credential-less egress identity with no <code>KeyProvider</code> reachability, and a
+      <b>per-space egress allowlist consented at sink creation and rendered on the space's consent
+      page</b>: <em>"adding a host is a consent event, never a config edit."</em> DL §8 does not
+      mention egress at all, and says nothing about whether a same-deployment feed skips it.</dd>
+    <dt>Why it matters</dt><dd>If a same-deployment feed bypasses the allowlist, the consent page for
+      a feed says less than the consent page for a webhook that carries the same rows.</dd>
+  </dl>
+  <p class="src">implementation.md "Outbound egress: sinks, webhooks &amp; feeds [pinned]"; security-logging-design.md §7b. DL §8 is silent.</p>
+</div>
+
+<h3>D · Consented feed: receiver side</h3>
+
+<div class="item">
+  <div class="hdr"><span class="tag">D1</span><span class="name">Accepting the feed at all</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The receiving space's owner or manager. DL's reason is one line and it is
+      the right one: <em>"a feed nobody asked for is spam."</em></dd>
+    <dt>To exactly what</dt><dd>Ongoing writes into their own space, attributed
+      <code>source:feed-&lt;name&gt;</code>, which they will own outright. One-way in v1, with no
+      write-back; DL calls bidirectional sync a different product.</dd>
+    <dt>What is pinned</dt><dd>Not stated. By symmetry with C1 it should be the same manifest.</dd>
+    <dt>Revocable</dt><dd><b>Not stated from this side.</b> §8 says "revocation stops the feed" and
+      names no revoker. See E3.</dd>
+    <dt>Takes effect on</dt><dd>Future copies.</dd>
+  </dl>
+  <p class="src">DL §8 Consented feeds.</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">D2</span><span class="name">Accepting that inbound data drives local automation</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The receiver. This is the consequence with teeth.</dd>
+    <dt>To exactly what</dt><dd>Copies land as ordinary writes on the receiver's chain, so
+      <b>the receiver's own triggers and rules fire on them</b>. DL calls this out as the point:
+      cross-space reactivity becomes local reactivity, which is what makes feeds the blessed
+      app-to-app interface. §7 gives it a dedicated event kind, <code>fed</code> ("a write attributed
+      to <code>source:feed-*</code>"), and notes that a listener on <code>written</code> sees feed
+      copies too.</dd>
+    <dt>What is pinned</dt><dd>The bound on what a woken routine may touch. R-G20 is the load-bearing
+      rule: a <b>listener</b>-woken routine may read and write only rows reachable from
+      <code>$trigger.ids</code>, precisely because <code>ingested</code> and <code>fed</code> triggers
+      are fired by outsiders and a globally guard-exempt listener is a confused deputy an outsider
+      steers. Ranging wider requires <code>run(…) unguarded</code>, one greppable word.</dd>
+    <dt>Revocable</dt><dd>By stopping the feed, or by the receiver changing their own triggers.</dd>
+    <dt>Takes effect on</dt><dd>Future arrivals. Automation already run has run.</dd>
+  </dl>
+  <p class="src">DL §8; §7 (event kinds, <code>fed</code>); guards-conformance R-G20, GC096–GC098.</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">D3</span><span class="name">Taking custody of the copies</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>The receiver.</dd>
+    <dt>To exactly what</dt><dd>The copies sit under the receiver's custody position, the receiver's
+      keys, the receiver's jurisdiction, the receiver's retention terms, and the receiver's own
+      owner-reach property (B3, now pointed the other way: the receiver's owner can reach the
+      sharer's data). Revocation does not take them back; export and deletion of them are the
+      <em>receiver's</em> exit ops.</dd>
+    <dt>What is pinned</dt><dd>Nothing.</dd>
+    <dt>Revocable</dt><dd>Only by the receiver deleting the rows, which is an ordinary write.</dd>
+    <dt>Takes effect on</dt><dd>Immediately, in the receiver's space.</dd>
+  </dl>
+  <p class="src">DL §8 (receiver owns the copies outright); §8 Exit ops; deploying.md §5.</p>
+</div>
+
+<div class="item">
+  <div class="hdr"><span class="tag">D4</span><span class="name">Both consents land in both chains</span></div>
+  <dl class="f">
+    <dt>Who consents</dt><dd>Both, once each.</dd>
+    <dt>To exactly what</dt><dd>DL §8's invitation pin says <em>"consent lands in both spaces'
+      chains."</em> Worth stating plainly what that is and is not: the command log is <b>per space</b>
+      and ordering is guaranteed per space only. There is no shared chain. So "both chains" means two
+      independent records that can be reverted, pruned or exported independently, and nothing
+      correlates them unless something is designed to.</dd>
+    <dt>What is pinned</dt><dd>Nothing correlating the two.</dd>
+    <dt>Revocable</dt><dd>Chain entries never are.</dd>
+    <dt>Takes effect on</dt><dd>n/a.</dd>
+  </dl>
+  <p class="src">DL §8 (invitation); DL §7 (ordering guaranteed per space only).</p>
+</div>
+
+<h3>E · The silences both doors share, and these are the decisions</h3>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">E1 · silent</span><span class="name">Does changing the shared op kill the share?</span></div>
+  <p style="margin:.2rem 0;font-size:.94rem;color:var(--ink-2)">For capability grants the answer is
+  settled and implemented: a grant pins the field set <b>and</b> the row-scope shape;
+  <b>narrowing = field-set subset AND row scope no weaker</b>; anything else is expansion and the
+  grant is dead until a human re-consents. <span class="mono">pins.rs</span> exists precisely because
+  the field-set-only form was <em>"decidable and wrong"</em>: deleting
+  <code>member == $caller</code> from an op body leaves the output field set byte-identical while
+  turning "read my expenses" into "read everyone's expenses".
+  <b>That exact attack applies unchanged to a share and to a feed, and §8 says nothing about it.</b>
+  A share is a consent to a manifest; the manifest can be redeployed underneath it.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">E2 · silent</span><span class="name">Does a share expire?</span></div>
+  <p style="margin:.2rem 0;font-size:.94rem;color:var(--ink-2)">Capability grants carry a
+  <b>mandatory expiry</b>: <em>"no unexpiring grants"</em> is pinned, and
+  <span class="mono">grants.rs</span> observes that before the registry existed, expiry was a grant's
+  <em>only</em> end. Shares and feeds are specified with no expiry at all, which makes them the one
+  standing authorization in the platform that outlives everything.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">E3 · silent</span><span class="name">Can the receiving side revoke?</span></div>
+  <p style="margin:.2rem 0;font-size:.94rem;color:var(--ink-2)">Every revocation §8 states is the
+  sharer's: the window closes, the feed stops. A guest who wants out of someone else's space, and a
+  receiver who wants a feed to stop arriving, have no stated verb. "Both ends consent" without "both
+  ends may withdraw" is asymmetric in the direction that favours whoever set it up.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">E4 · silent</span><span class="name">Is exposure syntax or runtime state? The documents disagree.</span></div>
+  <p style="margin:.2rem 0;font-size:.94rem;color:var(--ink-2)">DL §8's access model opens with a pin:
+  <em>"Who may call what is runtime state, never syntax, never IaC, same boundary as grants."</em>
+  R-G18 and GC063–GC065 put <code>share to guest:gil { openTasks, cardList }</code> in <b>source</b>,
+  as a compile-tier construct with <code>reject:</code> outcomes and
+  <code>guest_exposure_unguarded</code> classified <code>compile</code> in the class inventory. Those
+  cannot both be right as written. Resolution below.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">E5 · silent</span><span class="name">Transitivity and loops, and a rule that is cited but does not exist</span></div>
+  <p style="margin:.2rem 0;font-size:.94rem;color:var(--ink-2)">May a guest of S, who is an owner of T,
+  re-share S's rows onward? May a feed's output be fed onward, or fed back? DL §7 says a listener on
+  <code>written</code> sees feed copies too, <em>"which is what makes feeds locally reactive, and
+  <b>the anti-loop rule in §8</b> is what keeps that from being a cycle."</em> There is no anti-loop
+  rule in §8. The nearest thing is "one-way, no write-back in v1", which prevents A→B→A but not
+  A→B→C→A.</p>
+</div>
+
+<div class="item silent">
+  <div class="hdr"><span class="tag">E6 · silent</span><span class="name">Where is the invitation and consent surface actually specified?</span></div>
+  <p style="margin:.2rem 0;font-size:.94rem;color:var(--ink-2)">Nowhere.
+  <span class="mono">deploying.md</span> §5 says <em>"<code>bootstrap.md</code> §5 asks that anyone
+  joining a space they do not own be told…"</em>; <span class="mono">bootstrap.md</span> §8 says
+  <em>"§5's invitation and consent surface must carry the sentence."</em> Both point at
+  <span class="mono">bootstrap.md</span> §5, which is titled <em>"What <code>std.space.create</code>
+  must not do"</em> and contains no invitation surface. DL §8 gives the flow one bullet
+  (link/invite → accept → principal binding) and no design. Whichever option is chosen, this is the
+  document that has to be written.</p>
+</div>
+
+<h2>2 · Three designs</h2>
+
+<p>Three architectures, not three sizes of one. They differ in <em>where the shared rows live</em>:
+in the sharer's space (reference), in both (replication), or in neither (relocation).</p>
+
+<!-- ============ OPTION A ============ -->
+<div class="opt">
+<h3>Option A: Pull-through window, first and alone</h3>
+
+<div class="eli2"><b>ELI2</b>
+Your neighbour does not get a copy of your book. You cut a small window in your wall and they can
+read one shelf through it, standing outside. Board the window up and they stop reading, but they
+still remember what they already read.</div>
+
+<figure>
+<svg viewBox="0 0 800 340" role="img" aria-label="Diagram: a guest calls into the sharer's space through a window; no rows cross the boundary.">
+  <defs>
+    <marker id="aA" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#1c1a17"/>
+    </marker>
+    <marker id="aAd" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#6f6a60"/>
+    </marker>
+  </defs>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+    <!-- boundary -->
+    <text x="400" y="24" text-anchor="middle" font-size="12" fill="#6f6a60">space boundary</text>
+    <path d="M400,34 L400,130" stroke="#c9c2b4" stroke-width="2" stroke-dasharray="5 5"/>
+    <path d="M400,205 L400,300" stroke="#c9c2b4" stroke-width="2" stroke-dasharray="5 5"/>
+    <path d="M386,130 L414,130" stroke="#9c3b12" stroke-width="2.5"/>
+    <path d="M386,205 L414,205" stroke="#9c3b12" stroke-width="2.5"/>
+
+    <!-- boxes -->
+    <rect x="24" y="46" width="306" height="244" rx="6" fill="#fdfcf9" stroke="#c9c2b4"/>
+    <text x="40" y="70" font-size="13" font-weight="700" fill="#1c1a17">Space S: the sharer</text>
+    <rect x="470" y="46" width="306" height="244" rx="6" fill="#fdfcf9" stroke="#c9c2b4"/>
+    <text x="486" y="70" font-size="13" font-weight="700" fill="#1c1a17">The guest, elsewhere</text>
+
+    <!-- S contents -->
+    <circle cx="46" cy="96" r="8" fill="#9c3b12"/><text x="46" y="100" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">1</text>
+    <text x="62" y="100" font-size="12" fill="#4a463f">exposure: <tspan font-weight="600" fill="#1c1a17">which ops</tspan> (guard-bearing only)</text>
+    <circle cx="46" cy="124" r="8" fill="#9c3b12"/><text x="46" y="128" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">2</text>
+    <text x="62" y="128" font-size="12" fill="#4a463f">acl row: <tspan font-weight="600" fill="#1c1a17">which rows</tspan>, at which level</text>
+    <circle cx="46" cy="152" r="8" fill="#9c3b12"/><text x="46" y="156" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">3</text>
+    <text x="62" y="156" font-size="12" fill="#4a463f">custody: is a key-release path available?</text>
+
+    <rect x="40" y="176" width="274" height="46" rx="4" fill="#f4f1ea" stroke="#ddd8ce"/>
+    <text x="52" y="194" font-size="10.5" fill="#4a463f" font-family="ui-monospace,Menlo,monospace">guard → EXISTS ( acl … member = $caller )</text>
+    <text x="52" y="212" font-size="11" fill="#6f6a60">$caller = the guest's members row (null role)</text>
+
+    <text x="40" y="248" font-size="12" fill="#6f6a60">S's command log records the guest's calls,</text>
+    <text x="40" y="266" font-size="12" fill="#6f6a60">attributed to them, as themselves.</text>
+
+    <!-- guest contents -->
+    <circle cx="486" cy="96" r="8" fill="#9c3b12"/><text x="486" y="100" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">4</text>
+    <text x="502" y="100" font-size="12" fill="#4a463f">accept: bind my principal into S</text>
+    <circle cx="486" cy="124" r="8" fill="#9c3b12"/><text x="486" y="128" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">5</text>
+    <text x="502" y="128" font-size="12" fill="#4a463f">disclose my display name (the only one)</text>
+    <circle cx="486" cy="244" r="8" fill="#9c3b12"/><text x="486" y="248" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">6</text>
+    <text x="502" y="248" font-size="12" fill="#4a463f">told: S's owner can reach anything in S</text>
+    <text x="502" y="268" font-size="11.5" fill="#6f6a60">my device mirrors S under S's mirror policy</text>
+
+    <!-- arrows -->
+    <path d="M462,158 L338,158" stroke="#1c1a17" stroke-width="2" marker-end="url(#aA)"/>
+    <text x="400" y="151" text-anchor="middle" font-size="11" fill="#1c1a17" font-weight="600">call, as themselves</text>
+    <path d="M338,180 L462,180" stroke="#6f6a60" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#aAd)"/>
+    <text x="400" y="196" text-anchor="middle" font-size="11" fill="#6f6a60">rows S computed</text>
+
+    <text x="400" y="322" text-anchor="middle" font-size="12" fill="#4a463f">
+      No row is ever <tspan font-style="italic">stored</tspan> on the far side. Revoking ② closes the window at the next call.</text>
+  </g>
+</svg>
+<figcaption>Reference, not copy. The guest's read executes inside S, under S's guards, with
+<code>$caller</code> bound to the guest's members row. This is exactly what GC059–GC062 already
+assert against a real Postgres.</figcaption>
+</figure>
+
+<h4>What it makes easy</h4>
+<div class="cols">
+<div><h4>Easy</h4><ul>
+  <li>Revocation that nearly works: next call, plus mirror poisoning.</li>
+  <li>One audit story. The guest's activity is in S's chain, where the data is.</li>
+  <li>No divergence, no second copy to secure, no re-seal pipeline.</li>
+  <li>The enforcement half is <b>already built and tested</b>.</li>
+</ul></div>
+<div><h4>Hard</h4><ul>
+  <li>Liveness couples two spaces: if S is down or slow, the guest's app is.</li>
+  <li>Client-first and user-keyed spaces cannot use it at all: there is no key-release path (A3).</li>
+  <li>No app-to-app automation: nothing lands in the guest's chain, so no trigger of theirs can fire.</li>
+  <li>Needs the invitation/consent ceremony that exists in no document (E6).</li>
+</ul></div>
+<div><h4>Forecloses</h4><ul>
+  <li>Nothing structurally. DL calls the two doors complementary.</li>
+  <li>But it defers every integration use case until the feed exists.</li>
+</ul></div>
+</div>
+
+<h4>How it lands on what is already built</h4>
+<ul class="plain">
+<li><b>Guards / EXISTS chains.</b> Nothing changes. A guard is a correlated <code>EXISTS</code>
+  scoped to one space with <code>$caller</code> as a binding slot; the plan is caller-independent
+  (GC057 asserts the version hash is identical across callers). A guest is a different binding, not a
+  different plan.</li>
+<li><b>Grant pinning.</b> This option's central move: <b>make the share record a
+  <code>CapabilityGrant</code> whose principal is foreign.</b> <span class="mono">grants.rs</span> and
+  <span class="mono">pins.rs</span> then supply E1 (manifest expansion kills it), E2 (mandatory
+  expiry), E3 (a revocation record either side can hold), and <code>callersOf</code>'s token path,
+  with no new consent object invented.</li>
+<li><b>Per-space command log.</b> Untouched and correct: the guest's calls belong in S's log because
+  they happened in S.</li>
+<li><b>Per-space custody keys / sealed fields.</b> Sealed fields are readable through the window
+  <em>only</em> where S has a server-side release path. The guest never holds S's keys; S opens the
+  field, for that op, for that run, and logs it. Where S is client-first, DL's own rule applies:
+  refuse the window, offer a copy. That is an argument for building the feed <em>eventually</em>,
+  not first.</li>
+<li><b>Triggers.</b> Deliberately inert. No write lands in the guest's space, so no trigger of theirs
+  fires. This is the capability the option gives up.</li>
+<li><b>E4 dissolves.</b> Guard-bearing-ness is a property of an <em>op</em>, computable at compile
+  time with no share in sight. Stamp it into the artifact per op; let the <em>binding</em> to a named
+  guest be a runtime grant. DL's "never syntax" pin survives, R-G18's compile check survives, and
+  <code>guest_exposure_unguarded</code> stays a compile class. It fires on the op, not on a
+  <code>share to guest:gil</code> line naming a human in source. GC063/GC064 become assertions about
+  <code>vendorNames</code> and <code>allTasks</code>; GC065 becomes an assertion about the artifact's
+  recorded basis.</li>
+</ul>
+
+<p><b>Cost:</b> <span class="cost">LOW</span>. It is the cheapest of the three, and the gap is largest
+between what it costs and what it delivers. New: a guest principal kind, a foreign-principal grant
+path, the per-op guest-exposable mark in the artifact, and the invitation ceremony. It depends on no
+unbuilt subsystem.</p>
+</div>
+
+<!-- ============ OPTION B ============ -->
+<div class="opt">
+<h3>Option B: Consented feed replication, first and alone</h3>
+
+<div class="eli2"><b>ELI2</b>
+Nobody looks through a window. Every time your shelf changes, you post your neighbour a photocopy of
+one page. Those copies are theirs now. They can file them, and their own doorbell rings when one
+arrives. Stop posting and they keep every copy you already sent.</div>
+
+<figure>
+<svg viewBox="0 0 800 340" role="img" aria-label="Diagram: a one-way feed copies a named query's output into the receiver's space, where it lands as ordinary writes.">
+  <defs>
+    <marker id="aB" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9c3b12"/>
+    </marker>
+  </defs>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+    <text x="400" y="24" text-anchor="middle" font-size="12" fill="#6f6a60">space boundary</text>
+    <path d="M400,34 L400,230" stroke="#c9c2b4" stroke-width="2" stroke-dasharray="5 5"/>
+    <path d="M400,268 L400,300" stroke="#c9c2b4" stroke-width="2" stroke-dasharray="5 5"/>
+
+    <rect x="30" y="46" width="330" height="244" rx="6" fill="#fdfcf9" stroke="#c9c2b4"/>
+    <text x="46" y="70" font-size="13" font-weight="700" fill="#1c1a17">Space S: the sharer</text>
+    <rect x="440" y="46" width="330" height="244" rx="6" fill="#fdfcf9" stroke="#c9c2b4"/>
+    <text x="456" y="70" font-size="13" font-weight="700" fill="#1c1a17">Space R: the receiver</text>
+
+    <circle cx="52" cy="96" r="8" fill="#9c3b12"/><text x="52" y="100" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">1</text>
+    <text x="68" y="100" font-size="12.5" fill="#4a463f">consent: <tspan font-weight="600" fill="#1c1a17">this named query's slice</tspan></text>
+    <circle cx="52" cy="124" r="8" fill="#9c3b12"/><text x="52" y="128" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">2</text>
+    <text x="68" y="128" font-size="12.5" fill="#4a463f">consent: unseal here, per batch, logged</text>
+    <circle cx="52" cy="152" r="8" fill="#9c3b12"/><text x="52" y="156" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">3</text>
+    <text x="68" y="156" font-size="12.5" fill="#4a463f">consent: the egress destination</text>
+
+    <rect x="46" y="176" width="298" height="60" rx="4" fill="#f4f1ea" stroke="#ddd8ce"/>
+    <text x="60" y="195" font-size="11.5" fill="#4a463f">standing routine, one-way, per batch</text>
+    <text x="60" y="213" font-size="11.5" fill="#6f6a60">S's keys open S's sealed fields:</text>
+    <text x="60" y="229" font-size="11.5" fill="#6f6a60">plaintext exists briefly, in S's host</text>
+
+    <circle cx="462" cy="96" r="8" fill="#9c3b12"/><text x="462" y="100" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">4</text>
+    <text x="478" y="100" font-size="12.5" fill="#4a463f">consent: accept this feed at all</text>
+    <circle cx="462" cy="124" r="8" fill="#9c3b12"/><text x="462" y="128" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">5</text>
+    <text x="478" y="128" font-size="12.5" fill="#4a463f">consent: my triggers will fire on it</text>
+    <circle cx="462" cy="152" r="8" fill="#9c3b12"/><text x="462" y="156" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">6</text>
+    <text x="478" y="156" font-size="12.5" fill="#4a463f">consent: I own the copies, and keep them</text>
+
+    <rect x="456" y="176" width="298" height="60" rx="4" fill="#f4f1ea" stroke="#ddd8ce"/>
+    <text x="470" y="195" font-size="11.5" fill="#4a463f" font-family="ui-monospace,Menlo,monospace">source:feed-&lt;name&gt; → R's chain</text>
+    <text x="470" y="213" font-size="11.5" fill="#6f6a60">re-sealed under R's keys</text>
+    <text x="470" y="229" font-size="11.5" fill="#6f6a60">R can never read S's ciphertext</text>
+
+    <path d="M362,252 L440,252" stroke="#9c3b12" stroke-width="2.5" marker-end="url(#aB)"/>
+    <text x="400" y="244" text-anchor="middle" font-size="10.5" fill="#9c3b12" font-weight="600">one-way copy</text>
+    <text x="400" y="286" text-anchor="middle" font-size="11.5" fill="#6f6a60">no write-back in v1</text>
+
+    <text x="400" y="322" text-anchor="middle" font-size="12" fill="#4a463f">
+      Revocation stops future copies. Everything already sent stays, and it is R's.</text>
+  </g>
+</svg>
+<figcaption>Replication. The boundary is crossed once per batch, in one direction, and the crossing is
+a decrypt-and-re-encrypt, because custody keys are per space and R holds none of S's.</figcaption>
+</figure>
+
+<div class="cols">
+<div><h4>Easy</h4><ul>
+  <li>App-to-app integration, which DL calls the blessed interface.</li>
+  <li>No runtime coupling; R works when S is offline.</li>
+  <li>R's triggers fire, so cross-space reactivity becomes local reactivity.</li>
+  <li>Client-first spaces can share (compute on device, best-effort, device-gated).</li>
+</ul></div>
+<div><h4>Hard</h4><ul>
+  <li>Revocation is weak by construction and must be sold as such.</li>
+  <li>Sealed data means a per-batch plaintext hop through S's host, forever (C2).</li>
+  <li>Divergence: two copies, two chains, no correlation (D4).</li>
+  <li>Confused-deputy surface: outsider-attributed writes wake R's automation. R-G20 is the closure and it is unbuilt.</li>
+</ul></div>
+<div><h4>Forecloses</h4><ul>
+  <li>Nothing permanently, but it inverts the order: live sharing waits behind three subsystems.</li>
+  <li>It cannot serve "let my accountant look at this, live, and then stop."</li>
+</ul></div>
+</div>
+
+<h4>How it lands on what is already built</h4>
+<ul class="plain">
+<li><b>Guards.</b> Never evaluated across the boundary. S's guard bounds what the named query
+  returns; after that, R's own guards govern the copies as ordinary rows. This is clean, and it is
+  also the reason revocation cannot reach backwards.</li>
+<li><b>Grant pinning.</b> Fits well. The feed is a two-space act, and
+  <span class="mono">security-logging-design.md</span> §5 already says <em>"a grant spanning two
+  spaces is two grants, consented twice."</em> A feed is exactly that shape and should be built as
+  literally that: one grant in S (read the slice), one in R (write the copies).</li>
+<li><b>Per-space command log.</b> Both sides get a local record and there is no shared one.
+  Feed batches must apply <b>atomically per command group</b>. <span class="mono">implementation.md</span>
+  already pins this for the client mirror and the same rule has to hold here.</li>
+<li><b>Per-space custody keys / sealed fields.</b> The hardest part, and the one §8 never mentions.
+  R cannot decrypt S's sealed fields; so either the feed carries plaintext-skeleton fields only (safe,
+  and much less useful), or S unseals per batch and R re-seals, which is a standing, logged, indefinite key
+  release granted once. Both are defensible; neither is written down.</li>
+<li><b>Triggers.</b> This is the whole point (D2), and it is also the dependency: the
+  <code>fed</code> event kind, <code>debounce</code>/<code>coalesce</code>, at-least-once with
+  dead-lettering, and R-G20's provenance bound must all exist first.</li>
+<li><b>Unbuilt substrate it sits on.</b> Routines (no AST node, no parser production; <code>routine</code>
+  is a reserved word only), triggers (operand grammars parse strings, unreachable from
+  <code>parse_program</code>), outbound egress (one comment in <span class="mono">ordo-crypto</span>),
+  and the <code>source:feed-*</code> attribution path. That is three "Not started" board rows under
+  one feature.</li>
+</ul>
+
+<p><b>Cost:</b> <span class="cost">HIGH</span>, roughly 3–4× option A, and most of it is not
+sharing work. Choosing this first is choosing to build the automation tier and the egress subsystem
+first.</p>
+</div>
+
+<!-- ============ OPTION C ============ -->
+<div class="opt">
+<h3>Option C: The linking space: move the boundary instead of crossing it</h3>
+
+<div class="eli2"><b>ELI2</b>
+Instead of a window or a photocopy, you and your neighbour build a small shed between your two
+gardens, and you both keep a key. Anything you want to share, you put in the shed. Nothing ever
+crosses a wall, because the shared thing was never inside your house.</div>
+
+<figure>
+<svg viewBox="0 0 800 340" role="img" aria-label="Diagram: a third space holds the shared subset; both parties are ordinary members of it.">
+  <defs>
+    <marker id="aC" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#1c1a17"/>
+    </marker>
+  </defs>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">
+    <path d="M262,34 L262,300" stroke="#c9c2b4" stroke-width="2" stroke-dasharray="5 5"/>
+    <path d="M538,34 L538,300" stroke="#c9c2b4" stroke-width="2" stroke-dasharray="5 5"/>
+
+    <rect x="20" y="86" width="222" height="164" rx="6" fill="#fdfcf9" stroke="#c9c2b4"/>
+    <text x="36" y="112" font-size="13" font-weight="700" fill="#1c1a17">Space S</text>
+    <text x="36" y="138" font-size="12" fill="#6f6a60">private, untouched</text>
+    <text x="36" y="158" font-size="12" fill="#6f6a60">own chain, own keys</text>
+    <text x="36" y="178" font-size="12" fill="#6f6a60">own custody position</text>
+
+    <rect x="282" y="52" width="236" height="232" rx="6" fill="#fff8f2" stroke="#9c3b12" stroke-width="1.6"/>
+    <text x="400" y="78" text-anchor="middle" font-size="13" font-weight="700" fill="#9c3b12">Space L: the shared subset</text>
+    <circle cx="302" cy="106" r="8" fill="#9c3b12"/><text x="302" y="110" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">1</text>
+    <text x="318" y="110" font-size="12" fill="#4a463f">S's person joins as a member</text>
+    <circle cx="302" cy="134" r="8" fill="#9c3b12"/><text x="302" y="138" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">2</text>
+    <text x="318" y="138" font-size="12" fill="#4a463f">R's person joins as a member</text>
+    <rect x="296" y="154" width="208" height="62" rx="4" fill="#f4f1ea" stroke="#ddd8ce"/>
+    <text x="308" y="173" font-size="11.5" fill="#4a463f">ordinary roles, guards, acl, triggers</text>
+    <text x="308" y="191" font-size="11.5" fill="#4a463f">one chain, one custody position</text>
+    <text x="308" y="209" font-size="11.5" fill="#6f6a60">no new authorization surface at all</text>
+    <circle cx="302" cy="238" r="8" fill="#9c3b12"/><text x="302" y="242" text-anchor="middle" font-size="10" fill="#fff" font-weight="700">3</text>
+    <text x="318" y="242" font-size="12" fill="#4a463f">someone owns L and can</text>
+    <text x="318" y="260" font-size="12" fill="#4a463f">reach everything in it</text>
+
+    <rect x="558" y="86" width="222" height="164" rx="6" fill="#fdfcf9" stroke="#c9c2b4"/>
+    <text x="574" y="112" font-size="13" font-weight="700" fill="#1c1a17">Space R</text>
+    <text x="574" y="138" font-size="12" fill="#6f6a60">private, untouched</text>
+    <text x="574" y="158" font-size="12" fill="#6f6a60">own chain, own keys</text>
+    <text x="574" y="178" font-size="12" fill="#6f6a60">own custody position</text>
+
+    <path d="M246,206 L278,206" stroke="#1c1a17" stroke-width="2" marker-end="url(#aC)"/>
+    <text x="262" y="228" text-anchor="middle" font-size="11" fill="#1c1a17" font-weight="600">membership</text>
+    <path d="M554,206 L522,206" stroke="#1c1a17" stroke-width="2" marker-end="url(#aC)"/>
+    <text x="538" y="228" text-anchor="middle" font-size="11" fill="#1c1a17" font-weight="600">membership</text>
+
+    <text x="400" y="316" text-anchor="middle" font-size="12" fill="#4a463f">
+      Nothing crosses a boundary. The shared rows are <tspan font-style="italic">authored</tspan> in L, which is the cost.</text>
+  </g>
+</svg>
+<figcaption>Relocation. Consent becomes "join a space", which is already the platform's
+best-specified consent moment; revocation becomes "remove a member", which already takes effect on
+the next request.</figcaption>
+</figure>
+
+<div class="cols">
+<div><h4>Easy</h4><ul>
+  <li>Zero new authorization surface. Roles, groups, profiles, acl, guards, triggers, chain, export all work unchanged.</li>
+  <li>Revocation is immediate and total: suspend the membership, effective next request.</li>
+  <li><code>callersOf</code> already answers exhaustively for L.</li>
+  <li>No re-seal pipeline, no egress, no replication lag, no divergence.</li>
+</ul></div>
+<div><h4>Hard</h4><ul>
+  <li>The data has to <em>be</em> there. Sharing something that already exists in S still needs a copy, so C alone cannot retrofit.</li>
+  <li>Refs are per space. L's rows cannot point at S's rows, so L is a standalone model, not a view of one.</li>
+  <li>Somebody owns L, and B3's owner-reach disclosure now names them. "A neutral shed" is not a thing the platform can offer.</li>
+  <li>A third custody position, a third jurisdiction, a third retention policy, a third export.</li>
+</ul></div>
+<div><h4>Forecloses</h4><ul>
+  <li>Retrofit sharing of existing rows, without one of the other two doors.</li>
+  <li>DL §8 as written. This is a substitution, not a subset: it says the two settled doors are not needed.</li>
+  <li>Fine-grained sharing: the unit becomes a whole space, not an acl subtree.</li>
+</ul></div>
+</div>
+
+<h4>How it lands on what is already built</h4>
+<ul class="plain">
+<li><b>Guards / EXISTS chains.</b> Unchanged and space-local, which is the entire appeal. Every
+  guard in the corpus already assumes exactly this shape.</li>
+<li><b>Grant pinning.</b> Unchanged: an app over L holds an ordinary L-scoped grant, and scope
+  expansion kills it exactly as today.</li>
+<li><b>Per-space command log.</b> L has its own, and it is the <em>only</em> shared audit
+  trail any of these three options can produce, because it is one chain both parties can read.</li>
+<li><b>Per-space custody keys / sealed fields.</b> L's sealed fields are sealed under L's key, which
+  both members can reach through op access. There is no cross-custody problem, because there is no
+  crossing. The cost is that a row cannot be private-to-S and shared-into-L; it is one or the other,
+  authored once.</li>
+<li><b>Triggers.</b> Both parties' automation can fire on L's writes, because both are members of L,
+  and it fires under R-G20's ordinary rules with no outsider-provenance question at all. This is
+  strictly cleaner than the feed's story.</li>
+<li><b>What it needs that does not exist.</b> <code>std.space.create</code> as a callable op (the
+  board has it "Blocked: needs a platform-op path"), and the invitation ceremony (E6), which every
+  option needs.</li>
+</ul>
+
+<p><b>Cost:</b> <span class="cost">MEDIUM</span> in engineering, perhaps 1.5× option A, nearly all
+of it in space provisioning rather than sharing. <span class="cost">HIGH</span> in modelling churn:
+every domain that wants sharing has to be designed for it up front, and
+<span class="mono">modeling-guidance.md</span> §A's space-per-user advice becomes mandatory rather
+than idiomatic.</p>
+</div>
+
+<h2>3 · Side by side</h2>
+
+<div class="scroll"><table>
+<thead><tr><th></th><th>A · Window</th><th>B · Feed</th><th>C · Linking space</th></tr></thead>
+<tbody>
+<tr><td>Where shared rows live</td><td>Only in S</td><td>In S and in R</td><td>In neither, in L</td></tr>
+<tr><td>Revocation strength</td><td>Next call, plus mirror poisoning</td><td>Future copies only</td><td>Next request, total</td></tr>
+<tr><td>Sealed data</td><td>Readable only if S has a release path; refused at client-first</td><td>Unseal in S, re-seal in R, per batch, indefinitely</td><td>No crossing; sealed under L's key</td></tr>
+<tr><td>Receiver's triggers fire</td><td>No</td><td>Yes (the point)</td><td>Yes, ordinarily</td></tr>
+<tr><td>Works offline / decoupled</td><td>No</td><td>Yes</td><td>Partly (L is its own space)</td></tr>
+<tr><td>Retrofits existing data</td><td>Yes</td><td>Yes</td><td>No</td></tr>
+<tr><td>New authorization surface</td><td>Small (guest kind, foreign-principal grant)</td><td>Medium</td><td>None</td></tr>
+<tr><td>Unbuilt subsystems depended on</td><td>None</td><td>Routines, triggers, egress</td><td><code>std.space.create</code></td></tr>
+<tr><td>Conformance cases satisfied</td><td>GC059–GC066 (5 already pass)</td><td>None directly; needs GC096–GC098 first</td><td>None, it substitutes for the corpus</td></tr>
+<tr><td>Cost</td><td><span class="cost">LOW</span></td><td><span class="cost">HIGH</span></td><td><span class="cost">MEDIUM</span> + modelling churn</td></tr>
+</tbody></table></div>
+
+<h2>4 · Recommendation</h2>
+
+<div class="note rec">
+<p style="margin-top:0"><b>Option A, with one amendment: the share record <em>is</em> a capability
+grant with a foreign principal.</b> Then the feed, second, on top of the trigger tier, as two such
+grants, one each side. Keep the linking space as documented modelling guidance, and do not build
+it as machinery.</p>
+</div>
+
+<p>This is mine to be argued out of. The reasoning, in order of weight:</p>
+
+<ul class="plain">
+<li><b>The window is not a build, it is a consent surface over an engine that already passes its
+  tests.</b> Five of the eight guest cases execute against real Postgres today. The three that do not
+  are all registration. Building A first converts a passing-but-unreachable engine into a shipped
+  feature; building B or C first leaves it unreachable for longer.</li>
+<li><b>The feed is downstream of three "Not started" board rows.</b> Routines have no AST node.
+  Triggers parse strings unreachable from <code>parse_program</code>. Outbound egress is one comment.
+  Choosing B first is choosing to build the automation tier first while calling it sharing. The
+  automation tier deserves to be sequenced on its own merits, not smuggled in.</li>
+<li><b>Making the share a grant closes four of the seven silences for free.</b> E1 (manifest
+  expansion kills it) is the important one, and it is not hypothetical: <span class="mono">pins.rs</span>
+  exists because the naive form let someone delete <code>member == $caller</code> and silently turn
+  "read my expenses" into "read everyone's expenses". A share is a longer-lived consent than a grant
+  and is exposed to exactly the same edit. E2 gives it an expiry, E3 gives both sides a revocation
+  record, B5 collapses from two consent prompts to one.</li>
+<li><b>It also dissolves E4 rather than ruling on it.</b> Guard-bearing-ness is an op property;
+  compute it at compile time, stamp it in the artifact, and let the binding to a named human be
+  runtime state. R-G18's check survives at full strength and DL's "never syntax, never IaC" pin
+  survives intact. The corpus cases need re-spelling, not re-deciding.</li>
+<li><b>C is genuinely attractive and I am not recommending it as machinery, only as guidance.</b> It
+  is the only option with a shared audit trail, and its revocation is the strongest of the three. But
+  it cannot answer the question people actually ask (<em>share this budget with my accountant</em>)
+  without a copy mechanism to populate L, so it does not remove the need for A or B; it adds a third
+  owner with full reach over the shared rows; and refs being per space means L is a separate model
+  rather than a view. It belongs in <span class="mono">modeling-guidance.md</span> as the answer to
+  "we want a genuinely shared workspace", which is a different question from "let them see this".</li>
+</ul>
+
+<p><b>Where to disagree.</b> If the near-term customers are integrations rather than people (app-to-app,
+machine-to-machine) then B is right and A is the deferral, and the consequence is
+that sharing waits behind the automation tier. And if the goal this quarter is to add zero new
+authorization surface, C-as-guidance plus neither door is a defensible answer that costs one
+paragraph of documentation.</p>
+
+<p><b>What has to be written either way</b>, because every option needs it: the invitation and
+consent surface (E6). It is referenced by two documents, exists in neither, and it is where most
+of the twenty-two items above are actually rendered to a human.</p>
+
+<h2>5 · Contradictions found in the settled documents</h2>
+
+<ol class="plain">
+<li><b>Exposure registration is syntax and is also forbidden from being syntax.</b> DL §8: <em>"Who
+  may call what is runtime state, never syntax, never IaC."</em> R-G18 + GC063–GC065 put
+  <code>share to guest:gil { openTasks, cardList }</code> in source as a compile-tier construct with
+  <code>guest_exposure_unguarded</code> classified <code>compile</code>. Both are settled. The
+  proposed resolution is in option A: split the op property (compile) from the binding (runtime).
+  <em>Sharpest of the set: it decides where the feature is built.</em></li>
+<li><b>§7 cites an anti-loop rule in §8 that §8 does not contain.</b> DL §7: <em>"a listener on
+  <code>written</code> sees feed copies too, which is what makes feeds locally reactive, and the
+  anti-loop rule in §8 is what keeps that from being a cycle."</em> §8's feed pins are one-way, no
+  write-back, receiver owns the copies. None of this prevents A→B→C→A.</li>
+<li><b>The invitation and consent surface is cited by two documents and specified by none.</b>
+  <span class="mono">deploying.md</span> §5 → "<code>bootstrap.md</code> §5 asks…";
+  <span class="mono">bootstrap.md</span> §8 → "§5's invitation and consent surface must carry the
+  sentence"; <span class="mono">bootstrap.md</span> §5 is <em>"What <code>std.space.create</code>
+  must not do"</em> and contains nothing of the kind.</li>
+<li><b>§8 says a guest is not a member; §3 says the platform mints them a members row.</b> §8:
+  <em>"An ACL row may name a principal who is not a member of the space … the member just isn't from
+  around here."</em> §3, minting path (iv): <em>"guest binding, when an inter-space share is accepted,
+  a guest gets a members row with a null <code>role</code>."</em> Reconcilable by reading "member"
+  as "role-holder", which is how the corpus does it, but §8's wording is wrong as it stands, and
+  R-G11a/GC092 depend on the §3 reading.</li>
+<li><b>Feeds and grants describe the same two-space act with two different vocabularies.</b>
+  <span class="mono">security-logging-design.md</span> §5 pins <em>"a grant spanning two spaces is
+  two grants, consented twice"</em> and cites DL's own tier-2 bridge as the precedent. A feed is
+  precisely that shape and is nevertheless specified as a single object with two consents and one
+  revocation. Not a contradiction in outcome, but the two documents will diverge the moment either
+  is implemented.</li>
+<li><b>Sealed fields are absent from the feed design entirely.</b> Custody keys are per space, so
+  <em>every</em> sealed field in a feed slice implies an indefinite standing key release in the
+  sharing space. DL §7's release rule is written for a human caller invoking an op; §8's feed section
+  does not mention sealed data, keys, or release. This is a gap rather than a conflict, but it is the
+  gap that decides whether feeds are cheap or expensive.</li>
+</ol>
+
+<p class="meta" style="margin-top:3rem;padding-top:1.4rem;border-top:1px solid var(--rule);border-bottom:none">
+Nothing above is settled. When a choice is made, the item that has to be written first is the
+invitation and consent surface, and the item that has to be <em>ruled</em> first is contradiction 1.
+</p>
+
+</div>
+</body>
+</html>

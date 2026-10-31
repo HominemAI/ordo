@@ -1,0 +1,25 @@
+routine meterAnomaly in estate {
+  trigger when estate.readings.created debounce 5m
+  run($today: date) unguarded:                          # ← the listener bound,
+                                                      #   acknowledged. Why:
+    let baseline = readings reduce { a: avg value }   # this let reads ALL
+                                                      # readings, which is NOT
+                                                      # reachable from the
+                                                      # new rows. A listener
+                                                      # run is bounded to the
+                                                      # changed rows, so ranging
+                                                      # wider must be written.
+                                                      # (Also a global
+                                                      # baseline: per-meter
+                                                      # baselines need a
+                                                      # per-group let, which is a known
+                                                      # tier-1 limit.)
+    readings(value > 3 * baseline.a)
+      [id, value, meterId: meter.id, meter.kind, meter.unit.name]
+    each ->
+      set alerts { kind: "meter", key: "meter:" + meterId,
+                   severity: "warning", status: "active", raised: $today,
+                   title: kind + " anomaly in " + name }
+}
+# `avg` yields decimal; `3 * baseline.a` is compared exactly against `value`.
+# No rounding step exists in between, and none is applied implicitly

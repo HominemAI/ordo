@@ -1,0 +1,558 @@
+<title>Ordo Go-Live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    /* Cool slate paper with a brass accent: the wax-seal and brass-key end
+       of custody, rather than a warm-cream document. */
+    --ground:   #F3F4F7;
+    --raised:   #FFFFFF;
+    --ink:      #14161C;
+    --muted:    #545B6B;
+    --rule:     #D7DAE3;
+    --brass:    #8A5E14;
+    --brass-bg: #F2E7CE;
+    --danger:   #97291A;
+    --danger-bg:#F8E6E2;
+    --good:     #1A6144;
+    --mono-bg:  #1A1D24;
+    --mono-ink: #E6E8EE;
+    --focus:    #2B5FD9;
+    /* The side margin, and the only thing that decides the text width: the
+       column is auto, so it is the viewport less two of these. Relative, so
+       it tracks the window instead of a number picked for one monitor. The
+       16px floor only ever binds below a 320px viewport. */
+    --gutter: max(16px, 5%);
+    /* Starts at the large step rather than the small one: the page was asked
+       for because regular text would not do. */
+    --step: 25px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #12141A;
+      --raised:   #1A1D25;
+      --ink:      #E9EBF1;
+      --muted:    #A0A7B8;
+      --rule:     #2A2F3A;
+      --brass:    #DBA94E;
+      --brass-bg: #2B2317;
+      --danger:   #E79483;
+      --danger-bg:#2E1B17;
+      --good:     #63C398;
+      --mono-bg:  #0D0F14;
+      --mono-ink: #DDE0E8;
+      --focus:    #7CA0FF;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:   #12141A;
+    --raised:   #1A1D25;
+    --ink:      #E9EBF1;
+    --muted:    #A0A7B8;
+    --rule:     #2A2F3A;
+    --brass:    #DBA94E;
+    --brass-bg: #2B2317;
+    --danger:   #E79483;
+    --danger-bg:#2E1B17;
+    --good:     #63C398;
+    --mono-bg:  #0D0F14;
+    --mono-ink: #DDE0E8;
+    --focus:    #7CA0FF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+    font-size: var(--step);
+    line-height: 1.75;
+    padding-inline: var(--gutter);
+    padding-block: 0 5rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  /* No max-width at all. Every previous attempt here capped the column at
+     some number (576px, then 900px, then 1400px), and each one was a guess
+     about a monitor. The width is now whatever the window gives less the
+     gutter on each side, so nothing is centred and nothing is capped. */
+  .wrap { width: auto; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 2px; }
+
+  /* ── the size control, which is the one piece of chrome this page earns ── */
+  .bar {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 5;
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--rule);
+    margin-inline: calc(-1 * var(--gutter));
+    padding: .55rem var(--gutter);
+    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+  }
+  .bar span {
+    font-family: Archivo, system-ui, sans-serif;
+    font-size: .8rem; font-weight: 600; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .sizes { display: flex; gap: .4rem; }
+  .sizes button {
+    font-family: Archivo, system-ui, sans-serif;
+    font-size: .95rem; font-weight: 600;
+    padding: .3rem .75rem;
+    border: 1px solid var(--rule); border-radius: 999px;
+    background: var(--raised); color: var(--ink); cursor: pointer;
+  }
+  .sizes button[aria-pressed="true"] {
+    background: var(--brass-bg); border-color: var(--brass); color: var(--brass);
+  }
+
+  header.top { padding-block: 3rem 1rem; }
+  h1 {
+    font-family: Archivo, system-ui, sans-serif;
+    font-weight: 800; font-size: 2.5em; line-height: 1.06;
+    letter-spacing: -.02em; margin: 0 0 .6rem; text-wrap: balance;
+  }
+  .standfirst { font-size: 1.1em; color: var(--muted); margin: 0; text-wrap: pretty; }
+
+  h2 {
+    font-family: Archivo, system-ui, sans-serif;
+    font-weight: 800; font-size: 1.45em; line-height: 1.2;
+    margin: 0 0 .5rem; text-wrap: balance;
+  }
+  h3 {
+    font-family: Archivo, system-ui, sans-serif;
+    font-weight: 600; font-size: 1.02em; letter-spacing: .01em;
+    margin: 2rem 0 .4rem;
+  }
+  p { margin: 0 0 1.1rem; text-wrap: pretty; }
+  strong { font-weight: 600; }
+  a { color: var(--brass); text-underline-offset: .2em; }
+
+  /* ── steps: a real sequence only where order is real ── */
+  .step { padding-block: 2.5rem; border-top: 1px solid var(--rule); }
+  .step-head { display: flex; gap: 1rem; align-items: flex-start; margin-bottom: 1.2rem; }
+  .num {
+    flex: none;
+    font-family: Archivo, system-ui, sans-serif;
+    font-weight: 800; font-size: 1.5em; line-height: 1;
+    color: var(--brass);
+    min-width: 2.1em; padding-top: .1em;
+    font-variant-numeric: tabular-nums;
+  }
+  .who {
+    display: inline-block;
+    font-family: Archivo, system-ui, sans-serif;
+    font-size: .74em; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: .2em .6em; border-radius: 4px;
+    background: var(--brass-bg); color: var(--brass);
+    margin-bottom: .5rem;
+  }
+
+  pre {
+    background: var(--mono-bg); color: var(--mono-ink);
+    font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: .82em; line-height: 1.65;
+    padding: 1.1rem 1.2rem; border-radius: 8px;
+    overflow-x: auto; margin: 0 0 1.1rem;
+  }
+  pre b { color: #DBA94E; font-weight: 700; }
+  pre i { color: #8B93A6; font-style: normal; }
+  code {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+    font-size: .84em;
+    background: var(--brass-bg); color: var(--brass);
+    padding: .12em .38em; border-radius: 4px;
+    overflow-wrap: anywhere;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: 1em; }
+
+  .note, .warn {
+    border-left: 4px solid var(--brass);
+    background: var(--raised);
+    padding: 1.1rem 1.2rem; border-radius: 0 8px 8px 0;
+    margin: 0 0 1.2rem;
+  }
+  .warn { border-left-color: var(--danger); background: var(--danger-bg); }
+  .note > :last-child, .warn > :last-child { margin-bottom: 0; }
+  .note h3, .warn h3 { margin-top: 0; }
+  .warn strong { color: var(--danger); }
+
+  ul { margin: 0 0 1.1rem; padding-left: 1.3em; }
+  li { margin-bottom: .55rem; }
+  li::marker { color: var(--brass); }
+
+  .expect {
+    font-family: Archivo, system-ui, sans-serif;
+    font-size: .78em; font-weight: 600; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--good);
+    margin: 1.4rem 0 .3rem;
+  }
+  .ask {
+    display: flex; gap: .7rem; align-items: baseline;
+    border-top: 2px solid var(--rule); margin-top: 1.6rem; padding-top: 1rem;
+  }
+  .ask-label {
+    flex: none;
+    font-family: Archivo, system-ui, sans-serif;
+    font-size: .78em; font-weight: 600; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--muted);
+    padding-top: .35em;
+  }
+  .ask p { margin: 0; }
+
+  footer { border-top: 1px solid var(--rule); margin-top: 3rem; padding-top: 2rem; color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <div class="bar">
+    <span>Text size</span>
+    <div class="sizes" role="group" aria-label="Text size">
+      <button type="button" id="sz-1" data-px="25" aria-pressed="true">Large</button>
+      <button type="button" id="sz-2" data-px="30" aria-pressed="false">Larger</button>
+      <button type="button" id="sz-3" data-px="36" aria-pressed="false">Largest</button>
+      <button type="button" id="sz-4" data-px="44" aria-pressed="false">Huge</button>
+    </div>
+  </div>
+
+  <header class="top">
+    <h1>Ordo Go-Live</h1>
+    <p class="standfirst">Four things stand between the instance in the cluster
+    and a deployment serving real callers. Three of them are yours, and none of
+    them is a missing capability.</p>
+  </header>
+
+  <p>The machine has been up since 20 September with no program on it.
+  <code>ordo.inf.smg.icu</code> boots, creates its own platform tables, mints
+  custody for the system space, and serves. Every step below has been
+  exercised and has a test holding it. What is left is a decision, two
+  configurations and a release.</p>
+
+  <div class="note">
+    <h3>What I need from you, and what I never want</h3>
+    <p>I need to know <strong>when</strong> each step is done, not what it
+    produced. Not the passphrase, not the master key file, not a token, not a
+    password. If any of those ever appears in our conversation it has to be
+    rotated, so the answer I want is always just <em>done</em>.</p>
+  </div>
+
+  <div class="step">
+    <div class="step-head">
+      <div class="num">1</div>
+      <div>
+        <div class="who">Yours · decide</div>
+        <h2>What the first program actually is</h2>
+      </div>
+    </div>
+
+    <p>This is the one that gates the ordering of everything else, which is why
+    it is first even though it involves no commands. It is on the board as
+    <code>first-program</code>.</p>
+
+    <p><strong>My recommendation: something you actually use, with guards and
+    more than one member.</strong> The example I built,
+    <code>examples/first-app</code>, is one table with one field and no guard.
+    It proves the whole path end to end and proves almost nothing else. A first
+    deployment that never exercises who-may-read-which-row leaves the part the
+    entire argument rests on untested in production.</p>
+
+    <p>What the program contains decides which of my open work is
+    <em>blocking</em>:</p>
+
+    <ul>
+      <li><strong>Carries data from an old system</strong>: the import
+      verification pass becomes a gate. Without it a migration finishes and
+      nobody can say whether it worked.</li>
+      <li><strong>Has nightly or reactive rules</strong>: the trigger
+      declaration spelling becomes a gate, and that is a ruling only you can
+      make. The workers are built and registered; nothing can declare one.</li>
+      <li><strong>Has a browser page</strong>: the CORS question becomes a
+      gate. No page on another origin can call a deployment today.</li>
+      <li><strong>Has file attachments</strong>: nothing. That was a gate
+      until 26 September and is closed.</li>
+    </ul>
+
+    <div class="ask">
+      <div class="ask-label">Tell me</div>
+      <p>What the program is, and whether it has any of those four things.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-head">
+      <div class="num">2</div>
+      <div>
+        <div class="who">Yours · secrets</div>
+        <h2>Mint the deployment's custody</h2>
+      </div>
+    </div>
+
+    <p>Two commands, on the machine that will run the deployment. The first
+    mints a master key and writes it <em>sealed</em> under a passphrase, so the
+    file on disk is useless alone. The second creates a space's own keys.</p>
+
+    <pre><code><i># 1: the master key, sealed under a passphrase you supply in a FILE</i>
+ordo keys seal-master \
+  --out /etc/ordo/master.sealed \
+  --passphrase-file /run/secrets/ordo-pass
+
+<i># 2: the first space's custody, using that sealed file</i>
+ordo keys init --space system --as <b>you</b> \
+  --master-key-file /etc/ordo/master.sealed \
+  --passphrase-file /run/secrets/ordo-pass</code></pre>
+
+    <p>The passphrase comes from a <strong>file</strong> and not a flag,
+    deliberately: a flag is in your shell history and in the process list where
+    anyone on the box can read it, and a prompt cannot be scripted.
+    <code>seal-master</code> prints the key id and a fingerprint, and never the
+    key. It refuses to overwrite an existing file.</p>
+
+    <p>Then the deployment boots from the sealed file, with the master itself
+    nowhere in its environment:</p>
+
+    <pre><code>ORDO_KEY_PROVIDER=sealed-master
+ORDO_MASTER_KEY_FILE=/etc/ordo/master.sealed
+ORDO_MASTER_KEY_PASSPHRASE_FILE=/run/secrets/ordo-pass
+ORDO_SPACE=system
+ORDO_TOKEN_KEY=<i>32 random bytes, hex</i>
+ORDO_PAGE_KEY=<i>32 random bytes, hex</i></code></pre>
+
+    <div class="warn">
+      <h3>There is no escrow and no recovery</h3>
+      <p>The property that makes crypto-erasure real is the same property that
+      makes losing key material unrecoverable. <strong>Back up the sealed file
+      and the passphrase separately</strong>, to somewhere that is not this
+      deployment's database.</p>
+      <p>And the master key of the first boot is the one everything is wrapped
+      under. A mistyped master on a first boot gives you a system space wrapped
+      under the typo; the next boot under the right master refuses with
+      <em>custody exists but this master key does not open it</em>. The way
+      across is <code>ordo keys rewrap-master</code>, which is transactional
+      and moves no blind-index digest.</p>
+    </div>
+
+    <p class="expect">What good looks like</p>
+    <pre><code>ordo-host 0.1.0  addr=0.0.0.0:4000  space=system
+  custody     sealed-master  key <b>…</b>  epoch=1
+  system      system  (created at boot)
+  continuity  system: intact</code></pre>
+
+    <p>If the log says <code>custody test (UNSAFE — repository constant)</code>
+    then the provider did not take, and nothing real should be written to that
+    deployment until it does. That line is correct on your laptop under
+    <code>ordo dev</code> and is never correct in the cluster.</p>
+
+    <div class="ask">
+      <div class="ask-label">Tell me</div>
+      <p>Just <em>custody is done</em>, plus whether the startup log says
+      <code>sealed-master</code>.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-head">
+      <div class="num">3</div>
+      <div>
+        <div class="who">Yours · config</div>
+        <h2>Turn sign-in on</h2>
+      </div>
+    </div>
+
+    <div class="warn">
+      <h3>Corrected 29 September: this step is not enough, and I was wrong to present it as one</h3>
+      <p>Turning on <code>password</code> sign-in gives you the sign-in
+      routes and nothing that can use them. <strong>There is no way to create
+      a credential</strong> in a running deployment: the code that enrols one
+      is only ever called by tests. And a password sign-in can never pass the
+      extra check that deploying a program requires, by design, because a
+      password proves a secret and not that a person is present.</p>
+      <p>What is actually needed is <strong>passkey sign-in</strong>, which
+      is built and tested as a verifier and is refused by the server at
+      start-up. It is now the first thing to build.</p>
+    </div>
+
+    <p>Right now the instance has no authentication surface at all. The
+    <code>/auth/*</code> routes exist only when this is set, so without it
+    there is no way for a real caller to obtain a token, and the only tokens
+    that exist are the ones <code>ordo dev</code> prints locally and signs with
+    a key that dies with the process.</p>
+
+    <pre><code>ORDO_AUTH_METHODS=password
+ORDO_SESSION_SECS=3600        <i># how long a token lives</i>
+ORDO_SESSION_MAX_SECS=2592000 <i># how long a session may be refreshed for</i></code></pre>
+
+    <p><code>password</code> is the only method this binary serves. It will
+    refuse to boot on any other value. It will not start with an authentication
+    surface it cannot honour.</p>
+
+    <p>A token comes from a sign-in, not from a printed line:</p>
+
+    <pre><code>curl -s https://ordo.inf.smg.icu/auth/begin  -d '…'
+curl -s https://ordo.inf.smg.icu/auth/complete -d '…'</code></pre>
+
+    <div class="ask">
+      <div class="ask-label">Tell me</div>
+      <p><em>Auth is on</em>, and I will check that a sign-in round trip works
+      against the live door.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-head">
+      <div class="num">4</div>
+      <div>
+        <div class="who">Yours · one command</div>
+        <h2>Tag a release that actually publishes</h2>
+      </div>
+    </div>
+
+    <p>This is the last open item on the CI checklist: <strong>nothing has ever
+    published a release page.</strong> Until one does there is no pinned image
+    to deploy by digest, only a build somebody made by hand.</p>
+
+    <pre><code>git tag v0.1.1
+git push origin v0.1.1</code></pre>
+
+    <p><strong>Why the last one did not publish, since it looked like it
+    should.</strong> The <code>v0.1.0</code> tag ran the release workflow twice.
+    Both times every Linux and arm64-macOS leg finished, and both times the
+    <code>x86_64-apple-darwin</code> leg sat <em>queued</em> for twelve hours,
+    then nine, because its runner label is GitHub's last Intel image and does
+    not schedule for this account. The release job needs every binary, and a
+    job that can never start is indistinguishable from one that has not started
+    yet. No gate catches that, because a drill proves a job <em>fails</em> and
+    never that it <em>runs</em>.</p>
+
+    <p>That target was dropped on your reading that we build on GHA to run on
+    Linux, so a fresh tag should go green. The release notes also used to claim
+    a build-provenance attestation that this organization cannot attach; they
+    now say plainly that provenance and the Intel binary are both missing.</p>
+
+    <div class="ask">
+      <div class="ask-label">Tell me</div>
+      <p>Nothing. I will watch the run and report. Push the tag when you are
+      ready for it.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-head">
+      <div class="num">→</div>
+      <div>
+        <div class="who">Mine · after step 1</div>
+        <h2>Then the program goes on</h2>
+      </div>
+    </div>
+
+    <div class="warn">
+      <h3>This does not work today</h3>
+      <p>Deploying over the door needs a token that proves a person is
+      present, and the only sign-in the server offers cannot produce one.
+      The tests that show this command working create their tokens directly
+      and do not sign in. Until passkey sign-in is switched on, a program
+      can be applied only with direct database access, which is the
+      break-glass path.</p>
+    </div>
+
+    <p>Once custody exists and a program is chosen, deploying it is one command
+    against the door. No database password on a laptop, and the actor recorded
+    is the principal your token proved.</p>
+
+    <pre><code>ordo apply ./yourprogram.ordo \
+  --host ordo.inf.smg.icu \
+  --space system \
+  --token <i>$ORDO_TOKEN</i></code></pre>
+
+    <p>On a database with no program the boot mints custody and the log says
+    <code>custody only</code>, because the system space's founding member row
+    needs the <code>members</code> table that a program's DDL creates. The
+    first apply writes that row on the swap it triggers, with no restart:</p>
+
+    <pre><code>system space system: founding row written</code></pre>
+
+    <p>Then <code>ordo plan --against</code> shows what any later change would
+    do before it does it, and refuses, and does not warn, whenever a probe comes
+    back non-empty, because which row survives is your decision.</p>
+  </div>
+
+  <div class="step">
+    <div class="step-head">
+      <div class="num">·</div>
+      <div>
+        <div class="who">Mine · not blocking</div>
+        <h2>What I am deliberately not doing yet</h2>
+      </div>
+    </div>
+
+    <p>What I am holding:</p>
+
+    <ul>
+      <li><strong>The import verification pass.</strong> Waiting on step 1,
+      because it only matters if the first program carries data.</li>
+      <li><strong>Triggers that fire.</strong> Waiting on your ruling. The
+      supervisor and all four trigger workers are built and registered; the
+      language has no way to declare a listener, and two documents spell that
+      declaration two different ways, so building either would decide it by
+      accident.</li>
+      <li><strong>CORS at the door.</strong> Built as you ruled, an origin
+      allowlist. Nothing is set by default, so only a page on the
+      deployment's own origin can call it. <strong>If your page is served
+      from another origin, such as a Cloudflare Pages site, set
+      <code>ORDO_CORS_ORIGINS=https://your-page.example</code></strong> on
+      the deployment, or the browser will discard every answer without an
+      error you can see. The setting in the console is not built yet.</li>
+      <li><strong>The last of the CLI audit.</strong> An hour of work:
+      <code>ordo fmt</code> is promised in two documents and does not exist,
+      and the usage text still omits <code>quota</code> and
+      <code>usage</code>.</li>
+    </ul>
+  </div>
+
+  <footer>
+    <p>Every command and every log line on this page was taken from the
+    runbook it belongs to and checked against the binary that ships:
+    <code>docs/deploying.md</code> §4 and §4c for custody and boot order,
+    <code>docs/howto-operating.md</code> for the door, and the
+    <code>ordo</code> usage text for the flags. The four steps are checklist
+    items <code>17ae</code>, <code>17b</code>, <code>20b</code> and
+    <code>15a</code>.</p>
+  </footer>
+</div>
+
+<script>
+  // Text size, remembered per reader. The one interactive thing on the page,
+  // because the page exists to be read comfortably rather than to be operated.
+  (function () {
+    var KEY = "ordo-golive-size";
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".sizes button"));
+
+    function apply(px, persist) {
+      document.documentElement.style.setProperty("--step", px + "px");
+      buttons.forEach(function (b) {
+        b.setAttribute("aria-pressed", String(b.dataset.px === String(px)));
+      });
+      if (persist) {
+        try { localStorage.setItem(KEY, String(px)); } catch (e) { /* private window */ }
+      }
+    }
+
+    buttons.forEach(function (b) {
+      b.addEventListener("click", function () { apply(b.dataset.px, true); });
+    });
+
+    // A value this page no longer offers is ignored rather than honoured:
+    // the first version's smallest step was 21px, and restoring it would put
+    // a reader below the size this page now starts at, which is the whole
+    // thing it was asked to fix.
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
+    if (saved && buttons.some(function (b) { return b.dataset.px === saved; })) {
+      apply(saved, false);
+    } else if (saved) {
+      try { localStorage.removeItem(KEY); } catch (e) { /* private window */ }
+    }
+  })();
+</script>

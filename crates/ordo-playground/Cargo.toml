@@ -1,0 +1,22 @@
+[package]
+name = "ordo-playground"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ordo-syntax = { path = "../ordo-syntax" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-sema = { path = "../ordo-sema" }
+ordo-plan = { path = "../ordo-plan" }
+ordo-decompile = { path = "../ordo-decompile" }
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-host = { path = "../ordo-host" }
+ordo-conformance = { path = "../ordo-conformance" }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

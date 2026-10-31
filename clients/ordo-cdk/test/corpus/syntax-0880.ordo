@@ -1,0 +1,27 @@
+# standalone program: these entities replace the estate ones
+entity people {
+  member  -> members unique
+  manager -> members?
+}
+
+entity invoices {
+  owner  -> members
+  status: text = "open"
+}
+
+entity drafts {
+  author -> members
+  body:   text
+}
+
+release member when not invoices(owner == $member and status == "open") {
+  remove drafts.author
+  reassign invoices.owner to people(member == $member).manager or owner
+}
+# One rule per program. `open` lets any member leave, `locked` lets nobody,
+# and `when …` lets a member leave once every condition holds. `$member` is the
+# seat being released; `$caller` has no meaning here. With no `release` line
+# a program's members are LOCKED (see howto-leave.md).
+# Rows that point at the leaver stay by default and point at the seat, which keeps its name and reads status left.
+# The block may remove them or reassign them; `owner` is the tenant's
+# longest-standing other owner. The leave is `std.space.leave`.

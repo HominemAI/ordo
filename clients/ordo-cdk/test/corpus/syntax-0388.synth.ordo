@@ -1,0 +1,3 @@
+op searchVendors($q: text) =
+  vendors(active == true and (name contains $q or name starts $q))[name]
+    sort name

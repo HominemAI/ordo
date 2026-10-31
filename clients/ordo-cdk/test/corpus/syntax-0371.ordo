@@ -1,0 +1,4 @@
+# planned: composes vendorSpend above, which is planned.
+op bigSpenders($min: int) =                      # named-query composition:
+  vendorSpend($from: 2026-01-01, billed > $min)[name, billed]   # $ binds, fields filter
+  take 10

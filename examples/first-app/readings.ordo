@@ -1,0 +1,20 @@
+# One table. One field. The smallest thing that is still a real app: a shape
+# the platform can create, a way to put a row in, and a read the door will
+# serve.
+#
+# `readings` carries no `acl`, so it has no row-level guard. That is the right
+# shape for a first app and the wrong shape for a second one: the moment two
+# principals share a space, the guard is what decides who sees which row.
+
+domain readings @ 0.1.0
+
+entity readings {
+  label: text
+}
+
+op addReading($label: text) =
+  set readings { label: $label }
+
+op listReadings =
+  readings[id, label]
+  sort -id

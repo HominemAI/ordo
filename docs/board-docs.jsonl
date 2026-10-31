@@ -1,0 +1,145 @@
+{"file": "corpus-rulings.md", "kind": "record", "what": "The durable record of decisions taken where documents disagreed or were silent, with the reasoning."}
+{"file": "glossary.md", "kind": "record", "what": "The concept map: one entry per term, linked to the section that defines it."}
+{"file": "licensing.md", "kind": "record", "what": "Why Ordo is licensed the way it is, and what that means for a user."}
+{"file": "migrations/README.md", "kind": "record", "what": "How to log each try at moving a real app into Ordo; the import method and its skill are written from these logs"}
+{"file": "roadmap-checklist.md", "kind": "record", "what": "Every work item with its status and reasoning. The long-form record under the board."}
+{"file": "salvage-2026-09-05.md", "kind": "record", "what": "What eight agents left behind when the spend limit stopped them, and each branch's merge base."}
+{"file": "settings.md", "kind": "record", "what": "Every setting: default, whether built, and which layer can change it (deployment, app developer, tenant, person)."}
+{"file": "api-engine-design.md", "kind": "spec", "what": "The HTTP layer that serves registered ops."}
+{"file": "bootstrap.md", "kind": "spec", "what": "Whole-tenant atomic bootstrap of a space."}
+{"file": "composition-conformance.md", "kind": "spec", "what": "Test specification for named-query composition."}
+{"file": "corpus.md", "kind": "spec", "what": "What the conformance corpus is, its three tiers, and how to add to it."}
+{"file": "definition-language.md", "kind": "spec", "what": "The language authority. [settled] means owed; [lean] means not."}
+{"file": "domain-packages.md", "kind": "spec", "what": "Domain packages. Deferred by decision; on the future roadmap as 18b."}
+{"file": "guards-conformance.md", "kind": "spec", "what": "Test specification for access guards."}
+{"file": "implementation.md", "kind": "spec", "what": "Implementation choices behind the language: capability catalog, hot swap, key custody."}
+{"file": "migration.md", "kind": "spec", "what": "Moving data into Ordo and out of it."}
+{"file": "ordo-system.drawio", "kind": "spec", "what": "System diagrams, starting with the runtime request path."}
+{"file": "security-logging-design.md", "kind": "spec", "what": "Security and logging design: identity, the command log, the security stream, egress pins."}
+{"file": "sql-translation-corpus-2.md", "kind": "spec", "what": "A second set of 100 patterns, skewed to what application developers write."}
+{"file": "sql-translation-corpus.md", "kind": "spec", "what": "About 115 real SQL patterns translated to Ordo, as a stress test of the language."}
+{"file": "std-library.md", "kind": "spec", "what": "The standard library, std.: the platform ops and shapes every deployment has."}
+{"file": "syntax-examples.md", "kind": "spec", "what": "Pure syntax with no prose, exercising every construct in one domain."}
+{"file": "typed-id-keys.md", "kind": "spec", "what": "Typed ids: an entity prefix, an underscore, and the key."}
+{"file": "ui-gen.md", "kind": "spec", "what": "Generated UI: what a client can derive from a deployed program."}
+{"file": "adoption-dx-plan.md", "kind": "plan", "what": "Overcoming the cost of a new language: the adoption and developer-experience plan."}
+{"file": "dashboard-plan.md", "kind": "plan", "what": "The operator dashboard. Unruled."}
+{"file": "design-backend-functions.html", "kind": "plan", "what": "Backend functions design, drawn: how Supabase and Cloudflare build theirs, a comparison of 10 systems, isolation options, Ordo's function design (wake, identity, secrets, egress, caching, SDK), backend services as a phased path, 6 owner decisions"}
+{"file": "design-public-path.md", "kind": "plan", "what": "How the public path and API keys work at runtime: anonymous door, cache and invalidation, read layer, public writes, index, keys, per-tenant CORS, threats, build order"}
+{"file": "engine-plan.md", "kind": "plan", "what": "The engine's gap review and build plan."}
+{"file": "eval-harness-plan.md", "kind": "plan", "what": "A harness that measures how well an AI writes Ordo."}
+{"file": "f7-vault-plan.md", "kind": "plan", "what": "The client-first vault protocol, F7."}
+{"file": "plan-auth-federated.md", "kind": "plan", "what": "Signing in by emailed code, Discord and other OAuth2, Google and company OIDC, and guest sign-in; steps in denizens' order. SAML last."}
+{"file": "plan-backend-functions.md", "kind": "plan", "what": "Backend functions: what a function is (WASM in the deployment), declaring, secrets, egress, triggers, identity, limits, migration of ellanor and denizens, increments, owner questions"}
+{"file": "plan-blob-chain.md", "kind": "plan", "what": "Blob uploads through the write protocol, and the digest in the chain."}
+{"file": "plan-blob.md", "kind": "plan", "what": "Blob and content custody."}
+{"file": "plan-ci-images.md", "kind": "plan", "what": "CI and container images."}
+{"file": "plan-client-cache.md", "kind": "plan", "what": "The client runtime and its local replica (5g-pre)."}
+{"file": "plan-client-loading-fixes.md", "kind": "plan", "what": "How to fix the client loading findings (H1 to H4, M3 first): in-memory rows per screen, batched store writes, chunked sort, sync pacing settings; increments, budgets, invariants"}
+{"file": "plan-console.md", "kind": "plan", "what": "The plan for the Ordo console (18o): screens and the ops each calls, the gaps, stack, shipping, security, build order, and owner decisions"}
+{"file": "plan-delegation-surface.md", "kind": "plan", "what": "The delegation surface."}
+{"file": "plan-dev-loop.md", "kind": "plan", "what": "ordo dev: the sub-second local loop."}
+{"file": "plan-editor-tooling.md", "kind": "plan", "what": "Editor tooling."}
+{"file": "plan-enrolment.md", "kind": "plan", "what": "How a person gets a credential and becomes a member."}
+{"file": "plan-environments.md", "kind": "plan", "what": "Dev, staging and production as things Ordo supports: apply promotion, dev branches as tenants, staging clones, per-tenant rollout, seeding"}
+{"file": "plan-evolution-plans.md", "kind": "plan", "what": "How a schema change is made today, and the proposal to render, store, apply and undo it as a plan per step; answers the owner's grief notes on migrations"}
+{"file": "plan-export.md", "kind": "plan", "what": "Full space export and space deletion."}
+{"file": "plan-external-entities.md", "kind": "plan", "what": "Tables another system owns in the same database: external entities as generated read-only projections, random schema names, the audit owed"}
+{"file": "plan-first-program.md", "kind": "plan", "what": "The first program: a notes app signed in to with a passkey, its program, page, deployment and measurements (17ae)."}
+{"file": "plan-idempotency.md", "kind": "plan", "what": "Durable idempotency's last window (8q)."}
+{"file": "plan-identity-service.md", "kind": "plan", "what": "Ordo's own minimal identity service: a third service in the one image for deployment people, the CLI and machines"}
+{"file": "plan-import.md", "kind": "plan", "what": "Bulk import: loading an application's rows into a space."}
+{"file": "plan-json-field.md", "kind": "plan", "what": "The json field type (28b): each design choice, how it is built, its tests, and the owner's open questions"}
+{"file": "plan-key-service.md", "kind": "plan", "what": "An outside key service for the master key, for after the first deployment (SH-11, 18y)."}
+{"file": "plan-member-release.md", "kind": "plan", "what": "Leaving a tenant and deleting one's own account, gated by a tenant's release rule (checklist 27aq)"}
+{"file": "plan-offline.md", "kind": "plan", "what": "Offline writes (an outbox, and the client-first path) and counts and grouped results on the device; filed for after deployment (18ad)."}
+{"file": "plan-opslog.md", "kind": "plan", "what": "The deployment's operational security log (11-22)."}
+{"file": "plan-passkey-recovery.md", "kind": "plan", "what": "The way back in when a passkey is lost."}
+{"file": "plan-passkey-signin.md", "kind": "plan", "what": "Serving passkey sign-in and registration at the door, S0 to S7 (20b)."}
+{"file": "plan-production-ops.md", "kind": "plan", "what": "Production operations: rotation, restore and metering."}
+{"file": "plan-provisioning-on-signup.md", "kind": "plan", "what": "Built-in provisioning: a tenant of their own for each person at sign-up, an app developer's setting (11-15)."}
+{"file": "plan-public-data.md", "kind": "plan", "what": "Public data: what a visitor who is not signed in can see; the deployment's space as the public home, a public qualifier, exact cache invalidation, a public read layer"}
+{"file": "plan-refinement.md", "kind": "plan", "what": "Refinement on by default (27am): what exists, the default, the cost gate, where the filter runs, SDK builders, device parity, live and sync, React, docs to change, increments R1 to R8"}
+{"file": "plan-replica-feed.md", "kind": "plan", "what": "The replica's feed: the design pass for C4."}
+{"file": "plan-row-bound-seals.md", "kind": "plan", "what": "Binding a sealed value to the row it belongs to (security review 6, S6-003)."}
+{"file": "plan-runtime.md", "kind": "plan", "what": "The server binary, key custody and the worker supervisor."}
+{"file": "plan-schema-evolution.md", "kind": "plan", "what": "Changing a deployed schema."}
+{"file": "plan-sdk-device.md", "kind": "plan", "what": "Plan for the SDK's ready-made device, dropping unused syncs and one stream per tab (notes v2)"}
+{"file": "plan-second-factor.md", "kind": "plan", "what": "A second factor (security keys, code tokens) and backup codes to NIST SP 800-63B, T1 to T7 (23a, 23b)."}
+{"file": "plan-sharing.md", "kind": "plan", "what": "Sharing between tenants and with people who are not members: guests through a window, share links, and what each collides with (11-2, 11-2a)."}
+{"file": "plan-space-routing.md", "kind": "plan", "what": "Per-space database routing (18c, 18d)."}
+{"file": "plan-subdomain-signin.md", "kind": "plan", "what": "One sign-in across subdomains: the hand-off code, return origins, wildcard origins"}
+{"file": "plan-supabase-import.md", "kind": "plan", "what": "How Supabase users, sign-ins, tables, RLS and storage come into Ordo, move-day steps and the build list; ellanor needs a Jazz reader"}
+{"file": "plan-syntax-additions.md", "kind": "plan", "what": "Spelling, CDK form and compiler checks for the ruled language additions: public, deployment, $tenant, apikey, prev, orphans, settings, external entities"}
+{"file": "plan-tenant-pause.md", "kind": "plan", "what": "Pausing and resuming a whole tenant, and the deployment-level layer its people still reach (checklist 27ar)"}
+{"file": "plan-tenant-providers.md", "kind": "plan", "what": "Tenant-owned sign-in providers (L1): the setting, ops, routes, key, presence and originating-admin rules"}
+{"file": "plan-tenant-storage.md", "kind": "plan", "what": "Per-tenant object storage: requirements and increments."}
+{"file": "plan-tiers.md", "kind": "plan", "what": "Plan tiers: queries that get faster over time with a human approving. Proposed."}
+{"file": "plan-topology-audit.md", "kind": "plan", "what": "How to audit the settled topology against what buyers expect."}
+{"file": "plan-usability-testing.md", "kind": "plan", "what": "Testing whether a developer can walk the quickstart, automated and with people."}
+{"file": "tooling-and-embedding-plan.md", "kind": "plan", "what": "Tooling and embedding, in three tracks."}
+{"file": "usability-script-console.md", "kind": "plan", "what": "Script for a console usability session with a less technical tester: tasks, what to watch, what fails"}
+{"file": "deploying.md", "kind": "guide", "what": "What an operator has to decide, and what the platform decides for them."}
+{"file": "first-deployment.md", "kind": "guide", "what": "From nothing to a signed-in console and a deployed program"}
+{"file": "go-live-notes.md", "kind": "guide", "what": "One-page checklist for putting the notes app live"}
+{"file": "go-live.html", "kind": "guide", "what": "The go-live guide."}
+{"file": "howto-audit.md", "kind": "guide", "what": "The command log, checkpoints, revert, and what a client must keep."}
+{"file": "howto-byo-custody.md", "kind": "guide", "what": "For deployment owners and tenants: every bring-your-own custody option (database, bucket, keys), how to attach, change and detach each, and what is refused"}
+{"file": "howto-console.md", "kind": "guide", "what": "The deployment owner's guide to the console: first run, recovery, linking, settings, one image or two, backups"}
+{"file": "howto-cost.md", "kind": "guide", "what": "For app developers: cost classes, what a refinement may do, every refusal word for word with how to avoid it, the size limits and their settings, a pre-ship checklist"}
+{"file": "howto-custody.md", "kind": "guide", "what": "Sealed fields, blind indexes, rotation and crypto-erasure."}
+{"file": "howto-delegation.md", "kind": "guide", "what": "How a person lets an agent act for them: the consent ceremony's routes, the disclosure, approval with presence, redeem, list, revoke, settings (11-4b)"}
+{"file": "howto-e2e.md", "kind": "guide", "what": "How to run the notes end-to-end tests, locally and from GitHub"}
+{"file": "howto-files.md", "kind": "guide", "what": "How an app developer uploads, shows and downloads files with the SDK and ordo-react, and the blob door's meta route"}
+{"file": "howto-identity.md", "kind": "guide", "what": "Running the identity service: deployment people, invites, machine keys, ordo login, break-glass, backups, and rehearsing an upgrade on a copy"}
+{"file": "howto-leave.md", "kind": "guide", "what": "How a member leaves a tenant and how a person deletes their account: the release line, remove and reassign, the refusals"}
+{"file": "howto-loading.md", "kind": "guide", "what": "How an app developer loads a page in stages, and what Ordo promises never blocks"}
+{"file": "howto-operating.md", "kind": "guide", "what": "Deploy, roll back, hot swap, health and metrics."}
+{"file": "howto-pause.md", "kind": "guide", "what": "How an app developer and a deployment owner pause and resume a tenant: nopause ops, who may pause, what still answers"}
+{"file": "howto-public.md", "kind": "guide", "what": "How an app developer makes data readable by visitors who are not signed in: the public qualifier, the anonymous door, the cache, its settings, and what is not built yet"}
+{"file": "howto-roles.md", "kind": "guide", "what": "How to set who may call each op: the app's template, a tenant's own profile, groups and overrides"}
+{"file": "howto-routines.md", "kind": "guide", "what": "How to write a routine: triggers, the body, the change bound, paused tenants, failures"}
+{"file": "howto-sharing.md", "kind": "guide", "what": "For app developers: share links and guests, how to grant, revoke and set a link's lifetime"}
+{"file": "howto-sign-in.md", "kind": "guide", "what": "For app developers: passkey sign-in, a React page with live data, first sign-up, guards and the errors a page handles"}
+{"file": "howto-values.md", "kind": "guide", "what": "The six places Ordo deliberately differs from SQL."}
+{"file": "howto-workers.md", "kind": "guide", "what": "How a worker or agent acts for a person: what a delegation lets it do, ORDO_DELEGABLE_OPS, how its writes are recorded, how to stop it"}
+{"file": "modeling-guidance.md", "kind": "guide", "what": "Architecture decisions the language does not make for you."}
+{"file": "quickstart.md", "kind": "guide", "what": "From Postgres and a terminal to a running deployment."}
+{"file": "traps.md", "kind": "guide", "what": "The ambush list: each trap, why it exists, and the fix."}
+{"file": "tutorial.md", "kind": "guide", "what": "Two annotated build-alongs."}
+{"file": "writing-data.md", "kind": "guide", "what": "How writes describe a change."}
+{"file": "audit-2026-10-05d.md", "kind": "audit", "what": "Fable's audit of 25aa, 27aq, 25ac, the 422 change and 27ar: one fix, one privacy decision, low notes"}
+{"file": "audit-2026-10-06.md", "kind": "audit", "what": "Fable's audit of the 2026-10-06 batch: 3 fixes (deleted account via ticket, sweep removing leavers, bucket record's caller), 2 decisions"}
+{"file": "audit-2026-10-08.md", "kind": "audit", "what": "Audit of the 2026-10-07 to 10-08 batch: React gaps, json fields, delegation increment 2, routines, account removal, packages. 3 fixes, 6 decisions, what is sound."}
+{"file": "audit-2026-10-09.md", "kind": "audit", "what": "Promised features against built code and the board: 34 findings, with proposed board changes"}
+{"file": "audit-2026-10-11.md", "kind": "audit", "what": "Promised features against built code and the board for the batch since 8cb5ccd6 (sign-in, public path, delegation, profiles, loading fixes): 30 findings, 0 High, with proposed board changes"}
+{"file": "audit-2026-10-25-ux-perf.md", "kind": "audit", "what": "Fable's usability and performance audit of 2026-10-25: 4 high, 8 medium, 5 low, measured"}
+{"file": "audit-board-2026-09-29.md", "kind": "audit", "what": "Every board task checked against the code: where its work stands, where it was done, and what nothing was tracking."}
+{"file": "audit-board-coverage.md", "kind": "audit", "what": "Capabilities in the specs with no work item at all."}
+{"file": "audit-client-blocking-2026-10-10.md", "kind": "audit", "what": "Where Ordo's browser clients can freeze a page or hold a screen, measured, with the fix for each"}
+{"file": "audit-coverage-2026-09-07.md", "kind": "audit", "what": "The coverage audit re-run on 2026-09-07."}
+{"file": "audit-doc-contradictions.md", "kind": "audit", "what": "Where design documents contradict each other, and what the code decided."}
+{"file": "audit-one-way-gaps.md", "kind": "audit", "what": "Capabilities that work one way only (write without read-back, create without delete, record without a reader): 12 findings, with evidence and what tracks each"}
+{"file": "audit-security-trace.md", "kind": "audit", "what": "Which earlier security findings can be traced to an answer, and which cannot."}
+{"file": "audit-service-interfaces.md", "kind": "audit", "what": "Rule 9 audit: each service (database, mail, file storage, sign-in providers, key custody, drains, SDK door) against one client and one typed error; bugs first, fixes, sizes, order"}
+{"file": "audit-settings-wiring.md", "kind": "audit", "what": "For each setting a tenant or person should be able to change: what exists and what is missing to wire it (24d)."}
+{"file": "audit-settled-unimplemented.md", "kind": "audit", "what": "Settled rules with no implementation."}
+{"file": "audit-topology-gaps.md", "kind": "audit", "what": "The settled topology against what buyers ask for."}
+{"file": "critique-consolidated-3.md", "kind": "review", "what": "Adversarial critique, round 3."}
+{"file": "critique-consolidated-4.md", "kind": "review", "what": "Adversarial critique, round 4: five facts that stop a production pilot."}
+{"file": "critique-consolidated-5.md", "kind": "review", "what": "Critique round 5: the usability findings re-run against the docs."}
+{"file": "critique-consolidated.md", "kind": "review", "what": "Adversarial critique, round 1: five reviews merged."}
+{"file": "critique-round-5.html", "kind": "review", "what": "Critique round 5 as a page."}
+{"file": "security-hardening-review-2.md", "kind": "review", "what": "Security hardening review, round 2: a re-read after the round 1 fixes."}
+{"file": "security-hardening-review-3.md", "kind": "review", "what": "Security hardening review 3: architecture and trust boundaries. Proposed."}
+{"file": "security-hardening-review-4.md", "kind": "review", "what": "Security hardening review 4: boundary guarantees. Proposed."}
+{"file": "security-hardening-review.md", "kind": "review", "what": "Security hardening review, round 1 (SH-1 to SH-31)."}
+{"file": "security-review-6.html", "kind": "review", "what": "Security review, round 6, as a page."}
+{"file": "security-review-6.md", "kind": "review", "what": "Security review, round 6: 3 Critical and 5 Major, consolidated from two reviewers."}
+{"file": "supabase-comparison.html", "kind": "review", "what": "The board's Grief Remediation tab: Supabase's migration grievances beside what Ordo does, a verdict and next step for each, and Adam's notes (grief-notes.json, board.py grief)"}
+{"file": "access-model-explained.html", "kind": "explainer", "what": "Where data that is not one tenant's lives."}
+{"file": "blob-chain-explained.html", "kind": "explainer", "what": "What a blob upload writes into the chain."}
+{"file": "marks-explained.html", "kind": "explainer", "what": "What settled, lean and open mean."}
+{"file": "opslog-growth-explained.html", "kind": "explainer", "what": "What the security event table grows with."}
+{"file": "pooling-explained.html", "kind": "explainer", "what": "What a connection is, and why three stores cannot share a pool."}
+{"file": "sharing-options.html", "kind": "explainer", "what": "Sharing between spaces: the consent surface and three designs."}

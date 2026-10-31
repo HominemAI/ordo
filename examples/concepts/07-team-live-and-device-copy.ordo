@@ -1,0 +1,49 @@
+# Concept: members, invitations, live updates and the device copy
+#
+# The program only declares data and ops. The people and the screens come
+# from the platform:
+#   - A person joins a tenant by invitation (std.space.invite), by signing in
+#     where the tenant admits strangers, or at sign-up where the deployment
+#     provisions a tenant of their own. Each join creates one `members` row.
+#   - Every read is live-capable by nature. A caller opts in per call with
+#     `GET /op/topicList?live=1` (server-sent events). The server sends only
+#     `invalidate`, never data, and the client re-reads through the normal op.
+#   - A read the app marks as synced is kept in an IndexedDB copy on the device,
+#     per tenant and per person, sealed with a device key. The list draws from
+#     the copy, so it shows at once and shows offline. Writes still need the
+#     network today.
+#   - The copy holds only what an ordinary call would return, because the
+#     server applies the guards. Revoking access purges it at the next contact.
+#
+# See examples/notes for a working page.
+# Read next: docs/plan-client-cache.md, docs/plan-enrolment.md.
+
+domain team @ 1.0.0
+
+entity topics {
+  title:   text
+  pinned:  bool = false
+  updated: datetime
+  acl (read, write, admin)
+}
+
+entity replies {
+  topic  -> topics owned
+  author -> members
+  body:  text
+  posted: datetime
+}
+
+op topicList unbounded =
+  topics[id, rev, title, pinned, updated]
+  sort -pinned, -updated
+
+op repliesFor($topic: id) unbounded =
+  replies(topic == $topic)[body, posted, author.displayName]
+  sort posted
+
+op startTopic($title: text, $updated: datetime) =
+  set topics { title: $title, updated: $updated }
+
+op reply($topic: id, $body: text, $posted: datetime) =
+  set replies { topic: $topic, author: $caller, body: $body, posted: $posted }

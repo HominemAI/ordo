@@ -1,0 +1,32 @@
+/* The Deployment people screen (identity service, step 6). */
+
+.admins .once {
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.admins .confirm input {
+  max-inline-size: 24rem;
+}
+
+.audit {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+}
+
+.audit li {
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.audit-broken {
+  color: var(--danger);
+  font-weight: 650;
+  border-inline-start: 4px solid var(--danger);
+  padding-inline-start: 10px;
+}

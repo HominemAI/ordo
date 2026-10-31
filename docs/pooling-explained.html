@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What a connection is, and why three stores can&rsquo;t share the pool</title>
+<style>
+:root{
+  --ink:#14161a; --paper:#fbfaf7; --line:#e3ded4; --mut:#7a756b;
+  --pool:#2e4f8a; --pool-bg:#e8edf6; --pool-bd:#c2cfe6;
+  --store:#b07a2a; --store-bg:#f7ecd9; --store-bd:#e8d3ab;
+  --bad:#a23b3b; --bad-bg:#f8e9e7; --bad-bd:#e6bdb7;
+  --ok:#2e7d5b; --ok-bg:#e6f2ec; --ok-bd:#bcdccd;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:48px 24px 90px}
+h1{font-size:clamp(26px,4.5vw,38px);line-height:1.15;margin:0 0 8px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--mut);margin:0 0 36px;max-width:68ch}
+h2{font-size:21px;margin:46px 0 10px;letter-spacing:-.01em}
+h3{font-size:16px;margin:22px 0 8px}
+p{max-width:72ch;margin:0 0 14px}
+li{max-width:66ch}
+code{font-family:var(--mono);font-size:.87em;background:#f1ede4;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+figure{margin:22px 0;border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px;overflow-x:auto}
+figcaption{font-size:13px;color:var(--mut);margin-top:10px;max-width:76ch}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--mut);margin:10px 0 28px;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:18px 0}
+.card{border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:15px}
+.card p{font-size:14.5px;color:#3c3a35;margin:0}
+.callout{border:1px solid var(--bad-bd);background:var(--bad-bg);border-radius:10px;padding:14px 18px;margin:18px 0;max-width:76ch}
+.callout.ok{border-color:var(--ok-bd);background:var(--ok-bg)}
+.callout > b:first-child{display:block;margin-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.pull{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:24px 0;max-width:76ch}
+.pull b{display:block;margin-bottom:4px}
+.foot{color:var(--mut);font-size:13.5px;margin-top:44px}
+.mono-inline{font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>What a connection is, and why three stores can&rsquo;t share the pool</h1>
+<p class="sub">This walks through the question that turned up a real defect:
+why does Ordo hold six database connections per deployment, why can three
+of them not simply move into the request pool to save a connection, and
+what the flaky <code>ordo-host</code> test suite actually was.</p>
+
+<div class="legend">
+  <span><i style="background:var(--pool-bg);border-color:var(--pool-bd)"></i> the request pool</span>
+  <span><i style="background:var(--store-bg);border-color:var(--store-bd)"></i> a single-connection store</span>
+  <span><i style="background:var(--bad-bg);border-color:var(--bad-bd)"></i> stuck / refused</span>
+  <span><i style="background:var(--ok-bg);border-color:var(--ok-bd)"></i> resolved / fixed</span>
+</div>
+
+<h2>1 &middot; What a connection actually is</h2>
+<p>A Postgres connection is not a lightweight handle the way an HTTP
+keep-alive connection is. Each one is a <b>separate operating-system
+process</b> on the database server, forked to serve that one client for as
+long as it stays connected. That is the whole reason servers cap how many
+can exist at once: <code>max_connections</code> defaults to <b>100</b>, and
+it is a ceiling shared by <i>every</i> database on that server, not per
+database and not per application.</p>
+<p>This is not incidental to what follows. Every number in this document is
+a count of live server-side processes, and every one of them is drawn down
+against the same shared ceiling of 100.</p>
+
+<h2>2 &middot; What a pool is, and the detail that matters</h2>
+<p>Ordo's pool (<code>crates/ordo-exec/src/lib.rs</code>) is a fixed set of
+connections, sized once at construction. The important detail is <b>when</b>
+they open: <code>Pool::connect_with</code> dials every one of them, in a
+loop, before it returns anything to its caller
+(<code>crates/ordo-exec/src/lib.rs:674-678</code>). A pool configured for
+size 8 is <b>8 live server processes the moment the deployment boots</b>,
+whether or not a single request has arrived yet.</p>
+<p>Checking a connection out of the pool is not "is one available".
+It is taking a <b>permit</b> from a semaphore holding exactly <code>size</code>
+permits (<code>lib.rs:682</code>, <code>lib.rs:802-840</code>). If every
+permit is already held, the caller waits up to
+<code>acquire_timeout</code> (2 seconds by default,
+<code>lib.rs:140</code>) and then fails with a typed, retryable
+error, <code>PoolError::Saturated</code> (<code>lib.rs:304</code>,
+<code>lib.rs:372</code>). The module's own words: <i>"Backpressure surfaces
+as a fast failure the door can convert to a retryable response,
+never an unbounded internal queue."</i></p>
+
+<figure>
+<svg viewBox="0 0 820 210" width="100%" role="img" aria-label="a pool is permits over pre-opened sockets">
+  <defs>
+    <marker id="pa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <text x="20" y="26" font-size="13" font-weight="600" fill="#3c3a35">Pool::connect_with(size = 4)</text>
+  <rect x="20" y="40" width="440" height="80" rx="8" fill="var(--pool-bg)" stroke="var(--pool-bd)"/>
+  <text x="40" y="62" font-size="11.5" fill="var(--pool)">4 sockets dialed eagerly, before connect() returns</text>
+  <rect x="40" y="72" width="70" height="34" rx="6" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="75" y="93" text-anchor="middle" font-size="11" fill="var(--pool)">conn 1</text>
+  <rect x="120" y="72" width="70" height="34" rx="6" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="155" y="93" text-anchor="middle" font-size="11" fill="var(--pool)">conn 2</text>
+  <rect x="200" y="72" width="70" height="34" rx="6" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="235" y="93" text-anchor="middle" font-size="11" fill="var(--pool)">conn 3</text>
+  <rect x="280" y="72" width="70" height="34" rx="6" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="315" y="93" text-anchor="middle" font-size="11" fill="var(--pool)">conn 4</text>
+  <text x="40" y="112" font-size="10.5" fill="#7a756b">Semaphore::new(4): one permit per socket</text>
+  <path d="M480 80 h60" stroke="#7a756b" fill="none" marker-end="url(#pa)"/>
+  <rect x="555" y="40" width="240" height="150" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="675" y="64" text-anchor="middle" font-size="12.5" font-weight="600">a checkout</text>
+  <text x="575" y="86" font-size="11" fill="#3c3a35">1. take a permit</text>
+  <text x="575" y="106" font-size="11" fill="#3c3a35">2. permit free? &rarr; proceed at once</text>
+  <text x="575" y="126" font-size="11" fill="#3c3a35">3. none free? &rarr; wait, FIFO</text>
+  <text x="575" y="146" font-size="11" fill="var(--bad)">4. &gt; acquire_timeout (2s)</text>
+  <text x="575" y="163" font-size="11" fill="var(--bad)">&rarr; PoolError::Saturated (retryable)</text>
+</svg>
+<figcaption>All of a pool's connections exist before the first checkout,
+which is why a misconfigured database fails at boot rather than on the
+first request. A checkout is a wait on a fixed-size semaphore, not a query
+for a free socket, and the wait has a hard ceiling.
+Verified: <code>crates/ordo-exec/src/lib.rs:674-682</code> (the dial loop
+and the semaphore), <code>lib.rs:802-840</code> (<code>admit</code>, the
+checkout), <code>lib.rs:140</code> (2s default), <code>lib.rs:304</code>
+and <code>:372</code> (<code>PoolError::Saturated</code>).</figcaption>
+</figure>
+
+<h2>3 &middot; What one Ordo deployment actually holds: six connections</h2>
+<p>Add up every pool a deployment opens at boot and the total is six, not
+one:</p>
+<table>
+<tr><th>Connections</th><th>What it is</th><th>Source</th></tr>
+<tr><td>2</td><td>the request pool, at the size the tests set
+(<code>ORDO_PG_POOL_SIZE=2</code>); in production it is
+<code>available_parallelism().clamp(2, 8)</code></td>
+<td><code>crates/ordo-exec/src/lib.rs:136-139</code>,
+<code>crates/ordo-host/src/runtime.rs:461</code>,
+<code>runtime.rs:1623</code></td></tr>
+<tr><td>1</td><td>the keystore (<code>PgKeyStore</code>), which wraps and
+unwraps the space data-encryption keys</td>
+<td><code>crates/ordo-exec/src/keystore.rs:151</code></td></tr>
+<tr><td>1</td><td>the credential store (<code>PgCredentialStore</code>),
+which holds password hashes for login</td>
+<td><code>crates/ordo-host/src/credentials.rs:129</code></td></tr>
+<tr><td>1</td><td>the principal directory (<code>PgDirectoryStore</code>),
+which mints and looks up principal ids</td>
+<td><code>crates/ordo-host/src/principal_directory.rs:146</code></td></tr>
+<tr><td>1</td><td>the cross-node invalidation listener: one
+dedicated <code>LISTEN</code> session so a write on one replica can tell
+every other replica's <code>?live=1</code> subscribers, wired
+unconditionally for every deployment's default routing</td>
+<td><code>crates/ordo-host/src/runtime.rs:1979-1990</code>,
+<code>crates/ordo-host/src/invalidation.rs:256-262</code>,
+<code>crates/ordo-exec/src/jobs.rs</code> (<code>listen</code>)</td></tr>
+</table>
+<p><b>A useful contrast, in the same codebase.</b> A fourth thing that looks
+like it should need its own connection, session revocation
+(<code>PgSessionRevocations</code>, <code>crates/ordo-host/src/sessions.rs</code>),
+does not get one. Its constructor takes a clone of the request pool
+itself (<code>sessions.rs:92</code>, <code>:108</code>) rather than a
+<code>PoolConfig</code> of its own, so it adds <b>zero</b> connections.
+That is not an oversight; it is the same tradeoff made the other way, and
+&sect;5 is about exactly what makes that safe here and unsafe for the three
+stores above.</p>
+
+<figure>
+<svg viewBox="0 0 820 230" width="100%" role="img" aria-label="six connections, one deployment">
+  <rect x="20" y="20" width="780" height="190" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <text x="410" y="42" text-anchor="middle" font-size="12.5" fill="#7a756b">one Ordo deployment, against a server capped at max_connections = 100</text>
+  <rect x="45" y="60" width="150" height="70" rx="8" fill="var(--pool-bg)" stroke="var(--pool-bd)"/>
+  <text x="120" y="86" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--pool)">request pool</text>
+  <text x="120" y="104" text-anchor="middle" font-size="16" font-weight="700" fill="var(--pool)">2</text>
+  <text x="120" y="120" text-anchor="middle" font-size="9.5" fill="var(--pool)">prod: clamp(cores,2,8)</text>
+  <rect x="215" y="60" width="130" height="70" rx="8" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="280" y="82" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--store)">keystore</text>
+  <text x="280" y="108" text-anchor="middle" font-size="16" font-weight="700" fill="var(--store)">1</text>
+  <rect x="365" y="60" width="130" height="70" rx="8" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="430" y="76" text-anchor="middle" font-size="11" font-weight="600" fill="var(--store)">credential</text>
+  <text x="430" y="90" text-anchor="middle" font-size="11" font-weight="600" fill="var(--store)">store</text>
+  <text x="430" y="112" text-anchor="middle" font-size="16" font-weight="700" fill="var(--store)">1</text>
+  <rect x="515" y="60" width="140" height="70" rx="8" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="585" y="76" text-anchor="middle" font-size="11" font-weight="600" fill="var(--store)">principal</text>
+  <text x="585" y="90" text-anchor="middle" font-size="11" font-weight="600" fill="var(--store)">directory</text>
+  <text x="585" y="112" text-anchor="middle" font-size="16" font-weight="700" fill="var(--store)">1</text>
+  <rect x="675" y="60" width="120" height="70" rx="8" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="735" y="76" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--store)">invalidation</text>
+  <text x="735" y="90" text-anchor="middle" font-size="10.5" font-weight="600" fill="var(--store)">LISTEN</text>
+  <text x="735" y="112" text-anchor="middle" font-size="16" font-weight="700" fill="var(--store)">1</text>
+  <text x="410" y="158" text-anchor="middle" font-size="22" font-weight="700" fill="#3c3a35">= 6 connections, per deployment</text>
+  <rect x="150" y="172" width="520" height="30" rx="6" fill="none" stroke="#d8d3c8" stroke-dasharray="4 3"/>
+  <text x="410" y="192" text-anchor="middle" font-size="10.5" fill="#7a756b">session revocation shares the request pool above: +0, not +1</text>
+</svg>
+<figcaption>Six live server processes for one deployment before it has
+served a single request. Three of them are the single-connection stores
+this document is about.</figcaption>
+</figure>
+
+<h2>4 &middot; Why the three stores are each size 1</h2>
+<p>All three (the keystore, the credential store, the principal
+directory) are built the same way: one background thread, running a
+<code>current_thread</code> Tokio runtime of its own, holding one
+connection, reached by a job queue. Every statement any of them issues
+goes through that one thread, so at most one is ever in flight per store.
+A pool larger than 1 for a consumer that can only ever use 1 would just be
+sockets held open and idle. All three modules say this in almost the same
+words:</p>
+<div class="cards">
+  <div class="card">
+    <h4>keystore.rs:150</h4>
+    <p>&ldquo;One connection: every statement this store issues is
+    serialized through its single job loop anyway, so a larger pool would
+    only hold sockets open.&rdquo;</p>
+  </div>
+  <div class="card">
+    <h4>credentials.rs:127-129</h4>
+    <p>&ldquo;One connection: every statement is serialized through the job
+    loop anyway&hellip; It also keeps this store's footprint off the pool
+    the request path shares.&rdquo;</p>
+  </div>
+  <div class="card">
+    <h4>principal_directory.rs:143-145</h4>
+    <p>&ldquo;One connection: every statement is serialized through the job
+    loop anyway. Keeps this store's footprint off the pool the request
+    path shares, the same choice <code>PgCredentialStore</code> makes.&rdquo;</p>
+  </div>
+</div>
+<p>The size-1 argument is airtight on its own: it is about not wasting
+sockets. But notice the second sentence in two of the three quotes above.
+That is a different argument, and it is the one that matters more.</p>
+
+<h2>5 &middot; Why they must not share the request pool</h2>
+<p><b>This is reentrancy, not contention.</b> The two look similar from the
+outside (both show up as timeouts) but they have different
+causes and only one of them is a hazard baked into the shape of the code.</p>
+<p>A request checks out a connection from the request pool: a
+<code>TxConn</code>, holding one permit. While it still holds that
+permit (mid-transaction, before it commits) it calls into the
+keystore to seal or open a data key. See
+<code>sealed::put(tx: &amp;TxConn, ...)</code> and
+<code>sealed::resolve(db: Reader&lt;'_&gt;, keys: &amp;dyn KeyProvider, ...)</code>
+in <code>crates/ordo-exec/src/sealed.rs:107-159</code>; a live call site
+holding both at once is <code>resolve_sealed</code> in
+<code>crates/ordo-exec/src/undo.rs:2107-2120</code>, which is handed a
+transaction-scoped <code>Reader</code> and a <code>KeyProvider</code> in
+the same call.</p>
+<p>Today that is safe, because the keystore's connection comes from a
+completely separate pool on a separate thread. Here is what would happen
+if it did not:</p>
+
+<figure>
+<svg viewBox="0 0 820 340" width="100%" role="img" aria-label="the reentrancy deadlock, if the store shared the request pool">
+  <defs>
+    <marker id="da" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+    <marker id="db" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#a23b3b"/></marker>
+  </defs>
+  <text x="205" y="22" text-anchor="middle" font-size="13" font-weight="600" fill="var(--ok)">below the ceiling: works fine</text>
+  <rect x="30" y="34" width="350" height="130" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <text x="60" y="58" font-size="11.5" fill="#3c3a35">pool, size 4: 1 request running</text>
+  <rect x="60" y="68" width="50" height="30" rx="5" fill="var(--pool-bg)" stroke="var(--pool-bd)"/>
+  <text x="85" y="87" text-anchor="middle" font-size="10" fill="var(--pool)">held</text>
+  <rect x="120" y="68" width="50" height="30" rx="5" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="145" y="87" text-anchor="middle" font-size="10" fill="var(--mut)">free</text>
+  <rect x="180" y="68" width="50" height="30" rx="5" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="205" y="87" text-anchor="middle" font-size="10" fill="var(--mut)">free</text>
+  <rect x="240" y="68" width="50" height="30" rx="5" fill="#fff" stroke="var(--pool-bd)"/>
+  <text x="265" y="87" text-anchor="middle" font-size="10" fill="var(--mut)">free</text>
+  <text x="60" y="118" font-size="11" fill="#3c3a35">request holds permit #1 (its TxConn)</text>
+  <path d="M85 98 v14" stroke="#7a756b" fill="none" marker-end="url(#da)"/>
+  <text x="60" y="146" font-size="11" fill="var(--ok)">then asks the SAME pool for a 2nd permit</text>
+  <text x="60" y="160" font-size="10.5" fill="var(--ok)">(the store call): one is free &rarr; succeeds at once</text>
+
+  <text x="615" y="22" text-anchor="middle" font-size="13" font-weight="600" fill="var(--bad)">at the ceiling: every task self-blocks</text>
+  <rect x="440" y="34" width="350" height="290" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <text x="470" y="58" font-size="11.5" fill="#3c3a35">pool, size 4: 4 requests running</text>
+  <rect x="470" y="68" width="70" height="30" rx="5" fill="var(--bad-bg)" stroke="var(--bad-bd)"/>
+  <text x="505" y="87" text-anchor="middle" font-size="10" fill="var(--bad)">held: A</text>
+  <rect x="550" y="68" width="70" height="30" rx="5" fill="var(--bad-bg)" stroke="var(--bad-bd)"/>
+  <text x="585" y="87" text-anchor="middle" font-size="10" fill="var(--bad)">held: B</text>
+  <rect x="630" y="68" width="70" height="30" rx="5" fill="var(--bad-bg)" stroke="var(--bad-bd)"/>
+  <text x="665" y="87" text-anchor="middle" font-size="10" fill="var(--bad)">held: C</text>
+  <rect x="710" y="68" width="70" height="30" rx="5" fill="var(--bad-bg)" stroke="var(--bad-bd)"/>
+  <text x="745" y="87" text-anchor="middle" font-size="10" fill="var(--bad)">held: D</text>
+  <text x="470" y="120" font-size="11" fill="#3c3a35">A, B, C and D each hold one permit</text>
+  <text x="470" y="136" font-size="11" fill="#3c3a35">(their own request's <code>TxConn</code>)</text>
+  <path d="M505 98 v20 M585 98 v20 M665 98 v20 M745 98 v20" stroke="#7a756b" fill="none"/>
+  <path d="M505 118 L615 168 M585 128 L615 168 M665 128 L615 168 M745 118 L615 168"
+        stroke="var(--bad)" fill="none" marker-end="url(#db)"/>
+  <rect x="545" y="168" width="140" height="46" rx="8" fill="var(--bad-bg)" stroke="var(--bad-bd)"/>
+  <text x="615" y="188" text-anchor="middle" font-size="11" font-weight="600" fill="var(--bad)">0 permits free</text>
+  <text x="615" y="204" text-anchor="middle" font-size="10" fill="var(--bad)">all 4 are waiting on the store call</text>
+  <text x="470" y="238" font-size="11" fill="#3c3a35">Every holder is also a waiter. The only</text>
+  <text x="470" y="254" font-size="11" fill="#3c3a35">permits that could free one are held by</text>
+  <text x="470" y="270" font-size="11" fill="#3c3a35">requests that are themselves stuck here.</text>
+  <path d="M470 280 h300" stroke="#d8d3c8" stroke-dasharray="4 3"/>
+  <text x="470" y="298" font-size="11" font-weight="600" fill="var(--bad)">after acquire_timeout (2s): all four fail</text>
+  <text x="470" y="314" font-size="11" fill="var(--bad)">Saturated. TxConn drops, permits free up.</text>
+</svg>
+<figcaption>Left: with spare permits, a request's second checkout
+(its call into the store) succeeds, because someone else is
+free to give up a permit. Right: once every permit in the pool is held by
+a request that itself needs a second permit from that same pool, nobody
+is left to release one. It is not two requests waiting on each other; it
+is every request waiting on a pool whose only holders are exactly the
+requests waiting on it. <code>acquire_timeout</code> ends it by forcing a failure two seconds later.</figcaption>
+</figure>
+
+<div class="callout">
+<b>Three things worth naming about this failure mode</b>
+<ul style="margin:6px 0 0">
+<li><b>It is load-triggered.</b> At low concurrency there are always spare
+permits, so the second checkout succeeds and nothing looks wrong. The
+left panel above is what testing at low concurrency shows you.</li>
+<li><b>It gets worse with a bigger pool</b>, not better. More permits means
+more requests that can simultaneously reach the point of holding one and
+wanting a second, which is the precondition for the whole pool locking up
+at once.</li>
+<li><b>From outside it looks like a database problem</b> (timeouts,
+503s, "the database is slow") when the database was never the
+bottleneck. The bottleneck is a topology problem inside one process: a
+task depending on a second permit from the finite pool it is already
+occupying a seat in.</li>
+</ul>
+</div>
+
+<div class="pull">
+<b>The rule, stated plainly</b>
+A task holding a connection must never need a second one from the same
+finite pool. That is the entire reason the keystore, the credential store
+and the principal directory each dial their own connection instead of
+drawing from the request pool. It is exactly the property
+<code>PgSessionRevocations</code> gets to skip, because nothing calls it
+while already holding one of its own permits.
+</div>
+
+<h2>6 &middot; What this cost us: the test suite's connection ceiling</h2>
+<p><code>crates/ordo-host/tests/runtime.rs</code> has 16 tests that each
+spawn a real <code>ordo-host</code> binary to test boot behaviour.
+This was confirmed by counting every <code>.spawn().expect("spawn")</code> call in
+the file. Each spawned binary is a full deployment: the six connections
+from &sect;3, sometimes more when a test opens a connection of its own
+for its own assertions.</p>
+<p>The owner's machine has 10 cores, and <code>cargo test</code>'s default
+parallelism runs that many tests at once inside one binary. Sixteen tests
+that each stand up a full deployment, several running concurrently, adds
+up fast. It was measured directly rather than estimated: the roadmap entry
+for this (17ad, 2026-09-24) records that <code>runtime.rs</code> <b>peaks
+at 99 client backends on its own</b> against Postgres's default
+<code>max_connections = 100</code>. Put the cluster's limit back to 100
+after it had been raised for testing, and <code>runtime.rs</code> fails
+four tests every time, all four with the same error: <code>FATAL: sorry,
+too many clients already</code>.</p>
+<p>That is why the suite failed a different subset of its tests on almost
+every run for weeks, and why running it with <code>--test-threads=1</code>
+always passed: single-threaded, the sixteen deployments never overlap, so
+the ceiling is never approached.</p>
+<div class="callout">
+<b>It was diagnosed as something else for a long time.</b>
+The flakiness was tracked under checklist item 17ad as a leaked test
+server: a test that fails between spawning its binary and killing it
+leaves an orphaned <code>ordo-host</code> process running, and one was
+found still live 32 hours later. Leaked servers are real, and each one
+does hold its pool open and make the ceiling worse. <b>They are not what
+caused it.</b> A workspace re-run with the connection limit raised to 300
+came back clean; put back to exactly 100, it fails the same way regardless
+of whether anything has leaked yet in that run.
+</div>
+<p>Nothing about this was a capacity test. Nobody set out to see how many
+connections the platform could open under load. The connections were an
+accident of every one of sixteen tests booting a production-shaped
+deployment, at once, on a machine with enough cores to run them all
+concurrently.</p>
+
+<h2>7 &middot; What is being changed</h2>
+<p>The keystore, the credential store and the principal directory are
+being consolidated onto <b>one shared connection</b> instead of three,
+taking a deployment from six connections to four, in production
+as much as in the test suite. This is safe for a reason &sect;5
+already established: each store is already fully serialized internally
+(one job queue, one thread), and none of them is ever called while
+holding one of the <i>other</i> stores' connections. Merging the three
+store connections into one is not the same move as merging a store into
+the request pool; the request pool is the one pool a task can already be
+holding a permit from when it reaches for another.</p>
+
+<figure>
+<svg viewBox="0 0 820 170" width="100%" role="img" aria-label="six connections becoming four">
+  <defs><marker id="da2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker></defs>
+  <rect x="30" y="20" width="330" height="120" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <text x="195" y="42" text-anchor="middle" font-size="12.5" font-weight="600" fill="#3c3a35">today</text>
+  <rect x="50" y="55" width="90" height="50" rx="7" fill="var(--pool-bg)" stroke="var(--pool-bd)"/>
+  <text x="95" y="84" text-anchor="middle" font-size="11" fill="var(--pool)">request: 2</text>
+  <rect x="150" y="55" width="70" height="50" rx="7" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="185" y="84" text-anchor="middle" font-size="10.5" fill="var(--store)">keys: 1</text>
+  <rect x="230" y="55" width="70" height="50" rx="7" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="265" y="76" text-anchor="middle" font-size="9.5" fill="var(--store)">creds:</text>
+  <text x="265" y="90" text-anchor="middle" font-size="9.5" fill="var(--store)">1</text>
+  <text x="195" y="122" text-anchor="middle" font-size="11" fill="#7a756b">+ principal (1) + invalidation (1) = 6</text>
+
+  <path d="M375 80 h60" stroke="#7a756b" fill="none" marker-end="url(#da2)"/>
+
+  <rect x="450" y="20" width="330" height="120" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <text x="615" y="42" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--ok)">after this change</text>
+  <rect x="470" y="55" width="90" height="50" rx="7" fill="var(--pool-bg)" stroke="var(--pool-bd)"/>
+  <text x="515" y="84" text-anchor="middle" font-size="11" fill="var(--pool)">request: 2</text>
+  <rect x="570" y="55" width="110" height="50" rx="7" fill="var(--ok-bg)" stroke="var(--ok-bd)"/>
+  <text x="625" y="76" text-anchor="middle" font-size="10" fill="var(--ok)">keys + creds</text>
+  <text x="625" y="90" text-anchor="middle" font-size="10" fill="var(--ok)">+ principal: 1</text>
+  <rect x="690" y="55" width="70" height="50" rx="7" fill="var(--store-bg)" stroke="var(--store-bd)"/>
+  <text x="725" y="76" text-anchor="middle" font-size="9.5" fill="var(--store)">invalid-</text>
+  <text x="725" y="90" text-anchor="middle" font-size="9.5" fill="var(--store)">ation: 1</text>
+  <text x="615" y="122" text-anchor="middle" font-size="11" fill="var(--ok)">= 4 connections, per deployment</text>
+</svg>
+<figcaption>Three stores, three connections, collapse into one shared
+connection. The request pool and the invalidation listener are
+untouched. This change only touches connections that were
+already isolated from the request path.</figcaption>
+</figure>
+
+<div class="callout">
+<b>The trade</b>
+Today the three stores are independent: a lock held on the credential
+table cannot slow down a keystore lookup, because they are different
+connections entirely. Sharing one connection means they now serialize
+against <b>each other</b>: a store blocked on a database lock holds
+up the other two as well as itself. A request does still call into these
+stores mid-transaction, exactly the shape &sect;5 walked through; what
+does not change is that it never waits on a <i>second permit from the
+request pool</i> to do it. What does change is that a slow write on one
+store (a key rotation, say) now makes a login or a principal lookup wait
+on the same single connection, where before it would not have. That is a
+real change in behaviour, not a free one.
+</div>
+
+<p class="foot">Every connection count in &sect;3 and every quote in
+&sect;4 was read from the tree at commit <code>dcd4579</code>. The 16-test
+and 99/100 figures in &sect;6 are read from
+<code>docs/roadmap-checklist.md</code>, checklist item 17ad
+(2026-09-24), and independently confirmed by counting
+<code>.spawn().expect("spawn")</code> calls in
+<code>crates/ordo-host/tests/runtime.rs</code>.</p>
+
+</div>
+
+<h2>8 &middot; What it actually turned out to be</h2>
+
+<p>Everything above was written while the diagnosis was still
+&ldquo;deployments hold a lot of connections, and the test suite runs a lot
+of deployments.&rdquo; That was true and it was not the cause. The cause was
+one line.</p>
+
+<p><code>PoolConfig::from_env()</code> did not read
+<code>ORDO_PG_POOL_SIZE</code>. It read six environment variables and then
+computed the seventh as <code>min(cores, 8)</code>, unconditionally. So the
+name was a half-truth: <code>ordo_host::runtime</code> read the variable
+separately when a deployment booted, which meant the server binary honoured
+it and <em>every test that built a pool directly did not</em>. Those pools
+dialled eight apiece whatever the environment said.</p>
+
+<p>That is why sizing the spawned servers down worked and setting the same
+variable for the whole test run did nothing: the two paths were reading
+different things.</p>
+
+<table>
+<tr><th>Measured, on a 10-core machine</th><th>Peak client backends</th></tr>
+<tr><td><code>tests/runtime.rs</code>, before anything</td><td>99</td></tr>
+<tr><td>Whole workspace, before anything</td><td>81</td></tr>
+<tr><td>Whole workspace, after <code>from_env</code> reads the variable</td><td><b>25</b></td></tr>
+</table>
+
+<p>Against Postgres&rsquo;s stock <code>max_connections = 100</code>, of which
+about 97 are usable. The cluster needs no change, and neither does CI.</p>
+
+<p>Three things follow, and the third is the one worth keeping.</p>
+
+<ul>
+<li>The store consolidation in &sect;7 is still worth having, and it is not
+what fixed this. It takes a deployment from six connections to four,
+everywhere, including in production.</li>
+<li>Raising <code>max_connections</code> to 300, which is what was reached
+for first, would have worked and would have left the real defect in place
+with the ceiling moved.</li>
+<li><b>The question that found it was &ldquo;why are we testing that many
+connections?&rdquo;</b> Nothing was testing them. A function whose name
+promised to read the environment quietly ignored the one variable that
+named its field, and the number nobody could justify was the symptom.</li>
+</ul>
+
+</body>
+</html>

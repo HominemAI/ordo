@@ -1,0 +1,81 @@
+[package]
+name = "ordo-wasm"
+edition = "2021"
+version = "0.1.0"
+license = "AGPL-3.0-only"
+description = "The Ordo compiler and the v0 decompiler, compiled to WebAssembly."
+
+# NOT a workspace member — it is in the root manifest's `exclude` list, and
+# deliberately so, for two reasons:
+#
+#   1. The size profile below (`opt-level = "z"`, fat LTO, one codegen unit)
+#      is right for a payload that ships base64-inlined in an HTML page and
+#      wrong for every native binary in the workspace. A member inherits the
+#      workspace's `[profile]` and cannot override it.
+#   2. `cargo test --workspace` would build this crate for the host, where
+#      `wasm_bindgen` exports compile to nothing useful and there is no test
+#      to run. Excluding it keeps the native build exactly what it was.
+#
+# The cost is that it is not covered by a workspace-wide `cargo check`.
+# `scripts/build-wasm.sh` builds it, and that is the thing that has to pass.
+
+# Its own workspace root. The root manifest's `exclude` says the same thing
+# and is the one a reader looks at first, but `exclude` is resolved relative
+# to the manifest that declares it — so a `git worktree` checked out INSIDE
+# the repository (which is how the agents here work) walks past it and finds
+# the outer workspace anyway. This table is what makes the crate build from
+# wherever it happens to be.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ordo-syntax = { path = "../ordo-syntax" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-sema = { path = "../ordo-sema" }
+ordo-plan = { path = "../ordo-plan" }
+ordo-decompile = { path = "../ordo-decompile" }
+# For `Fixture`, which is the ONE place the parse → keys → schema → registry
+# → registration-check sequence is written down. The browser runs the same
+# constructor the conformance suite runs, so a green suite is evidence about
+# the page. Its `psql` half is never called here (there is no Postgres in a
+# browser) and, being unreachable, is dropped by LTO.
+ordo-conformance = { path = "../ordo-conformance" }
+serde_json = "1"
+wasm-bindgen = "0.2"
+
+# `getrandom` 0.2 arrives transitively (chacha20poly1305 → aead →
+# crypto-common → rand_core) and refuses to build for wasm32-unknown-unknown
+# unless something enables its `js` feature. Nothing on the paths this crate
+# calls draws a random byte — the fixture's key provider is deterministic
+# HMAC — but the crate still has to compile, so the feature is enabled here
+# and only for wasm targets, where it is the only choice that builds.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+# `-Oz` because the only cost that matters is bytes on a page. The
+# `--enable-*` flags are not optional: rustc emits bulk-memory (`memory.copy`,
+# `memory.fill`) and sign-extension opcodes by default now, and the `wasm-opt`
+# wasm-pack ships predates that default, so without them it rejects its own
+# input with "Bulk memory operations require bulk memory". Every listed
+# feature has been in every shipping browser for years.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+  "-Oz",
+  "--enable-bulk-memory",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+  "--enable-nontrapping-float-to-int",
+  "--enable-reference-types",
+]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"

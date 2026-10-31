@@ -1,0 +1,4 @@
+op recentOrders =                                # BOUNDED, and this is how: an
+  workOrders(status == "open")[opened, priority, descr]   #   explicit take is
+  sort -opened                                   #   evidence the compiler accepts
+  take 50                                        #   so no acknowledgment is needed

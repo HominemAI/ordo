@@ -1,0 +1,56 @@
+# 16 Files: blob and uri
+#
+# Shows the two field types for things that are not plain values.
+#   - `blob` holds a managed file. The row stores a reference. The bytes go
+#     to object storage, are encrypted before they get there, and are
+#     deleted when no row references them.
+#   - A blob field must be optional (`blob?`): the row exists first and the
+#     upload follows, through the blob door (`PUT /blob/{entity}/{field}/{id}`),
+#     never through an op. A blob can never be an op parameter or a default.
+#   - `blob inline` keeps small bytes inside the row (avatars, thumbnails).
+#   - `blob private` is client-sealed custody. It is declarable. The upload
+#     and read paths are not built yet and refuse by name.
+#   - `uri` is an address with no custody: stored, never fetched or served.
+#   - The reference says `photo.mime` and `photo.size` read like a ref's
+#     fields. Not built yet: the compiler answers `not_a_ref`, so no op below
+#     uses it. The metadata lives in the blob reference row, sealed when the
+#     field is, and the binder does not join to it.
+#   - A blob is not comparable or sortable. Only `count` aggregates it.
+#
+# Reference: docs/definition-language.md section 2 "Content types", "What a
+# `blob` refuses". Blob door: docs/api-engine-design.md section 5.
+
+domain shop @ 1.0.0
+
+entity products {
+  name:      text
+  price:     money
+  photo:     blob?                     # stored in object storage
+  thumbnail: blob inline?              # small, stored in the row
+  manual:    uri?                      # a link to a PDF held elsewhere
+}
+
+entity patients {
+  name: text
+  scan: blob private?                  # client-sealed: the platform holds no key
+}
+
+# Create the row first. The upload then targets this row's id.
+op addProduct($name: text, $price: money, $manual: text) =
+  set products { name: $name, price: $price, manual: $manual }
+
+# A blob field projects as a reference. The bytes are fetched from the blob
+# door, never inside an op result.
+op catalogue unbounded =
+  products[name, price, photo, manual]
+  sort name
+
+# Only `count` aggregates a blob.
+op withPhotos unbounded =
+  products[photo]
+  reduce { n: count }
+
+# A `uri` is an ordinary value: it can be filtered and sorted.
+op withManuals unbounded =
+  products(manual is not null)[name, manual]
+  sort manual

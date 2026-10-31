@@ -1,0 +1,16 @@
+op removeItem($item: id) =
+  del workItems { id: $item }                       # addressed remove
+
+op pruneTelemetry($before: date) =
+  del events(at <= $before)                         # bulk remove (old telemetry)
+
+op removeOrder($id: id) =
+  del workOrders { id: $id }                        # takes owned workItems;
+                                                    #   invoiceLines.workItem refs RESTRICT →
+                                                    #   error if billed work exists
+
+op removeBuilding($bldg: id) =
+  del locations { id: $bldg } subtree               # explicit tree+owned cascade
+
+op purgeEvents =
+  del events(true)                                  # delete-everything: stated, greppable

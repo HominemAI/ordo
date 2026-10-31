@@ -1,0 +1,621 @@
+# A gate that has never been seen to fail is a gate nobody has tested
+# (docs/roadmap-checklist.md 15a). ci.yml and images.yml assert that
+# certain conditions hold; this workflow asserts the opposite side of each
+# one -- that the same check FAILS when the thing it is guarding is
+# actually broken -- and it does that on every dispatch, not once by hand.
+#
+# `workflow_dispatch` only. It never runs on push or pull_request, so it can
+# never gate a merge or block `main`, and every break it makes is either
+# (a) a source edit inside a throwaway checkout on the runner, discarded
+# with the runner and never committed, or (b) a standalone fixture image
+# built from docker/gate-drill/, never pushed anywhere. ci.yml and
+# images.yml themselves are untouched by this file.
+#
+# Each job: break one thing, run the real gate's own command against the
+# broken state, and then assert that the gate command FAILED. A job that
+# ends green means "the gate held" -- it caught the break, as designed. A
+# job that ends red means the opposite: the gate did NOT catch a break it
+# is supposed to catch, which is a bug in the gate worth fixing before it
+# is trusted again.
+
+name: Gate drill
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: gate-drill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  # ── 1. the executed-case assertion (plan §2.3 / ci.yml) ──────────────────
+
+  executed-case-no-postgres:
+    name: "Drill: executed-case assertion / Postgres removed"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Deliberately no `services:` block -- this is the break. Everything
+    # else (env, toolchain, command) matches ci.yml's own step exactly, so
+    # "no reachable Postgres" is the only variable under test.
+    env:
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      ORDO_PSQL: psql
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates-drill
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Attempt the executed-case assertion with no Postgres reachable
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p ordo-conformance --test corpus \
+            c001_projection_subset_over_a_composed_source -- --exact --nocapture \
+            2>&1 | tee /tmp/c001.log
+          grep -qE '^test c001_projection_subset_over_a_composed_source \.\.\. ok$' /tmp/c001.log \
+            || { echo "C001 did not report a pass line — the execution tier did not run."; exit 1; }
+          grep -q 'test result: ok. 1 passed' /tmp/c001.log
+      - name: Assert the gate failed as designed
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the executed-case assertion PASSED with no Postgres service reachable — it proves nothing here and must fail."
+            exit 1
+          fi
+          echo "GATE: executed-case assertion | BROKE: Postgres service removed | RESULT: failed as expected"
+
+  executed-case-renamed:
+    name: "Drill: executed-case assertion / C001 renamed"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: ordo_conformance
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      ORDO_PSQL: psql
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates-drill
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # Runner disk noise only; the product fix is the store pool's size
+      # and wait (board task `store-pool-held-blocks-signin`). See the script.
+      - name: Postgres without durable commits (CI only)
+        run: bash scripts/ci-pg-fast-commits.sh
+      - name: Deliberately rename C001 in this throwaway checkout
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("crates/ordo-conformance/tests/corpus.rs")
+          text = p.read_text()
+          needle = "fn c001_projection_subset_over_a_composed_source"
+          n = text.count(needle)
+          assert n == 1, f"expected exactly one occurrence of {needle!r}, found {n} — drill fixture is stale"
+          p.write_text(text.replace(needle, "fn c001_renamed_by_the_gate_drill", 1))
+          PY
+      - name: Attempt the executed-case assertion against the renamed test
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p ordo-conformance --test corpus \
+            c001_projection_subset_over_a_composed_source -- --exact --nocapture \
+            2>&1 | tee /tmp/c001.log
+          grep -qE '^test c001_projection_subset_over_a_composed_source \.\.\. ok$' /tmp/c001.log \
+            || { echo "C001 did not report a pass line — the execution tier did not run."; exit 1; }
+          grep -q 'test result: ok. 1 passed' /tmp/c001.log
+      - name: Assert the gate failed as designed
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the executed-case assertion PASSED even though C001 was renamed out from under it."
+            exit 1
+          fi
+          echo "GATE: executed-case assertion | BROKE: C001 renamed | RESULT: failed as expected"
+
+  executed-case-deleted:
+    name: "Drill: executed-case assertion / C001 deleted"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: ordo_conformance
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      ORDO_PSQL: psql
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates-drill
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # Runner disk noise only; the product fix is the store pool's size
+      # and wait (board task `store-pool-held-blocks-signin`). See the script.
+      - name: Postgres without durable commits (CI only)
+        run: bash scripts/ci-pg-fast-commits.sh
+      - name: Deliberately delete C001 as a test case in this throwaway checkout
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("crates/ordo-conformance/tests/corpus.rs")
+          text = p.read_text()
+          # Dropping the #[test] attribute is "deleted from the corpus": the
+          # function stops being a test cargo's harness will ever run, which
+          # is the observable effect a deleted case has on this gate. It
+          # avoids brace-matching a case-body deletion, which would be
+          # fragile to maintain here as corpus.rs changes.
+          needle = "#[test]\nfn c001_projection_subset_over_a_composed_source"
+          n = text.count(needle)
+          assert n == 1, f"expected exactly one occurrence of {needle!r}, found {n} — drill fixture is stale"
+          p.write_text(text.replace(needle, "fn c001_projection_subset_over_a_composed_source", 1))
+          PY
+      - name: Attempt the executed-case assertion against the deleted test
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p ordo-conformance --test corpus \
+            c001_projection_subset_over_a_composed_source -- --exact --nocapture \
+            2>&1 | tee /tmp/c001.log
+          grep -qE '^test c001_projection_subset_over_a_composed_source \.\.\. ok$' /tmp/c001.log \
+            || { echo "C001 did not report a pass line — the execution tier did not run."; exit 1; }
+          grep -q 'test result: ok. 1 passed' /tmp/c001.log
+      - name: Assert the gate failed as designed
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the executed-case assertion PASSED even though C001 was deleted as a test."
+            exit 1
+          fi
+          echo "GATE: executed-case assertion | BROKE: C001 deleted (no longer #[test]) | RESULT: failed as expected"
+
+  # ── 2. the two-directional inventory, by name (plan §2.4 / ci.yml) ───────
+  #
+  # Three legs, three independent breaks, each isolated to the one leg it is
+  # meant to break — see the commit message for which class moves where and
+  # why the other two legs are untouched by each break.
+
+  inventory-engine-to-document:
+    name: "Drill: inventory / engine→document"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates-drill
+      - name: Delete the `duplicate` row from the document (engine still emits it)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("docs/api-engine-design.md")
+          lines = p.read_text().splitlines(keepends=True)
+          needle = "| `duplicate` |"
+          out = [l for l in lines if not l.startswith(needle)]
+          removed = len(lines) - len(out)
+          assert removed == 1, f"expected to remove exactly one row, removed {removed} — drill fixture is stale"
+          p.write_text("".join(out))
+          PY
+      - name: Attempt the engine→document inventory step
+        id: attempt
+        continue-on-error: true
+        run: |
+          cargo test -p ordo-api --test inventory_is_closed \
+            every_class_the_engine_can_emit_is_in_the_document -- --exact
+      - name: Assert the gate failed as designed, and named the right direction
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::every_class_the_engine_can_emit_is_in_the_document PASSED with an undocumented class still emitted."
+            exit 1
+          fi
+          echo "GATE: inventory engine→document | BROKE: 'duplicate' row deleted from api-engine-design.md | RESULT: failed as expected (step name alone identifies the direction)"
+
+  inventory-document-to-engine:
+    name: "Drill: inventory / document→engine"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates-drill
+      - name: Delete ErrorCode::MethodMismatch from the engine's ALL (document still promises it)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("crates/ordo-api/src/error.rs")
+          lines = p.read_text().splitlines(keepends=True)
+          needle = "ErrorCode::MethodMismatch,"
+          out = [l for l in lines if l.strip() != needle]
+          removed = len(lines) - len(out)
+          assert removed == 1, f"expected to remove exactly one line, removed {removed} — drill fixture is stale"
+          p.write_text("".join(out))
+          PY
+      - name: Attempt the document→engine inventory step
+        id: attempt
+        continue-on-error: true
+        run: |
+          cargo test -p ordo-api --test inventory_is_closed \
+            every_documented_class_is_one_the_engine_has -- --exact
+      - name: Assert the gate failed as designed, and named the right direction
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::every_documented_class_is_one_the_engine_has PASSED with a class the engine no longer has still documented."
+            exit 1
+          fi
+          echo "GATE: inventory document→engine | BROKE: ErrorCode::MethodMismatch removed from ordo-api's ALL | RESULT: failed as expected (step name alone identifies the direction)"
+
+  inventory-descriptor-to-wire:
+    name: "Drill: inventory / descriptor→wire"
+    runs-on: ubuntu-latest
+    # Heavier than the other two legs: this compiles ordo-cli plus its
+    # ordo-plan/ordo-conformance dependency chain (the market fixture),
+    # not just ordo-api.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: rust-gates-drill
+      - name: Delete the `missing_param` row from the document (a real op still names it as a refusal)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path("docs/api-engine-design.md")
+          lines = p.read_text().splitlines(keepends=True)
+          needle = "| `missing_param` |"
+          out = [l for l in lines if not l.startswith(needle)]
+          removed = len(lines) - len(out)
+          assert removed == 1, f"expected to remove exactly one row, removed {removed} — drill fixture is stale"
+          p.write_text("".join(out))
+          PY
+      - name: Attempt the descriptor→wire inventory step
+        id: attempt
+        continue-on-error: true
+        run: |
+          cargo test -p ordo-cli --test interface \
+            every_refusal_class_named_is_in_the_wire_inventory -- --exact
+      - name: Assert the gate failed as designed, and named the right direction
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::every_refusal_class_named_is_in_the_wire_inventory PASSED with a live refusal class removed from the document."
+            exit 1
+          fi
+          echo "GATE: inventory descriptor→wire | BROKE: 'missing_param' row deleted from api-engine-design.md | RESULT: failed as expected (step name alone identifies the direction)"
+
+  # ── 3. the smoke gates (plan §3.3 / images.yml) ───────────────────────────
+
+  cli-usage-exit:
+    name: "Drill: ordo-cli usage-exit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the deliberately broken fixture (bare invocation always exits 0)
+        run: docker build -t ordo-cli-broken:drill docker/gate-drill/cli-broken-entrypoint
+      - name: Attempt the usage-exit gate against it
+        id: attempt
+        continue-on-error: true
+        run: |
+          set +e
+          docker run --rm ordo-cli-broken:drill >/dev/null 2>&1
+          code=$?
+          set -e
+          echo "bare invocation exited $code, expected 2"
+          [ "$code" -eq 2 ]
+      - name: Assert the gate failed as designed
+        run: |
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the usage-exit gate PASSED against a fixture whose bare invocation always exits 0."
+            exit 1
+          fi
+          echo "GATE: ordo-cli usage-exit | BROKE: bare invocation always exits 0 (docker/gate-drill/cli-broken-entrypoint) | RESULT: failed as expected"
+
+  host-health-deep-404:
+    name: "Drill: ordo-host /health/deep three-way / 404"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the fake-boot fixture
+        run: docker build -t ordo-fake-http:drill docker/gate-drill/fake-http
+      - name: Run the fixture with /health/deep answering 404 (router not mounted)
+        run: |
+          docker run -d --name fake-host --network host \
+            -e FAKE_PORT=8080 \
+            -e "FAKE_ROUTES=/health/deep=404" \
+            ordo-fake-http:drill
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8080/health/live && break
+            if [ "$i" = 30 ]; then docker logs fake-host; exit 1; fi
+            sleep 1
+          done
+      - name: Attempt the /health/deep three-way assertion
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          deep=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/deep)
+          case "$deep" in
+            403) echo "/health/deep is mounted and gated (403). Correct." ;;
+            404) echo "FAIL: /health/deep is 404 — the platform router did not mount."; exit 1 ;;
+            200) echo "FAIL: /health/deep answered 200 UNAUTHENTICATED. The owner gate is missing; this image must not publish."; exit 1 ;;
+            *)   echo "FAIL: /health/deep answered $deep, which is none of the three meanings this test knows."; exit 1 ;;
+          esac
+      - name: Assert the gate failed as designed
+        run: |
+          docker rm -f fake-host || true
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the /health/deep three-way check PASSED against a route answering 404."
+            exit 1
+          fi
+          echo "GATE: ordo-host /health/deep three-way | BROKE: route answers 404 (router not mounted) | RESULT: failed as expected"
+
+  host-health-deep-200:
+    name: "Drill: ordo-host /health/deep three-way / 200"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the fake-boot fixture
+        run: docker build -t ordo-fake-http:drill docker/gate-drill/fake-http
+      - name: Run the fixture with /health/deep answering 200 (owner gate missing)
+        run: |
+          docker run -d --name fake-host --network host \
+            -e FAKE_PORT=8080 \
+            -e "FAKE_ROUTES=/health/deep=200" \
+            ordo-fake-http:drill
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8080/health/live && break
+            if [ "$i" = 30 ]; then docker logs fake-host; exit 1; fi
+            sleep 1
+          done
+      - name: Attempt the /health/deep three-way assertion
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          deep=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/deep)
+          case "$deep" in
+            403) echo "/health/deep is mounted and gated (403). Correct." ;;
+            404) echo "FAIL: /health/deep is 404 — the platform router did not mount."; exit 1 ;;
+            200) echo "FAIL: /health/deep answered 200 UNAUTHENTICATED. The owner gate is missing; this image must not publish."; exit 1 ;;
+            *)   echo "FAIL: /health/deep answered $deep, which is none of the three meanings this test knows."; exit 1 ;;
+          esac
+      - name: Assert the gate failed as designed
+        run: |
+          docker rm -f fake-host || true
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the /health/deep three-way check PASSED against a route answering 200 unauthenticated — the case it exists to catch."
+            exit 1
+          fi
+          echo "GATE: ordo-host /health/deep three-way | BROKE: route answers 200 unauthenticated (owner gate missing) | RESULT: failed as expected"
+
+  host-health-ready-unexpected:
+    name: "Drill: ordo-host /health/ready / unexpected status"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the fake-boot fixture
+        run: docker build -t ordo-fake-http:drill docker/gate-drill/fake-http
+      - name: Run the fixture with /health/ready answering 404 (neither 200 nor 503)
+        run: |
+          docker run -d --name fake-host --network host \
+            -e FAKE_PORT=8080 \
+            -e "FAKE_ROUTES=/health/ready=404" \
+            ordo-fake-http:drill
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8080/health/live && break
+            if [ "$i" = 30 ]; then docker logs fake-host; exit 1; fi
+            sleep 1
+          done
+      - name: Attempt the /health/ready assertion
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Owner-ruled 2026-09-20 (17t): readiness means ready to ACCEPT a
+          # deployment, so 200 is the expected case even for a bare image —
+          # never 404, which is what this fixture answers on purpose.
+          ready=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/ready)
+          case "$ready" in
+            200) echo "/health/ready: 200 — this image can accept and run a deployment (17t)." ;;
+            503) echo "/health/ready: 503 — a real readiness check failed." ;;
+            *)   echo "FAIL: /health/ready answered $ready; the readiness route is not behaving as a readiness route."; exit 1 ;;
+          esac
+      - name: Assert the gate failed as designed
+        run: |
+          docker rm -f fake-host || true
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the /health/ready check PASSED against a route answering 404, which is neither 200 nor 503."
+            exit 1
+          fi
+          echo "GATE: ordo-host /health/ready | BROKE: route answers 404 (neither 200 nor 503) | RESULT: failed as expected"
+
+  playground-unavailable:
+    name: "Drill: ordo-playground seeded check / UNAVAILABLE"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the fake-boot fixture
+        run: docker build -t ordo-fake-http:drill docker/gate-drill/fake-http
+      - name: Run the fixture logging an UNAVAILABLE database
+        run: |
+          docker run -d --name fake-pg --network host \
+            -e FAKE_PORT=7878 \
+            -e "FAKE_LOG_LINES=UNAVAILABLE: ordo_playground (boom)" \
+            ordo-fake-http:drill
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:7878/ && break
+            if [ "$i" = 30 ]; then docker logs fake-pg; exit 1; fi
+            sleep 1
+          done
+      - name: Attempt the seeded/UNAVAILABLE assertion
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          logs=$(docker logs fake-pg 2>&1)
+          echo "$logs"
+          if echo "$logs" | grep -q 'UNAVAILABLE:'; then
+            echo "FAIL: a playground database could not be seeded — panes over it would not run."
+            exit 1
+          fi
+          echo "$logs" | grep -q 'seeded:' \
+            || { echo "FAIL: no database reported as seeded; psql never reached Postgres from inside the image."; exit 1; }
+      - name: Assert the gate failed as designed
+        run: |
+          docker rm -f fake-pg || true
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the seeded check PASSED against a boot log containing UNAVAILABLE."
+            exit 1
+          fi
+          echo "GATE: ordo-playground seeded check | BROKE: boot log contains 'UNAVAILABLE: ordo_playground (boom)' | RESULT: failed as expected"
+
+  playground-never-seeded:
+    name: "Drill: ordo-playground seeded check / no seeded line at all"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the fake-boot fixture
+        run: docker build -t ordo-fake-http:drill docker/gate-drill/fake-http
+      - name: Run the fixture logging nothing about seeding
+        run: |
+          docker run -d --name fake-pg --network host \
+            -e FAKE_PORT=7878 \
+            ordo-fake-http:drill
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:7878/ && break
+            if [ "$i" = 30 ]; then docker logs fake-pg; exit 1; fi
+            sleep 1
+          done
+      - name: Attempt the seeded/UNAVAILABLE assertion
+        id: attempt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          logs=$(docker logs fake-pg 2>&1)
+          echo "$logs"
+          if echo "$logs" | grep -q 'UNAVAILABLE:'; then
+            echo "FAIL: a playground database could not be seeded — panes over it would not run."
+            exit 1
+          fi
+          echo "$logs" | grep -q 'seeded:' \
+            || { echo "FAIL: no database reported as seeded; psql never reached Postgres from inside the image."; exit 1; }
+      - name: Assert the gate failed as designed
+        run: |
+          docker rm -f fake-pg || true
+          if [ "${{ steps.attempt.outcome }}" = "success" ]; then
+            echo "::error::the seeded check PASSED against a boot log with no 'seeded:' line at all."
+            exit 1
+          fi
+          echo "GATE: ordo-playground seeded check | BROKE: boot log has no 'seeded:' line | RESULT: failed as expected"
+
+  # ── summary ────────────────────────────────────────────────────────────
+
+  summary:
+    name: Gate drill summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - executed-case-no-postgres
+      - executed-case-renamed
+      - executed-case-deleted
+      - inventory-engine-to-document
+      - inventory-document-to-engine
+      - inventory-descriptor-to-wire
+      - cli-usage-exit
+      - host-health-deep-404
+      - host-health-deep-200
+      - host-health-ready-unexpected
+      - playground-unavailable
+      - playground-never-seeded
+    steps:
+      - name: Print the drill's results
+        run: |
+          row() {
+            local label="$1" broke="$2" result="$3"
+            if [ "$result" = "success" ]; then
+              echo "| $label | $broke | held |"
+            else
+              echo "| $label | $broke | **DID NOT HOLD — investigate the job log** |"
+            fi
+          }
+          {
+            echo "## Gate drill results"
+            echo
+            echo "A row reading *held* means the real gate correctly failed on the"
+            echo "broken input this job fed it. A row reading DID NOT HOLD means the"
+            echo "opposite: the gate passed something it should have rejected."
+            echo
+            echo "| gate | broke | result |"
+            echo "|---|---|---|"
+            row "executed-case assertion" "Postgres service removed" "${{ needs.executed-case-no-postgres.result }}"
+            row "executed-case assertion" "C001 renamed" "${{ needs.executed-case-renamed.result }}"
+            row "executed-case assertion" "C001 deleted" "${{ needs.executed-case-deleted.result }}"
+            row "inventory engine→document" "'duplicate' row deleted from the document" "${{ needs.inventory-engine-to-document.result }}"
+            row "inventory document→engine" "ErrorCode::MethodMismatch removed from the engine" "${{ needs.inventory-document-to-engine.result }}"
+            row "inventory descriptor→wire" "'missing_param' row deleted from the document" "${{ needs.inventory-descriptor-to-wire.result }}"
+            row "ordo-cli usage-exit" "bare invocation always exits 0" "${{ needs.cli-usage-exit.result }}"
+            row "ordo-host /health/deep" "route answers 404" "${{ needs.host-health-deep-404.result }}"
+            row "ordo-host /health/deep" "route answers 200 unauthenticated" "${{ needs.host-health-deep-200.result }}"
+            row "ordo-host /health/ready" "route answers 404 (neither 200 nor 503)" "${{ needs.host-health-ready-unexpected.result }}"
+            row "ordo-playground seeded check" "boot log contains UNAVAILABLE" "${{ needs.playground-unavailable.result }}"
+            row "ordo-playground seeded check" "no seeded line at all" "${{ needs.playground-never-seeded.result }}"
+          } >> "$GITHUB_STEP_SUMMARY"

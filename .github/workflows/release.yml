@@ -1,0 +1,244 @@
+# Runs on a `v*` tag push, same trigger `images.yml` builds on — this
+# workflow depends on that one having already published (see the `images`
+# job's note below) rather than rebuilding.
+#
+# Secrets required: NONE. `GITHUB_TOKEN` creates the release and
+# authenticates to GHCR.
+#
+# Scope, stated so nobody has to infer it: this workflow publishes
+# ARTIFACTS. It does not deploy anything anywhere. See
+# `docs/plan-ci-images.md` §5 for what is deliberately out of scope and why.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist, e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+jobs:
+  # The images are not rebuilt here. `images.yml` already builds, smokes
+  # and pushes on a `v*` tag; duplicating that would produce a SECOND set
+  # of bytes for the same commit under the same tag, and two digests
+  # claiming to be one release is precisely the ambiguity the digest is
+  # supposed to remove. This job exists to state the dependency and to
+  # fail early if it was not honoured.
+  images:
+    name: Confirm the images published
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 5
+    steps:
+      - name: Note
+        run: |
+          {
+            echo "Images for this tag are built by \`images.yml\`, which runs on the same"
+            echo "\`v*\` tag push. This workflow does not rebuild them: two builds of one"
+            echo "commit produce two digests, and a release with two identities has none."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The CLI binaries ────────────────────────────────────────────────────
+  #
+  # `ordo` is an operator tool: someone runs it from a laptop or a bastion
+  # against a deployment's database. Handing them a container for that is
+  # worse ergonomics than a binary, so the release carries both.
+
+  binaries:
+    name: ${{ matrix.target }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    strategy:
+      # One target failing should not hide the other two's results.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            # The self-hosted runner, which is linux/x64, and since
+            # 2026-09-25 the only target this workflow builds.
+            runner: [self-hosted, ordo-k8s]
+          # **No macOS and no arm64 Linux.** Ruled 2026-09-25
+          # (`actions-billing`): *"We shouldnt be building for apple or
+          # arm. Done."*
+          #
+          # Both legs ran on GitHub-hosted runners, which have refused
+          # every job on this account since 2026-09-21, and `release`
+          # needs `binaries`, so a tagged release could not publish at
+          # all. The self-hosted runner is linux/x64 and cannot build
+          # either one natively.
+          #
+          # The earlier note here argued at length against
+          # cross-compiling the macOS binary, on the ground that a
+          # release artifact nobody watched compile the fixture is the
+          # one thing this job will not ship. That argument stands and
+          # now applies to both dropped targets rather than to one.
+          #
+          # The deployable is Linux/x64 and the images cover it. Anyone
+          # on another platform builds the operator CLI with
+          # `cargo install --locked --git`, which compiles and tests on
+          # the machine that will run it.
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      # Native runners per target rather than cross-compilation. The
+      # workspace is pure Rust with no C dependencies — no OpenSSL, no
+      # bindgen — so cross would work; native is chosen because a binary
+      # built on the platform it runs on is a binary whose linkage nobody
+      # has to reason about, and the matrix costs three short jobs.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ordo-cli --bin ordo
+
+      # The binary is smoke-tested the same way the image is: it compiles
+      # the real market fixture. A release artifact that cannot parse the
+      # project's own fixture is not a release artifact.
+      #
+      # Skipped on aarch64-linux only if the runner is emulated; the
+      # `ubuntu-24.04-arm` runner is native, so it runs everywhere.
+      - name: Smoke — the binary compiles the market fixture
+        run: |
+          # giftOrders reads a sealed field without an index (F0, not built).
+          ./target/${{ matrix.target }}/release/ordo check \
+            crates/ordo-conformance/fixtures/market.ordo --expect-fail giftOrders
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          dir="ordo-${{ inputs.tag || github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/$dir"
+          cp "target/${{ matrix.target }}/release/ordo" "dist/$dir/"
+          cp LICENSE LICENSE-APACHE NOTICE README.md "dist/$dir/"
+          tar -C dist -czf "dist/$dir.tar.gz" "$dir"
+          # Checksums beside the archive, because a download is only as
+          # good as the thing that says what it should have been. The same
+          # argument the artifact version hash makes one layer up.
+          ( cd dist && shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256" )
+
+      # Provenance for the binaries, matching what BuildKit attaches to the
+      # images. RECOMMENDED rather than mandated: it costs one step and no
+      # secret, and it is what lets someone verify the tarball came from
+      # this repository at this commit without trusting the release page.
+      # `continue-on-error`, with the reason on the line rather than in a
+      # commit nobody will read: artifact attestations are a paid GitHub
+      # feature, and this organization does not have them. The first
+      # release run (v0.1.0, 2026-09-20) failed here with "Feature not
+      # available for the HominemAI organization" AFTER building every
+      # binary, so a plan limit destroyed a release that had already
+      # succeeded. The step stays, because the day the feature is enabled
+      # it starts working with no edit; it just no longer takes the
+      # release down with it. The next step says plainly whether provenance
+      # was attached, so a green release never implies a signature it does
+      # not have.
+      - id: provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Say whether provenance was attached
+        run: |
+          if [ "${{ steps.provenance.outcome }}" = "success" ]; then
+            echo "provenance: attached to dist/*.tar.gz"
+          else
+            echo "provenance: NOT attached — artifact attestations are not"
+            echo "            available to this GitHub organization. The"
+            echo "            tarballs and their sha256 files are still"
+            echo "            published; what is missing is the signed"
+            echo "            statement that they came from this commit."
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [binaries]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # GHCR rejects an uppercase character anywhere in an image name,
+          # so `images.yml` pushes under the lowercase repository; the pull
+          # commands printed here must match what was actually pushed.
+          repo_lc="${GITHUB_REPOSITORY,,}"
+          {
+            echo "## \`ordo\` $TAG"
+            echo
+            echo "The operator CLI for \`x86_64-unknown-linux-gnu\`, smoke-tested by compiling"
+            echo "the market fixture, with a SHA-256 beside it."
+            echo
+            echo "### Images"
+            echo
+            echo "Published to GHCR by the \`Images\` workflow on the same tag:"
+            echo
+            echo "- \`ghcr.io/$repo_lc/ordo-host\`  — the deployable"
+            echo "- \`ghcr.io/$repo_lc/ordo-cli\`   — the operator tool"
+            echo "- \`ghcr.io/$repo_lc/ordo-playground\` — the browser surface"
+            echo
+            echo "**Deploy by digest, not by tag.** The digest is the image's identity the"
+            echo "same way an artifact version hash is a program's; a tag is a pointer that"
+            echo "can be moved. The digest for each image is in that workflow's run summary."
+            echo
+            echo "### Not included"
+            echo
+            echo "No Helm chart and no deployment manifests — see \`docs/plan-ci-images.md\` §5."
+            echo
+            echo "No macOS and no arm64 Linux binary. This release builds \`linux/x64\` only."
+            echo "Cross-compiling the others would ship a binary nobody watched compile the"
+            echo "fixture, which is the one thing the build job will not do. On any other"
+            echo "platform, build the CLI with \`cargo install --locked --git\` so it compiles"
+            echo "and self-tests on the machine that will run it. The deployable is Linux and"
+            echo "the images above cover it."
+            echo
+            echo "No build-provenance attestation. Artifact attestations are a paid GitHub"
+            echo "feature this organization does not have, so the tarballs and their SHA-256"
+            echo "files are published without a signed statement of where they came from."
+          } > notes.md
+
+          gh release create "$TAG" \
+            --title "ordo $TAG" \
+            --notes-file notes.md \
+            --verify-tag \
+            dist/*

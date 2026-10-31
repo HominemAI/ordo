@@ -1,0 +1,56 @@
+# 21 Public: data and ops anyone may read
+#
+# `public` makes a field, an entity or an op readable with no token. Ordo
+# serves a public read to a visitor as `$anonymous`, in the deployment's own
+# space.
+#   - Field tail: `price: money(2) public` marks one field.
+#   - Entity line `public`: every field of the entity. It is refused on a
+#     sealed field.
+#   - Entity line `public*`: the entity and every entity it owns. A child's
+#     own `public` line replaces the inherited one.
+#   - Op flag: `op pricing public =` runs on the public path.
+#   - A public op reads public fields only. A private field in a projection,
+#     a condition or a sort is refused (`public_reads_private`).
+#   - Refused: `public_sealed`, `public_private` (a private blob),
+#     `public_guarded` (an entity with `access read` or `acl`),
+#     `public_composes_private`, `public_caller` ($caller), and a public
+#     write that is not a plain create (`public_write_not_create`), that writes
+#     into a guarded entity (`public_write_guarded`) or that aims a ref at a
+#     private row (`public_write_ref`).
+#   - A file on a public row is public. A private row's file is not.
+#   - `ordo check` prints `(public: anyone may call it, with no token)`.
+# See docs/howto-public.md.
+
+domain shopfront @ 1.0.0
+
+entity plans {
+  name:   text  public
+  price:  money(2) public
+  margin: money(2)                 # private: no public op may read it
+}
+
+entity pages {
+  slug: text unique
+  body: text
+  public*                            # this entity and the entities it owns
+}
+
+entity pageImages {
+  doc   -> pages owned
+  image: blob?                       # public, because its row is public
+}
+
+op pricing public =
+  plans(price > 0)[name, price]
+  sort name
+  take 50
+
+op pageList public =
+  pages[slug, body]
+  sort slug
+  take 50
+
+op margins =                         # not public: a member calls it with a token
+  plans[name, margin]
+  sort name
+  take 50

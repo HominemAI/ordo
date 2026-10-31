@@ -1,0 +1,5 @@
+op darkPages unbounded =
+  pages(settings.theme == "dark" and settings["font size"] > 12)[title]
+
+op taggedPages($tag: text) unbounded =
+  pages(settings.tags contains $tag or settings.tags[0] == $tag)[title]

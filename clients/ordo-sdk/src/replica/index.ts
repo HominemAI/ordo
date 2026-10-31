@@ -1,0 +1,15 @@
+export { LocalReplica } from './replica.js';
+export type { FrameDelta, Frame, HeldRow, ReplicaRecord } from './replica.js';
+export { IndexedDbBackend, MemoryBackend } from './backend.js';
+export type { Backend } from './backend.js';
+export { createDeviceKeys } from './seal.js';
+export type { DeviceKeys } from './seal.js';
+export { syncOp } from './sync.js';
+export type { SyncDelta, SyncOptions, SyncState } from './sync.js';
+export { SyncManager, DEFAULT_TOUCH_EVERY_MS } from './manager.js';
+export type { ManagedOp, Observation, ObservedRows, SyncDeclaration, SyncManagerOptions, SyncView } from './manager.js';
+export { refineOp, refineRows, refineRowsAsync, refineMerge, checkQuery, REFINE_OPS, DEFAULT_REFINE_CHUNK } from './refine.js';
+export type { LocalQuery, RefineAsyncOptions, RefineCondition, RefineOp, SortKey } from './refine.js';
+export { openDevice, DEFAULT_DEVICE_STORE, DEFAULT_SYNC_IDLE_MS, DEFAULT_ERASE_AFTER_MS } from './device.js';
+export type { TabEnvironment, TabLocks, TabChannel, TabVisibility } from './tabs.js';
+export type { OpenDeviceOptions, OrdoDevice } from './device.js';

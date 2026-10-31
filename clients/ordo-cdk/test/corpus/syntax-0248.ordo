@@ -1,0 +1,3 @@
+op openOrders unbounded =                        # status is not unique: the
+  workOrders(status == "open")[opened, priority, descr, location.name, location.property.name]
+  sort priority, opened                          #   match set grows with the space

@@ -1,0 +1,36 @@
+# 01 Entities and fields
+#
+# Shows how to declare a table (an entity) and the closed set of field types.
+#   - every field is required, defaulted (`= v`) or optional (`?`)
+#   - types: text, int, money, bool, date, datetime, duration(unit), id
+#   - `text(64)` bounds a text field or parameter to 64 characters. The
+#     database keeps the bound on an open column and the write path keeps
+#     it on a sealed one. An over-long parameter answers `bound_violation`
+#     at the door; an over-long field value answers `check_violation`.
+#   - `(key: prod)` picks the prefix of the typed id (prod_01J8...)
+#   - `id` and `rev` exist on every entity and are never declared
+#
+# Reference: docs/definition-language.md section 3 "Syntax", section 2 "Types".
+
+domain shop @ 1.0.0
+
+entity products (key: prod) {
+  name:     text(120)                # required, at most 120 characters
+  price:    money                    # exact decimal, minor units on disk
+  stock:    int = 0                  # defaulted
+  active:   bool = true
+  sku:      text?                    # optional: null until set
+  launched: date?
+  updated:  datetime?
+  restock:  duration(d) = 14d        # a duration always names its unit
+  buyer:    id?                      # an id of any entity
+}
+
+# A read: source, projection, then steps. `id` and `rev` are implicit fields.
+op listProducts unbounded =
+  products[id, rev, name, price, stock, active]
+  sort name
+
+# A bounded text parameter: the door refuses a longer value before planning.
+op renameProduct($product: id, $name: text(120)) =
+  set products(id == $product) { name: $name }

@@ -1,0 +1,57 @@
+# 05 Sealed fields
+#
+# Shows how a field is kept encrypted at rest.
+#   - `sealed` stores the value in the tenant's encrypted payload. The
+#     database holds ciphertext.
+#   - `sealed indexed` adds a blind index: equality lookups run at SQL speed
+#     and the key never enters the database.
+#   - `unique` and `normalize(lower)` work on sealed fields too, through the
+#     blind index. `normalize(lower)` makes "A@x.com" and "a@x.com" one value.
+#   - `refinable` lets a caller narrow a read by equality on a sealed field.
+#     Every read takes a refinement on its open fields with no flag; a sealed
+#     field takes one only when marked `sealed indexed refinable`. `ordo
+#     check` prints each read's refinable fields (docs/howto-cost.md).
+#   - `std sealed` is one shape line. Without it the derived std ops
+#     (`std.patients.get`, `.list`, `.update`) see the open fields only, so
+#     granting them cannot disclose a sealed value. With it they see the
+#     whole row. Hand-written ops are unaffected either way.
+#   - Projecting a sealed field is work done by the host, row by row, after
+#     the database hands the rows over. `take` bounds that work, and so does
+#     the page a listing is served as. A sealed filter or sort key is not
+#     bounded by either (see 14-flags-unguarded-unbounded.ordo).
+#
+# Reference: docs/definition-language.md section 3 "Sealed fields",
+# section 2 "Text canonicalization", section 5 "Cost classes".
+
+domain clinic @ 1.0.0
+
+entity patients {
+  ward:      text                                        # open: plain column
+  admitted:  date                                        # open: plain column
+  name:      text    sealed                              # encrypted
+  email:     text?   sealed indexed unique normalize(lower)
+  diagnosis: text    sealed
+  mrn:       text    sealed indexed refinable
+  std sealed                                             # derived std ops see the sealed fields
+}
+
+op registerPatient($ward: text, $admitted: date, $name: text, $email: text, $diagnosis: text, $mrn: text) =
+  set patients { ward: $ward, admitted: $admitted, name: $name, email: $email, diagnosis: $diagnosis, mrn: $mrn }
+
+# Equality on a `sealed indexed` field rides the blind index: no scan.
+# This op projects open fields only. See the README: `ordo check` refuses
+# an op that combines a blind-index lookup with a sealed projection.
+op patientByEmail($email: text) =
+  patients(email == $email)[ward, admitted]
+
+# Projecting a sealed field opens it host-side for each row returned.
+# `take 3` bounds that work, so no acknowledgment is needed.
+op latestDiagnoses =
+  patients[admitted, diagnosis]
+  sort -admitted
+  take 3
+
+# Not shown: a filter on a sealed field that is NOT indexed, such as
+# `patients(diagnosis == $d)`. The reference says it runs host-side and needs
+# `unbounded`. Today `ordo check` reports `sealed_unsupported` for that op
+# (see the README, "Findings"). Index the field to filter on it.

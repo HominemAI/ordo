@@ -1,0 +1,1477 @@
+{
+ "comment": "Shared by clients/ordo-sdk/test/refine-parity.test.ts and crates/ordo-conformance/tests/refine_parity.rs. Each case is a refinement and the ids the server answers, in order. Rows are listed in id order, which is the server's tiebreak. `m` is a money(2) and `r` a decimal(4); `decimals` names them, and their values are the wire's exact decimal strings (27ak).",
+ "rows": [
+  {
+   "id": "r01",
+   "n": 5,
+   "t": "apple",
+   "b": true,
+   "m": "2.50",
+   "r": "0.0825"
+  },
+  {
+   "id": "r02",
+   "n": null,
+   "t": null,
+   "b": null,
+   "m": null,
+   "r": "0.1000"
+  },
+  {
+   "id": "r03",
+   "n": 0,
+   "t": "Apple",
+   "b": false,
+   "m": "100.00",
+   "r": null
+  },
+  {
+   "id": "r04",
+   "n": -3,
+   "t": "\ud83d\ude00",
+   "b": null,
+   "m": "-0.05",
+   "r": "-1.5000"
+  },
+  {
+   "id": "r05",
+   "n": 5,
+   "t": "\ue000",
+   "b": true,
+   "m": "2.50",
+   "r": "0.0800"
+  },
+  {
+   "id": "r06",
+   "n": 12,
+   "t": "\ufffd",
+   "b": false,
+   "m": "29.99",
+   "r": "12.0000"
+  },
+  {
+   "id": "r07",
+   "n": null,
+   "t": "zed",
+   "b": true,
+   "m": null,
+   "r": "0.0825"
+  },
+  {
+   "id": "r08",
+   "n": 7,
+   "t": "Zed",
+   "b": null,
+   "m": "0.00",
+   "r": null
+  },
+  {
+   "id": "r09",
+   "n": null,
+   "t": "\u00e9",
+   "b": false,
+   "m": "1000.00",
+   "r": "0.0000"
+  },
+  {
+   "id": "r10",
+   "n": 2,
+   "t": "\uff5e",
+   "b": null,
+   "m": "2.51",
+   "r": "2.0000"
+  },
+  {
+   "id": "r11",
+   "n": -3,
+   "t": "\ud801\udc00",
+   "b": true,
+   "m": "-12.50",
+   "r": "0.0800"
+  },
+  {
+   "id": "r12",
+   "n": 5,
+   "t": "",
+   "b": false,
+   "m": "29.99",
+   "r": "100.0000"
+  }
+ ],
+ "cases": [
+  {
+   "name": "int eq 5 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "eq",
+     "value": 5
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r05",
+    "r12"
+   ]
+  },
+  {
+   "name": "int ne 5 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "ne",
+     "value": 5
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r03",
+    "r04",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "int lt 5 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "lt",
+     "value": 5
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r03",
+    "r04",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "int le 5 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "le",
+     "value": 5
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r04",
+    "r05",
+    "r10",
+    "r11",
+    "r12"
+   ]
+  },
+  {
+   "name": "int gt 0 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "gt",
+     "value": 0
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r05",
+    "r06",
+    "r08",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "int ge 0 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "ge",
+     "value": 0
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r06",
+    "r08",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "int lt 0 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "lt",
+     "value": 0
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r11"
+   ]
+  },
+  {
+   "name": "int gt -3 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "gt",
+     "value": -3
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r06",
+    "r08",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "int ne 0 with nulls",
+   "where": [
+    {
+     "field": "n",
+     "op": "ne",
+     "value": 0
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r04",
+    "r05",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r11",
+    "r12"
+   ]
+  },
+  {
+   "name": "int is_null",
+   "where": [
+    {
+     "field": "n",
+     "op": "is_null"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r07",
+    "r09"
+   ]
+  },
+  {
+   "name": "int in without null",
+   "where": [
+    {
+     "field": "n",
+     "op": "in",
+     "value": [
+      5,
+      7
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r05",
+    "r08",
+    "r12"
+   ]
+  },
+  {
+   "name": "int in with null",
+   "where": [
+    {
+     "field": "n",
+     "op": "in",
+     "value": [
+      5,
+      null
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r05",
+    "r07",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "int in only null",
+   "where": [
+    {
+     "field": "n",
+     "op": "in",
+     "value": [
+      null
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r07",
+    "r09"
+   ]
+  },
+  {
+   "name": "bool eq true with nulls",
+   "where": [
+    {
+     "field": "b",
+     "op": "eq",
+     "value": true
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r05",
+    "r07",
+    "r11"
+   ]
+  },
+  {
+   "name": "bool ne true with nulls",
+   "where": [
+    {
+     "field": "b",
+     "op": "ne",
+     "value": true
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r03",
+    "r04",
+    "r06",
+    "r08",
+    "r09",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "bool eq false with nulls",
+   "where": [
+    {
+     "field": "b",
+     "op": "eq",
+     "value": false
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r03",
+    "r06",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "bool ne false with nulls",
+   "where": [
+    {
+     "field": "b",
+     "op": "ne",
+     "value": false
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r04",
+    "r05",
+    "r07",
+    "r08",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "bool is_null",
+   "where": [
+    {
+     "field": "b",
+     "op": "is_null"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r04",
+    "r08",
+    "r10"
+   ]
+  },
+  {
+   "name": "text eq apple",
+   "where": [
+    {
+     "field": "t",
+     "op": "eq",
+     "value": "apple"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01"
+   ]
+  },
+  {
+   "name": "text ne apple keeps nulls",
+   "where": [
+    {
+     "field": "t",
+     "op": "ne",
+     "value": "apple"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r03",
+    "r04",
+    "r05",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r11",
+    "r12"
+   ]
+  },
+  {
+   "name": "text eq empty string is not null",
+   "where": [
+    {
+     "field": "t",
+     "op": "eq",
+     "value": ""
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r12"
+   ]
+  },
+  {
+   "name": "text ne empty string keeps nulls",
+   "where": [
+    {
+     "field": "t",
+     "op": "ne",
+     "value": ""
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r03",
+    "r04",
+    "r05",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "text is_null",
+   "where": [
+    {
+     "field": "t",
+     "op": "is_null"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02"
+   ]
+  },
+  {
+   "name": "text in without null",
+   "where": [
+    {
+     "field": "t",
+     "op": "in",
+     "value": [
+      "apple",
+      "zed"
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r07"
+   ]
+  },
+  {
+   "name": "text in with null",
+   "where": [
+    {
+     "field": "t",
+     "op": "in",
+     "value": [
+      "apple",
+      null
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02"
+   ]
+  },
+  {
+   "name": "text mixed case eq",
+   "where": [
+    {
+     "field": "t",
+     "op": "eq",
+     "value": "Apple"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r03"
+   ]
+  },
+  {
+   "name": "text mixed case lt lowercase a",
+   "where": [
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "a"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r03",
+    "r08",
+    "r12"
+   ]
+  },
+  {
+   "name": "text mixed case ge uppercase A lt lowercase b",
+   "where": [
+    {
+     "field": "t",
+     "op": "ge",
+     "value": "A"
+    },
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "b"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r08"
+   ]
+  },
+  {
+   "name": "text gt Zed",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "Zed"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r04",
+    "r05",
+    "r06",
+    "r07",
+    "r09",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "text lt U+E000",
+   "where": [
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "\ue000"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r07",
+    "r08",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "text le U+E000",
+   "where": [
+    {
+     "field": "t",
+     "op": "le",
+     "value": "\ue000"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r07",
+    "r08",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "text gt U+E000",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "\ue000"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r06",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "text ge U+E000",
+   "where": [
+    {
+     "field": "t",
+     "op": "ge",
+     "value": "\ue000"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r05",
+    "r06",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "text gt U+FFFD",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "\ufffd"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r11"
+   ]
+  },
+  {
+   "name": "text lt U+FFFD",
+   "where": [
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "\ufffd"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "text gt emoji",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "\ud83d\ude00"
+    }
+   ],
+   "sort": [],
+   "expect": []
+  },
+  {
+   "name": "text ge emoji",
+   "where": [
+    {
+     "field": "t",
+     "op": "ge",
+     "value": "\ud83d\ude00"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04"
+   ]
+  },
+  {
+   "name": "text lt emoji",
+   "where": [
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "\ud83d\ude00"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r11",
+    "r12"
+   ]
+  },
+  {
+   "name": "text gt astral U+10400",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "\ud801\udc00"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04"
+   ]
+  },
+  {
+   "name": "text lt astral U+10400",
+   "where": [
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "\ud801\udc00"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "text gt U+FF5E",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "\uff5e"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r06",
+    "r11"
+   ]
+  },
+  {
+   "name": "text lt U+FF5E",
+   "where": [
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "\uff5e"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r03",
+    "r05",
+    "r07",
+    "r08",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "text range between U+E000 and emoji",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "\ue000"
+    },
+    {
+     "field": "t",
+     "op": "lt",
+     "value": "\ud83d\ude00"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r06",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "text in emoji and U+E000",
+   "where": [
+    {
+     "field": "t",
+     "op": "in",
+     "value": [
+      "\ud83d\ude00",
+      "\ue000"
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r05"
+   ]
+  },
+  {
+   "name": "text eq emoji",
+   "where": [
+    {
+     "field": "t",
+     "op": "eq",
+     "value": "\ud83d\ude00"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04"
+   ]
+  },
+  {
+   "name": "text eq decomposed e-acute is normalized",
+   "where": [
+    {
+     "field": "t",
+     "op": "eq",
+     "value": "e\u0301"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r09"
+   ]
+  },
+  {
+   "name": "text ne decomposed e-acute is normalized",
+   "where": [
+    {
+     "field": "t",
+     "op": "ne",
+     "value": "e\u0301"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r03",
+    "r04",
+    "r05",
+    "r06",
+    "r07",
+    "r08",
+    "r10",
+    "r11",
+    "r12"
+   ]
+  },
+  {
+   "name": "text in decomposed e-acute is normalized",
+   "where": [
+    {
+     "field": "t",
+     "op": "in",
+     "value": [
+      "e\u0301",
+      "apple"
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r09"
+   ]
+  },
+  {
+   "name": "text gt decomposed e-acute is normalized",
+   "where": [
+    {
+     "field": "t",
+     "op": "gt",
+     "value": "e\u0301"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r05",
+    "r06",
+    "r10",
+    "r11"
+   ]
+  },
+  {
+   "name": "sort int asc",
+   "where": [],
+   "sort": [
+    {
+     "field": "n",
+     "direction": "asc"
+    }
+   ],
+   "expect": [
+    "r04",
+    "r11",
+    "r03",
+    "r10",
+    "r01",
+    "r05",
+    "r12",
+    "r08",
+    "r06",
+    "r02",
+    "r07",
+    "r09"
+   ]
+  },
+  {
+   "name": "sort int desc",
+   "where": [],
+   "sort": [
+    {
+     "field": "n",
+     "direction": "desc"
+    }
+   ],
+   "expect": [
+    "r06",
+    "r08",
+    "r01",
+    "r05",
+    "r12",
+    "r10",
+    "r03",
+    "r04",
+    "r11",
+    "r02",
+    "r07",
+    "r09"
+   ]
+  },
+  {
+   "name": "sort text asc",
+   "where": [],
+   "sort": [
+    {
+     "field": "t",
+     "direction": "asc"
+    }
+   ],
+   "expect": [
+    "r12",
+    "r03",
+    "r08",
+    "r01",
+    "r07",
+    "r09",
+    "r05",
+    "r10",
+    "r06",
+    "r11",
+    "r04",
+    "r02"
+   ]
+  },
+  {
+   "name": "sort text desc",
+   "where": [],
+   "sort": [
+    {
+     "field": "t",
+     "direction": "desc"
+    }
+   ],
+   "expect": [
+    "r04",
+    "r11",
+    "r06",
+    "r10",
+    "r05",
+    "r09",
+    "r07",
+    "r01",
+    "r08",
+    "r03",
+    "r12",
+    "r02"
+   ]
+  },
+  {
+   "name": "sort int asc then text desc",
+   "where": [],
+   "sort": [
+    {
+     "field": "n",
+     "direction": "asc"
+    },
+    {
+     "field": "t",
+     "direction": "desc"
+    }
+   ],
+   "expect": [
+    "r04",
+    "r11",
+    "r03",
+    "r10",
+    "r05",
+    "r01",
+    "r12",
+    "r08",
+    "r06",
+    "r09",
+    "r07",
+    "r02"
+   ]
+  },
+  {
+   "name": "sort int desc then text asc",
+   "where": [],
+   "sort": [
+    {
+     "field": "n",
+     "direction": "desc"
+    },
+    {
+     "field": "t",
+     "direction": "asc"
+    }
+   ],
+   "expect": [
+    "r06",
+    "r08",
+    "r12",
+    "r01",
+    "r05",
+    "r10",
+    "r03",
+    "r11",
+    "r04",
+    "r07",
+    "r09",
+    "r02"
+   ]
+  },
+  {
+   "name": "sort text desc after ne filter",
+   "where": [
+    {
+     "field": "t",
+     "op": "ne",
+     "value": "apple"
+    }
+   ],
+   "sort": [
+    {
+     "field": "t",
+     "direction": "desc"
+    }
+   ],
+   "expect": [
+    "r04",
+    "r11",
+    "r06",
+    "r10",
+    "r05",
+    "r09",
+    "r07",
+    "r08",
+    "r03",
+    "r12",
+    "r02"
+   ]
+  },
+  {
+   "name": "sort int asc after ne filter",
+   "where": [
+    {
+     "field": "n",
+     "op": "ne",
+     "value": 5
+    }
+   ],
+   "sort": [
+    {
+     "field": "n",
+     "direction": "asc"
+    }
+   ],
+   "expect": [
+    "r04",
+    "r11",
+    "r03",
+    "r10",
+    "r08",
+    "r06",
+    "r02",
+    "r07",
+    "r09"
+   ]
+  },
+  {
+   "name": "money eq by value",
+   "where": [
+    {
+     "field": "m",
+     "op": "eq",
+     "value": "2.5"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r05"
+   ]
+  },
+  {
+   "name": "money ne by value",
+   "where": [
+    {
+     "field": "m",
+     "op": "ne",
+     "value": "2.50"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r02",
+    "r03",
+    "r04",
+    "r06",
+    "r07",
+    "r08",
+    "r09",
+    "r10",
+    "r11",
+    "r12"
+   ]
+  },
+  {
+   "name": "money gt orders as numbers",
+   "where": [
+    {
+     "field": "m",
+     "op": "gt",
+     "value": "10"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r03",
+    "r06",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "money lt zero",
+   "where": [
+    {
+     "field": "m",
+     "op": "lt",
+     "value": "0"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04",
+    "r11"
+   ]
+  },
+  {
+   "name": "money ge",
+   "where": [
+    {
+     "field": "m",
+     "op": "ge",
+     "value": "29.99"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r03",
+    "r06",
+    "r09",
+    "r12"
+   ]
+  },
+  {
+   "name": "money le a finer literal",
+   "where": [
+    {
+     "field": "m",
+     "op": "le",
+     "value": "2.505"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r04",
+    "r05",
+    "r08",
+    "r11"
+   ]
+  },
+  {
+   "name": "money in with a null",
+   "where": [
+    {
+     "field": "m",
+     "op": "in",
+     "value": [
+      "2.5",
+      "29.99",
+      null
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r05",
+    "r06",
+    "r07",
+    "r12"
+   ]
+  },
+  {
+   "name": "money sort asc",
+   "where": [],
+   "sort": [
+    {
+     "field": "m",
+     "direction": "asc"
+    }
+   ],
+   "expect": [
+    "r11",
+    "r04",
+    "r08",
+    "r01",
+    "r05",
+    "r10",
+    "r06",
+    "r12",
+    "r03",
+    "r09",
+    "r02",
+    "r07"
+   ]
+  },
+  {
+   "name": "money sort desc",
+   "where": [],
+   "sort": [
+    {
+     "field": "m",
+     "direction": "desc"
+    }
+   ],
+   "expect": [
+    "r09",
+    "r03",
+    "r06",
+    "r12",
+    "r10",
+    "r01",
+    "r05",
+    "r08",
+    "r04",
+    "r11",
+    "r02",
+    "r07"
+   ]
+  },
+  {
+   "name": "decimal eq by value",
+   "where": [
+    {
+     "field": "r",
+     "op": "eq",
+     "value": "0.08"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r05",
+    "r11"
+   ]
+  },
+  {
+   "name": "decimal gt",
+   "where": [
+    {
+     "field": "r",
+     "op": "gt",
+     "value": "0.08"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r02",
+    "r06",
+    "r07",
+    "r10",
+    "r12"
+   ]
+  },
+  {
+   "name": "decimal lt zero",
+   "where": [
+    {
+     "field": "r",
+     "op": "lt",
+     "value": "0"
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r04"
+   ]
+  },
+  {
+   "name": "decimal in",
+   "where": [
+    {
+     "field": "r",
+     "op": "in",
+     "value": [
+      "0.0825",
+      "12"
+     ]
+    }
+   ],
+   "sort": [],
+   "expect": [
+    "r01",
+    "r06",
+    "r07"
+   ]
+  },
+  {
+   "name": "decimal sort desc",
+   "where": [],
+   "sort": [
+    {
+     "field": "r",
+     "direction": "desc"
+    }
+   ],
+   "expect": [
+    "r12",
+    "r06",
+    "r10",
+    "r02",
+    "r01",
+    "r07",
+    "r05",
+    "r11",
+    "r09",
+    "r04",
+    "r03",
+    "r08"
+   ]
+  }
+ ],
+ "decimals": [
+  "m",
+  "r"
+ ]
+}

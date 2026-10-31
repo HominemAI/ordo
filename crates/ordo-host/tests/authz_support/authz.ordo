@@ -1,0 +1,97 @@
+# The authorization matrix's fixture program (`tests/authz_matrix.rs`).
+#
+# One of each surface the matrix walks:
+#
+#   notes        rows behind an owner guard (`acl`): the creator's alone
+#                until shared, by a grant, a share or a share link
+#   files        a note's files: a plain blob, a sealed blob, a private blob
+#   posters      public rows in the deployment's own space, with a public file
+#
+# Ops: reads, writes, a delete, two `download` reads, a public read.
+# Every authored write is delegable by default; `deleteNote` is a delete and
+# is not (`ORDO_DELEGABLE_OPS` is unset), so the agent rows tell them apart.
+
+domain authz @ 0.1.0
+
+entity notes {
+  title: text
+  body:  text = ""
+  created: datetime
+  acl (read, write, admin)
+}
+
+entity files {
+  note -> notes owned
+  name: text
+  plain:  blob?
+  vault:  blob? sealed
+  secret: blob? private
+}
+
+entity posters {
+  title: text
+  art:   blob?
+  public
+}
+
+op createNote($title: text, $body: text, $created: datetime) =
+  set notes { title: $title, body: $body, created: $created }
+
+op editNote($id: id, $rev: int, $title: text) =
+  set notes { id: $id, rev: $rev, title: $title }
+
+op deleteNote($id: id) =
+  del notes { id: $id }
+
+op myNotes unbounded download =
+  notes[id, rev, title, body, created]
+  sort -created
+
+op noteById($id: id) =
+  notes(id == $id)[id, rev, title, body]
+  take 1
+
+op notesMatching($p: text) =
+  notes(title matches $p)[id, title]
+  take 50
+
+op addFile($note: id, $name: text) =
+  set files { note: $note, name: $name }
+
+op myFiles unbounded download =
+  files[id, rev, note, name, plain, vault, secret]
+  sort name
+
+op addPoster($title: text) =
+  set posters { title: $title }
+
+op posterList public =
+  posters[id, title, art]
+  sort title
+  take 50
+
+# Typed fields for the injection rows: money and decimal places, an opaque
+# document, a bounded take and a paged listing. Rows have no owner guard;
+# the rows only probe what the door refuses.
+entity items {
+  label: text
+  price: money(2)
+  rate:  decimal(4)
+  tags:  json = {}
+}
+
+op createItem($label: text, $price: money(2), $rate: decimal(4), $tags: json) =
+  set items { label: $label, price: $price, rate: $rate, tags: $tags }
+
+op priceAtMost($cap: money(2)) =
+  items(price <= $cap)[id, label, price]
+  take 50
+
+op topN($n: int <= 50) =
+  items[id, label]
+  sort label
+  take $n
+
+op allItems =
+  items[id, label, price, rate, tags]
+  sort label

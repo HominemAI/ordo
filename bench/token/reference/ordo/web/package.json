@@ -1,0 +1,27 @@
+{
+  "name": "team-tasks-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "gen": "sh gen.sh"
+  },
+  "dependencies": {
+    "@hominemai/ordo-react": "file:../.bench/pkgs/ordo-react.tgz",
+    "@hominemai/ordo-sdk": "file:../.bench/pkgs/ordo-sdk.tgz",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.9.3",
+    "vite": "6.4.5"
+  }
+}

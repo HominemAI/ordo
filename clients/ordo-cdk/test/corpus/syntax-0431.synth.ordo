@@ -1,0 +1,17 @@
+op createOrder($loc: id, $opened: date, $descr: text, $priority: int <= 5) =
+  set workOrders { location: $loc, opened: $opened, descr: $descr, priority: $priority }
+
+op assignVendor($order: id, $rev: int, $vendor: id) =
+  set workOrders { id: $order, rev: $rev, vendor: $vendor, status: "scheduled" }
+
+op ingestReading($meter: id, $at: datetime, $value: int) =
+  set readings { meter: $meter, at: $at, value: $value }
+
+op closeStale =
+  set workOrders(status == "open" and opened <= 2025-12-31) { status: "void" }
+
+op completeItem($item: id) =
+  set workItems { id: $item, done: true }
+
+op raiseAlert($kind: text, $key: text, $title: text, $sev: text, $today: date) =
+  set alerts { kind: $kind, key: $key, title: $title, severity: $sev, status: "active", raised: $today }

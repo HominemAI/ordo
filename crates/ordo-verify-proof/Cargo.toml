@@ -1,0 +1,33 @@
+[package]
+name = "ordo-verify-proof"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ordo-verify-proof"
+path = "src/main.rs"
+
+# **This list is the argument.** A verifier a third party runs "with no access
+# to the deployment" is a claim, and the way to make it checkable is to build
+# a binary that *cannot* reach one: no `ordo-exec`, so no Postgres driver, no
+# pool, no connection string; no `ordo-egress` and no HTTP client of any kind,
+# so no network; no `ordo-crypto`, so no `KeyProvider`. What is left is
+# arithmetic over bytes the caller supplied on stdin or in a file.
+#
+# `tests/offline.rs` asserts this by parsing the manifest, and the assertion
+# is the deliverable: a reviewer confirming "this cannot phone home" reads one
+# list rather than auditing a call graph. It is the same discipline
+# `ordo-egress` uses in the opposite direction.
+[dependencies]
+# The chain's own types and its Ed25519 verifier. `ordo-commandlog` is itself
+# a pure crate -- `ed25519-dalek` and `sha2`, no async, no driver -- so
+# depending on it does not smuggle a runtime in. This is also the *point*:
+# the verifier checks signatures with the same `CheckpointVerifier` the
+# platform signs with, so a disagreement between them is impossible rather
+# than merely unlikely.
+ordo-commandlog = { path = "../ordo-commandlog" }
+serde_json = "1"
+
+[lints]
+workspace = true

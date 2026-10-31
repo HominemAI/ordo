@@ -1,0 +1,4 @@
+op latestReadings unbounded =                            # greatest-n-per-group
+  meters[kind, unit.name]  readings[at, value]
+  sort -readings.at
+  take[meters.id] 1

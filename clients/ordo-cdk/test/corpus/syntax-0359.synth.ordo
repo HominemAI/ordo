@@ -1,0 +1,3 @@
+op expiringSoon =
+  leases(status == "active" and end is not null and end <= 2026-12-31)[start, end, rent, unit.name, unit.property.name]
+    sort end

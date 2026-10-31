@@ -1,0 +1,52 @@
+[package]
+name = "ordo-identity-service"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The identity service for deployment people (`docs/plan-identity-service.md`,
+# checklist item 18o): its own server, its own Postgres database, its own
+# signing keys. It signs the short tokens the door and the console verify.
+
+[[bin]]
+name = "ordo-identity-service"
+path = "src/main.rs"
+
+[dependencies]
+# The same HTTP stack the door and the console serve with.
+axum = "0.8"
+# The database client and its one typed error (`PoolError`), opened with
+# `Pool::connect_own` so this database gets none of a deployment's tables.
+# Also the one reader of a database URL (`ordo_exec::dburl`).
+ordo-exec = { path = "../ordo-exec" }
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+# The deployment token's claims, signer and verifier, the sealing key file,
+# the clock and origins, shared with the console and the door.
+ordo-identity = { path = "../ordo-identity" }
+# The audit chain's hash and signed checkpoints.
+ordo-commandlog = { path = "../ordo-commandlog" }
+# HMAC for the machine sign-in challenge.
+ordo-crypto = { path = "../ordo-crypto" }
+ed25519-dalek = "2"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+
+# The unix user a host command runs as, for its audit row, through a safe
+# wrapper: the workspace forbids `unsafe`.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
+
+[dev-dependencies]
+ordo-identity = { path = "../ordo-identity", features = ["test-support"] }
+# `tests/import.rs` makes a console database with the console's own
+# migrations and sign-up, so the import is tested against the real rows.
+ordo-console = { path = "../ordo-console" }
+# `tests/import.rs` builds the service's settings the way the one image's
+# supervisor does, from the console's alone, to prove the upgrade.
+ordo-supervisor = { path = "../ordo-supervisor" }
+tower ={ version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

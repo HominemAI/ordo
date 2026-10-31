@@ -1,0 +1,7 @@
+entity maintenanceRequests {
+  unit -> units
+  descr: text
+  filed: date
+  access read unit.property.propertiesAccess(member == $caller)
+  access write open
+}

@@ -1,0 +1,3 @@
+op orderCostRollup($order: id) =
+  workItems(workOrder == $order)[descr, cost: coalesce(cost, 0)]
+    reduce { items: count, est: sum cost }

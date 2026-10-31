@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>settled · lean · open: what the marks mean</title>
+<style>
+:root{
+  --ink:#14161a; --paper:#fbfaf7; --line:#e3ded4; --mut:#7a756b;
+  --settled:#2e7d5b; --lean:#b07a2a; --open:#8a5fb0;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:880px;margin:0 auto;padding:48px 24px 90px}
+h1{font-size:clamp(28px,4.5vw,40px);line-height:1.1;margin:0 0 8px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--mut);margin:0 0 36px;max-width:60ch}
+h2{font-size:21px;margin:44px 0 10px;letter-spacing:-.01em}
+p{max-width:68ch;margin:0 0 14px}
+code{font-family:var(--mono);font-size:.88em;background:#f1ede4;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.mark{font-family:var(--mono);font-weight:600;border-radius:5px;padding:1px 8px;font-size:.85em}
+.m-s{color:var(--settled);background:#e6f2ec;border:1px solid #bcdccd}
+.m-l{color:var(--lean);background:#f7ecd9;border:1px solid #e8d3ab}
+.m-o{color:var(--open);background:#efe7f6;border:1px solid #d8c5ea}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:22px 0 8px}
+.card{border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px 18px}
+.card h3{margin:0 0 6px;font-size:16px;display:flex;align-items:center;gap:8px}
+.card p{font-size:14.5px;color:#3c3a35;margin:0 0 8px}
+.card .owe{font-size:13px;font-family:var(--mono);padding-top:8px;border-top:1px dashed var(--line)}
+.owe b{font-weight:600}
+figure{margin:26px 0;border:1px solid var(--line);border-radius:10px;background:#fff;padding:18px;overflow-x:auto}
+figcaption{font-size:13px;color:var(--mut);margin-top:10px;max-width:70ch}
+.ex{border-left:3px solid var(--line);padding:2px 0 2px 16px;margin:16px 0}
+.ex .who{font-family:var(--mono);font-size:12.5px;color:var(--mut);letter-spacing:.06em;text-transform:uppercase}
+table{border-collapse:collapse;width:100%;font-size:14.5px;margin:14px 0}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
+.pull{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:24px 0;max-width:70ch}
+.pull b{display:block;margin-bottom:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>What <span class="mark m-l">[lean]</span> actually means</h1>
+<p class="sub">The three status marks that appear on every rule in the spec documents,
+what each one obligates us to build, and the one subtlety that has repeatedly
+decided real work.</p>
+
+<h2>The three marks, in one sentence each</h2>
+<div class="cards">
+  <div class="card">
+    <h3><span class="mark m-s">[settled]</span> a promise</h3>
+    <p>This rule is decided, final, and the implementation is <i>wrong</i> until
+    it matches. The conformance corpus transcribes settled rules into executing
+    tests; a settled rule with no code is a tracked debt.</p>
+    <div class="owe"><b>We owe:</b> the build, exactly as written.</div>
+  </div>
+  <div class="card">
+    <h3><span class="mark m-l">[lean]</span> a sketch we like</h3>
+    <p>A direction we believe in, written down so it isn&rsquo;t lost. The
+    details are drafts. Nobody may build against it, cite it as authority, or
+    file its absence as a bug.</p>
+    <div class="owe"><b>We owe:</b> nothing. Not a line.</div>
+  </div>
+  <div class="card">
+    <h3><span class="mark m-o">[open]</span> a question</h3>
+    <p>The document knows a decision is needed and refuses to fake one. Open
+    items collect in the decisions board until someone (you) rules.</p>
+    <div class="owe"><b>We owe:</b> a ruling first, then maybe a build.</div>
+  </div>
+</div>
+
+<figure>
+<svg viewBox="0 0 820 240" width="100%" role="img" aria-label="obligation ladder">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <rect x="20"  y="30" width="220" height="130" rx="10" fill="#e6f2ec" stroke="#bcdccd"/>
+  <rect x="300" y="30" width="220" height="130" rx="10" fill="#f7ecd9" stroke="#e8d3ab"/>
+  <rect x="580" y="30" width="220" height="130" rx="10" fill="#efe7f6" stroke="#d8c5ea"/>
+  <text x="130" y="62"  text-anchor="middle" font-size="17" font-weight="600" fill="#2e7d5b">[settled]</text>
+  <text x="410" y="62"  text-anchor="middle" font-size="17" font-weight="600" fill="#b07a2a">[lean]</text>
+  <text x="690" y="62"  text-anchor="middle" font-size="17" font-weight="600" fill="#8a5fb0">[open]</text>
+  <text x="130" y="92"  text-anchor="middle" font-size="13" fill="#14161a">code MUST match</text>
+  <text x="130" y="112" text-anchor="middle" font-size="13" fill="#14161a">tests transcribe it</text>
+  <text x="130" y="132" text-anchor="middle" font-size="13" fill="#14161a">absence = tracked debt</text>
+  <text x="410" y="92"  text-anchor="middle" font-size="13" fill="#14161a">may NOT be built against</text>
+  <text x="410" y="112" text-anchor="middle" font-size="13" fill="#14161a">not authority, not a bug</text>
+  <text x="410" y="132" text-anchor="middle" font-size="13" fill="#14161a">owes nothing</text>
+  <text x="690" y="92"  text-anchor="middle" font-size="13" fill="#14161a">needs a ruling</text>
+  <text x="690" y="112" text-anchor="middle" font-size="13" fill="#14161a">lands on your board</text>
+  <text x="690" y="132" text-anchor="middle" font-size="13" fill="#14161a">then re-marked</text>
+  <path d="M690 160 v28 h-280" fill="none" stroke="#7a756b" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+  <path d="M410 160 v28 h-280 v-18" fill="none" stroke="#7a756b" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+  <text x="545" y="205" text-anchor="middle" font-size="12.5" fill="#7a756b">a ruling promotes: open → lean or settled · lean → settled (or deleted)</text>
+</svg>
+<figcaption>The marks are an obligation ladder. Only the leftmost box creates
+work; the other two exist precisely so the spec can hold ideas and questions
+<i>without</i> creating work. That keeps &ldquo;settled&rdquo; meaning
+something.</figcaption>
+</figure>
+
+<h2>Why <span class="mark m-l">[lean]</span> exists at all</h2>
+<p>A spec that may only contain finished decisions goes silent about the
+future, and then the future gets designed ad-hoc in code. A spec where
+everything written is binding turns every sketch into an accidental promise.
+<code>[lean]</code> is the escape from that trap: a place to write
+&ldquo;here is the shape we currently like&rdquo; where it can be read,
+criticized, and improved while remaining <b>legally nothing</b>. The build
+gate is real: the parser refuses lean spellings, the checklist files lean
+items as <i>not owed</i>, and an auditor finding lean-with-no-code finds
+nothing wrong.</p>
+
+<div class="pull"><b>The one-line test</b>
+If deleting the paragraph tomorrow would break a promise to anyone, it was
+never <code>[lean]</code>.</div>
+
+<h2>The subtlety that keeps deciding real work</h2>
+<p>A mark applies to a <b>sentence</b>, not a section, and one construct can
+carry different marks on its <i>semantics</i> and its <i>spelling</i>. This
+split has settled several disputes in this project, so it deserves its own
+picture:</p>
+
+<figure>
+<svg viewBox="0 0 820 210" width="100%" role="img" aria-label="spelling vs semantics">
+  <rect x="30" y="25" width="360" height="160" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <rect x="430" y="25" width="360" height="160" rx="10" fill="#fff" stroke="#e3ded4"/>
+  <text x="210" y="52" text-anchor="middle" font-size="14" font-weight="600">allocate( )</text>
+  <text x="610" y="52" text-anchor="middle" font-size="14" font-weight="600">routines &amp; triggers</text>
+  <rect x="55"  y="70" width="140" height="34" rx="6" fill="#e6f2ec" stroke="#bcdccd"/>
+  <rect x="225" y="70" width="140" height="34" rx="6" fill="#f7ecd9" stroke="#e8d3ab"/>
+  <text x="125" y="91" text-anchor="middle" font-size="12.5" fill="#2e7d5b">semantics settled</text>
+  <text x="295" y="91" text-anchor="middle" font-size="12.5" fill="#b07a2a">call site lean</text>
+  <text x="210" y="130" text-anchor="middle" font-size="12" fill="#7a756b">→ the MATH was owed and built &amp; golden-tested,</text>
+  <text x="210" y="148" text-anchor="middle" font-size="12" fill="#7a756b">even while no legal caller existed in the grammar</text>
+  <rect x="455" y="70" width="140" height="34" rx="6" fill="#e6f2ec" stroke="#bcdccd"/>
+  <rect x="625" y="70" width="140" height="34" rx="6" fill="#f7ecd9" stroke="#e8d3ab"/>
+  <text x="525" y="91" text-anchor="middle" font-size="12.5" fill="#2e7d5b">runtime settled</text>
+  <text x="695" y="91" text-anchor="middle" font-size="12.5" fill="#b07a2a">spelling lean</text>
+  <text x="610" y="130" text-anchor="middle" font-size="12" fill="#7a756b">→ the ENGINE was owed and built (queue, clock,</text>
+  <text x="610" y="148" text-anchor="middle" font-size="12" fill="#7a756b">delivery) while `routine`/`when` still don&rsquo;t parse</text>
+</svg>
+<figcaption>Reading marks sentence-by-sentence is what let both of these ship
+their settled half without waiting for, or accidentally freezing, their
+lean half.</figcaption>
+</figure>
+
+<h2>The cases you&rsquo;ve already ruled on, re-read through the marks</h2>
+<table>
+<tr><th>Construct</th><th>Settled part (built)</th><th>Lean part (not owed)</th></tr>
+<tr><td><code>allocate(total, weights, mode)</code></td>
+    <td>the arithmetic: exact split, parts sum to total, four modes, both venues agree</td>
+    <td>the call site: <code>each</code> over a list parameter is lean, so the function is built and golden-tested with no legal caller yet</td></tr>
+<tr><td>triggers</td>
+    <td>the runtime: event derivation, listener matching, clock, delivery, R-G20&rsquo;s authorization bound</td>
+    <td>the declaration spelling: <code>-&gt; run x</code> names a routine, and every <i>routine</i> spelling is lean, so <code>when&hellip;</code> deliberately does not parse yet</td></tr>
+<tr><td><code>std.E.rollup</code>, <code>under</code></td>
+    <td>none</td>
+    <td>wholly lean: derivable someday, owed by nobody, absent from the corpus&rsquo;s NOT_RUN reasons</td></tr>
+<tr><td>generated UI</td>
+    <td>§1–§4: descriptors, action discovery, CAS-by-default, headless runtime</td>
+    <td>§5&rsquo;s block set and layout hints, explicitly illustrative, which is why the Watermelon skin can exist without a spec change</td></tr>
+</table>
+
+<h2>Why this protects you specifically</h2>
+<p>Every mark is a budget decision you didn&rsquo;t have to sit in a meeting
+for. <span class="mark m-s">[settled]</span> is where engineering time is
+already committed; <span class="mark m-l">[lean]</span> is R&amp;D parked at
+zero cost; <span class="mark m-o">[open]</span> is the queue of things only
+you can move. When an audit says &ldquo;settled-but-unbuilt,&rdquo; that is a
+real debt. When something lean is unbuilt, that is the system working. And
+when a build agent proposes implementing a lean paragraph &ldquo;while
+they&rsquo;re in there&rdquo;, the refusal is automatic, because shipping a
+draft freezes it, and the whole point of the mark is that drafts stay
+cheap to change.</p>
+
+<p style="color:var(--mut);font-size:13.5px;margin-top:40px">Companion to
+<code>docs/decisions.html</code>. Marks live in the spec documents
+(<code>definition-language.md</code> and friends); rulings that move a mark
+are recorded in <code>docs/corpus-rulings.md</code> with their reasoning.</p>
+</div>
+</body>
+</html>

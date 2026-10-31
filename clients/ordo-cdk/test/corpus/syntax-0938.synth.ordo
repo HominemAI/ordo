@@ -1,0 +1,21 @@
+entity notices {
+  title: text public
+  body: text public
+  postedBy: text
+}
+
+entity noticeFiles {
+  notice -> notices owned
+  file: blob? public
+  public
+}
+
+op noticeBoard public =
+  notices[title, body]
+    sort title
+    take 50
+
+op noticeAuthors =
+  notices[title, postedBy]
+    sort title
+    take 50

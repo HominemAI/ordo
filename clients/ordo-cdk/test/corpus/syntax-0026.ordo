@@ -1,0 +1,155 @@
+domain estate @ 1.0.0
+
+entity properties {
+  name:     text
+  address:  text        sealed
+  acquired: date
+}
+
+entity locations {                       # building / floor / room
+  property -> properties   owned         # a location is meaningless without its property
+  parent   -> locations?   tree owned    # hierarchy AND composition
+  name:     text
+  kind:     text                         # "building" | "floor" | "room" | "area"
+  index (property, kind)
+}
+
+entity units {                           # rentable unit
+  property -> properties   owned
+  location -> locations?                 # association: unit sits somewhere
+  name:     text
+  unique (property, name)
+}
+
+entity people {
+  name:  text          sealed
+  email: text?         sealed indexed unique
+  phone: text?         sealed
+}
+
+entity leases {
+  unit ->  units                         # association: lease references, never owns
+  start:   date
+  end:     date?
+  rent:    money        sealed
+  status:  text = "active"               # "active" | "ended" | "pending"
+}
+
+entity leaseParties {                    # pure link: lease <-> person, M2M
+  lease  -> leases    owned
+  person -> people    owned
+  role:   text = "tenant"                # "tenant" | "guarantor"
+  unique (lease, person)
+}
+
+entity trades { name: text unique }      # "plumbing", "electrical", ...
+
+entity vendors {
+  name:   text
+  email:  text?        sealed
+  active: bool = true
+}
+
+entity vendorTrades {                    # pure link: vendor <-> trade
+  vendor -> vendors   owned
+  trade  -> trades    owned
+  unique (vendor, trade)
+}
+
+entity workOrders {
+  location -> locations                  # association
+  vendor   -> vendors?                   # association, assigned later
+  opened:   date
+  status:   text = "open"                # "open" | "scheduled" | "done" | "void"
+  priority: int  = 3                     # 1 urgent .. 5 someday
+  descr:    text        sealed
+}
+
+entity workItems {
+  workOrder -> workOrders   owned
+  descr:     text           sealed
+  cost:      money?         sealed
+  done:      bool = false
+}
+
+entity inspections {
+  unit      -> units
+  workOrder -> workOrders
+  at:        date
+}
+
+entity buildings {
+  property -> properties   owned
+  name:     text
+  seats:    int                          # capacity
+  used:     int = 0                      # maintained counter
+  check used <= seats                    # row-scoped: this row's own columns
+  check used >= 0
+  # What `check` CANNOT do: aggregate, count, or test existence over a
+  # collection. "at most 10 open work orders per building" is a question about
+  # OTHER rows, not about this row's neighbours, so it stays rule-tier: a
+  # maintained counter feeding a row-scoped check, exactly as `used` does here.
+  # The increment and the insert go in one atomic op; the check aborts the
+  # group on violation, so the seat never oversells and no `require`-style op
+  # precondition is needed.
+}
+
+entity invoices {
+  vendor -> vendors
+  number: text
+  issued: date
+  total:  money         sealed
+  unique (vendor, number)
+}
+
+entity invoiceLines {
+  invoice  -> invoices     owned
+  workItem -> workItems?                 # association back to the work
+  amount:   money           sealed
+}
+
+entity payments {
+  invoice -> invoices
+  paid:    date
+  amount:  money        sealed
+}
+
+entity meters {
+  unit -> units   owned
+  kind: text                             # "water" | "power" | "gas"
+}
+
+entity readings {
+  meter -> meters
+  at:    datetime
+  value: int
+  unique (meter, at)                     # ingestion identity
+}
+
+entity devices {
+  location   -> locations
+  kind:       text                       # "camera" | "door" | "leak"
+  externalId: text unique
+  armed:      bool = false
+}
+
+entity events {
+  device -> devices
+  at:     datetime
+  kind:   text                           # "motion" | "open" | "leak" | "offline"
+}
+
+entity alerts {
+  kind:     text
+  key:      text unique                  # upsert-by-key lifecycle
+  severity: text = "warning"             # "info" | "warning" | "critical"
+  title:    text        sealed
+  status:   text = "active"              # "active" | "resolved" | "dismissed"
+  raised:   date
+}
+
+entity pages {
+  title:    text
+  settings: json = {}                    # a JSON document, stored as jsonb
+  draft:    json?                        # absent until written
+}

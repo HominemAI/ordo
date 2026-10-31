@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["vitest/globals", "node", "vite/client"],
+
+    "strict": true,
+    // OFF here, and ON in every other package in this repository.
+    //
+    // `f` is a TOTAL proxy: every property access answers with a path, by
+    // construction, because a schema-free builder cannot know a deployment's
+    // field names and the typed `schema.ts` overlay adds them without
+    // removing the fallback. Typing it as an index signature is the only way
+    // TypeScript can express that, and this flag would then make every
+    // `f.total` a `Value | undefined` — so the package's own code, and every
+    // program an author writes with it, would carry a `!` on every field
+    // reference. A blanket non-null assertion is strictly worse than the flag
+    // being off: it silences the check everywhere instead of here.
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true
+  },
+  "include": ["src", "test", "vite.config.ts"]
+}

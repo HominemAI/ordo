@@ -1,0 +1,15 @@
+[package]
+name = "ordo-secevent"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+ordo-identity = { path = "../ordo-identity" }
+sha2 = "0.10"
+
+[lints]
+workspace = true

@@ -1,0 +1,656 @@
+# Every push to `main` and every `v*` tag builds, smokes and pushes the
+# `amd64` image of each deployable, and no other architecture (owner ruling,
+# 2026-09-29: "Only build x64", arm64 "can always add it later if it is
+# requested"). This replaces cadence B of 2026-09-19, which added `arm64` on
+# a tag.
+#
+# Secrets required: NONE. GHCR authenticates with the automatic
+# `GITHUB_TOKEN`, which is why GHCR is the registry (`docs/plan-ci-images.md`
+# §3.4). If this ever moves to Docker Hub or ECR it acquires a secret and a
+# rotation obligation; that is a real cost and should be paid deliberately.
+#
+# Deliberately NOT on pull_request. See `docs/plan-ci-images.md` §6.1: a
+# three-image multi-arch build on every PR costs more runner-minutes than
+# the entire test suite and answers a question ("does it containerise?")
+# that changes on roughly none of them.
+
+name: Images
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      push:
+        description: 'Push to GHCR (unchecked = build and smoke only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  # For build provenance attestation. Not a secret — a short-lived OIDC
+  # token minted per run.
+  id-token: write
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # `github.repository` carries this repo's actual case (`HominemAI/ordo`),
+  # and the registry API rejects an uppercase character anywhere in an
+  # image name — every push below would fail on the owner's own capital
+  # letters without this. One tiny job rather than three copies of the same
+  # `tr` in each image job.
+  prep:
+    name: Repository name (lowercase, for GHCR)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 2
+    outputs:
+      repo_lc: ${{ steps.lc.outputs.repo }}
+    steps:
+      - id: lc
+        run: echo "repo=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+  # ── The operator image ──────────────────────────────────────────────────
+  #
+  # First because it is the only one buildable against the tree as it stands.
+
+  cli:
+    name: ordo-cli
+    needs: prep
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Only needed to push, so gated the same as the push step below — a
+      # smoke-only run (manual dispatch with the checkbox unticked) never
+      # authenticates to the registry at all.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tag strategy, and why it looks like this.
+      #
+      # `deploying.md` §7 makes the artifact's VERSION HASH the identity of
+      # a deployed program: `ordo apply` stores under it, `$activations`
+      # references it, rollback names it. An image should rhyme with that,
+      # so the identity of an image here is its CONTENT DIGEST
+      # (`sha256:…`), surfaced in the run summary below and the only thing
+      # a deployment manifest should ever name.
+      #
+      # Everything metadata-action produces is a POINTER to a digest, not
+      # an identity:
+      #   sha-<short>  immutable in practice, and the one a human can trace
+      #                back to a commit. Deploy by digest; find the commit
+      #                by this.
+      #   <branch>     moves. For pulling "whatever main is" by hand.
+      #   v1.2.3       moves only if someone force-pushes a tag, which is
+      #                exactly why it is still not the identity.
+      #   latest       a convenience for `docker run`, on the default
+      #                branch only. Never in a deployment manifest.
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prep.outputs.repo_lc }}/ordo-cli
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Stage 1: build ONE architecture and load it into the local daemon.
+      #
+      # This is the whole reason the build is split in two. A multi-arch
+      # buildx build cannot be `docker load`ed (the daemon holds one
+      # platform per tag) and an arm64 image cannot be executed on an amd64
+      # runner without QEMU indirection that makes a boot failure ambiguous.
+      # So: build amd64, load it, RUN it, and only then build the manifest
+      # list — which reuses every layer from the cache below and costs
+      # little.
+      - name: Build (amd64, for the smoke test)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.cli
+          platforms: linux/amd64
+          target: runtime
+          load: true
+          tags: ordo-cli:smoke
+          cache-from: type=gha,scope=image-cli
+          cache-to: type=gha,mode=max,scope=image-cli
+
+      # An image that builds but cannot do its job must not publish.
+      #
+      # `ordo check` parses, binds and reports on a program and touches no
+      # database, so this exercises the compiler front end inside the
+      # runtime base — which is the thing a wrong base image breaks. The
+      # program is the real market fixture the conformance corpus is built
+      # on, not a hello-world.
+      - name: Smoke — the CLI compiles the market fixture inside the image
+        run: |
+          set -euo pipefail
+          # Copied in, not bind-mounted: on the self-hosted runner the
+          # Docker daemon runs apart from the job's filesystem, so a
+          # `-v $PWD/...` mount arrives empty ("/fx/market.ordo: No such
+          # file"). `docker cp` sends the bytes through the daemon's API.
+          cid=$(docker create ordo-cli:smoke check /fx/market.ordo --expect-fail giftOrders)
+          docker cp crates/ordo-conformance/fixtures/. "$cid":/fx
+          docker start -a "$cid"
+          docker rm "$cid" >/dev/null
+          # Usage on no arguments is exit 2 (`crates/ordo-cli/src/main.rs`).
+          # Asserting it proves the ENTRYPOINT is the binary rather than a
+          # shell that swallowed the arguments.
+          set +e
+          docker run --rm ordo-cli:smoke >/dev/null 2>&1
+          code=$?
+          set -e
+          [ "$code" -eq 2 ] || { echo "bare invocation exited $code, expected 2"; exit 1; }
+
+      # amd64 only, on a push to main and on a v* tag alike.
+      - name: Build and push
+        id: push
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.cli
+          platforms: linux/amd64
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=image-cli
+          cache-to: type=gha,mode=max,scope=image-cli
+          # SLSA build provenance, generated by BuildKit and attached to the
+          # image. `mode=max` records the full build definition, including
+          # which base image digest was used — which is the question you
+          # actually have when a CVE lands on a base.
+          provenance: mode=max
+          # SBOM, same attachment mechanism. RECOMMENDED, not mandated:
+          # both add a few seconds and one more artifact per push, and both
+          # are how someone answers "is this affected?" without rebuilding.
+          sbom: true
+
+      - name: Record the digest as the identity
+        if: steps.push.outcome == 'success'
+        run: |
+          {
+            echo "### ordo-cli"
+            echo
+            echo "**Identity (deploy this):** \`${{ steps.push.outputs.digest }}\`"
+            echo
+            echo "Pointers to it:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The one image ───────────────────────────────────────────────────────
+  #
+  # `ordo` (`docker/Dockerfile`, `plan-identity-service.md` 3.3): the
+  # supervisor (the entrypoint), the identity service, the console, the
+  # deployable and the CLI, with the console's page. The separate
+  # deployment-only and console-only images are no longer provided (ruled
+  # 2026-10-27); their binaries stay in this image and in the release's
+  # artifacts. The smoke proves: the supervisor carries exactly its 4 file
+  # capabilities and no other binary carries one; the 3 children come up
+  # ready, each as its own unix user, with only CAP_SETUID, CAP_SETGID,
+  # CAP_SETPCAP and CAP_CHOWN granted and a read-only root; the console
+  # sees the deployment through the supervisor's socket; the identity
+  # service answers under the console's origin at /identity and made its
+  # opted-in database on the console's server; a stop reaches every child with no
+  # CAP_KILL; and without CAP_SETPCAP the supervisor refuses to start
+  # rather than run a child as itself.
+
+  ordo:
+    name: ordo, the one image
+    needs: prep
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 60
+
+    # The console's own database, and the cluster the identity service makes
+    # its own database on, by the opt-in. Each refuses to boot
+    # without one.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: ordo_console
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prep.outputs.repo_lc }}/ordo
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (amd64, for the smoke test)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          target: runtime
+          load: true
+          tags: ordo:smoke
+          cache-from: type=gha,scope=image-ordo
+          cache-to: type=gha,mode=max,scope=image-ordo
+
+      # The supervisor binary as the image holds it: owner, mode and file
+      # capabilities, so a failure to switch users names its cause; and no
+      # other binary carries one. The image is distroless (no getcap), so
+      # each file comes out with `docker cp`, whose tar carries
+      # security.capability as a PAX record, and a python container decodes
+      # it as getcap would print it.
+      - name: "Smoke: the supervisor's owner, mode and file capabilities"
+        run: |
+          set -euo pipefail
+          docker rm -f ordo-caps >/dev/null 2>&1 || true
+          docker create --name ordo-caps ordo:smoke >/dev/null
+          for bin in ordo-supervisor ordo-console ordo-identity-service ordo-host; do
+            docker cp "ordo-caps:/usr/local/bin/$bin" - > "$bin.tar"
+          done
+          docker rm -f ordo-caps >/dev/null
+          cat > caps.py <<'PY'
+          import struct, sys, tarfile
+          names = ["chown", "dac_override", "dac_read_search", "fowner", "fsetid",
+                   "kill", "setgid", "setuid", "setpcap", "linux_immutable",
+                   "net_bind_service", "net_broadcast", "net_admin", "net_raw",
+                   "ipc_lock", "ipc_owner", "sys_module", "sys_rawio", "sys_chroot",
+                   "sys_ptrace", "sys_pacct", "sys_admin", "sys_boot", "sys_nice",
+                   "sys_resource", "sys_time", "sys_tty_config", "mknod", "lease",
+                   "audit_write", "audit_control", "setfcap", "mac_override",
+                   "mac_admin", "syslog", "wake_alarm", "block_suspend",
+                   "audit_read", "perfmon", "bpf", "checkpoint_restore"]
+          want = sys.argv[1]
+          m = tarfile.open(fileobj=sys.stdin.buffer, mode="r|").next()
+          raw = m.pax_headers.get("SCHILY.xattr.security.capability")
+          caps, flags = [], ""
+          if raw is not None:
+              b = raw.encode("utf-8", "surrogateescape")
+              magic, plo, ilo = struct.unpack_from("<III", b, 0)
+              perm = plo | ((struct.unpack_from("<I", b, 12)[0] << 32) if len(b) >= 20 else 0)
+              caps = [("cap_" + n) for i, n in enumerate(names) if perm >> i & 1]
+              flags = "ep" if magic & 1 else "p"
+          print(f"{m.name} {m.uid}:{m.gid} mode {m.mode:04o} caps {','.join(caps) or 'none'}={flags}")
+          if want == "supervisor":
+              ok = set(caps) == {"cap_chown", "cap_setuid", "cap_setgid", "cap_setpcap"} and flags == "p"
+              ok = ok and (m.uid, m.gid, m.mode & 0o7777) == (0, 65530, 0o750)
+              sys.exit(0 if ok else "FAIL: expected root:65530 mode 0750 with cap_chown,cap_setgid,cap_setuid,cap_setpcap=p, no cap_kill")
+          sys.exit(0 if not caps else f"FAIL: {m.name} carries {caps}")
+          PY
+          docker run --rm -i -v "$PWD/caps.py:/caps.py:ro" python:3.12-slim-bookworm python3 /caps.py supervisor < ordo-supervisor.tar
+          for bin in ordo-console ordo-identity-service ordo-host; do
+            docker run --rm -i -v "$PWD/caps.py:/caps.py:ro" python:3.12-slim-bookworm python3 /caps.py none < "$bin.tar"
+          done
+
+      # An image that builds but cannot do its job must not publish. The one
+      # image with the least it needs: 4 capabilities, a read-only root, the
+      # run folder on a tmpfs, the opt-in to make the identity database on
+      # the console's server (ORDO_IDENTITY_SHARE_CONSOLE_DB_SERVER) and no
+      # identity address (it is reached under the console's origin at
+      # /identity).
+      - name: "Smoke: the one image runs its 3 children, each as its own user"
+        run: |
+          set -euo pipefail
+          base=http://127.0.0.1:8081
+          docker run -d --name ordo-smoke \
+            --network host \
+            --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --cap-add CHOWN \
+            --read-only --tmpfs /run/ordo:uid=65530,mode=0711 --tmpfs /tmp:noexec,nosuid,nodev \
+            -e ORDO_CONSOLE_DATABASE_URL=postgres://ordo:ordo@localhost:5432/ordo_console \
+            -e ORDO_CONSOLE_ORIGIN=http://localhost:8081 \
+            -e ORDO_IDENTITY_SHARE_CONSOLE_DB_SERVER=true \
+            -e ORDO_PG_HOST=localhost \
+            -e ORDO_PG_PORT=5432 \
+            -e ORDO_PG_USER=ordo \
+            -e ORDO_PG_DB=postgres \
+            -e ORDO_PG_PASSWORD=ordo \
+            -e ORDO_SPACE=smoke \
+            -e ORDO_KEY_PROVIDER=test \
+            -e ORDO_DEV_UNSAFE_TEST_KEYS=1 \
+            -e ORDO_TOKEN_KEY=1111111111111111111111111111111111111111111111111111111111111111 \
+            -e ORDO_PAGE_KEY=2222222222222222222222222222222222222222222222222222222222222222 \
+            ordo:smoke
+
+          # The supervisor's own probe, with each child's state.
+          for i in $(seq 1 120); do
+            live=$(curl -sf http://127.0.0.1:8079/health/live || true)
+            if echo "$live" | grep -q '"identity":"ready"' \
+              && echo "$live" | grep -q '"console":"ready"' \
+              && echo "$live" | grep -q '"deployment":"ready"'; then break; fi
+            if [ "$i" = 120 ]; then
+              echo "FAIL: the 3 children never were ready: $live"
+              docker logs ordo-smoke 2>&1 | tail -80
+              exit 1
+            fi
+            sleep 1
+          done
+
+          ready=$(curl -sf "$base/health/ready")
+          echo "$ready" | grep -q '"consoleDatabase":"ok"' \
+            || { echo "FAIL: the console does not see its database: $ready"; exit 1; }
+          echo "$ready" | grep -q '"deployment":"ready"' \
+            || { echo "FAIL: the console does not see the deployment through the socket: $ready"; exit 1; }
+
+          # The door: live, and deep health gated (403 without a token: 404
+          # would be no router, 200 a missing gate).
+          curl -sf -o /dev/null http://127.0.0.1:8080/health/live \
+            || { echo "FAIL: the deployment's door does not answer on 8080"; exit 1; }
+          deep=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/health/deep)
+          [ "$deep" = 403 ] || { echo "FAIL: /health/deep answered $deep without a token, expected 403"; exit 1; }
+
+          # The identity service under the console's origin, passed through.
+          curl -s -D id-headers.txt -o id-page.html "$base/identity/sign-in"
+          grep -q '^HTTP/1.1 200' id-headers.txt || { echo "FAIL: /identity/sign-in:"; cat id-headers.txt; exit 1; }
+          grep -q 'href="/identity/page/identity.css"' id-page.html \
+            || { echo "FAIL: the sign-in page is not under /identity"; head -20 id-page.html; exit 1; }
+          status=$(curl -sf "$base/d/main/api/status")
+          echo "$status" | grep -q '"origin":"http://localhost:8081/identity"' \
+            || { echo "FAIL: the console does not send people to /identity: $status"; exit 1; }
+
+          # 4 unix users: the supervisor 65530, the identity service 65531,
+          # the console 65532, the deployment 65533. The runner's daemon runs
+          # a busybox `ps`, whose `user` column prints the number for a uid
+          # the host does not name.
+          docker top ordo-smoke -o user,pid,comm | tee top.txt
+          # `comm` keeps 15 characters: ordo-identity-service is ordo-identity-s.
+          for want in "ordo-identity-s 65531" "ordo-console 65532" "ordo-host 65533"; do
+            set -- $want
+            awk -v c="$1" -v u="$2" '$3 == c && $1 == u { ok = 1 } END { exit !ok }' top.txt \
+              || { echo "FAIL: $1 does not run as $2"; docker logs ordo-smoke 2>&1 | tail -40; exit 1; }
+          done
+
+          # The launcher carries CAP_SETUID: a child's user may not run it at
+          # all (root:65530 mode 0750), and the supervisor's own user gets
+          # EXIT_PRIVILEGE (77) from a parent the supervisor did not name.
+          if docker exec -u 65533 ordo-smoke /usr/local/bin/ordo-supervisor --supervised-child 1 - > launch.txt 2>&1; then
+            echo "FAIL: 65533 ran the launcher"; cat launch.txt; exit 1
+          fi
+          set +e
+          docker exec ordo-smoke /usr/local/bin/ordo-supervisor --supervised-child 1 - > launch.txt 2>&1
+          code=$?
+          set -e
+          [ "$code" = 77 ] || { echo "FAIL: a forged launcher exited $code, expected 77"; cat launch.txt; exit 1; }
+
+          # Read the logs into a file once. Under pipefail, `docker logs | grep -q`
+          # fails when grep stops at its match and docker logs dies writing to
+          # the closed pipe.
+          docker logs ordo-smoke > smoke.log 2>&1
+          grep -q 'built revision 1 from the container' smoke.log \
+            || { echo "FAIL: no revision 1 from the container"; tail -60 smoke.log; exit 1; }
+          grep -q "made database \`ordo_identity\` beside the console's" smoke.log \
+            || { echo "FAIL: the identity service made no database beside the console's"; tail -60 smoke.log; exit 1; }
+          grep -qi 'invite' smoke.log \
+            || { echo "FAIL: the first run printed no first invite"; tail -60 smoke.log; exit 1; }
+          if grep -q "runs as the supervisor's own unix user" smoke.log; then
+            echo "FAIL: a child fell back to the supervisor's user"; grep "unix user" smoke.log; exit 1
+          fi
+
+          # A stop goes through each child's relay: no CAP_KILL, and every
+          # child stops, the deployment first.
+          docker stop -t 200 ordo-smoke >/dev/null
+          docker logs ordo-smoke > stop.log 2>&1
+          grep -q 'ordo-supervisor: stopped' stop.log || { echo "FAIL: the supervisor did not stop cleanly"; tail -40 stop.log; exit 1; }
+          if grep -q 'did not stop' stop.log; then
+            echo "FAIL: a child had to be left running"; grep 'did not stop' stop.log; exit 1
+          fi
+          docker rm -f ordo-smoke
+
+      # Fail closed: without CAP_SETPCAP the launcher cannot switch users.
+      # With ORDO_SUPERVISOR_*_USER set (the image's default) the supervisor
+      # must refuse to start, naming the setting, and never run a child as
+      # its own unix user (images run 40172394128 did, under the console).
+      - name: "Smoke: the supervisor refuses when it cannot switch users"
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 60 docker run --rm --name ordo-refuse \
+            --network host \
+            --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add CHOWN \
+            --tmpfs /run/ordo:uid=65530,mode=0711 \
+            -e ORDO_SUPERVISOR_LISTEN=127.0.0.1:18079 \
+            -e ORDO_IDENTITY_SHARE_CONSOLE_DB_SERVER=true \
+            -e ORDO_CONSOLE_DATABASE_URL=postgres://ordo:ordo@localhost:5432/ordo_console \
+            -e ORDO_CONSOLE_ORIGIN=http://localhost:8081 \
+            -e ORDO_PG_HOST=localhost \
+            -e ORDO_PG_USER=ordo \
+            -e ORDO_PG_DB=postgres \
+            ordo:smoke > refuse.log 2>&1
+          code=$?
+          set -e
+          cat refuse.log
+          [ "$code" = 2 ] || { echo "FAIL: the supervisor exited $code without CAP_SETPCAP, expected 2 (refusing to start)"; exit 1; }
+          grep -q "refusing to start. ORDO_SUPERVISOR_IDENTITY_USER is 65531:65531" refuse.log \
+            || { echo "FAIL: the refusal does not name ORDO_SUPERVISOR_IDENTITY_USER"; exit 1; }
+          if grep -Eq "^(ordo-host|ordo-console|ordo-identity-service):" refuse.log; then
+            echo "FAIL: a child started although the supervisor could not switch users"; exit 1
+          fi
+
+      - name: Build and push
+        id: push
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=image-ordo
+          cache-to: type=gha,mode=max,scope=image-ordo
+          provenance: mode=max
+          sbom: true
+
+      - name: Record the digest as the identity
+        if: steps.push.outcome == 'success'
+        run: |
+          {
+            echo "### ordo"
+            echo
+            echo "**Identity (deploy this):** \`${{ steps.push.outputs.digest }}\`"
+            echo
+            echo "Pointers to it:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The playground ──────────────────────────────────────────────────────
+  #
+  # Its own image, not a route in the host image. `docker/Dockerfile.playground`
+  # carries the three reasons; the short one is that it drops and rebuilds
+  # three databases at boot and shells out to `psql`, so it needs a
+  # different base AND must not share a pod with the deployable.
+
+  playground:
+    name: ordo-playground
+    needs: prep
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Increment 0c landed `ORDO_PLAYGROUND_ADDR` in `main.rs`, so this
+      # probe now finds it on every run. Kept for the same reason the host
+      # probe is: one `grep` against a regression that would otherwise ship
+      # a container that serves nothing from outside itself.
+      - name: Can the playground bind a reachable address yet?
+        id: probe
+        run: |
+          if grep -q 'ORDO_PLAYGROUND_ADDR' crates/ordo-playground/src/main.rs; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ordo-playground still hardcodes 127.0.0.1:7878 — increment 0c is unbuilt; skipping."
+          fi
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: steps.probe.outputs.present == 'true'
+
+      - name: Log in to GHCR
+        if: steps.probe.outputs.present == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push))
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        if: steps.probe.outputs.present == 'true'
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ needs.prep.outputs.repo_lc }}/ordo-playground
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (amd64, for the smoke test)
+        if: steps.probe.outputs.present == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.playground
+          platforms: linux/amd64
+          target: runtime
+          load: true
+          tags: ordo-playground:smoke
+          cache-from: type=gha,scope=image-playground
+          cache-to: type=gha,mode=max,scope=image-playground
+
+      # The playground's boot IS its risky part: `App::seed` compiles the
+      # fixtures and then rebuilds three databases through the `psql`
+      # binary. So the smoke asserts the seed reached Postgres, not merely
+      # that a port opened — a playground whose panes all answer
+      # `relation "orders" does not exist` is exactly the failure this
+      # catches, and it looks perfectly healthy from the outside.
+      - name: Smoke — the playground seeds its databases and serves its page
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+
+          docker run -d --name ordo-pg-smoke \
+            --network host \
+            -e ORDO_PSQL=/usr/bin/psql \
+            -e ORDO_PG_HOST=localhost \
+            -e ORDO_PG_PORT=5432 \
+            -e ORDO_PG_USER=ordo \
+            -e PGPASSWORD=ordo \
+            -e ORDO_PLAYGROUND_ADDR=0.0.0.0:7878 \
+            ordo-playground:smoke
+
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:7878/; then break; fi
+            if [ "$i" = 60 ]; then
+              echo "the playground never served its page:"
+              docker logs ordo-pg-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # `main.rs` prints `seeded: <db>` per database and
+          # `UNAVAILABLE: <db> (...)` when one could not be built. The
+          # second is a startup that succeeds and a product that does not
+          # work, so it must fail the build.
+          logs=$(docker logs ordo-pg-smoke 2>&1)
+          echo "$logs"
+          if echo "$logs" | grep -q 'UNAVAILABLE:'; then
+            echo "FAIL: a playground database could not be seeded — panes over it would not run."
+            exit 1
+          fi
+          echo "$logs" | grep -q 'seeded:' \
+            || { echo "FAIL: no database reported as seeded; psql never reached Postgres from inside the image."; exit 1; }
+
+          docker rm -f ordo-pg-smoke
+
+      - name: Build and push
+        id: push
+        if: steps.probe.outputs.present == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push))
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile.playground
+          platforms: linux/amd64
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=image-playground
+          cache-to: type=gha,mode=max,scope=image-playground
+          provenance: mode=max
+          sbom: true
+
+      - name: Record the digest as the identity
+        if: steps.push.outcome == 'success'
+        run: |
+          {
+            echo "### ordo-playground"
+            echo
+            echo "**Identity (deploy this):** \`${{ steps.push.outputs.digest }}\`"
+            echo
+            echo "Pointers to it:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

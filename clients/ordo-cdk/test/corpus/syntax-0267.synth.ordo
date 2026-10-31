@@ -1,0 +1,3 @@
+op vacantUnits unbounded =
+  units[name, property.name]
+    match none leases(status == "active")

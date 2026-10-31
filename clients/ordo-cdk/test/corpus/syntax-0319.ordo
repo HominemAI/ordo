@@ -1,0 +1,5 @@
+op activityFeed($vendor: id) =                   # append: two shapes, one feed
+  workOrders(vendor == $vendor)[title: status, at: opened]
+  append invoices(vendor == $vendor)[title: number, at: issued]
+  sort -at
+  take 50

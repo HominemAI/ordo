@@ -1,0 +1,6 @@
+node_modules/
+.work/
+runs/
+.stack/
+test-results/
+playwright-report/

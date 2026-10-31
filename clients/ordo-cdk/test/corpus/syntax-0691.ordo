@@ -1,0 +1,19 @@
+entity properties {
+  name:     text
+  address:  text        sealed
+  acquired: date
+  acl (read, write, admin)               # ← derives the whole permission system
+}
+
+# derives, visibly: a real link entity
+#   propertiesAccess { propertie -> properties owned, member -> members owned,
+#                      level, unique (property, member) }
+# plus guards on `properties` AND its entire owned subtree (locations and units,
+# with nothing written on them), plus grantPropertiesAccess / revokePropertiesAccess
+# gated at the highest level (admin). Levels order left→right.
+#
+# Bootstrap, platform-derived (not written). See 8.8 for the full rule set:
+# the creating write is exempt from the guard it is bootstrapping; a creating
+# space MEMBER receives the `admin` row in the SAME command group; guests,
+# routines, sources and the system receive none; a space owner may always
+# administer any acl row in their space, checked at the door.

@@ -1,0 +1,3 @@
+op vacantUnits unbounded =                       # anti-join: filter by absence
+  units[name, property.name]
+  match none leases(status == "active")

@@ -1,0 +1,13 @@
+[package]
+name = "ordo-schema"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-syntax = { path = "../ordo-syntax" }
+serde_json = "1"
+
+[lints]
+workspace = true

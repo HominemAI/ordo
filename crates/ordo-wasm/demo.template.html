@@ -1,0 +1,208 @@
+<title>Ordo Converter</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1b1a17;
+    --dim: #6b6862;
+    --line: #e2ded6;
+    --accent: #7a4b1e;
+    --bad: #a02020;
+    --code-bg: #f4f1ea;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16150f;
+      --panel: #1e1d17;
+      --ink: #ece7db;
+      --dim: #9a958a;
+      --line: #34322a;
+      --accent: #e0a86a;
+      --bad: #f08a7a;
+      --code-bg: #12110c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16150f;
+    --panel: #1e1d17;
+    --ink: #ece7db;
+    --dim: #9a958a;
+    --line: #34322a;
+    --accent: #e0a86a;
+    --bad: #f08a7a;
+    --code-bg: #12110c;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: 28px 22px 60px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); margin: 0 0 22px; max-width: 68ch; font-size: 14px; }
+  .sub code { font-family: var(--mono); font-size: 12.5px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 15px 16px;
+    min-width: 0;
+  }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em;
+       color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  textarea {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+    background: var(--code-bg); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px;
+  }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    font: inherit; font-size: 13px; font-weight: 600;
+    background: var(--accent); color: var(--bg);
+    border: 0; border-radius: 6px; padding: 7px 15px; cursor: pointer;
+    margin: 10px 0 0;
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .out { margin-top: 12px; }
+  .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em;
+           color: var(--dim); margin: 12px 0 4px; font-weight: 600; }
+  pre {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 10px; margin: 0; overflow-x: auto; white-space: pre; color: var(--ink);
+  }
+  .meta { font-size: 12.5px; color: var(--dim); margin-top: 10px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  .err { color: var(--bad); font-size: 13px; white-space: pre-wrap;
+         border-left: 3px solid var(--bad); padding-left: 10px; margin-top: 12px; }
+  ul.notes { margin: 4px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--dim); }
+  ul.notes li { margin-bottom: 3px; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; font-size: 12.5px; color: var(--dim); }
+  details[open] summary { margin-bottom: 8px; }
+  footer { margin-top: 26px; font-size: 12.5px; color: var(--dim); max-width: 78ch; }
+  footer b { color: var(--ink); }
+  #boot { font-size: 13px; color: var(--dim); }
+</style>
+
+<div class="wrap">
+  <h1>Ordo &rarr; SQL &rarr; Ordo</h1>
+  <p class="sub">
+    The Ordo compiler and the v0 decompiler, compiled to WebAssembly and running
+    in this tab. Nothing is sent anywhere: the parser, binder, planner and
+    reverse compiler are the same Rust that the conformance suite runs.
+    <b>Rows are not executed</b> &mdash; that needs Postgres. What you get is the
+    SQL each side plans, and the refusals, by name, when a query is outside
+    what the compiler will lower.
+  </p>
+
+  <p id="boot">Loading the compiler&hellip;</p>
+
+  <div class="cols" id="app" hidden>
+    <section>
+      <h2>Ordo &rarr; SQL</h2>
+      <textarea id="q" rows="5" spellcheck="false"></textarea>
+      <button id="go-fwd">Compile</button>
+      <div class="out" id="fwd"></div>
+    </section>
+
+    <section>
+      <h2>SQL &rarr; Ordo</h2>
+      <textarea id="sql" rows="5" spellcheck="false"></textarea>
+      <button id="go-rev">Decompile</button>
+      <div class="out" id="rev"></div>
+    </section>
+  </div>
+
+  <details id="fixbox" hidden>
+    <summary>The schema both sides compile against (editable)</summary>
+    <textarea id="fixture" rows="18" spellcheck="false"></textarea>
+    <div class="meta">Edit this and both panes recompile against your schema.</div>
+  </details>
+
+  <footer>
+    <b>What a green answer here proves, and what it does not.</b> It proves this
+    source text compiled to this SQL through the real pipeline. It does not
+    prove Postgres accepted the SQL or returned the rows you expect &mdash; the
+    conformance suite proves that, against a seeded database, and it does not
+    run in a browser. On the reverse side, a decompilation is verified by
+    compiling it forward and showing you both SQL texts; their <i>rows</i> are
+    not compared here, so a translation that returns different rows would look
+    fine on this page and be caught by the served playground's differential run.
+  </footer>
+</div>
+
+<script type="module">
+/*__GLUE__*/
+
+// The wasm module, base64-inlined. No fetch, no <script src>, no network of
+// any kind: `WebAssembly.instantiate` is handed a byte array decoded from
+// this string, which is the one pattern that works under a strict CSP.
+const WASM_B64 = "__WASM_B64__";
+
+function bytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+function notes(list) {
+  if (!list || !list.length) return "";
+  return `<ul class="notes">${list.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`;
+}
+
+function renderForward(r) {
+  if (r.error) return `<div class="err">${esc(r.error)}</div>`;
+  return [
+    `<div class="label">Planned SQL</div><pre>${esc(r.sql)}</pre>`,
+    `<div class="label">Outputs</div><pre>${esc((r.outputs || []).join("\n"))}</pre>`,
+    `<div class="meta">cost <b>${esc(r.cost ?? "?")}</b> &middot; `,
+    `rows bounded by <b>${esc(r.rows_bound ?? "?")}</b> &middot; `,
+    `clock pinned to <b>${esc(r.clock ?? "?")}</b></div>`,
+  ].join("");
+}
+
+function renderReverse(r) {
+  if (r.error) return `<div class="err">${esc(r.error)}</div>`;
+  let html = `<div class="label">Ordo</div><pre>${esc(r.ordo)}</pre>${notes(r.notes)}`;
+  if (r.verify_error) {
+    html += `<div class="err">${esc(r.verify_error)}</div>`;
+  } else {
+    html += `<div class="label">Recompiled SQL (the round trip)</div><pre>${esc(r.roundtrip_sql)}</pre>`;
+    html += notes(r.notes_wasm);
+  }
+  return html;
+}
+
+await __wbg_init({ module_or_path: bytes(WASM_B64) });
+
+$("fixture").value = default_fixture();
+$("q").value = 'orders(status == "open")[total]';
+$("sql").value = "SELECT name FROM vendors WHERE active = true";
+
+const fwd = () => { $("fwd").innerHTML = renderForward(JSON.parse(compile($("fixture").value, $("q").value))); };
+const rev = () => { $("rev").innerHTML = renderReverse(JSON.parse(decompile($("fixture").value, $("sql").value))); };
+
+$("go-fwd").addEventListener("click", fwd);
+$("go-rev").addEventListener("click", rev);
+$("q").addEventListener("input", fwd);
+$("sql").addEventListener("input", rev);
+$("fixture").addEventListener("input", () => { fwd(); rev(); });
+
+$("boot").hidden = true;
+$("app").hidden = false;
+$("fixbox").hidden = false;
+fwd();
+rev();
+</script>

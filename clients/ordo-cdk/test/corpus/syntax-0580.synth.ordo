@@ -1,0 +1,17 @@
+routine staleAlerts in estate {
+  trigger every 15m
+  run($today: date):
+    set alerts(status == "active" and raised < $today - 30d) { status: "dismissed" }
+}
+
+routine dailyResolve in estate {
+  trigger every day 02:00Z
+  run:
+    del alerts(status == "dismissed")
+}
+
+routine motionSeen in estate {
+  trigger when estate.events.created debounce 30s
+  run:
+    set events(kind == "motion") { kind: "motion-seen" }
+}

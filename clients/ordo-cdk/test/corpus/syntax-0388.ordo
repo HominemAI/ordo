@@ -1,0 +1,5 @@
+op searchVendors($q: text) =                     # open-field text ops
+  vendors(active == true and (name contains $q or name starts $q))[name]
+  sort name
+# note: `descr contains $q` on workOrders would classify bounded/unbounded-host
+# (sealed). The compiler labels the op; unbounded requires the `unbounded` marker.

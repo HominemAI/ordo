@@ -1,0 +1,17 @@
+[package]
+name = "ordo-gen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The closed language tables. This crate exists to be their *second* reader,
+# so it depends on the producer and never restates one.
+ordo-syntax = { path = "../ordo-syntax" }
+# The interface descriptor arrives as JSON and leaves as TypeScript; nothing
+# here reaches a schema, a registry or a binder, for the reason
+# `ordo_plan::interface` gives about itself.
+serde_json = "1"
+
+[lints]
+workspace = true

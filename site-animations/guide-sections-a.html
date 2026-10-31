@@ -1,0 +1,375 @@
+    <section class="doc-section" id="sec-pitch">
+      <h2>The whole pitch, in one file</h2>
+      <p class="kicker">A closed, deterministic definition language — and a platform — compiling to Postgres.</p>
+      <p>Ordo is a grammar with <strong>one spelling per concept</strong>: one way to declare a shape, one way to read, one way to write. You author a <code>.ordo</code> file; the compiler derives the schema, the typed API, the permissions surface, the audit log, and the scheduled jobs from it. Nothing about the running app is hand-wired — it all falls out of the source.</p>
+      <p>The bet behind that rigidity is specific: <strong>a grammar strict enough that an LLM either emits it correctly or fails loudly is also the grammar humans can trust</strong>. There is no partial credit for a program that almost parses, and no silent fallback when a statement is ambiguous — the compiler stops and names the problem.</p>
+      <p>Here is a complete, working single-user app — a plant-watering tracker — start to finish:</p>
+      <div class="code-panel">
+        <div class="bar"><b>plantcare.ordo</b><button class="copy">copy</button></div>
+        <pre class="code"><code><span class="kw">domain</span> plantcare @ 0.1.0
+
+<span class="kw">entity</span> plants {
+  name:      text
+  room:      text?
+  everyDays: duration(ms) = 7d      <span class="cmt"># watering cadence</span>
+}
+
+<span class="kw">entity</span> waterings {
+  plant -&gt; plants   <span class="kw">owned</span>
+  at:    date
+  by:    text = <span class="str">""</span>
+}
+
+<span class="kw">entity</span> alerts {
+  key:      text <span class="kw">unique</span>             <span class="cmt"># upsert-by-key lifecycle</span>
+  severity: text = <span class="str">"warning"</span>
+  title:    text
+  status:   text = <span class="str">"active"</span>
+}
+
+<span class="hl-line"><span class="kw">op</span> thirsty(<span class="vr">$today</span>: date) =</span>
+  plants[name, room, everyDays]  waterings[at]
+  <span class="kw">sort</span> -waterings.at
+  <span class="kw">take</span>[plants.id] 1
+  | (at &lt;= <span class="vr">$today</span> - everyDays) <span class="kw">or</span> at <span class="kw">is</span> <span class="kw">null</span>
+
+<span class="kw">op</span> history(<span class="vr">$plant</span>: id) =
+  waterings(plant == <span class="vr">$plant</span>)[at, by]
+  <span class="kw">sort</span> -at
+  <span class="kw">take</span> 30
+
+<span class="hl-line"><span class="kw">op</span> water(<span class="vr">$plant</span>: id, <span class="vr">$by</span>: text, <span class="vr">$today</span>: date) =</span>
+  <span class="kw">set</span> waterings { plant: <span class="vr">$plant</span>, at: <span class="vr">$today</span>, by: <span class="vr">$by</span> }
+  <span class="kw">set</span> alerts(key == <span class="str">"thirsty:"</span> + <span class="vr">$plant</span>) { status: <span class="str">"resolved"</span> }
+
+<span class="kw">op</span> addPlant(<span class="vr">$name</span>: text, <span class="vr">$room</span>: text) =
+  <span class="kw">set</span> plants { name: <span class="vr">$name</span>, room: <span class="vr">$room</span> }
+
+<span class="kw">op</span> pruneLogs(<span class="vr">$before</span>: date) =
+  <span class="kw">del</span> waterings(at &lt;= <span class="vr">$before</span>)
+
+<span class="cmt"># routine &amp; route: settled in spec, source spelling being finalized</span>
+
+<span class="kw">routine</span> thirstCheck <span class="kw">in</span> plantcare {
+  <span class="kw">trigger</span> <span class="kw">every</span> <span class="kw">day</span> 09:00Z
+  <span class="kw">run</span>(<span class="vr">$today</span>: date):
+    <span class="kw">each</span> -&gt; <span class="kw">set</span> alerts { key: <span class="str">"thirsty:"</span> + plants.id,
+                         title: name + <span class="str">" needs water"</span>,
+                         status: <span class="str">"active"</span> }   <span class="cmt"># restate so resolved alerts re-raise</span>
+}
+
+<span class="kw">route</span> alerts.warning -&gt; [push] <span class="kw">fallback</span> email</code></pre>
+      </div>
+      <p>That single file is the whole app description. Two commands turn it into a running system — <code>ordo plan</code> shows you the derived diff before anything happens, and <code>ordo apply</code> registers it.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 190">
+          <rect class="d-box" x="10" y="70" width="110" height="50" rx="10"/>
+          <text class="d-text" x="65" y="90">write</text>
+          <text class="d-sub" x="65" y="106" text-anchor="middle">plantcare.ordo</text>
+          <path class="d-line" d="M120 95 H165" marker-end="url(#arrow-a)"/>
+          <rect class="d-box" x="165" y="70" width="110" height="50" rx="10"/>
+          <text class="d-text" x="220" y="90">ordo plan</text>
+          <text class="d-sub" x="220" y="106" text-anchor="middle">shows the diff</text>
+          <path class="d-line" d="M275 95 H320" marker-end="url(#arrow-a)"/>
+          <rect class="d-box-hi" x="320" y="70" width="120" height="50" rx="10"/>
+          <text class="d-text" x="380" y="90">ordo apply</text>
+          <text class="d-mono-hi" x="380" y="106" text-anchor="middle">artifact stored · versioned</text>
+          <path class="d-line" d="M440 95 H485" marker-end="url(#arrow-a)"/>
+          <rect class="d-box" x="485" y="18" width="205" height="154" rx="10"/>
+          <text class="d-text" x="587" y="42">registered surface</text>
+          <text class="d-mono" x="587" y="66" text-anchor="middle">schema</text>
+          <text class="d-mono" x="587" y="86" text-anchor="middle">api</text>
+          <text class="d-mono" x="587" y="106" text-anchor="middle">access</text>
+          <text class="d-mono" x="587" y="126" text-anchor="middle">audit</text>
+          <text class="d-mono" x="587" y="146" text-anchor="middle">routines</text>
+          <text class="d-sub" x="587" y="165" text-anchor="middle">→ running app</text>
+          <defs>
+            <marker id="arrow-a" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>write → plan → apply → one registered surface, all derived from the same source</figcaption>
+      </figure>
+
+      <h3 id="what-you-get">What you get</h3>
+      <ul>
+        <li>Typed API ops, one per declared <code>op</code> — nothing else is callable</li>
+        <li>A derived Postgres schema, with your identifiers surviving verbatim</li>
+        <li>A generated UI descriptor from shapes and ops — headless, nothing rendered</li>
+        <li>A runtime permissions surface — role→op profiles, changeable without a redeploy</li>
+        <li>Audit machinery — a hash-chained command log under every write</li>
+        <li>Scheduled routines and event routing, once <code>routine</code>/<code>route</code> land</li>
+      </ul>
+      <div class="callout warn">
+        <b>Pre-alpha, spec-first.</b> The parser, DDL lowering, API surface, and command log run today. <code>routine</code>/<code>route</code> source spelling, the always-on worker that fires them, and outbound egress (push/email/SMS) are the named seams still being closed. Nothing here is installable yet.
+      </div>
+    </section>
+
+    <section class="doc-section" id="sec-language">
+      <h2>The language</h2>
+      <p class="kicker">Shapes, typed ids, pipelines you can watch, and two write verbs — one spelling each.</p>
+      <p>Ordo's grammar covers four things: how you declare a shape, how a row gets its id, how you read, and how you write. Each has exactly one spelling, and each refuses rather than guesses when a statement doesn't fit.</p>
+
+      <h3 id="shapes">Shapes</h3>
+      <p>A shape is the whole story of a row — type, default, optionality, even custody — declared once, in place:</p>
+      <div class="split">
+        <div>
+          <p><code>text?</code> marks a field optional; anything without a <code>?</code> is required. Defaults are written as literals, so <code>tier: text = "basic"</code> is the entire default — nothing is computed at read time. <code>customer -&gt; customers</code> is a real, space-carrying foreign key, not a naming convention the reader has to trust. <code>sealed</code> on <code>memo</code> means that field is ciphertext at rest.</p>
+          <p><strong>Every entity is <code>sealed</code>-aware and <code>unique</code>-aware in the same breath</strong> as its type — there's no separate constraints block to fall out of sync with the field list.</p>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>market.ordo</b><button class="copy">copy</button></div>
+          <pre class="code"><code><span class="kw">entity</span> customers {
+  name:  text
+  email: text?  <span class="kw">sealed</span> <span class="kw">indexed</span> <span class="kw">unique</span> <span class="kw">normalize</span>(lower)
+  tier:  text = <span class="str">"basic"</span>
+}
+
+<span class="kw">entity</span> orders {
+  customer -&gt; customers
+  placed: date
+  status: text = <span class="str">"open"</span>
+  total:  money
+  memo:   text = <span class="str">""</span>   <span class="kw">sealed</span>
+}</code></pre>
+        </div>
+      </div>
+
+      <h3 id="typed-ids">Typed ids</h3>
+      <p>Every row's id is entity-prefixed and time-ordered — <code>plnt_01J8…</code> — and the server generates it; nothing in Ordo lets an author choose one. The prefix is derived from the entity name so that any id you see anywhere, in a log line or an audit entry, is self-describing without a lookup.</p>
+      <p>Derivation splits the name at camelCase boundaries, abbreviates each word, and joins with a hyphen — <code>orderItems</code> becomes <code>orde-item</code>. Two entities may never land on the same prefix; a collision is a compile error naming both offenders:</p>
+      <div class="code-panel">
+        <div class="bar"><b>compiler</b><button class="copy">copy</button></div>
+        <pre class="code"><code>[id_key_collision] `orders` and `orderings` both derive id key `orde`
+— give one an explicit key: `entity orderings (key: …)`</code></pre>
+      </div>
+
+      <h3 id="reads-pipelines">Reads are pipelines</h3>
+      <p>A read is a pipeline you can watch: filter, shape, sort, cut — evaluated in exactly the order written. There's no free-form SQL underneath it; what you spell is what runs.</p>
+      <div class="split">
+        <div class="code-panel">
+          <div class="bar"><b>market.ordo</b><button class="copy">copy</button></div>
+          <pre class="code"><code><span class="kw">op</span> openOrders(<span class="vr">$cust</span>: id) =
+  orders(customer == <span class="vr">$cust</span>
+         <span class="kw">and</span> status == <span class="str">"open"</span>)[placed, total]
+  <span class="kw">sort</span> -placed
+  <span class="kw">take</span> 3</code></pre>
+        </div>
+        <figure class="fig">
+          <svg viewBox="0 0 700 210">
+            <rect class="d-box" x="10" y="16" width="130" height="44" rx="10"/>
+            <text class="d-text" x="75" y="38">source</text>
+            <text class="d-mono" x="75" y="76" text-anchor="middle">orders</text>
+            <path class="d-line-dim" d="M75 60 V190" />
+            <rect class="d-box" x="10" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="75" y="116">filter</text>
+            <text class="d-mono" x="75" y="152" text-anchor="middle">6 rows</text>
+            <rect class="d-box" x="185" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="250" y="116">shape</text>
+            <text class="d-mono" x="250" y="152" text-anchor="middle">4 rows</text>
+            <rect class="d-box" x="360" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="425" y="116">sort -placed</text>
+            <text class="d-mono" x="425" y="152" text-anchor="middle">4 rows</text>
+            <rect class="d-box-hi" x="535" y="94" width="130" height="44" rx="10"/>
+            <text class="d-text" x="600" y="116">take 3</text>
+            <text class="d-mono-hi" x="600" y="152" text-anchor="middle">3 rows</text>
+            <path class="d-line" d="M140 116 H185" marker-end="url(#arrow-b)"/>
+            <path class="d-line" d="M315 116 H360" marker-end="url(#arrow-b)"/>
+            <path class="d-line" d="M490 116 H535" marker-end="url(#arrow-b)"/>
+            <text class="d-sub" x="350" y="188" text-anchor="middle">the cut is part of the sentence — no hidden SQL, no N+1 surprise</text>
+            <defs>
+              <marker id="arrow-b" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+              </marker>
+            </defs>
+          </svg>
+          <figcaption>filter → shape → sort → take, in the order written, row count shrinking at each stage</figcaption>
+        </figure>
+      </div>
+
+      <h3 id="writes-modes">Writes: two verbs, derived modes</h3>
+      <p>There is no <code>insert</code>, <code>update</code>, or <code>delete</code> keyword. There are two verbs, <code>set</code> and <code>del</code>, and <strong>the write mode is derived from the statement's condition, never spelled separately</strong>:</p>
+      <div class="code-panel">
+        <div class="bar"><b>tasks.ordo</b><button class="copy">copy</button></div>
+        <pre class="code"><code><span class="kw">op</span> addTask(<span class="vr">$project</span>: id, <span class="vr">$title</span>: text) =
+  <span class="kw">set</span> tasks { project: <span class="vr">$project</span>, title: <span class="vr">$title</span> }
+
+<span class="kw">op</span> renameTask(<span class="vr">$task</span>: id, <span class="vr">$title</span>: text) =
+  <span class="kw">set</span> tasks(id == <span class="vr">$task</span>) { title: <span class="vr">$title</span> }
+
+<span class="kw">op</span> purgeDone(<span class="vr">$project</span>: id) =
+  <span class="kw">del</span> tasks(project == <span class="vr">$project</span>
+            <span class="kw">and</span> status == <span class="str">"done"</span>)</code></pre>
+      </div>
+      <div class="tblwrap">
+        <table class="tbl">
+          <tr><th>Mode</th><th>What triggers it</th><th>Example</th></tr>
+          <tr><td>Create</td><td>no condition — nothing to address, so this makes a row</td><td><code>set tasks { project: $project, title: $title }</code></td></tr>
+          <tr><td>Addressed</td><td><code>id == …</code> — exactly one row, named</td><td><code>set tasks(id == $task) { title: $title }</code></td></tr>
+          <tr><td>Bulk</td><td>any other condition — a range, however many rows that is</td><td><code>del tasks(project == $project and status == "done")</code></td></tr>
+        </table>
+      </div>
+      <div class="callout">
+        A delete always states its target: <strong>bare <code>del tasks</code> does not parse.</strong> Delete-everything is spelled <code>del tasks(true)</code> — the same statement, said on purpose, so it's something a reviewer greps for rather than something a dropped condition quietly becomes.
+      </div>
+
+      <h3 id="refusals">Refusals are the feature</h3>
+      <p>When a statement can't be honored honestly, the compiler stops and names the problem — it never approximates or falls back to something close:</p>
+      <div class="code-panel">
+        <div class="bar"><b>compiler — messages abridged for illustration</b><button class="copy">copy</button></div>
+        <pre class="code"><code>del tasks
+  → [parse_error] a delete always states its target — delete-everything
+    is del tasks(true), said on purpose
+
+orders(customer == $cust) sort memo
+  → [sealed_unsupported] `memo` is sealed — the blind index answers
+    equality only, not sort
+
+entity orderings { … }
+  → [id_key_collision] `orders` and `orderings` both derive id key
+    `orde` — give one an explicit key</code></pre>
+      </div>
+      <p>Every one of these is a compile-time refusal, not a runtime surprise — you find out before you ship, not from a support ticket.</p>
+    </section>
+
+    <section class="doc-section" id="sec-lowering">
+      <h2>From source to Postgres</h2>
+      <p class="kicker">A two-command contract, exact DDL, and tenancy that lives in the keys, not a WHERE clause.</p>
+      <p>Ordo doesn't hide the database — it derives it. Every entity you declare becomes a real Postgres table, and the compiler shows you exactly what it will build before it builds anything.</p>
+
+      <h3 id="plan-apply">plan, then apply</h3>
+      <p><code>ordo plan</code> derives the schema, the API, and the access surface from your source and shows the exact diff — additions, drops, and everything in between, before anything happens. <code>ordo apply</code> takes that plan and stores it as a <strong>versioned artifact</strong> in the registry.</p>
+      <div class="callout warn">
+        <b><code>apply</code> does not run DDL against your database.</b> It registers a versioned, compiled program. What turns that artifact into running schema and endpoints is a separate concern from the language itself — <code>apply</code>'s job stops at "this program is now the registered one."
+      </div>
+
+      <h3 id="the-lowering">The lowering</h3>
+      <p>Every field lowers to a typed column, with your identifiers surviving <strong>verbatim and double-quoted</strong> — the same spelling in source, schema, and the command log. A <code>duration(ms)</code> literal like <code>7d</code> becomes a plain integer of milliseconds, so there's no unit bug waiting in a join.</p>
+      <div class="split">
+        <div class="code-panel">
+          <div class="bar"><b>plantcare.ordo</b><button class="copy">copy</button></div>
+          <pre class="code"><code><span class="kw">entity</span> plants {
+  name:      text
+  room:      text?
+  everyDays: duration(ms) = 7d
+}</code></pre>
+        </div>
+        <div class="code-panel">
+          <div class="bar"><b>derived DDL</b><button class="copy">copy</button></div>
+          <pre class="code"><code>CREATE TABLE "plants" (
+  "$space"    text   NOT NULL,
+  "id"        text   NOT NULL,
+  "name"      text   NOT NULL,
+  "room"      text,
+  <span class="hl-line">"everyDays" bigint NOT NULL DEFAULT 604800000,</span>
+  PRIMARY KEY ("$space","id")
+);</code></pre>
+        </div>
+      </div>
+      <p>Two columns appear on every table whether or not you declared them: <code>"id"</code> and <code>"$space"</code>. The primary key is always the pair <code>("$space","id")</code> — which is what makes tenancy structural rather than a convention someone has to remember to apply.</p>
+
+      <h3 id="tenancy-physics">Tenancy is structural</h3>
+      <p><code>"$space"</code> rides in every primary key <em>and</em> every foreign key. A row in one space cannot reference a row in another, because the reference itself carries the space it was made in — there's no query path that lets it happen by accident.</p>
+      <figure class="fig">
+        <svg viewBox="0 0 700 240">
+          <rect class="d-box" x="20" y="16" width="290" height="90" rx="10"/>
+          <text class="d-sub" x="40" y="34">space: acme</text>
+          <rect class="d-box-hi" x="40" y="46" width="110" height="40" rx="8"/>
+          <text class="d-text" x="95" y="66">orders row</text>
+          <rect class="d-box-hi" x="180" y="46" width="110" height="40" rx="8"/>
+          <text class="d-text" x="235" y="66">customers row</text>
+          <path class="d-line" d="M150 66 H180" marker-end="url(#arrow-c)"/>
+          <text class="d-mono" x="165" y="100" text-anchor="middle">FK carries $space</text>
+
+          <rect class="d-box" x="390" y="16" width="290" height="90" rx="10"/>
+          <text class="d-sub" x="410" y="34">space: studio</text>
+          <rect class="d-box-hi" x="410" y="46" width="110" height="40" rx="8"/>
+          <text class="d-text" x="465" y="66">orders row</text>
+
+          <path class="d-line-bad" d="M465 86 C 465 150, 235 150, 235 86" marker-end="url(#arrow-bad)"/>
+          <text class="d-text" x="350" y="168" fill="var(--pbad)">✕</text>
+          <text class="d-mono" x="350" y="188" text-anchor="middle">[cross_space_ref] refused at write time</text>
+
+          <text class="d-sub" x="350" y="222" text-anchor="middle">isolation is structural — not a WHERE clause someone remembered to add</text>
+          <defs>
+            <marker id="arrow-c" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+            </marker>
+            <marker id="arrow-bad" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--pbad)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>an in-lane reference carries $space and is allowed; a cross-lane reference is refused at write time</figcaption>
+      </figure>
+    </section>
+
+    <section class="doc-section" id="sec-api">
+      <h2>The API</h2>
+      <p class="kicker">Ops are the only callable surface — typed, versioned, and nothing else exists to call.</p>
+      <p>There is no free-form query endpoint. Every callable thing in an Ordo app is an <code>op</code> you declared, and each one compiles to exactly one route.</p>
+
+      <h3 id="ops-only-surface">Ops are the only surface</h3>
+      <p>Each op becomes <code>/op/{name}</code> — singular, never <code>/ops/</code>. Reads use <code>GET</code>; writes use <code>POST</code>. Params are validated at the door, and the response is shaped exactly the way the op's query says.</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <tr><th>Op</th><th>Method &amp; path</th><th>Params</th></tr>
+          <tr><td><code>thirsty</code></td><td><code>GET</code> <code>/op/thirsty</code></td><td><code>$today: date</code></td></tr>
+          <tr><td><code>history</code></td><td><code>GET</code> <code>/op/history</code></td><td><code>$plant: id</code></td></tr>
+          <tr><td><code>water</code></td><td><code>POST</code> <code>/op/water</code></td><td><code>$plant: id, $by: text, $today: date</code></td></tr>
+          <tr><td><code>addPlant</code></td><td><code>POST</code> <code>/op/addPlant</code></td><td><code>$name: text, $room: text</code></td></tr>
+          <tr><td><code>pruneLogs</code></td><td><code>POST</code> <code>/op/pruneLogs</code></td><td><code>$before: date</code></td></tr>
+        </table>
+      </div>
+      <p>Nothing you didn't declare is reachable — there's no ORM escape hatch and no admin query console sitting next to it.</p>
+
+      <h3 id="calling-an-op">Calling an op</h3>
+      <p>Parameters travel as a bare-keyed JSON body — no envelope, no wrapper object:</p>
+      <div class="code-panel">
+        <div class="bar"><b>request</b><button class="copy">copy</button></div>
+        <pre class="code"><code>POST /op/water
+{"plant":"plnt_01J8…","by":"adam"}</code></pre>
+      </div>
+      <p>Every response carries a per-op version header. If the client's compiled understanding of an op has drifted from what's currently registered, the response comes back flagged rather than silently mismatched — including <code>x-ordo-version-skew</code> for callers paging through a result set whose shape changed underneath them.</p>
+
+      <h3 id="cant-see-cant-hurt">What you can't see can't hurt you</h3>
+      <p>Authorization is not a line in your source — it's runtime platform data: role→op access profiles plus capability allowlists, looked up on every call.</p>
+      <div class="callout">
+        <b>A refused call and a call to an op that was never declared return the same 403 <code>access_denied</code>, byte-identical.</b> There is no signal in the response that distinguishes "you're not allowed" from "that doesn't exist." And the per-caller catalog doesn't mark what you can't reach — it simply <strong>omits</strong> it, so probing the catalog itself leaks nothing about what exists elsewhere in the app.
+      </div>
+      <figure class="fig">
+        <svg viewBox="0 0 700 150">
+          <rect class="d-box" x="20" y="20" width="200" height="50" rx="10"/>
+          <text class="d-text" x="120" y="40">call an undeclared op</text>
+          <text class="d-mono" x="120" y="58" text-anchor="middle">/op/deletePlant</text>
+          <rect class="d-box" x="20" y="90" width="200" height="50" rx="10"/>
+          <text class="d-text" x="120" y="110">call a real op, wrong role</text>
+          <text class="d-mono" x="120" y="128" text-anchor="middle">viewer → /op/water</text>
+          <path class="d-line" d="M220 45 C 320 45, 320 75, 420 75" marker-end="url(#arrow-d)"/>
+          <path class="d-line" d="M220 115 C 320 115, 320 85, 420 85" marker-end="url(#arrow-d)"/>
+          <rect class="d-box-hi" x="420" y="55" width="240" height="50" rx="10"/>
+          <text class="d-text" x="540" y="75">403 access_denied</text>
+          <text class="d-mono-hi" x="540" y="93" text-anchor="middle">byte-identical either way</text>
+          <defs>
+            <marker id="arrow-d" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="var(--panel-accent)"/>
+            </marker>
+          </defs>
+        </svg>
+        <figcaption>two very different requests, one indistinguishable refusal</figcaption>
+      </figure>
+
+      <h3 id="access-profiles">Access profiles <span class="tag built">runs today</span></h3>
+      <p>Profiles map roles to the ops they can call. For plantcare, a natural progression looks like this:</p>
+      <div class="tblwrap">
+        <table class="tbl">
+          <tr><th>Role</th><th>Can call</th></tr>
+          <tr><td>viewer</td><td><code>thirsty</code>, <code>history</code></td></tr>
+          <tr><td>editor</td><td>+ <code>water</code></td></tr>
+          <tr><td>manager</td><td>+ <code>addPlant</code></td></tr>
+          <tr><td>owner</td><td>+ <code>pruneLogs</code></td></tr>
+        </table>
+      </div>
+      <p>These four roles — <strong>owner, manager, editor, viewer</strong> — are the complete set; nothing in the language lets you invent an "admin" or a "member" role. Because profiles are runtime data rather than compiled syntax, you can widen or narrow who calls what without a redeploy — the source that declared <code>pruneLogs</code> never has to change for an owner to be promoted to a manager, or the reverse.</p>
+    </section>

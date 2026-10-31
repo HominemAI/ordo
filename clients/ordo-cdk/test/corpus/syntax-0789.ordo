@@ -1,0 +1,9 @@
+op myUnits unbounded =
+  leaseParties(person == $caller)[lease.unit.name, lease.unit.property.name]
+  sort name
+# `$caller` scoping is authorization, not a cardinality bound: the compiler
+# cannot prove how many units any given caller holds, so the acknowledgment
+# stands even though the result is small in practice.
+
+# guards decide what exists for this caller; `$caller` in the body decides what
+# they asked for. $caller is the one reserved parameter and is never client-suppliable.

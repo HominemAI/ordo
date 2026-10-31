@@ -1,0 +1,6 @@
+entity properties {
+  name: text
+  address: text sealed
+  acquired: date
+  acl (read, write, admin)
+}

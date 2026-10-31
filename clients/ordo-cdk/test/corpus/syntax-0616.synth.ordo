@@ -1,0 +1,7 @@
+routine securityWatch in estate {
+  trigger when estate.events.created
+  run($today: date) unguarded:
+    events(kind == "motion" and device.armed == true)[id, at, deviceId: device.id, device.location.name]
+    each ->
+      set alerts { kind: "security", key: "motion:" + deviceId, severity: "critical", status: "active", raised: $today, title: "Motion at " + name }
+}

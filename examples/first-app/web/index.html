@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Readings</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1a1a18; --dim: #6b6b66;
+    --line: #e2e1dd; --card: #fff; --bad: #a3321f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a; --fg: #ececea; --dim: #96968f;
+      --line: #2e2e33; --card: #1f1f23; --bad: #e0806c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 48px 16px; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, -apple-system, system-ui, sans-serif;
+  }
+  main { max-width: 34rem; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 .15rem; letter-spacing: -.01em; }
+  p.sub { margin: 0 0 2rem; color: var(--dim); font-size: .875rem; }
+  form { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+  input, button {
+    font: inherit; border: 1px solid var(--line); border-radius: 7px;
+    padding: .5rem .7rem; background: var(--card); color: var(--fg);
+  }
+  input { flex: 1; min-width: 0; }
+  button { cursor: pointer; font-weight: 500; }
+  button:disabled { opacity: .5; cursor: default; }
+  table {
+    width: 100%; border-collapse: collapse; background: var(--card);
+    border: 1px solid var(--line); border-radius: 9px; overflow: hidden;
+  }
+  th, td {
+    text-align: left; padding: .6rem .8rem;
+    border-bottom: 1px solid var(--line);
+  }
+  th { font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  td.empty, td.wait { color: var(--dim); font-style: italic; }
+  .refusal {
+    margin-bottom: 1.25rem; padding: .7rem .85rem; border-radius: 7px;
+    border: 1px solid var(--bad); color: var(--bad); font-size: .875rem;
+  }
+  .refusal code { font-weight: 600; }
+  footer { margin-top: 2rem; color: var(--dim); font-size: .8rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Readings</h1>
+  <p class="sub">One entity, one field, served by <code>listReadings</code>.</p>
+
+  <div id="refusal" class="refusal" hidden></div>
+
+  <form id="add">
+    <input id="label" placeholder="a label" required autocomplete="off">
+    <button type="submit">Add</button>
+  </form>
+
+  <table>
+    <thead><tr><th>label</th></tr></thead>
+    <tbody id="rows"><tr><td class="wait">loading…</td></tr></tbody>
+  </table>
+
+  <footer id="version"></footer>
+</main>
+
+<script>
+// Same origin as serve.py, which adds the space and the bearer token on the
+// way through. This page therefore holds no credential and knows no host.
+const rows = document.getElementById('rows');
+const refusalBox = document.getElementById('refusal');
+const version = document.getElementById('version');
+const form = document.getElementById('add');
+const label = document.getElementById('label');
+
+function refusal(envelope) {
+  const e = (envelope && envelope.error) || {};
+  refusalBox.innerHTML = e.code
+    ? `<code>${e.code}</code> · ${e.message || 'no message'}`
+    : 'The call failed and the answer carried no error envelope.';
+  refusalBox.hidden = false;
+}
+
+// Every call goes through here so a refusal is never mistaken for an empty
+// result. `ok` is false for both, and only one of them has rows.
+async function call(path, init) {
+  const answer = await fetch(path, init);
+  const body = await answer.json().catch(() => null);
+  if (!answer.ok) { refusal(body); return null; }
+  refusalBox.hidden = true;
+  return body;
+}
+
+function draw(body) {
+  version.textContent = body.version ? `version ${body.version}` : '';
+  if (!body.rows || body.rows.length === 0) {
+    rows.innerHTML = '<tr><td class="empty">no rows yet</td></tr>';
+    return;
+  }
+  rows.replaceChildren(...body.rows.map(row => {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.textContent = row.label;
+    tr.appendChild(td);
+    return tr;
+  }));
+}
+
+async function load() {
+  const body = await call('/op/listReadings');
+  if (body) draw(body);
+  else rows.innerHTML = '<tr><td class="empty">nothing to show</td></tr>';
+}
+
+form.addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = form.querySelector('button');
+  button.disabled = true;
+  const written = await call('/op/addReading', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: label.value })
+  });
+  button.disabled = false;
+  if (written) { label.value = ''; await load(); }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+# 18 Expressions and functions
+#
+# Shows the closed list of pure functions. They are legal wherever a field
+# is: projections, conditions, sort keys, group keys, write values.
+#   - Arithmetic: + - * /   abs round(x) round(x, n) floor ceil mod
+#                 least greatest. `/` yields a decimal at scale 12; it must be
+#                 rounded before it can be stored or projected as money or int.
+#   - Dates: year month week day hour dow; `date + 30d`; `date - 1w`.
+#   - Text: lower length trim, and `+` to join.
+#   - Null: `coalesce(a, b)`.
+#   - Choice: `cond(c1 -> v1, c2 -> v2, else)`. The last value is the else.
+#   - Durations: 7d 12h 30m 1mo 1y. `m` is minutes, `mo` is months.
+#   - No `now`. Time-relative reads take a `$today` parameter or use `since`.
+#
+# Reference: docs/definition-language.md section 2 "Types", "Literals" and
+# section 3 "Expression functions".
+
+domain shop @ 1.0.0
+
+entity orders {
+  customer: text
+  placed:   date
+  due:      date?
+  total:    money
+  discount: money?
+  qty:      int
+  note:     text?
+}
+
+op arithmetic unbounded =
+  orders[
+    customer,
+    net:      total - coalesce(discount, 0),
+    perUnit:  round(total / qty, 2),
+    wholes:   floor(total / qty),
+    rounded:  ceil(total / qty),
+    bigger:   greatest(total, 100),
+    smaller:  least(total, 100),
+    parity:   mod(qty, 2)
+  ]
+
+op dates unbounded =
+  orders[
+    placed,
+    y:       year(placed),
+    m:       month(placed),
+    wk:      week(placed),
+    weekday: dow(placed),
+    net30:   placed + 30d,
+    latest:  coalesce(due, placed + 14d)
+  ]
+  sort -placed
+
+op text unbounded =
+  orders[
+    shout:  lower(customer),
+    len:    length(customer),
+    clean:  trim(customer),
+    label:  customer + " (" + qty + ")",
+    memo:   coalesce(note, "none")
+  ]
+
+op tiers unbounded =
+  orders[customer, tier: cond(total >= 1000 -> "gold", total >= 100 -> "silver", "bronze")]
+  sort -total
+
+# An expression can be a sort key and a group key.
+op byWeekday unbounded =
+  orders[placed, total]
+  group dow(placed) { n: count, revenue: sum total }
+  sort dow

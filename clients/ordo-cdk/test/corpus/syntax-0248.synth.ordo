@@ -1,0 +1,3 @@
+op openOrders unbounded =
+  workOrders(status == "open")[opened, priority, descr, location.name, location.property.name]
+    sort priority, opened

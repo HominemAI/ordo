@@ -1,0 +1,308 @@
+domain market @ 1.1.0
+
+entity vendors {
+  name: text
+  region: text
+  active: bool = true
+}
+
+entity categories (key: cat) {
+  name: text unique
+  parent -> categories? tree
+}
+
+entity products {
+  vendor -> vendors
+  category -> categories
+  name: text
+  price: money
+  active: bool = true
+}
+
+entity customers {
+  name: text
+  email: text? unique sealed indexed normalize(lower)
+  tier: text = "basic"
+}
+
+entity orders (key: ord) {
+  customer -> customers
+  placed: date
+  status: text = "open"
+  total: money
+  memo: text sealed = ""
+}
+
+entity orderItems (key: item) {
+  order -> orders owned
+  product -> products
+  qty: int
+  amount: money
+}
+
+entity projects {
+  name: text
+  owner -> members
+  access read owner == $caller or projectMembers(member == $caller)
+  access write owner == $caller
+}
+
+entity projectMembers {
+  project -> projects owned
+  member -> members owned
+  canWrite: bool = false
+  access read project.projectMembers(member == $caller)
+  access write project.owner == $caller
+}
+
+entity tasks (key: task) {
+  project -> projects owned
+  assignee -> members?
+  title: text
+  status: text = "open"
+  access read project.projectMembers(member == $caller)
+  access write project.projectMembers(member == $caller and canWrite)
+}
+
+entity taskNotes (key: note) {
+  task -> tasks owned
+  body: text
+}
+
+entity boards (key: board) {
+  name: text
+  acl (read, write, admin)
+}
+
+entity cards (key: card) {
+  board -> boards owned
+  title: text
+  done: bool = false
+}
+
+entity folders (key: fold) {
+  owner -> members
+  name: text
+  parent -> folders? tree
+  access read open
+  access write owner == $caller
+}
+
+entity ledgerEntries (key: led) {
+  externalId: text unique
+  owner -> members
+  amount: money
+  note: text = ""
+  access read owner == $caller or note == "shared"
+  access write owner == $caller
+}
+
+entity coupons {
+  code: text unique
+  slug: text unique
+  value: money
+}
+
+op activeProducts unbounded =
+  products(active == true)[name, price, vendor, category]
+
+op cheapActive($cap: money) unbounded =
+  activeProducts(price < $cap)[name, price, category]
+
+op toolDeals($cap: money, $root: id) unbounded =
+  cheapActive($cap: $cap, category under $root)[name, price]
+    sort price
+
+op recentOrders($since: date = 2026-03-01) unbounded =
+  orders(placed >= $since)[placed, status, total]
+    sort placed
+
+op doneOrders($from: date) unbounded =
+  orders(status == "done" and placed >= $from)[placed, total, customer]
+
+op spendByCustomer($from: date) unbounded =
+  doneOrders($from: $from)[total, customer]
+    group customer { spent: sum total, n: count }
+
+op monthlyRevenue($from: date) unbounded =
+  doneOrders($from: $from)[placed, total]
+    group month(placed) { revenue: sum total }
+
+op productRevenue unbounded =
+  orderItems[amount, product]
+    group product { sold: count, revenue: sum amount }
+
+op top3Orders =
+  orders[placed, total, customer]
+    sort -total
+    take 3
+
+op catInfo unbounded =
+  categories[name, parent, depth]
+
+op customerByEmail($e: text) =
+  customers(email == $e)[name, tier]
+
+op giftOrders unbounded =
+  orders(memo == "gift")[placed, total, customer]
+
+op memoDigest =
+  orders[placed, memo]
+    sort placed
+    take 3
+
+op orderMemos unbounded =
+  orders[placed, total, memo]
+
+op myProjects unbounded =
+  projects[name, owner]
+    sort name
+
+op taskBoard unbounded =
+  tasks[title, status, project]
+    sort title
+
+op openTasks unbounded =
+  tasks(status == "open")[title, project]
+    sort title
+
+op myAssignedTasks unbounded =
+  tasks(assignee == $caller)[title]
+    sort title
+
+op noteFeed unbounded =
+  taskNotes[body, task]
+    sort body
+
+op teamRoster unbounded =
+  projectMembers[project, member, canWrite]
+
+op allTasks unbounded unguarded =
+  tasks[title, status]
+    sort title
+
+op boardList unbounded =
+  boards[name]
+    sort name
+
+op cardList unbounded =
+  cards[title, done, board]
+    sort title
+
+op firstTask =
+  tasks[title]
+    sort title
+    take 1
+
+op specTasks unbounded =
+  openTasks(title contains "spec")[title]
+
+op specCount =
+  specTasks[title]
+    reduce { n: count }
+
+op addTask($project: id, $title: text) =
+  set tasks { project: $project, title: $title }
+
+op claimTask($task: id) =
+  set tasks(id == $task) { assignee: $caller }
+
+op renameTask($task: id, $title: text) =
+  set tasks(id == $task) { title: $title }
+
+op closeTask($task: id) =
+  set tasks(id == $task) { status: "done" }
+
+op purgeDone($project: id) =
+  del tasks(project == $project and status == "done")
+
+op addNote($task: id, $body: text) =
+  set taskNotes { task: $task, body: $body }
+
+op addBoard($name: text) =
+  set boards { name: $name }
+
+op addCard($board: id, $title: text) =
+  set cards { board: $board, title: $title }
+
+op finishCard($card: id) =
+  set cards(id == $card) { done: true }
+
+op addCustomer($name: text, $email: text) =
+  set customers { name: $name, email: $email }
+
+op addAnonCustomer($name: text) =
+  set customers { name: $name }
+
+op clearCustomerEmail($c: id) =
+  set customers(id == $c) { email: null }
+
+op anonCustomers =
+  customers(email == null)[name]
+
+op movePM($pm: id, $p: id) =
+  set projectMembers(id == $pm) { project: $p }
+
+op moveBA($ba: id, $b: id) =
+  set boardsAccess(id == $ba) { board: $b }
+
+op renameTaskIf($task: id, $title: text, $rev: int) =
+  set tasks(id == $task) { title: $title, rev: $rev }
+
+op reassign($task: id, $who: id) =
+  set tasks(id == $task) { assignee: $who }
+
+op addCategory($name: text, $parent: id) =
+  set categories { name: $name, parent: $parent }
+
+op addRootCategory($name: text) =
+  set categories { name: $name }
+
+op moveCategory($cat: id, $parent: id) =
+  set categories(id == $cat) { parent: $parent }
+
+op dropCategory($cat: id) =
+  del categories(id == $cat)
+
+op setMemo($order: id, $memo: text) =
+  set orders(id == $order) { memo: $memo }
+
+op dropFolder($f: id) =
+  del folders(id == $f)
+
+op dropFolderTree($f: id) =
+  del folders { id: $f } subtree
+
+op dropCategoryTree($cat: id) =
+  del categories { id: $cat } subtree
+
+op purgeNotes =
+  del taskNotes(true)
+
+op entryList unbounded =
+  ledgerEntries[externalId, amount, note, owner]
+    sort externalId
+
+op recordEntry($ext: text, $amount: money, $note: text = "") =
+  set ledgerEntries { externalId: $ext, owner: $caller, amount: $amount, note: $note }
+
+op recordEntryFor($ext: text, $owner: id, $amount: money) =
+  set ledgerEntries { externalId: $ext, owner: $owner, amount: $amount }
+
+op recordEntryOnce($ext: text, $amount: money) =
+  set ledgerEntries { externalId: $ext, owner: $caller, amount: $amount, rev: null }
+
+op reviseEntry($ext: text, $amount: money, $rev: int) =
+  set ledgerEntries { externalId: $ext, owner: $caller, amount: $amount, rev: $rev }
+
+op renumberEntry($entry: id, $ext: text) =
+  set ledgerEntries { id: $entry, externalId: $ext }
+
+op renumberEntryOnce($entry: id, $ext: text) =
+  set ledgerEntries { id: $entry, externalId: $ext, rev: null }
+
+op claimCoupon($code: text, $slug: text, $value: money) =
+  set coupons { code: $code, slug: $slug, value: $value }
+
+op upsertCustomer($name: text, $email: text, $tier: text = "basic") =
+  set customers { email: $email, name: $name, tier: $tier }

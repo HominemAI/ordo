@@ -1,0 +1,67 @@
+# 15 Trees
+#
+# Shows hierarchy without recursion.
+#   - A self-ref marked `tree` makes the platform keep a materialized path
+#     and a read-only `depth` (root = 0), reject cycles and cap the depth.
+#   - `id under $root` selects a node and everything below it.
+#     `id above $leaf` selects a node and its ancestors.
+#   - A plain `del` of a node with children is refused (`tree_has_children`).
+#     `del e { id: $id } subtree` is the explicit cascade, one command per row.
+#   - Moving a node is a one-row `set` of its parent. A move under its own
+#     descendant is refused (`tree_cycle`).
+#   - `tree` and `owned` compose: `parent -> folders? tree owned` makes the
+#     children part of the parent.
+#
+# Reference: docs/definition-language.md section 3 "Trees", section 4
+# "Comparisons", docs/writing-data.md section 6a.
+
+domain files @ 1.0.0
+
+entity categories {
+  name:   text unique
+  parent -> categories? tree
+}
+
+entity products {
+  category -> categories
+  name:    text
+  price:   money
+}
+
+# The whole subtree under a node, with each node's depth.
+op subcategories($root: id) unbounded =
+  categories(id under $root)[name, depth]
+  sort depth, name
+
+# The breadcrumb: a node and every ancestor.
+op breadcrumb($leaf: id) unbounded =
+  categories(id above $leaf)[name, depth]
+  sort depth
+
+# Products anywhere below a category.
+op productsUnder($root: id) unbounded =
+  products(category under $root)[name, price, category.name]
+  sort name
+
+# Only the top of the hierarchy.
+op topLevel unbounded =
+  categories(depth == 0)[name]
+  sort name
+
+op addCategory($name: text, $parent: id) =
+  set categories { name: $name, parent: $parent }
+
+op addRoot($name: text) =
+  set categories { name: $name }
+
+# Reparenting is one addressed row at a time.
+op moveCategory($cat: id, $parent: id) =
+  set categories(id == $cat) { parent: $parent }
+
+# Refused if the node has children.
+op dropLeaf($cat: id) =
+  del categories { id: $cat }
+
+# The explicit cascade over the whole subtree.
+op dropBranch($cat: id) =
+  del categories { id: $cat } subtree

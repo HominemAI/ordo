@@ -1,0 +1,47 @@
+# 03 Unique, index and check
+#
+# Shows the three constraints a shape can carry.
+#   - `unique` on a field, or `unique (a, b)` for a pair. A nullable unique
+#     field admits at most one null row. Uniqueness is always per tenant.
+#   - `index` on a field, or `index (a, b)` for a pair, adds a lookup index.
+#     A sealed field's index is the blind index, `sealed indexed` (05).
+#     A ref field is indexed for you, unless an index or unique pair
+#     already starts with it.
+#   - `check <condition>` is a row invariant the database enforces inside
+#     every write. A violation rolls the whole write back.
+#
+# Reference: docs/definition-language.md section 3 "Row invariants: check",
+# "Refs" (Uniqueness), "Indexes".
+
+domain shop @ 1.0.0
+
+entity coupons {
+  code:     text unique                # one coupon per code
+  percent:  int
+  minSpend: money = 0
+  maxUses:  int
+  used:     int = 0
+  check percent >= 1 and percent <= 100
+  check used <= maxUses
+}
+
+entity prices {
+  sku:      text
+  currency: text
+  amount:   money
+  unique (sku, currency)               # one price per sku and currency
+  index (currency, amount)             # fast lookup by currency and amount
+}
+
+# The atomic counter pattern: `used + 1` runs inside the row's own update,
+# and `check used <= maxUses` makes the cap the database's, not the app's.
+# The call past the cap answers `check_violation`.
+op redeemCoupon($coupon: id) =
+  set coupons { id: $coupon, used: used + 1 }
+
+# `check` accepts a condition with `and` or `or` (never mixed without parens).
+entity tickets {
+  status: text = "open" index          # screens filter by status: index it
+  closedBy: text?
+  check status == "open" or status == "closed" or status == "void"
+}

@@ -1,0 +1,147 @@
+#!/bin/sh
+# Fill the site with synthesized content.
+#
+#     sh examples/marketing-site/dev/seed
+#
+# Signs in as the site owner (a guest; the secret is kept in dev/.data so a
+# second run is the same owner) and writes 10 products, 3 plans and 8
+# testimonials through the ops, in the deployment's own space, `system`. Visitors
+# read them with no token.
+#
+# The site owner must be an owner of `system`. The first run saves the owner's
+# principal id in dev/.data/owner-principal and, if the write is refused, says
+# so. Stop and start serve.sh (it reads that file into ORDO_DEPLOYMENT_OWNERS),
+# then run seed again.
+#
+# Run it again and it adds nothing twice: products converge on their slug.
+#
+# Needs: `serve.sh` running, curl, python3.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+door=${ORDO_URL:-http://127.0.0.1:4010}
+page=${SITE_DEV_PAGE:-http://localhost:5183}
+secret_file=${SITE_DEV_DIR:-"$here/.data"}/owner-secret
+mkdir -p "$(dirname "$secret_file")"
+
+export SEED_DOOR="$door" SEED_PAGE="$page" SEED_SECRET_FILE="$secret_file"
+export SEED_PRINCIPAL_FILE="$(dirname "$secret_file")/owner-principal"
+exec python3 - <<'PY'
+import json, os, sys, time, urllib.request, urllib.error
+
+DOOR, PAGE, SECRET_FILE = os.environ["SEED_DOOR"], os.environ["SEED_PAGE"], os.environ["SEED_SECRET_FILE"]
+PRINCIPAL_FILE = os.environ["SEED_PRINCIPAL_FILE"]
+SPACE = "system"  # the deployment's own space: where public data lives
+
+
+def call(method, path, body=None, token=None, space=None, key=None):
+    headers = {"Origin": PAGE, "Accept": "application/json"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    if space:
+        headers["X-Ordo-Space"] = space
+    if key:
+        headers["Idempotency-Key"] = key
+    req = urllib.request.Request(DOOR + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+
+# Sign in as the site owner: resume the saved guest, else make one.
+if os.path.exists(SECRET_FILE):
+    secret = open(SECRET_FILE).read().strip()
+    status, done = call("POST", "/auth/complete", {"method": "guest", "kind": "resume", "secret": secret})
+else:
+    status, done = call("POST", "/auth/complete", {"method": "guest", "kind": "new", "display": "Site owner"})
+    if status == 200:
+        with open(SECRET_FILE, "w") as f:
+            f.write(done["guest_secret"])
+        os.chmod(SECRET_FILE, 0o600)
+if status != 200:
+    sys.exit("sign-in failed (is serve.sh running, with ORDO_AUTH_GUEST=on?): %s %s" % (status, done))
+token = done["token"]
+# The owner's principal id is the token's second field. A token is signed,
+# not sealed, so its holder can read it. Dev only: a real deployment owner
+# knows their own account id.
+if not os.path.exists(PRINCIPAL_FILE):
+    import base64
+    payload = token.split(".")[0]
+    payload += "=" * (-len(payload) % 4)
+    fields = base64.urlsafe_b64decode(payload).decode().split("|")
+    with open(PRINCIPAL_FILE, "w") as f:
+        f.write(fields[1])
+
+# serve.sh applies the program. A visitor's read needs no token.
+for _ in range(300):
+    status, _body = call("GET", "/op/catalogue")
+    if status == 200:
+        break
+    time.sleep(0.1)
+else:
+    sys.exit("the site never became ready (is serve.sh running?)")
+
+n = [0]
+
+
+def write(op, params):
+    n[0] += 1
+    status, out = call("POST", "/op/" + op, params, token=token, space=SPACE, key="seed-%d-%d" % (os.getpid(), n[0]))
+    if status != 200:
+        sys.exit("%s failed: %s %s\nIf it was refused, the site owner is not yet an owner of `system`.\n"
+                 "The owner's principal id is saved in %s when the door gives one:\n"
+                 "stop and start serve.sh, then run seed again." % (op, status, out, PRINCIPAL_FILE))
+    return out["rows"][0]["created"]
+
+
+PRODUCTS = [
+    ("aurora-lamp", "Aurora Lamp", "Light that follows the day", "49.00", ["Dimmable", "Warm to cool", "USB-C"]),
+    ("drift-desk", "Drift Desk", "A desk that changes height with you", "329.00", ["Sit or stand", "Memory presets", "5 year warranty"]),
+    ("ember-mug", "Ember Mug", "Keeps coffee at the heat you chose", "79.50", ["8 hour battery", "Spill proof"]),
+    ("fjord-bag", "Fjord Bag", "A carry-on that fits a laptop and a lunch", "119.00", ["Waterproof", "Lifetime repairs"]),
+    ("grove-planter", "Grove Planter", "Self-watering for the forgetful", "34.00", ["2 week reservoir", "Recycled clay"]),
+    ("halo-headset", "Halo Headset", "Quiet for the open office", "189.00", ["Noise cancelling", "30 hour battery", "Two devices"]),
+    ("isle-kettle", "Isle Kettle", "Boils to the degree", "64.00", ["Temperature presets", "Keep warm"]),
+    ("juno-notebook", "Juno Notebook", "Paper that takes ink without bleeding", "18.00", ["Lay flat", "Acid free"]),
+    ("kite-charger", "Kite Charger", "One pad for phone, watch and buds", "55.00", ["15 W", "Travel fold"]),
+    ("lumen-clock", "Lumen Clock", "Wakes you with light, not noise", "72.00", ["Sunrise mode", "No phone needed"]),
+]
+PLANS = [
+    ("Starter", "For one person", "0.00", "month", ["1 project", "Community support"], False),
+    ("Team", "For small teams", "12.00", "month", ["Unlimited projects", "Email support", "Shared libraries"], True),
+    ("Studio", "For growing studios", "39.00", "month", ["Everything in Team", "Priority support", "Audit log"], False),
+]
+TESTIMONIALS = [
+    ("Mara Ellison", "Designer", "Northpoint", "I stopped fiddling with settings the first day.", 5),
+    ("Jon Okafor", "Founder", "Tidewater Goods", "Our whole office switched in a week.", 5),
+    ("Priya Nair", "Operations", "Brightleaf", "Support answered in minutes, and was right.", 5),
+    ("Tomas Berg", "Engineer", "Kestrel Labs", "Small details done properly. Rare.", 4),
+    ("Aiko Tanaka", "Writer", "Freelance", "The notebook alone is worth it.", 5),
+    ("Lena Fischer", "Buyer", "Harbor & Co", "Reliable delivery and honest pricing.", 4),
+    ("Samir Haddad", "Studio lead", "Oak Row", "We stopped losing mugs to the microwave.", 5),
+    ("Chloe Martin", "Teacher", "Elm Street School", "Simple enough that students use it unprompted.", 4),
+]
+
+for i, (slug, name, tag, price, feats) in enumerate(PRODUCTS, 1):
+    write("addProduct", {"slug": slug, "name": name, "tagline": tag,
+                               "description": "%s. Made in small batches and sold direct." % tag,
+                               "price": price, "features": feats, "rank": i})
+for i, (name, tag, price, period, feats, best) in enumerate(PLANS, 1):
+    write("addPlan", {"name": name, "tagline": tag, "price": price, "period": period,
+                            "features": feats, "highlighted": best, "rank": i})
+for i, (who, role, company, quote, stars) in enumerate(TESTIMONIALS, 1):
+    write("addTestimonial", {"author": who, "role": role, "company": company,
+                                   "quote": quote, "stars": stars, "rank": i})
+
+print("Seeded %d products, %d plans, %d testimonials." % (len(PRODUCTS), len(PLANS), len(TESTIMONIALS)))
+print()
+print("Next:")
+print("  cd examples/marketing-site/web && npm install")
+print("  npm run dev")
+PY

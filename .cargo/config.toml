@@ -1,0 +1,28 @@
+# A development default for the connection pool, and nothing else.
+#
+# `PoolConfig::size` defaults to `min(available_parallelism, 8)`, which is
+# the right shape for a deployment serving traffic and the wrong one for a
+# test. A Postgres connection is a process on the server, and the pool
+# dials all of them eagerly, so a pool of 8 is 8 live backends whether or
+# not anything uses them.
+#
+# `cargo test --workspace` runs many tests at once and several of them
+# stand up a real deployment. Measured 2026-09-25 on a 10-core machine:
+# the workspace peaked at 81 client backends against Postgres's default
+# `max_connections = 100`, and `crates/ordo-host/tests/runtime.rs` alone
+# reached 99 before its pools were sized down. The failures land as
+# `FATAL: sorry, too many clients already` in whichever suite happens to
+# dial last, which reads as a bug in that suite and is not one.
+#
+# **None of that was testing capacity.** The connections were an accident
+# of every test inheriting a production-shaped pool. Two is
+# `PoolConfig`'s own floor, and the boot's reserve check refuses a reserve
+# that is not smaller than the pool, so it is the smallest a deployment
+# accepts.
+#
+# `[env]` here applies to anything cargo runs, including `cargo run`. That
+# is deliberate: a local dev server wants the same small pool for the same
+# reason. Anything that needs production sizing sets `ORDO_PG_POOL_SIZE`
+# explicitly, and an explicit value in the environment wins over this.
+[env]
+ORDO_PG_POOL_SIZE = { value = "2", force = false }

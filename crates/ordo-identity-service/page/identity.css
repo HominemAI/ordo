@@ -1,0 +1,230 @@
+/* The identity service's page. Light and dark follow the system; the
+   tokens below pick a pair with light-dark(), and older browsers get the
+   media query instead. */
+
+:root {
+  color-scheme: light dark;
+
+  --bg-light: #f7f7f5;
+  --bg-dark: #16181b;
+  --card-light: #ffffff;
+  --card-dark: #1f2226;
+  --text-light: #1b1d20;
+  --text-dark: #e9eaec;
+  --quiet-light: #575c63;
+  --quiet-dark: #a9afb7;
+  --line-light: #c9ccd1;
+  --line-dark: #3b4047;
+  --accent-light: #1f5bd8;
+  --accent-dark: #8fb2ff;
+  --on-accent-light: #ffffff;
+  --on-accent-dark: #0d1526;
+  --danger-light: #b3261e;
+  --danger-dark: #ff9a8f;
+  --warn-bg-light: #fff4d6;
+  --warn-bg-dark: #3a3016;
+  --warn-line-light: #c99a1a;
+  --warn-line-dark: #b38a1e;
+
+  --bg: var(--bg-light);
+  --card: var(--card-light);
+  --text: var(--text-light);
+  --quiet: var(--quiet-light);
+  --line: var(--line-light);
+  --accent: var(--accent-light);
+  --on-accent: var(--on-accent-light);
+  --danger: var(--danger-light);
+  --warn-bg: var(--warn-bg-light);
+  --warn-line: var(--warn-line-light);
+
+  @media (prefers-color-scheme: dark) {
+    --bg: var(--bg-dark);
+    --card: var(--card-dark);
+    --text: var(--text-dark);
+    --quiet: var(--quiet-dark);
+    --line: var(--line-dark);
+    --accent: var(--accent-dark);
+    --on-accent: var(--on-accent-dark);
+    --danger: var(--danger-dark);
+    --warn-bg: var(--warn-bg-dark);
+    --warn-line: var(--warn-line-dark);
+  }
+
+  @supports (color: light-dark(white, black)) {
+    --bg: light-dark(var(--bg-light), var(--bg-dark));
+    --card: light-dark(var(--card-light), var(--card-dark));
+    --text: light-dark(var(--text-light), var(--text-dark));
+    --quiet: light-dark(var(--quiet-light), var(--quiet-dark));
+    --line: light-dark(var(--line-light), var(--line-dark));
+    --accent: light-dark(var(--accent-light), var(--accent-dark));
+    --on-accent: light-dark(var(--on-accent-light), var(--on-accent-dark));
+    --danger: light-dark(var(--danger-light), var(--danger-dark));
+    --warn-bg: light-dark(var(--warn-bg-light), var(--warn-bg-dark));
+    --warn-line: light-dark(var(--warn-line-light), var(--warn-line-dark));
+  }
+
+  accent-color: var(--accent);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+[hidden] { display: none !important; }
+
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 1rem/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.brand {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--quiet);
+  font-size: 0.9rem;
+}
+.brand .mark { color: var(--text); font-weight: 700; }
+
+main {
+  max-width: 36rem;
+  margin: 1.5rem auto 3rem;
+  padding: 1.25rem 1rem;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+}
+@media (max-width: 38rem) {
+  main { margin: 0; border-width: 0; border-radius: 0; }
+}
+
+h1 { font-size: 1.5rem; line-height: 1.25; margin: 0 0 0.75rem; }
+h2 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+h1:focus, h2:focus { outline: none; }
+h1:focus-visible, h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+p { margin: 0 0 0.75rem; }
+
+code {
+  font: 0.95em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: color-mix(in srgb, var(--line) 35%, transparent);
+  padding: 0.05em 0.3em;
+  border-radius: 0.25rem;
+}
+
+a { color: var(--accent); }
+
+.quiet, .help { color: var(--quiet); }
+.help { font-size: 0.9rem; }
+
+.field { margin: 0 0 1rem; }
+label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+input[type="text"] {
+  display: block;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+}
+input[type="text"][aria-invalid="true"] { border-color: var(--danger); border-width: 2px; }
+.field-error { display: none; color: var(--danger); font-weight: 600; margin: 0.25rem 0 0; }
+input[aria-invalid="true"] ~ .field-error { display: block; }
+
+button {
+  min-height: 2.75rem;
+  padding: 0.5rem 1.1rem;
+  font: inherit;
+  font-weight: 600;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+button.secondary { color: var(--text); background: transparent; border-color: var(--line); }
+button.danger { color: var(--card); background: var(--danger); border-color: var(--danger); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+:is(button, input, summary, a):focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin: 0 0 1rem; }
+.row.spread { justify-content: space-between; }
+.row p { margin: 0; }
+
+.check { display: flex; gap: 0.6rem; align-items: center; margin: 0.5rem 0 1rem; }
+.check input { width: 1.4rem; height: 1.4rem; margin: 0; flex: none; }
+.check label { margin: 0; font-weight: 600; }
+
+.warn {
+  background: var(--warn-bg);
+  border-left: 4px solid var(--warn-line);
+  padding: 0.75rem 1rem;
+  border-radius: 0.25rem;
+}
+.warn p:last-child { margin-bottom: 0; }
+div.warn { margin: 0 0 1rem; }
+
+.problem {
+  color: var(--danger);
+  font-weight: 600;
+  border: 2px solid var(--danger);
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.8rem;
+  margin: 0 0 1rem;
+}
+.problem:empty { border: 0; padding: 0; margin: 0; }
+.status { color: var(--quiet); min-height: 1.5em; margin: 1rem 0 0; }
+
+.codes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.4rem 1.5rem;
+  padding: 0.75rem 0.75rem 0.75rem 2.25rem;
+  margin: 0 0 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.5rem;
+  font: 1rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.items { list-style: none; padding: 0; margin: 0 0 0.75rem; }
+.items li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.items li p { margin: 0; font-size: 0.9rem; }
+
+.facts { margin: 0 0 1.25rem; }
+.facts dt { font-weight: 600; margin-top: 0.6rem; }
+.facts dd { margin: 0; }
+
+details { margin-top: 1.5rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+summary { cursor: pointer; font-weight: 600; min-height: 2.75rem; display: flex; align-items: center; }
+details form { margin-top: 0.75rem; }
+
+dialog {
+  max-width: min(30rem, calc(100vw - 2rem));
+  color: var(--text);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+}
+dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+dialog h2 { margin-top: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  button { transition: opacity 0.15s; }
+}
+
+@media (forced-colors: active) {
+  .problem, .warn, button { border: 1px solid CanvasText; }
+}

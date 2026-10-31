@@ -1,0 +1,115 @@
+domain wide @ 1.0.0
+
+entity orgs {
+  name: text unique
+  region: text = "unset"
+  active: bool = true
+  founded: date
+  seats: int = 0
+}
+
+entity teams {
+  org -> orgs
+  parent -> teams? tree
+  name: text
+  budget: money = 0
+  archived: bool = false
+}
+
+entity people (key: ppl) {
+  org -> orgs
+  team -> teams?
+  name: text
+  nickname: text?
+  email: text? unique sealed indexed normalize(lower)
+  notes: text sealed = ""
+  age: int?
+  salary: money = 0
+  active: bool = true
+  hired: date
+  lastSeen: datetime?
+  cadence: duration(ms) = 7d
+  shift: duration(h) = 8h
+  externalId: id?
+}
+
+entity projects (key: prj) {
+  org -> orgs
+  lead -> people
+  sponsor -> people?
+  name: text
+  code: text unique
+  budget: money = 0
+  startsOn: date
+  ends: date?
+  shipped: bool = false
+}
+
+entity tasks (key: tsk) {
+  project -> projects owned
+  assignee -> people?
+  title: text
+  priority: int = 3
+  estimate: duration(h)?
+  due: date?
+  done: bool = false
+  points: money = 0
+}
+
+entity tags {
+  label: text unique
+}
+
+entity taskTags (key: ttg) {
+  task -> tasks owned
+  tag -> tags
+}
+
+entity events (key: evt) {
+  task -> tasks?
+  kind: text = "note"
+  at: datetime
+  took: duration(ms)?
+  billable: bool = false
+}
+
+entity documents (key: doc) {
+  project -> projects owned
+  title: text
+  scan: blob?
+  contract: blob? sealed
+  avatar: blob? inline
+  source: uri?
+  canonical: uri? unique sealed indexed normalize(lower)
+  vault: blob? private
+  filedOn: date
+}
+
+op activePeople unbounded =
+  people(active == true)[name, org, team, salary, hired]
+
+op orgTeams unbounded =
+  teams[name, org, budget]
+
+op openTasks unbounded =
+  tasks(done == false)[title, priority, project, assignee]
+
+op projectRoster unbounded =
+  projects[name, code, lead, sponsor, budget]
+
+op tasksByProject unbounded =
+  tasks[points, project]
+    group project { total: sum points, n: count }
+
+op topPaid =
+  people[name, salary]
+    sort -salary
+    take 5
+
+op eventLog unbounded =
+  events[kind, at, task]
+    sort -at
+
+op projectDocuments unbounded =
+  documents[title, scan, source, filedOn, project]
+    sort -filedOn

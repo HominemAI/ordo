@@ -1,0 +1,16 @@
+{
+  "name": "ordo-assistant-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small script that acts for a manager through a delegation grant.",
+  "type": "module",
+  "scripts": {
+    "start": "node assistant.mjs"
+  },
+  "dependencies": {
+    "@hominemai/ordo-sdk": "file:../../../clients/ordo-sdk"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

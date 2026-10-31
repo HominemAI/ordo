@@ -1,0 +1,42 @@
+[package]
+name = "ordo-exec"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# `ordo_blob::StoreResolver` is an `async_trait` (it reads `$spacebucket`),
+# and `bucket::AttachedStores` implements it. Same version as `ordo-blob`'s,
+# because the macro's generated bounds have to match the trait's.
+async-trait = "0.1.92"
+# The retry backoff's jitter (`backoff`). Already in the tree through
+# `ordo-identity`, so no new crate.
+getrandom = "0.2"
+ordo-blob = { path = "../ordo-blob" }
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-conformance = { path = "../ordo-conformance" }
+ordo-crypto = { path = "../ordo-crypto" }
+# `FaultClass`, the class `PoolError::class` answers, shared with the
+# identity stores' `StoreFault` without a dependency between the two.
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+ordo-plan = { path = "../ordo-plan" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-secevent = { path = "../ordo-secevent" }
+ordo-sema = { path = "../ordo-sema" }
+ordo-syntax = { path = "../ordo-syntax" }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = "0.7"
+
+[dev-dependencies]
+# `import::BlobDoor` is an `async_trait`, and `tests/import.rs` implements it
+# with a door that records what it was handed rather than uploading it. Same
+# version as the dependency above, because the macro's generated bounds have
+# to match the trait's.
+async-trait = "0.1.92"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

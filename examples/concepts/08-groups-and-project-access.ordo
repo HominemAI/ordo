@@ -1,0 +1,50 @@
+# Concept: tenants define their own roles over resources
+#
+# The app developer writes this file once. Each tenant then shapes its own
+# permissions at runtime, with no deploy:
+#   - the tenant makes groups, such as "Design" and "Finance"
+#       std.space.createGroup, std.space.addToGroup
+#   - `acl (read, write, admin)` on `projects` derives a grant op,
+#     `grantProjectsAccess`, and a link entity that holds the grants
+#   - a project is granted to a group or to one person, at a level
+#       grantProjectsAccess($project: <id>, $member: <group or person>, $level: "write")
+#   - a member of the group opens that project. A person outside it does not.
+#
+# An acl row that names a group applies to every member of the group. The
+# derived guards add the group walk themselves, so nothing below spells it.
+# A group confers no role. Groups are for who reaches which row, and the
+# tenant's profile (who may call which op) is a separate layer.
+#
+# Who may hand out what: the person who creates a project is its admin and
+# may grant it. A manager may change the tenant's profile only to hand out
+# ops the manager can call. Only an owner widens past that.
+#
+# Read next: docs/howto-roles.md section 4, docs/definition-language.md "Groups".
+
+domain projects @ 1.0.0
+
+entity projects {
+  name: text
+  acl (read, write, admin)
+}
+
+entity tasks {
+  project -> projects owned
+  title:  text
+  done:   bool = false
+}
+
+# Guard-bearing reads: what the caller sees depends on the grants.
+op myProjects unbounded =
+  projects[id, name]
+  sort name
+
+op tasksOf($project: id) unbounded =
+  tasks(project == $project)[id, title, done]
+  sort title
+
+op addProject($name: text) =
+  set projects { name: $name }
+
+op addTask($project: id, $title: text) =
+  set tasks { project: $project, title: $title }

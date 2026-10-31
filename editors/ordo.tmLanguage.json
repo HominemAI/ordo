@@ -1,0 +1,560 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "information_for_contributors": [
+    "One grammar, many hosts: VS Code, the JetBrains TextMate bundle importer, shiki (the docs site), and any Monaco/CodeMirror build that speaks TextMate all consume this file unchanged. Edit it here and nowhere else.",
+    "TWO RULES THIS FILE MUST KEEP, both enforced by crates/ordo-syntax/tests/editor_grammar.rs:",
+    "1. `ordoInventory` below is the manifest of every word this grammar treats as vocabulary. The reserved half must equal ordo_syntax::Keyword::ALL exactly, in both directions, and be a partition. The contextual half must contain no reserved word except the ones `dual` names.",
+    "2. Every vocabulary word must be written inside a CAPTURING group in some regex — `\\b(open)\\b`, not `\\bopen\\b`. The test reads the groups; a word matched outside one is invisible to it and will be reported as absent from the grammar.",
+    "Scope names are two-layer on purpose: every leaf sits under a standard TextMate prefix (`keyword.`, `storage.modifier.`, `constant.`, `support.`), so an untuned theme colours it sensibly by prefix, while the distinctive leaf (`keyword.other.access-open.ordo`) lets an Ordo theme say something a generic theme cannot.",
+    "What this grammar deliberately CANNOT do is written down in docs/plan-editor-tooling.md, increment 0's `Known blind spots`. Do not add a rule that pretends to do one of those things."
+  ],
+  "name": "Ordo",
+  "scopeName": "source.ordo",
+  "fileTypes": ["ordo"],
+
+  "ordoInventory": {
+    "comment": "The manifest. See information_for_contributors. `languageVersion` is the ordo-syntax version this grammar tracks; the parity test pins it, so a language release cannot ship without the highlighter admitting which language it highlights.",
+    "languageVersion": "0.1.0",
+    "reserved": {
+      "keyword.declaration.ordo": [
+        "domain", "entity", "op", "routine", "app", "page", "principal",
+        "client", "auth", "policy", "compliance", "channel", "space"
+      ],
+      "keyword.other.clause.ordo": [
+        "trigger", "when", "every", "check", "index", "unique", "acl", "access"
+      ],
+      "keyword.control.pipeline.ordo": [
+        "group", "reduce", "sort", "take", "append", "let", "distinct", "each", "whole"
+      ],
+      "keyword.control.match.ordo": ["match", "cond"],
+      "keyword.operator.match.ordo": ["any", "none", "on"],
+      "keyword.other.write.ordo": ["set", "del", "subtree"],
+      "keyword.operator.logical.ordo": ["and", "or", "not", "in", "is"],
+      "keyword.operator.word.ordo": ["contains", "starts", "matches", "under", "above", "since"],
+      "storage.modifier.ordo": ["sealed", "indexed", "owned", "tree", "normalize"],
+      "storage.modifier.flag.ordo": ["unbounded", "reproducible", "nopause", "public", "filled"],
+      "storage.modifier.flag.unguarded.ordo": ["unguarded"],
+      "constant.language.ordo": ["null", "true", "false"]
+    },
+    "contextual": {
+      "keyword.other.access-verb.ordo": ["read", "write", "admin"],
+      "keyword.other.access-open.ordo": ["open"],
+      "keyword.other.schedule.ordo": ["day"],
+      "keyword.other.trigger-run.ordo": ["run"],
+      "constant.language.event.ordo": [
+        "created", "converged", "deleted", "written", "ingested", "fed", "reverted"
+      ],
+      "support.type.ordo": [
+        "text", "int", "money", "decimal", "bool", "date", "datetime", "duration",
+        "id", "blob", "uri", "json"
+      ],
+      "support.type.unit.ordo": ["ms", "s", "m", "h", "d", "w", "mo", "y"],
+      "support.function.ordo": [
+        "year", "month", "week", "day", "hour", "dow", "abs", "round", "floor",
+        "ceil", "mod", "least", "greatest", "hash", "allocate", "coalesce",
+        "lower", "length", "trim"
+      ],
+      "support.function.aggregate.ordo": [
+        "count", "sum", "avg", "min", "max", "median", "percentile", "distinct", "joined"
+      ],
+      "support.constant.allocate-mode.ordo": [
+        "largestRemainder", "first", "last", "largestShare"
+      ]
+    },
+    "dual": ["distinct"]
+  },
+
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#illegal-unterminated-string" },
+    { "include": "#string" },
+    { "include": "#illegal-single-quoted" },
+    { "include": "#schedule" },
+    { "include": "#trigger-when" },
+    { "include": "#arrow-run" },
+    { "include": "#run-header" },
+    { "include": "#declaration-domain" },
+    { "include": "#declaration-named" },
+    { "include": "#declaration-routine" },
+    { "include": "#declaration-bare" },
+    { "include": "#acl" },
+    { "include": "#access" },
+    { "include": "#group-reduce" },
+    { "include": "#param" },
+    { "include": "#literal" },
+    { "include": "#type" },
+    { "include": "#ref-declaration" },
+    { "include": "#field-declaration" },
+    { "include": "#allocate" },
+    { "include": "#function" },
+    { "include": "#keywords" },
+    { "include": "#dot-path" },
+    { "include": "#illegal-name" },
+    { "include": "#operator" },
+    { "include": "#punctuation" }
+  ],
+
+  "repository": {
+
+    "comment": {
+      "name": "comment.line.number-sign.ordo",
+      "match": "#.*$",
+      "comment": "`#` to end of line, anywhere outside a string. There are no block comments — one spelling."
+    },
+
+    "illegal-unterminated-string": {
+      "comment": "`unterminated string` and `strings do not span lines (concatenate with +)` are the same defect seen from two sides, and both are lex errors. Claimed before #string so the opening quote of a run-on string is refused rather than opening a run that dyes the rest of the file. A well-formed string never matches: the closing quote blocks the end-of-line anchor.",
+      "name": "invalid.illegal.unterminated-string.ordo",
+      "match": "\"[^\"\\n]*$"
+    },
+
+    "string": {
+      "comment": "A string never spans a line. The end alternative on the newline is belt-and-braces behind #illegal-unterminated-string: whatever happens, one bad quote costs one line, never the file.",
+      "name": "string.quoted.double.ordo",
+      "begin": "\"",
+      "end": "\"|(?=\\n)",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.ordo" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.ordo" } },
+      "patterns": [
+        {
+          "comment": "Typed ids live HERE and nowhere else: `_` is not an identifier character, so `task_01J8ZK…` cannot be a bare token and is only ever written inside a text literal or an id parameter's value.",
+          "name": "constant.other.typed-id.ordo",
+          "match": "\\b[a-z][a-zA-Z0-9]*_[0-9A-Za-z]+\\b"
+        },
+        {
+          "comment": "The closed escape set (G4): exactly these four.",
+          "name": "constant.character.escape.ordo",
+          "match": "\\\\[\"\\\\nt]"
+        },
+        { "name": "invalid.illegal.unknown-escape.ordo", "match": "\\\\." }
+      ]
+    },
+
+    "illegal-single-quoted": {
+      "comment": "`No single quotes` is a settled lexical rule, so the highlighter refuses before the compiler does.",
+      "name": "invalid.illegal.single-quoted-string.ordo",
+      "match": "'[^'\\n]*'"
+    },
+
+    "schedule": {
+      "patterns": [
+        {
+          "comment": "`every day 08:00Z`. The Z is mandatory (§7) — and note that this whole clause is NOT one token to the lexer: `08:00Z` lexes as Int Colon Int and then a capital Z, which is a lex error. Schedules are parsed from a standalone string by ordo_syntax::trigger::Schedule. The grammar shows the settled spelling; the parser does not accept the enclosing declaration yet.",
+          "match": "\\b(every)\\s+(day)\\s+([01]\\d|2[0-3]):([0-5]\\d)Z\\b",
+          "captures": {
+            "1": { "name": "keyword.other.clause.ordo" },
+            "2": { "name": "keyword.other.schedule.ordo" },
+            "3": { "name": "constant.numeric.time.ordo" },
+            "4": { "name": "constant.numeric.time.ordo" }
+          }
+        },
+        {
+          "comment": "Any other schedule time: no Z, an offset, a one-digit hour. All refusals with their own messages.",
+          "match": "\\b(every)\\s+(day)\\s+(\\S+)",
+          "captures": {
+            "1": { "name": "keyword.other.clause.ordo" },
+            "2": { "name": "keyword.other.schedule.ordo" },
+            "3": { "name": "invalid.illegal.schedule-time.ordo" }
+          }
+        },
+        {
+          "match": "\\b(every)\\s+(\\d+(?:ms|mo|[smhdwy]))\\b",
+          "captures": {
+            "1": { "name": "keyword.other.clause.ordo" },
+            "2": { "name": "constant.numeric.duration.ordo" }
+          }
+        }
+      ]
+    },
+
+    "trigger-when": {
+      "patterns": [
+        {
+          "comment": "`when estate.readings.created` — the event kind is a closed seven-word vocabulary, and a wildcard is legal at a whole position only.",
+          "match": "\\b(when)\\s+([a-z][a-zA-Z0-9]*(?:\\.(?:[a-zA-Z0-9]+|\\*))*)\\.(created|converged|deleted|written|ingested|fed|reverted|\\*)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.clause.ordo" },
+            "2": { "name": "entity.name.tag.ordo" },
+            "3": { "name": "constant.language.event.ordo" }
+          }
+        },
+        {
+          "comment": "An unrecognised kind is `unknown_event_kind`, not a pattern that silently never fires.",
+          "match": "\\b(when)\\s+([a-z][a-zA-Z0-9.*]*)\\.([a-zA-Z0-9]+)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.clause.ordo" },
+            "2": { "name": "entity.name.tag.ordo" },
+            "3": { "name": "invalid.illegal.event-kind.ordo" }
+          }
+        }
+      ]
+    },
+
+    "arrow-run": {
+      "match": "(->)\\s*(run)\\s+([a-z][a-zA-Z0-9]*)",
+      "captures": {
+        "1": { "name": "keyword.operator.arrow.ordo" },
+        "2": { "name": "keyword.other.trigger-run.ordo" },
+        "3": { "name": "entity.name.function.ordo" }
+      }
+    },
+
+    "run-header": {
+      "comment": "A routine's `run(...):` header. `run` is contextual — a field may still be named `run`, so only this position colours it.",
+      "match": "^\\s*(run)\\s*(?=\\()",
+      "captures": { "1": { "name": "keyword.other.trigger-run.ordo" } }
+    },
+
+    "declaration-domain": {
+      "comment": "`domain estate @ 1.0.0`. The version is one visual thing and three tokens: the lexer sees Decimal(`1.0`), Dot, Int(`0`) and declparse::version_text reassembles them. Colouring it whole is the honest rendering of what the author wrote.",
+      "match": "\\b(domain)\\s+([a-z][a-zA-Z0-9]*)(?:\\s*(@)\\s*(\\d+(?:\\.\\d+)*))?",
+      "captures": {
+        "1": { "name": "keyword.declaration.ordo" },
+        "2": { "name": "entity.name.namespace.ordo" },
+        "3": { "name": "keyword.operator.version.ordo" },
+        "4": { "name": "constant.numeric.version.ordo" }
+      }
+    },
+
+    "declaration-named": {
+      "patterns": [
+        {
+          "match": "\\b(entity)\\s+([a-z][a-zA-Z0-9]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.ordo" },
+            "2": { "name": "entity.name.type.ordo" }
+          }
+        },
+        {
+          "match": "\\b(op)\\s+([a-z][a-zA-Z0-9]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.ordo" },
+            "2": { "name": "entity.name.function.ordo" }
+          }
+        },
+        {
+          "match": "\\b(app|page|principal|client|auth|policy|compliance|channel|space)\\s+([a-z][a-zA-Z0-9]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.ordo" },
+            "2": { "name": "entity.name.type.ordo" }
+          }
+        }
+      ]
+    },
+
+    "declaration-routine": {
+      "comment": "`routine leaseExpiry in estate {`. `in` is the boolean-membership operator everywhere else in the language; here it is a clause word, and only this position can tell.",
+      "match": "\\b(routine)\\s+([a-z][a-zA-Z0-9]*)(?:\\s+(in)\\s+([a-z][a-zA-Z0-9]*))?",
+      "captures": {
+        "1": { "name": "keyword.declaration.ordo" },
+        "2": { "name": "entity.name.function.ordo" },
+        "3": { "name": "keyword.declaration.ordo" },
+        "4": { "name": "entity.name.namespace.ordo" }
+      }
+    },
+
+    "declaration-bare": {
+      "comment": "The same heads with no name after them, so an in-progress line still colours.",
+      "match": "\\b(domain|entity|op|routine|app|page|principal|client|auth|policy|compliance|channel|space)\\b",
+      "captures": { "1": { "name": "keyword.declaration.ordo" } }
+    },
+
+    "acl": {
+      "begin": "\\b(acl)\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "keyword.other.clause.ordo" },
+        "2": { "name": "punctuation.section.parens.begin.ordo" }
+      },
+      "end": "\\)",
+      "endCaptures": { "0": { "name": "punctuation.section.parens.end.ordo" } },
+      "patterns": [
+        {
+          "match": "\\b(read|write|admin)\\b",
+          "captures": { "1": { "name": "keyword.other.access-verb.ordo" } }
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+
+    "access": {
+      "comment": "A guard clause runs to end of line — UNLESS a delimiter is open, which is G6 stated as a grammar rule: while #parens is on the stack this rule's `end` is never tested, so a guard wrapped inside its parens stays one clause across lines, exactly as the lexer treats it. Inside the clause `open` means the decision to open, and `$caller` is the anchor the whole guard grammar exists to reach.",
+      "begin": "\\b(access)\\s+(read|write|admin)\\b",
+      "beginCaptures": {
+        "1": { "name": "keyword.other.clause.ordo" },
+        "2": { "name": "keyword.other.access-verb.ordo" }
+      },
+      "end": "(?=\\n)",
+      "patterns": [
+        {
+          "match": "\\b(open)\\b",
+          "captures": { "1": { "name": "keyword.other.access-open.ordo" } }
+        },
+        { "include": "#parens" },
+        { "include": "$self" }
+      ]
+    },
+
+    "parens": {
+      "begin": "\\(",
+      "end": "\\)",
+      "beginCaptures": { "0": { "name": "punctuation.section.parens.begin.ordo" } },
+      "endCaptures": { "0": { "name": "punctuation.section.parens.end.ordo" } },
+      "patterns": [{ "include": "#parens" }, { "include": "$self" }]
+    },
+
+    "group-reduce": {
+      "comment": "Aggregate names are contextual — `count` is a legal field name — so they are coloured as functions only inside a group/reduce brace block, and only in the value position (`n: count`, never a key named `count:`).",
+      "begin": "\\b(group|reduce)\\b",
+      "beginCaptures": { "1": { "name": "keyword.control.pipeline.ordo" } },
+      "end": "(?<=\\})|(?=\\n)",
+      "patterns": [
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.section.braces.begin.ordo" } },
+          "endCaptures": { "0": { "name": "punctuation.section.braces.end.ordo" } },
+          "patterns": [
+            {
+              "match": "\\b(count|sum|avg|min|max|median|percentile|distinct|joined)\\b(?!\\s*:)",
+              "captures": { "1": { "name": "support.function.aggregate.ordo" } }
+            },
+            { "include": "$self" }
+          ]
+        },
+        { "include": "$self" }
+      ]
+    },
+
+    "param": {
+      "patterns": [
+        {
+          "comment": "`$caller` is the one reserved parameter (never client-suppliable) and `$trigger` is the listener envelope. Both are platform-supplied, so both read as language, not as an author's parameter.",
+          "name": "variable.language.ordo",
+          "match": "\\$(?:caller|trigger)\\b"
+        },
+        { "name": "variable.parameter.ordo", "match": "\\$[a-z][a-zA-Z0-9]*\\b" },
+        {
+          "comment": "`a parameter is $ followed by a lowercase name`.",
+          "name": "invalid.illegal.parameter.ordo",
+          "match": "\\$\\S*"
+        }
+      ]
+    },
+
+    "literal": {
+      "patterns": [
+        {
+          "comment": "Datetime: UTC only, the Z is mandatory.",
+          "name": "constant.numeric.datetime.ordo",
+          "match": "\\b\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|02-(?:0[1-9]|1\\d|2[0-9]))T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\dZ\\b"
+        },
+        {
+          "name": "invalid.illegal.datetime.ordo",
+          "match": "\\b\\d{4}-\\d{2}-\\d{2}T[0-9:+\\-Zz]*"
+        },
+        {
+          "comment": "A date literal must name a day that exists. A regex can carry the month lengths, so 2026-02-31, 2026-04-31 and 2026-11-31 are refused here exactly as the lexer refuses them. It cannot carry the leap rule: 2026-02-29 needs arithmetic on the year, so it is coloured as a valid date and the compiler is the one that refuses it. That is the honest split, and it is the ONLY calendar case this file gets wrong on purpose.",
+          "name": "constant.numeric.date.ordo",
+          "match": "\\b\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|02-(?:0[1-9]|1\\d|2[0-9]))\\b"
+        },
+        { "name": "invalid.illegal.date.ordo", "match": "\\b\\d{4}-\\d{2}-\\d{2}\\b" },
+        {
+          "comment": "`90d`, `1mo`, `500ms`, `5m` — `m` is minutes and `mo` is months, spelling and never context.",
+          "name": "constant.numeric.duration.ordo",
+          "match": "\\b\\d+(?:ms|mo|[smhdwy])\\b"
+        },
+        {
+          "comment": "`unknown duration unit — units are ms s m h d w mo y`.",
+          "name": "invalid.illegal.duration-unit.ordo",
+          "match": "\\b\\d+[a-zA-Z]+\\b"
+        },
+        {
+          "comment": "Exact decimal. No float exists anywhere in this language.",
+          "name": "constant.numeric.decimal.ordo",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        { "name": "constant.numeric.integer.ordo", "match": "\\b\\d+\\b" }
+      ]
+    },
+
+    "type": {
+      "patterns": [
+        {
+          "match": "(:)\\s*(duration)\\s*(\\()\\s*(ms|s|m|h|d|w|mo|y)\\s*(\\))",
+          "captures": {
+            "1": { "name": "punctuation.separator.type.ordo" },
+            "2": { "name": "support.type.ordo" },
+            "3": { "name": "punctuation.section.parens.begin.ordo" },
+            "4": { "name": "support.type.unit.ordo" },
+            "5": { "name": "punctuation.section.parens.end.ordo" }
+          }
+        },
+        {
+          "match": "(:)\\s*(text|int|money|decimal|bool|date|datetime|id|blob|uri|json)\\b(\\?)?",
+          "captures": {
+            "1": { "name": "punctuation.separator.type.ordo" },
+            "2": { "name": "support.type.ordo" },
+            "3": { "name": "keyword.operator.optional.ordo" }
+          }
+        }
+      ]
+    },
+
+    "ref-declaration": {
+      "comment": "`property -> properties owned`. Anchored at line start because `->` also means `yields` in cond arms, in `each ->` and in a trigger's `-> run`, and only position tells them apart. A shape's refs are always the line.",
+      "match": "^\\s*([a-z][a-zA-Z0-9]*)\\s*(->)\\s*([a-z][a-zA-Z0-9]*)(\\?)?",
+      "captures": {
+        "1": { "name": "variable.other.member.declaration.ordo" },
+        "2": { "name": "keyword.operator.arrow.ordo" },
+        "3": { "name": "entity.name.type.ordo" },
+        "4": { "name": "keyword.operator.optional.ordo" }
+      }
+    },
+
+    "field-declaration": {
+      "comment": "The name in `name:` — a shape field, a write payload key, an aggregate output. All of them are a name being bound, which is one thing and gets one colour. The colon is left unconsumed so #type can claim it.",
+      "match": "^\\s*([a-z][a-zA-Z0-9]*)\\s*(?=:)",
+      "captures": { "1": { "name": "variable.other.member.declaration.ordo" } }
+    },
+
+    "allocate": {
+      "comment": "The blessed money split. Its optional third argument names WHICH party absorbs the odd minor unit — a business rule, from a closed set, and an unknown mode is a compile error rather than a silent default. It is coloured only inside allocate's own parens, because `last` is an ordinary field name anywhere else.",
+      "begin": "\\b(allocate)\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "support.function.ordo" },
+        "2": { "name": "punctuation.section.parens.begin.ordo" }
+      },
+      "end": "\\)",
+      "endCaptures": { "0": { "name": "punctuation.section.parens.end.ordo" } },
+      "patterns": [
+        {
+          "match": "\\b(largestRemainder|first|last|largestShare)\\b\\s*(?=\\))",
+          "captures": { "1": { "name": "support.constant.allocate-mode.ordo" } }
+        },
+        { "include": "#parens" },
+        { "include": "$self" }
+      ]
+    },
+
+    "function": {
+      "comment": "The closed expression-function set, with its arities checked by the parser. Coloured only when a `(` follows, so a field named `round` stays a field.",
+      "match": "\\b(year|month|week|day|hour|dow|abs|round|floor|ceil|mod|least|greatest|hash|allocate|coalesce|lower|length|trim)\\b\\s*(?=\\()",
+      "captures": { "1": { "name": "support.function.ordo" } }
+    },
+
+    "keywords": {
+      "comment": "The reserved tier, split by what a word DOES rather than by one flat `keyword` colour: a theme that wants declarations loud and word-operators quiet can have it, and `unguarded` — the one word in the language that switches authorization off — has a scope of its very own so it can be made impossible to skim past.",
+      "patterns": [
+        {
+          "match": "\\b(match)\\s+(any|none|on)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.match.ordo" },
+            "2": { "name": "keyword.operator.match.ordo" }
+          }
+        },
+        {
+          "match": "\\b(trigger|when|every|check|index|unique|acl|access)\\b",
+          "captures": { "1": { "name": "keyword.other.clause.ordo" } }
+        },
+        {
+          "match": "\\b(group|reduce|sort|take|append|let|distinct|each|whole)\\b",
+          "captures": { "1": { "name": "keyword.control.pipeline.ordo" } }
+        },
+        {
+          "match": "\\b(match|cond)\\b",
+          "captures": { "1": { "name": "keyword.control.match.ordo" } }
+        },
+        {
+          "match": "\\b(any|none|on)\\b",
+          "captures": { "1": { "name": "keyword.operator.match.ordo" } }
+        },
+        {
+          "match": "\\b(set|del|subtree)\\b",
+          "captures": { "1": { "name": "keyword.other.write.ordo" } }
+        },
+        {
+          "match": "\\b(and|or|not|in|is)\\b",
+          "captures": { "1": { "name": "keyword.operator.logical.ordo" } }
+        },
+        {
+          "match": "\\b(contains|starts|matches|under|above|since)\\b",
+          "captures": { "1": { "name": "keyword.operator.word.ordo" } }
+        },
+        {
+          "match": "\\b(sealed|indexed|owned|tree|normalize)\\b",
+          "captures": { "1": { "name": "storage.modifier.ordo" } }
+        },
+        {
+          "match": "\\b(unguarded)\\b",
+          "captures": { "1": { "name": "storage.modifier.flag.unguarded.ordo" } }
+        },
+        {
+          "match": "\\b(unbounded|reproducible|nopause|public|filled)\\b",
+          "captures": { "1": { "name": "storage.modifier.flag.ordo" } }
+        },
+        {
+          "match": "\\b(null|true|false)\\b",
+          "captures": { "1": { "name": "constant.language.ordo" } }
+        }
+      ]
+    },
+
+    "dot-path": {
+      "match": "(\\.)([a-z][a-zA-Z0-9]*)",
+      "captures": {
+        "1": { "name": "punctuation.accessor.ordo" },
+        "2": { "name": "variable.other.property.ordo" }
+      }
+    },
+
+    "illegal-name": {
+      "comment": "One identifier rule for every declared name: lowerCamel, no underscores, no hyphens, 64 characters. The lexer's three refusals, shown before the compiler runs. The hyphen case is absent on purpose — `lease-expiry` is genuinely `lease` minus `expiry` and no regex can know which was meant.",
+      "patterns": [
+        {
+          "name": "invalid.illegal.identifier.ordo",
+          "match": "\\b[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]*\\b"
+        },
+        { "name": "invalid.illegal.identifier.ordo", "match": "\\b[A-Z][a-zA-Z0-9]*\\b" },
+        { "name": "invalid.illegal.identifier.ordo", "match": "_[a-zA-Z0-9_]*" },
+        {
+          "comment": "`name exceeds 64 characters` — 65 or more.",
+          "name": "invalid.illegal.identifier.ordo",
+          "match": "\\b[a-z][a-zA-Z0-9]{64,}\\b"
+        }
+      ]
+    },
+
+    "operator": {
+      "patterns": [
+        {
+          "comment": "`!` is not an operator — negation is the word `not`, inequality is `!=`.",
+          "name": "invalid.illegal.operator.ordo",
+          "match": "!(?!=)"
+        },
+        { "name": "keyword.operator.comparison.ordo", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.arrow.ordo", "match": "->" },
+        { "name": "keyword.operator.arithmetic.ordo", "match": "[+\\-*/]" },
+        {
+          "comment": "The pipeline bar: a filter step whose scope is decided by where it sits.",
+          "name": "keyword.operator.bar.ordo",
+          "match": "\\|"
+        },
+        { "name": "keyword.operator.assignment.ordo", "match": "=" },
+        { "name": "keyword.operator.optional.ordo", "match": "\\?" },
+        { "name": "keyword.operator.version.ordo", "match": "@" }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.section.parens.begin.ordo", "match": "\\(" },
+        { "name": "punctuation.section.parens.end.ordo", "match": "\\)" },
+        { "name": "punctuation.section.brackets.begin.ordo", "match": "\\[" },
+        { "name": "punctuation.section.brackets.end.ordo", "match": "\\]" },
+        { "name": "punctuation.section.braces.begin.ordo", "match": "\\{" },
+        { "name": "punctuation.section.braces.end.ordo", "match": "\\}" },
+        { "name": "punctuation.separator.ordo", "match": "[,:]" }
+      ]
+    }
+  }
+}

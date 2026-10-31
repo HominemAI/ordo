@@ -1,0 +1,13 @@
+# planned: an aggregate over a sealed value is refused today (sealed_unsupported);
+# host-side folding is not built. `count` over sealed rows is built.
+op vendorSpend($from: date) unbounded =          # sealed aggregate over a date
+  vendors[name]  invoices(issued >= $from)[total]   #   range: unbounded-host,
+  group vendors.id, vendors.name {                  #   acknowledged. group by id
+                                                    #   (+name for display): same-named
+                                                    #   vendors never merge
+    n:      count
+    billed: sum total
+    large:  count(total > 100000)
+  }
+  | billed > 0
+  sort -billed

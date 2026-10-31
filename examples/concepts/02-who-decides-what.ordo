@@ -1,0 +1,65 @@
+# Concept: guards, acl and door roles, three layers that each decide one thing
+#
+#   1. The DOOR decides whether a caller may call an op at all.
+#      Roles (owner, manager, editor, viewer), per-member overrides and
+#      capability tokens live in the tenant's access profile. That is runtime
+#      data, never `.ordo` syntax. A refusal here is `access_denied`.
+#   2. A GUARD decides which rows an allowed op sees or may change. It is
+#      written on the entity, so no op can forget it.
+#      A refusal here is `not_found` (cannot read) or `access_guard` (cannot write).
+#   3. `acl (...)` is the one-line form of a guard: it derives the per-row
+#      access entity, the guards and the grant ops.
+#
+# Below: `cases` uses acl, `internalNotes` uses a hand-written guard, and
+# `caseReport` is an admin report that bypasses guards on purpose.
+#
+# Read next: docs/definition-language.md section 3 "Access guards" and "acl",
+# section 8 "Access model", docs/glossary.md "guard / acl".
+
+domain support @ 1.0.0
+
+# Per-row levels. Whoever creates a case gets `admin` on it in the same write.
+entity cases {
+  title:  text
+  status: text = "open"
+  acl (read, write, admin)
+}
+
+# A comment belongs to its case and inherits the case's acl. It has no
+# `access` line of its own.
+entity caseComments {
+  case -> cases owned
+  body: text
+}
+
+# A hand-written guard: only the author reads and writes the note.
+entity internalNotes {
+  author -> members
+  body:   text
+  access read   author == $caller
+  access write  author == $caller
+}
+
+op myCases unbounded =
+  cases[title, status]
+  sort title
+
+op openCase($title: text) =
+  set cases { title: $title }
+
+op comment($case: id, $body: text) =
+  set caseComments { case: $case, body: $body }
+
+op addNote($body: text) =
+  set internalNotes { author: $caller, body: $body }
+
+# Layer 2 narrows this to the notes the caller wrote.
+op myNotes unbounded =
+  internalNotes[body]
+
+# Layer 1 decides who may CALL this. Layer 2 is bypassed by `unguarded`, so a
+# deployment lists it only for an admin role in the access profile.
+op caseReport unbounded unguarded =
+  cases[status]
+  group status { n: count }
+  sort status

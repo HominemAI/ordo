@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "declarationMap": true,
+    "outDir": "dist",
+    "paths": { "@hominemai/ordo-sdk/*": ["../ordo-sdk/dist/*"] }
+  },
+  "include": ["src"]
+}

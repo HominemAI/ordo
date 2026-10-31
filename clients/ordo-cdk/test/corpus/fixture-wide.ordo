@@ -1,0 +1,180 @@
+# The `wide` fixture — a schema built to be *hit*, not to be realistic.
+#
+# The `market` fixture of composition-conformance.md is a good corpus spine
+# but a narrow test surface: six entities, four scalar types, one tree, one
+# sealed field, and no two refs pointing at the same target. This schema
+# exists so the generated corpus has somewhere to aim.
+#
+# Coverage intent, so a reader can check it rather than trust it:
+#
+#   scalar types    all 10 (text int money bool date datetime duration id
+#                   blob uri), each present nullable and non-nullable where
+#                   the type allows it, several with defaults, two duration
+#                   units (ms and h)
+#   content tiers   `blob` external · `blob sealed` · `blob inline` ·
+#                   `blob private` (declared, F7-deferred) · `uri` ·
+#                   `uri sealed indexed unique` — the four addressable
+#                   combinations plus the one that proves `uri` is
+#                   text-shaped rather than opaque
+#   refs            plain · optional · owned · tree self-edge ·
+#                   PARALLEL EDGES (two refs to one target) ·
+#                   a link entity (many-to-many) · chains 4 deep
+#   marks           unique · sealed · sealed indexed unique normalize ·
+#                   a sealed field on an entity that also has open fields
+#   shapes          an entity with no refs at all (join root) and one that is
+#                   nothing but refs (the link entity)
+#
+# The parallel-edge case is the one worth naming: `projects.lead` and
+# `projects.sponsor` both point at `people`. Dotting names the field, so it
+# stays unambiguous — but multi-source match inference has to enumerate two
+# paths and say so, which is the error P3 owes.
+
+domain wide @ 1.0.0
+
+# ── join root: no refs, so every path into it is inbound ──
+entity orgs {
+  name:     text unique
+  region:   text = "unset"
+  active:   bool = true
+  founded:  date
+  seats:    int = 0
+}
+
+# ── tree self-edge, plus a ref out ──
+entity teams {
+  org    -> orgs
+  parent -> teams?   tree
+  name:     text
+  budget:   money = 0
+  archived: bool = false
+}
+
+# ── the widest scalar surface, and the sealed pair ──
+entity people (key: ppl) {
+  org    -> orgs
+  team   -> teams?
+  name:      text
+  nickname:  text?
+  email:     text?  sealed indexed unique normalize(lower)
+  notes:     text = ""   sealed
+  age:       int?
+  salary:    money = 0
+  active:    bool = true
+  hired:     date
+  lastSeen:  datetime?
+  cadence:   duration(ms) = 7d
+  shift:     duration(h)  = 8h
+  externalId: id?
+}
+
+# ── PARALLEL EDGES: two refs at one target ──
+# (`startsOn`, not `starts`: `starts` is the reserved text operator. A closed
+#  grammar means reserved words are not available as field names, and the
+#  parser says so at the field rather than misreading the line.)
+entity projects (key: prj) {
+  org     -> orgs
+  lead    -> people
+  sponsor -> people?
+  name:      text
+  code:      text unique
+  budget:    money = 0
+  startsOn:  date
+  ends:      date?
+  shipped:   bool = false
+}
+
+# ── owned child, four hops from orgs (orgs<-projects<-tasks) ──
+entity tasks (key: tsk) {
+  project  -> projects  owned
+  assignee -> people?
+  title:     text
+  priority:  int = 3
+  estimate:  duration(h)?
+  due:       date?
+  done:      bool = false
+  points:    money = 0
+}
+
+entity tags {
+  label: text unique
+}
+
+# ── link entity: nothing but refs ──
+entity taskTags (key: ttg) {
+  task -> tasks  owned
+  tag  -> tags
+}
+
+# ── datetime + duration surface, optional parent ──
+entity events (key: evt) {
+  task -> tasks?
+  kind:     text = "note"
+  at:       datetime
+  took:     duration(ms)?
+  billable: bool = false
+}
+
+# ── content types: the four blob tiers and the address type ──
+#
+# `documents` is where the content surface lives, and each field is a
+# DIFFERENT physical column shape, which is the point:
+#
+#   scan     blob             -> `text`   (the hex handle, external object)
+#   contract blob sealed      -> `bytea`  (the handle inside an envelope)
+#   avatar   blob inline      -> `bytea`  (the payload-store handle; bytes in-row)
+#   source   uri              -> `text`   (an address, no custody)
+#   canonical uri sealed indexed unique normalize(lower)
+#                             -> `bytea` + a `$bidx` column
+#
+# The last one is the load-bearing one: a `uri` is an ADDRESS, and an
+# address is a value. It seals, it blind-indexes, it normalizes, it takes
+# a uniqueness constraint — everything a `blob` refuses, and refusing them
+# is the whole difference between the two types.
+entity documents (key: doc) {
+  project   -> projects  owned
+  title:      text
+  scan:       blob?
+  contract:   blob?  sealed
+  avatar:     blob?  inline
+  source:     uri?
+  canonical:  uri?   sealed indexed unique normalize(lower)
+  # Client-sealed custody: declarable, and refused by every runtime path
+  # that would have to touch the plaintext until F7 Phase 6 lands the key
+  # ceremony. It is in the fixture precisely so the refusal has something
+  # to refuse — a tier nothing can declare is a tier nothing can test.
+  vault:      blob?  private
+  filedOn:    date
+}
+
+# ── ops over the wide schema, mirroring the market library's shapes ──
+
+op activePeople unbounded =
+  people(active == true)[name, org, team, salary, hired]
+
+op orgTeams unbounded =
+  teams[name, org, budget]
+
+op openTasks unbounded =
+  tasks(done == false)[title, priority, project, assignee]
+
+op projectRoster unbounded =
+  projects[name, code, lead, sponsor, budget]
+
+op tasksByProject unbounded =
+  tasks[points, project]
+  group project { total: sum points, n: count }
+
+op topPaid =
+  people[name, salary]
+  sort -salary
+  take 5
+
+op eventLog unbounded =
+  events[kind, at, task]
+  sort -at
+
+# A blob field projects its REFERENCE, which is what a read of one means:
+# the bytes are fetched from the blob door with the handle this returns.
+op projectDocuments unbounded =
+  documents[title, scan, source, filedOn, project]
+  sort -filedOn

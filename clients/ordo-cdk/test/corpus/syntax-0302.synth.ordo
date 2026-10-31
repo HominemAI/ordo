@@ -1,0 +1,4 @@
+op monthlyMaintenance unbounded =
+  invoices[total]
+    group month(issued) { spent: sum total }
+    sort -month

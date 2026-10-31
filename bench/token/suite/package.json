@@ -1,0 +1,17 @@
+{
+  "name": "team-tasks-hidden-suite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The hidden suite of the token benchmark: one Playwright suite for every stack. Agents never see it.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@supabase/supabase-js": "2.118.0",
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}

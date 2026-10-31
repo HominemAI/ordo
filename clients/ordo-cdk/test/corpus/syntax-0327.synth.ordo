@@ -1,0 +1,4 @@
+op overpaidInvoices unbounded =
+  invoices[number, total]  payments[amount]
+    group invoices.id, invoices.number, invoices.total { paid: sum amount }
+    | paid > total

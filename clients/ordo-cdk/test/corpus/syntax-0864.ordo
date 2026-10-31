@@ -1,0 +1,11 @@
+op openProperty($name: text, $addr: text, $acquired: date, $coOwner: id) =
+  let prop = set properties { name: $name, address: $addr, acquired: $acquired }
+  set propertiesAccess { propertie: prop.id, member: $coOwner, level: "admin" }
+# the create is guard-exempt (G10a); the creator takes the auto-grant; $coOwner
+# gets admin; all in ONE atomic command group. `prop` carries id, rev and the
+# fields this statement wrote, and is usable only in LATER statements, never
+# in this one, and never in this statement's condition.
+#
+# `let` binds CREATE mode only. On a converge, a CAS write (`id` + `rev`) or a
+# bulk write it is a compile error, `unbindable_write`: those either address a
+# row whose id the caller already holds, or affect an unknown number of rows.

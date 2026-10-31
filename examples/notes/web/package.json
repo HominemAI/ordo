@@ -1,0 +1,34 @@
+{
+  "name": "ordo-notes-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The notes page: React over @hominemai/ordo-sdk, served by Vite on http://localhost:5173.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "gen": "sh gen.sh",
+    "check": "npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/react-test-renderer": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "fake-indexeddb": "^6.2.5",
+    "react-test-renderer": "^18.3.1",
+    "typescript": "^5.6.3",
+    "vite": "^6.4.4",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

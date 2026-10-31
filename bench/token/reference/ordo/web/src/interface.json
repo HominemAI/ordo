@@ -1,0 +1,1693 @@
+{
+  "digest": "5a757b7a40967d1f",
+  "domain": "tasktracker",
+  "entities": [
+    {
+      "acl_levels": null,
+      "checks": [],
+      "entity": "members",
+      "fields": [
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "principal",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "displayName",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "kind",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "right",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "memberCount",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "int",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "role",
+          "normalize": null,
+          "optional": true,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "status",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "tabular",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "joined",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "date",
+          "unique": false
+        }
+      ],
+      "guarded": false,
+      "key": "mem",
+      "referenced_by": [
+        {
+          "entity": "groupMembers",
+          "field": "group",
+          "owned": true
+        },
+        {
+          "entity": "groupMembers",
+          "field": "member",
+          "owned": true
+        },
+        {
+          "entity": "tasks",
+          "field": "assignee",
+          "owned": false
+        }
+      ],
+      "tree": false,
+      "unique_keys": []
+    },
+    {
+      "acl_levels": null,
+      "checks": [],
+      "entity": "tasks",
+      "fields": [
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "title",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": "false",
+          "enum_values": null,
+          "indexed": false,
+          "name": "done",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "bool",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "assignee",
+          "normalize": null,
+          "optional": true,
+          "owned": false,
+          "places": null,
+          "ref": "members",
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "id",
+          "unique": false
+        }
+      ],
+      "guarded": false,
+      "key": "task",
+      "referenced_by": [],
+      "tree": false,
+      "unique_keys": []
+    }
+  ],
+  "id_types": [
+    {
+      "actions": [
+        {
+          "kind": "write",
+          "mode": "creates",
+          "op": "std.tasks.create",
+          "param": "assignee",
+          "required": false
+        },
+        {
+          "kind": "write",
+          "mode": "converges",
+          "op": "std.tasks.update",
+          "param": "assignee",
+          "required": true
+        },
+        {
+          "kind": "write",
+          "mode": "converges",
+          "op": "updateTask",
+          "param": "assignee",
+          "required": false
+        }
+      ],
+      "detail": [],
+      "entity": "members",
+      "get": [],
+      "key": "mem",
+      "list": [
+        {
+          "op": "listMembers",
+          "param": null,
+          "single_row": false
+        },
+        {
+          "op": "me",
+          "param": null,
+          "single_row": false
+        }
+      ]
+    },
+    {
+      "actions": [
+        {
+          "kind": "delete",
+          "mode": "deletes",
+          "op": "deleteTask",
+          "param": "id",
+          "required": true
+        },
+        {
+          "kind": "delete",
+          "mode": "deletes",
+          "op": "std.tasks.delete",
+          "param": "id",
+          "required": true
+        },
+        {
+          "kind": "write",
+          "mode": "converges",
+          "op": "std.tasks.update",
+          "param": "id",
+          "required": true
+        },
+        {
+          "kind": "write",
+          "mode": "converges",
+          "op": "updateTask",
+          "param": "id",
+          "required": true
+        }
+      ],
+      "detail": [
+        {
+          "kind": "read",
+          "mode": null,
+          "op": "std.tasks.get",
+          "param": "id",
+          "required": true
+        }
+      ],
+      "entity": "tasks",
+      "get": [
+        {
+          "op": "std.tasks.get",
+          "param": "id",
+          "single_row": false
+        }
+      ],
+      "key": "task",
+      "list": [
+        {
+          "op": "listTasks",
+          "param": null,
+          "single_row": false
+        },
+        {
+          "op": "std.tasks.list",
+          "param": null,
+          "single_row": false
+        }
+      ]
+    }
+  ],
+  "ops": [
+    {
+      "call": {
+        "cas": false,
+        "live": false,
+        "method": "POST",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "write",
+      "mode": "creates",
+      "op": "addTask",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "title"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "title",
+          "places": null,
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": null,
+          "entity": "tasks",
+          "label": "creates",
+          "summary": {
+            "keys": [
+              "created"
+            ],
+            "value": "id"
+          },
+          "verb": "set"
+        }
+      ],
+      "version": "408cd585dfa9c4ed"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": false,
+        "method": "DELETE",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "delete",
+      "mode": "deletes",
+      "op": "deleteTask",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "tasks",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": null,
+          "entity": "tasks",
+          "label": "deletes",
+          "summary": {
+            "keys": [
+              "deleted"
+            ],
+            "value": "count"
+          },
+          "verb": "del"
+        }
+      ],
+      "version": "54c8e675d99dc66b"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "unbounded (pageable)"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": true,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "listMembers",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "displayName",
+          "role"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "members",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "displayName",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "role",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          }
+        ],
+        "row_identity": {
+          "entity": "members",
+          "key": "mem"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "5125fdc9102fd111"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "unbounded (pageable)"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": true,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "listTasks",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "rev",
+          "title",
+          "done",
+          "assignee"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "tasks",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "rev",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "done",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "bool"
+          },
+          {
+            "align": "left",
+            "id_entity": "members",
+            "name": "assignee",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          }
+        ],
+        "row_identity": {
+          "entity": "tasks",
+          "key": "task"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "f854af9df17da10d"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "me",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "displayName",
+          "role"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "members",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "displayName",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "role",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          }
+        ],
+        "row_identity": {
+          "entity": "members",
+          "key": "mem"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "0f835e6886837cd5"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": false,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.tasks.count",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "rev",
+          "title",
+          "done",
+          "assignee"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": false
+        },
+        "outputs": [
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "n",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          }
+        ],
+        "row_identity": null,
+        "shape": "rows",
+        "single_row": true,
+        "sync": {
+          "reason": "measure",
+          "syncable": false
+        },
+        "synthetic_rows": true
+      },
+      "statements": [],
+      "version": "77e4df70f8039b8e"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": false,
+        "method": "POST",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "write",
+      "mode": "creates",
+      "op": "std.tasks.create",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "title"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "title",
+          "places": null,
+          "required": true,
+          "type": "text"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "done"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "done",
+          "places": null,
+          "required": false,
+          "type": "bool"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "assignee"
+          },
+          "filled": false,
+          "id_entity": "members",
+          "max": null,
+          "min": null,
+          "name": "assignee",
+          "places": null,
+          "required": false,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": null,
+          "entity": "tasks",
+          "label": "creates",
+          "summary": {
+            "keys": [
+              "created"
+            ],
+            "value": "id"
+          },
+          "verb": "set"
+        }
+      ],
+      "version": "2cea1cba8188e1f0"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": false,
+        "method": "DELETE",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "delete",
+      "mode": "deletes",
+      "op": "std.tasks.delete",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "tasks",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": null,
+          "entity": "tasks",
+          "label": "deletes",
+          "summary": {
+            "keys": [
+              "deleted"
+            ],
+            "value": "count"
+          },
+          "verb": "del"
+        }
+      ],
+      "version": "ac448390e3a43563"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.tasks.get",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "tasks",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "rev",
+          "title",
+          "done",
+          "assignee"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_param",
+        "invalid_refinement",
+        "method_mismatch",
+        "missing_param",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "tasks",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "rev",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "done",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "bool"
+          },
+          {
+            "align": "left",
+            "id_entity": "members",
+            "name": "assignee",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          }
+        ],
+        "row_identity": {
+          "entity": "tasks",
+          "key": "task"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "5c0e425c65786403"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "unbounded (pageable)"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.tasks.list",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "rev",
+          "title",
+          "done",
+          "assignee"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": true,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "tasks",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "rev",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "done",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "bool"
+          },
+          {
+            "align": "left",
+            "id_entity": "members",
+            "name": "assignee",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          }
+        ],
+        "row_identity": {
+          "entity": "tasks",
+          "key": "task"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "0921a4706e4b71a0"
+    },
+    {
+      "call": {
+        "cas": true,
+        "live": false,
+        "method": "POST",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "write",
+      "mode": "converges",
+      "op": "std.tasks.update",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "tasks",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        },
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "rev",
+          "places": null,
+          "required": true,
+          "type": "int"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "title"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "title",
+          "places": null,
+          "required": true,
+          "type": "text"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "done"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "done",
+          "places": null,
+          "required": true,
+          "type": "bool"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "assignee"
+          },
+          "filled": false,
+          "id_entity": "members",
+          "max": null,
+          "min": null,
+          "name": "assignee",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "cas_miss",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": "rev",
+          "entity": "tasks",
+          "label": "converges",
+          "summary": {
+            "keys": [
+              "updated"
+            ],
+            "value": "count"
+          },
+          "verb": "set"
+        }
+      ],
+      "version": "ab201192f903f973"
+    },
+    {
+      "call": {
+        "cas": true,
+        "live": false,
+        "method": "POST",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "write",
+      "mode": "converges",
+      "op": "updateTask",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "tasks",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        },
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "rev",
+          "places": null,
+          "required": true,
+          "type": "int"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "title"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "title",
+          "places": null,
+          "required": true,
+          "type": "text"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "done"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "done",
+          "places": null,
+          "required": true,
+          "type": "bool"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "tasks",
+            "field": "assignee"
+          },
+          "filled": false,
+          "id_entity": "members",
+          "max": null,
+          "min": null,
+          "name": "assignee",
+          "places": null,
+          "required": false,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "cas_miss",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": "rev",
+          "entity": "tasks",
+          "label": "converges",
+          "summary": {
+            "keys": [
+              "updated"
+            ],
+            "value": "count"
+          },
+          "verb": "set"
+        }
+      ],
+      "version": "4bc3ef3108b978bc"
+    }
+  ],
+  "schema_version": "ordo.interface/2"
+}

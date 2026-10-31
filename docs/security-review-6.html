@@ -1,0 +1,309 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Review Six</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --ground:   #F3F4F7;
+    --raised:   #FFFFFF;
+    --ink:      #14161C;
+    --muted:    #545B6B;
+    --rule:     #D7DAE3;
+    --brass:    #8A5E14;
+    --brass-bg: #F2E7CE;
+    --danger:   #97291A;
+    --danger-bg:#F8E6E2;
+    --good:     #1A6144;
+    --good-bg:  #E3F0E9;
+    --mono-bg:  #1A1D24;
+    --mono-ink: #E6E8EE;
+    --focus:    #2B5FD9;
+    --gutter: max(16px, 5%);
+    --step: 25px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#12141A; --raised:#1A1D25; --ink:#E9EBF1; --muted:#A0A7B8;
+      --rule:#2A2F3A; --brass:#DBA94E; --brass-bg:#2B2317; --danger:#E79483;
+      --danger-bg:#2E1B17; --good:#63C398; --good-bg:#16271F;
+      --mono-bg:#0D0F14; --mono-ink:#DDE0E8; --focus:#7CA0FF;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#12141A; --raised:#1A1D25; --ink:#E9EBF1; --muted:#A0A7B8;
+    --rule:#2A2F3A; --brass:#DBA94E; --brass-bg:#2B2317; --danger:#E79483;
+    --danger-bg:#2E1B17; --good:#63C398; --good-bg:#16271F;
+    --mono-bg:#0D0F14; --mono-ink:#DDE0E8; --focus:#7CA0FF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: var(--step); line-height: 1.7;
+    padding-inline: var(--gutter); padding-block: 0 5rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { width: auto; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+  .bar {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--rule);
+    margin-inline: calc(-1 * var(--gutter)); padding: .55rem var(--gutter);
+    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+  }
+  .bar span {
+    font-family: Archivo, system-ui, sans-serif; font-size: .8rem;
+    font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .sizes { display: flex; gap: .4rem; }
+  .sizes button {
+    font-family: Archivo, system-ui, sans-serif; font-size: .95rem;
+    font-weight: 600; padding: .3rem .75rem; border: 1px solid var(--rule);
+    border-radius: 999px; background: var(--raised); color: var(--ink);
+    cursor: pointer;
+  }
+  .sizes button[aria-pressed="true"] {
+    background: var(--brass-bg); border-color: var(--brass); color: var(--brass);
+  }
+
+  header.top { padding-block: 3rem 1rem; }
+  h1 {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 800;
+    font-size: 2.4em; line-height: 1.06; letter-spacing: -.02em;
+    margin: 0 0 .6rem; text-wrap: balance;
+  }
+  .standfirst { font-size: 1.05em; color: var(--muted); margin: 0; text-wrap: pretty; }
+  h2 {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 800;
+    font-size: 1.4em; line-height: 1.2; margin: 3rem 0 1rem;
+    text-wrap: balance; border-top: 1px solid var(--rule); padding-top: 2rem;
+  }
+  p { margin: 0 0 1.05rem; text-wrap: pretty; }
+  a { color: var(--brass); text-underline-offset: .2em; }
+
+  .scoreboard {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+    border-radius: 10px; overflow: hidden; margin: 2rem 0;
+  }
+  .cell { background: var(--raised); padding: 1.1rem 1.2rem; }
+  .cell .n {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 800;
+    font-size: 2.1em; line-height: 1; display: block; margin-bottom: .25rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .cell .l { font-size: .82em; color: var(--muted); line-height: 1.4; display: block; }
+  .cell.good .n { color: var(--good); }
+  .cell.bad .n  { color: var(--danger); }
+
+  .finding {
+    border: 1px solid var(--rule); border-radius: 10px;
+    background: var(--raised); padding: 1.3rem 1.4rem; margin: 0 0 1.1rem;
+  }
+  .finding.new { border-color: var(--danger); border-width: 2px; }
+  .finding > :last-child { margin-bottom: 0; }
+  .fid {
+    display: flex; gap: .7rem; align-items: baseline; flex-wrap: wrap;
+    margin-bottom: .6rem;
+  }
+  .fid code {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .8em;
+    font-weight: 700; color: var(--muted); background: none; padding: 0;
+  }
+  .fid h3 {
+    font-family: Archivo, system-ui, sans-serif; font-weight: 600;
+    font-size: 1em; margin: 0; flex: 1 1 14ch;
+  }
+  .tag {
+    font-family: Archivo, system-ui, sans-serif; font-size: .68em;
+    font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    padding: .25em .7em; border-radius: 999px; white-space: nowrap;
+  }
+  .t-closed  { background: var(--good-bg);   color: var(--good); }
+  .t-open    { background: var(--danger-bg); color: var(--danger); }
+  .t-partial { background: var(--brass-bg);  color: var(--brass); }
+
+  pre {
+    background: var(--mono-bg); color: var(--mono-ink);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: .74em; line-height: 1.6; padding: 1rem 1.1rem;
+    border-radius: 8px; overflow-x: auto; margin: 0 0 1.05rem;
+  }
+  pre b { color: #E79483; font-weight: 700; }
+  code {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .82em;
+    background: var(--brass-bg); color: var(--brass);
+    padding: .12em .38em; border-radius: 4px; overflow-wrap: anywhere;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: 1em; }
+  ul { margin: 0 0 1.05rem; padding-left: 1.3em; }
+  li { margin-bottom: .5rem; }
+  li::marker { color: var(--brass); }
+  footer { border-top: 1px solid var(--rule); margin-top: 3rem; padding-top: 2rem; color: var(--muted); font-size: .92em; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+<div class="wrap">
+  <div class="bar">
+    <span>Text size</span>
+    <div class="sizes" role="group" aria-label="Text size">
+      <button type="button" id="s6-1" data-px="25" aria-pressed="true">Large</button>
+      <button type="button" id="s6-2" data-px="30" aria-pressed="false">Larger</button>
+      <button type="button" id="s6-3" data-px="36" aria-pressed="false">Largest</button>
+      <button type="button" id="s6-4" data-px="44" aria-pressed="false">Huge</button>
+    </div>
+  </div>
+
+  <header class="top">
+    <h1>Security Review Six</h1>
+    <p class="standfirst">Two reviewers who had never seen the system, working
+    separately, over everything built since the last security review in
+    August. Every finding checked against the code or the running system.</p>
+  </header>
+
+  <div class="scoreboard">
+    <div class="cell bad"><span class="n">3</span><span class="l">Critical</span></div>
+    <div class="cell"><span class="n">5</span><span class="l">Major</span></div>
+    <div class="cell"><span class="n">3</span><span class="l">Minor</span></div>
+    <div class="cell"><span class="n">15</span><span class="l">places our documents disagree with our code</span></div>
+  </div>
+
+  <p><strong>Nothing is fixed yet.</strong> The rule this review runs under is
+  that decisions that are yours come to you before any repair starts. What was
+  corrected the same day is the documentation that told operators something
+  false.</p>
+
+  <h2>The three to read first</h2>
+
+  <div class="finding new">
+    <div class="fid"><code>S6-001</code><h3>A permission rule is skipped whenever the compiler adds a table by itself</h3><span class="tag t-open">Critical · seen live</span></div>
+    <p>When a query names two tables that only connect through a third, the compiler adds the third automatically. <strong>It does not apply the third table's permission rule.</strong></p>
+    <p>The reviewer reproduced it against the running system: a member saw which person was assigned to which place, where the assignment belonged to somebody else and their own rule forbade reading it. The owner and the non-owner received identical results.</p>
+    <p>It is the same mistake as one we already knew about, on a second path that was recorded nowhere. The description the system publishes about the operation says the rule <em>is</em> applied, so anyone auditing from that description would have been told it was safe.</p>
+    <p><strong>Needs from you:</strong> a go. The ruling already exists and covers both paths.</p>
+  </div>
+  <div class="finding new">
+    <div class="fid"><code>S6-002</code><h3>Suspending a member does nothing</h3><span class="tag t-open">Critical · seen live</span></div>
+    <p>The front door decides who may do what from a list it reads at startup. <strong>That list leaves out whether a member is suspended</strong>, so everybody is treated as active, and no operation exists that suspends anyone. The reviewer marked a member suspended in the database; they kept full access.</p>
+    <p>Removing a member does work, at the next restart or deploy. Until then they are still served.</p>
+    <p>Our operator guide said suspension was <em>immediate by construction</em>. It now says what is true, and how to cut somebody off today: remove them and restart.</p>
+    <p><strong>Needs from you:</strong> what suspension and removal should mean, and how fast.</p>
+  </div>
+  <div class="finding new">
+    <div class="fid"><code>S6-003</code><h3>Encrypted values can be moved between records undetected</h3><span class="tag t-open">Critical · read in code</span></div>
+    <p>Every protected value is locked in a way that records which <strong>column</strong> it belongs to, and not which <strong>row</strong>. Somebody holding the database, who cannot read a value, can copy it onto a different record and it opens there as if it had always been there. Stored files behave the same way.</p>
+    <p>That is precisely the person the key design exists to constrain. They still cannot read anything. They can rearrange it.</p>
+    <p>One thing is not yet known: whether the audit history would reveal the move afterwards. Nobody has checked, so it is listed as a question and not assumed either way. If it would, this drops to Major.</p>
+    <p><strong>Needs from you:</strong> whether to bind each value to its own record. Now is the cheap moment: nothing is deployed, so it costs no migration.</p>
+  </div>
+
+  <h2>The cause behind three of them</h2>
+
+  <p>The reviewer's hardest objection was to a design choice rather than a
+  bug: <strong>the front door works from a snapshot of who the members are,
+  taken at startup.</strong> Suspension being ignored, removal being slow,
+  and a membership change that tells nobody are all consequences of that one
+  decision. The code admits it in a comment, calling itself weaker than its
+  own documentation.</p>
+
+  <h2>Loading data in</h2>
+
+  <p>The loader is two days old and had never been reviewed, so it got the
+  hardest look.</p>
+
+  <div class="finding">
+    <div class="fid"><code>S6-006</code><h3>Something I told you about it was false</h3><span class="tag t-partial">Major</span></div>
+    <p>I said a changed bundle under a name already used would be refused. <strong>That is only true if the record ids changed.</strong> If the ids are the same and the contents differ, a re-run carries on, keeps the old contents for what it already loaded, takes the new for the rest, and reports success over the mixture.</p>
+    <p>The claim was in the original plan, and I repeated it to you without checking what the comparison actually covered. Corrected in five places.</p>
+  </div>
+  <div class="finding">
+    <div class="fid"><code>S6-007</code><h3>Two records with the same unique key are quietly merged</h3><span class="tag t-partial">Major · yours</span></div>
+    <p>They should be refused. A loader for somebody else's data that cannot reject a duplicate is how a migration ends with fewer records than it began with and nobody noticing. The code says so in its own comments and had put the question off.</p>
+    <p><strong>Needs from you:</strong> refuse or merge. I recommend refuse.</p>
+  </div>
+  <div class="finding">
+    <div class="fid"><code>S6-008</code><h3>No size limit on anything it reads</h3><span class="tag t-partial">Major</span></div>
+    <p>Every file in a bundle is read whole into memory, attachments included, before any limit is consulted. One oversized file exhausts the machine before a refusal can fire.</p>
+  </div>
+
+  <h2>What held when attacked</h2>
+
+  <p>As important as the findings, because a repair must not break any of
+  it.</p>
+
+  <ul>
+    <li><strong>The fix from last week held.</strong> The reviewer looked for
+    a second place where history could be signed without being verified
+    first, and found none.</li>
+    <li><strong>Keys.</strong> The sealed master file, the way retired keys
+    are genuinely destroyed rather than merely forgotten, and the rule that
+    key material never leaves the component that holds it.</li>
+    <li><strong>Tokens.</strong> Checked in constant time, authenticity
+    before content, and an old format cannot be passed off as current.</li>
+    <li><strong>The front door's single answer.</strong> An operation that
+    does not exist and one you may not call look identical, so guessing
+    reveals nothing.</li>
+    <li><strong>Deleting a tenant.</strong> Keys are destroyed before rows,
+    so an interrupted deletion leaves nothing readable.</li>
+  </ul>
+
+  <h2>Where my own earlier work was wrong</h2>
+
+  <p>Three things, stated plainly since they change how much weight
+  yesterday's trace deserves:</p>
+
+  <ul>
+    <li>The trace said no contradiction between documents and code had been
+    found. The review found fifteen. A trace asks whether a mechanism exists,
+    and does not ask whether it is right. My sentence read as though it had
+    asked both.</li>
+    <li>Its summary counts were wrong: nine and nine, where it said eight and
+    ten.</li>
+    <li>I guessed that the finding about tokens not being tied to a device
+    was probably closed. It is still open.</li>
+  </ul>
+
+  <h2>What is waiting on you</h2>
+
+  <ul>
+    <li><strong>A go</strong> on the permission fix. Already ruled.</li>
+    <li><strong>Membership:</strong> what suspension and removal mean, and
+    how fast.</li>
+    <li><strong>Protected values:</strong> bind each to its own record, and
+    whether files are checked on every read.</li>
+    <li><strong>Loading data:</strong> refuse or merge duplicates.</li>
+    <li><strong>The simple key setup:</strong> warn, refuse outside
+    development, or strengthen. Minor, and the go-live guide is not
+    affected.</li>
+  </ul>
+
+  <p>All five are on the decisions board with a recommendation each.</p>
+
+  <footer>
+    <p>The full document, with the attack steps, the file and line for every
+    claim, the fifteen contradictions and the repair plan, is
+    <code>docs/security-review-6.md</code>. The two reviewers' own files are
+    in <code>review/</code>. One old finding, about copies shared between
+    tenants, was reached by neither reviewer and is still unexamined.</p>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var KEY = "ordo-security6-size";
+    var buttons = Array.prototype.slice.call(document.querySelectorAll(".sizes button"));
+    function apply(px, persist) {
+      document.documentElement.style.setProperty("--step", px + "px");
+      buttons.forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.px === String(px))); });
+      if (persist) { try { localStorage.setItem(KEY, String(px)); } catch (e) {} }
+    }
+    buttons.forEach(function (b) { b.addEventListener("click", function () { apply(b.dataset.px, true); }); });
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { saved = null; }
+    if (saved && buttons.some(function (b) { return b.dataset.px === saved; })) { apply(saved, false); }
+  })();
+</script>

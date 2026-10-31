@@ -1,0 +1,100 @@
+# 12 Access guards
+#
+# Shows row-level rules written on the entity, so no op can forget them.
+#   - `access read <walk>` decides which rows a caller sees.
+#   - `access write <walk>` decides which rows a caller may change.
+#   - A walk starts at `$caller` and follows declared refs: forward hops
+#     (`project.`), reverse collection steps (`projectMembers(...)`), `==`
+#     against `$caller` or a literal, and bare bool fields. `and` / `or`
+#     never mix without parens. No `!=`, no ordering, no functions.
+#   - A guard must mention `$caller` in at least one branch.
+#   - Both verbs or neither: `access write open` is the explicit spelling of
+#     an open verb. It is a keyword, never part of a walk.
+#   - A child entity with no `access` of its own inherits its owner's guard.
+#   - A row you cannot read answers `not_found`, the same as a row that does
+#     not exist. A row you can read but not write answers `access_guard`.
+#   - Guards apply before an op's own sort and take.
+#
+# Reference: docs/definition-language.md section 3 "Access guards" (G1 to G18),
+# docs/guards-conformance.md.
+
+domain projects @ 1.0.0
+
+entity projects {
+  name:  text
+  owner  -> members
+  access read   owner == $caller or projectMembers(member == $caller)
+  access write  owner == $caller
+}
+
+entity projectMembers {
+  project -> projects owned
+  member  -> members  owned
+  canWrite: bool = false
+  access read   project.projectMembers(member == $caller)
+  access write  project.owner == $caller
+}
+
+entity tasks {
+  project  -> projects owned
+  assignee -> members?
+  title:   text
+  status:  text = "open"
+  access read   project.projectMembers(member == $caller)
+  access write  project.projectMembers(member == $caller and canWrite)
+}
+
+# No `access` line: notes inherit the guard of tasks, rebased through the
+# ownership path (task.project.projectMembers(...)).
+entity taskNotes {
+  task -> tasks owned
+  body: text
+}
+
+# Read open, write by the author only. `open` is spelled out on purpose.
+entity announcements {
+  author -> members
+  body:   text
+  pinned: bool = false
+  access read   open
+  access write  author == $caller
+}
+
+# A literal in a walk, and a bare bool field as an atom.
+entity pages {
+  owner  -> members
+  title: text
+  visibility: text = "private"
+  published: bool = false
+  access read   published or visibility == "public" or owner == $caller
+  access write  owner == $caller
+}
+
+# The guard shapes every op that touches the entity.
+op myTasks unbounded =
+  tasks[title, status, project.name]
+  sort title
+
+# `$caller` also works in a body, to say who is asking.
+op assignedToMe unbounded =
+  tasks(assignee == $caller)[title, status]
+  sort title
+
+op addTask($project: id, $title: text) =
+  set tasks { project: $project, title: $title }
+
+op closeTask($task: id) =
+  set tasks(id == $task) { status: "done" }
+
+op addNote($task: id, $body: text) =
+  set taskNotes { task: $task, body: $body }
+
+op notes unbounded =
+  taskNotes[body, task.title]
+
+op announce($body: text) =
+  set announcements { author: $caller, body: $body }
+
+op feed unbounded =
+  announcements[body, pinned, author.displayName]
+  sort -pinned

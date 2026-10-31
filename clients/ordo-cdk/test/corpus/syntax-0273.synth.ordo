@@ -1,0 +1,3 @@
+op occupiedUnits unbounded =
+  units[name]
+    match any leases(status == "active")

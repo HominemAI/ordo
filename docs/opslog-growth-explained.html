@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What $secevents grows with</title>
+<style>
+:root{
+  --ink:#14161a; --paper:#fbfaf7; --line:#e3ded4; --mut:#7a756b;
+  --chain:#2e4f8a; --chain-bg:#e8edf6; --chain-bd:#c2cfe6;
+  --row:#2e7d5b; --row-bg:#e6f2ec; --row-bd:#bcdccd;
+  --store:#b07a2a; --store-bg:#f7ecd9; --store-bd:#e8d3ab;
+  --gap:#a23b3b; --gap-bg:#f8e9e7; --gap-bd:#e6bdb7;
+  --propose:#2e7d5b; --decline:#a23b3b; --open:#8a5fb0;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:48px 24px 90px}
+h1{font-size:clamp(26px,4.5vw,38px);line-height:1.15;margin:0 0 8px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--mut);margin:0 0 36px;max-width:65ch}
+h2{font-size:21px;margin:46px 0 10px;letter-spacing:-.01em}
+h3{font-size:16px;margin:22px 0 8px}
+p{max-width:70ch;margin:0 0 14px}
+li{max-width:66ch}
+code{font-family:var(--mono);font-size:.87em;background:#f1ede4;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.tag{font-family:var(--mono);font-weight:600;border-radius:5px;padding:1px 8px;font-size:.82em;white-space:nowrap}
+.t-propose{color:var(--propose);background:#e6f2ec;border:1px solid #bcdccd}
+.t-decline{color:var(--decline);background:#f8e9e7;border:1px solid #e6bdb7}
+.t-open{color:var(--open);background:#efe7f6;border:1px solid #d8c5ea}
+figure{margin:22px 0;border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px;overflow-x:auto}
+figcaption{font-size:13px;color:var(--mut);margin-top:10px;max-width:74ch}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--mut);margin:10px 0 28px;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:18px 0}
+.card{border:1px solid var(--line);border-radius:10px;background:#fff;padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:15px}
+.card p{font-size:14.5px;color:#3c3a35;margin:0}
+.callout{border:1px solid var(--gap-bd);background:var(--gap-bg);border-radius:10px;padding:14px 18px;margin:18px 0;max-width:74ch}
+.callout.ok{border-color:var(--row-bd);background:var(--row-bg)}
+.callout.note{border-color:var(--chain-bd);background:var(--chain-bg)}
+.callout > b:first-child{display:block;margin-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:14px 0}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.pull{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:24px 0;max-width:74ch}
+.pull b{display:block;margin-bottom:4px}
+.twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0}
+@media (max-width:600px){.twocol{grid-template-columns:1fr}}
+.col h4{margin:0 0 8px;font-size:14.5px;letter-spacing:.03em;text-transform:uppercase}
+.col ul{margin:0;padding-left:20px;font-size:14.5px}
+.col li{margin-bottom:6px}
+.foot{color:var(--mut);font-size:13.5px;margin-top:44px}
+.assume{font-size:13.5px;color:var(--mut);margin:6px 0 16px;max-width:74ch}
+.num{font-family:var(--mono)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>What <code>$secevents</code> grows with, and how fast</h1>
+<p class="sub">You asked what exactly is growing, what the implication is,
+what the growth looks like at one tenant and at a hundred, whether it moves
+with every change or every rotation, whether it is linear or exponential,
+and what the workarounds are. This walks the code that answers each
+question, kind by kind, with the collapse-key fix (<code>plan-opslog.md</code>
+D1b, already in this tree) as the dividing line between what changed and
+what did not.</p>
+
+<div class="legend">
+  <span><i style="background:var(--gap-bg);border-color:var(--gap-bd)"></i> denial path (collapsed)</span>
+  <span><i style="background:var(--chain-bg);border-color:var(--chain-bd)"></i> everything else (one entry each)</span>
+  <span><i style="background:var(--store-bg);border-color:var(--store-bd)"></i> deployment scope (shared, all tenants)</span>
+  <span><i style="background:var(--row-bg);border-color:var(--row-bd)"></i> bounded / capped</span>
+</div>
+
+<h2>1 &middot; The one rule that decides everything downstream</h2>
+<p><code>Recorder::observe</code> (<code>crates/ordo-secevent/src/recorder.rs:348-387</code>)
+looks at the kind of the thing that just happened and does one of two
+things. If it is <code>EventKind::Denied</code>, it folds into a windowed
+accumulator that only becomes a hashed entry when the window closes. For
+every other kind (<code>KeyReleased</code>, <code>CustodyAction</code>,
+<code>AuthenticatorLinked</code>, all of it), it builds a
+<code>StreamEntry::single</code> immediately: one observation, one entry,
+forever. <code>EventKind::collapses()</code>
+(<code>event.rs:459-461</code>) is one line: <code>matches!(self,
+EventKind::Denied(_))</code>. That line is the headline of this whole
+document. Denials are the kind the design spent its effort bounding. Every
+other kind pays full price, one row per occurrence, with no cap at all
+except the outbox and retention described in §6.</p>
+
+<figure>
+<svg viewBox="0 0 820 300" width="100%" role="img" aria-label="the two paths through observe">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <rect x="330" y="15" width="160" height="44" rx="8" fill="#fff" stroke="#e3ded4"/>
+  <text x="410" y="42" text-anchor="middle" font-size="13" font-weight="600">observe(obs)</text>
+  <path d="M395 59 L245 100" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <path d="M425 59 L575 100" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <text x="290" y="82" text-anchor="middle" font-size="11" fill="var(--gap)" font-weight="600">Denied</text>
+  <text x="560" y="82" text-anchor="middle" font-size="11" fill="var(--chain)" font-weight="600">everything else</text>
+
+  <rect x="60" y="100" width="270" height="70" rx="8" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="195" y="126" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--gap)">Collapser.observe</text>
+  <text x="195" y="143" text-anchor="middle" font-size="11" fill="var(--gap)">fold into window, keyed on</text>
+  <text x="195" y="158" text-anchor="middle" font-size="10.5" fill="var(--gap)">(scope, about, subject, op)</text>
+
+  <rect x="490" y="100" width="270" height="70" rx="8" fill="var(--chain-bg)" stroke="var(--chain-bd)"/>
+  <text x="625" y="126" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--chain)">StreamEntry::single</text>
+  <text x="625" y="143" text-anchor="middle" font-size="11" fill="var(--chain)">count = 1, hashed immediately</text>
+  <text x="625" y="158" text-anchor="middle" font-size="10.5" fill="var(--chain)">KeyReleased, CustodyAction, …</text>
+
+  <path d="M195 170 v30" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="80" y="200" width="230" height="60" rx="8" fill="var(--row-bg)" stroke="var(--row-bd)"/>
+  <text x="195" y="222" text-anchor="middle" font-size="12" font-weight="600" fill="#2e7d5b">window closes at 60s</text>
+  <text x="195" y="238" text-anchor="middle" font-size="10.5" fill="#2e7d5b">≤ 256 entries per scope</text>
+  <text x="195" y="252" text-anchor="middle" font-size="10.5" fill="#2e7d5b">+ one Suppressed marker</text>
+
+  <path d="M625 170 v30" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="510" y="200" width="230" height="60" rx="8" fill="#f4f3ef" stroke="#d8d3c8"/>
+  <text x="625" y="222" text-anchor="middle" font-size="12" font-weight="600" fill="#6b6659">no window, no cap</text>
+  <text x="625" y="238" text-anchor="middle" font-size="10.5" fill="#6b6659">every call is one entry</text>
+  <text x="625" y="252" text-anchor="middle" font-size="10.5" fill="#6b6659">bounded only by the outbox</text>
+
+  <path d="M195 260 v15 h430 v-15" stroke="#7a756b" fill="none"/>
+  <path d="M625 260 v15" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="330" y="278" width="160" height="20" rx="6" fill="#fff" stroke="#e3ded4" stroke-dasharray="3 3"/>
+  <text x="410" y="292" text-anchor="middle" font-size="10.5" fill="#7a756b">outbox → drainer → $secevents</text>
+</svg>
+<figcaption>Verified: <code>crates/ordo-secevent/src/recorder.rs:348-387</code>
+(<code>observe</code>'s match), <code>collapse.rs:150-185</code>
+(<code>Collapser::observe</code>), <code>event.rs:459-461</code>
+(<code>collapses()</code>), <code>event.rs:636-657</code>
+(<code>StreamEntry::single</code>). The right-hand box is where every
+<code>KeyReleased</code> lands, which is why §4 below is the real story
+rather than the denial path.</figcaption>
+</figure>
+
+<h2>2 &middot; Kind by kind, what actually writes an entry</h2>
+<p><code>EventKind</code> has thirteen variants
+(<code>crates/ordo-secevent/src/event.rs:380-449</code>). I grepped every
+crate in the workspace for a constructor of each one, outside
+<code>ordo-secevent</code>'s own tests. Most of them have no producer at
+all today.</p>
+
+<table>
+<tr><th>Kind</th><th>Collapses?</th><th>Producer, verified</th></tr>
+<tr><td><code>Denied</code></td><td>yes</td>
+    <td>The door, three call sites: <code>ordo-host/src/lib.rs:1192,
+    1241, 1270</code> (unverifiable token, non-member, not-live
+    delegation).</td></tr>
+<tr><td><code>KeyReleased</code></td><td>no</td>
+    <td><code>MeteredKeys::release</code>, <code>ordo-host/src/metrics.rs:884-921</code>,
+    on every successful lease: ordinary sealed reads and writes.
+    See §4.</td></tr>
+<tr><td><code>CustodyAction</code></td><td>no</td>
+    <td>Five sites, all administrative: <code>ordo-exec/src/erase.rs</code>,
+    <code>ordo-exec/src/undo.rs</code> (per-object presence markers on a blob
+    restore), <code>ordo-host/src/attest_ops.rs</code>,
+    <code>ordo-host/src/exit_ops.rs</code>, <code>ordo-host/src/bucket_ops.rs</code>.
+    Operator/platform acts, not request traffic.</td></tr>
+<tr><td><code>AuthenticatorLinked</code> / <code>Unlinked</code> /
+    <code>PrincipalOnboarded</code></td><td>no</td>
+    <td>The type has a conversion from <code>ordo_identity::AuditEvent</code>
+    (<code>event.rs:497-519</code>), and <code>ordo-identity/src/directory.rs:407,439,467</code>
+    produces those events, but they only ever land in
+    <code>session.rs:41</code>'s <code>audit: Vec&lt;AuditEvent&gt;</code>.
+    Nothing in <code>ordo-host</code> or <code>ordo-exec</code> reads that
+    field. <b>These three kinds are wired in the type system and dead in
+    the tree</b>: zero entries, today.</td></tr>
+<tr><td><code>Authenticated</code>, <code>AuthenticationFailed</code>,
+    <code>StepUpDemanded</code>, <code>StepUpSatisfied</code>,
+    <code>MembershipSuspended</code>, <code>MembershipReactivated</code></td>
+    <td>no</td>
+    <td><b>No constructor anywhere outside the enum definition and
+    <code>ordo-secevent</code>'s own tests.</b> Defined, never produced.</td></tr>
+<tr><td><code>Suppressed</code> / <code>EventsDropped</code></td><td>no
+    (self-describing)</td>
+    <td>Minted by the collapser's own cap (<code>collapse.rs:229-256</code>)
+    and the outbox's own bound (<code>recorder.rs:273-296</code>). The
+    record declaring its own degradation, never a caller's act.</td></tr>
+</table>
+
+<div class="callout note">
+<b>This narrows the question more than I expected.</b>
+Of thirteen defined kinds, only four have a live producer today: denials
+(collapsed), key releases (not), custody actions (rare, administrative),
+and the two markers the stream writes about itself. The other seven are
+either unbuilt or built-and-unwired. So "what is growing" narrows to two
+things, almost entirely: denials, which are bounded by design, and key
+releases, which are not, rather than a broad security log accumulating
+from many directions at once.
+</div>
+
+<h2>3 &middot; What D1b changed, and what it left alone</h2>
+<p>Before D1b, the deployment stream's collapse key was effectively
+<code>(scope, subject, op)</code>: every deployment-scope
+observation shares one <code>scope</code>, so the space a stranger probed
+never entered the key. A sweep across ten thousand spaces at one op
+degenerated to <i>one</i> open window and <i>one</i> closed entry with
+<code>count: 10000</code>, indistinguishable in the record from ten
+thousand retries against a single space
+(<code>docs/plan-opslog.md</code> §0.3). D1b adds
+<code>about: Option&lt;SpaceId&gt;</code> to both <code>StreamEntry</code>
+and <code>CollapseKey</code> (<code>event.rs:610-618</code>,
+<code>collapse.rs:64-73</code>), carried through by <code>observe</code>
+(<code>recorder.rs:358-362</code>) whenever routing sends an observation to
+the deployment scope. Now a hundred-space sweep is a hundred distinct
+keys.</p>
+<p>The per-window cap stays keyed on <code>Scope</code> alone, not on
+<code>(Scope, about)</code>, deliberately
+(<code>collapse.rs:28-38</code>, <code>:169</code>). If it counted per
+target, an attacker choosing space ids would be choosing their own budget.
+<code>DEFAULT_CAP</code> is <b>256</b> and the window is <b>60 seconds</b>
+(<code>collapse.rs:89,97</code>). So the exact, verified statement is: a
+sweep now produces at most 256 distinct entries per scope per 60-second
+window, plus one <code>Suppressed</code> marker for whatever the cap
+refused, and the whole shape repeats every window for as long as the sweep
+continues. <code>plan-opslog.md</code> §Q-4 calls this what it is: <i>"a
+deliberate 256-fold increase in the volume of the artifact under attack,
+bounded, declared, and cut by retention at the next checkpoint."</i></p>
+
+<figure>
+<svg viewBox="0 0 820 260" width="100%" role="img" aria-label="a sweep before and after D1b">
+  <text x="205" y="26" text-anchor="middle" font-size="13" font-weight="600" fill="var(--gap)">before D1b</text>
+  <rect x="30" y="42" width="350" height="46" rx="7" fill="#fff" stroke="#e3ded4"/>
+  <text x="205" y="70" text-anchor="middle" font-size="12">one principal denies against 10,000 spaces</text>
+  <path d="M205 88 v22" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="80" y="110" width="250" height="40" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="205" y="134" text-anchor="middle" font-size="12" fill="var(--gap)">key = (deployment, subject, op)</text>
+  <path d="M205 150 v20" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="105" y="170" width="200" height="52" rx="7" fill="#f4f3ef" stroke="#d8d3c8"/>
+  <text x="205" y="192" text-anchor="middle" font-size="12.5" font-weight="600" fill="#6b6659">1 window, 1 entry</text>
+  <text x="205" y="208" text-anchor="middle" font-size="10.5" fill="#6b6659">count: 10000, no space named</text>
+
+  <line x1="440" y1="10" x2="440" y2="250" stroke="#e3ded4"/>
+
+  <text x="640" y="26" text-anchor="middle" font-size="13" font-weight="600" fill="var(--propose)">after D1b (this tree)</text>
+  <rect x="460" y="42" width="360" height="46" rx="7" fill="#fff" stroke="#e3ded4"/>
+  <text x="640" y="70" text-anchor="middle" font-size="12">same sweep, 10,000 spaces</text>
+  <path d="M640 88 v22" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="490" y="110" width="300" height="40" rx="7" fill="var(--row-bg)" stroke="var(--row-bd)"/>
+  <text x="640" y="134" text-anchor="middle" font-size="12" fill="#2e7d5b">key = (deployment, about, subject, op)</text>
+  <path d="M640 150 v20" stroke="#7a756b" fill="none" marker-end="url(#a1)"/>
+  <rect x="510" y="170" width="260" height="66" rx="7" fill="var(--row-bg)" stroke="var(--row-bd)"/>
+  <text x="640" y="190" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2e7d5b">≤256 windows opened,</text>
+  <text x="640" y="206" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2e7d5b">≤256 entries per 60s</text>
+  <text x="640" y="222" text-anchor="middle" font-size="10.5" fill="#2e7d5b">+1 Suppressed{further: 9744}</text>
+</svg>
+<figcaption>Verified: <code>crates/ordo-secevent/src/collapse.rs:1-38</code>
+(module doc, states the pre-D1b degenerate case explicitly),
+<code>:150-185</code> (<code>observe</code>, the cap check at <code>:169</code>
+reads <code>open_per_scope.get(&amp;key.scope)</code>, not the full key),
+<code>docs/plan-opslog.md</code> §0.3 and §1.3.</figcaption>
+</figure>
+
+<h2>4 &middot; The actual growth term: key releases</h2>
+<p><code>MeteredKeys::release</code> wraps every
+<code>KeyProvider::release</code> call. On success it always emits
+<code>EventKind::KeyReleased</code> at <code>Scope::Deployment</code>,
+because it calls <code>observe</code> with
+<code>Relationship::None</code> unconditionally
+(<code>ordo-host/src/metrics.rs:918</code>), so <code>route()</code>
+sends it to the deployment scope regardless of who the subject
+is. The space the release touched rides along as <code>about</code>
+(<code>:909</code>, D2 in <code>plan-opslog.md</code>), so the entry names
+which tenant it concerned, but the entry itself lives in the <b>one
+shared deployment stream</b>, not in that tenant's own space stream. A
+tenant cannot see their own key-release volume in their own audit view;
+it is the operator's record, summed across every tenant the deployment
+serves (<code>event.rs:44-48</code>: "the platform's own custody and
+key-release events, which belong to the operator and not to any
+tenant").</p>
+<p>And <code>KeyReleased</code> does not collapse. Every successful
+release is a separate, immediately-hashed entry, with no window and no
+cap other than the outbox (§6). So the deployment stream's size is, to
+first order, a running count of every sealed-field read and write the
+whole deployment has ever served.</p>
+
+<h3>What actually calls release, and how many times per write</h3>
+<p>Reads are cheap: <code>open_sealed</code>
+(<code>crates/ordo-exec/src/lib.rs:670-683</code>) takes exactly
+<b>one</b> lease per query, opens every sealed cell the query returned
+under it, and releases. A read returning 500 rows across three sealed
+columns is still one <code>KeyReleased</code> entry.</p>
+<p>Writes are not. <code>crates/ordo-conformance/src/write.rs</code>
+calls <code>release</code> once per sealed field to seal the new value
+(<code>:1472-1475</code> on create, <code>:3360-3363</code> on update),
+and separately, once per sealed field, to mint the image reference the
+command group carries (<code>seal_image_ref</code>, <code>:3049-3052</code>).
+<code>crates/ordo-crypto/src/sealed.rs:37-40</code> states the image
+cost exactly: <i>"a converge over a sealed field stores the payload
+twice, once for the before-image, once for the after-image,
+and a bulk write over N rows stores 2N."</i> So per sealed field touched:</p>
+<ul>
+<li><b>create</b>: 1 write-purpose release (seal) + 1 image-purpose
+release (after-image only, there is no before) = <b>2</b>
+<code>KeyReleased</code> entries.</li>
+<li><b>update / converge</b>: 1 write-purpose release + 2 image-purpose
+releases (before and after) = <b>3</b> <code>KeyReleased</code>
+entries.</li>
+</ul>
+<p>In an app developer's terms: a key release is not one per row and not
+one per request. It is one per sealed field your write touches (roughly
+tripled on an update, because the chain keeps both sides of the change),
+and one per query on the read side no matter how many rows or sealed
+columns that query returns. A form that updates a customer's name (not
+sealed) and email (sealed) writes one <code>$commandlog</code> group and
+about three <code>$secevents</code> entries, entirely from the one
+sealed field.</p>
+
+<div class="callout">
+<b>One wiring gap worth naming, because it changes whether any of this
+fires at all.</b>
+<code>MeteredKeys::with_stream</code> is what attaches a
+<code>Recorder</code> so releases actually reach <code>$secevents</code>;
+without it, <code>MeteredKeys</code> still increments the Prometheus
+counter but records nothing durable. Grepping the tree, the only call
+sites for <code>.with_stream(</code> are <code>ordo-host/src/metrics.rs</code>'s
+own unit tests (<code>:1120, 1159, 1276</code>). The deployment fixture
+used by <code>ordo-host</code>'s integration tests builds
+<code>MeteredKeys::new(f.keys.clone(), metrics.clone())</code> with no
+<code>.with_stream()</code> at all (<code>ordo-host/tests/deployment.rs:190-196</code>).
+The mechanism is real and correctly built; whether a given deployment's
+key releases actually land in <code>$secevents</code> depends on one line
+of bootstrap code that nothing in this tree demonstrates today. Everything
+below assumes it is wired, because that is the configuration the design
+and <code>implementation.md</code> call for.
+</div>
+
+<h2>5 &middot; Growth per tenant, and at a hundred</h2>
+<p class="assume">Everything in this table is arithmetic over stated
+assumptions, not a measurement. Entry size is estimated from the frozen
+encoding (<code>chain.rs:20-40</code>: 16-byte domain prefix, length-prefixed
+scope/subject/op/kind, four <code>u64</code>s, a correlation list, an
+optional trailer). <code>recorder.rs:316-326</code>'s own sizing
+note lands on "~200 bytes an entry", which is what I use below for a
+<code>KeyReleased</code> entry (short op, one correlation, one <code>about</code>
+trailer).</p>
+
+<table>
+<tr><th>Scenario</th><th>Assumption</th><th>KeyReleased/day</th><th>~Bytes/day</th></tr>
+<tr><td>Quiet tenant</td>
+    <td>1,000 calls/day, 10% touch sealed data: 60 reads + 40 writes
+    averaging 1 sealed field each</td>
+    <td>60×1 + 40×2 = <span class="num">140</span></td>
+    <td>~28 KB</td></tr>
+<tr><td>Busy tenant</td>
+    <td>200,000 calls/day, 20% touch sealed data: 24,000 reads + 16,000
+    writes averaging 1.5 sealed fields, weighted 2.5 releases/field
+    (mix of create and converge)</td>
+    <td>24,000×1 + 16,000×1.5×2.5 = <span class="num">84,000</span></td>
+    <td>~16.8 MB</td></tr>
+<tr><td>100 tenants
+    (10 busy + 90 quiet)</td>
+    <td>same per-tenant assumptions, summed, all landing in the
+    <b>one</b> deployment stream (§4)</td>
+    <td>10×84,000 + 90×140 = <span class="num">852,600</span></td>
+    <td>~170 MB/day</td></tr>
+</table>
+
+<p>At the default 90-day retention (<code>Retention::DEFAULT_KEEP_SECS</code>,
+<code>store.rs:448</code>), that hundred-tenant deployment accumulates on
+the order of <b>15 GB</b> in <code>$secevents</code> from key releases
+alone before the first checkpoint prune reclaims anything, under these
+assumptions. Compare that to the worst-case denial sweep from §3: 256
+entries × ~150 bytes ≈ 38 KB per minute, so even an hour of continuous
+attack (60 windows) is roughly 2.3 MB, a rounding error next to a
+single busy tenant's <i>ordinary</i> traffic. The attack path is the one
+that got engineered attention (bounded, capped, declared); the traffic
+path is the one actually filling the disk, and nothing bounds it.</p>
+
+<h2>6 &middot; Does it grow with every change? With every rotation?</h2>
+<p><b>Ordinary writes do not write here.</b> An <code>UPDATE</code> on a
+non-sealed column runs the write protocol, appends a command group to
+<code>$commandlog</code>, and never calls <code>KeyProvider::release</code>:
+nothing in that path touches <code>ordo-secevent</code> at all.
+Only a write or read that reaches a field marked <code>sealed</code> in
+the schema takes a lease, and only taking a lease writes an entry. So it grows with every sealed-field read or write, not
+with every change, and how much of your schema is sealed is a design
+decision you already control.</p>
+
+<h3>Rotation</h3>
+<p><code>docs/roadmap-checklist.md</code> item <b>17i</b> is unchecked,
+and its own text is blunt: <i>"<code>rotate()</code> has no production
+caller at all: revocation never opens a new epoch."</i>
+<code>docs/plan-production-ops.md</code> §1.1 confirms
+<code>LocalKeyProvider::rotate</code> mints a new epoch and re-seals
+nothing (<code>custody.rs:686-700</code>). I grepped the tree for
+<code>epoch_rotated</code> and <code>reseal_completed</code>, the
+two <code>CustodyAction</code> strings the plan specifies for a rotation,
+and found neither anywhere outside the plan document itself. <b>I
+cannot give you a real number for what rotating a space costs
+<code>$secevents</code>, because the re-seal worker does not exist in
+this tree.</b> Calling the raw <code>rotate()</code> primitive today mints
+a key and writes nothing to the security stream at all; it also re-seals nothing, which is a correctness gap far bigger than
+a logging question.</p>
+<p>What the plan <i>specifies</i>, for when 17i lands
+(<code>plan-production-ops.md</code> §K1): <i>"one key lease per chunk,
+not per pass"</i>: <code>release(space, Purpose::Reseal,
+correlation)</code> once per chunk of the keyset-paged scan, not once per
+object or per row, plus two <code>CustodyAction</code> markers,
+<code>epoch_rotated</code> at the start and <code>reseal_completed</code>
+at the end. If it ships as designed, a rotation's cost to
+<code>$secevents</code> is <code>O(chunks)</code>, which is a knob (chunk
+size) the operator sets, not <code>O(objects)</code>. That is the
+designed shape, not a measured one.</p>
+
+<h2>7 &middot; Linear or exponential</h2>
+<p><b>Linear, not exponential, in every dimension I can find.</b> Per
+tenant, growth is linear in that tenant's sealed-field read/write volume.
+Across tenants, it is linear in tenant count, because every tenant's key
+releases sum into the same uncollapsed deployment stream (§4):
+double the tenants, double the entries, no multiplicative interaction
+between them. Under attack, growth is capped at
+<code>DEFAULT_CAP</code> (256) entries per scope per 60-second window
+(§3), which is a flat ceiling, not a curve.</p>
+<p>What is bounded: the per-window denial cap; the outbox, hard-capped at
+<code>Recorder::DEFAULT_OUTBOX</code> = 16,384 entries
+(<code>recorder.rs:326</code>), past which arrivals are refused and
+declared lost rather than growing unboundedly; and retention, which drops
+whole prefixes at a verified checkpoint (<code>store.rs</code> module
+doc, §1) so the stored total never exceeds roughly
+<code>keep_secs</code> worth of traffic. What is <b>not</b> bounded: the
+rate itself. Nothing caps how many <code>KeyReleased</code> entries a
+deployment can produce per second; it is exactly as fast as legitimate
+sealed-field traffic is fast. Retention controls how much history you
+keep, not how fast the stream fills between prunes.</p>
+
+<figure>
+<svg viewBox="0 0 820 280" width="100%" role="img" aria-label="shape of growth over time">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#7a756b"/></marker>
+  </defs>
+  <line x1="60" y1="230" x2="780" y2="230" stroke="#7a756b"/>
+  <line x1="60" y1="20" x2="60" y2="230" stroke="#7a756b"/>
+  <text x="60" y="248" font-size="11" fill="#7a756b">day 0</text>
+  <text x="700" y="248" font-size="11" fill="#7a756b">day 90</text>
+  <text x="20" y="28" font-size="11" fill="#7a756b">entries</text>
+
+  <!-- baseline linear ramp from ordinary key-release traffic -->
+  <path d="M60 220 L760 60" stroke="var(--chain)" stroke-width="2.5" fill="none"/>
+  <text x="420" y="110" font-size="11.5" fill="var(--chain)" font-weight="600">ordinary KeyReleased traffic</text>
+  <text x="420" y="125" font-size="10.5" fill="var(--chain)">linear, uncollapsed, unbounded rate</text>
+
+  <!-- capped attack spike -->
+  <path d="M300 220 L300 205 L330 205 L330 220" stroke="var(--gap)" stroke-width="2.5" fill="none"/>
+  <text x="330" y="196" font-size="10.5" fill="var(--gap)">sweep: capped at 256/window, ~flat</text>
+
+  <!-- retention prune sawtooth -->
+  <path d="M760 60 L760 150" stroke="var(--decline)" stroke-width="2" stroke-dasharray="4 3" fill="none" marker-end="url(#a2)"/>
+  <text x="640" y="175" font-size="10.5" fill="var(--decline)">checkpoint prune cuts the whole</text>
+  <text x="640" y="189" font-size="10.5" fill="var(--decline)">prefix past the retention horizon</text>
+
+  <rect x="600" y="20" width="170" height="20" rx="4" fill="none" stroke="var(--line)"/>
+  <text x="685" y="34" text-anchor="middle" font-size="10" fill="#7a756b">store size, not rate</text>
+</svg>
+<figcaption>The steep blue line is the term that matters: it is set by
+how much sealed traffic the deployment serves, not by anything
+adversarial, and nothing in the design slows it down. The red step is a
+sweep, capped at 256 entries per minute regardless of how many spaces the
+attacker names. The dashed cut is what retention buys back periodically
+: a smaller stored total, not a slower fill rate.</figcaption>
+</figure>
+
+<h2>8 &middot; Workarounds, with tradeoffs</h2>
+<div class="cards">
+  <div class="card">
+    <h4><span class="tag t-propose">recommended</span> (a) collapse key releases</h4>
+    <p>Give <code>KeyReleased</code> the same windowed treatment
+    <code>Denied</code> already has: key on
+    <code>(scope, about, purpose)</code>, one entry per window with
+    <code>count</code> inside the hashed body. Cuts the dominant term by
+    roughly the window length's worth of traffic (up to 60× under the
+    default window). Costs per-release correlation resolution: today each
+    entry carries the request's own correlation id, which is exactly the
+    handle §4 relies on to join a release back to a command group; a
+    collapsed entry would keep only a bounded sample
+    (<code>CORRELATION_SAMPLE</code> = 4, the same limit denials already
+    accept, <code>event.rs:596</code>).</p>
+  </div>
+  <div class="card">
+    <h4><span class="tag t-decline">argue against</span> (b) sample key releases</h4>
+    <p><code>security-logging-design.md</code> pins, for the sibling
+    stream, <i>"Nothing is sampled. Every observation is recorded,
+    collapsed with its count, or counted into a declared loss; there is no
+    fourth path where an event quietly does not happen."</i> That rule was
+    written for denials, but the reasoning is the same for key releases:
+    a probabilistic audit trail is not an audit trail, and there is already
+    a statistical view of exactly this data,
+    <code>ordo_key_release_total</code> (<code>metrics.rs:124-126</code>),
+    that carries no integrity guarantee and resets on restart.
+    Sampling the security stream would just build a worse, tamper-evident
+    copy of a counter that already exists.</p>
+  </div>
+  <div class="card">
+    <h4><span class="tag t-open">ruled, unbuilt</span> (c) the deployment-log toggle</h4>
+    <p><code>ORDO_DEPLOYMENT_SECLOG</code>, off turning off deployment-scope
+    recording entirely, is ruled 2026-09-07 and specified in
+    <code>plan-opslog.md</code> §4, but item D3 is unchecked and I
+    found no <code>ORDO_DEPLOYMENT_SECLOG</code> anywhere in the tree. If
+    built, it removes 100% of this growth (all <code>KeyReleased</code>
+    entries are deployment-scope), at the cost of losing every deployment
+    security event, including denial sweeps, while it is off. All-or-nothing,
+    and not available today.</p>
+  </div>
+  <div class="card">
+    <h4><span class="tag t-propose">available now</span> (d) tune retention</h4>
+    <p><code>Retention::deployment_keep_secs</code> already gives the
+    deployment stream its own number, separate from tenant streams
+    (<code>store.rs:422-440</code>, D1b), set via
+    <code>ORDO_DEPLOYMENT_SECLOG_RETENTION_DAYS</code>
+    (<code>store.rs:442</code>). Default is 90 days, same as tenant
+    retention, changeable today with no code change. This bounds the
+    stored <i>total</i>, not the append <i>rate</i>: §5's per-day
+    number is unaffected, only how many days of it you keep on disk.</p>
+  </div>
+  <div class="card">
+    <h4><span class="tag t-decline">largest saving, largest loss</span> (e) stop recording successful releases</h4>
+    <p>Removing <code>KeyReleased</code> entirely removes the term that
+    dominates every number in §5. It is also the biggest loss of evidence
+    on the table: <code>implementation.md:488-492</code> specifies key
+    releases as mandatory deployment-log content precisely because the
+    stream is the only tamper-evident record of which lease touched which
+    space, when. The Prometheus counter is not a substitute: it has
+    no chain, no checkpoint, and resets on every restart.</p>
+  </div>
+</div>
+
+<div class="pull">
+<b>Recommendation.</b>
+(d) is a one-line configuration change available today and worth doing
+regardless of anything else: it costs nothing and directly bounds
+disk. It does not fix the rate. (a), collapsing key releases the way
+denials already collapse, is the real fix: the pattern is proven, the
+`count`-inside-the-hashed-body machinery already exists, and it is the
+only option here that reduces the dominant term without deleting the
+evidence it produces. (b) and (e) trade away the property that makes this
+stream worth having at all, and (c) is not a lever until it ships.
+</div>
+
+<p class="foot">Every claim above cites a file and the line verified
+against this tree (branch <code>d1-collapse-key</code>) on 2026-09-11.
+Where a number is estimated rather than read from a measurement
+(every figure in §5, and the shape in §K1 of §6) the assumption is
+stated next to it and is not presented as a measured fact.</p>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,9 @@
+op setRent($lease: id, $rev: int, $annual: money) =
+  set leases { id: $lease, rev: $rev, rent: round($annual / 12, 0) }
+# `rent: $annual / 12` alone is `implicit_rounding`. A decimal never lands in a
+# money slot on its own. Only round(x, 0), floor and ceil convert: money IS
+# minor units, so `round(x, 2)` asks for digits finer than the smallest unit
+# there is, and is the same error.
+# `round` is HALF-UP (away from zero), globally. Division uses the same tie-break
+# when it reduces scale. Need half-even? Express it in app code.
+# `/ 0` is a typed runtime error, uniform with mod(a, 0).

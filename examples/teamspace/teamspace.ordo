@@ -1,0 +1,103 @@
+# A small team project tracker in one shared tenant.
+#
+# A founder signs up and gets the tenant, as its owner. Colleagues come in
+# by invitation (`std.space.invite`) at the role the invitation names.
+#
+# Two kinds of people:
+#   - admins: the tenant's `owner` and `manager` roles.
+#   - members: the `editor` role. (`viewer` can read and cannot write.)
+#
+# Who may do what, layer by layer:
+#   1. The door. Every role may call the ops written below; writes need
+#      `editor` or above. The derived `std.*` ops are for `manager` and
+#      `owner` only, so projects and project teams are managed through
+#      `std.projects.*` and `std.team.*` by admins alone. Invitations are
+#      for `manager` and `owner`; role changes are the `owner`'s.
+#   2. The guard on `tasks`. A person reads and writes the tasks of the
+#      projects whose team they are on.
+#   3. The reports. They are `unguarded`, so they total every project,
+#      whoever is on its team. The door keeps them for `owner` and
+#      `manager`: the app's profile template says so
+#      (`ORDO_ACCESS_TEMPLATE`, set in `dev/serve.sh`), and a tenant's owner
+#      may open them to a group of their own with `std.space.setOpAccess`.
+
+domain teamspace @ 0.1.0
+
+entity projects {
+  name:    text
+  summary: text = ""
+  added: datetime
+}
+
+# Who works on which project. Admins add and remove rows with
+# `std.team.create` and `std.team.delete`.
+entity team {
+  project -> projects owned
+  member  -> members
+  unique (project, member)
+}
+
+entity tasks {
+  project  -> projects owned
+  title:    text
+  status:   text = "todo"
+  assignee -> members?
+  author   -> members
+  due:      date?
+  added:  datetime
+  check status == "todo" or status == "doing" or status == "review" or status == "done"
+  access read   project.team(member == $caller)
+  access write  project.team(member == $caller)
+}
+
+# The projects the caller is on.
+op myProjects unbounded =
+  team(member == $caller)[project.id, project.name, project.summary]
+  sort project.name
+
+# Who is on one project.
+op projectTeam($project: id) unbounded =
+  team(project == $project)[id, member, memberName: member.displayName, memberRole: member.role]
+  sort memberName
+
+# One project's tasks. The guard on `tasks` leaves out a project the caller
+# is not on.
+op board($project: id) unbounded =
+  tasks(project == $project)[id, rev, title, status, assignee, assigneeName: assignee.displayName, authorName: author.displayName, due, added]
+  sort added
+
+# The page stamps `$added` from its own clock (`filled`).
+op createTask($project: id, $title: text, $assignee: id = null, $due: date = null, $added: datetime filled) =
+  set tasks { project: $project, title: $title, assignee: $assignee, due: $due, author: $caller, added: $added }
+
+# Compare-and-set on `rev`: a task someone else changed meanwhile answers
+# `cas_miss`, and nothing is overwritten.
+op moveTask($id: id, $rev: int, $status: text) =
+  set tasks { id: $id, rev: $rev, status: $status }
+
+op editTask($id: id, $rev: int, $title: text, $assignee: id = null, $due: date = null) =
+  set tasks { id: $id, rev: $rev, title: $title, assignee: $assignee, due: $due }
+
+# The caller's own seat in the team: the page reads its role from here.
+op me =
+  members(id == $caller)[id, displayName, role]
+
+# Everyone in the tenant, with their role.
+op people unbounded =
+  members(kind == "principal")[id, displayName, role, status, joined]
+  sort displayName
+
+# The admin report, one row per project: tasks by status, and how many are
+# past due. Owners and managers only, by the template; the body checks no
+# role. `counts` is grouped on `project` and joined back to `projects`,
+# so a project with no tasks still has its row, with zeros.
+op reportByProject($today: date filled) unbounded unguarded =
+  let counts = tasks[status] group project { total: count, todo: count(status == "todo"), doing: count(status == "doing"), review: count(status == "review"), done: count(status == "done"), overdue: count(due < $today and status != "done") }
+  projects[id, name]  counts[total, todo, doing, review, done, overdue]
+  sort name
+
+# The admin report, one row per person: what is assigned to them.
+op reportByPerson($today: date filled) unbounded unguarded =
+  let load = tasks[status] group assignee { total: count, open: count(status != "done"), done: count(status == "done"), overdue: count(due < $today and status != "done") }
+  members(kind == "principal")[id, displayName, role]  load[total, open, done, overdue]
+  sort displayName

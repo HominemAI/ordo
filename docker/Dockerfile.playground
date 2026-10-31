@@ -1,0 +1,98 @@
+# Built by `images.yml`: `amd64` on every push to `main`, `amd64`+`arm64`
+# on a `v*` tag. See `docs/plan-ci-images.md` §3.3.
+#
+# The playground: `crates/ordo-playground`, a browser surface over the
+# compiler. It is its OWN image rather than a route inside the host image,
+# and the reason is mechanical rather than aesthetic — see §3.3 of the plan,
+# summarised here because whoever edits this file needs it:
+#
+#   1. The playground does not use `ordo-host`'s serving path at all. It
+#      builds its own axum router (`ordo_playground::server::router`) and
+#      executes SQL by shelling out to the `psql` BINARY through
+#      `ordo_conformance::Pg` — not through `ordo-exec`'s pool. So it needs
+#      a Postgres client program in its runtime, which is why this image is
+#      debian-slim and the host/CLI images are distroless.
+#
+#   2. It REBUILDS three databases at boot (`App::seed`, dropping and
+#      recreating `ordo_playground{,_market,_wide}`). A process that runs
+#      `DROP SCHEMA public CASCADE` on startup must never share an image,
+#      a pod or a database with the deployable.
+#
+#   3. It pins the clock to `Clock::CORPUS` and serves fixture data. It is a
+#      demonstration surface, and its blast radius should be visible in the
+#      deployment topology rather than only in a code comment.
+#
+# `ORDO_PLAYGROUND_ADDR` (increment 0c): `main.rs` reads it, defaulting to
+# `127.0.0.1:7878` so `cargo run` keeps its current, correct-for-a-laptop
+# behaviour. `images.yml`'s playground probe checks for the variable name
+# in `main.rs` and stops skipping once it is read.
+#
+#   docker build -f docker/Dockerfile.playground -t ordo-playground:dev .
+
+ARG RUST_VERSION=1.97
+ARG DEBIAN_RELEASE=bookworm
+ARG PG_MAJOR=17
+
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS chef
+RUN cargo install cargo-chef --locked --version ^0.1
+WORKDIR /build
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+# `--locked`: `Cargo.lock` is committed (increment 0b), so a drifting
+# dependency fails the build instead of silently entering the image, and
+# two builds of one commit produce the same bytes.
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked -p ordo-playground --bin ordo-playground \
+ && strip target/release/ordo-playground
+
+# ── runtime ──────────────────────────────────────────────────────────────
+#
+# debian-slim, NOT distroless: `ordo_conformance::Pg::run` invokes the
+# `psql` executable, so a base with no shell and no packages cannot serve a
+# single pane. The `ORDO_PSQL` default is
+# `/opt/homebrew/opt/postgresql@17/bin/psql` — a macOS Homebrew path — so
+# the env override below is load-bearing, not cosmetic.
+#
+# Pinned to the same major as `scripts/conformance-pg.sh`
+# (`postgresql@17`), so the client the playground shells out to is the one
+# the corpus was executed against.
+
+FROM debian:${DEBIAN_RELEASE}-slim AS runtime
+ARG PG_MAJOR
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates gnupg curl; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg; \
+    echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"; \
+    apt-get purge -y --auto-remove gnupg curl; \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root, created explicitly: unlike distroless there is no `:nonroot`
+# tag doing this for us, and a playground running as uid 0 is a playground
+# one container escape away from mattering.
+RUN useradd --system --uid 65532 --create-home --home-dir /home/ordo ordo
+USER 65532:65532
+
+COPY --from=builder /build/target/release/ordo-playground /usr/local/bin/ordo-playground
+
+ENV ORDO_PSQL="/usr/bin/psql" \
+    ORDO_PG_HOST="" \
+    ORDO_PG_PORT="5432" \
+    ORDO_PG_USER="" \
+    ORDO_PG_DB="" \
+    ORDO_PLAYGROUND_ADDR="0.0.0.0:7878"
+
+EXPOSE 7878
+
+ENTRYPOINT ["/usr/local/bin/ordo-playground"]

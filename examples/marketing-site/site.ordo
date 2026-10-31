@@ -1,0 +1,94 @@
+# A marketing site: products, pricing plans and testimonials that anyone can
+# read with no token, and a contact form that anyone can write to.
+#
+# Each content entity has a `public` line, so a public op may read its fields.
+# The four reads below are `public`: a visitor calls `GET /op/pricing` with no
+# sign-in. The site owner fills the content with the ordinary add ops, signed
+# in, in the deployment's space (`system`).
+#
+# `contact` is a public write. It only creates an `enquiries` row. A visitor
+# cannot read enquiries back; the site owner does, with `enquiryList`.
+#
+# `features` is a JSON array of short strings, `["SSO", "Audit log"]`.
+# `rank` orders each list on the page, lowest first.
+
+domain marketing @ 0.2.0
+
+entity products {
+  slug:        text unique
+  name:        text
+  tagline:     text
+  description: text = ""
+  price:       money(2)
+  features:    json = []
+  rank:        int = 100
+  public
+}
+
+entity plans {
+  name:        text
+  tagline:     text = ""
+  price:       money(2)
+  period:      text = "month"
+  features:    json = []
+  highlighted: bool = false
+  rank:        int = 100
+  public
+}
+
+entity testimonials {
+  author:  text
+  role:    text = ""
+  company: text = ""
+  quote:   text
+  stars:   int = 5
+  rank:    int = 100
+  public
+}
+
+# Enquiries from the contact form. No `public` line: a visitor can create a
+# row and can never read one.
+entity enquiries {
+  name:    text(120)
+  email:   text(200)
+  company: text(120) = ""
+  message: text(2000)
+}
+
+# The public reads the page calls. A visitor needs no token.
+op catalogue public =
+  products[id, slug, name, tagline, description, price, features, rank]
+  sort rank
+  take 100
+
+op product($slug: text) public =
+  products(slug == $slug)[id, slug, name, tagline, description, price, features]
+
+op pricing public =
+  plans[id, name, tagline, price, period, features, highlighted, rank]
+  sort rank
+  take 100
+
+op reviews public =
+  testimonials[id, author, role, company, quote, stars, rank]
+  sort rank
+  take 100
+
+# The public write. A plain create with no `id`, so a visitor can add a row and
+# change nothing.
+op contact($name: text(120), $email: text(200), $company: text(120), $message: text(2000)) public =
+  set enquiries { name: $name, email: $email, company: $company, message: $message }
+
+# The reads and writes the site owner uses. They are not public: they need a token.
+op enquiryList =
+  enquiries[id, name, email, company, message]
+  take 100
+
+op addProduct($slug: text, $name: text, $tagline: text, $description: text, $price: money(2), $features: json, $rank: int) =
+  set products { slug: $slug, name: $name, tagline: $tagline, description: $description, price: $price, features: $features, rank: $rank }
+
+op addPlan($name: text, $tagline: text, $price: money(2), $period: text, $features: json, $highlighted: bool, $rank: int) =
+  set plans { name: $name, tagline: $tagline, price: $price, period: $period, features: $features, highlighted: $highlighted, rank: $rank }
+
+op addTestimonial($author: text, $role: text, $company: text, $quote: text, $stars: int, $rank: int) =
+  set testimonials { author: $author, role: $role, company: $company, quote: $quote, stars: $stars, rank: $rank }

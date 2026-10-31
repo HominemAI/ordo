@@ -1,0 +1,161 @@
+/* The People screen (step 8). Tables that turn into one card a row when
+   their own width is small, so a phone never scrolls sideways. */
+
+.people-pick,
+.people-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 16px;
+  margin-block: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+.people-pick select,
+.people-form select,
+.field select {
+  margin-block-end: 0;
+  max-inline-size: 100%;
+}
+
+.people-table {
+  container-type: inline-size;
+  max-inline-size: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.people-table table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+
+.people-table caption {
+  text-align: start;
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding-block-end: 4px;
+}
+
+.people-table th,
+.people-table td {
+  text-align: start;
+  vertical-align: top;
+  padding: 8px;
+  border-block-end: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.people-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.person-name {
+  display: block;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.person-id {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.group-list .person-name {
+  display: inline;
+}
+
+.group-list li {
+  margin-block-end: 6px;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-block: 12px;
+}
+
+.panel h3 {
+  margin-block: 4px 8px;
+  font-size: 1rem;
+}
+
+.via-list {
+  padding-inline-start: 20px;
+  overflow-wrap: anywhere;
+}
+
+.ticket {
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+@container (width < 640px) {
+  .people-table table,
+  .people-table tbody,
+  .people-table tr,
+  .people-table th,
+  .people-table td {
+    display: block;
+  }
+
+  .people-table thead {
+    display: none;
+  }
+
+  .people-table tr {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-block-end: 12px;
+  }
+
+  .people-table th,
+  .people-table td {
+    border-block-end: 0;
+    padding: 4px 12px;
+  }
+
+  .people-table tbody th {
+    padding-block-start: 10px;
+  }
+
+  .people-table td::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+  }
+
+  .people-table td[data-label='Actions']::before {
+    content: none;
+  }
+
+  .people-table td[data-label='Actions'] {
+    padding-block-end: 12px;
+  }
+}
+
+/* Step 8b: checkboxes in a form, and groups of them. */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.people-form fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 0;
+}
+
+.people-form fieldset .check {
+  margin-inline-end: 12px;
+}

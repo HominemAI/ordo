@@ -1,0 +1,7 @@
+# planned: an aggregate over a sealed value is refused today (sealed_unsupported);
+# host-side folding is not built. `count` over sealed rows is built.
+op overpaidInvoices unbounded =                  # cross-entity bar condition
+  invoices[number, total]  payments[amount]
+  group invoices.id, invoices.number, invoices.total { paid: sum amount }
+  | paid > total                                    # per-row fields ride the key;
+                                                    #   bare fields in { } don't parse

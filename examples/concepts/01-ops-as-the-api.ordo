@@ -1,0 +1,58 @@
+# Concept: ops are the API
+#
+# This is a complete small program. Nothing else defines the API:
+#   - each `op` becomes one HTTP route, derived from what the body does
+#       read            -> GET    /op/<name>
+#       set (any)       -> POST   /op/<name>
+#       del only        -> DELETE /op/<name>
+#   - `ordo interface` turns the compiled program into interface.json, the
+#     one data contract the typed SDK, the CDK and generated screens share
+#   - `ordo check` prints each op's mode, cost class and what it touches
+#   - reads can call other reads (composition); writes are called, never composed
+#
+# Try it:
+#   ordo check examples/concepts/01-ops-as-the-api.ordo
+#   ordo interface examples/concepts/01-ops-as-the-api.ordo
+#
+# Read next: docs/api-engine-design.md, docs/std-library.md.
+
+domain helpdesk @ 1.0.0
+
+entity customers {
+  name:  text
+  email: text unique
+}
+
+entity tickets (key: tick) {
+  customer -> customers
+  subject: text
+  status:  text = "open"
+  opened:  date
+  check status == "open" or status == "pending" or status == "closed"
+}
+
+# A read. GET /op/openTickets
+op openTickets unbounded =
+  tickets(status != "closed")[id, subject, status, opened, customer.name]
+  sort -opened
+
+# A read built on another read (composition). Still one GET.
+op oldestOpen =
+  openTickets[subject, name, opened]
+  sort opened
+  take 5
+
+# A write that creates. POST /op/openTicket. The compiler labels it `creates`.
+op openTicket($customer: id, $subject: text, $opened: date) =
+  set tickets { customer: $customer, subject: $subject, opened: $opened }
+
+# A write that converges one named row. The `rev` makes it compare-and-set.
+op closeTicket($ticket: id, $rev: int) =
+  set tickets { id: $ticket, rev: $rev, status: "closed" }
+
+# A pure delete. DELETE /op/dropTicket
+op dropTicket($ticket: id) =
+  del tickets { id: $ticket }
+
+# No op was written for "get one customer". The platform derived
+# std.customers.get, .list, .count, .create, .update and .delete from the shape.

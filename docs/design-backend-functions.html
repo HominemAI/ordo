@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ordo Backend Functions</title>
+<style>
+:root{
+  --ink:#14161a; --paper:#fbfaf7; --panel:#ffffff; --line:#e3ded4; --line2:#cfc8ba; --mut:#6f6a60;
+  --code-bg:#f1ede4;
+  --plat:#2e4f8a; --plat-bg:#e8edf6; --plat-bd:#a9bbdc;
+  --ten:#2e7d5b;  --ten-bg:#e6f2ec;  --ten-bd:#a6cfba;
+  --ctl:#9a6a1f;  --ctl-bg:#f7ecd9;  --ctl-bd:#dfc597;
+  --gap:#a23b3b;  --gap-bg:#f8e9e7;  --gap-bd:#e0aea7;
+  --open:#7a50a3; --open-bg:#efe7f6; --open-bd:#cdb5e3;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+:root:not([data-theme="light"]){
+  --ink:#e8e5df; --paper:#15171a; --panel:#1d2024; --line:#33373d; --line2:#4a4f57; --mut:#a29d93;
+  --code-bg:#24282d;
+  --plat:#9db8e8; --plat-bg:#1e2735; --plat-bd:#3c5379;
+  --ten:#7fceab;  --ten-bg:#1a2a23;  --ten-bd:#356250;
+  --ctl:#dcb471;  --ctl-bg:#2c2618;  --ctl-bd:#665430;
+  --gap:#e79490;  --gap-bg:#2e1f1e;  --gap-bd:#6b403c;
+  --open:#c3a2e0; --open-bg:#272033; --open-bd:#56446f;
+}}
+:root[data-theme="dark"]{
+  --ink:#e8e5df; --paper:#15171a; --panel:#1d2024; --line:#33373d; --line2:#4a4f57; --mut:#a29d93;
+  --code-bg:#24282d;
+  --plat:#9db8e8; --plat-bg:#1e2735; --plat-bd:#3c5379;
+  --ten:#7fceab;  --ten-bg:#1a2a23;  --ten-bd:#356250;
+  --ctl:#dcb471;  --ctl-bg:#2c2618;  --ctl-bd:#665430;
+  --gap:#e79490;  --gap-bg:#2e1f1e;  --gap-bd:#6b403c;
+  --open:#c3a2e0; --open-bg:#272033; --open-bd:#56446f;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:940px;margin:0 auto;padding:40px 16px 90px}
+h1{font-size:clamp(28px,5vw,40px);line-height:1.1;margin:0 0 8px;letter-spacing:-.01em}
+.sub{color:var(--mut);margin:0 0 20px;max-width:66ch}
+h2{font-size:22px;margin:56px 0 10px;letter-spacing:-.01em;padding-top:14px;border-top:1px solid var(--line)}
+h2 .n{color:var(--mut);font-weight:500;margin-right:6px}
+h3{font-size:16.5px;margin:28px 0 8px}
+p{max-width:70ch;margin:0 0 12px}
+ul{padding-left:20px;margin:0 0 14px}
+li{max-width:68ch;margin-bottom:5px}
+a{color:var(--plat)}
+code{font-family:var(--mono);font-size:.86em;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px;overflow-wrap:anywhere}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;margin:0 0 14px}
+pre code{background:none;border:0;padding:0;font-size:inherit}
+.tag{font-family:var(--mono);font-weight:600;border-radius:5px;padding:1px 7px;font-size:.78em;white-space:nowrap}
+.t-ok{color:var(--ten);background:var(--ten-bg);border:1px solid var(--ten-bd)}
+.t-no{color:var(--gap);background:var(--gap-bg);border:1px solid var(--gap-bd)}
+.t-q{color:var(--open);background:var(--open-bg);border:1px solid var(--open-bd)}
+.t-mid{color:var(--ctl);background:var(--ctl-bg);border:1px solid var(--ctl-bd)}
+figure{margin:20px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px}
+figure svg{display:block;width:100%;height:auto;max-width:560px;margin:0 auto}
+figcaption{font-size:13.5px;color:var(--mut);margin-top:10px;max-width:72ch}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.four{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.four figure{margin:0}
+@media (max-width:820px){.two{grid-template-columns:1fr}.four{grid-template-columns:1fr 1fr}}
+@media (max-width:480px){.four{grid-template-columns:1fr}}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:16px 0}
+.card{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px 16px}
+.card h4{margin:0 0 6px;font-size:15px}
+.card p,.card li{font-size:14.5px;margin:0 0 4px}
+.card.ten{border-color:var(--ten-bd);background:var(--ten-bg)}
+.card.plat{border-color:var(--plat-bd);background:var(--plat-bg)}
+.card.ctl{border-color:var(--ctl-bd);background:var(--ctl-bg)}
+.card.open{border-color:var(--open-bd);background:var(--open-bg)}
+.lead{font-size:18px;max-width:64ch;margin:0 0 14px}
+.callout{border:1px solid var(--plat-bd);background:var(--plat-bg);border-radius:10px;padding:12px 16px;margin:16px 0;max-width:76ch}
+.tw{overflow-x:auto;margin:14px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+table{border-collapse:collapse;font-size:13.5px;width:100%}
+th,td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--code-bg);font-weight:600;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td:first-child{font-weight:600}
+.wide table{min-width:1100px}
+.mid table{min-width:640px}
+.dots{font-family:var(--mono);letter-spacing:1px;white-space:nowrap}
+.q{border:1px solid var(--open-bd);background:var(--open-bg);border-radius:10px;padding:12px 16px;margin:12px 0;max-width:76ch}
+.q b.qq{display:block;margin-bottom:6px}
+.q .rec{font-size:15px}
+.phase{display:grid;grid-template-columns:44px 1fr;gap:10px;margin:10px 0;max-width:78ch}
+.phase .num{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;background:var(--plat-bg);border:1px solid var(--plat-bd);color:var(--plat)}
+.phase .body{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px 14px}
+.phase .body h4{margin:0 0 4px;font-size:15px}
+.phase .body p{font-size:14.5px;margin:0}
+.toc{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 8px;font-size:14px}
+.toc a{border:1px solid var(--line);border-radius:999px;padding:3px 10px;text-decoration:none;background:var(--panel)}
+.theme{float:right;font:inherit;font-size:13px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:4px 12px;cursor:pointer}
+.src li{font-size:14px}
+.small{font-size:13.5px;color:var(--mut)}
+/* svg */
+.bx{fill:var(--panel);stroke:var(--line2);stroke-width:1.2}
+.bp{fill:var(--plat-bg);stroke:var(--plat-bd);stroke-width:1.2}
+.bt{fill:var(--ten-bg);stroke:var(--ten-bd);stroke-width:1.2}
+.bc{fill:var(--ctl-bg);stroke:var(--ctl-bd);stroke-width:1.2}
+.bg{fill:var(--gap-bg);stroke:var(--gap-bd);stroke-width:1.2}
+.bo{fill:var(--open-bg);stroke:var(--open-bd);stroke-width:1.2}
+.fr{fill:none;stroke:var(--line2);stroke-width:1.3;stroke-dasharray:5 4}
+svg text{fill:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px}
+svg .m{fill:var(--mut);font-size:11.5px}
+svg .b{font-weight:600}
+svg .h{font-weight:700;font-size:14px}
+.ar{stroke:var(--mut);stroke-width:1.5;fill:none;marker-end:url(#ah)}
+.ahp{fill:var(--mut)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahp" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+</svg>
+<div class="wrap">
+
+<button class="theme" id="tt" type="button">Light / dark</button>
+<h1>Ordo Backend Functions</h1>
+<p class="sub">A design, 2026-10-10, for ellanor-readiness ask 4. It builds on <code>docs/plan-backend-functions.md</code> and the rulings of 2026-10-08. Design only: nothing here is built.</p>
+<nav class="toc">
+  <a href="#s1">1 Summary</a><a href="#s2">2 How others build it</a><a href="#s3">3 Comparison</a><a href="#s4">4 Isolation options</a><a href="#s5">5 Ordo's design</a><a href="#s6">6 Services</a><a href="#s7">7 Open decisions</a><a href="#src">Sources</a>
+</nav>
+
+<!-- ============ 1 ============ -->
+<h2 id="s1"><span class="n">1</span>The recommendation on one screen</h2>
+<p class="lead"><b>Run each function as a fresh WebAssembly instance inside Ordo, and let it reach data only through ops.</b> This is Fastly's runtime model with Convex's data model, plus Ordo's sealed secrets.</p>
+
+<div class="cards">
+  <div class="card ten"><h4>Where it runs</h4><p>Inside the Ordo binary, in wasmtime. A JS engine (StarlingMonkey) is compiled to Wasm, so a function is a plain bundled JS file. No containers, no extra infrastructure.</p></div>
+  <div class="card ten"><h4>How fast</h4><p>A fresh instance per call, made from a snapshot taken at apply. Fastly reports about 5 microseconds to start one. Nothing is shared between calls, so nothing leaks between tenants.</p></div>
+  <div class="card plat"><h4>How it reaches data</h4><p>Only through the program's ops. It runs as the caller, through a grant the program declares, or as its own principal. There is no service key and no database URL.</p></div>
+  <div class="card ctl"><h4>Secrets</h4><p>Sealed by custody. The function holds a handle. The egress kernel fills in the value only for the host the secret is bound to.</p></div>
+  <div class="card plat"><h4>How it ships</h4><p>With the program. <code>ordo apply</code> stores the code by hash beside the ops. The SDK can take a function inline and bundle it.</p></div>
+  <div class="card open"><h4>Long-running services</h4><p>A later, separate track. First an identity and a door for code the app developer runs. Then Ordo starts and stops it. A scheduler comes last.</p></div>
+</div>
+
+<h3>Why this and not the others</h3>
+<ul>
+  <li><b>V8 isolates</b> port fastest from Cloudflare. They also pull a large C++ engine into the binary. Cloudflare needed process sandboxes, frozen timers and a 24-hour patch pipeline to make them safe.</li>
+  <li><b>MicroVMs</b> are the strongest wall. They need KVM on the host, a guest kernel per call, and about 125 ms to boot.</li>
+  <li><b>Containers</b> fit long-running services. For a 2-second model call they cost too much.</li>
+  <li><b>The edge buys little here.</b> Ellanor's functions spend their time waiting on a model API. Running near the database matters more than running near the person.</li>
+  <li><b>Cloudflare stays</b> until this is built (ruled 2026-10-08).</li>
+</ul>
+
+<!-- ============ 2 ============ -->
+<h2 id="s2"><span class="n">2</span>How Supabase and Cloudflare build it</h2>
+
+<div class="two">
+<figure>
+<svg viewBox="0 0 440 545" role="img" aria-label="Supabase Edge Functions request path">
+  <rect class="bx" x="20" y="10" width="400" height="40" rx="8"/>
+  <text x="220" y="35" text-anchor="middle">Browser or app: <tspan class="b">POST /functions/v1/name</tspan> + JWT</text>
+  <line class="ar" x1="220" y1="50" x2="220" y2="68"/>
+  <rect class="bp" x="20" y="70" width="400" height="44" rx="8"/>
+  <text x="220" y="89" text-anchor="middle" class="b">Global API gateway</text>
+  <text x="220" y="105" text-anchor="middle" class="m">routes to a nearby region</text>
+  <line class="ar" x1="220" y1="114" x2="220" y2="132"/>
+  <rect class="fr" x="20" y="134" width="400" height="236" rx="10"/>
+  <text x="34" y="153" class="m b">Edge Runtime: Rust + Deno, open source</text>
+  <rect class="bc" x="40" y="162" width="360" height="48" rx="8"/>
+  <text x="220" y="181" text-anchor="middle" class="b">Main worker (trusted)</text>
+  <text x="220" y="199" text-anchor="middle" class="m">checks the JWT, picks the function, holds every env var</text>
+  <line class="ar" x1="92" y1="210" x2="92" y2="234"/>
+  <line class="ar" x1="220" y1="210" x2="220" y2="234"/>
+  <line class="ar" x1="348" y1="210" x2="348" y2="234"/>
+  <rect class="bt" x="40" y="236" width="104" height="66" rx="8"/>
+  <rect class="bt" x="168" y="236" width="104" height="66" rx="8"/>
+  <rect class="bt" x="296" y="236" width="104" height="66" rx="8"/>
+  <text x="92" y="258" text-anchor="middle" class="b">User worker</text><text x="92" y="275" text-anchor="middle" class="m">V8 isolate</text><text x="92" y="291" text-anchor="middle" class="m">eszip bundle</text>
+  <text x="220" y="258" text-anchor="middle" class="b">User worker</text><text x="220" y="275" text-anchor="middle" class="m">V8 isolate</text><text x="220" y="291" text-anchor="middle" class="m">eszip bundle</text>
+  <text x="348" y="258" text-anchor="middle" class="b">User worker</text><text x="348" y="275" text-anchor="middle" class="m">V8 isolate</text><text x="348" y="291" text-anchor="middle" class="m">eszip bundle</text>
+  <text x="220" y="327" text-anchor="middle" class="m">Each: 256 MB, 2 s CPU, 150 s (free) or 400 s (paid) wall</text>
+  <text x="220" y="347" text-anchor="middle" class="m">Secrets: env vars the main worker allows, Deno.env.get()</text>
+  <line class="ar" x1="115" y1="370" x2="115" y2="390"/>
+  <line class="ar" x1="325" y1="370" x2="325" y2="390"/>
+  <rect class="bt" x="20" y="392" width="190" height="70" rx="8"/>
+  <text x="115" y="413" text-anchor="middle" class="b">supabase-js + user JWT</text>
+  <text x="115" y="431" text-anchor="middle" class="m">through PostgREST</text>
+  <text x="115" y="448" text-anchor="middle" class="m">row security applies</text>
+  <rect class="bg" x="230" y="392" width="190" height="70" rx="8"/>
+  <text x="325" y="413" text-anchor="middle" class="b">Service key or DB URL</text>
+  <text x="325" y="431" text-anchor="middle" class="m">in every function's env</text>
+  <text x="325" y="448" text-anchor="middle" class="m">bypasses row security</text>
+  <line class="ar" x1="115" y1="462" x2="115" y2="484"/>
+  <line class="ar" x1="325" y1="462" x2="325" y2="484"/>
+  <rect class="bx" x="20" y="486" width="400" height="44" rx="8"/>
+  <text x="220" y="513" text-anchor="middle" class="b">Postgres, one per project</text>
+</svg>
+<figcaption><b>Supabase Edge Functions.</b> A trusted main worker routes each request to a user worker, a V8 isolate running a Deno bundle (eszip). The red box is the weak spot: any function holding the service key can skip row security.</figcaption>
+</figure>
+
+<figure>
+<svg viewBox="0 0 440 590" role="img" aria-label="Cloudflare Workers and Pages Functions request path">
+  <rect class="bx" x="20" y="10" width="400" height="40" rx="8"/>
+  <text x="220" y="35" text-anchor="middle">Request from anywhere</text>
+  <line class="ar" x1="220" y1="50" x2="220" y2="68"/>
+  <rect class="bp" x="20" y="70" width="400" height="44" rx="8"/>
+  <text x="220" y="89" text-anchor="middle" class="b">Nearest Cloudflare location</text>
+  <text x="220" y="105" text-anchor="middle" class="m">the same code is deployed to every location</text>
+  <line class="ar" x1="220" y1="114" x2="220" y2="132"/>
+  <rect class="bt" x="20" y="134" width="400" height="48" rx="8"/>
+  <text x="220" y="153" text-anchor="middle" class="b">CDN cache + Pages static files</text>
+  <text x="220" y="171" text-anchor="middle" class="m">a hit answers here and no code runs</text>
+  <line class="ar" x1="220" y1="182" x2="220" y2="202"/>
+  <rect class="fr" x="20" y="204" width="400" height="198" rx="10"/>
+  <text x="34" y="223" class="m b">workerd process, sandboxed (namespaces + seccomp)</text>
+  <rect class="bt" x="40" y="234" width="104" height="52" rx="8"/>
+  <rect class="bt" x="168" y="234" width="104" height="52" rx="8"/>
+  <rect class="bt" x="296" y="234" width="104" height="52" rx="8"/>
+  <text x="92" y="256" text-anchor="middle" class="b">isolate</text><text x="92" y="273" text-anchor="middle" class="m">app A</text>
+  <text x="220" y="256" text-anchor="middle" class="b">isolate</text><text x="220" y="273" text-anchor="middle" class="m">app B</text>
+  <text x="348" y="256" text-anchor="middle" class="b">isolate</text><text x="348" y="273" text-anchor="middle" class="m">app C</text>
+  <text x="220" y="306" text-anchor="middle" class="m">hundreds or thousands per process, 128 MB each</text>
+  <rect class="bo" x="40" y="318" width="360" height="66" rx="8"/>
+  <text x="220" y="340" text-anchor="middle" class="b">Pages Functions: /functions/*.js</text>
+  <text x="220" y="357" text-anchor="middle" class="m">file routes compiled into one Worker</text>
+  <text x="220" y="373" text-anchor="middle" class="m">onRequest(context), same runtime and bindings</text>
+  <line class="ar" x1="220" y1="402" x2="220" y2="422"/>
+  <rect class="bc" x="20" y="424" width="400" height="60" rx="8"/>
+  <text x="220" y="444" text-anchor="middle" class="b">Bindings on env</text>
+  <text x="220" y="461" text-anchor="middle" class="m">KV · R2 · D1 · Queues · Hyperdrive · Secrets · services</text>
+  <text x="220" y="476" text-anchor="middle" class="m">a permission and an API in one; storage needs no key in code</text>
+  <line class="ar" x1="115" y1="484" x2="115" y2="506"/>
+  <line class="ar" x1="325" y1="484" x2="325" y2="506"/>
+  <rect class="bt" x="20" y="508" width="190" height="70" rx="8"/>
+  <text x="115" y="529" text-anchor="middle" class="b">Durable Object</text>
+  <text x="115" y="547" text-anchor="middle" class="m">one instance per id</text>
+  <text x="115" y="564" text-anchor="middle" class="m">one thread, own SQLite</text>
+  <rect class="bx" x="230" y="508" width="190" height="70" rx="8"/>
+  <text x="325" y="529" text-anchor="middle" class="b">fetch() out</text>
+  <text x="325" y="547" text-anchor="middle" class="m">6 open connections</text>
+  <text x="325" y="564" text-anchor="middle" class="m">10,000 subrequests (paid)</text>
+</svg>
+<figcaption><b>Cloudflare Workers and Pages Functions.</b> No containers. One sandboxed process holds many V8 isolates from many customers. Pages Functions are a Worker built from file routes. State lives in bindings and Durable Objects, never in the isolate, which can be evicted at any time.</figcaption>
+</figure>
+</div>
+
+<h3>What Ordo takes from each</h3>
+<ul>
+  <li><b>From Supabase:</b> a trusted front (Ordo's door) in front of untrusted code. Ordo drops the service key: no function gets a way around access rules.</li>
+  <li><b>From Cloudflare:</b> bindings. A function is handed capabilities, never credentials. Ordo goes further: even its secrets are handles.</li>
+  <li><b>From Cloudflare's security model:</b> layers. A Wasm sandbox first, a separate functions pod with seccomp second, when the deployment owner wants it.</li>
+</ul>
+
+<!-- ============ 3 ============ -->
+<h2 id="s3"><span class="n">3</span>Every system side by side</h2>
+<p>Scroll the table sideways on a phone. <span class="tag t-q">?</span> marks a figure I could not confirm from a primary source.</p>
+<div class="tw wide">
+<table>
+<thead><tr><th>System</th><th>Isolation unit</th><th>Cold start</th><th>Density and cost</th><th>State it may hold</th><th>Caching</th><th>Secrets</th><th>Database</th><th>Limits</th><th>Developer experience</th></tr></thead>
+<tbody>
+<tr><td>Supabase Edge Functions</td><td>V8 isolate (Deno), one per user worker</td><td>Milliseconds, from an eszip bundle</td><td>Many isolates per host; billed per invocation</td><td>None durable. A worker may be reused for a while. Optional mounted storage</td><td>HTTP cache headers only <span class="tag t-q">?</span></td><td>Env vars; <code>Deno.env.get</code></td><td>supabase-js through PostgREST, or a direct DB URL; service key bypasses row security</td><td>256 MB, 2 s CPU, 150 to 400 s wall, 20 MB bundle</td><td>TS on Deno; <code>supabase functions deploy</code>; local runtime</td></tr>
+<tr><td>Cloudflare Workers</td><td>V8 isolate inside a sandboxed workerd process</td><td>About 100 times faster than a container process (Cloudflare)</td><td>Thousands per process; billed by requests and CPU time <span class="tag t-q">?</span></td><td>Globals may survive but are evicted at any time. Durable Objects for real state</td><td>Cache API, CDN, KV</td><td>Bindings: secrets and capabilities on <code>env</code></td><td>D1, Hyperdrive to Postgres, Durable Object SQLite</td><td>128 MB; CPU 10 ms free, up to 5 min paid; 64 MiB bundle; 6 connections</td><td>Wrangler; JS, TS, Wasm; local workerd</td></tr>
+<tr><td>Cloudflare Pages Functions</td><td>Same as Workers: one Worker built from <code>/functions</code></td><td>Same</td><td>Same</td><td>Same</td><td>Static files served from cache first</td><td>Same bindings</td><td>Same</td><td>Same</td><td>File routes, <code>onRequest(context)</code>. Ellanor uses this today</td></tr>
+<tr><td>Vercel Functions (Fluid)</td><td>An instance (microVM) shared by many concurrent calls</td><td>Cut by bytecode caching and pre-warming</td><td>Billed on active CPU, memory and calls</td><td>Process globals shared by concurrent calls</td><td>CDN; data cache in Next.js</td><td>Env vars</td><td>Any client library; marketplace Postgres</td><td>300 s default, 800 s max, 30 min beta</td><td>Git push; Node, Python, Bun, Rust, Edge</td></tr>
+<tr><td>AWS Lambda</td><td>Firecracker microVM per execution environment, one call at a time</td><td>100s of ms to seconds; SnapStart restores a snapshot</td><td>Under 5 MiB VMM overhead; billed in GB-seconds</td><td>Warm environment reused; <code>/tmp</code> up to 10 GB</td><td>None built in; CloudFront in front</td><td>Env vars (4 KB), Secrets Manager</td><td>IAM roles, VPC to RDS</td><td>10,240 MB, 15 min, 6 MB payload, 250 MB zip or 10 GB image</td><td>Any language; zip or image; SAM, CDK</td></tr>
+<tr><td>Deno Deploy</td><td>V8 isolates (Classic); full Deno apps (new) <span class="tag t-q">?</span></td><td>Low <span class="tag t-q">?</span></td><td>2 regions, self-hosted regions possible</td><td>Deno KV</td><td>Deno KV, CDN</td><td>Env vars</td><td>Deno KV; any Postgres client</td><td>Not confirmed</td><td>Deno 2; Classic sunsets 2026-07-20</td></tr>
+<tr><td>Fly.io Machines</td><td>Firecracker microVM running your OCI image</td><td>Well under a second from stopped</td><td>Billed while running; stops when idle</td><td>Anything; volumes persist</td><td>Yours to build</td><td>Fly secrets as env</td><td>Anything on the private network</td><td>Machine size you choose</td><td>Dockerfile, <code>fly deploy</code>, REST API</td></tr>
+<tr><td>Convex</td><td>V8 isolates in a Rust backend; Node for <code>"use node"</code> actions</td><td>None for the default runtime</td><td>Many isolates per backend</td><td>Queries and mutations are deterministic transactions</td><td>Query results cached and kept live by subscription</td><td>Env vars in the dashboard</td><td>Queries and mutations use <code>ctx.db</code>; actions only call them</td><td>Actions: 10 min, 64 MB (512 MB Node); not retried</td><td>TS functions in the repo; closest to Ordo's model</td></tr>
+<tr><td>Firebase Functions (2nd gen)</td><td>Cloud Run container</td><td>Seconds; min instances keep some warm</td><td>Up to 1000 calls per instance (default 80)</td><td>Process globals while warm</td><td>Hosting CDN</td><td>Secret Manager</td><td>Admin SDK bypasses security rules</td><td>Cloud Run limits</td><td>JS, Python; Firebase CLI</td></tr>
+<tr><td>Fastly Compute</td><td>Wasm instance per request, in Wasmtime</td><td>About 5 µs to instantiate</td><td>Very high; nothing kept between calls</td><td>None; KV and config stores</td><td>Fastly cache, core of the product</td><td>Secret store</td><td>None built in; HTTP out</td><td>Not confirmed</td><td>Rust, JS (StarlingMonkey), Go</td></tr>
+</tbody>
+</table>
+</div>
+<p class="small">The pattern: edge platforms (Cloudflare, Fastly, Supabase) use isolates or Wasm and keep no state. Cloud platforms (Lambda, Vercel, Firebase) use microVMs or containers and keep a warm process. Convex is the only one where the function's database access is the platform's own transaction model. Ordo should be in that last group.</p>
+
+<!-- ============ 4 ============ -->
+<h2 id="s4"><span class="n">4</span>Isolation options for Ordo</h2>
+<p>Each drawing shows what sits between one function and the next. Read from the bottom up.</p>
+
+<div class="four">
+<figure>
+<svg viewBox="0 0 220 236" role="img" aria-label="Wasm in-process">
+  <text x="110" y="18" text-anchor="middle" class="h">Wasm in-process</text>
+  <rect class="bt" x="10" y="32" width="62" height="70" rx="6"/><rect class="bt" x="79" y="32" width="62" height="70" rx="6"/><rect class="bt" x="148" y="32" width="62" height="70" rx="6"/>
+  <text x="41" y="62" text-anchor="middle" class="b">call</text><text x="41" y="80" text-anchor="middle" class="m">own memory</text>
+  <text x="110" y="62" text-anchor="middle" class="b">call</text><text x="110" y="80" text-anchor="middle" class="m">own memory</text>
+  <text x="179" y="62" text-anchor="middle" class="b">call</text><text x="179" y="80" text-anchor="middle" class="m">own memory</text>
+  <rect class="bc" x="10" y="110" width="200" height="34" rx="6"/><text x="110" y="132" text-anchor="middle">wasmtime</text>
+  <rect class="bp" x="10" y="150" width="200" height="34" rx="6"/><text x="110" y="172" text-anchor="middle">Ordo process</text>
+  <rect class="bx" x="10" y="190" width="200" height="34" rx="6"/><text x="110" y="212" text-anchor="middle">host kernel</text>
+</svg>
+<figcaption>Wall: Wasm memory bounds, checked by the compiler. No I/O the host does not hand over.</figcaption>
+</figure>
+<figure>
+<svg viewBox="0 0 220 236" role="img" aria-label="V8 isolates">
+  <text x="110" y="18" text-anchor="middle" class="h">V8 isolates</text>
+  <rect class="bt" x="10" y="32" width="62" height="70" rx="6"/><rect class="bt" x="79" y="32" width="62" height="70" rx="6"/><rect class="bt" x="148" y="32" width="62" height="70" rx="6"/>
+  <text x="41" y="62" text-anchor="middle" class="b">isolate</text><text x="41" y="80" text-anchor="middle" class="m">own heap</text>
+  <text x="110" y="62" text-anchor="middle" class="b">isolate</text><text x="110" y="80" text-anchor="middle" class="m">own heap</text>
+  <text x="179" y="62" text-anchor="middle" class="b">isolate</text><text x="179" y="80" text-anchor="middle" class="m">own heap</text>
+  <rect class="bc" x="10" y="110" width="200" height="34" rx="6"/><text x="110" y="132" text-anchor="middle">V8 engine</text>
+  <rect class="bp" x="10" y="150" width="200" height="34" rx="6"/><text x="110" y="172" text-anchor="middle">process + seccomp</text>
+  <rect class="bx" x="10" y="190" width="200" height="34" rx="6"/><text x="110" y="212" text-anchor="middle">host kernel</text>
+</svg>
+<figcaption>Wall: V8's heap separation. A V8 bug crosses it, so a process sandbox is needed too.</figcaption>
+</figure>
+<figure>
+<svg viewBox="0 0 220 236" role="img" aria-label="MicroVMs">
+  <text x="110" y="18" text-anchor="middle" class="h">MicroVMs</text>
+  <rect class="bt" x="10" y="32" width="62" height="38" rx="6"/><rect class="bt" x="79" y="32" width="62" height="38" rx="6"/><rect class="bt" x="148" y="32" width="62" height="38" rx="6"/>
+  <text x="41" y="56" text-anchor="middle" class="b">app</text><text x="110" y="56" text-anchor="middle" class="b">app</text><text x="179" y="56" text-anchor="middle" class="b">app</text>
+  <rect class="bo" x="10" y="74" width="62" height="30" rx="6"/><rect class="bo" x="79" y="74" width="62" height="30" rx="6"/><rect class="bo" x="148" y="74" width="62" height="30" rx="6"/>
+  <text x="41" y="94" text-anchor="middle" class="m">kernel</text><text x="110" y="94" text-anchor="middle" class="m">kernel</text><text x="179" y="94" text-anchor="middle" class="m">kernel</text>
+  <rect class="bc" x="10" y="110" width="200" height="34" rx="6"/><text x="110" y="132" text-anchor="middle">Firecracker + jailer</text>
+  <rect class="bp" x="10" y="150" width="200" height="34" rx="6"/><text x="110" y="172" text-anchor="middle">KVM</text>
+  <rect class="bx" x="10" y="190" width="200" height="34" rx="6"/><text x="110" y="212" text-anchor="middle">host kernel</text>
+</svg>
+<figcaption>Wall: hardware virtualisation. Each call has its own guest kernel.</figcaption>
+</figure>
+<figure>
+<svg viewBox="0 0 220 236" role="img" aria-label="Containers">
+  <text x="110" y="18" text-anchor="middle" class="h">Containers</text>
+  <rect class="bt" x="10" y="32" width="62" height="72" rx="6"/><rect class="bt" x="79" y="32" width="62" height="72" rx="6"/><rect class="bt" x="148" y="32" width="62" height="72" rx="6"/>
+  <text x="41" y="62" text-anchor="middle" class="b">image</text><text x="41" y="80" text-anchor="middle" class="m">+ app</text>
+  <text x="110" y="62" text-anchor="middle" class="b">image</text><text x="110" y="80" text-anchor="middle" class="m">+ app</text>
+  <text x="179" y="62" text-anchor="middle" class="b">image</text><text x="179" y="80" text-anchor="middle" class="m">+ app</text>
+  <rect class="bc" x="10" y="110" width="200" height="34" rx="6"/><text x="110" y="132" text-anchor="middle">namespaces + cgroups</text>
+  <rect class="bp" x="10" y="150" width="200" height="34" rx="6"/><text x="110" y="172" text-anchor="middle">container runtime</text>
+  <rect class="bx" x="10" y="190" width="200" height="34" rx="6"/><text x="110" y="212" text-anchor="middle">shared host kernel</text>
+</svg>
+<figcaption>Wall: kernel namespaces. Every app shares one kernel. gVisor or Kata add a layer.</figcaption>
+</figure>
+</div>
+
+<div class="tw mid">
+<table>
+<thead><tr><th>Option</th><th>Security</th><th>Cold start</th><th>Density</th><th>Languages</th><th>Cost to run it</th><th>Fit for Ordo</th></tr></thead>
+<tbody>
+<tr><td>Wasm in-process (wasmtime)</td><td class="dots">●●●●○</td><td>Microseconds from a snapshot</td><td class="dots">●●●●●</td><td>JS now; Rust, Go, Python later as Wasm</td><td>Nothing extra: it is the Ordo binary</td><td><span class="tag t-ok">functions, v1</span></td></tr>
+<tr><td>V8 isolates (deno_core)</td><td class="dots">●●●○○</td><td>About 5 ms <span class="tag t-q">?</span></td><td class="dots">●●●●○</td><td>JS, TS, Wasm</td><td>About 40 MB of C++ in the binary; fast patching owed</td><td><span class="tag t-mid">close second</span></td></tr>
+<tr><td>MicroVMs (Firecracker)</td><td class="dots">●●●●●</td><td>Under 125 ms boot; snapshots faster</td><td class="dots">●●●○○</td><td>Any</td><td>KVM hosts, images, a scheduler</td><td><span class="tag t-mid">services, hosted Ordo</span></td></tr>
+<tr><td>Containers</td><td class="dots">●●○○○</td><td>Seconds</td><td class="dots">●●○○○</td><td>Any</td><td>A cluster, images, a registry</td><td><span class="tag t-mid">services, phase 1</span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="small">Dots are my judgement, not a measurement. Wasm loses a dot on security only because a wasmtime bug runs inside Ordo's own process; the functions pod (section 5) puts it back.</p>
+
+<!-- ============ 5 ============ -->
+<h2 id="s5"><span class="n">5</span>Ordo's design, drawn</h2>
+
+<figure>
+<svg viewBox="0 0 440 772" role="img" aria-label="Ordo backend function: wake, identity, run, reach data, record">
+  <rect class="bo" x="8" y="8" width="100" height="48" rx="8"/><text x="58" y="28" text-anchor="middle" class="b">Page call</text><text x="58" y="45" text-anchor="middle" class="m">/v1/fn/x</text>
+  <rect class="bo" x="116" y="8" width="100" height="48" rx="8"/><text x="166" y="28" text-anchor="middle" class="b">Webhook</text><text x="166" y="45" text-anchor="middle" class="m">/hooks/t/x</text>
+  <rect class="bo" x="224" y="8" width="100" height="48" rx="8"/><text x="274" y="28" text-anchor="middle" class="b">Change</text><text x="274" y="45" text-anchor="middle" class="m">trigger when</text>
+  <rect class="bo" x="332" y="8" width="100" height="48" rx="8"/><text x="382" y="28" text-anchor="middle" class="b">Schedule</text><text x="382" y="45" text-anchor="middle" class="m">trigger every</text>
+  <line class="ar" x1="58" y1="56" x2="80" y2="78"/><line class="ar" x1="166" y1="56" x2="144" y2="78"/>
+  <line class="ar" x1="274" y1="56" x2="296" y2="78"/><line class="ar" x1="382" y1="56" x2="360" y2="78"/>
+  <rect class="bp" x="8" y="80" width="208" height="64" rx="8"/>
+  <text x="112" y="100" text-anchor="middle" class="b">The door</text>
+  <text x="112" y="117" text-anchor="middle" class="m">sign-in · access profile · quotas</text>
+  <text x="112" y="133" text-anchor="middle" class="m">idempotency · pause · signature</text>
+  <rect class="bp" x="224" y="80" width="208" height="64" rx="8"/>
+  <text x="328" y="100" text-anchor="middle" class="b">Routine engine (12a)</text>
+  <text x="328" y="117" text-anchor="middle" class="m">one run per tenant</text>
+  <text x="328" y="133" text-anchor="middle" class="m">retries · dead letters · pause skips</text>
+  <line class="ar" x1="112" y1="144" x2="160" y2="164"/><line class="ar" x1="328" y1="144" x2="280" y2="164"/>
+  <rect class="bc" x="8" y="166" width="424" height="86" rx="8"/>
+  <text x="220" y="186" text-anchor="middle" class="b">Who it runs as</text>
+  <text x="220" y="205" text-anchor="middle" class="m">the caller: a delegation that lasts this one call</text>
+  <text x="220" y="222" text-anchor="middle" class="m">a carried grant: declared in the program, never wider</text>
+  <text x="220" y="239" text-anchor="middle" class="m">function:x@v on a schedule or change · source:x on a webhook</text>
+  <line class="ar" x1="220" y1="252" x2="220" y2="272"/>
+  <rect class="fr" x="8" y="274" width="424" height="214" rx="10"/>
+  <text x="20" y="292" class="m b">Function host: any process, or its own pod</text>
+  <rect class="bx" x="24" y="302" width="392" height="40" rx="8"/>
+  <text x="220" y="327" text-anchor="middle">Code by hash, stored with the program version</text>
+  <line class="ar" x1="220" y1="342" x2="220" y2="356"/>
+  <rect class="bx" x="24" y="358" width="392" height="40" rx="8"/>
+  <text x="220" y="383" text-anchor="middle">Compiled module + pre-initialized snapshot</text>
+  <line class="ar" x1="220" y1="398" x2="220" y2="412"/>
+  <rect class="bt" x="24" y="414" width="392" height="64" rx="8"/>
+  <text x="220" y="434" text-anchor="middle" class="b">Fresh Wasm instance for this call</text>
+  <text x="220" y="452" text-anchor="middle" class="m">JS engine · ctx.op · fetch · ctx.secret · ctx.log</text>
+  <text x="220" y="469" text-anchor="middle" class="m">128 MB · 10 s CPU fuel · 60 s wall (defaults)</text>
+  <line class="ar" x1="76" y1="488" x2="76" y2="510"/><line class="ar" x1="220" y1="488" x2="220" y2="510"/><line class="ar" x1="364" y1="488" x2="364" y2="510"/>
+  <rect class="bp" x="8" y="512" width="136" height="86" rx="8"/>
+  <text x="76" y="533" text-anchor="middle" class="b">ctx.op</text>
+  <text x="76" y="552" text-anchor="middle" class="m">the op pipeline</text>
+  <text x="76" y="569" text-anchor="middle" class="m">guards, access,</text>
+  <text x="76" y="586" text-anchor="middle" class="m">only ops in uses</text>
+  <rect class="bc" x="152" y="512" width="136" height="86" rx="8"/>
+  <text x="220" y="533" text-anchor="middle" class="b">fetch</text>
+  <text x="220" y="552" text-anchor="middle" class="m">egress kernel:</text>
+  <text x="220" y="569" text-anchor="middle" class="m">allowlist, deny list,</text>
+  <text x="220" y="586" text-anchor="middle" class="m">secret filled in here</text>
+  <rect class="bx" x="296" y="512" width="136" height="86" rx="8"/>
+  <text x="364" y="533" text-anchor="middle" class="b">ctx.log</text>
+  <text x="364" y="552" text-anchor="middle" class="m">scrubbed of every</text>
+  <text x="364" y="569" text-anchor="middle" class="m">live secret value,</text>
+  <text x="364" y="586" text-anchor="middle" class="m">64 KB per call</text>
+  <line class="ar" x1="76" y1="598" x2="76" y2="618"/><line class="ar" x1="220" y1="598" x2="220" y2="618"/><line class="ar" x1="364" y1="598" x2="364" y2="618"/>
+  <rect class="bt" x="8" y="620" width="136" height="54" rx="8"/>
+  <text x="76" y="642" text-anchor="middle" class="b">Tenant database</text><text x="76" y="660" text-anchor="middle" class="m">one per tenant</text>
+  <rect class="bx" x="152" y="620" width="136" height="54" rx="8"/>
+  <text x="220" y="642" text-anchor="middle" class="b">Outside APIs</text><text x="220" y="660" text-anchor="middle" class="m">bound hosts only</text>
+  <rect class="bx" x="296" y="620" width="136" height="54" rx="8"/>
+  <text x="364" y="642" text-anchor="middle" class="b">$fnruns + logs</text><text x="364" y="660" text-anchor="middle" class="m">kept 14 days</text>
+  <line class="ar" x1="76" y1="674" x2="96" y2="696"/><line class="ar" x1="220" y1="674" x2="300" y2="696"/>
+  <rect class="bt" x="8" y="698" width="208" height="64" rx="8"/>
+  <text x="112" y="718" text-anchor="middle" class="b">Command log</text>
+  <text x="112" y="736" text-anchor="middle" class="m">writes as function:x@v</text>
+  <text x="112" y="752" text-anchor="middle" class="m">on behalf of user:y</text>
+  <rect class="bg" x="224" y="698" width="208" height="64" rx="8"/>
+  <text x="328" y="718" text-anchor="middle" class="b">Security stream</text>
+  <text x="328" y="736" text-anchor="middle" class="m">denials · egress refused</text>
+  <text x="328" y="752" text-anchor="middle" class="m">bad signatures · host mismatch</text>
+</svg>
+<figcaption><b>One function call, top to bottom.</b> Four wake-ups, two front doors, one identity, one fresh instance. The instance can do four things: call an op, fetch out, use a secret by handle, and log. Everything it changes lands in the command log under its name and the person's.</figcaption>
+</figure>
+
+<h3>Where it runs</h3>
+<ul>
+  <li><b>By default, in every Ordo process.</b> Nothing to install.</li>
+  <li><b>Optionally, in its own pod</b> with <code>ORDO_WORKERS=functions</code>. The deployment owner chooses. That pod gets a tighter seccomp profile and no database pool of its own; it calls ops back through the host.</li>
+  <li><b>Per tenant:</b> every call gets its own instance. The tenant id is fixed in <code>ctx</code> by the host. Ops resolve to that tenant's database. A semaphore caps concurrent calls per tenant (default 10).</li>
+</ul>
+
+<h3>How it reaches data</h3>
+<div class="cards">
+  <div class="card plat"><h4>As the caller</h4><p>A page call. A delegation from the person to <code>function:x@v</code> for this one call. It can never reach past what the person can. Ruled 2026-10-08.</p></div>
+  <div class="card ctl"><h4>Through a grant</h4><p>The program declares a grant the function carries, such as a public grant or a narrow write. The owner raised this on 2026-10-08. It is decision 3 below.</p></div>
+  <div class="card ten"><h4>As itself</h4><p>A schedule or change runs as <code>function:x@v</code>, with routine rules. A webhook runs as <code>source:x</code>, write-only.</p></div>
+  <div class="card"><h4>Never</h4><p>No service key, no SQL, no database URL. Ops are the only normal way to transact (ruled 2026-10-08), so a function uses them too.</p></div>
+</div>
+
+<h3>The caching layers</h3>
+<figure>
+<svg viewBox="0 0 440 330" role="img" aria-label="Four caching layers for functions">
+  <text x="20" y="18" class="m b">a call checks from the top; the first hit wins</text>
+  <rect class="bt" x="8" y="28" width="424" height="62" rx="8"/>
+  <text x="20" y="50" class="b">1 · Result cache (opt-in, public only)</text>
+  <text x="20" y="68" class="m">key: function, arguments, program version</text>
+  <text x="20" y="83" class="m">dropped on ordo.invalidate, or after its time to live</text>
+  <text x="420" y="50" text-anchor="end" class="m">hit: no code runs</text>
+  <line class="ar" x1="220" y1="90" x2="220" y2="104"/>
+  <rect class="bp" x="8" y="106" width="424" height="62" rx="8"/>
+  <text x="20" y="128" class="b">2 · Snapshot in memory</text>
+  <text x="20" y="146" class="m">JS engine booted and code parsed at apply time</text>
+  <text x="20" y="161" class="m">pooling allocator keeps instance slots ready</text>
+  <text x="420" y="128" text-anchor="end" class="m">hit: microseconds</text>
+  <line class="ar" x1="220" y1="168" x2="220" y2="182"/>
+  <rect class="bc" x="8" y="184" width="424" height="62" rx="8"/>
+  <text x="20" y="206" class="b">3 · Compiled code on disk, by hash</text>
+  <text x="20" y="224" class="m">a restart or a new pod skips compiling</text>
+  <text x="20" y="239" class="m">same hash in two versions: compiled once</text>
+  <text x="420" y="206" text-anchor="end" class="m">hit: milliseconds</text>
+  <line class="ar" x1="220" y1="246" x2="220" y2="260"/>
+  <rect class="bx" x="8" y="262" width="424" height="62" rx="8"/>
+  <text x="20" y="284" class="b">4 · Code store in the control database</text>
+  <text x="20" y="302" class="m">the source of truth, written by ordo apply</text>
+  <text x="20" y="317" class="m">compile and snapshot on first use</text>
+  <text x="420" y="284" text-anchor="end" class="m">miss: one compile</text>
+</svg>
+<figcaption><b>Caching.</b> Layer 1 reuses the public path's cache and its invalidation signal. It is off unless a function on the public path asks for it, because a signed-in call's answer belongs to one person. Layers 2 to 4 cache code, never data.</figcaption>
+</figure>
+
+<h3>How the SDK passes a function in</h3>
+<p>The owner: <i>"our sdks will allow the passing in of functions."</i> The CDK takes the function body inline and turns it into the same two things a hand-written program has.</p>
+<div class="two">
+<pre><code>// infra/notes.ts
+fn("classifyNotes", {
+  in: "notes",
+  call: { notes: json() }, returns: json(),
+  by: "member",
+  egress: ["api.openai.com"],
+  secrets: ["openaiKey"],
+}, async ({ notes }, ctx) => {
+  const r = await fetch(OPENAI, {
+    method: "POST",
+    headers: {
+      authorization: ctx.secret("openaiKey").bearer(),
+    },
+    body: JSON.stringify(build(notes)),
+  });
+  return parse(await r.json());
+});</code></pre>
+<figure style="margin:0">
+<svg viewBox="0 0 440 330" role="img" aria-label="From inline function to stored code">
+  <rect class="bo" x="40" y="8" width="360" height="44" rx="8"/><text x="220" y="35" text-anchor="middle" class="b">fn(..., async (input, ctx) =&gt; ...)</text>
+  <line class="ar" x1="220" y1="52" x2="220" y2="70"/>
+  <rect class="bx" x="40" y="72" width="360" height="44" rx="8"/><text x="220" y="99" text-anchor="middle">CDK synth bundles the closure (esbuild)</text>
+  <line class="ar" x1="130" y1="116" x2="130" y2="134"/><line class="ar" x1="310" y1="116" x2="310" y2="134"/>
+  <rect class="bp" x="40" y="136" width="170" height="54" rx="8"/><text x="125" y="158" text-anchor="middle" class="b">function block</text><text x="125" y="176" text-anchor="middle" class="m">in the .ordo text</text>
+  <rect class="bp" x="230" y="136" width="170" height="54" rx="8"/><text x="315" y="158" text-anchor="middle" class="b">fn/classify-notes.js</text><text x="315" y="176" text-anchor="middle" class="m">one bundled file</text>
+  <line class="ar" x1="130" y1="190" x2="200" y2="212"/><line class="ar" x1="310" y1="190" x2="240" y2="212"/>
+  <rect class="bc" x="40" y="214" width="360" height="44" rx="8"/><text x="220" y="241" text-anchor="middle">ordo check, then ordo apply</text>
+  <line class="ar" x1="220" y1="258" x2="220" y2="276"/>
+  <rect class="bt" x="40" y="278" width="360" height="44" rx="8"/><text x="220" y="305" text-anchor="middle" class="b">code stored by hash with the version</text>
+</svg>
+</figure>
+</div>
+<ul>
+  <li><b>The closure may not capture anything</b> from the CDK file except imports. Synth refuses it otherwise, because it runs somewhere else.</li>
+  <li><b>A function in a file</b> (<code>code "fn/x.js"</code>) gives the same result. The two are interchangeable.</li>
+  <li><b>Languages:</b> TS and JS first. Rust and Go compile to Wasm directly. Python through componentize-py. Java is the least mature Wasm path today <span class="tag t-q">?</span>.</li>
+</ul>
+
+<h3>Limits, all settings with defaults</h3>
+<div class="tw mid">
+<table>
+<thead><tr><th>Limit</th><th>Default</th><th>Ordo</th><th>Cloudflare</th><th>Supabase</th></tr></thead>
+<tbody>
+<tr><td>Memory</td><td>128 MB, ceiling 512 MB</td><td>wasmtime memory limit</td><td>128 MB</td><td>256 MB</td></tr>
+<tr><td>CPU</td><td>10 s</td><td>fuel, checked by epoch</td><td>30 s default, 5 min max</td><td>2 s</td></tr>
+<tr><td>Wall time</td><td>60 s page, 15 min routine, 10 s webhook</td><td>epoch interruption</td><td>no limit while connected</td><td>150 or 400 s</td></tr>
+<tr><td>Outbound calls</td><td>50 per call, 6 at once</td><td>egress kernel</td><td>10,000, 6 at once</td><td>no cap found</td></tr>
+<tr><td>Code size</td><td>20 MB</td><td>apply refuses</td><td>64 MiB</td><td>20 MB</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- ============ 6 ============ -->
+<h2 id="s6"><span class="n">6</span>Backend service as a service</h2>
+<p>A function wakes, answers, and is gone. A service is a program the app developer wants running: an HTTP server, a worker, a queue consumer. The owner asked for both: <i>"backend service as a service allowing users to deploy actual service code to run on ordo and serve."</i></p>
+
+<h3>How others run services</h3>
+<div class="tw mid">
+<table>
+<thead><tr><th>Platform</th><th>Unit</th><th>Woken how</th><th>What it adds</th></tr></thead>
+<tbody>
+<tr><td>Fly.io Machines</td><td>Firecracker microVM from your image</td><td>The proxy starts a stopped machine on a request</td><td>Regions you pick, volumes, a REST API</td></tr>
+<tr><td>Railway</td><td>Container per service</td><td>Always on</td><td>Private network between services; a worker is a service with no domain</td></tr>
+<tr><td>Render</td><td>Container per service</td><td>Always on</td><td>Web service, private service, background worker and cron as named kinds</td></tr>
+<tr><td>Cloud Run</td><td>Container in gVisor (gen 1) or a microVM (gen 2)</td><td>Requests; scales to zero</td><td>Many requests per instance, jobs, worker pools</td></tr>
+<tr><td>Cloudflare Containers</td><td>Container controlled by a Durable Object</td><td>A Worker asks for an instance by name</td><td>Same deploy as Workers; sleeps when idle</td></tr>
+</tbody>
+</table>
+</div>
+<p class="small">The common shape: an image, an identity, a private network, a way to wake it, and secrets as env. Cloudflare's is closest to Ordo: the code in front (a Worker) decides when the container runs.</p>
+
+<figure>
+<svg viewBox="0 0 440 500" role="img" aria-label="A service running beside Ordo">
+  <rect class="bx" x="20" y="8" width="400" height="40" rx="8"/><text x="220" y="33" text-anchor="middle">The app's page, or a sender</text>
+  <line class="ar" x1="220" y1="48" x2="220" y2="66"/>
+  <rect class="bp" x="20" y="68" width="400" height="56" rx="8"/>
+  <text x="220" y="90" text-anchor="middle" class="b">Ordo door</text>
+  <text x="220" y="108" text-anchor="middle" class="m">route /svc/name · sign-in · quotas · wakes it (phase 2)</text>
+  <line class="ar" x1="220" y1="124" x2="220" y2="146"/>
+  <rect class="fr" x="8" y="148" width="424" height="236" rx="10"/>
+  <text x="20" y="166" class="m b">The deployment's own cluster</text>
+  <rect class="bt" x="24" y="176" width="392" height="70" rx="8"/>
+  <text x="220" y="198" text-anchor="middle" class="b">Service: an image pinned by digest</text>
+  <text x="220" y="216" text-anchor="middle" class="m">HTTP server, worker, or queue consumer</text>
+  <text x="220" y="233" text-anchor="middle" class="m">declared in the program, deployed by ordo apply</text>
+  <line class="ar" x1="118" y1="246" x2="118" y2="276"/><line class="ar" x1="322" y1="246" x2="322" y2="276"/>
+  <rect class="bp" x="24" y="278" width="188" height="90" rx="8"/>
+  <text x="118" y="299" text-anchor="middle" class="b">Calls ops</text>
+  <text x="118" y="318" text-anchor="middle" class="m">as service:name</text>
+  <text x="118" y="335" text-anchor="middle" class="m">with a declared grant</text>
+  <text x="118" y="352" text-anchor="middle" class="m">through the door</text>
+  <rect class="bc" x="228" y="278" width="188" height="90" rx="8"/>
+  <text x="322" y="299" text-anchor="middle" class="b">Egress proxy</text>
+  <text x="322" y="318" text-anchor="middle" class="m">its only way out</text>
+  <text x="322" y="335" text-anchor="middle" class="m">fills in sealed secrets</text>
+  <text x="322" y="352" text-anchor="middle" class="m">for their bound hosts</text>
+  <line class="ar" x1="118" y1="368" x2="118" y2="402"/><line class="ar" x1="322" y1="368" x2="322" y2="402"/>
+  <rect class="bt" x="24" y="404" width="188" height="44" rx="8"/><text x="118" y="431" text-anchor="middle" class="b">Tenant data</text>
+  <rect class="bx" x="228" y="404" width="188" height="44" rx="8"/><text x="322" y="431" text-anchor="middle" class="b">Outside APIs</text>
+  <text x="220" y="478" text-anchor="middle" class="m">Queue: a routine's outbox feeds the service, at least once</text>
+</svg>
+<figcaption><b>A service beside Ordo.</b> The service gets the same promises as a function: it reaches data only through ops under its own name, and it never holds a raw secret. The egress proxy is the same egress kernel, run as a network hop, so a container can use secret handles too.</figcaption>
+</figure>
+
+<h3>Functions and services, compared</h3>
+<div class="tw mid">
+<table>
+<thead><tr><th></th><th>Function</th><th>Service</th></tr></thead>
+<tbody>
+<tr><td>Lives</td><td>One call</td><td>Until stopped</td></tr>
+<tr><td>Code</td><td>One JS file or Wasm component</td><td>Any image, any language</td></tr>
+<tr><td>Runs in</td><td>Ordo's own process</td><td>A container or microVM beside Ordo</td></tr>
+<tr><td>Isolation</td><td>Fresh Wasm instance</td><td>Container; a microVM runtime when hosting others' code</td></tr>
+<tr><td>Holds state</td><td>No</td><td>In memory, between requests</td></tr>
+<tr><td>Identity</td><td>Caller, grant, or <code>function:x@v</code></td><td><code>service:name</code> with a grant</td></tr>
+<tr><td>Secrets</td><td>Handles, filled in by the egress kernel</td><td>Handles, filled in by the egress proxy</td></tr>
+<tr><td>Cost to run</td><td>Near zero when idle</td><td>Memory while running; zero once Ordo can sleep it</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>A phased path</h3>
+<div class="phase"><div class="num">0</div><div class="body"><h4>Today: code elsewhere, acting through delegation</h4><p>A worker on Cloudflare or Fly holds a delegation and calls ops. Built. Worker credentials wait for the post-deploy roadmap (ruled 2026-10-08).</p></div></div>
+<div class="phase"><div class="num">1</div><div class="body"><h4>A declared service: identity and door</h4><p>A <code>service</code> block names an image by digest, its grant, its hosts and secrets. The CDK writes the cluster manifests. Ordo gives it <code>service:name</code>, a route through the door and the egress proxy. Ordo runs no scheduler.</p></div></div>
+<div class="phase"><div class="num">2</div><div class="body"><h4>Ordo wakes and sleeps it</h4><p>The door starts the service on a request and stops it when idle, the way Cloudflare Containers and Fly do. Idle services cost nothing.</p></div></div>
+<div class="phase"><div class="num">3</div><div class="body"><h4>Queues and schedules for services</h4><p>A routine's outbox becomes a queue a service consumes, with the same retries and dead letters. Cron wakes a service like a function.</p></div></div>
+<div class="phase"><div class="num">4</div><div class="body"><h4>Hosted Ordo: other people's code</h4><p>When one cluster runs many app developers' services, each runs in a microVM runtime (Kata with Firecracker, or gVisor). Until then the app developer owns the cluster and trusts their own code.</p></div></div>
+
+<!-- ============ 7 ============ -->
+<h2 id="s7"><span class="n">7</span>Open decisions for the owner</h2>
+
+<div class="q"><b class="qq">1 · Do functions run as WebAssembly in Ordo (wasmtime with a JS engine), rather than V8 isolates?</b>
+<div class="rec"><b>Yes, Wasm.</b> It needs nothing beyond the Ordo binary, starts in microseconds and takes any language later. V8 ports Cloudflare code faster but ties Ordo to JS and a large C++ engine.</div></div>
+
+<div class="q"><b class="qq">2 · Does every call get a fresh instance, with nothing kept between calls?</b>
+<div class="rec"><b>Yes, fresh per call.</b> A snapshot makes it nearly free, and no state can pass between people or tenants. Cloudflare and Vercel reuse a warm process, where one request's leftovers can reach the next.</div></div>
+
+<div class="q"><b class="qq">3 · May the program give a function its own grant, used instead of the caller's reach?</b>
+<div class="rec"><b>Yes, declared in the program and recorded on every use.</b> It covers "pass along grants" and public grants without a service key. The grant names its ops, so it can never be wider than written.</div></div>
+
+<div class="q"><b class="qq">4 · Does the SDK take a function inline and bundle it at synth?</b>
+<div class="rec"><b>Yes, beside code in a file.</b> Both produce the same function block and hashed file. An inline function may capture only imports, so it behaves the same wherever it runs.</div></div>
+
+<div class="q"><b class="qq">5 · May a public function opt in to the public path's result cache?</b>
+<div class="rec"><b>Yes, opt-in and public only.</b> It reuses the cache and invalidation the public path already has. A signed-in call is never cached, because its answer belongs to one person.</div></div>
+
+<div class="q"><b class="qq">6 · For services, does Ordo start with identity and a door, and leave running containers to the cluster?</b>
+<div class="rec"><b>Yes, phase 1 first.</b> It gives services Ordo's promises (ops only, sealed secrets) with no scheduler to build. Waking and sleeping comes in phase 2.</div></div>
+
+<!-- ============ sources ============ -->
+<h2 id="src">Sources</h2>
+<p class="small">Read 2026-10-10. Figures marked <span class="tag t-q">?</span> above were not confirmed from these pages.</p>
+<ul class="src">
+  <li>Supabase: <a href="https://supabase.com/docs/guides/functions/architecture">Edge Functions architecture</a>, <a href="https://supabase.com/docs/guides/functions/limits">limits</a>, <a href="https://supabase.com/docs/guides/functions/secrets">secrets</a>, <a href="https://github.com/supabase/edge-runtime">edge-runtime (main and user workers)</a>, <a href="https://github.com/supabase/edge-runtime/issues/719">worker policies (oneshot, per_worker)</a></li>
+  <li>Cloudflare: <a href="https://developers.cloudflare.com/workers/reference/how-workers-works/">how Workers works</a>, <a href="https://developers.cloudflare.com/workers/platform/limits/">limits</a>, <a href="https://blog.cloudflare.com/mitigating-spectre-and-other-security-threats-the-cloudflare-workers-security-model/">security model</a>, <a href="https://developers.cloudflare.com/workers/runtime-apis/bindings/">bindings</a>, <a href="https://developers.cloudflare.com/pages/functions/">Pages Functions</a>, <a href="https://developers.cloudflare.com/durable-objects/">Durable Objects</a>, <a href="https://developers.cloudflare.com/containers/">Containers</a></li>
+  <li>Vercel: <a href="https://vercel.com/docs/fluid-compute">Fluid compute</a></li>
+  <li>AWS: <a href="https://firecracker-microvm.github.io/">Firecracker</a>, <a href="https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html">Lambda quotas</a>, <a href="https://tomodahinata.com/en/blog/aws-lambda-cold-start-snapstart-provisioned-concurrency-performance-guide">SnapStart overview (secondary)</a></li>
+  <li>Deno: <a href="https://docs.deno.com/deploy/">Deno Deploy</a></li>
+  <li>Fly.io: <a href="https://docs.fly.io/machines/overview">Machines overview</a></li>
+  <li>Convex: <a href="https://docs.convex.dev/functions/actions">actions</a>, <a href="https://docs.convex.dev/functions/runtimes">runtimes</a>, <a href="https://stack.convex.dev/how-convex-works">how Convex works</a></li>
+  <li>Firebase: <a href="https://firebase.google.com/docs/functions/version-comparison">version comparison</a>, <a href="https://firebase.blog/posts/2022/12/cloud-functions-firebase-v2/">2nd gen concurrency</a></li>
+  <li>Fastly and Wasm: <a href="https://bytecodealliance.org/articles/making-javascript-run-fast-on-webassembly">JS on Wasm, 5 µs instantiation</a>, <a href="https://bytecodealliance.org/articles/wasmtime-1-0-fast-safe-and-production-ready">Wasmtime 1.0</a>, <a href="https://cfallin.org/blog/2024/08/27/aot-js/">AOT JS on Wasm</a></li>
+  <li>Services: <a href="https://docs.cloud.google.com/run/docs/container-contract">Cloud Run container contract</a>, <a href="https://render.com/docs/background-workers">Render background workers</a>, <a href="https://blog.railway.com/p/deploy-scale-docker-containers-railway">Railway containers</a></li>
+  <li>Ordo: <code>docs/plan-backend-functions.md</code>, <code>docs/corpus-rulings.md</code> (2026-10-08), <code>docs/design-public-path.md</code>, <code>docs/howto-audit.md</code></li>
+</ul>
+
+</div>
+<script>
+(function(){
+  var r=document.documentElement,b=document.getElementById('tt');
+  try{var s=localStorage.getItem('theme');if(s)r.setAttribute('data-theme',s);}catch(e){}
+  b.addEventListener('click',function(){
+    var dark=r.getAttribute('data-theme')?r.getAttribute('data-theme')==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+    var n=dark?'light':'dark';r.setAttribute('data-theme',n);
+    try{localStorage.setItem('theme',n);}catch(e){}
+  });
+})();
+</script>
+</body>
+</html>

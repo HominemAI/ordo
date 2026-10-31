@@ -1,0 +1,8 @@
+# cargo-audit configuration. Every ignore needs a written reason.
+[advisories]
+ignore = [
+  # crypto-bigint 0.5.5 timing variability, reached only through p256 0.13.
+  # Ordo uses p256 to sign in tests only; no production path signs with it.
+  # Revisit when p256 0.14 is adopted (audit F8).
+  "RUSTSEC-2026-0387",
+]

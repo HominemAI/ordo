@@ -1,0 +1,29 @@
+[package]
+name = "ordo-crypto"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+# argon2id for the sealed-master KEK. One already-resolved, pure-Rust crate
+# (`ordo-identity` already depends on it), so the "no openssl, no bindgen, no
+# cc" property the distroless base and the four-target release matrix both
+# rest on survives intact.
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# For one assertion: the argon2id profile this crate pins for the
+# sealed-master KEK and the one `ordo-identity` pins for password hashing
+# are the same three numbers. They are restated rather than shared
+# (`ordo-identity` depends on this crate for its sealing key file, so a
+# shared constant would have to live here, and three integers do not earn
+# that), so the parity needs a test or the two drift the first time
+# somebody updates one. A dev-dependency, so the shipped graph is unchanged.
+ordo-identity = { path = "../ordo-identity" }

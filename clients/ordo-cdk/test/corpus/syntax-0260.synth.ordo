@@ -1,0 +1,4 @@
+op recentOrders =
+  workOrders(status == "open")[opened, priority, descr]
+    sort -opened
+    take 50

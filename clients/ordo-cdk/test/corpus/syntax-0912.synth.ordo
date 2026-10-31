@@ -1,0 +1,16 @@
+entity invoices {
+  number: text unique
+  status: text = "open"
+  total: int
+}
+
+op openInvoices nopause =
+  invoices(status == "open")[number, total]
+    sort number
+    take 50
+
+op markPaid($number: text) nopause =
+  set invoices(number == $number) { status: "paid" }
+
+op addInvoice($number: text, $total: int) =
+  set invoices { number: $number, total: $total }

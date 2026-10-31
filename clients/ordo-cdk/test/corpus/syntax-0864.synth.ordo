@@ -1,0 +1,3 @@
+op openProperty($name: text, $addr: text, $acquired: date, $coOwner: id) =
+  let prop = set properties { name: $name, address: $addr, acquired: $acquired }
+  set propertiesAccess { propertie: prop.id, member: $coOwner, level: "admin" }

@@ -1,0 +1,3 @@
+op ordersUnderBuilding($loc: id) unbounded =    # tree traversal: whole subtree
+  workOrders(location under $loc and status != "done")[opened, status, descr]
+  sort -opened                                  #   a subtree is not a static cap

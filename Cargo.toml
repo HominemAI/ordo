@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ordo-blob",
+  "crates/ordo-syntax",
+  "crates/ordo-schema",
+  "crates/ordo-sema",
+  "crates/ordo-plan",
+  "crates/ordo-decompile",
+  "crates/ordo-egress",
+  "crates/ordo-fault",
+  "crates/ordo-env",
+  "crates/ordo-identity",
+  "crates/ordo-identity-service",
+  "crates/ordo-commandlog",
+  "crates/ordo-secevent",
+  "crates/ordo-api",
+  "crates/ordo-conformance",
+  "crates/ordo-playground",
+  "crates/ordo-crypto",
+  "crates/ordo-cli",
+  "crates/ordo-console",
+  "crates/ordo-supervisor",
+  "crates/ordo-exec",
+  "crates/ordo-gen",
+  "crates/ordo-host",
+  "crates/ordo-verify-proof",
+]
+
+# `ordo-wasm` builds only for wasm32-unknown-unknown and needs a release
+# profile tuned for payload size rather than for a native binary. A member
+# cannot override `[profile]`, so it is excluded and built on its own by
+# `scripts/build-wasm.sh`. See its manifest for the full reasoning.
+exclude = ["crates/ordo-wasm"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+authors = ["Hominem"]
+license = "AGPL-3.0-only"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Local builds carry no debug information (owner, 2026-09-30). On macOS the
+# default kept each binary's debug data in loose `.o` files beside it: 44G
+# and 296,684 files in target/debug/deps, read by no debugger. CI already
+# builds this way (CARGO_PROFILE_DEV_DEBUG=0). A panic still names the
+# function; it no longer carries file and line. To debug one crate, run
+# CARGO_PROFILE_DEV_DEBUG=2 cargo test -p <crate>.
+[profile.dev]
+debug = "none"

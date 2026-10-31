@@ -1,0 +1,1022 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ordo — Working File</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='5' y='4' width='22' height='26' rx='3' fill='%23b07a3c'/><rect x='8' y='8' width='16' height='19' rx='1.5' fill='%23fdfaf3'/><rect x='11' y='2' width='10' height='6' rx='2' fill='%23555b66'/><path d='M11 14h10M11 18.5h10M11 23h6' stroke='%23555b66' stroke-width='2' stroke-linecap='round'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=IBM+Plex+Mono:wght@400;500&family=Public+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --ground:#edeff2;--surface:#fff;--surface-2:#f5f7f8;
+    --ink:#12171d;--ink-2:#384450;--muted:#616b76;
+    --line:#d3d9de;--line-soft:#e3e8ec;
+    --accent:#1d5e5a;--accent-soft:#dbe9e7;
+    --code-bg:#eef2f4;--code-fg:#0f4f4b;--code-line:#d3dfe0;
+    --stop:#a33a32;--stop-bg:#f5dedb;
+    --warn:#9a6a08;--warn-bg:#f4e9d2;
+    --ok:#2e7d5b;--ok-bg:#dfeee7;
+    --ask:#2f62b0;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+    --sans:"Public Sans",system-ui,sans-serif;
+    --display:"Fraunces",Georgia,serif;
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --ground:#101418;--surface:#171c22;--surface-2:#1c2229;
+    --ink:#e4e8ec;--ink-2:#b9c2cb;--muted:#8b959f;
+    --line:#2b333c;--line-soft:#232a32;
+    --accent:#5fb6ae;--accent-soft:#1b2f2e;
+    --code-bg:#1e262b;--code-fg:#8fd4cd;--code-line:#2f3b40;
+    --stop:#e07b71;--stop-bg:#33201e;
+    --warn:#d4a03c;--warn-bg:#2d2416;
+    --ok:#6cc296;--ok-bg:#172c23;
+    --ask:#7fa8ec;
+  }}
+  :root[data-theme="dark"]{
+    --ground:#101418;--surface:#171c22;--surface-2:#1c2229;
+    --ink:#e4e8ec;--ink-2:#b9c2cb;--muted:#8b959f;
+    --line:#2b333c;--line-soft:#232a32;
+    --accent:#5fb6ae;--accent-soft:#1b2f2e;
+    --code-bg:#1e262b;--code-fg:#8fd4cd;--code-line:#2f3b40;
+    --stop:#e07b71;--stop-bg:#33201e;
+    --warn:#d4a03c;--warn-bg:#2d2416;
+    --ok:#6cc296;--ok-bg:#172c23;
+    --ask:#7fa8ec;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.58}
+  .wrap{max-width:1120px;margin:0 auto;padding:46px 24px 140px}
+
+  header{border-bottom:2px solid var(--ink);padding-bottom:22px}
+  .eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
+  h1{font-family:var(--display);font-weight:600;font-size:clamp(30px,5vw,44px);line-height:1.05;letter-spacing:-.015em;margin:0 0 14px}
+  .intro{max-width:70ch;color:var(--ink-2);margin:0}
+  .intro b{color:var(--ink)}
+
+  .bar{position:sticky;top:0;z-index:30;background:var(--ground);border-bottom:1px solid var(--line);
+       display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 0;margin-bottom:10px}
+  button{font-family:var(--sans);font-size:14px;font-weight:600;padding:8px 16px;border-radius:3px;
+         border:1px solid var(--accent);background:var(--accent);color:var(--surface);cursor:pointer}
+  button.ghost{background:transparent;color:var(--accent)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .status{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .status.dirty{color:var(--warn)} .status.saved{color:var(--ok)}
+  button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+  button:disabled{opacity:.45;cursor:default}
+  /* The filter hides every row that is not yours to answer, group headings
+     included, so a heading never stands over nothing. */
+  body.filtered tbody tr:not(.needsyou){display:none}
+  /* The same for blocked rows: status class `stop`, the red pill. */
+  body.onlyblocked tbody tr:not(.blocked){display:none}
+  #blockedBtn{color:var(--stop);border-color:var(--stop)}
+  #blockedBtn[aria-pressed="true"]{background:var(--stop);border-color:var(--stop);color:var(--surface)}
+  .progress{font-family:var(--mono);font-size:12px;color:var(--muted);margin-left:auto}
+
+  h2.sec{font-family:var(--display);font-weight:600;font-size:26px;letter-spacing:-.015em;
+         margin:46px 0 6px;border-bottom:1px solid var(--line);padding-bottom:11px}
+  .seclede{max-width:72ch;color:var(--ink-2);margin:0 0 20px}
+
+  .strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(126px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin:24px 0 8px}
+  .stat{background:var(--surface);padding:13px 15px 15px;display:flex;flex-direction:column;gap:3px}
+  .stat .n{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:25px;line-height:1;font-weight:500}
+  .stat .n.stop{color:var(--stop)} .stat .n.warn{color:var(--warn)} .stat .n.ok{color:var(--ok)}
+  details.fold{margin:34px 0 0;border:1px solid var(--line);background:var(--surface)}
+  details.fold > summary{cursor:pointer;padding:12px 16px;font-family:var(--display);font-weight:600;font-size:17px}
+  details.fold .count{font-family:var(--mono);font-size:12px;font-weight:400;color:var(--muted);margin-left:8px}
+  details.fold h3{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+                  color:var(--muted);margin:0;padding:14px 16px 6px;border-top:1px solid var(--line)}
+  details.fold dl{margin:0;padding:0 16px 12px;display:grid;grid-template-columns:minmax(200px,300px) 1fr;gap:5px 16px;font-size:14px}
+  details.fold dt{font-family:var(--mono);font-size:12px;color:var(--ink);overflow-wrap:anywhere}
+  details.fold dd{margin:0;color:var(--ink-2)}
+  @media (max-width:700px){details.fold dl{grid-template-columns:1fr}}
+  .tabs{display:flex;gap:0;margin:18px 0 0;border-bottom:1px solid var(--line)}
+  .tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;
+               padding:9px 16px;font-family:var(--mono);font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  .tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+  /* A tab shows its own tasks. A filter, Needs me or Blocked, looks across both. */
+  body.tab-now:not(.filtered):not(.onlyblocked) tbody tr.future,
+  body.tab-now:not(.filtered):not(.onlyblocked) tbody tr.grouprow:not(.hasnow),
+  body.tab-future:not(.filtered):not(.onlyblocked) tbody tr:not(.future):not(.grouprow),
+  body.tab-future:not(.filtered):not(.onlyblocked) tbody tr.grouprow:not(.hasfuture){display:none}
+  body.tab-future:not(.filtered):not(.onlyblocked) tbody tr.panelrow.future.show{display:table-row}
+  /* The Grief Remediation tab replaces the task table; a filter brings the tasks back. */
+  body.tab-compare:not(.filtered):not(.onlyblocked) .tablewrap.tasks{display:none}
+  body:not(.tab-compare) #compare,body.filtered #compare,body.onlyblocked #compare{display:none}
+  #compare{margin-top:14px}
+  .cmpkey{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+  .cmpkey button{font-size:13px}
+  .cmpkey button[aria-pressed="true"]{border-color:var(--accent);color:var(--ink)}
+  .cmptable{min-width:980px}
+  .cmptable th,.cmptable td{vertical-align:top;font-size:13.5px;line-height:1.45;padding:9px 11px;border-top:1px solid var(--line-soft)}
+  .cmptable td:first-child{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .cmptable td:nth-child(2){width:28%}
+  .cmptable td:nth-child(4){width:30%}
+  .cmptable code{font-family:var(--mono);font-size:12px;background:var(--code-bg);color:var(--code-fg);padding:0 3px}
+  .cmptable tr.cmpgroup td{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+                           color:var(--muted);background:var(--surface-2);padding:7px 11px}
+  .v{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 7px;white-space:nowrap}
+  .v.ok{color:var(--ok);background:var(--ok-bg)}
+  .v.part{color:var(--warn);background:var(--warn-bg)}
+  .v.gap,.v.prob{color:var(--stop);background:var(--stop-bg)}
+  .v.prob{font-weight:600}
+  .v.opp{color:var(--accent);background:var(--accent-soft)}
+  .cmptable tbody tr.alt > td{background:color-mix(in srgb,var(--surface-2) 55%,var(--surface))}
+  .cmptable tbody tr[data-id]{cursor:pointer}
+  .cmptable tbody tr[data-id]:hover > td{background:var(--surface-2)}
+  .cmptable tbody tr[data-id].open > td{background:var(--accent-soft)}
+  .cmptable tr.cmpnote > td{background:var(--accent-soft);padding:4px 11px 12px}
+  .cmptable tr.cmpnote textarea{width:100%;min-height:72px;box-sizing:border-box}
+  .cmptable .noted{display:block;margin-top:4px;font-size:10px;color:var(--accent)}
+  .cmpsrc{margin:0;padding:10px 16px 14px 34px;font-size:13.5px}
+  .cmpsrc a{color:var(--accent)}
+  tr.opens{cursor:pointer}
+  tr.opens:hover > td{background:var(--surface-2)}
+  tr.offwork{display:none !important}
+  .pill.plain{color:var(--muted);background:var(--surface-2)}
+  .pill.work{margin-left:6px}
+  .panel.where{--pcol:var(--ok);grid-column:1 / -1}
+  .panel.where.queued,.panel.where.waiting{--pcol:var(--warn)}
+  .panel.where.blocked{--pcol:var(--stop)}
+  .panel.where.none,.panel.where.filed{--pcol:var(--muted)}
+  #workFilter{font-family:var(--mono);font-size:12px}
+  .look{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:6px}
+  .look li{display:flex;gap:10px;align-items:baseline;font-size:14px}
+  .look a,#sumText a{color:var(--accent);cursor:pointer;text-decoration:underline}
+  .look .why{color:var(--muted)}
+  .stat .k{font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+
+  .docs{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
+  .doc{background:var(--surface);padding:13px 15px 15px}
+  .doc .f{font-family:var(--mono);font-size:12.5px;font-weight:500;color:var(--accent);display:block;margin-bottom:4px;word-break:break-all}
+  .doc p{margin:0;font-size:13.5px;color:var(--ink-2);line-height:1.45}
+
+  /* ── the table ─────────────────────────────────────────── */
+  .tablewrap{border:1px solid var(--line);background:var(--surface);overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:760px}
+  thead th{background:var(--surface-2);font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+           text-transform:uppercase;font-weight:500;color:var(--muted);text-align:left;
+           padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+  tbody tr.item{border-bottom:1px solid var(--line-soft)}
+  tbody tr.item:hover{background:var(--surface-2)}
+  tbody tr.item.open{background:var(--surface-2)}
+  td{padding:11px 14px;vertical-align:middle}
+  td.name{font-weight:600;color:var(--ink);min-width:210px}
+  td.name .sub{display:block;font-weight:400;font-size:13px;color:var(--muted);margin-top:2px}
+  td.ref{font-family:var(--mono);font-size:12px;color:var(--accent);white-space:nowrap}
+  td.toggles{text-align:right;white-space:nowrap}
+
+  .pill{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;
+        padding:2px 7px;border-radius:2px;white-space:nowrap}
+  .pill.ok{color:var(--ok);background:var(--ok-bg)}
+  .pill.warn{color:var(--warn);background:var(--warn-bg)}
+  .pill.stop{color:var(--stop);background:var(--stop-bg)}
+  .pill.run{color:var(--accent);background:var(--accent-soft)}
+
+  .tg{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;
+      padding:4px 9px;margin-left:5px;border-radius:2px;border:1px solid var(--line);
+      background:transparent;color:var(--muted);cursor:pointer}
+  .tg:hover{border-color:var(--accent);color:var(--accent)}
+  .tg[aria-expanded="true"]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+  .tg.has::after{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;
+                 background:var(--ok);margin-left:6px;vertical-align:middle}
+
+  /* One block per item. Explain runs the full width, Suggest and Ask sit
+     side by side beneath it, then the answer and its history run the full
+     width again. Everything about one decision is on screen at once, so
+     answering does not mean opening four panels in turn. */
+  .block{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}
+  .block > .panel{min-width:0}
+  .block > .panel.explain,
+  .block > .panel.answer,
+  .block > .panel.history{grid-column:1 / -1}
+  .block > .panel.solo{grid-column:1 / -1}
+  @media (max-width:820px){.block{grid-template-columns:1fr}}
+  .asks{margin:0;padding:0;list-style:none;counter-reset:ask}
+  .asks li{counter-increment:ask;display:grid;grid-template-columns:34px 1fr;gap:4px 8px;
+           padding:14px 0;border-top:1px solid var(--line)}
+  .asks li:first-child{border-top:0;padding-top:2px}
+  .asks li::before{content:counter(ask);font-family:var(--mono);font-size:12px;color:var(--warn);
+           border:1px solid var(--warn);border-radius:50%;width:24px;height:24px;display:grid;place-items:center}
+  .asks li.done::before{color:var(--ok);border-color:var(--ok)}
+  .asks li > *{grid-column:2}
+  .asks .q p{color:var(--ink);font-weight:500}
+  .asks .sg{color:var(--ink-2);font-size:14px;border-left:2px solid var(--accent);padding-left:10px;margin:2px 0 6px}
+  textarea.one{min-height:54px}
+  .asks .ans{border-left:2px solid var(--ok);padding:2px 0 2px 10px;color:var(--ink);font-size:15px;white-space:pre-wrap}
+  /* Marks: each ask's state. Green done, yellow questions, red close it: the owner's. Blue ?: Claude has a question. */
+  .asks .marks{display:flex;gap:6px;align-items:center;margin:6px 0 2px}
+  .asks .marks button{width:26px;height:26px;border-radius:50%;padding:0;display:grid;place-items:center;
+                      font-size:13px;line-height:1;border:1.5px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer}
+  .asks .marks button:hover{border-color:var(--ink-2)}
+  .asks .marks button.m-done[aria-pressed="true"]{background:var(--ok);border-color:var(--ok);color:#fff}
+  .asks .marks button.m-questions[aria-pressed="true"]{background:var(--warn);border-color:var(--warn);color:#fff}
+  .asks .marks button.m-close[aria-pressed="true"]{background:var(--stop);border-color:var(--stop);color:#fff}
+  .asks .marks button.m-asking[aria-pressed="true"]{background:var(--ask);border-color:var(--ask);color:#fff}
+  .asks .marks .mlab{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-left:4px}
+  .asks li.mark-done{box-shadow:inset 3px 0 0 var(--ok)}
+  .asks li.mark-questions{box-shadow:inset 3px 0 0 var(--warn)}
+  .asks li.mark-close{box-shadow:inset 3px 0 0 var(--stop)}
+  .asks li.mark-asking{box-shadow:inset 3px 0 0 var(--ask)}
+  .asks .anslab{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ok);margin-bottom:2px}
+  .panel.history{--pcol:var(--muted)}
+  .panel.history ol{margin:0;padding:0;list-style:none}
+  .panel.history li{padding:9px 0;border-top:1px solid var(--line);color:var(--ink-2)}
+  .panel.history li:first-child{border-top:0;padding-top:0}
+  .panel.history .when{font-family:var(--mono);font-size:11px;color:var(--muted);display:block;margin-bottom:3px}
+  .panel.history .none{color:var(--muted);font-style:italic}
+  tr.panelrow{display:none}
+  tr.panelrow.show{display:table-row}
+  tr.panelrow > td{padding:0;border-bottom:1px solid var(--line)}
+  .panel{padding:18px 20px 20px;background:var(--surface);border-left:3px solid var(--pcol,var(--accent))}
+  .panel.explain{--pcol:var(--muted)}
+  .panel.suggest{--pcol:var(--accent)}
+  .panel.ask{--pcol:var(--warn)}
+  .panel.answer{--pcol:var(--ok)}
+  .panel .lab{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+              color:var(--pcol);display:block;margin-bottom:8px}
+  .panel p{margin:0 0 14px;color:var(--ink-2);max-width:62ch;font-size:16px;line-height:1.7}
+  .panel ul{margin:0 0 14px;padding-left:20px;max-width:62ch}
+  .panel li{margin:0 0 9px;color:var(--ink-2);font-size:16px;line-height:1.6}
+  .panel .lead p,.panel .lead li{color:var(--ink)}
+  details.more{margin-top:6px}
+  details.more > summary{cursor:pointer;font-family:var(--mono);font-size:11.5px;letter-spacing:.05em;
+                         text-transform:uppercase;color:var(--muted);padding:4px 0}
+  details.more[open] > summary{margin-bottom:10px}
+  details.more p,details.more li{font-size:15px}
+  .panel p:last-child{margin-bottom:0}
+  /* Inline code needs to read as a distinct token, not as emphasis. A tinted
+     ground with a hairline does that at small sizes where weight alone does
+     not — italic or bold inline code is the thing that was hard to scan. */
+  code{
+    font-family:var(--mono);
+    font-size:.86em;
+    background:var(--code-bg);
+    color:var(--code-fg);
+    border:1px solid var(--code-line);
+    border-radius:3px;
+    padding:.1em .38em;
+    /* long paths must be able to wrap, or a panel scrolls sideways */
+    word-break:break-word;
+  }
+  .panel code{font-size:12.8px}
+  td.ref code, .doc .f code{background:none;border:0;padding:0}
+  .panel b{color:var(--ink)}
+
+  textarea{font-family:var(--sans);font-size:15px;line-height:1.5;color:var(--ink);background:var(--surface-2);
+           border:1px solid var(--line);border-radius:3px;padding:11px 13px;min-height:96px;resize:vertical;width:100%}
+  textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
+  .arow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:11px}
+  select{font-family:var(--mono);font-size:12.5px;padding:6px 9px;border:1px solid var(--line);
+         border-radius:3px;background:var(--surface);color:var(--ink)}
+  .hint{font-family:var(--mono);font-size:11px;color:var(--muted)}
+
+  tr.grouprow td{background:var(--surface-2);font-family:var(--mono);font-size:11px;letter-spacing:.09em;
+                 text-transform:uppercase;color:var(--accent);padding:9px 14px;border-bottom:1px solid var(--line)}
+
+  footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-size:13.5px;max-width:78ch}
+  footer code{font-family:var(--mono);font-size:12.5px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body class="tab-now">
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Ordo · working file · saved as you type</div>
+  <h1>Where we are, and what I need from you</h1>
+  <p class="intro">
+    The official Ordo roadmap and the source of truth for open decisions, kept current with every push and in agreement with <code>docs/roadmap-checklist.md</code>. Each entry is a <b>task</b>. A task
+    carries one or more <b>asks</b>, each a single question with what I would do beside it
+    and one <b>answer</b> box for you. Under the asks is a <b>comment</b> box for anything
+    about the task as a whole. What you type is saved as you type it. Tell me you have
+    answered and I read only what is new.
+  </p>
+</header>
+
+<div class="bar">
+  <button id="needsMe" aria-pressed="false" title="Only the rows waiting on you">Needs me</button>
+  <button id="blockedBtn" aria-pressed="false" title="Only the rows that are blocked">Blocked</button>
+  <select id="workFilter" aria-label="Show tasks by the state of their work" title="Where the work stands">
+    <option value="">Work: any</option>
+  </select>
+  <button class="ghost" id="expandAnswers">Next unanswered</button>
+  <span class="status" id="status">loading</span>
+  <span class="progress" id="progress"></span>
+</div>
+
+<h2 class="sec">Where we are</h2>
+<!-- Written by `python3 scripts/board.py summary`, kept in docs/board-summary.json. -->
+<p class="seclede" id="sumText"></p>
+<div class="strip" id="tiles"></div>
+<ul class="look" id="look"></ul>
+
+<!-- Written by `python3 scripts/board.py docs set`, kept in docs/board-docs.jsonl. -->
+<details class="fold" id="docsFold">
+  <summary>The documents, and what each is for <span class="count" id="docsCount"></span></summary>
+  <div id="docsList"></div>
+</details>
+
+<h2 class="sec">Tasks</h2>
+<p class="seclede">
+  Click a task to open it and see its asks. One task is open at a time, and clicking away
+  or clicking it again closes it.
+  Your typing is kept either way.
+</p>
+
+<div class="tabs" role="tablist">
+  <button role="tab" id="tabNow" aria-selected="true">Now</button>
+  <button role="tab" id="tabFuture" aria-selected="false" title="The roadmap for after the first deployment">Future</button>
+  <button role="tab" id="tabCompare" aria-selected="false" title="Supabase's migration grievances beside what Ordo does, with your notes">Grief Remediation</button>
+</div>
+
+<div class="tablewrap tasks">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Task</th>
+        <th scope="col">Ref</th>
+        <th scope="col">Status</th>
+        <th scope="col" style="text-align:right">Detail</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<!-- The Grief Remediation tab: docs/supabase-comparison.html, fetched from /compare when first opened.
+     Notes typed under a row are saved to docs/grief-notes.json through /api/grief. -->
+<div id="compare"></div>
+
+<footer>
+  <p>
+    <b>How saving works.</b> There is no save step. Each answer goes to the board's
+    database a moment after you stop typing, and into
+    <code>docs/board-answers.jsonl</code>, which git keeps. An answer stays in its box,
+    and stays editable, until I read it. Then it moves to the history underneath.
+  </p>
+  <p>
+    The page is served by <code>~/scripts/board</code> at
+    <code>http://127.0.0.1:8737</code>, and answers to this machine only.
+  </p>
+</footer>
+</div>
+
+<script>
+// The rows and the answers live in ~/.board/ordo.db, served by
+// `python3 scripts/board.py serve`. This page holds no state of its own:
+// what you type is sent as you type it, and a refresh reads it back.
+let ITEMS=[],openPanel=null;
+const drafts={},timers=new Map();
+
+const statusEl=document.getElementById("status"),progressEl=document.getElementById("progress");
+function setStatus(t,c){statusEl.textContent=t;statusEl.className="status"+(c?" "+c:"")}
+// A task carries asks, numbered from 1. Each ask has one answer. Ask 0 is
+// the comment on the task as a whole. What you are typing is a draft, one
+// per ask, until I read it.
+const key=(id,n)=>id+"#"+n;
+function draftOf(it,n){
+  return (it.answers||[]).find(a=>(a.ask||0)===n&&a.source==="page"&&!a.read)||null;
+}
+// The answer to ask n that I have read, since the task was last put to you.
+// An ask put to you again on its own counts from its own mark.
+function since(it,n){
+  const a=n&&(it.asks||[])[n-1];
+  return Math.max(it.asked_after||0,(a&&a.after)||0);
+}
+function closedAnswer(it,n){
+  const a=(it.answers||[]).filter(a=>(a.ask||0)===n&&a.text.trim()&&a.read&&a.seq>since(it,n));
+  return a.length?a[a.length-1]:null;
+}
+function said(it,n){
+  if((drafts[key(it.id,n)]&&drafts[key(it.id,n)].text||"").trim())return true;
+  return (it.answers||[]).some(a=>(a.ask||0)===n&&a.text.trim()
+    &&a.seq>since(it,n)&&a!==draftOf(it,n));
+}
+// Answered means every ask has an answer since the task was last put to
+// you, or a ruling was recorded on it. A comment answers a task only when
+// the task has no asks. scripts/board.py applies the same test in `settled`.
+function answered(it){
+  const asks=it.asks||[];
+  const last=Math.max(it.asked_after||0,...asks.map(a=>a.after||0));
+  if((it.answers||[]).some(a=>a.source==="record"&&!(a.ask||0)&&a.text.trim()&&a.seq>last))return true;
+  if(!asks.length)return said(it,0);
+  return asks.every((_,i)=>said(it,i+1));
+}
+function updateProgress(){
+  const rows=ITEMS.filter(i=>i.id);
+  progressEl.textContent=rows.filter(answered).length+" of "+rows.length+" tasks answered";
+}
+
+// ── marks ──────────────────────────────────────────────────────────────
+// Saved to docs/board-marks.json through /api/marks, apart from answers, so a
+// mark can change at any time, on a closed ask too. Clicking the lit button
+// again clears it.
+let MARKS={};
+const MARK_UI=[["done","\u2713","Done: nothing more on this"],
+               ["questions","\u25CF","Questions: talk it over"],
+               ["close","\u2715","Close it: Claude decides"],
+               ["asking","?","Claude has a question for you"]];
+function markRow(id,ask,li){
+  const row=document.createElement("div");row.className="marks";
+  const lab=document.createElement("span");lab.className="mlab";
+  const paint=()=>{
+    const m=(MARKS[id+":"+ask]||{}).mark||"";
+    for(const b of row.querySelectorAll("button"))b.setAttribute("aria-pressed",b.dataset.m===m?"true":"false");
+    li.classList.remove("mark-done","mark-questions","mark-close","mark-asking");
+    if(m)li.classList.add("mark-"+m);
+    lab.textContent=m?MARK_UI.find(x=>x[0]===m)[2]:"";
+  };
+  for(const [m,glyph,title] of MARK_UI){
+    const b=document.createElement("button");b.type="button";b.className="m-"+m;b.dataset.m=m;
+    b.textContent=glyph;b.title=title;b.setAttribute("aria-label",title+" (ask "+ask+")");
+    b.addEventListener("click",async ev=>{
+      ev.stopPropagation();
+      const key=id+":"+ask,cur=(MARKS[key]||{}).mark,next=cur===m?"":m;
+      if(next)MARKS[key]={mark:next,at:""};else delete MARKS[key];
+      paint();
+      try{
+        const r=await fetch("/api/marks",{method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({id,ask,mark:next})});
+        if(!r.ok)throw new Error(r.status);
+        setStatus("saved · "+new Date().toLocaleTimeString(),"saved");
+      }catch(e){setStatus("mark not saved: restart the board server?","dirty")}
+    });
+    row.appendChild(b);
+  }
+  row.appendChild(lab);paint();
+  return row;
+}
+
+async function send(id){
+  timers.delete(id);
+  const d=drafts[id];
+  try{
+    const r=await fetch("/api/answer",{method:"POST",keepalive:true,
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({id:d.id,ask:d.ask,status:d.status,text:d.text})});
+    if(!r.ok)throw new Error(r.status);
+    if(!timers.size)setStatus("saved · "+new Date().toLocaleTimeString(),"saved");
+  }catch(e){
+    setStatus("not saved: is the board still running?","dirty");
+    timers.set(id,setTimeout(()=>send(id),4000));
+  }
+}
+function queue(id,wait){
+  clearTimeout(timers.get(id));
+  timers.set(id,setTimeout(()=>send(id),wait));
+  setStatus("saving…","dirty");
+  updateProgress();
+}
+function flush(){
+  for(const [id,t] of [...timers]){clearTimeout(t);send(id)}
+}
+
+const tbody=document.getElementById("rows");
+
+function closeOpen(){
+  if(!openPanel)return;
+  openPanel.row.classList.remove("show");
+  openPanel.btn.setAttribute("aria-expanded","false");
+  openPanel.itemRow.classList.remove("open");
+  openPanel=null;
+}
+
+// A row is yours when its status says so, or when it sits in the section
+// that exists for exactly that. scripts/board.py applies the same two tests
+// for `ls --needs`; change one and change the other.
+const NEEDS_LABEL=/^(decide|needs you|needs me|confirm|awaiting you|your call|blocked on you|unanswered|yours)$/i;
+const NEEDS_GROUP=/needs (you|me)/i;
+let needsCount=0,blockedCount=0,futureCount=0,SUMMARY={},DOCS=[];
+
+function when(a){
+  if(!a.at)return "recorded, date not kept";
+  return a.at.length>10?new Date(a.at).toLocaleString():a.at;
+}
+
+function render(){
+  let groupTr=null,inNeedsGroup=false;
+  for(const it of ITEMS){
+    if(it.group){
+      const tr=document.createElement("tr");tr.className="grouprow";
+      const td=document.createElement("td");td.colSpan=4;td.textContent=it.group;
+      tr.appendChild(td);tbody.appendChild(tr);
+      groupTr=tr;inNeedsGroup=NEEDS_GROUP.test(it.group);continue;
+    }
+    const asks=it.asks||[];
+    const mine=[];
+    for(let n=0;n<=asks.length;n++){
+      const d=draftOf(it,n);if(d)mine.push(d);
+      drafts[key(it.id,n)]={id:it.id,ask:n,status:d?d.status:"open",text:d?d.text:""};
+    }
+
+    const tr=document.createElement("tr");tr.className="item"+(it.future?" future":"");tr.id="row-"+it.id;
+    if(it.future)futureCount++;
+    if(groupTr)groupTr.classList.add(it.future?"hasfuture":"hasnow");
+    // An answered row never needs you again, whatever group it is in, until
+    // it is put to you again.
+    const settled=!!((it.decided||"").trim())||answered(it);
+    // An unanswered ask waits on you whatever the status label says.
+    // A blue mark is Claude's question to you, and waits on you even on a
+    // settled task.
+    const asking=Object.entries(MARKS).some(([k,v])=>{const [t,n]=k.split(":");return t===it.id&&v.mark==="asking"&&!(+n>((it.asks||[]).length));});
+    // A future task's asks wait until its time comes (owner, 2026-10-03).
+    const needs=!it.future&&(asking||!settled
+      &&(inNeedsGroup||NEEDS_LABEL.test((it.status&&it.status[1])||"")
+         ||(asks.length>0&&!(it.decided||"").trim())));
+    if(needs){
+      tr.classList.add("needsyou");needsCount++;
+      if(groupTr)groupTr.classList.add("needsyou");
+    }
+    // A blocked row is one whose status class is `stop`. scripts/board.py
+    // applies the same test for `ls --blocked`.
+    if(it.status&&it.status[0]==="stop"){
+      tr.classList.add("blocked");blockedCount++;
+      if(groupTr)groupTr.classList.add("blocked");
+    }
+    const tdName=document.createElement("td");tdName.className="name";
+    tdName.appendChild(document.createTextNode(it.name));
+    if(it.sub){const s=document.createElement("span");s.className="sub";s.textContent=it.sub;tdName.appendChild(s)}
+    const tdRef=document.createElement("td");tdRef.className="ref";tdRef.textContent=it.ref;
+    const tdStat=document.createElement("td");
+    const pill=document.createElement("span");pill.className="pill "+it.status[0];pill.textContent=it.status[1];
+    tdStat.appendChild(pill);
+    tr.dataset.work=it.work||"";
+    if(it.work){
+      const w=document.createElement("span");
+      w.className="pill work "+(WORK[it.work]?WORK[it.work][1]:"plain");
+      w.textContent=WORK[it.work]?WORK[it.work][0]:it.work;
+      w.title=it.where||"";
+      tdStat.appendChild(w);
+    }
+    if(it.decided){
+      const p=document.createElement("span");p.className="pill ok";p.style.marginLeft="6px";p.textContent="you decided";
+      p.title=it.decided;tdStat.appendChild(p);
+    }
+    const tdTg=document.createElement("td");tdTg.className="toggles";
+    tr.append(tdName,tdRef,tdStat,tdTg);
+    tbody.appendChild(tr);
+
+    // One block per item, holding every field at once:
+    //   explain            what the task is
+    //   suggest            what I would do about the task as a whole
+    //   asks               one line each: the ask, what I would do, your answer
+    //   comment            anything else, and where the task stands
+    //   history            every answer and comment I have read
+    const has = k => !!(it[k]&&it[k].trim());
+    const decidable = asks.length>0||has("suggest");
+    const prow=document.createElement("tr");prow.className="panelrow"+(needs?" needsyou":"")+(it.future?" future":"");
+    prow.dataset.work=it.work||"";
+    const ptd=document.createElement("td");ptd.colSpan=4;
+    const block=document.createElement("div");block.className="block";
+    ptd.appendChild(block);prow.appendChild(ptd);
+
+    function panelOf(key,label,solo){
+      const panel=document.createElement("div");panel.className="panel "+key+(solo?" solo":"");
+      const lab=document.createElement("span");lab.className="lab";lab.textContent=label;
+      panel.appendChild(lab);
+      return panel;
+    }
+    // What shows first is short. The rest folds under it: everything after
+    // the marker, or after the first paragraph of a task written before
+    // there was one.
+    function html(key,label,solo){
+      const panel=panelOf(key,label,solo);
+      const x=document.createElement("div");x.className="lead";
+      let [first,rest]=it[key].split("<!--more-->");
+      x.innerHTML=first;
+      if(rest===undefined&&x.children.length>1){
+        const more=document.createElement("div");
+        while(x.children.length>1)more.appendChild(x.children[1]);
+        rest=more.innerHTML;
+      }
+      panel.appendChild(x);
+      if(rest&&rest.trim()){
+        const d=document.createElement("details");d.className="more";
+        const sm=document.createElement("summary");sm.textContent="More detail";
+        const body=document.createElement("div");body.innerHTML=rest;
+        d.append(sm,body);panel.appendChild(d);
+      }
+      block.appendChild(panel);
+    }
+
+    if(it.work){
+      const panel=panelOf("where "+it.work,"The work: "+(WORK[it.work]?WORK[it.work][0]:it.work));
+      const x=document.createElement("p");
+      x.textContent=it.where||"Nothing recorded about where.";
+      panel.appendChild(x);block.appendChild(panel);
+    }
+    if(has("explain")) html("explain","What this is");
+    const ruled=!!(it.decided||"").trim();
+    if(ruled){
+      const panel=panelOf("answer solo","Your ruling");
+      const x=document.createElement("p");x.textContent=it.decided;
+      panel.appendChild(x);block.appendChild(panel);
+    }
+    if(has("suggest")) html("suggest","What I would do",true);
+
+    const openBtn=document.createElement("button");
+    function box(n,placeholder,small){
+      const ta=document.createElement("textarea");
+      if(small)ta.className="one";
+      ta.placeholder=placeholder;
+      ta.value=drafts[key(it.id,n)].text;
+      ta.addEventListener("input",()=>{
+        drafts[key(it.id,n)].text=ta.value;
+        queue(key(it.id,n),700);
+        openBtn.classList.toggle("has",answered(it));
+        if(n){
+          const li=ta.closest("li");
+          if(li)li.classList.toggle("done",!!ta.value.trim());
+        }
+      });
+      ta.addEventListener("blur",flush);
+      return ta;
+    }
+    if(asks.length){
+      const panel=panelOf("ask solo",asks.length===1?"The ask":"The asks, "+asks.length);
+      const ol=document.createElement("ol");ol.className="asks";
+      asks.forEach((a,i)=>{
+        const li=document.createElement("li");
+        if(said(it,i+1))li.classList.add("done");
+        const q=document.createElement("div");q.className="q";q.innerHTML=a.text;
+        li.appendChild(q);
+        if(a.suggest){
+          const sg=document.createElement("div");sg.className="sg";sg.innerHTML=a.suggest;
+          li.appendChild(sg);
+        }
+        // An ask you have answered is closed: it shows the answer and takes
+        // no more. What you are still typing stays open until I read it.
+        const given=closedAnswer(it,i+1);
+        if(given||ruled){
+          const an=document.createElement("div");an.className="ans";
+          const lab=document.createElement("span");lab.className="anslab";
+          lab.textContent=given?(given.source==="record"?"Your ruling":"Your answer"):"Settled by your ruling";
+          an.appendChild(lab);
+          if(given)an.appendChild(document.createTextNode(given.text));
+          li.classList.add("done");li.appendChild(an);
+        } else {
+          li.appendChild(box(i+1,"Your answer to "+(i+1),true));
+        }
+        li.appendChild(markRow(it.id,i+1,li));
+        ol.appendChild(li);
+      });
+      panel.appendChild(ol);
+      block.appendChild(panel);
+    }
+    if(decidable){
+      const panel=panelOf("answer","Comment");
+      const ta=box(0,ruled||asks.some((_,i)=>closedAnswer(it,i+1))
+        ?"Answered. Add a comment if something has changed."
+        :"Anything about the task as a whole. Optional.");
+      panel.appendChild(ta);
+      const arow=document.createElement("div");arow.className="arow";
+      const sel=document.createElement("select");sel.setAttribute("aria-label","Status for "+it.ref);
+      for(const [v,t] of [["open","○  still thinking"],["decided","●  decided — go"],["deferred","—  deferred"],["discuss","?  needs a conversation"]]){
+        const o=document.createElement("option");o.value=v;o.textContent=t;sel.appendChild(o);
+      }
+      sel.value=drafts[key(it.id,0)].status;
+      sel.addEventListener("change",()=>{drafts[key(it.id,0)].status=sel.value;queue(key(it.id,0),0)});
+      const hint=document.createElement("span");hint.className="hint";
+      hint.textContent="saved as you type · moves to the history once I have read it";
+      arow.append(sel,hint);panel.appendChild(arow);
+      block.appendChild(panel);
+
+      // Every answer on this item, oldest first: rulings on the record, and
+      // what you typed here once I have read it. What is still in the box
+      // above is not history yet.
+      const hp=panelOf("history","History");
+      const past=(it.answers||[]).filter(a=>!mine.includes(a));
+      if(past.length){
+        const ol=document.createElement("ol");
+        for(const h of past){
+          const li=document.createElement("li");
+          const w=document.createElement("span");w.className="when";
+          const about=h.source==="record"?(h.ask?"ruling on ask "+h.ask:"ruling")
+            :(h.ask?"answer to ask "+h.ask:"comment");
+          w.textContent=about+" · "+when(h)+(h.source==="page"&&h.status!=="open"?" · "+h.status:"");
+          const t=document.createElement("span");t.textContent=h.text;
+          li.append(w,t);ol.appendChild(li);
+        }
+        hp.appendChild(ol);
+      } else {
+        const n=document.createElement("p");n.className="none";
+        n.textContent="Nothing answered on this task yet.";hp.appendChild(n);
+      }
+      block.appendChild(hp);
+    }
+
+    if(block.children.length){
+      tbody.appendChild(prow);
+      openBtn.className="tg"+(answered(it)?" has":"");
+      openBtn.type="button";openBtn.textContent="Open";openBtn.setAttribute("aria-expanded","false");
+      openBtn.dataset.item=it.id||"";
+      openBtn.addEventListener("click",ev=>{
+        ev.stopPropagation();
+        const wasOpen=openPanel&&openPanel.btn===openBtn;
+        closeOpen();
+        if(wasOpen)return;
+        prow.classList.add("show");
+        openBtn.setAttribute("aria-expanded","true");
+        tr.classList.add("open");
+        openPanel={row:prow,btn:openBtn,itemRow:tr};
+      });
+      tdTg.appendChild(openBtn);
+      // The whole line opens the task. The button stays for the keyboard.
+      tr.classList.add("opens");
+      tr.addEventListener("click",ev=>{
+        if(String(window.getSelection()))return;
+        ev.stopPropagation();openBtn.click();
+      });
+    }
+  }
+}
+
+// The summary: a few sentences, the tiles, and the rows to look at. Two
+// tiles are counted from the rows here so they cannot lag the board.
+// Where the work stands, apart from whether it was decided.
+// scripts/board.py holds the same seven states in WORK.
+const WORK={built:["built","ok"],building:["building","run"],queued:["queued","warn"],
+  blocked:["blocked","stop"],waiting:["waiting on you","warn"],filed:["filed, no go","plain"],
+  none:["decision only","plain"]};
+const workSel=document.getElementById("workFilter");
+function byWork(){
+  closeOpen();
+  const want=workSel.value;
+  let group=null,any=false;
+  const done=()=>{if(group)group.classList.toggle("offwork",!!want&&!any)};
+  for(const tr of tbody.children){
+    if(tr.classList.contains("grouprow")){done();group=tr;any=false;continue}
+    const off=!!want&&tr.dataset.work!==want;
+    tr.classList.toggle("offwork",off);
+    if(!off)any=true;
+  }
+  done();
+}
+workSel.addEventListener("change",byWork);
+workSel.addEventListener("click",ev=>ev.stopPropagation());
+function workOptions(){
+  const n={};
+  for(const i of ITEMS)if(i.id&&i.work)n[i.work]=(n[i.work]||0)+1;
+  for(const k of Object.keys(WORK)){
+    if(!n[k])continue;
+    const o=document.createElement("option");o.value=k;o.textContent=WORK[k][0]+" ("+n[k]+")";
+    workSel.appendChild(o);
+  }
+}
+
+function tab(which){
+  closeOpen();
+  document.body.classList.toggle("tab-now",which==="now");
+  document.body.classList.toggle("tab-future",which==="future");
+  document.getElementById("tabNow").setAttribute("aria-selected",which==="now"?"true":"false");
+  document.getElementById("tabFuture").setAttribute("aria-selected",which==="future"?"true":"false");
+  document.body.classList.toggle("tab-compare",which==="compare");
+  document.getElementById("tabCompare").setAttribute("aria-selected",which==="compare"?"true":"false");
+  if(which==="compare")loadCompare();
+}
+document.getElementById("tabNow").addEventListener("click",ev=>{ev.stopPropagation();tab("now")});
+document.getElementById("tabFuture").addEventListener("click",ev=>{ev.stopPropagation();tab("future")});
+document.getElementById("tabCompare").addEventListener("click",ev=>{ev.stopPropagation();tab("compare")});
+
+let compareLoaded=false;
+async function loadCompare(){
+  if(compareLoaded)return;
+  const box=document.getElementById("compare");
+  try{
+    const r=await fetch("/compare",{cache:"no-store"});
+    if(!r.ok)throw new Error(r.status);
+    box.innerHTML=await r.text();
+    compareLoaded=true;
+  }catch(e){
+    box.innerHTML='<p class="seclede">The board server predates this tab. Restart it (<code>~/scripts/board</code>) and reload.</p>';
+    return;
+  }
+  let notes={};
+  try{const r=await fetch("/api/grief",{cache:"no-store"});if(r.ok)notes=await r.json()}catch(e){}
+  const mark=tr=>{
+    const td=tr.firstElementChild;let m=td.querySelector(".noted");
+    const has=!!(notes[tr.dataset.id]&&notes[tr.dataset.id].text.trim());
+    if(has&&!m){m=document.createElement("span");m.className="noted";m.textContent="note";td.append(m)}
+    if(!has&&m)m.remove();
+  };
+  const restripe=()=>{
+    let i=0;
+    for(const tr of box.querySelectorAll(".cmptable tbody tr")){
+      if(tr.classList.contains("cmpgroup")){i=0;continue}
+      if(!tr.dataset.id)continue;
+      tr.classList.toggle("alt",!tr.hidden&&(i++%2===1));
+    }
+  };
+  const gtimers={};
+  async function saveNote(id,text){
+    try{
+      const r=await fetch("/api/grief",{method:"POST",keepalive:true,
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({id,text})});
+      if(!r.ok)throw new Error(r.status);
+      notes[id]={text,at:(await r.json()).saved};
+      setStatus("saved · "+new Date().toLocaleTimeString(),"saved");
+    }catch(e){
+      setStatus("not saved: is the board still running?","dirty");
+      gtimers[id]=setTimeout(()=>saveNote(id,text),4000);
+    }
+  }
+  for(const tr of box.querySelectorAll(".cmptable tbody tr[data-id]")){
+    mark(tr);
+    tr.addEventListener("click",ev=>{
+      ev.stopPropagation();
+      if(ev.target.closest("a"))return;
+      const next=tr.nextElementSibling;
+      if(next&&next.classList.contains("cmpnote")){next.remove();tr.classList.remove("open");return}
+      const nr=document.createElement("tr");nr.className="cmpnote";
+      const td=document.createElement("td");td.colSpan=6;
+      const ta=document.createElement("textarea");
+      ta.placeholder="Your thoughts on row "+tr.dataset.id.slice(1)+". Saved as you type.";
+      ta.value=(notes[tr.dataset.id]||{}).text||"";
+      ta.addEventListener("click",e=>e.stopPropagation());
+      ta.addEventListener("input",()=>{
+        const id=tr.dataset.id,text=ta.value;
+        notes[id]={text,at:""};mark(tr);
+        setStatus("typing","dirty");
+        clearTimeout(gtimers[id]);gtimers[id]=setTimeout(()=>saveNote(id,text),600);
+      });
+      td.append(ta);nr.append(td);tr.after(nr);tr.classList.add("open");ta.focus();
+    });
+  }
+  restripe();
+  const key=document.getElementById("cmpKey");
+  key.addEventListener("click",ev=>{
+    ev.stopPropagation();
+    const b=ev.target.closest("button");if(!b)return;
+    for(const x of key.querySelectorAll("button"))x.setAttribute("aria-pressed",x===b?"true":"false");
+    const v=b.dataset.v;
+    for(const tr of box.querySelectorAll(".cmptable tbody tr[data-v]"))tr.hidden=!!v&&tr.dataset.v!==v;
+    for(const g of box.querySelectorAll(".cmptable tr.cmpgroup")){
+      let n=g.nextElementSibling,any=false;
+      while(n&&!n.classList.contains("cmpgroup")){if(!n.hidden)any=true;n=n.nextElementSibling}
+      g.hidden=!any;
+    }
+    for(const nr of box.querySelectorAll(".cmptable tr.cmpnote")){
+      const owner=nr.previousElementSibling;nr.hidden=!!(owner&&owner.hidden);
+    }
+    restripe();
+  });
+  for(const b of key.querySelectorAll("button[data-v]")){
+    const v=b.dataset.v;if(!v)continue;
+    const n=box.querySelectorAll('.cmptable tr[data-v="'+v+'"]').length;
+    b.insertAdjacentText("beforeend"," ("+n+")");
+  }
+}
+
+const KINDS=[["record","The record"],["spec","Specifications"],["plan","Plans"],["guide","Guides"],
+             ["audit","Audits"],["review","Reviews"],["explainer","Explainers"]];
+function renderDocs(){
+  document.getElementById("docsCount").textContent=DOCS.length+" documents";
+  const list=document.getElementById("docsList");
+  for(const [kind,title] of KINDS){
+    const of=DOCS.filter(d=>d.kind===kind);if(!of.length)continue;
+    const h=document.createElement("h3");h.textContent=title+" · "+of.length;
+    const dl=document.createElement("dl");
+    for(const d of of){
+      const dt=document.createElement("dt");dt.textContent=d.file;
+      const dd=document.createElement("dd");dd.textContent=d.what;
+      dl.append(dt,dd);
+    }
+    list.append(h,dl);
+  }
+}
+
+function goTo(id){
+  if(document.body.classList.contains("filtered"))showOnly("needs");
+  if(document.body.classList.contains("onlyblocked"))showOnly("blocked");
+  const tr=document.getElementById("row-"+id);
+  if(!tr)return;
+  if(workSel.value){workSel.value="";byWork()}
+  tab(tr.classList.contains("future")?"future":"now");
+  const b=tr.querySelector(".tg");
+  closeOpen();
+  if(b)b.click();
+  tr.scrollIntoView({block:"start",behavior:"smooth"});
+}
+function rowLink(id,label){
+  const a=document.createElement("a");a.href="#row-"+id;a.textContent=label;a.title=id;
+  a.addEventListener("click",ev=>{ev.preventDefault();ev.stopPropagation();goTo(id)});
+  return a;
+}
+function renderSummary(sum){
+  const text=document.getElementById("sumText");
+  text.textContent="";
+  if(sum.date){const b=document.createElement("b");b.textContent=sum.date+". ";text.appendChild(b)}
+  // `[[row-id]]` in the text is a link to that row, shown by its name.
+  const names=Object.fromEntries(ITEMS.filter(i=>i.id).map(i=>[i.id,i.name]));
+  (sum.text||"").split(/\[\[([^\]]+)\]\]/).forEach((piece,n)=>{
+    if(n%2===0)return text.appendChild(document.createTextNode(piece));
+    if(!names[piece])return text.appendChild(document.createTextNode(piece));
+    text.appendChild(rowLink(piece,names[piece]));
+  });
+  const tiles=document.getElementById("tiles");
+  const all=[[String(needsCount),"Needs you",needsCount?"warn":"ok"],
+             [String(blockedCount),"Blocked",blockedCount?"stop":"ok"],...(sum.tiles||[])];
+  for(const [n,k,cls] of all){
+    const d=document.createElement("div");d.className="stat";
+    const a=document.createElement("span");a.className="n "+(cls||"");a.textContent=n;
+    const b=document.createElement("span");b.className="k";b.textContent=k;
+    d.append(a,b);tiles.appendChild(d);
+  }
+  const look=document.getElementById("look");
+  const byId=Object.fromEntries(ITEMS.filter(i=>i.id).map(i=>[i.id,i]));
+  for(const l of sum.look||[]){
+    const it=byId[l.id];if(!it)continue;
+    const li=document.createElement("li");
+    const a=rowLink(l.id,it.name);
+    const pill=document.createElement("span");pill.className="pill "+it.status[0];pill.textContent=it.status[1];
+    const w=document.createElement("span");w.className="why";w.textContent=l.why||"";
+    li.append(pill,a,w);look.appendChild(li);
+  }
+}
+
+// Two filters, one at a time: pressing one releases the other.
+const needsBtn=document.getElementById("needsMe");
+const blockedBtn=document.getElementById("blockedBtn");
+function showOnly(which){
+  closeOpen();
+  const needs=which==="needs"&&!document.body.classList.contains("filtered");
+  const blocked=which==="blocked"&&!document.body.classList.contains("onlyblocked");
+  document.body.classList.toggle("filtered",needs);
+  document.body.classList.toggle("onlyblocked",blocked);
+  needsBtn.setAttribute("aria-pressed",needs?"true":"false");
+  blockedBtn.setAttribute("aria-pressed",blocked?"true":"false");
+  needsBtn.textContent=needs?"Showing "+needsCount+" · show all":"Needs me ("+needsCount+")";
+  blockedBtn.textContent=blocked?"Showing "+blockedCount+" · show all":"Blocked ("+blockedCount+")";
+}
+needsBtn.addEventListener("click",ev=>{ev.stopPropagation();showOnly("needs")});
+blockedBtn.addEventListener("click",ev=>{ev.stopPropagation();showOnly("blocked")});
+
+// click away closes; clicks inside the open panel do not
+document.addEventListener("click",ev=>{
+  if(!openPanel)return;
+  if(openPanel.row.contains(ev.target))return;
+  closeOpen();
+});
+document.addEventListener("keydown",ev=>{ if(ev.key==="Escape") closeOpen(); });
+
+document.getElementById("expandAnswers").addEventListener("click",ev=>{
+  ev.stopPropagation();
+  closeOpen();
+  // The first item that can be answered and has not been, by you here or
+  // on the record.
+  const first=ITEMS.find(i=>i.id&&!answered(i)&&!(i.decided||"").trim()
+                           &&((i.asks||[]).length||(i.suggest&&i.suggest.trim())));
+  if(!first)return setStatus("everything is answered","saved");
+  const b=[...document.querySelectorAll(".tg")].find(x=>x.dataset.item===first.id);
+  if(!b)return;
+  tab(first.future?"future":"now");
+  b.click();
+  b.closest("tr").scrollIntoView({block:"start",behavior:"smooth"});
+  const t=openPanel&&(openPanel.row.querySelector(".asks li:not(.done) textarea")
+                      ||openPanel.row.querySelector("textarea"));
+  if(t)t.focus({preventScroll:true});
+});
+
+// ⌘S has nothing left to do except send what is still waiting, which is
+// worth keeping so the habit does not open the browser's own save dialog.
+window.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="s"){e.preventDefault();flush()}
+});
+window.addEventListener("pagehide",flush);
+
+function stopped(){
+  const tr=document.createElement("tr"),td=document.createElement("td");
+  td.colSpan=4;td.style.padding="28px 14px";
+  td.innerHTML="<b>The board is not running.</b> Start it with "
+    +"<code>~/scripts/board</code> and open "
+    +"<code>http://127.0.0.1:8737</code>.";
+  tr.appendChild(td);tbody.appendChild(tr);
+  needsBtn.disabled=true;setStatus("no rows loaded","dirty");
+}
+
+(async()=>{
+  try{
+    if(location.protocol==="file:")throw new Error("opened as a file");
+    const r=await fetch("/api/board");
+    if(!r.ok)throw new Error(r.status);
+    const got=await r.json();ITEMS=got.items;SUMMARY=got.summary||{};DOCS=got.docs||[];
+    try{const mr=await fetch("/api/marks",{cache:"no-store"});if(mr.ok)MARKS=await mr.json()}catch(e){}
+  }catch(e){return stopped()}
+  render();
+  needsBtn.textContent=needsCount?"Needs me ("+needsCount+")":"Nothing needs you";
+  needsBtn.disabled=needsCount===0;
+  blockedBtn.textContent=blockedCount?"Blocked ("+blockedCount+")":"Nothing blocked";
+  blockedBtn.disabled=blockedCount===0;
+  renderSummary(SUMMARY);
+  renderDocs();
+  workOptions();
+  document.getElementById("tabNow").textContent="Now ("+(ITEMS.filter(i=>i.id).length-futureCount)+")";
+  document.getElementById("tabFuture").textContent="Future ("+futureCount+")";
+  updateProgress();
+  setStatus("up to date");
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+# 10 Writes: set and del
+#
+# Shows the two write verbs. The MODE is derived from the statement and
+# printed by `ordo check`; it is never spelled.
+#   - `set e { f: v }`                create (no condition, no identity)
+#   - `set e(id == $id) { f: v }`     converge one named row
+#   - `set e { id: $id, rev: $r, ...}` compare-and-set: `cas_miss` if the
+#                                     row is no longer at version r
+#   - `set e { sku: $s, ... }`        converge-or-create on a unique key
+#                                     (idempotent import, one call per record)
+#   - `rev: null`                     create-once: `expected_absent` if it exists
+#   - `set e(cond) { f: v }`          bulk converge over many rows
+#   - `del e { id: $id }`             remove one row (owned rows go with it)
+#   - `del e(cond)`                   bulk remove. Bare `del e` does not parse.
+#   - `del e(true)`                   delete everything, said on purpose
+#   - A creating statement must cover every required field (insert_incomplete).
+#   - A ranged write may not assign `id` or a unique field.
+#
+# Reference: docs/definition-language.md section 6, docs/writing-data.md.
+
+domain shop @ 1.0.0
+
+entity products {
+  sku:    text unique
+  name:   text
+  price:  money
+  stock:  int = 0
+  active: bool = true
+}
+
+entity reviews {
+  product -> products owned
+  stars:   int
+  body:    text = ""
+}
+
+# A create: no condition, no identity, and no unique field covered.
+# (`products` has a unique `sku`, so a statement that names it is a
+# converge-or-create. `reviews` has none.)
+op addReview($product: id, $stars: int, $body: text) =
+  set reviews { product: $product, stars: $stars, body: $body }
+
+op renameProduct($product: id, $name: text) =
+  set products(id == $product) { name: $name }
+
+# Compare-and-set: the caller read version $rev and says so.
+op repriceIf($product: id, $rev: int, $price: money) =
+  set products { id: $product, rev: $rev, price: $price }
+
+# Converge-or-create on the unique key `sku`. Calling it twice is safe.
+op importProduct($sku: text, $name: text, $price: money) =
+  set products { sku: $sku, name: $name, price: $price }
+
+# Create-once: a second call with the same sku is refused, not merged.
+op importOnce($sku: text, $name: text, $price: money) =
+  set products { sku: $sku, name: $name, price: $price, rev: null }
+
+# Bulk converge: every active product under the floor is retired.
+# The braces carry no identity or unique field.
+op retireCheap($floor: money) =
+  set products(active and price < $floor) { active: false }
+
+op removeProduct($product: id) =
+  del products { id: $product }
+
+op purgeRetired =
+  del products(active == false)
+
+# Delete-everything has to be spelled out.
+op wipeCatalogue =
+  del products(true)
+
+# Several statements are one atomic group: both land or neither does.
+op swapSku($a: id, $b: id, $skuA: text, $skuB: text, $tmp: text) =
+  set products { id: $a, sku: $tmp }
+  set products { id: $b, sku: $skuB }
+  set products { id: $a, sku: $skuA }

@@ -1,0 +1,11 @@
+entity maintenanceRequests {                 # tenant portal: anyone with the
+  unit ->  units                             #   link may file one
+  descr:   text
+  filed:   date
+
+  access read   unit.property.propertiesAccess(member == $caller)
+  access write  open                         # explicit, greppable, in the diff
+}
+# the word is `open`. `access write true` does NOT parse. The boolean literal
+# is not a guard, and a position that accepted it could not tell a decision to
+# open from an expression that is true today

@@ -1,0 +1,11 @@
+routine securityWatch in estate {                # LISTENER-woken: the run is
+  trigger when estate.events.created             #   bounded to the new events
+  run($today: date) unguarded:                   # a create-by-key row is not
+    events(kind == "motion" and device.armed == true)   # reachable from the new
+      [id, at, deviceId: device.id, device.location.name]   # events, so say so
+    each ->
+      set alerts { kind: "security", key: "motion:" + deviceId,
+                   severity: "critical", status: "active", raised: $today,
+                   title: "Motion at " + name }
+}
+# the condition a trigger is too blind to hold is the rule's first line

@@ -1,0 +1,6 @@
+entity inspections {
+  unit -> units
+  workOrder -> workOrders
+  at: date
+  check workOrder.location.property == unit.property
+}

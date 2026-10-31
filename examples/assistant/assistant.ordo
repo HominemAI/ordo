@@ -1,0 +1,69 @@
+# Expense approval, with an assistant who acts for the manager.
+#
+# One tenant. Staff submit expenses to a manager. The manager approves or
+# rejects them. A delegation grant lets an assistant do part of that work in
+# the manager's name.
+#
+# Who may do what:
+#   - The guard on `expenses`: a person reads and writes the expenses they
+#     submitted, and the expenses submitted to them. Under a delegation,
+#     `$caller` is the manager, so the assistant sees the manager's rows and
+#     no others.
+#   - The verbs are separate ops. `approveSmallExpense` is the only decision
+#     op the assistant's grant lists, and its body refuses an amount over
+#     100.00. The program cannot read `$agent`, so the limit is a property of
+#     the op, not of who calls it.
+#   - `approveExpense` (any amount) and `rejectExpense` are left out of the
+#     grant, so the door refuses the assistant there.
+
+domain assistant @ 0.1.0
+
+entity expenses {
+  submitter -> members
+  manager   -> members
+  amount:    money(2)
+  title:     text
+  status:    text = "pending"
+  note:      text = ""
+  decidedBy -> members?
+  decidedVia: text = ""
+  added:     datetime
+  check amount > 0
+  check status == "pending" or status == "approved" or status == "rejected"
+  access read   submitter == $caller or manager == $caller
+  access write  submitter == $caller or manager == $caller
+}
+
+op me =
+  members(id == $caller)[id, displayName, role]
+
+# Staff send an expense to their manager.
+op submitExpense($manager: id, $amount: money(2), $title: text, $added: datetime filled) =
+  set expenses { submitter: $caller, manager: $manager, amount: $amount, title: $title, added: $added }
+
+# What waits for the caller to decide.
+op pendingExpenses unbounded =
+  expenses(manager == $caller and status == "pending")[id, rev, amount, title, added, submitter: submitter.displayName]
+  sort added
+
+# The caller's own submissions.
+op myExpenses unbounded =
+  expenses(submitter == $caller)[id, amount, title, status, note]
+  sort -added
+
+# Any amount. The manager's own op, not in the assistant's grant.
+op approveExpense($expense: id, $note: text = "") =
+  set expenses(id == $expense and manager == $caller and status == "pending") { status: "approved", decidedBy: $caller, decidedVia: "approveExpense", note: $note }
+
+# Only up to 100.00. The assistant's grant lists this op and no other write.
+op approveSmallExpense($expense: id, $note: text = "") =
+  set expenses(id == $expense and manager == $caller and status == "pending" and amount <= 100.00) { status: "approved", decidedBy: $caller, decidedVia: "approveSmallExpense", note: $note }
+
+op rejectExpense($expense: id, $note: text = "") =
+  set expenses(id == $expense and manager == $caller and status == "pending") { status: "rejected", decidedBy: $caller, decidedVia: "rejectExpense", note: $note }
+
+# Who decided what, and through which op. The command log also names the
+# agent behind a delegated write: `agent:<assistant> on behalf of user:<manager>`.
+op history unbounded =
+  expenses(status != "pending")[id, amount, title, status, note, decidedVia, manager: manager.displayName, decidedBy: decidedBy.displayName]
+  sort -added

@@ -1,0 +1,32 @@
+[package]
+name = "ordo-identity"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+argon2 = "0.5"
+async-trait = "0.1.92"
+base64 = "0.22"
+ed25519-dalek = "2"
+ordo-fault = { path = "../ordo-fault" }
+ordo-env = { path = "../ordo-env" }
+# The seal behind `sealing.rs`, the key file the console and the identity
+# service share (`plan-identity-service.md` 2.1).
+ordo-crypto = { path = "../ordo-crypto" }
+getrandom = "0.2"
+p256 = "0.13"
+ring = "0.17"
+serde = "1"
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+
+[features]
+# The software authenticator (`software_authenticator.rs`): a real key that
+# signs real assertions, for tests in other crates. Never enabled by a
+# deployment's build: `ordo-host` turns it on in `[dev-dependencies]` only.
+test-support = []
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+# Concept: sealed fields and custody
+#
+# `sealed` fields are encrypted before they reach the database.
+#   - Each tenant has a master-wrapped key, and the data key has numbered
+#     epochs. A sealed value carries the epoch it was written under.
+#   - `ordo keys init` mints a tenant's custody. `ordo keys rotate` mints the
+#     next epoch and a worker re-seals old rows. `ordo keys destroy` retires an
+#     old epoch for good.
+#   - The command log never holds a sealed value, only an opaque handle.
+#   - Blind-index keys come from the tenant master key, not the epoch, so a
+#     rotation never moves a digest and `unique` stays true.
+#   - Deleting a tenant destroys its key (crypto-erasure).
+#
+# Read next: docs/howto-custody.md, docs/glossary.md "DEK epoch / rotation".
+
+domain clinic @ 1.0.0
+
+entity patients {
+  ward:      text
+  admitted:  date
+  name:      text   sealed                              # encrypted
+  email:     text?  sealed indexed unique normalize(lower)
+  diagnosis: text   sealed
+}
+
+# Create or update a patient by email. The key is the blind index digest.
+op upsertPatient($ward: text, $admitted: date, $name: text, $email: text, $diagnosis: text) =
+  set patients { email: $email, ward: $ward, admitted: $admitted, name: $name, diagnosis: $diagnosis }
+
+# Lookup by email uses the blind index: SQL speed, no key in the database.
+op wardOf($email: text) =
+  patients(email == $email)[ward, admitted]
+
+# Projecting sealed fields opens them host-side, one row at a time.
+op recentPatients =
+  patients[name, diagnosis, admitted]
+  sort -admitted
+  take 10

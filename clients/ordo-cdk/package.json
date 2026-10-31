@@ -1,0 +1,46 @@
+{
+  "name": "@hominemai/ordo-cdk",
+  "version": "0.1.0",
+  "description": "The typed TypeScript builder for Ordo: define in code, synthesize canonical .ordo.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HominemAI/ordo.git",
+    "directory": "clients/ordo-cdk"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "check": "npm run typecheck && npm run test",
+    "gen:corpus": "ORDO_UPDATE_GOLDEN=1 vitest run test/corpus.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^6.4.4",
+    "vitest": "^4.1.11",
+    "@types/node": "^22.10.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,44 @@
+# Notes owned by their author, shared read-only one note at a time.
+# `acl` derives the link entity `notesAccess`, the guards on `notes`,
+# `grantNotesAccess` and `revokeNotesAccess`, and the creator's admin
+# row in the same command group as the create.
+#
+# `deleteNote` is a plain `del`. A note owns its access rows, so they go with
+# it (owner ruling 2026-09-29, `owned-delete`).
+#
+# `tags` is a JSON array of words, `["work", "ideas"]`. `notesTagged` asks
+# the array for one word with `contains`, inside the document.
+
+domain notes @ 0.1.0
+
+entity notes {
+  title: text
+  body:  text = ""
+  tags:  json = []
+  created: datetime
+  acl (read, write, admin)
+}
+
+op createNote($title: text, $body: text, $tags: json, $created: datetime) =
+  set notes { title: $title, body: $body, tags: $tags, created: $created }
+
+op editNote($id: id, $rev: int, $title: text, $body: text, $tags: json) =
+  set notes { id: $id, rev: $rev, title: $title, body: $body, tags: $tags }
+
+op deleteNote($id: id) =
+  del notes { id: $id }
+
+# Take one note back from one guest. `revokeNotesAccess` is the derived form;
+# this one names the note and the guest and so needs no access row id.
+op unshareNote($note: id, $member: id) =
+  del notesAccess(note == $note and member == $member)
+
+op myNotes unbounded =
+  notes[id, rev, title, body, tags, created]
+  sort -created
+
+# The notes that carry one tag. `contains` on a JSON array matches an
+# element equal to `$tag`.
+op notesTagged($tag: text) unbounded =
+  notes(tags contains $tag)[id, rev, title, body, tags, created]
+  sort -created

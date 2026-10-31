@@ -1,0 +1,18 @@
+[package]
+name = "ordo-conformance"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+ordo-syntax = { path = "../ordo-syntax" }
+ordo-schema = { path = "../ordo-schema" }
+ordo-sema = { path = "../ordo-sema" }
+ordo-plan = { path = "../ordo-plan" }
+ordo-commandlog = { path = "../ordo-commandlog" }
+ordo-crypto = { path = "../ordo-crypto" }
+serde_json = "1"
+unicode-normalization = "0.1.25"
+
+[lints]
+workspace = true

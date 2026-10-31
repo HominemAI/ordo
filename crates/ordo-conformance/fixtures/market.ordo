@@ -1,0 +1,381 @@
+# The `market` fixture of docs/composition-conformance.md — §2.1 schema and
+# §2.3 callee library, transcribed verbatim. This file is the single source
+# of truth for the harness: the DDL, the op registry and every plan are
+# derived from it by the compiler, never hand-written alongside it.
+
+domain market @ 1.1.0
+
+entity vendors {
+  name:   text
+  region: text
+  active: bool = true
+}
+
+entity categories (key: cat) {
+  name:   text unique
+  parent -> categories?  tree
+}
+
+entity products {
+  vendor   -> vendors
+  category -> categories
+  name:   text
+  price:  money
+  active: bool = true
+}
+
+entity customers {
+  name:  text
+  email: text?  sealed indexed unique normalize(lower)
+  tier:  text = "basic"
+}
+
+entity orders (key: ord) {
+  customer -> customers
+  placed: date
+  status: text = "open"
+  total:  money
+  memo:   text = ""   sealed
+}
+
+entity orderItems (key: item) {
+  order   -> orders   owned
+  product -> products
+  qty:    int
+  amount: money
+}
+
+op activeProducts unbounded =
+  products(active == true)[name, price, vendor, category]
+
+op cheapActive($cap: money) unbounded =
+  activeProducts(price < $cap)[name, price, category]
+
+op toolDeals($cap: money, $root: id) unbounded =
+  cheapActive($cap: $cap, category under $root)[name, price]
+  sort price
+
+op recentOrders($since: date = 2026-03-01) unbounded =
+  orders(placed >= $since)[placed, status, total]
+  sort placed
+
+op doneOrders($from: date) unbounded =
+  orders(status == "done" and placed >= $from)[placed, total, customer]
+
+op spendByCustomer($from: date) unbounded =
+  doneOrders($from: $from)[total, customer]
+  group customer { spent: sum total, n: count }
+
+op monthlyRevenue($from: date) unbounded =
+  doneOrders($from: $from)[placed, total]
+  group month(placed) { revenue: sum total }
+
+op productRevenue unbounded =
+  orderItems[amount, product]
+  group product { sold: count, revenue: sum amount }
+
+op top3Orders =
+  orders[placed, total, customer]
+  sort -total
+  take 3
+
+op catInfo unbounded =
+  categories[name, parent, depth]
+
+op customerByEmail($e: text) =
+  customers(email == $e)[name, tier]
+
+op giftOrders unbounded =
+  orders(memo == "gift")[placed, total, customer]
+
+# Host-class reads: projecting a sealed field opens it host-side, which is
+# work per row the database hands over. A `take` bounds that work, and so
+# does the page a listing is served as (DL §5 "Cost classes"; ruling
+# 2026-09-05, keyset paging is a row bound): both are `bounded-host`.
+# `orderMemos` keeps the word because the composition tests need an
+# acknowledged callee, not because the gate demands it.
+op memoDigest =
+  orders[placed, memo]
+  sort placed
+  take 3
+
+op orderMemos unbounded =
+  orders[placed, total, memo]
+
+
+# ── guards-conformance.md §3.1: the guard clusters ──────────────────────
+# Write ops (Stage 5). Modes are derived, never spelled: no condition is a
+# create, `id ==` is addressed, anything else ranges (bulk). Guards become
+# preconditions: outside the READ view is `not_found` (G12), inside it but
+# outside the write guard is `access_guard` (G10); creates prove the guard
+# against the would-be row unless every caller-path must run through rows
+# referencing the new one (G10a) — then the acl bootstrap answers instead.
+
+entity projects {
+  name:  text
+  owner -> members
+  access read   owner == $caller or projectMembers(member == $caller)
+  access write  owner == $caller
+}
+
+entity projectMembers {
+  project -> projects  owned
+  member  -> members   owned
+  canWrite: bool = false
+  access read   project.projectMembers(member == $caller)
+  access write  project.owner == $caller
+}
+
+entity tasks (key: task) {
+  project  -> projects  owned
+  assignee -> members?
+  title:  text
+  status: text = "open"
+  access read   project.projectMembers(member == $caller)
+  access write  project.projectMembers(member == $caller and canWrite)
+}
+
+entity taskNotes (key: note) {
+  task -> tasks  owned
+  body: text
+}
+
+entity boards (key: board) {
+  name: text
+  acl (read, write, admin)
+}
+
+entity cards (key: card) {
+  board -> boards  owned
+  title: text
+  done:  bool = false
+}
+
+# A GUARDED tree. `categories` is a tree nobody guards, so it can show what
+# `del … subtree` does but never who may do it — and `del … subtree`
+# evaluates guards over the whole subtree, not the anchor alone. Rows here
+# can differ in writability at different depths, which is the only shape
+# that can tell an all-or-nothing cascade from a partial one.
+entity folders (key: fold) {
+  owner -> members
+  name:  text
+  parent -> folders?  tree
+  access read   open
+  access write  owner == $caller
+}
+
+op myProjects unbounded =
+  projects[name, owner]
+  sort name
+
+op taskBoard unbounded =
+  tasks[title, status, project]
+  sort title
+
+op openTasks unbounded =
+  tasks(status == "open")[title, project]
+  sort title
+
+op myAssignedTasks unbounded =
+  tasks(assignee == $caller)[title]
+  sort title
+
+op noteFeed unbounded =
+  taskNotes[body, task]
+  sort body
+
+op teamRoster unbounded =
+  projectMembers[project, member, canWrite]
+
+op allTasks unbounded unguarded =
+  tasks[title, status]
+  sort title
+
+op boardList unbounded =
+  boards[name]
+  sort name
+
+op cardList unbounded =
+  cards[title, done, board]
+  sort title
+
+op firstTask =
+  tasks[title]
+  sort title
+  take 1
+
+op specTasks unbounded =
+  openTasks(title contains "spec")[title]
+
+op specCount =
+  specTasks[title]
+  reduce { n: count }
+
+op addTask($project: id, $title: text) =
+  set tasks { project: $project, title: $title }
+
+op claimTask($task: id) =
+  set tasks(id == $task) { assignee: $caller }
+
+op renameTask($task: id, $title: text) =
+  set tasks(id == $task) { title: $title }
+
+op closeTask($task: id) =
+  set tasks(id == $task) { status: "done" }
+
+op purgeDone($project: id) =
+  del tasks(project == $project and status == "done")
+
+op addNote($task: id, $body: text) =
+  set taskNotes { task: $task, body: $body }
+
+op addBoard($name: text) =
+  set boards { name: $name }
+
+op addCard($board: id, $title: text) =
+  set cards { board: $board, title: $title }
+
+op finishCard($card: id) =
+  set cards(id == $card) { done: true }
+
+# F4: sealed writes — the envelope and the blind index are the write
+# path's to maintain; a read opens the plaintext host-side (27ao).
+op addCustomer($name: text, $email: text) =
+  set customers { name: $name, email: $email }
+
+# 8l — the reserved null sentinel. `email` is `sealed indexed unique`, so
+# a null does NOT write SQL NULL into `email$bidx`: it HMACs the reserved
+# sentinel. That is what makes all three of these true at once — a second
+# anonymous customer collides on the unique constraint (DL: a nullable
+# unique field admits at most one null row), clearing an email MOVES the
+# digest rather than erasing it, and `email == null` reaches the digest
+# column instead of comparing a digest against SQL NULL and matching
+# nothing forever.
+op addAnonCustomer($name: text) =
+  set customers { name: $name }
+
+op clearCustomerEmail($c: id) =
+  set customers(id == $c) { email: null }
+
+op anonCustomers =
+  customers(email == null)[name]
+
+# Reparenting ops — the shape the guard sweep escalated with. A write
+# guard proven only against the pre-image would let these walk a row into
+# a parent the caller does not control.
+op movePM($pm: id, $p: id) =
+  set projectMembers(id == $pm) { project: $p }
+
+op moveBA($ba: id, $b: id) =
+  set boardsAccess(id == $ba) { board: $b }
+
+# `rev` states a belief about the addressed row (§6 rule 9): converge if
+# the row is still the version the caller read, `cas_miss` otherwise.
+op renameTaskIf($task: id, $title: text, $rev: int) =
+  set tasks(id == $task) { title: $title, rev: $rev }
+
+op reassign($task: id, $who: id) =
+  set tasks(id == $task) { assignee: $who }
+
+# Tree writes: the platform maintains `$path` and `depth`, rejects cycles,
+# caps depth, and refuses to delete a node with children.
+op addCategory($name: text, $parent: id) =
+  set categories { name: $name, parent: $parent }
+
+op addRootCategory($name: text) =
+  set categories { name: $name }
+
+op moveCategory($cat: id, $parent: id) =
+  set categories(id == $cat) { parent: $parent }
+
+op dropCategory($cat: id) =
+  del categories(id == $cat)
+
+op setMemo($order: id, $memo: text) =
+  set orders(id == $order) { memo: $memo }
+
+# Deletes state their target (rule 5): the addressed brace form, the
+# explicit subtree cascade (rule 6), and delete-everything spelled out. A
+# bare `del <entity>` is not among them — it does not parse.
+op dropFolder($f: id) =
+  del folders { id: $f }
+
+op dropFolderTree($f: id) =
+  del folders { id: $f } subtree
+
+op dropCategoryTree($cat: id) =
+  del categories { id: $cat } subtree
+
+op purgeNotes =
+  del taskNotes(true)
+
+# ── §6 rules 8 and 9: identity precedence and the blessed upsert ────────
+# Two entities the write-rule tests own. `ledgerEntries` is the ingestion
+# shape the rule is written for — one statement per record, addressed by a
+# declared external id — and it is deliberately unguarded, so the tests
+# assert about identity rather than about authorization. `coupons` exists
+# only to be REFUSED: two unique keys means any statement covering both
+# claims two identities, and the platform must not pick one.
+
+entity ledgerEntries (key: led) {
+  externalId: text unique
+  owner  -> members
+  amount: money
+  note:   text = ""
+  # Read and write differ on purpose: a shared line is visible to the
+  # whole space and writable only by its owner, so a converge-or-create
+  # landing on someone else's row has BOTH answers to give — the write
+  # guard's (`access_guard`, on a row you can see) and the read guard's
+  # (`duplicate`, on a row you cannot).
+  access read   owner == $caller or note == "shared"
+  access write  owner == $caller
+}
+
+entity coupons {
+  code:  text unique
+  slug:  text unique
+  value: money
+}
+
+op entryList unbounded =
+  ledgerEntries[externalId, amount, note, owner]
+  sort externalId
+
+# Converge-or-create: idempotent ingestion, one statement per record.
+op recordEntry($ext: text, $amount: money, $note: text = "") =
+  set ledgerEntries { externalId: $ext, owner: $caller, amount: $amount, note: $note }
+
+# The same upsert, naming an owner: the create branch's guard is the one
+# that decides, and it decides against the would-be row's values.
+op recordEntryFor($ext: text, $owner: id, $amount: money) =
+  set ledgerEntries { externalId: $ext, owner: $owner, amount: $amount }
+
+# `rev: null` — create-once. The mode label is `creates`, not
+# `creates-or-converges`: this statement cannot converge.
+op recordEntryOnce($ext: text, $amount: money) =
+  set ledgerEntries { externalId: $ext, owner: $caller, amount: $amount, rev: null }
+
+# `rev: $r` on a KEYED write: converge only if the row is still version r.
+# `note` is deliberately absent — a converge touches only what it
+# describes (rule 10).
+op reviseEntry($ext: text, $amount: money, $rev: int) =
+  set ledgerEntries { externalId: $ext, owner: $caller, amount: $amount, rev: $rev }
+
+# Rule 8's first clause: `id` in the braces addresses, and `externalId` —
+# a unique field — is carried as an ordinary value.
+op renumberEntry($entry: id, $ext: text) =
+  set ledgerEntries { id: $entry, externalId: $ext }
+
+# Refused at compile time: an id is obtainable only from a row that
+# existed, so asserting its absence contradicts itself (rule 9).
+op renumberEntryOnce($entry: id, $ext: text) =
+  set ledgerEntries { id: $entry, externalId: $ext, rev: null }
+
+# Refused at compile time: `code` and `slug` are both unique keys.
+op claimCoupon($code: text, $slug: text, $value: money) =
+  set coupons { code: $code, slug: $slug, value: $value }
+
+# The sealed-key upsert: `customers.email` addresses through its blind
+# index, so `normalize(lower)` decides what "the same row" means.
+op upsertCustomer($name: text, $email: text, $tier: text = "basic") =
+  set customers { email: $email, name: $name, tier: $tier }

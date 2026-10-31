@@ -1,0 +1,6 @@
+op assignProperty($property: id, $rev: int, $name: text, $manager: id) =
+  set properties       { id: $property, rev: $rev, name: $name }
+  set propertiesAccess { propertie: $property, member: $manager, level: "write" }
+# one op = ONE atomic command group. `propertiesAccess`'s own derived write
+# guard applies to the second statement in the ordinary way: the caller holds
+# `admin` on that property, or is the space owner (checked at the door).

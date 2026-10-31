@@ -1,0 +1,352 @@
+{
+  "_README": [
+    "Blind-validation ledger. A mechanical want COUNTS only once at least one",
+    "author who never saw its expected values (nor anyone else's queries) has",
+    "satisfied it from its wording alone \u2014 the wants.rs guard enforces this,",
+    "so an unvalidated want fails the build rather than silently counting.",
+    "Relations are computed from other wants and are exempt. Judged wants have",
+    "no mechanical expectation to validate.",
+    "Run a validation with: examples/blind_report.rs against an answers file",
+    "produced by an isolated author given the redacted wants (id, probes,",
+    "intent, columns, order_matters \u2014 never rows/n)."
+  ],
+  "validated": {
+    "W001": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W002": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W003": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W005": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W006": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W008": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W009": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W010": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W011": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W013": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W014": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W015": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W018": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W019": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W020": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W023": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W025": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W026": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W027": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W028": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W030": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W031": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W033": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W034": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W038": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W039": [
+      {
+        "author": "blind-A",
+        "date": "2026-08-10"
+      },
+      {
+        "author": "blind-B",
+        "date": "2026-08-10"
+      }
+    ],
+    "W048": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W049": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W050": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W051": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W052": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W053": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W054": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W055": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W056": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W057": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ],
+    "W058": [
+      {
+        "author": "blind-C",
+        "date": "2026-08-10",
+        "round": "rewritten wants only"
+      }
+    ]
+  }
+}

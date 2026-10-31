@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where data that is not one tenant's lives</title>
+<style>
+:root{
+  --ink:#14161a; --paper:#fbfaf7; --panel:#ffffff; --line:#e3ded4; --mut:#7a756b;
+  --code-bg:#f1ede4;
+  --plat:#2e4f8a; --plat-bg:#e8edf6; --plat-bd:#c2cfe6;
+  --ten:#2e7d5b;  --ten-bg:#e6f2ec;  --ten-bd:#bcdccd;
+  --ctl:#b07a2a;  --ctl-bg:#f7ecd9;  --ctl-bd:#e8d3ab;
+  --gap:#a23b3b;  --gap-bg:#f8e9e7;  --gap-bd:#e6bdb7;
+  --open:#8a5fb0; --open-bg:#efe7f6; --open-bd:#d8c5ea;
+  --dim:#9d998e; --dimbg:#f4f3ef; --dimbd:#d8d3c8;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+:root{
+  --ink:#e8e5df; --paper:#15171a; --panel:#1d2024; --line:#33373d; --mut:#9a958c;
+  --code-bg:#24282d;
+  --plat:#9db8e8; --plat-bg:#1e2735; --plat-bd:#35486a;
+  --ten:#7fceab;  --ten-bg:#1a2a23;  --ten-bd:#2f5744;
+  --ctl:#dcb471;  --ctl-bg:#2c2618;  --ctl-bd:#5a4a29;
+  --gap:#e79490;  --gap-bg:#2e1f1e;  --gap-bd:#5f3936;
+  --open:#c3a2e0; --open-bg:#272033; --open-bd:#4c3c63;
+  --dim:#7d7970; --dimbg:#212327; --dimbd:#3a3e44;
+}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:920px;margin:0 auto;padding:48px 24px 90px}
+h1{font-size:clamp(26px,4.5vw,38px);line-height:1.15;margin:0 0 8px;letter-spacing:-.01em;text-wrap:balance}
+.sub{color:var(--mut);margin:0 0 34px;max-width:66ch}
+h2{font-size:21px;margin:48px 0 10px;letter-spacing:-.01em}
+h3{font-size:16px;margin:26px 0 8px}
+p{max-width:70ch;margin:0 0 14px}
+li{max-width:68ch;margin-bottom:5px}
+code{font-family:var(--mono);font-size:.87em;background:var(--code-bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.6;max-width:74ch}
+pre code{background:none;border:0;padding:0;font-size:inherit}
+.tag{font-family:var(--mono);font-weight:600;border-radius:5px;padding:1px 8px;font-size:.82em;white-space:nowrap}
+.t-built{color:var(--ten);background:var(--ten-bg);border:1px solid var(--ten-bd)}
+.t-unbuilt{color:var(--gap);background:var(--gap-bg);border:1px solid var(--gap-bd)}
+.t-prop{color:var(--open);background:var(--open-bg);border:1px solid var(--open-bd)}
+figure{margin:24px 0;border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:16px;overflow-x:auto}
+figcaption{font-size:13px;color:var(--mut);margin-top:10px;max-width:78ch}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--mut);margin:10px 0 28px;align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:18px 0}
+.card{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:16px 18px}
+.card h4{margin:0 0 6px;font-size:15px}
+.card p{font-size:14.5px;color:var(--ink);opacity:.86;margin:0}
+.callout{border:1px solid var(--gap-bd);background:var(--gap-bg);border-radius:10px;padding:14px 18px;margin:18px 0;max-width:76ch}
+.callout.ok{border-color:var(--ten-bd);background:var(--ten-bg)}
+.callout.note{border-color:var(--plat-bd);background:var(--plat-bg)}
+.callout.prop{border-color:var(--open-bd);background:var(--open-bg)}
+.callout > b:first-child{display:block;margin-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:16px 0}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.pull{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 20px;margin:24px 0;max-width:76ch}
+.pull b{display:block;margin-bottom:4px}
+.twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0}
+@media (max-width:620px){.twocol{grid-template-columns:1fr}}
+.col h4{margin:0 0 8px;font-size:14.5px;letter-spacing:.03em;text-transform:uppercase}
+.col ul{margin:0;padding-left:20px;font-size:14.5px}
+.foot{color:var(--mut);font-size:13.5px;margin-top:48px;border-top:1px solid var(--line);padding-top:18px}
+.openlist{border:1px solid var(--open-bd);background:var(--panel);border-radius:10px;padding:4px 20px 14px;margin:18px 0}
+.openlist h4{font-size:14.5px;margin:16px 0 4px}
+.openlist p{font-size:14.5px;margin:0 0 4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Where data that is not one tenant's lives</h1>
+<p class="sub">A working document, not a settled one. It follows the
+2026-09-12 rulings on the third home and the tenancy topology through the
+code, and reports where they hold, where they need amending, and where a
+rule exists in the language with nothing behind it. Every claim cites the
+file it was checked against.</p>
+
+<div class="legend">
+  <span><i style="background:var(--ctl-bg);border-color:var(--ctl-bd)"></i> control plane</span>
+  <span><i style="background:var(--plat-bg);border-color:var(--plat-bd)"></i> system space</span>
+  <span><i style="background:var(--ten-bg);border-color:var(--ten-bd)"></i> tenant space</span>
+  <span><i style="background:var(--gap-bg);border-color:var(--gap-bd)"></i> refused, or missing</span>
+  <span><i style="background:var(--open-bg);border-color:var(--open-bd)"></i> proposed here</span>
+</div>
+
+<h2>1 &middot; The three homes, and the test that separates them</h2>
+
+<p>Ordo names two places data can live and needs three. The <b>control
+plane</b> holds identity, authentication, access profiles, grants and share
+grants, plus the attachment tables and the job queue
+(<code>docs/plan-space-routing.md</code> §3). None of it is modelled as
+entities and none of it has a chain: <code>AccessEngine</code> is an
+in-process structure the door consults
+(<code>crates/ordo-identity/src/access.rs:644</code>), not a table a query can
+reach. <b>Tenant spaces</b> hold customer data, one chain each, guards
+compiled into every read. Between them sits content the platform itself
+authors and everybody reads: a tool catalogue, system agents, reference
+data. Today it has nowhere to be.</p>
+
+<p>The fill ruled on 2026-09-12 is a <b>system space</b>: an ordinary space,
+platform-owned, with a universal read window. It inherits a chain, guards,
+versioning, deploys and export with no new entity kind and no placement
+syntax, and its only distinguishing properties are that nobody erases it
+and everybody reads it.</p>
+
+<h3>The placement test is authorship</h3>
+<p>A third party is itself a tenant. What they publish belongs in their own
+space and is shared outward. The ruling's reason is attribution: a
+platform-owned space holding their listing would make the platform the
+author of record for something it did not write.</p>
+
+<div class="callout note">
+<b>The conclusion holds. The reason needs amending.</b>
+The chain would in fact attribute the row correctly. A third party writing
+into a platform space would do so as a guest, and the corpus pins that a
+guest is "attributed in the granting space's chain as themselves"
+(<code>definition-language.md</code>, Inter-space sharing). Bootstrap
+separately refuses any synthetic actor: the genesis group carries "no
+<code>unguarded</code> in it and no synthetic 'the platform did this' actor".
+So the row-level attribution is safe either way. What is <i>not</i> safe is
+everything that follows the <b>space</b> rather than the row: custody,
+jurisdiction, the data-encryption key, export and erasure are all per space
+and owner-gated. A third party whose listing lives in the platform's space
+cannot export it, cannot erase it, and holds no key over it. Authorship is
+the right test; custody is the stronger argument for it.
+</div>
+
+<figure>
+<svg viewBox="0 0 860 380" width="100%" role="img" aria-label="the three homes and the authorship test">
+  <defs>
+    <marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mut)"/></marker>
+  </defs>
+
+  <rect x="20" y="24" width="250" height="150" rx="10" fill="var(--ctl-bg)" stroke="var(--ctl-bd)"/>
+  <text x="145" y="50" text-anchor="middle" font-size="14" font-weight="700" fill="var(--ctl)">control plane</text>
+  <text x="145" y="72" text-anchor="middle" font-size="11.5" fill="var(--ctl)">identity, access profiles, grants</text>
+  <text x="145" y="90" text-anchor="middle" font-size="11.5" fill="var(--ctl)">share grants, $spacedb, $spacebucket</text>
+  <text x="145" y="108" text-anchor="middle" font-size="11.5" fill="var(--ctl)">$jobs, $schedules</text>
+  <rect x="44" y="120" width="202" height="38" rx="6" fill="var(--panel)" stroke="var(--ctl-bd)"/>
+  <text x="145" y="137" text-anchor="middle" font-size="11" fill="var(--ctl)">no chain, no guards,</text>
+  <text x="145" y="151" text-anchor="middle" font-size="11" fill="var(--ctl)">not queryable as entities</text>
+
+  <rect x="305" y="24" width="250" height="150" rx="10" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="430" y="50" text-anchor="middle" font-size="14" font-weight="700" fill="var(--plat)">system space</text>
+  <text x="430" y="72" text-anchor="middle" font-size="11.5" fill="var(--plat)">tool catalogue, system agents,</text>
+  <text x="430" y="90" text-anchor="middle" font-size="11.5" fill="var(--plat)">reference data</text>
+  <rect x="329" y="104" width="202" height="54" rx="6" fill="var(--panel)" stroke="var(--plat-bd)"/>
+  <text x="430" y="121" text-anchor="middle" font-size="11" fill="var(--plat)">an ordinary space: chain, guards,</text>
+  <text x="430" y="135" text-anchor="middle" font-size="11" fill="var(--plat)">deploys, export, universal read</text>
+  <text x="430" y="150" text-anchor="middle" font-size="11" fill="var(--plat)">window out to everyone</text>
+
+  <rect x="590" y="24" width="250" height="150" rx="10" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="715" y="50" text-anchor="middle" font-size="14" font-weight="700" fill="var(--ten)">tenant spaces</text>
+  <text x="715" y="72" text-anchor="middle" font-size="11.5" fill="var(--ten)">customer data, and everything</text>
+  <text x="715" y="90" text-anchor="middle" font-size="11.5" fill="var(--ten)">a third party publishes</text>
+  <rect x="614" y="104" width="202" height="54" rx="6" fill="var(--panel)" stroke="var(--ten-bd)"/>
+  <text x="715" y="121" text-anchor="middle" font-size="11" fill="var(--ten)">own chain, own key, own custody,</text>
+  <text x="715" y="135" text-anchor="middle" font-size="11" fill="var(--ten)">own jurisdiction, own erasure,</text>
+  <text x="715" y="150" text-anchor="middle" font-size="11" fill="var(--ten)">tens of thousands of them</text>
+
+  <rect x="150" y="216" width="560" height="52" rx="9" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="430" y="238" text-anchor="middle" font-size="13.5" font-weight="700">the placement test</text>
+  <text x="430" y="256" text-anchor="middle" font-size="12" fill="var(--mut)">is the platform genuinely the author of this row?</text>
+
+  <path d="M430 216 v-42" stroke="var(--mut)" fill="none" marker-end="url(#ah1)"/>
+
+  <path d="M330 268 L250 268 L250 300" stroke="var(--plat)" fill="none" marker-end="url(#ah1)"/>
+  <rect x="118" y="300" width="264" height="58" rx="8" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="250" y="320" text-anchor="middle" font-size="12" font-weight="600" fill="var(--plat)">yes: the system space</text>
+  <text x="250" y="337" text-anchor="middle" font-size="11" fill="var(--plat)">catalogue, reference data, system agents</text>
+  <text x="250" y="351" text-anchor="middle" font-size="11" fill="var(--plat)">nobody erases it, everybody reads it</text>
+
+  <path d="M530 268 L610 268 L610 300" stroke="var(--ten)" fill="none" marker-end="url(#ah1)"/>
+  <rect x="478" y="300" width="264" height="58" rx="8" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="610" y="320" text-anchor="middle" font-size="12" font-weight="600" fill="var(--ten)">no: the author's own space</text>
+  <text x="610" y="337" text-anchor="middle" font-size="11" fill="var(--ten)">a third party's app listing, shared outward</text>
+  <text x="610" y="351" text-anchor="middle" font-size="11" fill="var(--ten)">their key, their erasure, their consent</text>
+</svg>
+<figcaption>The three homes and the one question that assigns a row to one
+of them. The control plane is disqualified for platform runtime content not
+by policy but by shape: it has no chain, no guards and no query surface, so
+a catalogue there would be invisible to every mechanism the platform
+already has. Verified against <code>plan-space-routing.md</code> §3 for the
+control-plane inventory and <code>crates/ordo-identity/src/access.rs</code>
+for the engine being an in-process structure rather than a table.</figcaption>
+</figure>
+
+<h3>Two consequences of "an ordinary space" that the ruling does not cover</h3>
+<p><b>The system space needs a human owner.</b> "A space always has at least
+one owner, minted at creation," for a <b>human</b> principal, and "pending
+owner is not a state" (<code>definition-language.md</code>, Space
+bootstrap). There is no synthetic-actor path. So the deployment's catalogue
+is owned by a named person.</p>
+<p><b>And that person can delete it.</b> Exit ops "always exist" and are
+owner-only, step-up gated and command-logged; deletion is the
+crypto-erasure path. So "nobody erases it" is a property this document
+would like the system space to have and which nothing in the platform
+currently provides. Either the system space is exempted from the exit ops
+(which contradicts "always exist"), or the ownership is held somewhere that
+makes accidental deletion implausible, and either answer needs stating.</p>
+
+<h2>2 &middot; Where the schema sits, and why it forces a decision</h2>
+
+<p>Everything in §1 assumes the system space can carry a <code>tools</code>
+entity that tenant spaces do not have. It cannot, and the reason is in two
+DDL strings.</p>
+
+<pre><code>CREATE TABLE IF NOT EXISTS "$artifacts" (
+  "version" text PRIMARY KEY, "artifact" text NOT NULL,
+  "source" text NOT NULL, "ddl" text NOT NULL,
+  "applied_at" bigint NOT NULL, "actor" text NOT NULL );
+CREATE TABLE IF NOT EXISTS "$activations" (
+  "seq" bigserial PRIMARY KEY,
+  "version" text NOT NULL REFERENCES "$artifacts" ("version"),
+  "at" bigint NOT NULL, "actor" text NOT NULL )</code></pre>
+
+<p><code>crates/ordo-exec/src/registry.rs:67</code>. Neither table carries a
+<code>$space</code> column, and the module doc states the consequence in its
+own words at <code>:15</code>: "<code>$activations</code> records which
+version <b>the deployment</b> points at, one row per re-point, newest
+wins."</p>
+
+<p>Every entity table, by contrast, is emphatically per space: primary key
+<code>("$space", "id")</code>
+(<code>crates/ordo-exec/src/undo.rs:233</code>), composite foreign keys, and
+a planner invariant that "every physical alias is constrained:
+<code>"alias"."$space"</code> appears"
+(<code>crates/ordo-plan/src/lib.rs:670</code>).</p>
+
+<p>Put those together. One artifact describes one schema for the whole
+deployment. The system space is a space in that deployment. So the moment
+the platform declares <code>entity tools</code> for its catalogue, the
+<code>tools</code> table exists for <b>every</b> space in the deployment, and
+every tenant has an empty one. What keeps it empty is the entity's write
+guard and the door in front of it. No schema boundary is involved.</p>
+
+<figure>
+<svg viewBox="0 0 860 300" width="100%" role="img" aria-label="one artifact, one schema, every space">
+  <rect x="250" y="18" width="360" height="62" rx="9" fill="var(--ctl-bg)" stroke="var(--ctl-bd)"/>
+  <text x="430" y="41" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--ctl)">$artifacts + $activations</text>
+  <text x="430" y="59" text-anchor="middle" font-size="11.5" fill="var(--ctl)">no $space column &#183; one active version</text>
+  <text x="430" y="73" text-anchor="middle" font-size="11" fill="var(--ctl)">registry.rs:67, doc at :15</text>
+
+  <path d="M430 80 v22 h-280 v18" stroke="var(--mut)" fill="none"/>
+  <path d="M430 80 v22 h280 v18" stroke="var(--mut)" fill="none"/>
+  <path d="M430 80 v40" stroke="var(--mut)" fill="none"/>
+  <text x="430" y="116" text-anchor="middle" font-size="11.5" fill="var(--mut)">one DDL, applied everywhere</text>
+
+  <rect x="30" y="140" width="240" height="132" rx="9" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="150" y="162" text-anchor="middle" font-size="13" font-weight="700" fill="var(--plat)">system space</text>
+  <rect x="52" y="176" width="196" height="34" rx="6" fill="var(--panel)" stroke="var(--plat-bd)"/>
+  <text x="150" y="191" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--plat)">tools: 4,100 rows</text>
+  <text x="150" y="204" text-anchor="middle" font-size="10.5" fill="var(--plat)">the catalogue, singular</text>
+  <rect x="52" y="218" width="196" height="34" rx="6" fill="var(--panel)" stroke="var(--plat-bd)"/>
+  <text x="150" y="233" text-anchor="middle" font-size="11.5" fill="var(--plat)">projects, tasks, invoices &#8230;</text>
+  <text x="150" y="246" text-anchor="middle" font-size="10.5" fill="var(--plat)">every tenant entity, empty</text>
+
+  <rect x="310" y="140" width="240" height="132" rx="9" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="430" y="162" text-anchor="middle" font-size="13" font-weight="700" fill="var(--ten)">tenant space A</text>
+  <rect x="332" y="176" width="196" height="34" rx="6" fill="var(--panel)" stroke="var(--gap-bd)"/>
+  <text x="430" y="191" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--gap)">tools: 0 rows</text>
+  <text x="430" y="204" text-anchor="middle" font-size="10.5" fill="var(--gap)">exists; a guard keeps it empty</text>
+  <rect x="332" y="218" width="196" height="34" rx="6" fill="var(--panel)" stroke="var(--ten-bd)"/>
+  <text x="430" y="233" text-anchor="middle" font-size="11.5" fill="var(--ten)">projects, tasks, invoices &#8230;</text>
+  <text x="430" y="246" text-anchor="middle" font-size="10.5" fill="var(--ten)">the tenant's actual data</text>
+
+  <rect x="590" y="140" width="240" height="132" rx="9" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="710" y="162" text-anchor="middle" font-size="13" font-weight="700" fill="var(--ten)">tenant space B</text>
+  <rect x="612" y="176" width="196" height="34" rx="6" fill="var(--panel)" stroke="var(--gap-bd)"/>
+  <text x="710" y="191" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--gap)">tools: 0 rows</text>
+  <text x="710" y="204" text-anchor="middle" font-size="10.5" fill="var(--gap)">and no way to install its own</text>
+  <rect x="612" y="218" width="196" height="34" rx="6" fill="var(--panel)" stroke="var(--ten-bd)"/>
+  <text x="710" y="233" text-anchor="middle" font-size="11.5" fill="var(--ten)">projects, tasks, invoices &#8230;</text>
+  <text x="710" y="246" text-anchor="middle" font-size="10.5" fill="var(--ten)">the same shapes as A, always</text>
+</svg>
+<figcaption>The catalogue is singular by data, not by schema. The
+<code>tools</code> table is created in every space by the one deployment-wide
+DDL, and the system space is distinguished only by being the space whose
+<code>$space</code> value has rows. The same fact is why tenant B cannot
+install an app tenant A does not have: installing a package that declares
+shapes is a re-point of <code>$activations</code>, and
+<code>$activations</code> describes the deployment.</figcaption>
+</figure>
+
+<div class="callout">
+<b>One capability closes both gaps, and it is not small.</b>
+Per-space activation (<code>$activations</code> gains a <code>$space</code>)
+is the single change that would let the catalogue be a schema the system
+space has and tenants do not, <i>and</i> let a tenant install an app another
+tenant has not. It touches the artifact registry, the planner's cache,
+deploy propagation on <code>DEPLOY_CHANNEL</code>
+(<code>registry.rs:88</code>), and the load gate, which builds its shape
+verification shadow "from <i>the DDL the artifact asserts its database
+holds</i>" (<code>registry.rs</code> module doc) and would need a per-space
+shadow. It also interacts with routing: under
+<code>plan-space-routing.md</code> the registry stays in the control
+database while entity tables move to targets, so per-space activation means
+the control database holds the authority for DDL that has been applied to
+databases it does not own.
+</div>
+
+<h3>The three ways out, and what each costs</h3>
+<table>
+<tr><th>Option</th><th>What an app may be</th><th>Cost</th><th>What it cannot do</th></tr>
+<tr><td><b>(a) deployment-level apps</b></td>
+    <td>a package with shapes, installed by the operator</td>
+    <td>none: this is today</td>
+    <td>a marketplace where tenant A installs and tenant B does not</td></tr>
+<tr><td><b>(b) per-space activation</b></td>
+    <td>a package with its own shapes, per tenant</td>
+    <td>the registry, the planner cache, deploy propagation, the load gate, and the assumption that one schema describes a deployment</td>
+    <td>nothing structural; it is the answer with the largest price</td></tr>
+<tr><td><b>(c) apps are configuration</b></td>
+    <td>rows over shapes the platform already defines</td>
+    <td>installing is a write</td>
+    <td>anything needing a new entity, a new guard shape, or a new index</td></tr>
+</table>
+
+<p>The prior decision recommends deciding what an app is allowed to be
+before choosing between these, and that remains right. One addition from
+§5 below: the guard grammar interacts with this choice. A guard that
+enumerates tier names as literals puts the tier ladder in the schema, so
+under (a) or (c) a creator cannot add a tier without a deployment-wide
+redeploy. That is a reason to prefer a data-driven tier shape regardless of
+which option is taken, and it is worked out in §5.</p>
+
+<h2>3 &middot; Anonymous and public access</h2>
+
+<p>G15 settles the language question and settles it permissively:
+"<code>anonymous</code> = no principal, hence no members row, hence every
+guard evaluates false &#8230; <b>Unguarded ops do answer anonymous
+callers</b> (guards are bypassed; the door is a separate layer)."</p>
+
+<p>The door disagrees, and it gets there first.</p>
+
+<pre><code>fn check_access(state, op, space, headers) -> Result&lt;(String, String), ApiError&gt; {
+    let token = bearer(headers);
+    match token {
+        None =&gt; Err(door_denial(&amp;op.name, None)),
+        Some(token) =&gt; match state.access.check(token, space, &amp;op.name) { &#8230; }
+    }
+}</code></pre>
+
+<p><code>crates/ordo-api/src/router.rs:722</code>, and the blob gate is the
+same shape at <code>:206</code>. Below it,
+<code>AccessEngine::check(&amp;self, claims: &amp;TokenClaims, space, op, now)</code>
+takes claims by reference with no optional form
+(<code>crates/ordo-identity/src/access.rs:644</code>), and
+<code>TokenClaims</code> requires a <code>PrincipalId</code>. A token that
+fails to verify produces a denial recorded as
+<code>Subject::Unverified</code> with <code>RecordedDecision::TokenUnverifiable</code>
+and returns <code>AccessDecision::Deny</code>
+(<code>crates/ordo-host/src/lib.rs:1222</code>).</p>
+
+<div class="callout">
+<b>So this is a settled language rule with no implementation, and the gap is
+at the door rather than in the guards.</b>
+There is no representation of a caller who has no principal. Anonymous is
+not denied by a guard evaluating false, which is what G15 describes. It is
+denied before any guard is compiled, before the engine is consulted, and
+before the op is planned.
+</div>
+
+<figure>
+<svg viewBox="0 0 860 420" width="100%" role="img" aria-label="four access paths and where each is refused">
+  <defs>
+    <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mut)"/></marker>
+    <marker id="ah2r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--gap)"/></marker>
+  </defs>
+
+  <text x="107" y="22" text-anchor="middle" font-size="12.5" font-weight="700">anonymous</text>
+  <text x="320" y="22" text-anchor="middle" font-size="12.5" font-weight="700">member</text>
+  <text x="533" y="22" text-anchor="middle" font-size="12.5" font-weight="700">window guest</text>
+  <text x="746" y="22" text-anchor="middle" font-size="12.5" font-weight="700">tier-gated non-supporter</text>
+
+  <text x="14" y="72" font-size="10.5" fill="var(--mut)">bearer</text>
+  <text x="14" y="86" font-size="10.5" fill="var(--mut)">token</text>
+  <text x="14" y="163" font-size="10.5" fill="var(--mut)">door</text>
+  <text x="14" y="256" font-size="10.5" fill="var(--mut)">guard</text>
+  <text x="14" y="350" font-size="10.5" fill="var(--mut)">answer</text>
+
+  <line x1="60" y1="36" x2="855" y2="36" stroke="var(--line)"/>
+  <line x1="60" y1="126" x2="855" y2="126" stroke="var(--line)"/>
+  <line x1="60" y1="216" x2="855" y2="216" stroke="var(--line)"/>
+  <line x1="60" y1="310" x2="855" y2="310" stroke="var(--line)"/>
+
+  <rect x="62" y="48" width="180" height="62" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="152" y="70" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--gap)">none</text>
+  <text x="152" y="87" text-anchor="middle" font-size="10.5" fill="var(--gap)">bearer(headers) is None</text>
+  <text x="152" y="101" text-anchor="middle" font-size="10.5" fill="var(--gap)">router.rs:730</text>
+  <rect x="62" y="138" width="180" height="62" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="152" y="163" text-anchor="middle" font-size="12" font-weight="700" fill="var(--gap)">REFUSED HERE</text>
+  <text x="152" y="181" text-anchor="middle" font-size="10.5" fill="var(--gap)">door_denial, no principal</text>
+  <text x="152" y="194" text-anchor="middle" font-size="10.5" fill="var(--gap)">to resolve</text>
+  <rect x="62" y="228" width="180" height="62" rx="7" fill="var(--dimbg)" stroke="var(--dimbd)" stroke-dasharray="4 3"/>
+  <text x="152" y="256" text-anchor="middle" font-size="11" fill="var(--dim)">never reached</text>
+  <text x="152" y="272" text-anchor="middle" font-size="10.5" fill="var(--dim)">G15 describes this row</text>
+  <rect x="62" y="322" width="180" height="56" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="152" y="345" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--gap)">access_denied</text>
+  <text x="152" y="362" text-anchor="middle" font-size="10.5" fill="var(--gap)">where G15 promises rows</text>
+
+  <rect x="256" y="48" width="180" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="346" y="70" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">verified claims</text>
+  <text x="346" y="87" text-anchor="middle" font-size="10.5" fill="var(--ten)">principal + role</text>
+  <rect x="256" y="138" width="180" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="346" y="163" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">passes</text>
+  <text x="346" y="180" text-anchor="middle" font-size="10.5" fill="var(--ten)">status, role, profile,</text>
+  <text x="346" y="193" text-anchor="middle" font-size="10.5" fill="var(--ten)">step-up</text>
+  <rect x="256" y="228" width="180" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="346" y="253" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">members row binds</text>
+  <text x="346" y="270" text-anchor="middle" font-size="10.5" fill="var(--ten)">$caller matches; walk true</text>
+  <rect x="256" y="322" width="180" height="56" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="346" y="352" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">rows</text>
+
+  <rect x="450" y="48" width="180" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="540" y="70" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">verified claims</text>
+  <text x="540" y="87" text-anchor="middle" font-size="10.5" fill="var(--ten)">principal, no role,</text>
+  <text x="540" y="100" text-anchor="middle" font-size="10.5" fill="var(--ten)">no profile</text>
+  <rect x="450" y="138" width="180" height="62" rx="7" fill="var(--open-bg)" stroke="var(--open-bd)"/>
+  <text x="540" y="160" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--open)">unclear</text>
+  <text x="540" y="177" text-anchor="middle" font-size="10.5" fill="var(--open)">engine has role, profile,</text>
+  <text x="540" y="190" text-anchor="middle" font-size="10.5" fill="var(--open)">capability &#183; no guest layer</text>
+  <rect x="450" y="228" width="180" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="540" y="250" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">guest members row</text>
+  <text x="540" y="266" text-anchor="middle" font-size="10.5" fill="var(--ten)">null role; acl row names it</text>
+  <text x="540" y="280" text-anchor="middle" font-size="10.5" fill="var(--ten)">op must be guard-bearing</text>
+  <rect x="450" y="322" width="180" height="56" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="540" y="345" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">rows in the grant</text>
+  <text x="540" y="362" text-anchor="middle" font-size="10.5" fill="var(--ten)">from the owner's database</text>
+
+  <rect x="644" y="48" width="196" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="742" y="70" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">verified claims</text>
+  <text x="742" y="87" text-anchor="middle" font-size="10.5" fill="var(--ten)">principal + role or guest</text>
+  <rect x="644" y="138" width="196" height="62" rx="7" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="742" y="163" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">passes</text>
+  <text x="742" y="180" text-anchor="middle" font-size="10.5" fill="var(--ten)">the op is callable</text>
+  <rect x="644" y="228" width="196" height="62" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="742" y="253" text-anchor="middle" font-size="12" font-weight="700" fill="var(--gap)">REFUSED HERE</text>
+  <text x="742" y="271" text-anchor="middle" font-size="10.5" fill="var(--gap)">no groupMembers row for the tier</text>
+  <rect x="644" y="322" width="196" height="56" rx="7" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="742" y="342" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--gap)">not_found (addressed, G12)</text>
+  <text x="742" y="360" text-anchor="middle" font-size="10.5" fill="var(--gap)">or filtered out (collection)</text>
+
+  <path d="M152 110 v26" stroke="var(--gap)" fill="none" marker-end="url(#ah2r)"/>
+  <path d="M346 110 v26" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M346 200 v26" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M346 290 v30" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M540 110 v26" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M540 200 v26" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M540 290 v30" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M742 110 v26" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M742 200 v26" stroke="var(--mut)" fill="none" marker-end="url(#ah2)"/>
+  <path d="M742 290 v30" stroke="var(--gap)" fill="none" marker-end="url(#ah2r)"/>
+</svg>
+<figcaption>Four callers, one layered door, and the row at which each is
+stopped. The anonymous column is stopped at the top, two layers above where
+the language says the decision belongs. The guest column is the one
+genuinely unclear cell: <code>access.rs</code> contains no occurrence of
+"guest", and <code>Role</code> has exactly four variants, none of them a
+guest (<code>crates/ordo-identity/src/principal.rs:105</code>), so what
+admits a null-role members row to an op at the door is not decided in the
+code. The tier-gated column is the only one refused where the corpus says
+refusals belong, at the guard.</figcaption>
+</figure>
+
+<h3>What a public anonymous path would actually require</h3>
+
+<p><b>Is the anonymous caller a principal holding a grant?</b> The capability
+machinery fits the <i>authorization</i> question exactly. A grant names one
+space and carries "an explicit op allowlist, enumerated by a human at grant
+time on the consent page", which is precisely the sentence "this space's
+public surface is these three ops". <code>TokenClaims</code> already carries
+<code>capability: Option&lt;CapabilityGrant&gt;</code> and the capability
+path is exclusive by token shape, so an anonymous grant would never fall
+through to roles.</p>
+
+<p>What does not fit is the <i>token</i>. A capability grant is presented as
+a bearer string, and a public bearer string shipped into every browser is a
+secret with no secret to keep: it cannot be revoked for one caller, and
+rotating it logs out the world. So the grant is the right authorization
+object and the token is the wrong delivery. <span class="tag t-prop">proposed</span>
+The door synthesizes claims when there is no <code>Authorization</code>
+header, binding a reserved per-space anonymous principal to the space's
+anonymous grant, and <code>AccessEngine::check</code> runs its three layers
+unchanged. That is one new construction site in <code>router.rs</code> and
+no change to the engine's logic.</p>
+
+<h3>What stops it being an abuse surface</h3>
+<p>Four things are load-bearing here, and three of them are properties of
+code that exists.</p>
+<ul>
+<li><b>The deny-volume alert does not see allowed calls.</b>
+<code>ordo_denials_total{space,principal,principal_kind,op}</code> is
+incremented on denial only, and the door's own comment calls it "the
+mandatory deny-volume-per-principal-per-space alert's only input"
+(<code>crates/ordo-host/src/lib.rs</code>). A flood of <i>successful</i>
+anonymous reads is invisible to it. Anonymous access needs its own rate
+limit, which is not the access engine's job and does not exist anywhere
+today.</li>
+<li><b>The idempotency cache keys on the resolved principal</b>
+("the idempotency cache keys on it (SH-17)",
+<code>crates/ordo-api/src/router.rs:718</code>). One anonymous principal per
+space means every stranger shares one idempotency namespace, so an
+anonymous <i>write</i> is a collision surface by construction: two unrelated
+callers can be served each other's cached result.</li>
+<li><b>Cursors key on the principal too</b>
+(<code>parse_cursor(state, &amp;space, op, &amp;gate.principal, &#8230;)</code>,
+<code>router.rs:750</code>), with the same sharing and the same conclusion.</li>
+<li><b>Security-event routing would lose the property that protects it.</b>
+Today an unverifiable presentation routes to the deployment stream, and the
+code says why: "<code>route</code> would send an unverified subject to the
+deployment stream whatever were passed here, which is the property that
+stops a stranger growing a space's audit spine"
+(<code>ordo-host/src/lib.rs:1239</code>). If anonymous becomes a principal
+<i>with a relationship to the space</i>, its denials would route into that
+space's own stream, and a stranger could grow a tenant's audit spine at
+will.</li>
+</ul>
+
+<div class="callout prop">
+<b>Three rules follow, and this document proposes them. It does not
+report them as settled.</b>
+<b>(i) Anonymous is read-only</b>, enforced at the door rather than advised,
+because the idempotency and cursor namespaces are shared by construction.
+<b>(ii) Anonymous denials route to the deployment stream</b> even though
+anonymous is a principal of a named space, preserving the property quoted
+above. <b>(iii) An anonymous grant is an ordinary capability grant with an
+ordinary consent page</b>, so the public surface of a space is enumerated by
+a human and is visible in the same place every other grant is.
+</div>
+
+<h3>Whether the browsable case wants a CDN instead</h3>
+
+<p>For the catalogue specifically, "publish to static files behind a CDN" is
+a stronger answer than a live anonymous read, and it converges with
+something the third-home ruling already proposes for a different reason.</p>
+
+<div class="twocol">
+  <div class="col">
+    <h4 style="color:var(--ten)">What publishing buys</h4>
+    <ul>
+      <li>The abuse surface disappears. An unauthenticated read never
+      reaches Postgres, takes no pool connection, and shares no idempotency
+      or cursor namespace.</li>
+      <li>It is the <b>same mechanism</b> as the cross-publisher discovery
+      projection the 2026-09-12 ruling already calls for: "a derived
+      projection in the control plane, rebuilt from what publishers
+      consented to expose, never a source of truth, and pruned when a
+      publisher is erased". One artifact serves both.</li>
+      <li>It sidesteps §4's routing inversion for the catalogue entirely, so
+      a tenant on an attached target does not pay a cross-database read to
+      list the tools (see §4 and open question 4).</li>
+    </ul>
+  </div>
+  <div class="col">
+    <h4 style="color:var(--gap)">What publishing costs</h4>
+    <ul>
+      <li>Staleness is bounded by whatever invalidates the CDN, and nothing
+      does today. <code>DEPLOY_CHANNEL</code> nudges nodes
+      (<code>registry.rs:88</code>); no channel nudges an edge cache.</li>
+      <li>It serves no per-caller variation, so anything whose answer
+      depends on who is asking cannot be published.</li>
+      <li>Publishing <i>is</i> the disclosure decision. There is no guard
+      behind a published file, and G12's non-enumerability does not reach
+      it.</li>
+    </ul>
+  </div>
+</div>
+
+<p><span class="tag t-prop">proposed</span> Publish the browsable catalogue.
+Reserve live anonymous reads for answers that genuinely depend on the
+request: a share link's target (already bearer and mandatorily expiring,
+<code>definition-language.md</code> line 454), a slug or seat availability
+check, a status page whose value is its freshness. Everything else that is
+public and identical for every caller is a file.</p>
+
+<h3>One structural wrinkle to know before building either</h3>
+<p>G2 requires that at least one disjunct of a guard reference
+<code>$caller</code>, and G15 makes every such disjunct false for an
+anonymous caller. So an anonymous-readable entity must declare
+<code>access read open</code>. G9 requires both verbs to be declared and
+allows <code>open</code> as the value of either, so "anyone reads, members
+write" is spellable, which is what the public half of a paywall needs.</p>
+<p>But G9 also pins that <code>open</code> "does not satisfy the
+guard-bearing test for guest exposure", and an op exposed to guests must be
+guard-bearing or it is a compile error. So the same public entity that an
+anonymous stranger may read cannot be exposed through a window to a guest
+from another space. Two strangers, two doors, and the door that is open is
+the one for the stranger with no relationship. In practice the guest can
+use the anonymous path, so this is a wrinkle and not a blocker. It will
+still surface as a compile error on an op an author has every reason to
+expect to work.</p>
+
+<h2>4 &middot; Sharing: windows against feeds, and two inversions</h2>
+
+<p>Ordo has exactly two sharing doors. A <b>window</b> is an ACL row on a
+subtree: the guest calls the granting space's ops under their own identity,
+passes exactly the guards that row satisfies, and is attributed in the
+granting space's chain. Live, revocable, and "revocation closes the window
+at the next call". A <b>feed</b> is a standing routine replicating a defined
+slice into the receiving space, where "copies land as ordinary writes on the
+receiver's chain (<code>source:feed-&lt;name&gt;</code>), so the receiver's
+own triggers and rules fire on them".</p>
+
+<h3>Inversion one: cost, under the routing topology</h3>
+<p>A window resolves its grant in the control plane and then reads the
+<b>owner's</b> target. Under <code>plan-space-routing.md</code> that is a
+second connection to a second database, and it can never be joined against
+the guest's own rows, because the two sets of rows are in different
+databases. A feed copies into the receiver's space, after which every read
+is local and joinable.</p>
+<p>In a single-database deployment the window is the cheaper mechanism,
+because a feed pays for storage and a routine to maintain freshness. Under
+routing the feed is the cheaper one. The guidance to app authors inverts,
+which is why it has to be written down rather than discovered.</p>
+
+<h3>Inversion two: what revocation leaves behind</h3>
+<p>This one points the other way, and the two rules collide on the same
+content.</p>
+
+<div class="callout">
+<b>Neither mechanism makes delivered data go away.</b>
+The corpus already states the limit of the window: revocation "stops access,
+not memory (a guest's mirror may hold what it already fetched), stated
+honestly, never pretended otherwise". And for the feed: "revocation stops
+the feed, already-copied data stays, stated at consent". So the difference
+between them on revocation is not clean-versus-dirty. It is <b>how much was
+already delivered</b>. A window delivers only what was actually fetched,
+lazily and per call. A feed delivers the entire defined slice eagerly,
+whether the receiver ever looked at it. For paid content that gap is the
+whole product: a lapsed feed subscriber holds every back issue, on their
+own chain, under their own key, in their own jurisdiction, and no act of
+the publisher reaches it.
+</div>
+
+<p>So the rule for paid or revocable content is a window, and the reason is
+exposure minimization rather than clean revocation. Stating it the other
+way ("windows revoke properly") would be false and would be discovered to
+be false by the first customer who asks what a lapsed subscriber still
+holds.</p>
+
+<figure>
+<svg viewBox="0 0 860 430" width="100%" role="img" aria-label="window versus feed, cost under routing and aftermath of revocation">
+  <defs>
+    <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mut)"/></marker>
+  </defs>
+
+  <text x="215" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="var(--plat)">window &#183; an ACL row on a subtree</text>
+  <text x="645" y="20" text-anchor="middle" font-size="13" font-weight="700" fill="var(--ctl)">feed &#183; a routine copying a slice</text>
+  <line x1="430" y1="8" x2="430" y2="420" stroke="var(--line)"/>
+
+  <text x="215" y="42" text-anchor="middle" font-size="11" fill="var(--mut)">under routing: two databases, never joinable</text>
+  <rect x="30" y="54" width="160" height="76" rx="8" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="110" y="76" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">guest's space</text>
+  <text x="110" y="94" text-anchor="middle" font-size="10.5" fill="var(--ten)">target B</text>
+  <text x="110" y="112" text-anchor="middle" font-size="10.5" fill="var(--ten)">their own rows</text>
+  <rect x="240" y="54" width="160" height="76" rx="8" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="320" y="76" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--plat)">owner's space</text>
+  <text x="320" y="94" text-anchor="middle" font-size="10.5" fill="var(--plat)">target A</text>
+  <text x="320" y="112" text-anchor="middle" font-size="10.5" fill="var(--plat)">the shared subtree</text>
+  <path d="M190 78 h48" stroke="var(--mut)" fill="none" marker-end="url(#ah3)"/>
+  <text x="215" y="72" text-anchor="middle" font-size="9.5" fill="var(--mut)">2nd conn</text>
+  <path d="M238 112 h-46" stroke="var(--gap)" stroke-dasharray="4 3" fill="none"/>
+  <text x="215" y="126" text-anchor="middle" font-size="9.5" fill="var(--gap)">no join possible</text>
+
+  <text x="645" y="42" text-anchor="middle" font-size="11" fill="var(--mut)">under routing: one database, fully joinable</text>
+  <rect x="460" y="54" width="160" height="76" rx="8" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="540" y="76" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--ten)">receiver's space</text>
+  <text x="540" y="94" text-anchor="middle" font-size="10.5" fill="var(--ten)">target B</text>
+  <text x="540" y="112" text-anchor="middle" font-size="10.5" fill="var(--ten)">their rows + the copies</text>
+  <rect x="670" y="54" width="160" height="76" rx="8" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="750" y="76" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--plat)">publisher's space</text>
+  <text x="750" y="94" text-anchor="middle" font-size="10.5" fill="var(--plat)">target A</text>
+  <text x="750" y="112" text-anchor="middle" font-size="10.5" fill="var(--plat)">the source slice</text>
+  <path d="M668 92 h-46" stroke="var(--mut)" fill="none" marker-end="url(#ah3)"/>
+  <text x="645" y="86" text-anchor="middle" font-size="9.5" fill="var(--mut)">routine</text>
+
+  <line x1="20" y1="160" x2="840" y2="160" stroke="var(--line)"/>
+  <text x="430" y="182" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--gap)">the same two mechanisms, after revocation</text>
+
+  <rect x="30" y="200" width="370" height="94" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="215" y="222" text-anchor="middle" font-size="11.5" font-weight="600">access stops at the next call</text>
+  <rect x="52" y="232" width="326" height="50" rx="6" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="215" y="251" text-anchor="middle" font-size="11" fill="var(--gap)">what the guest keeps: whatever they actually fetched</text>
+  <text x="215" y="268" text-anchor="middle" font-size="11" fill="var(--gap)">lazy, partial, bounded by their own reading</text>
+
+  <rect x="460" y="200" width="370" height="94" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="645" y="222" text-anchor="middle" font-size="11.5" font-weight="600">the routine stops; the copies do not move</text>
+  <rect x="482" y="232" width="326" height="50" rx="6" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="645" y="251" text-anchor="middle" font-size="11" fill="var(--gap)">what the receiver keeps: the entire delivered slice</text>
+  <text x="645" y="268" text-anchor="middle" font-size="11" fill="var(--gap)">eager, complete, on their chain, under their key</text>
+
+  <rect x="150" y="316" width="560" height="94" rx="9" fill="var(--open-bg)" stroke="var(--open-bd)"/>
+  <text x="430" y="340" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--open)">the two rules point opposite ways for paid content</text>
+  <text x="430" y="362" text-anchor="middle" font-size="11.5" fill="var(--open)">"read often, joined locally" says feed &#183; "paid and revocable" says window</text>
+  <text x="430" y="382" text-anchor="middle" font-size="11.5" fill="var(--open)">the deciding question: is continued access the product,</text>
+  <text x="430" y="398" text-anchor="middle" font-size="11.5" fill="var(--open)">or is the delivered copy the product?</text>
+</svg>
+<figcaption>Two inversions on one page, because an author who learns one and
+not the other will get the opposite case wrong. Top: under routing a window
+is a cross-database read and a feed is local, so the cost guidance inverts
+from the single-database case. Bottom: neither mechanism recalls delivered
+data, and the difference is volume. Sources:
+<code>definition-language.md</code>, Inter-space sharing (both revocation
+sentences, verbatim), <code>corpus-rulings.md</code> 2026-09-12 "Sharing
+inverts under the routing topology", <code>plan-space-routing.md</code>
+§1 and §3.</figcaption>
+</figure>
+
+<p>A third path is worth naming because it sits outside both doors. Bulk
+paid content can be the <b>blob tier</b>: bytes sealed under the publisher's
+key in the publisher's space, fetched through a reference. That does not
+change the revocation arithmetic (a fetched file is a fetched file), but it
+does move large content off the chain, which the 2026-09-12 bulk ruling
+already recommends for a different reason.</p>
+
+<h2>5 &middot; Tiered membership, the Patreon shape</h2>
+
+<p>The obvious spelling is illegal and the reason is exact. G1 closes the
+guard grammar to forward ref hops, reverse collection steps,
+<code>==</code> against <code>$caller</code> or literals, bare
+<code>bool</code> fields, and <code>and</code>/<code>or</code>. Then it says
+so explicitly: "<b>No other operators, no functions, no arithmetic, no
+<code>!=</code>, no ordering, no <code>in</code>.</b>" So
+<code>subscriber.tier &gt;= post.tier</code> is
+<code>invalid_guard_walk</code>, twice over: it orders, and its
+<code>==</code> would be field against field rather than against a literal
+or <code>$caller</code>.</p>
+
+<div class="callout note">
+<b>The corpus does already have an ordered ladder, and checking it changes
+the argument.</b>
+<code>acl (read, write, admin)</code> declares levels that are "a full
+ordering, left to right", and the derived guard tests "the caller holds a
+level at or above X". It fits G1 because each threshold "compiles to a
+<b>closed disjunction of <code>==</code> over the qualifying levels</b>
+inside one reverse step, which is how an ordering fits in G1's closed
+grammar". So ordering is not missing from the language. It is present,
+pinned in the <i>schema</i>, and expanded into <code>==</code> disjuncts at
+compile time.
+</div>
+
+<p>Three consequences follow, and the third is the one that decides the
+shape.</p>
+
+<p><b>The acl ladder does not give a Patreon.</b> It has exactly three
+threshold <i>positions</i>: first (read), second (write), last (admin). All
+levels read. So <code>acl (bronze, silver, gold)</code> gives one read
+threshold, at bronze. The ladder orders writing and administering, not
+reading, and a paywall is a read gate.</p>
+
+<p><b>The escape hatch reaches the shape but puts it in the schema.</b> The
+derived link entity is "queryable, writable, extendable like any entity"
+and hand-rolled <code>access</code> clauses stay open, so a guard can
+enumerate the qualifying levels itself:
+<code>channel.channelAccess(member == $caller and (level == "silver" or level == "gold"))</code>.
+That is legal G1, it is one acl row per supporter, and a tier change is a
+single converge, because <code>grantChannelAccess</code> is
+converge-or-create on the unique key. The cost is that "silver" and "gold"
+are literals in a guard, so the tier ladder lives in the schema. Adding a
+platinum tier is a schema change, a schema change is a deploy, and by §2 a
+deploy re-points <code>$activations</code> for the whole deployment. A
+creator adding a tier becomes an operator act affecting every tenant.</p>
+
+<p><b>So the group-per-tier shape wins, for a better reason than the one
+usually given.</b> It is preferred not because ordering is unspellable, but
+because it is the shape that keeps the tier in <b>data</b>:</p>
+
+<pre><code>entity posts {
+  channel -&gt; channels owned
+  tier    -&gt; members                 # a members row with kind: group
+  body: text
+  access read   tier.groupMembers.group(member == $caller)
+  access write  channel.channelAccess(member == $caller and level == "admin")
+}</code></pre>
+
+<p>The reverse step names its arriving ref (<code>groupMembers.group</code>)
+because <code>groupMembers { group -&gt; members owned, member -&gt; members
+owned }</code> declares two refs to <code>members</code>, which is the exact
+case G1's <code>ambiguous_reverse_step</code> rule was written for. A
+domain entity may hold a <code>-&gt; members</code> ref (the corpus uses
+<code>assignee -&gt; members?</code> and <code>owner -&gt; members</code>),
+and a group <i>is</i> a members row, so <code>tier -&gt; members</code>
+points at a group. Adding a tier is then a row, not a deploy.</p>
+
+<h3>Pressure-testing it, which is where it gets awkward</h3>
+
+<p><b>(1) A supporter must be a members row in the creator's space.</b> G15
+is unconditional: no principal means no members row means every guard
+evaluates false, "as a defined rule, not as a consequence of
+null-comparison folklore". The Groups section says the same from the other
+side: "A principal with no members row in the space binds nothing, and every
+guard evaluates false." <code>groupMembers</code> is per space and both its
+refs point at that space's <code>members</code>. So every paying supporter
+holds a <code>members</code> row in the creator's space.</p>
+
+<p><b>(2) And the only path that creates one is invitation and acceptance.</b>
+The platform creates members rows "at exactly four moments", and the only
+one that applies to someone outside the space is <b>guest binding</b>, "when
+an inter-space share is accepted". The corpus adds: "There is no
+domain-authored path to minting one." Combined with "Invitation, never
+enumeration: shares flow link/invite to accept to principal binding", this
+means becoming a supporter is a two-sided handshake, not a payment webhook.
+A creator's billing integration cannot mint the membership; it can only
+invite, and the supporter must accept before any guard passes. A paid
+signup therefore has a step between "paid" and "can read" that the platform
+cannot remove.</p>
+
+<p><b>(3) At scale this is a lot of rows, and a lot of chain.</b> Groups may
+not nest (<code>group_nesting</code>, depth 1 in v1), so "their tier and
+below" has to be materialized: a supporter at tier 4 of 5 holds four
+<code>groupMembers</code> rows, and a downgrade from 4 to 2 is two removals.
+Every one is an ordinary audited command, so every membership move is a
+command group appended to the creator's chain under
+<code>pg_advisory_xact_lock(APPEND_LOCK_NS, space_lock_key(space))</code>
+(<code>crates/ordo-exec/src/commandlog.rs:120</code>, <code>:130</code>,
+<code>:197</code>). Routing does not help: "Routing does not raise any
+tenant's write ceiling, which is a separate and currently unmeasured limit"
+(<code>plan-space-routing.md</code> §0.7). A billing cycle that re-checks
+ten thousand subscriptions on the first of the month serializes through one
+advisory lock in one space.</p>
+
+<div class="callout">
+<b>(4) The creator learns the identity of every supporter, and there is no
+version of this shape where they do not.</b>
+The members row is a row in the creator's own space, readable by the
+creator, and domains read <code>displayName</code> off a
+<code>-&gt; members</code> ref as ordinary data. <code>callersOf</code>
+"resolves through groups, so 'who can call X' stays one exhaustive query and
+answers with humans, not group names". <code>memberCount</code> on a group
+row is platform-maintained, so a per-tier headcount is free. And consent
+"lands in both spaces' chains" at accept, so the binding is a durable record
+on both sides. <b>Anonymous patronage is not expressible.</b> A supporter
+who wants their support private cannot have it, and a creator gets a full
+subscriber list as a structural consequence rather than as a feature. A
+product built on this shape owes that disclosure at signup.
+</div>
+
+<p><b>(5) Two smaller pins that happen to fall the right way.</b> G17 keeps
+guard-only fields out of outputs, so a supporter cannot probe the ladder
+through the op (a condition on one is <code>not_output_field</code>) even
+though the creator reads <code>groupMembers</code> directly as an ordinary
+entity. And "a guest creating an acl-bearing row gets no auto-grant", so a
+supporter who comments in the creator's space does not thereby become the
+administrator of their own comment; the space owner administers it.</p>
+
+<p><b>(6) One that does not.</b> The public stub of §6 is
+<code>access read open</code>, and <code>open</code> is not guard-bearing, so
+the stub's op cannot be exposed to guests. A supporter who is a guest reads
+the gated body through the guest door and must read the stub through the
+anonymous door. One page, two doors, and the anonymous one is unbuilt.</p>
+
+<figure>
+<svg viewBox="0 0 860 330" width="100%" role="img" aria-label="the tier guard as a walk, and what each hop requires">
+  <defs>
+    <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mut)"/></marker>
+  </defs>
+  <text x="430" y="22" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--mut)">access read  tier.groupMembers.group(member == $caller)</text>
+
+  <rect x="26" y="46" width="170" height="72" rx="8" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="111" y="70" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ten)">posts</text>
+  <text x="111" y="88" text-anchor="middle" font-size="10.5" fill="var(--ten)">the row being read</text>
+  <text x="111" y="104" text-anchor="middle" font-size="10.5" fill="var(--ten)">tier is DATA on the row</text>
+
+  <path d="M196 82 h42" stroke="var(--mut)" fill="none" marker-end="url(#ah4)"/>
+  <text x="217" y="74" text-anchor="middle" font-size="9.5" fill="var(--mut)">tier</text>
+
+  <rect x="240" y="46" width="170" height="72" rx="8" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="325" y="70" text-anchor="middle" font-size="12" font-weight="700" fill="var(--plat)">members (kind: group)</text>
+  <text x="325" y="88" text-anchor="middle" font-size="10.5" fill="var(--plat)">one row per tier</text>
+  <text x="325" y="104" text-anchor="middle" font-size="10.5" fill="var(--plat)">adding a tier is a write</text>
+
+  <path d="M410 82 h42" stroke="var(--mut)" fill="none" marker-end="url(#ah4)"/>
+  <text x="431" y="74" text-anchor="middle" font-size="9.5" fill="var(--mut)">.group</text>
+
+  <rect x="454" y="46" width="170" height="72" rx="8" fill="var(--plat-bg)" stroke="var(--plat-bd)"/>
+  <text x="539" y="70" text-anchor="middle" font-size="12" font-weight="700" fill="var(--plat)">groupMembers</text>
+  <text x="539" y="88" text-anchor="middle" font-size="10.5" fill="var(--plat)">reverse step names its ref:</text>
+  <text x="539" y="104" text-anchor="middle" font-size="10.5" fill="var(--plat)">two refs to members, G1</text>
+
+  <path d="M624 82 h42" stroke="var(--mut)" fill="none" marker-end="url(#ah4)"/>
+  <text x="645" y="74" text-anchor="middle" font-size="9.5" fill="var(--mut)">member</text>
+
+  <rect x="668" y="46" width="166" height="72" rx="8" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="751" y="70" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ten)">== $caller</text>
+  <text x="751" y="88" text-anchor="middle" font-size="10.5" fill="var(--ten)">the caller's OWN row,</text>
+  <text x="751" y="104" text-anchor="middle" font-size="10.5" fill="var(--ten)">never a group they are in</text>
+
+  <rect x="26" y="150" width="808" height="72" rx="8" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="430" y="174" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--gap)">what the last hop requires, and it is the whole cost of this shape</text>
+  <text x="430" y="194" text-anchor="middle" font-size="11.5" fill="var(--gap)">the supporter holds a members row IN THE CREATOR'S SPACE (G15: no members row, every guard false)</text>
+  <text x="430" y="211" text-anchor="middle" font-size="11.5" fill="var(--gap)">created only by guest binding on an accepted share &#183; no domain-authored path &#183; consent in both chains</text>
+
+  <rect x="26" y="238" width="262" height="76" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="157" y="260" text-anchor="middle" font-size="11.5" font-weight="600">10,000 supporters</text>
+  <text x="157" y="278" text-anchor="middle" font-size="10.5" fill="var(--mut)">10,000 members rows in one space</text>
+  <text x="157" y="294" text-anchor="middle" font-size="10.5" fill="var(--mut)">plus one groupMembers row per</text>
+  <text x="157" y="308" text-anchor="middle" font-size="10.5" fill="var(--mut)">tier at or below theirs</text>
+
+  <rect x="299" y="238" width="262" height="76" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="430" y="260" text-anchor="middle" font-size="11.5" font-weight="600">every move is a command group</text>
+  <text x="430" y="278" text-anchor="middle" font-size="10.5" fill="var(--mut)">appended under one per-space</text>
+  <text x="430" y="294" text-anchor="middle" font-size="10.5" fill="var(--mut)">advisory lock; a monthly billing</text>
+  <text x="430" y="308" text-anchor="middle" font-size="10.5" fill="var(--mut)">sweep serializes through it</text>
+
+  <rect x="572" y="238" width="262" height="76" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="703" y="260" text-anchor="middle" font-size="11.5" font-weight="600">the creator sees every name</text>
+  <text x="703" y="278" text-anchor="middle" font-size="10.5" fill="var(--mut)">callersOf answers with humans,</text>
+  <text x="703" y="294" text-anchor="middle" font-size="10.5" fill="var(--mut)">not group names; memberCount is</text>
+  <text x="703" y="308" text-anchor="middle" font-size="10.5" fill="var(--mut)">free; anonymous support is not</text>
+</svg>
+<figcaption>The tier guard drawn as the walk it compiles to, with the
+requirement each hop imposes. The first three hops are cheap and are
+ordinary indexed semi-joins. The last one is where the whole design cost
+sits: <code>== $caller</code> can only match a members row in this space, so
+every supporter must be bound into the creator's space before any tier
+question can be asked at all.</figcaption>
+</figure>
+
+<h2>6 &middot; Non-enumerability against the paywall</h2>
+
+<p>G12 says an addressed read or write on a row outside the caller's read
+view answers <code>not_found</code>, "byte-identical to the answer for an id
+that does not exist", and gives its reason: ids leak, and a distinguishable
+error "turns it into an oracle answering <i>does this row exist, and is it in
+a space I am not in?</i>".</p>
+
+<p>A paywall's job is the exact opposite. It must say: this exists, here is
+what it is about, here is what it costs, and you cannot have it. The
+proposed resolution is a public <b>stub</b> entity plus a gated <b>body</b>
+entity. It works, with four qualifications.</p>
+
+<h3>(a) Does it double every entity?</h3>
+<p>It doubles every entity that is both advertised and gated, which in a
+paid-content app is the central one. It does not double the rest. The
+split brings structure with it, though:</p>
+<ul>
+<li><b>The body must declare its own <code>access</code> clause.</b> G6
+inherits from the nearest <b>guard-bearing</b> ancestor, and G9 pins that
+<code>open</code> is not guard-bearing. So a body <code>owned</code> by an
+<code>open</code> stub inherits nothing and must declare its own guard, and
+G9 makes that both verbs.</li>
+<li><b>Field placement becomes an access decision.</b> Every field is now
+either advertised or withheld, and moving one across the line is a schema
+change, which by §2 is a deployment-wide deploy.</li>
+<li><b>G3 constrains the tempting shortcut.</b> Guards may not touch sealed
+fields (<code>guard_on_sealed</code>), so the paywall cannot be "seal the
+body and call that the gate". In this shape the guard walks membership
+rather than the body, so it is unaffected, but the shortcut is closed.</li>
+</ul>
+
+<h3>(b) What happens to the <code>?live</code> subscription</h3>
+<p>Three answers, and one is genuinely good news.</p>
+<ul>
+<li><b>Unlock is live, and free.</b> G16 puts guard entities into the op's
+inlined base-entity set: they "appear in the scope manifest and are
+subscribed by <code>?live</code>. A membership or acl write therefore
+invalidates guarded live queries, permission changes are visible changes."
+So a client subscribed to the gated body query <i>while it returns
+nothing</i> is invalidated the moment the supporter's
+<code>groupMembers</code> row is written. No polling. The non-obvious part
+is that the client must subscribe to the empty gated query rather than to
+the stub.</li>
+<li><b>A subscription on the stub never fires on unlock</b>, because the
+stub's rows did not change. A page that renders "locked" from the stub
+stays locked until something re-reads.</li>
+<li><b>At scale it is a re-query storm.</b> The same G16 rule means every
+membership write in the creator's space invalidates every live query whose
+guard walks <code>groupMembers</code>, for every subscriber. One supporter
+joining invalidates every other supporter's live subscription on every
+tier-gated op, and invalidation here is per entity rather than per row.
+Worse, the substrate is unproven: the invalidation bus is per database
+(<code>plan-space-routing.md</code> §0.8), and
+<code>PgInvalidationBus</code> "is constructed in tests and not in the
+serving path today", with <code>lib.rs:195-201</code> already naming the
+bus, rather than the <code>live_capable</code> flag, as "the honest gate on
+<code>?live</code>".</li>
+</ul>
+
+<h3>(c) What the stub leaks</h3>
+<p>Everything it advertises, to everyone, permanently, with no guard behind
+it: existence, count, titles, timing and publication cadence; which tier
+each item requires, so the shape of the paywall is public; and the group row
+ids the <code>tier</code> refs point at. If <code>memberCount</code> ever
+appears in the stub's output shape, per-tier supporter counts leak too.</p>
+<p>And it re-opens enumeration for the advertised half. The stub's id space
+is public by design. G12 still closes the oracle at the body, because an
+addressed body read still answers <code>not_found</code>, so an attacker
+holding a stub id learns nothing more than the stub already told them.</p>
+<div class="callout ok">
+<b>This is a choice that was made.</b>
+G12 is a rule that a <i>guarded</i> row must not leak through an error class.
+Publishing is a different act with a different rule. The stub makes the
+publishing decision explicit and greppable, because
+<code>access read open</code> is a keyword and "it is greppable: one word,
+one meaning, findable in every schema review". A reviewer can enumerate
+every public surface in a schema with one search, which is exactly what a
+paywall's public half needs and exactly what a boolean
+<code>isPublic</code> field would not give.
+</div>
+
+<h3>(d) The dependency that decides whether any of it works</h3>
+<div class="callout">
+<b>The paywall's public half is blocked and its private half is not, which
+is the wrong way round.</b>
+The stub is <code>access read open</code>, so G15 says an unguarded op
+answers anonymous callers. But §3 shows the door refuses before the engine
+is reached, so nothing anonymous ever gets to the stub. Meanwhile the gated
+body works today for any caller who has a members row. So the half of the
+paywall meant to sell is unreachable and the half meant to withhold is
+built.
+</div>
+
+<figure>
+<svg viewBox="0 0 860 380" width="100%" role="img" aria-label="stub and body against the paywall, for three callers">
+  <defs>
+    <marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mut)"/></marker>
+  </defs>
+
+  <rect x="300" y="18" width="260" height="60" rx="8" fill="var(--open-bg)" stroke="var(--open-bd)"/>
+  <text x="430" y="40" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--open)">entity postStub</text>
+  <text x="430" y="57" text-anchor="middle" font-size="10.5" fill="var(--open)">title, teaser, tier name, price, date</text>
+  <text x="430" y="71" text-anchor="middle" font-size="10.5" fill="var(--open)">access read open / access write &lt;guarded&gt;</text>
+
+  <rect x="300" y="96" width="260" height="60" rx="8" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="430" y="118" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--ten)">entity postBody (owned)</text>
+  <text x="430" y="135" text-anchor="middle" font-size="10.5" fill="var(--ten)">the paid content</text>
+  <text x="430" y="149" text-anchor="middle" font-size="10.5" fill="var(--ten)">must declare its own clause: open is not guard-bearing</text>
+
+  <rect x="20" y="192" width="255" height="170" rx="9" fill="var(--panel)" stroke="var(--gap-bd)"/>
+  <text x="147" y="214" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--gap)">anonymous stranger</text>
+  <rect x="40" y="226" width="215" height="52" rx="6" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="147" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="var(--gap)">stub: REFUSED AT THE DOOR</text>
+  <text x="147" y="263" text-anchor="middle" font-size="10.5" fill="var(--gap)">no bearer token, router.rs:730</text>
+  <rect x="40" y="288" width="215" height="52" rx="6" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="147" y="308" text-anchor="middle" font-size="11" font-weight="600" fill="var(--gap)">body: refused at the same door</text>
+  <text x="147" y="325" text-anchor="middle" font-size="10.5" fill="var(--gap)">the paywall never gets to sell</text>
+  <text x="147" y="354" text-anchor="middle" font-size="10.5" fill="var(--gap)">G15 says this row should read the stub</text>
+
+  <rect x="302" y="192" width="255" height="170" rx="9" fill="var(--panel)" stroke="var(--line)"/>
+  <text x="429" y="214" text-anchor="middle" font-size="12.5" font-weight="700">member, no tier</text>
+  <rect x="322" y="226" width="215" height="52" rx="6" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="429" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="var(--ten)">stub: reads it</text>
+  <text x="429" y="263" text-anchor="middle" font-size="10.5" fill="var(--ten)">sees the offer and the price</text>
+  <rect x="322" y="288" width="215" height="52" rx="6" fill="var(--gap-bg)" stroke="var(--gap-bd)"/>
+  <text x="429" y="308" text-anchor="middle" font-size="11" font-weight="600" fill="var(--gap)">body: not_found (G12)</text>
+  <text x="429" y="325" text-anchor="middle" font-size="10.5" fill="var(--gap)">or filtered from a collection</text>
+  <text x="429" y="354" text-anchor="middle" font-size="10.5" fill="var(--mut)">?live on the empty body query fires on unlock</text>
+
+  <rect x="584" y="192" width="255" height="170" rx="9" fill="var(--panel)" stroke="var(--ten-bd)"/>
+  <text x="711" y="214" text-anchor="middle" font-size="12.5" font-weight="700" fill="var(--ten)">supporter at the tier</text>
+  <rect x="604" y="226" width="215" height="52" rx="6" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="711" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="var(--ten)">stub: reads it</text>
+  <text x="711" y="263" text-anchor="middle" font-size="10.5" fill="var(--ten)">though not through a window</text>
+  <rect x="604" y="288" width="215" height="52" rx="6" fill="var(--ten-bg)" stroke="var(--ten-bd)"/>
+  <text x="711" y="308" text-anchor="middle" font-size="11" font-weight="600" fill="var(--ten)">body: rows</text>
+  <text x="711" y="325" text-anchor="middle" font-size="10.5" fill="var(--ten)">groupMembers walk succeeds</text>
+  <text x="711" y="354" text-anchor="middle" font-size="10.5" fill="var(--mut)">and is a members row in the creator's space</text>
+
+  <path d="M300 48 L160 48 L160 192" stroke="var(--mut)" fill="none" marker-end="url(#ah5)"/>
+  <path d="M430 156 v36" stroke="var(--mut)" fill="none" marker-end="url(#ah5)"/>
+  <path d="M560 48 L700 48 L700 192" stroke="var(--mut)" fill="none" marker-end="url(#ah5)"/>
+</svg>
+<figcaption>The stub/body split against the three callers a paywall has.
+The split does what it is meant to do for the middle column, which is the
+one G12 would otherwise make invisible. It fails in the left column for a
+reason that has nothing to do with the split: the door, not the guard.
+Verified against G12 and G15 in <code>definition-language.md</code>, G6 and
+G9 for the inheritance and guard-bearing rules, G16 for the live
+subscription behaviour, and <code>crates/ordo-api/src/router.rs:730</code>
+for the refusal.</figcaption>
+</figure>
+
+<h2>7 &middot; What is still open</h2>
+
+<div class="openlist">
+
+<h4>1. One system space, or several</h4>
+<p>The catalogue was ruled singular. Whether system agents, reference data
+and the catalogue share one space is not. Several would separate blast
+radius and erasure, but the argument that a deploy to one should not
+re-point the others is empty until per-space activation exists (§2), so
+today the only real difference is the guard surface and who owns each.</p>
+
+<h4>2. Who owns the system space, and what stops them ending it</h4>
+<p>A space must have at least one human owner at creation, and exit ops
+always exist and are owner-only. So "nobody erases it" currently has no
+mechanism. Either exempt the system space from the exit ops, contradicting
+"always exist", or place the ownership somewhere that makes it implausible,
+and say which.</p>
+
+<h4>3. Discovery across publishers is a fourth sharing mechanism</h4>
+<p>The corpus pins that "sharing goes through one of two doors" and the
+2026-09-12 ruling then proposes a third artifact, a derived control-plane
+projection, precisely because windows and feeds both require a relationship.
+Nothing is decided about its shape: how a publisher's consent to be listed
+is represented (it is neither a window nor a feed), what refreshes it, what
+it is allowed to contain, and how "pruned when a publisher is erased" is
+triggered given erasure is a per-space act in a database the control plane
+may not own under routing.</p>
+
+<h4>4. Where the system space sits under routing, and what the universal read window costs</h4>
+<p>This is new here and it is not in <code>plan-space-routing.md</code>. §4's
+inversion applies to the system space itself: a tenant on an attached target
+reading the catalogue through a universal window is a cross-database read,
+and the catalogue may not be replicated, so the feed escape is closed by the
+same ruling that created the system space. Colocating the system space on
+the default target fixes it for the long tail and not for promoted tenants,
+who are the largest ones and the ones paying for promotion. The CDN
+publication of §3 sidesteps it entirely for the browsable case, which is an
+argument for publication beyond the anonymous one.</p>
+
+<h4>5. Payment state lives entirely outside Ordo</h4>
+<p>There is no billing vocabulary in the platform and that is deliberate:
+<code>policy spaces</code> makes even the space allowance "a counter a
+service updates", and "overselling is structurally impossible for the same
+reason seats are". So the mapping from "paid" to "in the tier group" is an
+external service holding a capability grant on the creator's space, with
+lag, partial failure and reconciliation. What happens when the provider
+says lapsed and the group write fails is not a platform question today. Given
+§5's finding that membership writes serialize through one advisory lock per
+space, it may need to become one.</p>
+
+<h4>6. Anonymous writes, if they are ever wanted</h4>
+<p>§3's read-only proposal exists because the idempotency cache and the
+cursor namespace both key on the resolved principal. A public form
+submission would need a per-request synthetic principal, which is a
+different design with its own attribution question: what actor does the
+resulting command group name?</p>
+
+<h4>7. Whether the tier ladder may ever live in the schema</h4>
+<p>§5 chooses group-per-tier because the acl-level shape puts tier names in
+guard literals and a schema change is a deployment-wide deploy. If
+per-space activation (§2, option b) lands, that objection dissolves and the
+acl-level shape becomes both viable and cheaper: one row per supporter
+rather than one per tier at or below theirs, and one converge per tier
+change rather than N adds and removes. So §2 and §5 are coupled, and
+choosing (b) should reopen §5.</p>
+
+<h4>8. How a guest reaches the door at all</h4>
+<p>Found while drawing the four paths. The access engine's three layers are
+membership roles, per-space access profiles, and capability allowlists.
+<code>Role</code> has exactly four variants and none is a guest
+(<code>crates/ordo-identity/src/principal.rs:105</code>), and
+<code>crates/ordo-identity/src/access.rs</code> contains no occurrence of
+"guest". The corpus says a guest holds "no role and no profile" and that
+the compiler enforces guard-bearing ops for guest exposure, which is the
+<i>guard</i> half. What admits a null-role members row past the
+<i>door</i> is not settled in the code read for this document. This may be
+unbuilt rather than undecided, but it should be established before the
+window path is relied on for paid content.</p>
+
+<h4>9. Anonymous denial routing</h4>
+<p>§3 proposes that anonymous denials stay on the deployment stream even
+though anonymous is a principal of a named space, to preserve the property
+that a stranger cannot grow a tenant's audit spine. That is a proposal in
+this document and not a ruling. It has a cost: an operator investigating
+abuse against one tenant's public surface reads it in the deployment stream
+mixed with every other tenant's.</p>
+
+</div>
+
+<h2>8 &middot; What this document is asking for</h2>
+
+<div class="pull">
+<b>Three things need a ruling before any of it is built.</b>
+<b>(i)</b> What an app is allowed to be (§2), because it decides per-space
+activation, and per-space activation decides §5's shape and §1's ability to
+give the system space a schema tenants do not have.
+<b>(ii)</b> Whether the public surface is published or live (§3), because
+publishing removes the abuse surface, the routing cost in open question 4,
+and the anonymous door all at once, at the price of staleness and no
+per-caller variation.
+<b>(iii)</b> Whether "revocation stops access" is a promise the product
+makes (§4), because neither mechanism delivers it and the difference
+between them is volume.
+</div>
+
+<p>Everything else in §7 can be deferred without building against a wrong
+assumption, with one exception: open question 8. If the guest door is
+unbuilt rather than merely undocumented, the window path is not available
+today, and §4's conclusion that paid content wants a window is a conclusion
+about a mechanism that does not yet work.</p>
+
+<p class="foot">Companion to <code>corpus-rulings.md</code> 2026-09-12 (the
+third home, the tenancy topology),
+<code>docs/plan-space-routing.md</code>, and the <code>system-space</code>,
+<code>per-tenant-install</code>, <code>sharing-under-routing</code> and
+<code>tenancy-topology</code> rows in <code>docs/decisions.html</code>.
+Claims about the language cite <code>definition-language.md</code> by rule
+number; claims about behaviour cite the file and line read from the tree on
+2026-09-12. Where this document departs from what was ruled, it says so in
+a callout: §1 on the attribution argument, §4 on what revocation leaves,
+and §5 on why the group-per-tier shape is right.</p>
+
+</div>
+</body>
+</html>

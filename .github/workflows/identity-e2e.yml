@@ -1,0 +1,107 @@
+name: Identity service end-to-end
+
+# The identity service's page in a real browser with a virtual passkey,
+# wired as the console e2e is (console-e2e.yml): a throwaway service
+# (crates/ordo-identity-service/e2e/stack.sh) on CI's Postgres service
+# container, and Playwright flows against it.
+#
+# The upgrade case from a console that predates the identity service was
+# retired 2026-10-31 (owner): that console exists only in the private
+# history repository.
+
+on:
+  push:
+    branches: [main, bleeding]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_BACKTRACE: '1'
+
+concurrency:
+  group: identity-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  throwaway:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      CI: '1'
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_PASSWORD: ordo
+      ORDO_PSQL: psql
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: e2e-identity
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: crates/ordo-identity-service/e2e/package-lock.json
+
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Postgres without durable commits (CI only)
+        run: bash scripts/ci-pg-fast-commits.sh
+
+      - name: Build ordo-identity-service
+        run: cargo build -p ordo-identity-service
+
+      - name: Install and typecheck the tests
+        working-directory: crates/ordo-identity-service/e2e
+        run: npm ci && npm run typecheck
+
+      - name: Install Chromium
+        working-directory: crates/ordo-identity-service/e2e
+        run: npx playwright install --with-deps chromium
+
+      # Playwright starts the service (stack.sh) and stops it at the end.
+      - name: Run the use cases
+        working-directory: crates/ordo-identity-service/e2e
+        run: npx playwright test
+
+      - name: Upload the traces and service log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: identity-e2e-report
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true
+          path: |
+            crates/ordo-identity-service/e2e/test-results/
+            crates/ordo-identity-service/e2e/.stack/*.log

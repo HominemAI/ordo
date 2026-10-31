@@ -1,0 +1,9 @@
+op expiringSoon =                                # since + dot-paths through links
+  leases(status == "active"                      # a step ends at END OF LINE unless
+         and end is not null                     # a delimiter is open (G6), so both
+         and end <= 2026-12-31)[start, end, rent, unit.name, unit.property.name]
+  sort end                                       # breaks above are inside the parens
+# The projection belongs to the source and cannot begin a line of its own. Drop it
+# and `leases(…)` is still a complete step (one that reads the WHOLE row), so a
+# wrapped `[…]` would let the next line silently narrow what the line above it
+# disclosed. Break inside the parens (or inside the brackets); never between them.

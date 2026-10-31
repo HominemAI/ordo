@@ -1,0 +1,7 @@
+routine leaseExpiry in estate {
+  trigger every day 08:00Z
+  run($today: date):
+    leases(status == "active" and end is not null and end <= $today + 60d)[id, end, unit.name]
+    each ->
+      set alerts { kind: "lease", key: "leaseExpiry:" + id, severity: "warning", status: "active", raised: $today, title: unit.name + " lease ends " + end }
+}

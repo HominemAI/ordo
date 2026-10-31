@@ -1,0 +1,66 @@
+[package]
+name = "ordo-console"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# The console: its own server, its own Postgres database and its own sign-in
+# (`docs/plan-console.md`, checklist item 18o). Step 1a is the server, the
+# store and sign-in; step 1b adds the page it serves and the image.
+
+[[bin]]
+name = "ordo-console"
+path = "src/main.rs"
+
+[dependencies]
+# The same HTTP stack `ordo-host` serves the door with.
+axum = "0.8"
+# Random tokens, codes and owner ids, from the operating system.
+getrandom = "0.2"
+# The database client and its one typed error (`PoolError`), the same pool
+# every Ordo store uses. The console opens it with `Pool::connect_own`, so
+# its database gets none of a deployment's tables.
+ordo-exec = { path = "../ordo-exec" }
+ordo-fault = { path = "../ordo-fault" }
+# The one list of settings that hold a secret, shared with `ordo-host`.
+ordo-env = { path = "../ordo-env" }
+# The one client to the supervisor's socket, its typed error and the
+# revision it is handed (`src/runtime/`, `plan-identity-service.md` 3.2).
+ordo-supervisor = { path = "../ordo-supervisor" }
+# Passkey ceremonies and argon2id, reused rather than written again.
+ordo-identity = { path = "../ordo-identity" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+# The one client to the deployment's door (`door.rs`): HTTP/1.1 over a plain
+# socket to loopback, or TLS (rustls, TLS 1.2 and up, the web PKI roots) to
+# anywhere else. All already in the tree: hyper through axum, rustls through
+# `ordo-egress`.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "0.26"
+# The console key (G14): an Ed25519 pair the console makes and signs its
+# sign-in challenges with. The private half is sealed in the console database.
+ed25519-dalek = "2"
+
+# Marking the console not dumpable, through a safe wrapper: the workspace
+# forbids `unsafe`.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process", "thread"] }
+
+[dev-dependencies]
+ordo-identity = { path = "../ordo-identity", features = ["test-support"] }
+# `tests/door_link.rs` stands the deployment's real sign-in routes and console
+# key ops up in-process, so the console's client is tested against the door
+# it talks to. Test only: the console itself never links `ordo-host`.
+ordo-host = { path = "../ordo-host" }
+ordo-api = { path = "../ordo-api" }
+ordo-secevent = { path = "../ordo-secevent" }
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

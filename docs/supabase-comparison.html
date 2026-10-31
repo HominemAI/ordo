@@ -1,0 +1,331 @@
+<!-- The Grief Remediation tab of the decisions page. A fragment: docs/decisions.html
+     fetches it from /compare and supplies the styles, the filter and the note boxes.
+     Edit the rows here; the page itself does not change. A row's number is its
+     permanent id (g<n>): the owner's notes in docs/grief-notes.json are keyed by
+     it, so never renumber; a new row takes the next number. Sources at the bottom. -->
+<section class="cmp">
+<p class="seclede">
+  What people complain about in Supabase's schema and migration system, set beside what Ordo does today.
+  Researched 2026-09-30, updated from your notes 2026-10-01, from Supabase's GitHub issues and discussions, its docs, and community write-ups.
+  Rows marked <b>Adam</b> are your own grievances. Click a row to write your thoughts on it; they save as you type.
+</p>
+
+<div class="cmpkey" id="cmpKey">
+  <button data-v="" aria-pressed="true">All</button>
+  <button data-v="ok" aria-pressed="false"><span class="v ok">Addressed</span> Ordo answers it</button>
+  <button data-v="part" aria-pressed="false"><span class="v part">Partial</span> designed or half built</button>
+  <button data-v="gap" aria-pressed="false"><span class="v gap">Gap</span> Ordo has no answer yet</button>
+  <button data-v="prob" aria-pressed="false"><span class="v prob">Problem</span> a defect in Ordo today</button>
+  <button data-v="opp" aria-pressed="false"><span class="v opp">Opportunity</span> room to do better</button>
+</div>
+
+<div class="tablewrap">
+<table class="cmptable">
+<thead><tr>
+  <th scope="col">#</th>
+  <th scope="col">Supabase: the grievance</th>
+  <th scope="col">Who</th>
+  <th scope="col">Ordo today</th>
+  <th scope="col">Verdict</th>
+  <th scope="col">What to do</th>
+</tr></thead>
+<tbody>
+
+<tr class="cmpgroup"><td colspan="6">Migration history and drift</td></tr>
+<tr data-v="ok" data-id="g1"><td>1</td>
+  <td>The history table is trusted over the real schema. A dashboard hotfix drifts from the repo and nothing notices.</td>
+  <td>Reported</td>
+  <td>The shape gate refuses to serve on drift. <code>plan</code> diffs the live schema, never a history.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g2"><td>2</td>
+  <td>Files are named by timestamp. A rebase or a second repo breaks <code>db push</code>, and <code>migration repair</code> edits history by hand.</td>
+  <td>Reported</td>
+  <td>A version is the artifact's content hash. There is no file order to get wrong.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="part" data-id="g3"><td>3</td>
+  <td>Supabase cannot adopt a database that already exists. Its migrations expect to have made every table, so a running production database has no clean starting point (a "baseline").</td>
+  <td>Reported</td>
+  <td>Import through the write path is built. <code>ordo introspect</code> is unbuilt, by ruling 18k.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Nothing before first deployment. Import covers moving data in.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">Long chains of migrations</td></tr>
+<tr data-v="ok" data-id="g4"><td>4</td>
+  <td>The schema is spread across hundreds of migration files. No one file says what a table is now.</td>
+  <td><b>Adam</b></td>
+  <td>The <code>.ordo</code> program is the current state. There is no chain of files.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g5"><td>5</td>
+  <td>A fresh database, branch or reset replays every migration. It is slow, and breaks when an old file no longer runs.</td>
+  <td><b>Adam</b></td>
+  <td>A fresh database is one create from the current program (<code>create_schema</code>). Nothing is replayed.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g6"><td>6</td>
+  <td>Squash is the only cleanup. It has lost storage policies and triggers, and its output is unreadable.</td>
+  <td>Reported</td>
+  <td>Nothing to squash.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="part" data-id="g7"><td>7</td>
+  <td>(Ordo's version of the chain.) A tenant many versions behind is diffed straight to the current version.</td>
+  <td>Found</td>
+  <td>Ruled: every artifact and plan is kept, and a lagging tenant replays each step in order.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27a and 27b.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">Rollback</td></tr>
+<tr data-v="part" data-id="g8"><td>8</td>
+  <td>No down migrations. Requested since 2022, 48 participants.</td>
+  <td>Reported</td>
+  <td>Rollback serves the old version again. Ruled: each step stores its reverse, and a failed migration never switched.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27a and 27c.</td></tr>
+<tr data-v="ok" data-id="g9"><td>9</td>
+  <td><code>migration down --linked</code> resets production. One user lost their whole database.</td>
+  <td>Reported</td>
+  <td>No command resets a deployment's database. See row 24 for the dev loop.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g10"><td>10</td>
+  <td>Nothing keeps a migration compatible with the version already serving.</td>
+  <td>Reported</td>
+  <td>D3 refuses dropping a field the active version reads. <code>--no-activate</code> stages ahead.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="gap" data-id="g11"><td>11</td>
+  <td>(Ordo.) Required to optional (B6) breaks rollback.</td>
+  <td>Found</td>
+  <td>The plan says so. Nothing enforces it.</td>
+  <td><span class="v gap">Gap</span></td>
+  <td>Reverse rules per change, <code>plan-evolution-plans.md</code> §3.3. Queued, 27a.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">The diff tool</td></tr>
+<tr data-v="ok" data-id="g12"><td>12</td>
+  <td>The diff misses RLS policies, grants, auth triggers, realtime publications, comments and domains. Sign-up breaks in new environments.</td>
+  <td>Reported</td>
+  <td><code>ddl_for</code> emits a closed, listed set. Access lives in the artifact, not in SQL.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g13"><td>13</td>
+  <td><code>security_invoker</code> on views is silently dropped.</td>
+  <td>Reported</td>
+  <td>No SQL views or policies to drop.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g14"><td>14</td>
+  <td>Statements come out in the wrong order. JOIN views are regenerated forever.</td>
+  <td>Reported</td>
+  <td><code>ddl_for</code> runs fixed passes in a fixed order.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="opp" data-id="g15"><td>15</td>
+  <td>(The cost of the closed set.) Postgres features outside it cannot be expressed at all.</td>
+  <td>Found</td>
+  <td>No escape hatch.</td>
+  <td><span class="v opp">Opportunity</span></td>
+  <td>Decide whether one is wanted.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">Locks, downtime and data</td></tr>
+<tr data-v="prob" data-id="g16"><td>16</td>
+  <td><code>ALTER TABLE</code> waits behind one slow read and stalls all traffic. <code>lock_timeout</code> is left to each team.</td>
+  <td>Reported</td>
+  <td><code>schema_apply</code> sets no <code>lock_timeout</code>. A queued ALTER can block a table for up to 30 seconds.</td>
+  <td><span class="v prob">Problem</span></td>
+  <td>Queued. Board <code>apply-lock-timeout</code>.</td></tr>
+<tr data-v="ok" data-id="g17"><td>17</td>
+  <td>A plain <code>CREATE INDEX</code> blocks writes.</td>
+  <td>Reported</td>
+  <td><code>CONCURRENTLY</code>, with validity read back.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="part" data-id="g18"><td>18</td>
+  <td>A new constraint is checked over the whole table under a lock.</td>
+  <td>Reported</td>
+  <td>Probes run first. <code>NOT VALID</code> then <code>VALIDATE</code> is increment 3.</td>
+  <td><span class="v part">Partial</span></td>
+  <td><code>NOT VALID</code> then validate; uniques via a concurrent index. Board <code>apply-lock-timeout</code>.</td></tr>
+<tr data-v="part" data-id="g19"><td>19</td>
+  <td>Data migrations are hand-written. Backfills hold locks, and schema and data cannot be retried apart.</td>
+  <td>Reported</td>
+  <td>Ruled: choices are made in the plan, with a committable receipt.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27a.</td></tr>
+<tr data-v="ok" data-id="g20"><td>20</td>
+  <td>How long a migration takes is only known once it runs.</td>
+  <td>Reported</td>
+  <td><code>plan</code> prints a freeze estimate before anything runs.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="gap" data-id="g40"><td>40</td>
+  <td>Does the deployment serve every version its tenants are on?</td>
+  <td><b>Adam</b></td>
+  <td>One version back (D-B2). You asked what serving more costs.</td>
+  <td><span class="v gap">Gap</span></td>
+  <td>Board <code>evolution-plans</code>, ask 3, put again.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">Tables from other systems in the same database</td></tr>
+<tr data-v="ok" data-id="g21"><td>21</td>
+  <td>The diff guesses ownership. Another system's tables show up as yours or as a <code>DROP</code>.</td>
+  <td><b>Adam</b></td>
+  <td>Extra live tables, columns and constraints are not drift, and are never proposed for drop.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="part" data-id="g22"><td>22</td>
+  <td>There is no clean way to reference data another system owns.</td>
+  <td><b>Adam</b></td>
+  <td>Ruled: external entities, generated read-only projections. Not deferred.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27i.</td></tr>
+<tr data-v="ok" data-id="g23"><td>23</td>
+  <td>The other owner's change flags your drift. Unannounced <code>auth</code> indexes broke every Prisma project.</td>
+  <td>Reported</td>
+  <td>Extra live objects are tolerated.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="prob" data-id="g24"><td>24</td>
+  <td><code>db reset</code> wipes every table, including other systems'.</td>
+  <td>Reported</td>
+  <td><code>ordo dev</code> runs <code>DROP SCHEMA public CASCADE</code> on any database it is pointed at. Ruled 2026-10-01: drop only the program's tables and note the rest.</td>
+  <td><span class="v prob">Problem</span></td>
+  <td>Queued. Board <code>dev-reset-foreign</code>.</td></tr>
+<tr data-v="part" data-id="g25"><td>25</td>
+  <td>A name another system already uses.</td>
+  <td>Found</td>
+  <td>Ruled: Ordo's tables move under a prefix plus a random identifier.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27k.</td></tr>
+<tr data-v="gap" data-id="g26"><td>26</td>
+  <td>Your foreign key on their table breaks their operations (<code>profiles</code> to <code>auth.users</code>).</td>
+  <td>Reported</td>
+  <td>The reverse applies: an outside foreign key into an Ordo table blocks Ordo's deletes and drops. Increment 5 does not look for one.</td>
+  <td><span class="v gap">Gap</span></td>
+  <td>Ruled: the first apply lists untracked tables and errors on a clash. Queued, 27j.</td></tr>
+<tr data-v="part" data-id="g27"><td>27</td>
+  <td>(Ordo.) Another system writes straight into an Ordo table.</td>
+  <td>Found</td>
+  <td>Ruled 2026-10-01: direct database access is discouraged and handled by access control. Ordo's role alone writes its tables. Grants not yet audited.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Audit, board <code>deploy-schema-audit</code>.</td></tr>
+<tr data-v="part" data-id="g28"><td>28</td>
+  <td><code>must be owner of table</code> when the migrating role differs from the one that created the table.</td>
+  <td>Reported</td>
+  <td>Roles are Postgres roles, not people. In Supabase everyone applies as <code>postgres</code>, so two people's migrations share one owner; the clash is with Supabase's own service roles. Ordo's parallel: the deployment's role against a tenant database's owner.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Board <code>deploy-schema-audit</code>.</td></tr>
+<tr data-v="ok" data-id="g29"><td>29</td>
+  <td>The API's schema cache goes stale, or reloads on every DDL. One project lost 371 seconds in 28 hours.</td>
+  <td>Reported</td>
+  <td>Ordo serves from the artifact, not from a schema cache read off the database.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g41"><td>41</td>
+  <td>An app sharing the database cannot use Ordo's data, because direct database access is discouraged.</td>
+  <td><b>Adam</b></td>
+  <td>Ruled: other systems reach Ordo through the door. Grant-based views maybe, later.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep. Views: 27u, not planned.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">Platform-owned schemas and access</td></tr>
+<tr data-v="part" data-id="g30"><td>30</td>
+  <td><code>auth</code>, <code>storage</code> and <code>realtime</code> were locked in April 2025. Old migrations now fail.</td>
+  <td>Reported</td>
+  <td>Std entities live in the program. A clash between std and user names is unverified.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Audit first (<code>deploy-schema-audit</code>), then random schema names.</td></tr>
+<tr data-v="ok" data-id="g31"><td>31</td>
+  <td>Making a table reachable takes a dashboard setting plus grants. The default flips on 30 Oct 2026.</td>
+  <td>Reported</td>
+  <td>Nothing is reachable unless an op exposes it, and ops are in the artifact.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+<tr data-v="ok" data-id="g32"><td>32</td>
+  <td>Generated types are a manual step, lag the schema, and change between runs.</td>
+  <td>Reported</td>
+  <td>Types come from the same compiled program as the DDL.</td>
+  <td><span class="v ok">Addressed</span></td>
+  <td>Keep.</td></tr>
+
+<tr class="cmpgroup"><td colspan="6">Dev, staging and production</td></tr>
+<tr data-v="part" data-id="g33"><td>33</td>
+  <td>Local behaves differently from hosted: Postgres version, realtime, RLS, OAuth.</td>
+  <td>Reported</td>
+  <td>Ruled: dev by default, then staging, then production, each gated on the one before.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27e and 27f.</td></tr>
+<tr data-v="part" data-id="g34"><td>34</td>
+  <td>Staging is a separate project kept in step by hand.</td>
+  <td>Reported</td>
+  <td>Ruled: promotion by hash, once compiling is proven byte-stable.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27e and 27f.</td></tr>
+<tr data-v="part" data-id="g35"><td>35</td>
+  <td>Branches cost about a project each. A merge deleted a client's UAT database.</td>
+  <td>Reported</td>
+  <td>Ruled: a dev branch is a tenant in the dev deployment. Promoting one for special tenants comes later.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27g. Future: <code>tenant-builds</code>.</td></tr>
+<tr data-v="part" data-id="g36"><td>36</td>
+  <td>Auth settings and secrets do not travel with the schema.</td>
+  <td>Reported</td>
+  <td>Environment variables read by server and dev alike. A bad value refuses to start. Still set by hand in each environment.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Board <code>settings-in-code</code> (18ac).</td></tr>
+<tr data-v="gap" data-id="g37"><td>37</td>
+  <td>No safe way to get realistic data. Seeding <code>auth.users</code> is awkward.</td>
+  <td>Reported</td>
+  <td>Ruled: staging clones mask personal data by default, as the app developer's setting.</td>
+  <td><span class="v gap">Gap</span></td>
+  <td>Queued, 27v. Future: <code>data-generation</code>.</td></tr>
+<tr data-v="gap" data-id="g38"><td>38</td>
+  <td>Destructive commands look the same in every environment.</td>
+  <td>Reported</td>
+  <td><code>ordo rollback</code> and future drops do not know which environment they aim at.</td>
+  <td><span class="v gap">Gap</span></td>
+  <td>With the rollout build (27h).</td></tr>
+<tr data-v="part" data-id="g39"><td>39</td>
+  <td>A preview branch replays history and fails as <code>MIGRATIONS_FAILED</code>.</td>
+  <td>Reported</td>
+  <td>Ruled: migration is seamless. The old version serves until the new one works, so a failure shuts nobody out.</td>
+  <td><span class="v part">Partial</span></td>
+  <td>Queued, 27c.</td></tr>
+
+</tbody>
+</table>
+</div>
+
+<details class="fold">
+  <summary>Sources</summary>
+  <ul class="cmpsrc">
+    <li><a href="https://github.com/orgs/supabase/discussions/11263">Rollback ("down") migrations, discussion #11263</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/43997">Lost entire database after migration down, #43997</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/40721">Cannot baseline an existing production database, #40721</a></li>
+    <li><a href="https://github.com/supabase/supabase/issues/15695">Remote migration history not in sync, #15695</a></li>
+    <li><a href="https://github.com/supabase/cli/issues/3974">db diff misses auth triggers, publications, privileges, CLI #3974</a></li>
+    <li><a href="https://github.com/supabase/cli/issues/3483">Wrong statement order for a function in a CHECK, CLI #3483</a></li>
+    <li><a href="https://github.com/supabase/cli/issues/4027">JOIN views regenerated forever, CLI #4027</a></li>
+    <li><a href="https://supabase.com/docs/guides/local-development/declarative-database-schemas">Declarative schemas and their limits</a></li>
+    <li><a href="https://github.com/supabase/cli/issues/1493">Squash deletes storage schema migration, CLI #1493</a></li>
+    <li><a href="https://github.com/supabase/cli/issues/1685">Squash leaves out entries, CLI #1685</a></li>
+    <li><a href="https://github.com/supabase/supabase/issues/45124">Preview migrate step dies on a gap, #45124</a></li>
+    <li><a href="https://supabase.com/docs/guides/deployment/branching/troubleshooting">Branching troubleshooting</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/34270">Auth, storage and realtime restrictions, #34270</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/45329">Tables not exposed to the Data API automatically, #45329</a></li>
+    <li><a href="https://github.com/supabase/auth/issues/1140">Auth schema changes cause Prisma drift, auth #1140</a></li>
+    <li><a href="https://github.com/supabase/supabase/issues/50043">Schema cache reloaded 85 times a day, #50043</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/6326">"must be owner of table" on db push, #6326</a></li>
+    <li><a href="https://supabase.com/docs/guides/troubleshooting/dashboard-errors-when-managing-users-N1ls4A">Dashboard errors when managing users</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/19747">Slow ALTER TABLE on a large table, #19747</a></li>
+    <li><a href="https://github.com/supabase/postgres-meta/issues/831">Inconsistent generated types, postgres-meta #831</a></li>
+    <li><a href="https://github.com/supabase/cli/issues/46">Local Postgres version differs from hosted, CLI #46</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/40583">Feature parity between Cloud and local, #40583</a></li>
+    <li><a href="https://github.com/orgs/supabase/discussions/27860">Branching for dev and production, #27860</a></li>
+    <li><a href="https://www.supaclone.io/blog/supabase-branching-vs-separate-projects">Branching vs separate staging projects</a></li>
+    <li><a href="https://supabase.com/docs/guides/local-development/managing-config">Managing config and secrets</a></li>
+    <li><a href="https://xata.io/blog/neon-vs-supabase-vs-xata-postgres-branching-part-2">Postgres branching compared, part 2</a></li>
+  </ul>
+</details>
+</section>

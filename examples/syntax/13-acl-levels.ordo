@@ -1,0 +1,63 @@
+# 13 acl: derived permission machinery
+#
+# Shows the one-line form of access control.
+#   - `acl (read, write, admin)` on an entity derives:
+#       * a link entity `<entity>Access` (here `boardsAccess`) with a row per
+#         member per board and a `level` field
+#       * read and write guards on the board and everything it owns
+#       * ops `grantBoardsAccess`, `revokeBoardsAccess`, `setBoardsAccessLevel`
+#       * a bootstrap: the creator gets the top level in the same command group
+#   - Levels are ordered left to right. Position decides the rights: the
+#     first level reads, the second writes, the last administers.
+#   - Cards are owned by boards, so they inherit the board's acl.
+#   - The access rows are ordinary rows. You can read them in an op, and you
+#     can write them in the same atomic group as other changes.
+#
+# Reference: docs/definition-language.md section 3 "`acl`", docs/glossary.md
+# "guard / acl". Compare examples/notes/notes.ordo.
+
+domain boards @ 1.0.0
+
+entity boards {
+  name: text
+  acl (read, write, admin)
+}
+
+entity cards {
+  board -> boards owned
+  title: text
+  done:  bool = false
+}
+
+op addBoard($name: text) =
+  set boards { name: $name }
+
+op addCard($board: id, $title: text) =
+  set cards { board: $board, title: $title }
+
+op finishCard($card: id) =
+  set cards(id == $card) { done: true }
+
+# Only the boards the caller holds a level on come back.
+op myBoards unbounded =
+  boards[name]
+  sort name
+
+# The derived link entity is an ordinary source. Who holds what:
+op whoCanSee($board: id) unbounded =
+  boardsAccess(board == $board)[member.displayName, level]
+  sort member.displayName
+
+# Hand a board to someone and give them the top level, in one atomic group.
+# The caller must already hold the top level on the board.
+op handOver($board: id, $to: id) =
+  set boardsAccess { board: $board, member: $to, level: "admin" }
+
+# Take one person back off one board by name, not by access row id.
+op removeFrom($board: id, $member: id) =
+  del boardsAccess(board == $board and member == $member)
+
+# Create a board and share it with a teammate in one op.
+op startShared($name: text, $teammate: id) =
+  let b = set boards { name: $name }
+  set boardsAccess { board: b.id, member: $teammate, level: "write" }

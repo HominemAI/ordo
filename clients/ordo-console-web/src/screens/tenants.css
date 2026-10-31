@@ -1,0 +1,141 @@
+/* The Tenants screen (step 5). A table that turns into one card a tenant
+   when its own width is small, so a phone never scrolls sideways. */
+
+.tenant-table {
+  container-type: inline-size;
+  max-inline-size: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.tenant-table table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+
+.tenant-table caption {
+  text-align: start;
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding-block-end: 4px;
+}
+
+.tenant-table th,
+.tenant-table td {
+  text-align: start;
+  vertical-align: top;
+  padding: 8px;
+  border-block-end: 1px solid var(--line);
+}
+
+.tenant-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.tenant-name {
+  display: block;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.tenant-id {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.tenant-table .tag {
+  margin-inline-start: 0;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pill-tenant-active {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.pill-tenant-paused,
+.pill-tenant-failed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+select {
+  font: inherit;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  margin-block-end: 12px;
+}
+
+@container (width < 640px) {
+  .tenant-table table,
+  .tenant-table tbody,
+  .tenant-table tr,
+  .tenant-table th,
+  .tenant-table td {
+    display: block;
+  }
+
+  .tenant-table thead {
+    display: none;
+  }
+
+  .tenant-table tr {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-block-end: 12px;
+  }
+
+  .tenant-table th,
+  .tenant-table td {
+    border-block-end: 0;
+    padding: 4px 12px;
+  }
+
+  .tenant-table tbody th {
+    padding-block-start: 10px;
+  }
+
+  .tenant-table td::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+  }
+
+  .tenant-table td[data-label='Actions']::before {
+    content: none;
+  }
+
+  .tenant-table td[data-label='Actions'] {
+    padding-block-end: 12px;
+  }
+}
+
+/* Owner succession: the open cases, one card each. */
+.case-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.case-list .case {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  overflow-wrap: anywhere;
+}
+
+.case-list .objections {
+  margin: 4px 0 8px;
+  padding-inline-start: 18px;
+}

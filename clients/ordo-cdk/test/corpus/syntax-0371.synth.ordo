@@ -1,0 +1,3 @@
+op bigSpenders($min: int) =
+  vendorSpend($from: 2026-01-01, billed > $min)[name, billed]
+    take 10

@@ -1,0 +1,147 @@
+/* The Shares and security screen (step 9). Tables turn into one card a row
+   when their own width is small, so a phone never scrolls sideways. */
+
+.view-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-block-end: 12px;
+}
+
+.view-switch button[aria-pressed='true'] {
+  border-color: var(--text);
+  font-weight: 650;
+}
+
+.picker,
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 16px;
+}
+
+.picker label,
+.picker select {
+  flex-basis: 100%;
+}
+
+.log-filters > div {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+.log-filters select,
+.log-filters input {
+  max-inline-size: 100%;
+}
+
+.share-table {
+  container-type: inline-size;
+  max-inline-size: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+.share-table table {
+  inline-size: 100%;
+  border-collapse: collapse;
+}
+
+.share-table caption {
+  text-align: start;
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding-block-end: 4px;
+}
+
+.share-table th,
+.share-table td {
+  text-align: start;
+  vertical-align: top;
+  padding: 8px;
+  border-block-end: 1px solid var(--line);
+}
+
+.share-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.share-table .detail {
+  overflow-wrap: anywhere;
+}
+
+.share-name {
+  display: block;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.share-id {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.share-table .tag {
+  margin-inline-start: 0;
+}
+
+.pill-link-live {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.pill-link-revoked,
+.pill-kind-denied,
+.pill-kind-authentication-failed,
+.pill-kind-events-dropped,
+.pill-kind-sealed-unreadable {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+@container (width < 640px) {
+  .share-table table,
+  .share-table tbody,
+  .share-table tr,
+  .share-table th,
+  .share-table td {
+    display: block;
+  }
+
+  .share-table thead {
+    display: none;
+  }
+
+  .share-table tr {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-block-end: 12px;
+  }
+
+  .share-table th,
+  .share-table td {
+    border-block-end: 0;
+    padding: 4px 12px;
+  }
+
+  .share-table tbody th {
+    padding-block-start: 10px;
+  }
+
+  .share-table td::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+  }
+
+  .share-table td[data-label='Actions']::before {
+    content: none;
+  }
+
+  .share-table td[data-label='Actions'] {
+    padding-block-end: 12px;
+  }
+}

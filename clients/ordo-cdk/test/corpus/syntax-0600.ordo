@@ -1,0 +1,13 @@
+routine leaseExpiry in estate {                  # CLOCK-woken: guards pass
+  trigger every day 08:00Z
+  run($today: date):
+    leases(status == "active" and end is not null and end <= $today + 60d)
+      [id, end, unit.name]
+    each ->
+      set alerts { kind: "lease", key: "leaseExpiry:" + id,
+                   severity: "warning", status: "active", raised: $today,
+                   title: unit.name + " lease ends " + end }
+}
+# converge-or-create on alerts.key: creation-capable, so every REQUIRED field
+# must be covered (`kind`, `title`), and `status` is restated so a resolved
+# alert re-raises (converge touches only described fields)

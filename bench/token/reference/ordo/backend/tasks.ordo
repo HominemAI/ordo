@@ -1,0 +1,43 @@
+# The bench's team task tracker: the reference build on Ordo.
+#
+# A team is a tenant. The person who signs up first gets one of their own,
+# as its `owner` (ORDO_PROVISION_SELF_SERVE, in deploy.env). Colleagues join
+# by invitation (`std.space.invite`) as `editor`, which the page shows as
+# "member". Only the owner may invite or remove people: the door keeps the
+# membership ops for owners.
+#
+# Nothing here guards rows by person. Every member of a team reads and
+# writes every task of that team, and the door refuses anyone who is not a
+# member before an op runs.
+
+domain tasktracker @ 0.1.0
+
+entity tasks {
+  title:    text
+  done:     bool = false
+  assignee -> members?
+}
+
+# Every task of the team, in the order they were added.
+op listTasks unbounded =
+  tasks[id, rev, title, done, assignee]
+  sort id
+
+op addTask($title: text) =
+  set tasks { title: $title }
+
+# Compare-and-set on `rev`. A task someone changed meanwhile answers
+# `cas_miss`, and nothing is overwritten.
+op updateTask($id: id, $rev: int, $title: text, $done: bool, $assignee: id = null) =
+  set tasks { id: $id, rev: $rev, title: $title, done: $done, assignee: $assignee }
+
+op deleteTask($id: id) =
+  del tasks { id: $id }
+
+# The people of the team, active ones only.
+op listMembers unbounded =
+  members(kind == "principal" and status == "active")[id, displayName, role]
+
+# The caller's own seat.
+op me =
+  members(id == $caller)[id, displayName, role]

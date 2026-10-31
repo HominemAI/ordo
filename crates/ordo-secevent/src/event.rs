@@ -733,6 +733,14 @@ pub enum EventKind {
         act: String,
         detail: String,
     },
+    /// An act on an app secret (`plan-backend-functions.md` §5): one set
+    /// (`set`) or removed (`removed`) by the deployment owner. `detail` is
+    /// one line of `key=value` pairs naming the secret, its version and who
+    /// acted. Never the value.
+    Secret {
+        act: String,
+        detail: String,
+    },
 }
 
 impl EventKind {
@@ -774,6 +782,7 @@ impl EventKind {
             EventKind::ConsoleKey { .. } => "console-key",
             EventKind::DeploymentBooted { .. } => "deployment-booted",
             EventKind::Deploy { .. } => "deploy",
+            EventKind::Secret { .. } => "secret",
         }
     }
 
@@ -1001,6 +1010,7 @@ impl StreamEntry {
             EventKind::ConsoleKey { act, detail } => format!("console-key {act} {detail}"),
             EventKind::DeploymentBooted { detail } => format!("deployment-booted {detail}"),
             EventKind::Deploy { act, detail } => format!("deploy {act} {detail}"),
+            EventKind::Secret { act, detail } => format!("secret {act} {detail}"),
             EventKind::UpstreamClaim { act, detail } => {
                 format!("upstream-claim {act} {detail}")
             }

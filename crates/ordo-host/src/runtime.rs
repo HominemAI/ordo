@@ -2083,6 +2083,9 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             // G14: console keys. Always registered: with no sign-in they
             // answer with the setting that switches it on.
             name if crate::console_keys::OPS.contains(&name) => true,
+            // Backend functions: the app secrets, in the control database
+            // every assembly has.
+            name if crate::secrets::OPS.contains(&name) => true,
             // G4: the list of tenants, read from the registry every
             // assembly has.
             name if crate::fleet::OPS.contains(&name) => true,
@@ -2703,6 +2706,8 @@ struct PlatformWiring<'a> {
     /// Console keys, shared with the sign-in routes (G14). `None` with no
     /// sign-in.
     console_keys: Option<Arc<crate::console_keys::ConsoleKeys>>,
+    /// The app secrets (backend functions), shared with [`Runtime::secrets`].
+    secrets: &'a Arc<crate::secrets::SecretStore>,
     /// What a completed credential reset does to the person's second factors.
     redeem_hook: crate::credential_ops::RedeemHook,
     /// The second-step levels the admission op writes a tenant's choice to.
@@ -3048,6 +3053,11 @@ async fn platform_ops_for(
         if let Some(c) = w.contact.clone() {
             ops = ops.with_contact(c);
         }
+        ops = ops.with_secrets(Arc::new(crate::secrets::SecretOps {
+            store: w.secrets.clone(),
+            now: now.clone(),
+            stream: Some(stream.clone()),
+        }));
         if let Some(keys) = w.console_keys.clone() {
             ops = ops.with_console_keys(Arc::new(crate::console_keys::ConsoleKeyOps {
                 keys,
@@ -3433,6 +3443,10 @@ pub struct Runtime {
     /// ledger is off, the same posture `usage_flush`/`usage_rollup`'s
     /// workers take.
     pub quotas: Option<Arc<crate::quotas::PgQuotas>>,
+    /// The app secrets for backend functions (`plan-backend-functions.md`
+    /// §5), bound by the serving program. The function runtime's `fetch` is
+    /// [`crate::secrets::fn_fetch`] over this store.
+    pub secrets: Arc<crate::secrets::SecretStore>,
 }
 
 /// The trigger surface a deployment registers.
@@ -4698,6 +4712,16 @@ async fn assemble_program(
             })
     };
     let redeem_hook: crate::credential_ops::RedeemHook = Arc::default();
+    // Backend functions: the app secrets, sealed under the deployment's own
+    // keys in the control database, bound by the serving program.
+    let secrets = Arc::new(
+        crate::secrets::SecretStore::pg(pool.clone(), keys.clone(), &space.0)
+            .following(deployment.clone()),
+    );
+    secrets
+        .ensure_table()
+        .await
+        .map_err(|e| BootRefusal::Database(e.to_string()))?;
     let platform_ops = platform_ops_for(PlatformWiring {
         metrics: &metrics,
         replica: &replica,
@@ -4705,6 +4729,7 @@ async fn assemble_program(
         guess_limits: auth.as_ref().map(|(a, _)| a.guess.clone()),
         contact: auth.as_ref().and_then(|(a, _)| a.contact().cloned()),
         console_keys: auth.as_ref().and_then(|(a, _)| a.console_keys().cloned()),
+        secrets: &secrets,
         origins: tenant_origins.clone(),
         redeem_hook: redeem_hook.clone(),
         second_levels: &second_levels,
@@ -5310,6 +5335,7 @@ async fn assemble_program(
         node_status,
         spaces,
         quotas,
+        secrets,
     })
 }
 

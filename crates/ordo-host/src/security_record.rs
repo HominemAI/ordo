@@ -53,7 +53,7 @@ pub const PAGE_MAX: usize = 200;
 pub const PAGE_DEFAULT: usize = 50;
 
 /// Every kind a `kind` filter may name, as the stream spells them.
-pub const KINDS: [&str; 25] = [
+pub const KINDS: [&str; 26] = [
     "denied",
     "authenticated",
     "authentication-failed",
@@ -79,6 +79,7 @@ pub const KINDS: [&str; 25] = [
     "console-key",
     "deployment-booted",
     "deploy",
+    "secret",
 ];
 
 fn param(name: &str, ty: ParamTy) -> ParamSpec {
@@ -211,7 +212,8 @@ pub fn describe(kind: &EventKind) -> (Option<String>, String) {
         | EventKind::SessionHandoff { act, detail }
         | EventKind::UpstreamClaim { act, detail }
         | EventKind::ConsoleKey { act, detail }
-        | EventKind::Deploy { act, detail } => (Some(act.clone()), detail.clone()),
+        | EventKind::Deploy { act, detail }
+        | EventKind::Secret { act, detail } => (Some(act.clone()), detail.clone()),
         _ => (None, String::new()),
     }
 }
@@ -335,6 +337,10 @@ mod tests {
             },
             EventKind::ConsoleKey {
                 act: "added".into(),
+                detail: String::new(),
+            },
+            EventKind::Secret {
+                act: "set".into(),
                 detail: String::new(),
             },
         ];

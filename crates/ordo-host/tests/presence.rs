@@ -147,6 +147,8 @@ const READS: &[&str] = &[
     "std.delegation.review",
     "std.deployment.observedCost",
     "std.deployment.consoleKeys",
+    // The app secrets' names and hosts, never a value.
+    "std.deployment.secrets",
     "std.deployment.versions",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).

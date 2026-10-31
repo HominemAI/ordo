@@ -366,6 +366,11 @@ fn encode_kind(out: &mut Vec<u8>, kind: &EventKind) {
             put_str(out, act);
             put_str(out, detail);
         }
+        EventKind::Secret { act, detail } => {
+            out.push(25);
+            put_str(out, act);
+            put_str(out, detail);
+        }
     }
 }
 
@@ -576,6 +581,11 @@ fn decode_kind(r: &mut Reader<'_>) -> Result<EventKind, DecodeError> {
             let act = r.str()?;
             let detail = r.str()?;
             EventKind::Deploy { act, detail }
+        }
+        25 => {
+            let act = r.str()?;
+            let detail = r.str()?;
+            EventKind::Secret { act, detail }
         }
         other => return Err(DecodeError::BadTag(other)),
     })

@@ -119,6 +119,7 @@ pub mod schema_apply;
 pub mod secdrain;
 pub mod second_factor_store;
 pub mod second_factors;
+pub mod secrets;
 pub mod security_key;
 pub mod security_record;
 pub mod self_serve;

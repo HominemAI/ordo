@@ -74,6 +74,7 @@ export const KINDS = [
   'console-key',
   'deployment-booted',
   'deploy',
+  'secret',
 ] as const;
 
 export type Source = 'deployment' | 'tenant' | 'console';

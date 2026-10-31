@@ -998,6 +998,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::profile_ops::specs())
     .chain(crate::observed_cost::specs())
     .chain(crate::console_keys::specs())
+    .chain(crate::secrets::specs())
     .chain(crate::deploy_ops::specs())
     .chain(crate::fleet::specs())
     .chain(crate::settings::specs())
@@ -1828,6 +1829,9 @@ pub fn owner_only(name: &str) -> bool {
         // G14. Which consoles may sign in as the deployment owner is the
         // owner's, and the ops answer only in the deployment's own space.
         || crate::console_keys::OPS.contains(&name)
+        // Backend functions. The app secrets are the deployment owner's, and
+        // the ops answer only in the deployment's own space.
+        || crate::secrets::OPS.contains(&name)
         // G4. The list of every tenant is the deployment owner's, and the
         // op answers only in the deployment's own space.
         || crate::fleet::OPS.contains(&name)
@@ -2179,6 +2183,9 @@ pub struct PlatformOps {
     /// assembly with no sign-in, which the three ops refuse naming the
     /// setting.
     pub console_keys: Option<Arc<crate::console_keys::ConsoleKeyOps>>,
+    /// The app secrets ([`crate::secrets`]). `None` is an assembly that
+    /// registered the ops and wired nothing, which they refuse.
+    pub secrets: Option<Arc<crate::secrets::SecretOps>>,
     /// The list of tenants' state ([`crate::fleet`], G4). `None` is an
     /// assembly that registered the op and wired nothing, which it says.
     pub tenant_list: Option<Arc<crate::fleet::TenantListOps>>,
@@ -2251,6 +2258,7 @@ impl PlatformOps {
             profiles: None,
             observed_cost: None,
             console_keys: None,
+            secrets: None,
             tenant_list: None,
             settings: None,
             quotas: None,
@@ -2430,6 +2438,11 @@ impl PlatformOps {
         ops: Arc<crate::console_keys::ConsoleKeyOps>,
     ) -> PlatformOps {
         self.console_keys = Some(ops);
+        self
+    }
+
+    pub fn with_secrets(mut self, ops: Arc<crate::secrets::SecretOps>) -> PlatformOps {
+        self.secrets = Some(ops);
         self
     }
 
@@ -2879,6 +2892,21 @@ impl PlatformOps {
                 // A key's owner is the principal: the console session it
                 // mints names the principal, and every op and step-up
                 // matches on that.
+                let engine = self.engine();
+                let principal = engine
+                    .principal_of_member(&SpaceId(space.to_string()), caller)
+                    .map(|p| p.0.clone())
+                    .unwrap_or_else(|| caller.to_string());
+                ops.execute(name, space, bound, &principal).await
+            }
+            name if crate::secrets::OPS.contains(&name) => {
+                let ops = self.secrets.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the secret ops and wired no state for them",
+                    )
+                })?;
+                // `$caller` is the member id in this space; the record
+                // names the principal, as console keys do.
                 let engine = self.engine();
                 let principal = engine
                     .principal_of_member(&SpaceId(space.to_string()), caller)

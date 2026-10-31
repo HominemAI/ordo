@@ -217,6 +217,17 @@ fn the_encoding_is_a_decoding() {
             Timestamp(24),
             cor(16),
         ),
+        StreamEntry::single(
+            Scope::Deployment,
+            Subject::member("usr_ana"),
+            "std.deployment.setSecret",
+            EventKind::Secret {
+                act: "set".into(),
+                detail: "name=openaiKey version=2 by=usr_ana".into(),
+            },
+            Timestamp(25),
+            cor(17),
+        ),
     ];
     for e in entries {
         let bytes = encode_entry(&e);

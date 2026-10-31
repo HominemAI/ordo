@@ -313,6 +313,35 @@ op startProject($name: text(120), $first: text, $today: date) =
 - `let x = set ...` binds a create only. `x.id` is usable in later
   statements of the same op.
 
+## Functions and secrets
+
+A `function` is for what the language cannot express, such as calling an
+outside API. Reach for an op first. The code is a bundled JavaScript file.
+
+```ordo
+function suggestTitle in studio {
+  call($text: text(20000)) -> json by member
+  code "fn/suggest-title.js"
+  egress api.anthropic.com
+  secrets llmKey
+  limit wall 30s, memory 64 mb
+}
+
+secret llmKey for api.anthropic.com
+```
+
+- `call` and `code` are required. `by member` is the only caller. It
+  answers `json`.
+- `egress` lists the hosts `fetch` may reach. A hyphenated host is quoted.
+- `secret name for host, host` binds a value to exact hosts. The deployment
+  owner sets it with `ordo secret set`. `secrets name` on a function must
+  name a declared secret bound to one of its `egress` hosts.
+- The code is `export default { async call(input, ctx) { ... } }`. It
+  gets `ctx.secret("llmKey")` as a handle to put in a header. It never
+  reads the value.
+- The page calls it by name (`client.callFunction`, `useFunction`).
+  `ordo fn runs` and `ordo fn log` show what happened.
+
 ## Commands
 
 | Command | Does |
@@ -450,6 +479,26 @@ op sorted unbounded =
 
 **A listing read without `unbounded`** is refused when nothing bounds its
 rows. Write `unbounded`, or `take n` with a literal or a `<=`-bounded param.
+
+**A function reaches only its `egress` hosts and never reads a secret.**
+`ctx.secret("name")` is a handle for a header. The host fills the value in
+on the way out, and only for the hosts the secret is bound to. Code cannot
+print, hash or compare the value. A secret a function lists must be bound
+to one of its `egress` hosts.
+
+```ordo-refused
+# refused: invalid_function
+function ask in studio {
+  call($q: text(200)) -> json
+  code "fn/ask.js"
+  egress api.one.example
+  secrets key
+}
+secret key for api.two.example
+```
+
+A function is not a way round the language. Reads and writes of your own
+rows are ops. A function holds no database access and cannot call an op.
 
 # Guards, roles and membership
 
@@ -1078,6 +1127,21 @@ await setLead(client, { id: p.id, lead: member }).commit(); // sets or keeps it
 - `server_busy` and `serialization_conflict` are retried by the client
   already. `token` may be a function, so it can renew (`signin.md`).
 
+## Calling a function
+
+```ts
+const { result } = await client.callFunction<{ title: string }>(
+  'suggestTitle',
+  { text: note.body },
+);
+```
+
+`result` is the JSON the function returned. A failure is an `OrdoRefusal`
+whose class is `function_error` (the code threw; the message is its own),
+`function_timeout`, `function_oom`, `function_busy` (retry later),
+`egress_refused` or `space_paused`. Wire: `POST /fn/<name>` with the
+parameters as a JSON body. In React use `useFunction(name)`.
+
 ## The wire
 
 Read: `GET /op/<name>?param=value`. Write: `POST /op/<name>` with a JSON
@@ -1120,16 +1184,15 @@ front). Hooks give the same detail as `refusal` (`.class`, `.message`,
 
 # SDK signatures
 
-Copied from `clients/ordo-react/src` and `clients/ordo-sdk/src`. Every
-export an app touches, with its import path. `readonly` is left off the
-fields here; every field is read-only. `?` marks an optional field.
+From `clients/ordo-react/src` and `clients/ordo-sdk/src`. Every
+export an app touches. `readonly` is left off the
+fields (all are read-only). `?` marks an optional field.
 
 Import paths:
 
 - `@hominemai/ordo-react`: everything in this package, from the root only.
 - `@hominemai/ordo-sdk/<folder>/<file>.js`: one file of the SDK. Prefer
-  these subpaths. The root `@hominemai/ordo-sdk` also exports all of it
-  (never a generated surface: that is your app's own).
+  these subpaths. The SDK root also exports all of it.
 - `./generated/ops.js`, `./generated/ids.js`: your app's, from
   `ordo gen ts <dir> --app <src>`.
 
@@ -1222,6 +1285,8 @@ type CommitState<R> =
   | { status: 'refused'; refusal: Refusal };
 interface CasConflict { kind: 'cas_miss'; refusal: Refusal; attempted: Params; sentRev: number | null }
 
+useFunction<R>(name: string): { call(params?, o?): Promise<R | null>; busy: boolean; error: Error | null }
+
 useOpForm(op: string, initial?: FormValues): UseOpForm
 type FormValues = Readonly<Record<string, ParamValue | undefined>>;
 interface UseOpForm {
@@ -1292,6 +1357,7 @@ interface OrdoClientOptions {
 }
 client.withSpace(space: string): OrdoClient
 client.space: string
+client.callFunction<R>(name: string, params?: Params, o?): Promise<{ result: R; replayed: boolean }>
 
 // ./generated/ops.js: one function per op
 opName(client: OrdoClient, params: OpNameParams): ReadCall<OpNameRow, OpNameRefusal, OpNameFields>
@@ -1365,8 +1431,7 @@ interface PasskeySession {
 }
 interface SignInOptions { space?: string; invitation?: string; human?: string }
 interface RegisterOptions { display?: string; space?: string; invitation?: string; ticket?: string; human?: string }
-registerPasskey(door, o?: RegisterOptions): Promise<PasskeySession>
-signInWithPasskey(door, o?: SignInOptions): Promise<PasskeySession>
+registerPasskey(door, o?: RegisterOptions) | signInWithPasskey(door, o?: SignInOptions): Promise<PasskeySession>
 stepUp(door, token: string): Promise<PasskeySession>
 class PasskeyError extends OrdoRefusal {
   failure: 'unsupported' | 'cancelled' | 'refused' | 'unavailable' | 'malformed'
@@ -1399,7 +1464,6 @@ signInMethods(door, o?: { tenant?: string }): Promise<{
 
 // @hominemai/ordo-sdk/auth/resume.js
 resumeSession(door, o?: { onMiss?: (why: 'none' | 'remember_off', message?: string) => void }): Promise<PasskeySession | null>
-//   null: nothing to resume. Throws when the door cannot be reached.
 
 // @hominemai/ordo-sdk/auth/provisioning.js
 tenantStatus(door, token: TokenSource): Promise<TenantStatus>

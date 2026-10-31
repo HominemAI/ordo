@@ -1,15 +1,14 @@
 # SDK signatures
 
-Copied from `clients/ordo-react/src` and `clients/ordo-sdk/src`. Every
-export an app touches, with its import path. `readonly` is left off the
-fields here; every field is read-only. `?` marks an optional field.
+From `clients/ordo-react/src` and `clients/ordo-sdk/src`. Every
+export an app touches. `readonly` is left off the
+fields (all are read-only). `?` marks an optional field.
 
 Import paths:
 
 - `@hominemai/ordo-react`: everything in this package, from the root only.
 - `@hominemai/ordo-sdk/<folder>/<file>.js`: one file of the SDK. Prefer
-  these subpaths. The root `@hominemai/ordo-sdk` also exports all of it
-  (never a generated surface: that is your app's own).
+  these subpaths. The SDK root also exports all of it.
 - `./generated/ops.js`, `./generated/ids.js`: your app's, from
   `ordo gen ts <dir> --app <src>`.
 
@@ -102,6 +101,8 @@ type CommitState<R> =
   | { status: 'refused'; refusal: Refusal };
 interface CasConflict { kind: 'cas_miss'; refusal: Refusal; attempted: Params; sentRev: number | null }
 
+useFunction<R>(name: string): { call(params?, o?): Promise<R | null>; busy: boolean; error: Error | null }
+
 useOpForm(op: string, initial?: FormValues): UseOpForm
 type FormValues = Readonly<Record<string, ParamValue | undefined>>;
 interface UseOpForm {
@@ -172,6 +173,7 @@ interface OrdoClientOptions {
 }
 client.withSpace(space: string): OrdoClient
 client.space: string
+client.callFunction<R>(name: string, params?: Params, o?): Promise<{ result: R; replayed: boolean }>
 
 // ./generated/ops.js: one function per op
 opName(client: OrdoClient, params: OpNameParams): ReadCall<OpNameRow, OpNameRefusal, OpNameFields>
@@ -245,8 +247,7 @@ interface PasskeySession {
 }
 interface SignInOptions { space?: string; invitation?: string; human?: string }
 interface RegisterOptions { display?: string; space?: string; invitation?: string; ticket?: string; human?: string }
-registerPasskey(door, o?: RegisterOptions): Promise<PasskeySession>
-signInWithPasskey(door, o?: SignInOptions): Promise<PasskeySession>
+registerPasskey(door, o?: RegisterOptions) | signInWithPasskey(door, o?: SignInOptions): Promise<PasskeySession>
 stepUp(door, token: string): Promise<PasskeySession>
 class PasskeyError extends OrdoRefusal {
   failure: 'unsupported' | 'cancelled' | 'refused' | 'unavailable' | 'malformed'
@@ -279,7 +280,6 @@ signInMethods(door, o?: { tenant?: string }): Promise<{
 
 // @hominemai/ordo-sdk/auth/resume.js
 resumeSession(door, o?: { onMiss?: (why: 'none' | 'remember_off', message?: string) => void }): Promise<PasskeySession | null>
-//   null: nothing to resume. Throws when the door cannot be reached.
 
 // @hominemai/ordo-sdk/auth/provisioning.js
 tenantStatus(door, token: TokenSource): Promise<TenantStatus>

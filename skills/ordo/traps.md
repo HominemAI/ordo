@@ -101,3 +101,23 @@ op sorted unbounded =
 
 **A listing read without `unbounded`** is refused when nothing bounds its
 rows. Write `unbounded`, or `take n` with a literal or a `<=`-bounded param.
+
+**A function reaches only its `egress` hosts and never reads a secret.**
+`ctx.secret("name")` is a handle for a header. The host fills the value in
+on the way out, and only for the hosts the secret is bound to. Code cannot
+print, hash or compare the value. A secret a function lists must be bound
+to one of its `egress` hosts.
+
+```ordo-refused
+# refused: invalid_function
+function ask in studio {
+  call($q: text(200)) -> json
+  code "fn/ask.js"
+  egress api.one.example
+  secrets key
+}
+secret key for api.two.example
+```
+
+A function is not a way round the language. Reads and writes of your own
+rows are ops. A function holds no database access and cannot call an op.

@@ -219,6 +219,35 @@ op startProject($name: text(120), $first: text, $today: date) =
 - `let x = set ...` binds a create only. `x.id` is usable in later
   statements of the same op.
 
+## Functions and secrets
+
+A `function` is for what the language cannot express, such as calling an
+outside API. Reach for an op first. The code is a bundled JavaScript file.
+
+```ordo
+function suggestTitle in studio {
+  call($text: text(20000)) -> json by member
+  code "fn/suggest-title.js"
+  egress api.anthropic.com
+  secrets llmKey
+  limit wall 30s, memory 64 mb
+}
+
+secret llmKey for api.anthropic.com
+```
+
+- `call` and `code` are required. `by member` is the only caller. It
+  answers `json`.
+- `egress` lists the hosts `fetch` may reach. A hyphenated host is quoted.
+- `secret name for host, host` binds a value to exact hosts. The deployment
+  owner sets it with `ordo secret set`. `secrets name` on a function must
+  name a declared secret bound to one of its `egress` hosts.
+- The code is `export default { async call(input, ctx) { ... } }`. It
+  gets `ctx.secret("llmKey")` as a handle to put in a header. It never
+  reads the value.
+- The page calls it by name (`client.callFunction`, `useFunction`).
+  `ordo fn runs` and `ordo fn log` show what happened.
+
 ## Commands
 
 | Command | Does |

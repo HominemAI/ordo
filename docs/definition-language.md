@@ -3212,6 +3212,77 @@ out, egress declared on the consent page. The platform hosts no foreign code in
 v1 (in-process WASM hosting deferred until third-party in-process logic is
 actually wanted).
 
+### Functions and secrets [built, increment 1]
+
+A `function` is for what the language cannot express, such as calling an
+outside API. Its code is a JavaScript file bundled with the program. It runs
+in a fresh WebAssembly instance per call. It holds no database URL and no
+secret value. `howto-functions.md` is the user guide.
+
+```
+function suggestTitle in notes {
+  call($text: text(20000)) -> json by member
+  code "fn/suggest-title.js"
+  egress api.anthropic.com
+  secrets llmKey
+  limit wall 30s, cpu 2s, memory 64 mb
+  nopause
+}
+
+secret llmKey for api.anthropic.com
+```
+
+Grammar:
+
+```
+function <name> [in <domain>] { <clause> ... }
+clause = call(<param>, ...) -> json [by member]
+       | code "<path>.js"
+       | egress <host>, <host>, ...
+       | secrets <name>, <name>, ...
+       | limit <wall|cpu> <duration> | memory <size>, ...
+       | nopause
+secret <name> for <host>, <host>, ...
+```
+
+- `function` and `secret` head a declaration only at the start of a top-level
+  line. They are not reserved words, so a field may be named `secret`.
+- Clauses go in any order. Inside the braces a line break ends nothing.
+- `call` and `code` are required, and each appears once. `call` takes typed
+  parameters like an op, checked at the door. It answers `json`.
+- `by member` is the default and the only caller built. `by public` and any
+  other caller are `invalid_function`.
+- `code` is a relative path ending in `.js` or `.mjs`, at most 20 MB. It
+  stays inside the program's directory. `ordo apply` hashes the file into
+  the manifest.
+- `egress` lists the hosts `fetch` may reach. A host with a hyphen goes in
+  quotes: `"my-model.example.com"`. Any other host is refused before DNS.
+- `secrets` lists the secrets the code may use, by name. Each must be a
+  declared `secret` bound to at least one `egress` host.
+- `limit` takes `wall` and `cpu` (durations such as `30s` or `500ms`) and
+  `memory` (a size with a space, `64 mb`). Defaults: wall 60 s, cpu 10 s,
+  memory 128 MB. Ceilings: 15 min, 60 s, 512 MB. Memory under 8 mb and a
+  zero `wall` or `cpu` are refused.
+- `nopause` keeps the function answering while the tenant is paused.
+- `secret name for host, host` binds the value to exact host names, and at
+  least one is required. A URL, a port or a wildcard is
+  `invalid_secret_host`. A host whose first label starts with a digit is
+  quoted. The value is never in the program. The deployment owner sets it
+  with `ordo secret set`, from standard input.
+- `trigger`, `uses` and `webhook` on a function are not built. The parser
+  refuses them and says so.
+
+Refusals:
+
+| Class | When |
+|---|---|
+| `invalid_function` | a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a bad code path, a bad or repeated host, a repeated secret, a limit outside its bounds, or a listed secret that is undeclared or not bound to an `egress` host |
+| `duplicate_secret` | two `secret` lines name one secret. Put every host on one line |
+| `invalid_secret_host` | a host that is a URL, has a port or a wildcard, or is not a DNS name |
+
+The page calls a function with `POST /fn/<name>` or the SDK's
+`callFunction`. Run history is `ordo fn runs` and `ordo fn log`.
+
 ### Domain package
 
 > **Not built yet [2026-10-04]: the compiler refuses the block form today.**

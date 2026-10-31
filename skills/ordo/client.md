@@ -65,6 +65,21 @@ await setLead(client, { id: p.id, lead: member }).commit(); // sets or keeps it
 - `server_busy` and `serialization_conflict` are retried by the client
   already. `token` may be a function, so it can renew (`signin.md`).
 
+## Calling a function
+
+```ts
+const { result } = await client.callFunction<{ title: string }>(
+  'suggestTitle',
+  { text: note.body },
+);
+```
+
+`result` is the JSON the function returned. A failure is an `OrdoRefusal`
+whose class is `function_error` (the code threw; the message is its own),
+`function_timeout`, `function_oom`, `function_busy` (retry later),
+`egress_refused` or `space_paused`. Wire: `POST /fn/<name>` with the
+parameters as a JSON body. In React use `useFunction(name)`.
+
 ## The wire
 
 Read: `GET /op/<name>?param=value`. Write: `POST /op/<name>` with a JSON

@@ -1198,3 +1198,4 @@
 {"seq": 1198, "item": "backend-functions", "ask": 0, "at": "2026-10-31T10:57:43Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1199, "item": "backend-functions", "ask": 16, "at": "2026-10-31", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1200, "item": "backend-functions", "ask": 17, "at": "2026-10-31", "status": "decided", "text": "ok no wasm? i thought it was faster", "source": "record", "read": true}
+{"seq": 1201, "item": "backend-functions", "ask": 0, "at": "2026-10-31", "status": "decided", "text": "Yes. Also make sure we're testing upgrade of a function.", "source": "record", "read": true}

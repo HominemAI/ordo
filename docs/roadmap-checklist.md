@@ -11741,8 +11741,12 @@ Items the owner has explicitly placed AFTER the first deployment. Listed so
       body (the `triggers` task), and `routine` is still a lean spelling
       (19c). Planned in `plan-backend-functions.md`, all 13 asks answered
       2026-10-11. **V1** (owner, 2026-10-31): function calls run as Wasm in
-      wasmtime; long-running services stay v2. Not built; increments 1, 2
-      and 4 first. Board: `backend-functions`.
+      wasmtime; long-running services stay v2. Increment 1 is on main
+      (f9835982). Left in it: the SDK call and the notes v2 button,
+      `ordo fn runs`, the engine cache, `TextEncoder` and `crypto.subtle`,
+      and an upgrade test for functions (owner, 2026-10-31: "make sure we're
+      testing upgrade of a function"). Then increments 2 and 4. Board:
+      `backend-functions`.
 
 - [ ] **18ab · A guest who can write.** The owner, 2026-09-29: *"Add
       planning for writing for post-deploy."* A sharer may let a guest write,

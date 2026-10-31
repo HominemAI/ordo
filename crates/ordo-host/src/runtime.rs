@@ -6397,7 +6397,7 @@ async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<(
             Ok(0) => {}
             Ok(n) => println!("functions: {n} loaded for version {}", current.version),
             Err(e) => eprintln!(
-                "functions: none served for version {} — {e}",
+                "functions: none served for version {}: {e}",
                 current.version
             ),
         }
@@ -6512,7 +6512,7 @@ async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<(
                     // finish on the entry they started with.
                     let schema = deployment.current().fixture.schema.clone();
                     if let Err(e) = functions.reload(&pool, &to, &schema).await {
-                        eprintln!("deploy {to}: no functions served — {e}");
+                        eprintln!("deploy {to}: no functions served: {e}");
                     }
                     // The bus learns the new version's ops and entities, and
                     // the public cache drops everything: a deploy may move

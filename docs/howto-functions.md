@@ -1,7 +1,97 @@
-# How to Use Backend Functions
+# Backend functions
 
-A backend function is the app developer's code that the deployment runs on
-request (`plan-backend-functions.md`). This guide covers what is built.
+A backend function is your own code that the deployment runs on request.
+It runs inside the Ordo binary, in a fresh WebAssembly instance per call.
+It can call outside APIs through `fetch`, use a secret by name, and log.
+It holds no database URL, no service key and no secret value.
+
+Increment 1 builds one kind: a function the page calls, JSON in and JSON
+out. Schedules, change triggers, webhooks and calling ops from a function
+come later (`plan-backend-functions.md` §12).
+
+The worked example is `suggestTitle` in `examples/notes-v2`.
+
+## Declaring a function
+
+A `function` block sits in the `.ordo` program beside `entity` and `op`:
+
+```ordo
+function suggestTitle in notes {
+  call($text: text(20000)) -> json by member
+  code "fn/suggest-title.js"
+  egress api.anthropic.com
+  secrets llmKey
+  limit wall 30s, memory 64 mb
+}
+```
+
+| Clause | Means |
+|---|---|
+| `call($p: type, ...) -> json` | Called from the page. The parameters are typed and checked at the door like an op's. It answers JSON. |
+| `by member` | Who may call it: a signed-in member of the tenant. The default. |
+| `code "fn/x.js"` | The bundled ES module, relative to the program's directory. `.js` or `.mjs`, at most 20 MB. |
+| `egress host, ...` | The hosts it may reach. Any other host is refused before DNS. A name with a hyphen goes in quotes: `"my-model.example.com"`. |
+| `secrets name, ...` | The secrets it may use, by name. A function with secrets must list at least one host. |
+| `limit wall 30s, cpu 2s, memory 64 mb` | Optional. Unset limits take the defaults below. Write a size with a space: `64 mb`. |
+| `nopause` | Optional. It keeps answering while the tenant is paused. |
+
+`ordo check` compiles the block and lists it under `FUNCTIONS`. A function
+may not share a name with an op or a routine.
+
+### The code
+
+The module's default export has a `call(input, ctx)` method:
+
+```js
+export default {
+  async call(input, ctx) {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": ctx.secret("llmKey"),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ /* ... */ }),
+    });
+    if (!r.ok) throw new Error("the model answered " + r.status);
+    return { title: (await r.json()).content[0].text };
+  },
+};
+```
+
+- `input` holds the declared parameters.
+- `fetch`, `Response` and `Headers` follow the Web standard. A body is a
+  string; use `JSON.stringify`. Only `https://` URLs to declared hosts work.
+- `ctx.secret(name)` returns a handle, never the value. Put it in a header
+  as it is, or as `ctx.secret(name).bearer()` for `Bearer <value>`, or
+  `ctx.secret(name).template("Token {}")`. The host fills the value in on
+  the way out, for the secret's bound hosts only.
+- `console.log`, `console.warn` and `console.error` go to the run's log.
+- `ctx.tenant`, `ctx.function`, `ctx.version` and `ctx.runId` describe the
+  call. `ctx.runId` is the page's `Idempotency-Key` when it sent one.
+- Throwing ends the call with `function_error` and your message.
+
+Bundle anything you import into the one file, with esbuild or similar.
+The engine is Boa, a JavaScript engine written in Rust and compiled to
+WebAssembly. It runs ES2023 with promises and `async`. It has no Node APIs,
+no `setTimeout`, and no `TextEncoder` or `crypto.subtle` yet.
+
+### Limits
+
+| Limit | Default | Ceiling | Over it |
+|---|---|---|---|
+| Memory | 128 MB | 512 MB | `function_oom` |
+| CPU | 10 s | 60 s | `function_timeout` |
+| Wall time | 60 s | 15 min | `function_timeout` |
+| Calls at once, per tenant | 10 | | `function_busy` (429) |
+| Calls at once, per server | 100 | | `function_busy` (429) |
+| Outbound calls per call | 50 | | the `fetch` rejects |
+| Log per call | 64 KB | | the rest is dropped and marked |
+| Answer | 1 MB | | `function_error` |
+| Input | 1 MB | | refused at the door |
+
+CPU is counted as WebAssembly fuel. Waiting on the network counts toward
+wall time and not toward CPU.
 
 ## Secrets
 
@@ -95,3 +185,79 @@ another allowed host still cannot carry the key there.
 A redirect is returned to the function as an answer. It is never followed.
 If an answer repeats a secret's value, the value is replaced with `[secret]`
 before the function sees it.
+
+## Deploying a function
+
+`ordo apply` deploys the code with the program:
+
+```
+ordo apply examples/notes-v2 --db <database>
+```
+
+1. It reads each `code` file and refuses a missing one or one over 20 MB.
+2. It puts each file's SHA-256 in the program's manifest, so a change to
+   the code alone is a new version.
+3. It stores the code in `$fncode` by that hash, then stores and activates
+   the version.
+
+Each server loads the active version's functions at boot and on every
+deploy. New calls run the new code; calls already running finish on the
+old one. A rollback brings its own code back, because the old version's
+code is still stored by hash.
+
+An apply over `--host` refuses a program with functions for now: the
+door's apply does not carry code files yet. Use `--db`.
+
+## Calling a function
+
+The page calls `POST /fn/<name>` with the parameters as JSON, the same
+way it calls a write op:
+
+```
+POST /fn/suggestTitle
+Authorization: Bearer <token>
+x-ordo-space: <tenant>
+Idempotency-Key: <optional>
+Content-Type: application/json
+
+{ "text": "milk, eggs, bread, coffee" }
+```
+
+The answer is the function's JSON under `result`:
+
+```json
+{ "result": { "title": "Groceries for the week" } }
+```
+
+The door runs the op door's steps first: sign-in, the access check, quotas,
+the tenant binding and parameter types. An unknown function name gets the
+same `access_denied` as a function the caller may not call. A paused tenant
+answers `space_paused` with its pause answer, unless the function says
+`nopause`.
+
+The call runs as the signed-in person. In this increment a function
+reaches no ops, so that identity shows in the run record:
+`function:suggestTitle@<version> on behalf of <person>`.
+
+With an `Idempotency-Key`, a repeated call with the same body gets the
+first answer back and the function does not run again. The same key with a
+different body is refused `idempotency_mismatch`. A failed call frees the
+key, so a retry runs again.
+
+### Refusals
+
+| Class | Status | Means |
+|---|---|---|
+| `function_error` | 500 | The code threw, or answered something that is not JSON or is too large. |
+| `function_timeout` | 504 | It ran past its wall time or its CPU limit. |
+| `function_oom` | 500 | It needed more memory than its limit. |
+| `function_busy` | 429 | Too many calls are running. Retry after the `Retry-After` seconds. |
+| `egress_refused` | 400 | An outbound call was refused, and the code let it end the call. The message names the reason. |
+
+### What is recorded
+
+Each call writes one row to `$fnruns` in the deployment's database: the
+function, the version, the tenant, who called, the wall time, CPU, peak
+memory, the number of outbound calls and their hosts, bytes sent and
+received, the outcome class and the log. The input, the answer and request
+bodies are never recorded. The log is scrubbed of live secret values.

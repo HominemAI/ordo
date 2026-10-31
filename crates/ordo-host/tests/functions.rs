@@ -6,7 +6,8 @@
 //! The door here is `ordo_api::function_routes` over a real `ApiState`, the
 //! host's [`HostFunctions`] runner, the real wasmtime function host, and the
 //! code read back from `$fncode` by the hash in the program's manifest.
-//! `/v1` is the prefix the serving binary nests these routes under.
+//! The serving binary merges the same routes into its door (`runtime::door`),
+//! beside `/op/<name>`; the plan writes the path as `/v1/fn/<name>`.
 //!
 //! Needs a Postgres the conformance settings reach (`ORDO_PG_*`).
 

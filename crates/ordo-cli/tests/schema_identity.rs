@@ -565,6 +565,8 @@ fn a_secret_binding_is_part_of_the_programs_version() {
     assert!(doc.get("secrets").is_none(), "no secrets, no key");
 
     let twice = format!("secret k for a.example.com\nsecret k for b.example.com\n{BASE}");
-    let err = load_sources(&one(&twice)).err().expect("refused");
+    let Err(err) = load_sources(&one(&twice)) else {
+        panic!("two lines for one secret are refused")
+    };
     assert!(format!("{err:?}").contains("duplicate_secret"), "{err:?}");
 }

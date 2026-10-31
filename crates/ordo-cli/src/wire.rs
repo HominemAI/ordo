@@ -550,17 +550,32 @@ fn render_created(row: &Value) -> Outcome {
 /// `GET path` with the bearer token, the answer read as JSON. Used by
 /// `ordo triggers`, which asks a running deployment what it serves.
 pub(crate) async fn get_json(host: &Host, path: &str, token: &str) -> Result<(u16, Value), String> {
+    get_json_in(host, path, token, None).await
+}
+
+/// [`get_json`], bound to `space` when one is given: a read op through the
+/// door, which a read answers only as a `GET`.
+async fn get_json_in(
+    host: &Host,
+    path: &str,
+    token: &str,
+    space: Option<&str>,
+) -> Result<(u16, Value), String> {
     use futures::StreamExt;
 
+    let mut headers = vec![
+        ("authorization".into(), format!("Bearer {token}")),
+        ("accept".into(), "application/json".into()),
+    ];
+    if let Some(space) = space {
+        headers.push((ordo_api::router::SPACE_HEADER.into(), space.to_string()));
+    }
     let response = http::send(
         &host.endpoint,
         Request {
             method: "GET",
             path: path.to_string(),
-            headers: vec![
-                ("authorization".into(), format!("Bearer {token}")),
-                ("accept".into(), "application/json".into()),
-            ],
+            headers,
             body: None,
         },
     )
@@ -849,6 +864,141 @@ pub async fn revoke_console_key_over_the_wire(flags: &Flags) -> Outcome {
         row["id"].as_str().unwrap_or(&id),
         row["name"].as_str().unwrap_or("unnamed"),
         row["sessionsEnded"].as_u64().unwrap_or(0)
+    ))
+}
+
+/// The host, the token and the space a secret command talks to the door
+/// with, or the refusal that says which is missing.
+async fn secret_door(flags: &Flags) -> Result<(Host, String, String), Outcome> {
+    let host = match requested(flags) {
+        Some(Ok(h)) => h,
+        Some(Err(e)) => return Err(Outcome::usage(e)),
+        None => {
+            return Err(Outcome::usage(format!(
+                "`ordo secret` talks to the deployment's door: `--host <h>` or {HOST_ENV} is \
+                 required\n"
+            )))
+        }
+    };
+    let token = token(flags).await.map_err(Outcome::usage)?;
+    let space = space(flags).map_err(Outcome::usage)?;
+    Ok((host, token, space))
+}
+
+/// The hosts a listed secret is bound to, in words.
+fn bound_words(row: &Value) -> String {
+    let hosts: Vec<&str> = row["hosts"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if hosts.is_empty() {
+        "bound to no host: the program declares no `secret` by this name".into()
+    } else {
+        format!("bound to {}", hosts.join(", "))
+    }
+}
+
+/// `ordo secret set <name>`: seal `value` as the secret's next version
+/// (`std.deployment.setSecret`). The value came from standard input; one
+/// trailing line end is dropped, as a file form drops it.
+pub async fn set_secret_over_the_wire(flags: &Flags, name: &str, mut value: Vec<u8>) -> Outcome {
+    if value.ends_with(b"\n") {
+        value.pop();
+        if value.ends_with(b"\r") {
+            value.pop();
+        }
+    }
+    if value.is_empty() {
+        return Outcome::usage(
+            "standard input held no value; pipe one in: `ordo secret set <name> < key.txt`\n"
+                .into(),
+        );
+    }
+    let Ok(text) = String::from_utf8(value) else {
+        return Outcome::usage("a secret's value is UTF-8 text; standard input was not\n".into());
+    };
+    let (host, token, space) = match secret_door(flags).await {
+        Ok(d) => d,
+        Err(o) => return o,
+    };
+    let op_path = format!("/op/{}", ordo_host::secrets::SET);
+    let body = json!({"$space": space, "name": name, "value": text}).to_string();
+    drop(text);
+    let (status, value) =
+        match post_touching(&host, &op_path, flags, &token, &space, body, None).await {
+            Ok(v) => v,
+            Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+        };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    let row = &value["rows"][0];
+    Outcome::ok(format!(
+        "SET      secret {} version {}; {}\n",
+        row["name"].as_str().unwrap_or(name),
+        row["version"].as_u64().unwrap_or(0),
+        bound_words(row)
+    ))
+}
+
+/// `ordo secret ls`: every secret with a value, its bound hosts, version,
+/// and who set it when (`std.deployment.secrets`). Never a value.
+pub async fn list_secrets_over_the_wire(flags: &Flags) -> Outcome {
+    let (host, token, space) = match secret_door(flags).await {
+        Ok(d) => d,
+        Err(o) => return o,
+    };
+    let op_path = format!("/op/{}", ordo_host::secrets::LIST);
+    let (status, value) = match get_json_in(&host, &op_path, &token, Some(&space)).await {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+    };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    let rows = value["rows"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return Outcome::ok(
+            "no secrets are set; `ordo secret set <name> < key.txt` sets one\n".into(),
+        );
+    }
+    let mut out = String::new();
+    for row in &rows {
+        out.push_str(&format!(
+            "{}  version {}  set by {} at {}  {}\n",
+            row["name"].as_str().unwrap_or("?"),
+            row["version"].as_u64().unwrap_or(0),
+            row["setBy"].as_str().unwrap_or("?"),
+            row["setAt"].as_u64().unwrap_or(0),
+            bound_words(row)
+        ));
+    }
+    Outcome::ok(out)
+}
+
+/// `ordo secret rm <name>`: remove the secret's value
+/// (`std.deployment.removeSecret`). A function that uses it is then refused
+/// with `secret_not_set` until it is set again.
+pub async fn remove_secret_over_the_wire(flags: &Flags, name: &str) -> Outcome {
+    let (host, token, space) = match secret_door(flags).await {
+        Ok(d) => d,
+        Err(o) => return o,
+    };
+    let op_path = format!("/op/{}", ordo_host::secrets::REMOVE);
+    let body = json!({"$space": space, "name": name}).to_string();
+    let (status, value) =
+        match post_touching(&host, &op_path, flags, &token, &space, body, None).await {
+            Ok(v) => v,
+            Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+        };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    let row = &value["rows"][0];
+    Outcome::ok(format!(
+        "REMOVED  secret {} (it was version {})\n",
+        row["name"].as_str().unwrap_or(name),
+        row["version"].as_u64().unwrap_or(0)
     ))
 }
 

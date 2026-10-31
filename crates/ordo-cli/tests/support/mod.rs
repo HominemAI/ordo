@@ -66,4 +66,9 @@ pub mod operator {
         super::isolate();
         ordo_cli::operator::run(cmd, args)
     }
+
+    pub fn run_with_input(cmd: &str, args: &[String], input: &[u8]) -> Outcome {
+        super::isolate();
+        ordo_cli::operator::run_with_input(cmd, args, input)
+    }
 }

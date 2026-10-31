@@ -286,6 +286,16 @@ fn now() -> Timestamp {
 
 /// Run one of the three commands. `args` is everything after the verb.
 pub fn run(cmd: &str, args: &[String]) -> Outcome {
+    run_with(cmd, args, None)
+}
+
+/// [`run`], with `input` standing in for standard input. For the commands
+/// that read a value from it (`ordo secret set`), so a test can give one.
+pub fn run_with_input(cmd: &str, args: &[String], input: &[u8]) -> Outcome {
+    run_with(cmd, args, Some(input.to_vec()))
+}
+
+fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
     let flags = match parse_flags(args) {
         Ok(f) => f,
         Err(e) => return Outcome::usage(e),
@@ -365,6 +375,7 @@ pub fn run(cmd: &str, args: &[String]) -> Outcome {
         "usage" => rt.block_on(usage(flags)),
         "space" => rt.block_on(space_cmd(flags)),
         "console-key" => rt.block_on(console_key_cmd(flags)),
+        "secret" => rt.block_on(secret_cmd(flags, input)),
         "import" => rt.block_on(import_cmd(flags)),
         "fleet" => rt.block_on(fleet_cmd(flags)),
         "triggers" => rt.block_on(crate::triggers::run(flags)),
@@ -2619,6 +2630,93 @@ async fn console_key_cmd(flags: Flags) -> Outcome {
             "unknown `ordo console-key` subcommand `{other}`, the only one is `revoke`\n{USAGE}"
         )),
     }
+}
+
+/// `ordo secret set|ls|rm`: the deployment's app secrets for backend
+/// functions (`plan-backend-functions.md` §5), over the door. A value is read
+/// from standard input, never from the command line, and nothing reads one
+/// back.
+async fn secret_cmd(flags: Flags, input: Option<Vec<u8>>) -> Outcome {
+    const USAGE: &str =
+        "ordo secret set <name> --host <h> --token <t> --space <s>   (value on stdin)\n\
+                         ordo secret ls --host <h> --token <t> --space <s>\n\
+                         ordo secret rm <name> --host <h> --token <t> --space <s>\n";
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(USAGE.into());
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    if flags.named_value("--value").is_some() {
+        return Outcome::usage(
+            "a secret's value is read from standard input, never from the command line, \
+             where it would land in the shell history and the process list:\n  \
+             ordo secret set <name> < key.txt\n"
+                .into(),
+        );
+    }
+    if let Err(e) = flags.only(&["--host", "--token", "--space"]) {
+        return Outcome::usage(format!("{e}\n{USAGE}"));
+    }
+    let name = |flags: &Flags| match flags.positional.as_slice() {
+        [n] => Ok(n.clone()),
+        [] => Err(Outcome::usage(format!(
+            "`ordo secret {sub}` needs a name\n{USAGE}"
+        ))),
+        _ => Err(Outcome::usage(format!(
+            "`ordo secret {sub}` takes one name; a value is read from standard input\n{USAGE}"
+        ))),
+    };
+    match sub.as_str() {
+        "set" => {
+            let name = match name(&flags) {
+                Ok(n) => n,
+                Err(o) => return o,
+            };
+            let value = match input {
+                Some(v) => v,
+                None => match read_secret_stdin() {
+                    Ok(v) => v,
+                    Err(e) => return Outcome::usage(e),
+                },
+            };
+            crate::wire::set_secret_over_the_wire(&flags, &name, value).await
+        }
+        "ls" => {
+            if !flags.positional.is_empty() {
+                return Outcome::usage(format!("`ordo secret ls` takes no name\n{USAGE}"));
+            }
+            crate::wire::list_secrets_over_the_wire(&flags).await
+        }
+        "rm" => {
+            let name = match name(&flags) {
+                Ok(n) => n,
+                Err(o) => return o,
+            };
+            crate::wire::remove_secret_over_the_wire(&flags, &name).await
+        }
+        other => Outcome::usage(format!(
+            "unknown `ordo secret` subcommand `{other}`; they are `set`, `ls` and `rm`\n{USAGE}"
+        )),
+    }
+}
+
+/// The value for `ordo secret set`, from standard input. Refused from a
+/// terminal, where typing it would show it on the screen.
+fn read_secret_stdin() -> Result<Vec<u8>, String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return Err(
+            "`ordo secret set` reads the value from standard input; pipe it in so it \
+             is not shown on the screen:\n  ordo secret set <name> < key.txt\n"
+                .into(),
+        );
+    }
+    let mut v = Vec::new();
+    stdin
+        .read_to_end(&mut v)
+        .map_err(|e| format!("could not read the value from standard input: {e}\n"))?;
+    Ok(v)
 }
 
 async fn space_cmd(flags: Flags) -> Outcome {

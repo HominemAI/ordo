@@ -152,6 +152,17 @@ fn usage() -> ! {
          deployment owner's own sign-in with a passkey touch: this op is\n      \
          never exempt from step-up. `--host`, `--token` and `--space` resolve\n      \
          as for `apply`.\n  \
+         ordo secret set <name> --host <h> --token <t> --space <s>\n      \
+         set an app secret for backend functions (`std.deployment.setSecret`).\n      \
+         The value is read from standard input, never from the command line:\n      \
+         `ordo secret set openaiKey < key.txt`. It is sealed under the\n      \
+         deployment's keys and never read back. Each set is a new version.\n  \
+         ordo secret ls --host <h> --token <t> --space <s>\n      \
+         list the app secrets: name, bound hosts, version, who set it and\n      \
+         when. Never a value.\n  \
+         ordo secret rm <name> --host <h> --token <t> --space <s>\n      \
+         remove an app secret's value. `--host`, `--token` and `--space`\n      \
+         resolve as for `apply`.\n  \
          ordo import --bundle <b> [--name <n>] --host <h> --token <t> --space <s>\n      \
          load a bundle an operator has staged for this space through the\n      \
          deployment's own door (`std.space.import`, 11-10a). The bundle is\n      \
@@ -425,6 +436,7 @@ fn main() {
             | "usage"
             | "space"
             | "console-key"
+            | "secret"
             | "identity"
             | "import"
             | "fleet"

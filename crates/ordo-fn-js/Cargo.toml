@@ -1,0 +1,26 @@
+[package]
+name = "ordo-fn-js"
+edition = "2021"
+version = "0.1.0"
+license = "AGPL-3.0-only"
+description = "The JavaScript engine a backend function runs in, compiled to WebAssembly."
+
+# NOT a workspace member, for the reasons `ordo-wasm` gives: it builds only
+# for wasm32-unknown-unknown and wants a size profile no native binary wants.
+# `scripts/build-fn-engine.sh` builds it and copies the module to
+# `crates/ordo-fn/engine/ordo_fn_js.wasm`, which `ordo-fn` embeds.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+boa_engine = { version = "0.21", default-features = false }
+getrandom = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,33 @@
+[package]
+name = "ordo-fn"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Runs a backend function: wasmtime, a fresh instance per call, limits, fetch through the egress seam."
+
+# The function host. It depends on no `ordo-*` crate that holds a database
+# pool or a key: a function reaches the outside only through `FnFetch`, which
+# the caller hands in. The engine module it runs is built from
+# `crates/ordo-fn-js` by `scripts/build-fn-engine.sh` and committed at
+# `engine/ordo_fn_js.wasm`, the way `crates/ordo-wasm/demo.html` is, so a
+# workspace build needs no wasm toolchain.
+[dependencies]
+# Only what a host for one JS engine needs. No `cache` (it pulls a disk cache
+# and its config parser), no `component-model`, no WASI: the guest gets six
+# imports and nothing else. `cranelift` compiles; `async` lets `fetch` await
+# the network on a fiber without blocking a thread.
+wasmtime = { version = "50", default-features = false, features = ["runtime", "cranelift", "async", "std", "parallel-compilation"] }
+# Pre-initializes the engine once (boot plus prelude) and rewrites the module
+# with that memory as its data, so each call's fresh instance starts booted.
+wasmtime-wizer = { version = "50", default-features = false }
+futures = "0.3"
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[lints]
+workspace = true

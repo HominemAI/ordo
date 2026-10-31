@@ -1,0 +1,4 @@
+[target.wasm32-unknown-unknown]
+# getrandom has no source of entropy on this target; the host gives one
+# through the `random` import (see `src/lib.rs`).
+rustflags = ["--cfg", "getrandom_backend=\"custom\""]

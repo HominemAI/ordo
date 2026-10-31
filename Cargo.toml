@@ -8,6 +8,7 @@ members = [
   "crates/ordo-plan",
   "crates/ordo-decompile",
   "crates/ordo-egress",
+  "crates/ordo-fn",
   "crates/ordo-fault",
   "crates/ordo-env",
   "crates/ordo-identity",
@@ -50,3 +51,28 @@ unsafe_code = "forbid"
 # CARGO_PROFILE_DEV_DEBUG=2 cargo test -p <crate>.
 [profile.dev]
 debug = "none"
+
+# Backend functions compile one 3.6 MB engine module per process
+# (`crates/ordo-fn`). Unoptimized, cranelift takes about 12 s for it, so every
+# test binary that runs a function would pay that. These crates build
+# optimized even in dev; the engine is then ready in about 1 s.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+[profile.dev.package.cranelift-frontend]
+opt-level = 2
+[profile.dev.package.cranelift-entity]
+opt-level = 2
+[profile.dev.package.cranelift-bforest]
+opt-level = 2
+[profile.dev.package.regalloc2]
+opt-level = 2
+[profile.dev.package.wasmparser]
+opt-level = 2
+[profile.dev.package.wasm-encoder]
+opt-level = 2
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 2
+[profile.dev.package.wasmtime-wizer]
+opt-level = 2
+[profile.dev.package.wasmtime]
+opt-level = 2

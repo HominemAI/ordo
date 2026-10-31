@@ -140,7 +140,8 @@ wall time and not toward CPU.
 The first call after a server starts needs the engine compiled, which
 takes about a second. The server keeps the compiled engine on disk, in
 `ORDO_FN_CACHE_DIR` (`$XDG_CACHE_HOME/ordo/fn`, else
-`$HOME/.cache/ordo/fn`). A restart loads it in about 30 ms. A new Ordo
+`$HOME/.cache/ordo/fn`). The one image sets it to `/var/cache/ordo-fn`,
+the `fn-cache` volume. A restart loads it in about 30 ms. A new Ordo
 release compiles once and replaces the file. `off` turns the cache off.
 See `docs/settings.md`.
 

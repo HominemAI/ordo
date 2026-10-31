@@ -177,11 +177,13 @@ services:
     # each up with the databases: the identity service's holds the key its
     # signing keys are sealed with (ORDO_IDENTITY_DATA_DIR,
     # ORDO_IDENTITY_KEY_FILE), the console's its own key, the supervisor's
-    # the deployment's live settings.
+    # the deployment's live settings. fn-cache keeps the compiled function
+    # engine (ORDO_FN_CACHE_DIR), so a restart skips its compile.
     volumes:
       - identity-data:/var/lib/ordo-identity
       - console-data:/var/lib/ordo-console
       - supervisor-data:/var/lib/ordo-supervisor
+      - fn-cache:/var/cache/ordo-fn
     ports: ["127.0.0.1:8081:8081", "127.0.0.1:8080:8080"]
     restart: unless-stopped
 
@@ -203,3 +205,4 @@ volumes:
   console-data:
   identity-data:
   supervisor-data:
+  fn-cache:

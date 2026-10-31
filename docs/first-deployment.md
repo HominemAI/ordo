@@ -228,7 +228,9 @@ Back up these, and keep keys apart from data.
 
 `docker/compose.one.yml` names these volumes (`identity-data`,
 `console-data`, `supervisor-data`). Do not run without them: an anonymous
-volume is lost on `docker compose down` and then `up`.
+volume is lost on `docker compose down` and then `up`. A fourth,
+`fn-cache`, holds the compiled function engine. Losing it costs one
+compile of about a second.
 
 A database copy without the keys yields no secrets. Keys without a database
 open nothing. Store them in different places. Detail: `howto-console.md`,

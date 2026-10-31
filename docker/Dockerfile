@@ -107,7 +107,8 @@ RUN cargo build --release --locked \
  && ordo-setcap check target/release/ordo-supervisor \
  && ordo-setcap none target/release/ordo-console \
  && mkdir -p -m 0700 /out/var/lib/ordo-supervisor /out/var/lib/ordo-console /out/var/lib/ordo-identity \
- && mkdir -p -m 0711 /out/run/ordo
+ && mkdir -p -m 0711 /out/run/ordo \
+ && mkdir -p -m 0700 /out/var/cache/ordo-fn
 
 # ── runtime: the one image ───────────────────────────────────────────────
 #
@@ -127,6 +128,10 @@ COPY --from=builder --chown=65530:65530 /out/var/lib/ordo-supervisor /var/lib/or
 COPY --from=builder --chown=65531:65531 /out/var/lib/ordo-identity /var/lib/ordo-identity
 COPY --from=builder --chown=65532:65532 /out/var/lib/ordo-console /var/lib/ordo-console
 COPY --from=builder --chown=65530:65530 /out/run/ordo /run/ordo
+# The compiled function engine, cached so a restart skips its compile.
+# ordo-host (65533) owns it; the cache refuses a directory it does not own.
+COPY --from=builder --chown=65533:65533 /out/var/cache/ordo-fn /var/cache/ordo-fn
+ENV ORDO_FN_CACHE_DIR=/var/cache/ordo-fn
 COPY --from=page /page/dist /usr/share/ordo-console/page
 
 # The settings with no default, each refused at boot by name: the console's

@@ -129,3 +129,28 @@ test('a share link with a password asks for it, refuses a wrong one, and opens w
     await ada.close();
   }
 });
+
+test('Suggest title is on the note page, and with no llmKey set it shows the refusal that names the setting', async ({}, testInfo) => {
+  testInfo.setTimeout(240_000);
+  const ada = await owner('Ada');
+  try {
+    await openV2(ada.page);
+    const title = unique('suggest-');
+    await addNote(ada.page, title, 'milk, eggs, bread, coffee');
+    await noteInList(ada.page, title).click();
+
+    const suggest = ada.page.getByRole('button', { name: 'Suggest title', exact: true });
+    await expect(suggest).toBeVisible();
+    await expect(suggest).toBeEnabled();
+
+    // The stack never sets `llmKey` and calls no outside host. The function
+    // is refused before anything leaves, and the page shows why.
+    await suggest.click();
+    const refusal = ada.page.getByTestId('suggest-error');
+    await expect(refusal).toBeVisible({ timeout: 60_000 });
+    await expect(refusal).toContainText('ordo secret set llmKey');
+    await expect(ada.page.getByLabel('Title', { exact: true })).toHaveValue(title);
+  } finally {
+    await ada.close();
+  }
+});

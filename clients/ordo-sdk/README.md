@@ -527,6 +527,35 @@ await downloadFile(client, handle, 'report.pdf');
   upload needs longer than any fixed one. Pass a `signal`.
 - The first argument is a client, or any object with `fileDoor()`.
 
+## Backend functions
+
+A function the program declares runs at `POST /fn/<name>` as the signed-in
+person. `docs/howto-functions.md` has the whole story. The client calls it by
+name:
+
+```ts
+const { result } = await client.callFunction<{ title: string }>('suggestTitle', {
+  text: note.body,
+});
+```
+
+- The parameters are plain JSON. A name that is not an identifier, or a
+  parameter that is not JSON, is refused before the wire as an
+  `OrdoLocalRefusal`.
+- `result` is the JSON the function returned. `replayed` is true when the
+  door answered a repeated `idempotencyKey` with the first answer.
+- No `Idempotency-Key` is sent unless you pass `idempotencyKey`.
+- Errors are the ones you already catch. A refusal is an `OrdoRefusal` with
+  one of `access_denied`, `space_paused`, `function_error`, `function_timeout`,
+  `function_oom`, `function_busy` or `egress_refused`. The message names what
+  to change, such as `ordo secret set llmKey`. `function_busy` carries the
+  door's `Retry-After` in `retryAfterMs`.
+- A busy door is retried under `busyRetry`, as for an op.
+- The interface descriptor does not list functions, so there is no generated
+  function per declared function. The name and the result type are yours.
+- `@hominemai/ordo-react` has `useFunction(name)`, which returns `call`,
+  `busy` and `error`.
+
 ## What is deliberately not here
 
 - **`.live()`**: the SSE verb. `call.terminal` stamps `live` on 76 reads in

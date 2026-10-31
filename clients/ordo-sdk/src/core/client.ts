@@ -26,6 +26,7 @@ import type {
   ResolvedConflictRetry,
 } from './busy.js';
 import { isJsonValue, type JsonValue } from './json.js';
+import { callFunction, type FunctionCallOptions, type FunctionResponse } from './function.js';
 import type { FileDoor } from './files.js';
 import {
   DEFAULT_CLIENT_CALL_TIMEOUT_MS,
@@ -249,6 +250,30 @@ export class OrdoClient {
       wrap: async (e) => networkError(e, this.#site),
       busyRetry: this.#busyRetry,
     };
+  }
+
+  /**
+   * Call a backend function, `POST /fn/<name>`, as the signed-in person
+   * (`docs/howto-functions.md`). The answer is the function's JSON under
+   * `result`. A refusal is thrown as the ordinary {@link OrdoRefusal}.
+   */
+  callFunction<R = JsonValue>(
+    name: string,
+    params: Readonly<Record<string, unknown>> = {},
+    options: FunctionCallOptions = {},
+  ): Promise<FunctionResponse<R>> {
+    return callFunction<R>(
+      {
+        baseUrl: this.#baseUrl,
+        space: this.space,
+        token: async () =>
+          this.#token === undefined ? undefined : typeof this.#token === 'function' ? await this.#token() : this.#token,
+        transport: (url, init, onRetry) => this.#send(url, init, 'busy', onRetry),
+      },
+      name,
+      params,
+      options,
+    );
   }
 
   /** A client bound to a different space; everything else is shared. */

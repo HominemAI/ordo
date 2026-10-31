@@ -45,6 +45,12 @@ import {
 } from '@hominemai/ordo-sdk/core/network.js';
 import { checkRefine, type Refine } from '@hominemai/ordo-sdk/core/refine.js';
 import type { FileDoor } from '@hominemai/ordo-sdk/core/files.js';
+import {
+  callFunction,
+  type FunctionCallOptions,
+  type FunctionResponse,
+} from '@hominemai/ordo-sdk/core/function.js';
+import type { JsonValue } from '@hominemai/ordo-sdk/core/json.js';
 
 // Plain wire types, the answer's shape and the download helpers are the
 // SDK's (owner ruling, 2026-10-23: ordo-react imports ordo-sdk's code and
@@ -171,6 +177,29 @@ export class DescriptorClient {
    */
   feedBroken(e: unknown): OrdoNetworkError | null {
     return streamError(e, this.#site);
+  }
+
+  /**
+   * Call a backend function, `POST /fn/<name>`, as the signed-in person.
+   * The SDK's own call ({@link callFunction}); a refusal is an `OrdoRefusal`.
+   */
+  callFunction<R = JsonValue>(
+    name: string,
+    params: Readonly<Record<string, unknown>> = {},
+    options: FunctionCallOptions = {},
+  ): Promise<FunctionResponse<R>> {
+    return callFunction<R>(
+      {
+        baseUrl: this.#baseUrl,
+        space: this.space,
+        token: () => this.#currentToken(),
+        transport: (url, init, onRetry) =>
+          this.#send(url, init, busyOnly(this.#busyRetry), onRetry),
+      },
+      name,
+      params,
+      options,
+    );
   }
 
   /** `.fetch()` — one shot over a read op. */

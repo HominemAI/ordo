@@ -190,6 +190,7 @@ export { useOpQuery, type UseOpQuery, type UseOpQueryOptions } from './hooks/use
 export { useOpPages, type ExhaustOptions, type UseOpPages, type UseOpPagesOptions } from './hooks/useOpPages.js';
 export { useRow, type UseRow } from './hooks/useRow.js';
 export { useOwnDownload, type UseOwnDownload } from './hooks/useOwnDownload.js';
+export { useFunction, type UseFunction } from './hooks/useFunction.js';
 export {
   useCommit,
   type UseCommit,

@@ -1,4 +1,4 @@
-import { useCommit, useRow } from '@hominemai/ordo-react';
+import { useCommit, useFunction, useRow } from '@hominemai/ordo-react';
 import { useState } from 'react';
 import { refusalText } from '../errors.js';
 import { message } from '../hooks.js';
@@ -33,6 +33,9 @@ export function NoteEditor({ note, online, onClose }: Props) {
   const edit = useCommit('editNote', { autoResolve: true });
   const del = useCommit('deleteNote');
   const { bind } = useRow(base.id);
+  // `suggestTitle` is a backend function (notes.ordo). It runs as this
+  // person; a refusal names the setting to change, and is shown as it came.
+  const suggest = useFunction<{ title?: string }>('suggestTitle');
   const busy = edit.committing || del.committing;
 
   const conflict = edit.state.status === 'conflict' ? edit.state : null;
@@ -47,6 +50,11 @@ export function NoteEditor({ note, online, onClose }: Props) {
     }
   };
 
+  const suggestTitle = async () => {
+    const answer = await suggest.call({ text: body });
+    if (answer?.title) setTitle(answer.title);
+  };
+
   const refusal = edit.refusal ?? del.refusal;
   const error = thrown ?? (refusal ? refusalText(refusal) : null);
 
@@ -54,6 +62,20 @@ export function NoteEditor({ note, online, onClose }: Props) {
     <section className="card" aria-label="Note">
       <label htmlFor="title">Title</label>
       <input id="title" value={title} onChange={(e) => setTitle(e.target.value)} disabled={busy} />
+      <div className="row">
+        <button
+          type="button"
+          disabled={busy || suggest.busy || !online || body.trim() === ''}
+          onClick={() => void suggestTitle()}
+        >
+          {suggest.busy ? 'Suggesting...' : 'Suggest title'}
+        </button>
+      </div>
+      {suggest.error !== null && (
+        <p role="alert" className="error" data-testid="suggest-error">
+          {suggest.error.message}
+        </p>
+      )}
       <label htmlFor="body">Note</label>
       <textarea id="body" rows={8} value={body} onChange={(e) => setBody(e.target.value)} disabled={busy} />
 

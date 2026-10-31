@@ -240,6 +240,26 @@ The answer is the function's JSON under `result`:
 { "result": { "title": "Groceries for the week" } }
 ```
 
+From the SDK, the client makes this call and throws the usual `OrdoRefusal`
+on a refusal:
+
+```ts
+const { result } = await client.callFunction<{ title: string }>('suggestTitle', {
+  text: note.body,
+});
+```
+
+In React, `useFunction('suggestTitle')` returns `call`, `busy` and `error`.
+`call` answers the result, or `null` after a refusal. `error.message` is the
+door's words. Notes v2 uses it for its "Suggest title" button and shows the
+message under the title field. With `llmKey` unset the message names
+`ordo secret set llmKey`.
+
+The SDK sends no `Idempotency-Key` unless you pass `idempotencyKey`. It
+checks the name and that the parameters are JSON before the wire. The
+interface descriptor does not list functions yet, so the generated code has
+no typed call per function. You give the name and the result type.
+
 The door runs the op door's steps first: sign-in, the access check, quotas,
 the tenant binding and parameter types. An unknown function name gets the
 same `access_denied` as a function the caller may not call. A paused tenant

@@ -2852,6 +2852,24 @@ pub fn engine_from_directory(
         }
     }
 
+    // **Backend functions**, `by member`: every role in the tenant may call
+    // one, and a guest, who holds no role, may not
+    // (`plan-backend-functions.md` §7). The template may name a function as
+    // it names an op. Nothing granted them before 2026-10-31, so the
+    // serving binary answered `access_denied` to every call; the door tests
+    // ran a checker of their own. `tests/upgrade_continuity.rs` calls them
+    // through the binary.
+    for func in &f.schema.functions {
+        let name = &func.name.name;
+        let roles = match template.roles_for(name) {
+            Some(roles) => roles.to_vec(),
+            None => vec![Role::Viewer, Role::Editor, Role::Manager, Role::Owner],
+        };
+        for role in roles {
+            profile = profile.allow(role, name);
+        }
+    }
+
     // The deployment's own surfaces. Not registered ops — reserved names in
     // the same namespace, so who may see the deployment's internals is
     // decided by the access model that already exists rather than by a

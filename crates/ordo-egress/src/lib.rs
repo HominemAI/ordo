@@ -128,6 +128,7 @@ pub use dest::{resolve_and_pin, resolve_and_pin_host, Allowlist, HttpsUrl, Pinne
 pub use function::{
     BodySide, FetchAction, FetchError, FnEgress, FnFetch, FnFetchRequest, FnFetchResponse,
     FnLimits, FnMacAnswer, FnMacRequest, HeaderValue, MacHash, SecretBytes, SecretSource,
+    DEFAULT_REQUEST_BODY_CAP, REQUEST_BODY_ENV,
 };
 pub use refusal::Refusal;
 pub use sign::{SinkSecret, SIGNATURE_HEADER, SIGNATURE_VERSION, TIMESTAMP_HEADER};

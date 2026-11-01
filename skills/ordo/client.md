@@ -84,6 +84,12 @@ whose class is `function_error` (the code threw; the message is its own),
 `egress_refused` or `space_paused`. Wire: `POST /fn/<name>` with the
 parameters as a JSON body. In React use `useFunction(name)`.
 
+A file goes in by handle, never in the body. Upload it to the row's `blob`
+field first (`uploadFile`, `useFileUpload`), read the row back for the
+handle, then pass it: `client.callFunction('extractDocument', { file:
+row.file })`. A file the caller may not read is `not_found`. A body over
+`ORDO_FN_BODY_BYTES` (1 MiB) is `bound_violation`.
+
 ## The wire
 
 Read: `GET /op/<name>?param=value`. Write: `POST /op/<name>` with a JSON

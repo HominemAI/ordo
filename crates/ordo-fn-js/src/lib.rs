@@ -1,7 +1,7 @@
 //! The JavaScript engine a backend function runs in.
 //!
 //! This crate compiles to one WebAssembly module: the Boa engine, a small
-//! Web-shaped prelude (`fetch`, `Response`, `Headers`, `console`,
+//! Web-shaped prelude (`fetch`, `Response`, `Headers`, `Blob`, `console`,
 //! `TextEncoder`, `TextDecoder`, `crypto`; byte work in `web.rs`) and four
 //! exports the host drives. The host (`ordo-fn`) pre-initializes it once with
 //! `ordo_init`, snapshots the result, and makes a fresh instance of that
@@ -11,8 +11,9 @@
 //!
 //! | Import | What it does |
 //! |---|---|
-//! | `fetch(ptr, len) -> i32` | one outbound request, as JSON; the reply length, negative for a refusal |
+//! | `fetch(req, req_len, body, body_len) -> i32` | one outbound request: its method, URL and headers as JSON, its body as bytes; the reply length, negative for a refusal |
 //! | `mac(req, req_len, data, data_len) -> i32` | an HMAC keyed by a secret: the request as JSON, the data as bytes; the reply length, negative for a refusal |
+//! | `blob(ptr, len) -> i32` | one file the call was given, read as the caller: the handle as JSON; the reply length, negative for a refusal |
 //! | `take_reply(ptr)` | copies the pending reply into guest memory |
 //! | `log(level, ptr, len)` | one log line; the host scrubs and caps it |
 //! | `result(ptr, len)` | the call's answer, as JSON |
@@ -37,7 +38,8 @@ use boa_engine::{
 
 #[link(wasm_import_module = "ordo")]
 extern "C" {
-    fn fetch(ptr: *const u8, len: usize) -> i32;
+    fn fetch(req_ptr: *const u8, req_len: usize, body_ptr: *const u8, body_len: usize) -> i32;
+    fn blob(ptr: *const u8, len: usize) -> i32;
     fn mac(req_ptr: *const u8, req_len: usize, data_ptr: *const u8, data_len: usize) -> i32;
     fn take_reply(ptr: *mut u8);
     fn log(level: i32, ptr: *const u8, len: usize);
@@ -158,7 +160,8 @@ fn boot() -> JsResult<Context> {
         .build()
         .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
     let mut init = boa_engine::object::ObjectInitializer::new(&mut ctx);
-    init.function(NativeFunction::from_fn_ptr(native_fetch), js_string!("fetch"), 1)
+    init.function(NativeFunction::from_fn_ptr(native_fetch), js_string!("fetch"), 4)
+        .function(NativeFunction::from_fn_ptr(native_blob), js_string!("blob"), 1)
         .function(NativeFunction::from_fn_ptr(native_log), js_string!("log"), 2)
         .function(NativeFunction::from_fn_ptr(native_mac), js_string!("hostMac"), 4);
     web::install(&mut init);
@@ -210,11 +213,16 @@ fn settle(p: &JsPromise) -> JsResult<JsValue> {
     }
 }
 
-/// `__ordo_native.fetch(requestJson) -> { ok: responseJson } | { refused: errorJson }`
+/// `__ordo_native.fetch(requestJson, buffer, offset, length)
+///   -> { ok: responseJson } | { refused: errorJson }`
+///
+/// The body crosses as bytes beside the request, so a file goes out as it
+/// is, with no text encoding on the way.
 fn native_fetch(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let req = args.get_or_undefined(0).to_string(ctx)?.to_std_string_escaped();
-    // SAFETY: a pointer and length into a live string.
-    let n = unsafe { fetch(req.as_ptr(), req.len()) };
+    let body = web::bytes(args, 1, ctx)?;
+    // SAFETY: pointers and lengths into a live string and a live vector.
+    let n = unsafe { fetch(req.as_ptr(), req.len(), body.as_ptr(), body.len()) };
     let buf = take(n);
     let text = String::from_utf8_lossy(&buf).into_owned();
     let o = boa_engine::object::ObjectInitializer::new(ctx).build();
@@ -262,6 +270,45 @@ fn native_mac(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
             ctx,
         )?;
     }
+    Ok(o.into())
+}
+
+/// `__ordo_native.blob(requestJson) -> { ok: ArrayBuffer, type } | { refused: errorJson }`
+///
+/// One file, read by the host as the person calling. The reply is a 4-byte
+/// little-endian length, that many bytes of `{"type":...}`, then the file.
+fn native_blob(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let req = args.get_or_undefined(0).to_string(ctx)?.to_std_string_escaped();
+    // SAFETY: a pointer and length into a live string.
+    let n = unsafe { blob(req.as_ptr(), req.len()) };
+    let mut buf = take(n);
+    let o = boa_engine::object::ObjectInitializer::new(ctx).build();
+    if n < 0 {
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        o.set(
+            js_string!("refused"),
+            JsValue::from(JsString::from(text)),
+            false,
+            ctx,
+        )?;
+        return Ok(o.into());
+    }
+    let bad = || JsNativeError::error().with_message("the host sent a malformed file");
+    let head_len = buf
+        .get(..4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or_else(bad)?;
+    let head = buf.get(4..4 + head_len).ok_or_else(bad)?;
+    let head = String::from_utf8_lossy(head).into_owned();
+    let bytes = buf.split_off(4 + head_len);
+    o.set(
+        js_string!("head"),
+        JsValue::from(JsString::from(head)),
+        false,
+        ctx,
+    )?;
+    let v = web::array_buffer(bytes, ctx)?;
+    o.set(js_string!("ok"), v, false, ctx)?;
     Ok(o.into())
 }
 

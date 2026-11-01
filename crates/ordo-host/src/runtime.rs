@@ -5271,6 +5271,17 @@ async fn assemble_program(
         ordo_egress::DenyList::from_vars(&env)
             .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
     };
+    // `ORDO_FN_BODY_BYTES`, `ORDO_FN_BLOB_BYTES` and
+    // `ORDO_FN_FETCH_BODY_BYTES`: a call's body, the bytes one call may read
+    // through `ctx.blob`, and the body one `fetch` may send.
+    let functions_settings = {
+        let env = |k: &str| std::env::var(k).ok();
+        crate::functions::FnSettings::from_vars(&env)
+            .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
+    };
+    // A function reads files through the blob door's own port, as the
+    // person calling. No store, no port: `ctx.blob` answers `blob_no_store`.
+    let functions_blobs = blobs.as_ref().map(|b| b.port.clone());
     // `ORDO_FN_CACHE_DIR`: where the compiled function engine is kept.
     let functions_engine_cache = {
         let env = |k: &str| std::env::var(k).ok();
@@ -5361,22 +5372,26 @@ async fn assemble_program(
         usage_rollup,
         catchup,
         node_status,
-        functions: Arc::new(crate::functions::HostFunctions::new(
-            ordo_fn::HostConfig {
-                engine_cache: functions_engine_cache,
-                ..ordo_fn::HostConfig::default()
-            },
-            crate::functions::FnTable::default(),
-            spaces.clone(),
-            pool_for_functions,
-            crate::secrets::fn_fetch(
-                secrets_for_functions.clone(),
-                ordo_egress::TlsRoots::webpki(),
-                functions_deny,
-                ordo_egress::FnLimits::default(),
-            ),
-            secrets_for_functions,
-        )),
+        functions: Arc::new(
+            crate::functions::HostFunctions::new(
+                ordo_fn::HostConfig {
+                    engine_cache: functions_engine_cache,
+                    ..ordo_fn::HostConfig::default()
+                },
+                crate::functions::FnTable::default(),
+                spaces.clone(),
+                pool_for_functions,
+                crate::secrets::fn_fetch(
+                    secrets_for_functions.clone(),
+                    ordo_egress::TlsRoots::webpki(),
+                    functions_deny,
+                    functions_settings.fetch_limits(),
+                ),
+                secrets_for_functions,
+            )
+            .with_blobs(functions_blobs)
+            .with_settings(functions_settings),
+        ),
         spaces,
         quotas,
         secrets,

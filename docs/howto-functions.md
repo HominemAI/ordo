@@ -5,9 +5,10 @@ It runs inside the Ordo binary, in a fresh WebAssembly instance per call.
 It can call outside APIs through `fetch`, use a secret by name, and log.
 It holds no database URL, no service key and no secret value.
 
-Increment 1 builds one kind: a function the page calls, JSON in and JSON
-out. Schedules, change triggers, webhooks and calling ops from a function
-come later (`plan-backend-functions.md` §12).
+What is built is one kind: a function the page calls, JSON in and JSON
+out, with files in through `blob` parameters. Schedules, change triggers,
+webhooks and calling ops from a function come later
+(`plan-backend-functions.md` §12).
 
 The worked example is `suggestTitle` in `examples/notes-v2`.
 
@@ -27,7 +28,7 @@ function suggestTitle in notes {
 
 | Clause | Means |
 |---|---|
-| `call($p: type, ...) -> json` | Called from the page. The parameters are typed and checked at the door like an op's. It answers JSON. |
+| `call($p: type, ...) -> json` | Called from the page. The parameters are typed and checked at the door like an op's. A `blob` parameter takes a file (see [Reading a file](#reading-a-file)). It answers JSON. |
 | `by member` | Who may call it: a signed-in member of the tenant. The default. |
 | `code "fn/x.js"` | The bundled ES module, relative to the program's directory. `.js` or `.mjs`, at most 20 MB. |
 | `egress host, ...` | The hosts it may reach. Any other host is refused before DNS. A name with a hyphen goes in quotes: `"my-model.example.com"`. |
@@ -61,12 +62,16 @@ export default {
 
 - `input` holds the declared parameters.
 - `fetch`, `Response` and `Headers` follow the Web standard. A body is a
-  string; use `JSON.stringify`. Only `https://` URLs to declared hosts work.
+  string (use `JSON.stringify` for an object), a `Blob`, an `ArrayBuffer`
+  or a typed array. A string goes as UTF-8; bytes go as they are. Only
+  `https://` URLs to declared hosts work.
 - `ctx.secret(name)` returns a handle, never the value. Put it in a header
   as it is, or as `ctx.secret(name).bearer()` for `Bearer <value>`, or
   `ctx.secret(name).template("Token {}")`. The host fills the value in on
   the way out, for the secret's bound hosts only.
 - `console.log`, `console.warn` and `console.error` go to the run's log.
+- `ctx.blob(input.file)` reads a file the call was given, as the caller.
+  See [Reading a file](#reading-a-file).
 - `ctx.tenant`, `ctx.function`, `ctx.version` and `ctx.runId` describe the
   call. `ctx.runId` is the page's `Idempotency-Key` when it sent one.
 - Throwing ends the call with `function_error` and your message.
@@ -82,6 +87,8 @@ Beside `fetch`, `Response`, `Headers` and `console`:
 
 | API | What works |
 |---|---|
+| `Blob` | `new Blob(parts, { type })`, `size`, `type`, `bytes()`, `arrayBuffer()`, `text()`, `slice()`. A `Blob` can be a `fetch` body. |
+| `Uint8Array` base64 | `bytes.toBase64()` and `Uint8Array.fromBase64(text)`, with `{ alphabet: "base64url" }` and `{ omitPadding: true }`. The work runs in Rust. |
 | `TextEncoder` | `encode` and `encodeInto`, UTF-8. A lone surrogate becomes U+FFFD. |
 | `TextDecoder` | UTF-8 only, with `fatal` and `ignoreBOM`. `stream: true` throws; decode the whole input at once. |
 | `crypto.getRandomValues` | Integer typed arrays, up to 65536 bytes per call. |
@@ -130,7 +137,8 @@ its name instead: see [Checking a webhook's signature](#checking-a-webhooks-sign
 | Outbound calls per call | 50 | | the `fetch` rejects |
 | Log per call | 64 KB | | the rest is dropped and marked |
 | Answer | 1 MB | | `function_error` |
-| Input | 1 MB | | refused at the door |
+| Input | 1 MiB, `ORDO_FN_BODY_BYTES` | 64 MiB | `bound_violation` at the door, naming the setting |
+| Files read per call | 20 MiB, `ORDO_FN_BLOB_BYTES` | 1 GiB | `ctx.blob` rejects with `blob_too_large`, naming the setting |
 
 CPU is counted as WebAssembly fuel. Waiting on the network counts toward
 wall time and not toward CPU.
@@ -144,6 +152,83 @@ takes about a second. The server keeps the compiled engine on disk, in
 the `fn-cache` volume. A restart loads it in about 30 ms. A new Ordo
 release compiles once and replaces the file. `off` turns the cache off.
 See `docs/settings.md`.
+
+## Reading a file
+
+A function takes a file as a `blob` parameter. The bytes never ride in the
+call's JSON. The page uploads the file to the blob door first
+(`howto-files.md`), then passes the handle.
+
+```ordo
+secret mistralKey for api.mistral.ai
+
+function extractDocument in documents {
+  call($file: blob) -> json
+  code "fn/extract-document.js"
+  egress api.mistral.ai
+  secrets mistralKey
+  limit memory 256 mb
+}
+```
+
+```js
+export default {
+  async call(input, ctx) {
+    const file = await ctx.blob(input.file);
+    const data = (await file.bytes()).toBase64();
+    const r = await fetch("https://api.mistral.ai/v1/ocr", {
+      method: "POST",
+      headers: {
+        authorization: ctx.secret("mistralKey").bearer(),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "mistral-ocr-latest",
+        document: { type: "document_url", document_url: `data:${file.type};base64,${data}` },
+      }),
+    });
+    if (!r.ok) throw new Error("OCR answered " + r.status);
+    return await r.json();
+  },
+};
+```
+
+The page's steps:
+
+1. Write the row that owns the file, with an op.
+2. Upload the bytes: `PUT /blob/{entity}/{field}/{id}`, or `useFileUpload`.
+3. Read the row back. An op that answers the `blob` field answers its handle.
+4. Call the function with the handle: `{ "file": "<32 hex characters>" }`.
+
+How the read works:
+
+- `ctx.blob(handle)` answers a `Blob` with the file's bytes, its `type` as
+  uploaded, and its `size`.
+- It reads as the person calling. The door checks `std.$blob.get`, the
+  check `GET /blob/{handle}` makes, before the code runs. The row guard
+  runs on the read. A file the caller may not read is `blob_not_found`,
+  the same answer the blob door gives for a file that does not exist.
+- It reads only the handles in the call's own `blob` arguments. Any other
+  handle is `blob_not_argument`, even one the caller could read.
+- One call reads at most `ORDO_FN_BLOB_BYTES` of files, 20 MiB by default.
+  A file over what is left is refused on its size, before its bytes are
+  read.
+- A refusal rejects with a `BlobRefused` error whose `code` is the reason.
+  Uncaught, it ends the call:
+
+| Reason | Answer | Means |
+|---|---|---|
+| `blob_not_found` | 404 `not_found` | no such file, or the caller may not read it |
+| `blob_too_large` | 400 `invalid_param` | over the call's cap; the message names `ORDO_FN_BLOB_BYTES` |
+| `blob_not_argument` | 500 `function_error` | the code read a handle it was not given |
+| `blob_unavailable` | 503 `server_busy` | file storage is busy; try again |
+| `blob_no_store` | 500 `internal` | the deployment has no file storage |
+
+A file sent out passes the egress limits too: one `fetch` body is at most
+`ORDO_FN_FETCH_BODY_BYTES`, 32 MiB by default. Base64 makes a file a third
+larger, so a 20 MiB file fits. Raise both settings together. A large file also needs memory:
+the bytes, the base64 text and the JSON body are each held at once, so give
+such a function `limit memory 256 mb` or more.
 
 ## Secrets
 
@@ -293,7 +378,7 @@ another allowed host still cannot carry the key there.
 
 | Limit | Default |
 |---|---|
-| Request body | 10 MB |
+| Request body | 32 MiB, `ORDO_FN_FETCH_BODY_BYTES` |
 | Response body | 25 MB |
 | One request's time | 60 s |
 | A secret's value | 64 KiB |
@@ -428,14 +513,16 @@ key, so a retry runs again.
 | `function_oom` | 500 | It needed more memory than its limit. |
 | `function_busy` | 429 | Too many calls are running. Retry after the `Retry-After` seconds. |
 | `egress_refused` | 400 | An outbound call was refused, and the code let it end the call. The message names the reason. |
+| `not_found` | 404 | A `blob` argument names a file the caller may not read, or none at all. |
+| `bound_violation` | 400 | The body is over `ORDO_FN_BODY_BYTES`. Send a file through the blob door instead. |
 
 ### What is recorded
 
 Each call writes one row to `$fnruns` in the deployment's database: the
 function, the version, the tenant, who called, the wall time, CPU, peak
 memory, the number of outbound calls and their hosts, bytes sent and
-received, the outcome class and the log. The input, the answer and request
-bodies are never recorded. The log is scrubbed of live secret values.
+received, the outcome class and the log. The input, the answer, request
+bodies and file bytes are never recorded. The log is scrubbed of live secret values.
 
 ## Runs and logs
 

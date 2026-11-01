@@ -13,14 +13,17 @@
 //! - **Limits** (plan §9): memory through a resource limiter, CPU as fuel, and
 //!   wall time through epoch interruption plus a timeout around the network
 //!   waits.
-//! - **Seven imports** and nothing else: `fetch` and `mac` (both through
-//!   [`FnFetch`]), `take_reply`, `log`, `result`, `now_ms`, `random`. No
-//!   file, socket, environment or secret value is reachable. `mac` signs or
-//!   verifies an HMAC with a secret as the key; the key stays in the host.
+//! - **Eight imports** and nothing else: `fetch` and `mac` (both through
+//!   [`FnFetch`]), `blob` (through [`FnBlobs`]), `take_reply`, `log`,
+//!   `result`, `now_ms`, `random`. No file, socket, environment or secret
+//!   value is reachable. `mac` signs or verifies an HMAC with a secret as the
+//!   key; the key stays in the host. `blob` reads a file the call was given
+//!   as a `blob` argument, as the person calling (`src/blob.rs`).
 //!
 //! The door (`ordo-api`) does sign-in, access, quotas, idempotency and pause
 //! before a call gets here, and turns an [`FnError`] into an HTTP answer.
 
+pub mod blob;
 mod cache;
 pub mod error;
 pub mod seam;
@@ -39,6 +42,7 @@ use wasmtime::{
 };
 use wasmtime_wizer::{InstanceState, SnapshotVal, ValType, Wizer};
 
+pub use blob::{BlobError, FnBlob, FnBlobs, NoBlobs, BLOB_BYTES_ENV, DEFAULT_BLOB_BYTES};
 pub use cache::{CacheOutcome, CacheWrite};
 pub use error::{BusyScope, FnError, Limit, Remedy};
 pub use seam::{
@@ -64,6 +68,9 @@ pub struct Limits {
     pub log_bytes: usize,
     /// The function's answer, as JSON text.
     pub output_bytes: usize,
+    /// Bytes read through `ctx.blob`, all files together
+    /// ([`BLOB_BYTES_ENV`]).
+    pub blob_bytes: u64,
 }
 
 impl Default for Limits {
@@ -75,6 +82,7 @@ impl Default for Limits {
             max_fetches: 50,
             log_bytes: 64 * 1024,
             output_bytes: 1024 * 1024,
+            blob_bytes: DEFAULT_BLOB_BYTES,
         }
     }
 }
@@ -90,6 +98,7 @@ impl Limits {
             max_fetches: 500,
             log_bytes: 1024 * 1024,
             output_bytes: 16 * 1024 * 1024,
+            blob_bytes: 1024 * 1024 * 1024,
         }
     }
 
@@ -102,6 +111,7 @@ impl Limits {
             max_fetches: self.max_fetches.min(ceiling.max_fetches),
             log_bytes: self.log_bytes.min(ceiling.log_bytes),
             output_bytes: self.output_bytes.min(ceiling.output_bytes),
+            blob_bytes: self.blob_bytes.min(ceiling.blob_bytes),
         }
     }
 }
@@ -165,6 +175,12 @@ pub struct FnCall {
     pub fetch: Arc<dyn FnFetch>,
     /// Removes live secret values from log lines and error messages.
     pub scrub: Arc<dyn Scrub>,
+    /// Reads files as the person calling. [`NoBlobs`] when the deployment
+    /// has no file storage.
+    pub blobs: Arc<dyn FnBlobs>,
+    /// The handles in the call's `blob` arguments: the only files
+    /// `ctx.blob` may read.
+    pub blob_args: Vec<String>,
 }
 
 /// Removes every live secret value of a tenant from text the function
@@ -204,6 +220,9 @@ pub struct RunReport {
     pub hosts: Vec<String>,
     pub bytes_out: u64,
     pub bytes_in: u64,
+    /// Files read through `ctx.blob`, and their bytes.
+    pub blob_reads: u32,
+    pub blob_bytes: u64,
     pub logs: Vec<LogLine>,
     pub logs_truncated: bool,
 }
@@ -531,6 +550,8 @@ impl FnHost {
         report.hosts = guest.hosts;
         report.bytes_out = guest.bytes_out;
         report.bytes_in = guest.bytes_in;
+        report.blob_reads = guest.blob_reads;
+        report.blob_bytes = guest.blob_bytes;
         report.logs = guest.logs;
         report.logs_truncated = guest.logs_truncated;
         FnRun { outcome, report }
@@ -616,6 +637,9 @@ async fn run_in(
     let code = text("code");
     // Only a refusal the host itself issued in this call may set the
     // outcome class; a function cannot claim one by throwing `{code}`.
+    if let Some(e) = guest.blob_refusals.iter().find(|e| e.kind() == code) {
+        return Err(FnError::Blob(e.clone()));
+    }
     if !code.is_empty() && guest.issued.contains(&code) {
         return Err(FnError::Fetch {
             code,
@@ -726,6 +750,14 @@ struct Guest {
     reply: Vec<u8>,
     /// Refusal codes this host issued during the call.
     issued: Vec<String>,
+    blobs: Option<Arc<dyn FnBlobs>>,
+    /// Lowercase hex, as the door bound them.
+    blob_args: Vec<String>,
+    blob_limit: u64,
+    blob_reads: u32,
+    blob_bytes: u64,
+    /// The `ctx.blob` refusals issued during the call.
+    blob_refusals: Vec<BlobError>,
     result: Option<Vec<u8>>,
     limits_output: usize,
     output_over: bool,
@@ -757,6 +789,12 @@ impl Guest {
             bytes_in: 0,
             reply: Vec::new(),
             issued: Vec::new(),
+            blobs: None,
+            blob_args: Vec::new(),
+            blob_limit: 0,
+            blob_reads: 0,
+            blob_bytes: 0,
+            blob_refusals: Vec::new(),
             result: None,
             limits_output: 0,
             output_over: false,
@@ -775,6 +813,13 @@ impl Guest {
         g.secrets = call.secrets.clone();
         g.fetch = Some(call.fetch.clone());
         g.scrub = Some(call.scrub.clone());
+        g.blobs = Some(call.blobs.clone());
+        g.blob_args = call
+            .blob_args
+            .iter()
+            .map(|h| h.to_ascii_lowercase())
+            .collect();
+        g.blob_limit = limits.blob_bytes;
         g.max_fetches = limits.max_fetches;
         g.limits_output = limits.output_bytes;
         g.log_limit = limits.log_bytes;
@@ -813,10 +858,11 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
     linker.func_wrap_async(
         "ordo",
         "fetch",
-        |mut caller: Caller<'_, Guest>, (ptr, len): (i32, i32)| {
+        |mut caller: Caller<'_, Guest>, (ptr, len, body_ptr, body_len): (i32, i32, i32, i32)| {
             Box::new(async move {
                 let req = guest_bytes(&mut caller, ptr, len).unwrap_or_default();
-                let reply = guest_fetch(caller.data_mut(), &req).await;
+                let body = guest_bytes(&mut caller, body_ptr, body_len).unwrap_or_default();
+                let reply = guest_fetch(caller.data_mut(), &req, body).await;
                 let g = caller.data_mut();
                 let (bytes, refused) = match reply {
                     Ok(b) => (b, false),
@@ -855,6 +901,34 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
                         let b = serde_json::json!({ "code": e.code, "message": e.message })
                             .to_string()
                             .into_bytes();
+                        (b, true)
+                    }
+                };
+                let n = bytes.len() as i32;
+                g.reply = bytes;
+                if refused {
+                    -n
+                } else {
+                    n
+                }
+            })
+        },
+    )?;
+    linker.func_wrap_async(
+        "ordo",
+        "blob",
+        |mut caller: Caller<'_, Guest>, (ptr, len): (i32, i32)| {
+            Box::new(async move {
+                let req = guest_bytes(&mut caller, ptr, len).unwrap_or_default();
+                let reply = guest_blob(caller.data_mut(), &req).await;
+                let g = caller.data_mut();
+                let (bytes, refused) = match reply {
+                    Ok(b) => (b, false),
+                    Err(e) => {
+                        let b = serde_json::json!({ "code": e.kind(), "message": e.to_string() })
+                            .to_string()
+                            .into_bytes();
+                        g.blob_refusals.push(e);
                         (b, true)
                     }
                 };
@@ -946,8 +1020,6 @@ struct WireRequest {
     url: String,
     #[serde(default)]
     headers: Vec<(String, WireHeader)>,
-    #[serde(default)]
-    body: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -974,7 +1046,7 @@ impl Refused {
     }
 }
 
-async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
+async fn guest_fetch(g: &mut Guest, raw: &[u8], body: Vec<u8>) -> Result<Vec<u8>, Refused> {
     let req: WireRequest = serde_json::from_slice(raw)
         .map_err(|e| Refused::new("bad_request", format!("a malformed request: {e}")))?;
     if g.fetches >= g.max_fetches {
@@ -1022,7 +1094,6 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
     if !g.hosts.contains(&host) {
         g.hosts.push(host);
     }
-    let body = req.body.into_bytes();
     g.bytes_out += body.len() as u64;
     let space = g.space.clone();
     let resp = fetch
@@ -1047,6 +1118,50 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, Refused> {
     })
     .to_string()
     .into_bytes())
+}
+
+/// The wire shape of a guest `ctx.blob` request, as the prelude writes it.
+#[derive(serde::Deserialize)]
+struct WireBlob {
+    handle: String,
+}
+
+/// One `ctx.blob` from the guest: the handle checked against the call's
+/// `blob` arguments, the cap against what the call has read so far, then
+/// the read through the seam, as the person calling. The reply is a 4-byte
+/// little-endian length, that many bytes of `{"type":...}`, then the file.
+async fn guest_blob(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, BlobError> {
+    let req: WireBlob = serde_json::from_slice(raw).map_err(|_| BlobError::NotArgument)?;
+    let handle = req.handle.trim().to_ascii_lowercase();
+    if !g.blob_args.contains(&handle) {
+        return Err(BlobError::NotArgument);
+    }
+    let blobs = g.blobs.clone().ok_or(BlobError::NoStore)?;
+    let left = g.blob_limit.saturating_sub(g.blob_bytes);
+    let limit = g.blob_limit;
+    let file = blobs.read(&handle, left).await.map_err(|e| match e {
+        // The seam knows what was left, not the call's whole cap.
+        BlobError::TooLarge { size, left, .. } => BlobError::TooLarge { size, left, limit },
+        other => other,
+    })?;
+    // The seam refuses a file over `left` before reading it. Held again
+    // here, so a seam that read it anyway still cannot pass the cap.
+    let size = file.bytes.len() as u64;
+    if size > left {
+        return Err(BlobError::TooLarge {
+            size,
+            left,
+            limit: g.blob_limit,
+        });
+    }
+    g.blob_reads += 1;
+    g.blob_bytes += size;
+    let head = serde_json::json!({ "type": file.mime }).to_string();
+    let mut out = Vec::with_capacity(4 + head.len() + file.bytes.len());
+    out.extend_from_slice(&(head.len() as u32).to_le_bytes());
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(&file.bytes);
+    Ok(out)
 }
 
 /// The wire shape of a guest HMAC request, as the prelude writes it. The

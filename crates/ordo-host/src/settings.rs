@@ -1532,6 +1532,18 @@ pub static REGISTRY: &[Setting] = &[
         r#"an absolute path, or off"#,
     ),
     s(
+        "ORDO_FN_BLOB_BYTES",
+        "Storage and blobs",
+        r#"20971520 (20 MiB)"#,
+        r#"0 to 1073741824"#,
+    ),
+    s(
+        "ORDO_FN_FETCH_BODY_BYTES",
+        "Storage and blobs",
+        r#"33554432 (32 MiB)"#,
+        r#"1024 to 268435456"#,
+    ),
+    s(
         "ORDO_IMPORT_BUNDLE_DIR",
         "Storage and blobs",
         r#"none"#,
@@ -1684,6 +1696,12 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s("ORDO_JSON_MAX_DEPTH", "CORS and the door", r#"64"#, r#""#),
+    s(
+        "ORDO_FN_BODY_BYTES",
+        "CORS and the door",
+        r#"1048576 (1 MiB)"#,
+        r#"1024 to 67108864"#,
+    ),
     s(
         "ORDO_TENANT_CATCHUP_SECS",
         "CORS and the door",

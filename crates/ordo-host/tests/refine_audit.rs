@@ -42,6 +42,8 @@ fn dummy(ty: &ParamTy) -> &'static str {
         ParamTy::Uri => "https://example.test/x",
         // A JSON string is a document like any other.
         ParamTy::Json => "x",
+        // A function's only; no op has one.
+        ParamTy::Blob => "0123456789abcdef0123456789abcdef",
     }
 }
 

@@ -444,7 +444,7 @@ is a named class, not a silent ignore:
 | `blob_default` | `= <literal>` on a `blob` | The only producer of a blob value is an upload; a literal here names an object nobody uploaded. |
 | `blob_required` | a `blob` field without `?` | An upload addresses an existing row, so the field is empty between the row's creation and the upload. This is also what keeps the derived `std.E.create` insert-complete while excluding blob fields from its parameters. |
 | `blob_not_normalizable` | `normalize(...)` on a `blob` | `normalize` canonicalizes text before equality and the blind index; a blob has neither. |
-| `blob_parameter` | `$f: blob` | Bytes are not a JSON wire value. They arrive through the blob door, which is why that door exists. |
+| `blob_parameter` | `$f: blob` on an op | Bytes are not a JSON wire value. They arrive through the blob door, which is why that door exists. A function may take `$f: blob`; it reads the file as the caller ("Functions and secrets"). |
 | `inline_without_blob` | `inline` on a non-`blob` field | `inline` chooses where **bytes** are stored, and nothing else has bytes. |
 | `private_without_blob` | `private` on a non-`blob` field | `private` is client-sealed custody over **bytes**. To seal an ordinary field under the space's key, write `sealed`, which is different custody and a different consent page. |
 | `conflicting_custody` | `blob sealed private` | `sealed` seals under the space's key (the platform can open it for a caller who passed the door); `private` seals under a key the platform never holds. Together they name two positions, not a stronger one. |
@@ -3212,7 +3212,7 @@ out, egress declared on the consent page. Short code the deployment owns runs
 in the platform as backend functions (next section). Long-running services
 stay outside it until v2.
 
-### Functions and secrets [built, increment 1]
+### Functions and secrets [built, increments 1 and 2]
 
 A `function` is for what the language cannot express, such as calling an
 outside API. Its code is a JavaScript file bundled with the program. It runs
@@ -3251,6 +3251,12 @@ secret <name>
 - Clauses go in any order. Inside the braces a line break ends nothing.
 - `call` and `code` are required, and each appears once. `call` takes typed
   parameters like an op, checked at the door. It answers `json`.
+- A `call` parameter may be `blob`: `call($file: blob)`. An op parameter
+  may not (`blob_parameter`). The page uploads the file to the blob door
+  first and passes its handle, 32 hex characters. The code reads it with
+  `ctx.blob(input.file)`, as the caller: the door checks `std.$blob.get`,
+  and the row guard decides. A file the caller may not read is
+  `not_found`.
 - `by member` is the default and the only caller built. `by public` and any
   other caller are `invalid_function`.
 - `code` is a relative path ending in `.js` or `.mjs`, at most 20 MB. It
@@ -3286,7 +3292,9 @@ Refusals:
 | `invalid_secret_host` | a host that is a URL, has a port or a wildcard, or is not a DNS name |
 
 The page calls a function with `POST /fn/<name>` or the SDK's
-`callFunction`. Run history is `ordo fn runs` and `ordo fn log`.
+`callFunction`. The body is at most `ORDO_FN_BODY_BYTES` (1 MiB). One call
+reads at most `ORDO_FN_BLOB_BYTES` (20 MiB) of files. Run history is
+`ordo fn runs` and `ordo fn log`.
 
 ### Domain package
 

@@ -1233,3 +1233,5 @@
 {"seq": 1233, "item": "cut-test-time-by-building-and", "ask": 4, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1234, "item": "cut-test-time-by-building-and", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1235, "item": "ci-max-connections", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1236, "item": "cut-test-time-by-building-and", "ask": 5, "at": "2026-11-01T23:54:54Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1237, "item": "cut-test-time-by-building-and", "ask": 5, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}

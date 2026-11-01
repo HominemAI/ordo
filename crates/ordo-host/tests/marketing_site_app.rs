@@ -609,11 +609,13 @@ async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
             ("ORDO_PROXY_HEADER", "X-Forwarded-For"),
             ("ORDO_PROXY_TRUSTED", "127.0.0.1"),
             ("ORDO_PROXY_SLOW_AFTER", "2"),
-            ("ORDO_PROXY_SLOW_MS", "500"),
+            ("ORDO_PROXY_SLOW_MS", "2000"),
         ],
     )
     .await;
     assert!(d.log().contains("proxy mode: on"), "{}", d.log());
+    // A 2 s slow-down: an unslowed visit took over 500 ms on a loaded CI
+    // runner (run 41297909915), so a 500 ms one could not tell them apart.
     let timed = |visitor: &str| {
         let started = std::time::Instant::now();
         let (status, _, body) = d.visit("/op/pricing", &[("X-Forwarded-For", visitor)]);
@@ -621,14 +623,14 @@ async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
         started.elapsed()
     };
     for _ in 0..2 {
-        assert!(timed("203.0.113.9") < Duration::from_millis(500));
+        assert!(timed("203.0.113.9") < Duration::from_millis(2000));
     }
     assert!(
-        timed("203.0.113.9") >= Duration::from_millis(500),
+        timed("203.0.113.9") >= Duration::from_millis(2000),
         "slowed, still served"
     );
     assert!(
-        timed("203.0.113.10") < Duration::from_millis(500),
+        timed("203.0.113.10") < Duration::from_millis(2000),
         "another visitor"
     );
     d.stop_quietly();

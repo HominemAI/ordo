@@ -2,8 +2,7 @@
 # Install cargo-nextest from its release, pinned by version and checksum.
 #
 # The binary goes in $RUNNER_TEMP/nextest-bin (or $TMPDIR outside Actions),
-# which is added to $GITHUB_PATH. It needs no Rust toolchain, so a job that
-# only runs an archived test build can use it.
+# which is added to $GITHUB_PATH.
 #
 # To move to a newer release: change VERSION, and take each SHA256 from the
 # release's assets (each `.tar.gz` lists its digest on the release page).

@@ -11762,3 +11762,9 @@ asks 2 to 4. Measured that day: 32 min of tests across the shards, about
   ruling that stress runs need not run every time.
 - `notes_app` tests run in parallel unless they share state. The tests
   that count connections keep running one at a time.
+- Ask 5 ("ok"): the shared test build is dropped. Its archive was 1.74 GB
+  and took 4.5 min to download in each shard, against about 1 min to build
+  from the warm cache. The first nextest run took 25 min, slower than
+  before. Each shard now builds what it runs, and nextest still runs files
+  at once. Debug info was already off on CI (`CARGO_PROFILE_DEV_DEBUG: 0`),
+  so the line-tables cut in the recommendation had nothing to cut.

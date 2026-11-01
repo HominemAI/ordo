@@ -152,15 +152,14 @@ Rename a job only together with the ruleset.
 CI (`.github/workflows/ci.yml`) runs on the self-hosted runner, each test
 job against its own leased CI Postgres server:
 
-- `build (tests)` compiles the test binaries once
-  (`scripts/ci-test-shard.sh archive`), uploads them as a nextest archive,
-  then runs the doc tests. It is not a required check.
 - `test (rest)` runs fmt, clippy, every crate but ordo-host and ordo-host's
-  unit tests, then the S3 contract, the C001 proof and the inventories.
+  unit tests, then the doc tests, the S3 contract, the C001 proof and the
+  inventories.
 - `test (host K 4)` each run every 4th ordo-host integration test
   (`--partition slice:K/4`).
-- The `test` jobs compile nothing. They fail when `build (tests)` did not
-  deliver; `test (rest)` also fails when the doc tests did.
+- Each `test` job builds what it runs from the warm `rust-gates` cache.
+  One shared build was tried on 2026-11-01 and dropped: its 1.74 GB took
+  4.5 min per job to download, against about 1 min to build.
 
 A push to `bleeding` runs only the reached crates; open the pull request to
 `main` for the full suite, or push with `ci: full`.

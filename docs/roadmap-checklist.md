@@ -11748,8 +11748,13 @@ Items the owner has explicitly placed AFTER the first deployment. Listed so
       `TextEncoder` and `crypto.subtle`. One unsafe call loads the cached
       engine (ask 18, ruled). HMAC keyed by a secret's name is built
       (ask 19), with `secret name` alone declaring a signing key. The
-      language reference and the skill describe functions. Then increments
-      2 and 4.
+      language reference and the skill describe functions. Increment 2,
+      files in, is built (2026-11-01): `$x: blob` arguments read as the
+      caller through the blob door's row guard (`ctx.blob`), fetch sends
+      bytes, and three caps are settings: `ORDO_FN_BODY_BYTES` (1 MiB),
+      `ORDO_FN_BLOB_BYTES` (20 MiB), `ORDO_FN_FETCH_BODY_BYTES` (32 MiB).
+      Guard: `a_function_reads_a_file_as_its_caller_and_the_row_guard_holds`
+      in `crates/ordo-host/tests/blob_door.rs`. Then increment 4.
       Board: `backend-functions`.
 
 - [ ] **18af · Function logs in the console (v2).** The owner,

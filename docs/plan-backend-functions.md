@@ -317,7 +317,7 @@ approved by the deployment. Data can choose a path, never a host.
 | Limit | Default | Layer |
 |---|---|---|
 | Requests per call | 50 | deployment ceiling, function may lower |
-| Request body | 10 MB | same |
+| Request body | 32 MiB (`ORDO_FN_FETCH_BODY_BYTES`), so a full 20 MiB file fits as base64 | same |
 | Response body | 25 MB | same |
 | One request's time | 60 s | same |
 | Concurrent requests per call | 6 | same |

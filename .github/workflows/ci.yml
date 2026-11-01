@@ -223,6 +223,9 @@ jobs:
     env:
       REACHED: ${{ (matrix.shard == 'rest' && needs.changes.outputs.rest) || needs.changes.outputs.host }}
       ORDO_CI_CRATES: ${{ needs.changes.outputs.crates }}
+      # refine_audit's whole matrix runs on pull requests, nightly, by hand
+      # and with `ci: full`; a plain push to bleeding sends a sample.
+      ORDO_REFINE_AUDIT_FULL: "${{ (github.event_name != 'push' || contains(github.event.head_commit.message, 'ci: full')) && '1' || '' }}"
       # ORDO_PG_HOST comes from the lease step.
       ORDO_PG_PORT: '5432'
       ORDO_PG_USER: ordo

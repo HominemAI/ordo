@@ -1,17 +1,30 @@
 name: Console end-to-end
 
 # The Ordo console end to end, wired as the notes e2e is (e2e.yml): a
-# throwaway stack on every push, browser flows with a virtual passkey. The
-# stack is clients/ordo-console-web/e2e/stack.sh: the console's own
-# Postgres database (CI's service container), the page built by Vite, and
-# the real `ordo-console` serving it. A second stack (stack-identity.sh)
-# runs the console on the real identity service. How to run it: docs/howto-e2e.md,
+# throwaway stack, browser flows with a virtual passkey. The stack is
+# clients/ordo-console-web/e2e/stack.sh: the console's own Postgres
+# database (CI's service container), the page built by Vite, and the real
+# `ordo-console` serving it. A second stack (stack-identity.sh) runs the
+# console on the real identity service. How to run it: docs/howto-e2e.md,
 # "The console".
+#
+# When this runs (owner ruling, 2026-11-01), as ci.yml says in full:
+#
+# - A push to `bleeding` runs it when the change reaches it: ordo-console,
+#   ordo-cli, ordo-identity-service, ordo-supervisor or a crate they build
+#   on, or clients/ordo-console-web (scripts/ci-affected.mjs). A run it
+#   does not reach says "Not reached by this change" and passes.
+# - A pull request to `main`, the nightly run on `main` (09:00 UTC) and a
+#   manual run run everything. So does a push whose commits carry the
+#   trailer line `ci: full`.
 
 on:
   push:
-    branches: [main, bleeding]
+    branches: [bleeding]
   pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 9 * * *'
   workflow_dispatch:
 
 env:
@@ -20,6 +33,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   RUST_BACKTRACE: '1'
 
+# Runs on `main` (the nightly one) are never cancelled.
 concurrency:
   group: console-e2e-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -28,14 +42,41 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: changes (console e2e)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+    outputs:
+      reached: ${{ steps.affected.outputs.console_e2e }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: github.event_name == 'push'
+      - name: What this change reaches
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: node scripts/ci-affected.mjs
+
   throwaway:
+    name: console e2e
+    needs: changes
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
     timeout-minutes: 30
 
     services:
       postgres:
-        image: postgres:17
+        # An empty image skips the service when the change does not reach this.
+        image: ${{ needs.changes.outputs.reached == 'true' && 'postgres:17' || '' }}
         env:
           POSTGRES_USER: ordo
           POSTGRES_PASSWORD: ordo
@@ -48,6 +89,7 @@ jobs:
           --health-retries 10
 
     env:
+      REACHED: ${{ needs.changes.outputs.reached }}
       CI: '1'
       ORDO_PG_HOST: localhost
       ORDO_PG_PORT: '5432'
@@ -56,16 +98,23 @@ jobs:
       ORDO_PSQL: psql
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
         with:
           shared-key: e2e-console
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
         with:
           node-version: '20'
           cache: npm
@@ -74,19 +123,23 @@ jobs:
             clients/ordo-console-web/e2e/package-lock.json
 
       - name: Install psql
+        if: env.REACHED == 'true'
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
       - name: Postgres without durable commits (CI only)
+        if: env.REACHED == 'true'
         run: bash scripts/ci-pg-fast-commits.sh
 
       # ordo-identity-service: the second stack (stack-identity.sh), the
       # console on the identity service.
       - name: Build ordo-console, ordo and ordo-identity-service
+        if: env.REACHED == 'true'
         run: cargo build -p ordo-console -p ordo-cli -p ordo-identity-service -p ordo-supervisor && cargo build -p ordo-console --example e2e_door
 
       - name: Install, typecheck and build the page; install the tests
+        if: env.REACHED == 'true'
         run: |
           (cd clients/ordo-console-web && npm ci && npm run build)
           (cd clients/ordo-console-web/e2e && npm ci && npm run typecheck)
@@ -95,17 +148,20 @@ jobs:
       # job's limit on 2026-10-31. --with-deps still installs the system
       # libraries, and skips a browser it finds here.
       - name: Keep the browsers
+        if: env.REACHED == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-chromium-${{ hashFiles('clients/ordo-console-web/e2e/package-lock.json') }}
 
       - name: Install Chromium
+        if: env.REACHED == 'true'
         working-directory: clients/ordo-console-web/e2e
         run: npx playwright install --with-deps chromium
 
       # Playwright starts the stack (stack.sh) and stops it at the end.
       - name: Run the use cases
+        if: env.REACHED == 'true'
         working-directory: clients/ordo-console-web/e2e
         run: npx playwright test
 
@@ -113,12 +169,12 @@ jobs:
       # report (store-pool-held-blocks-signin). The stack also writes one as
       # it stops, while the door still runs (.stack/pg-at-stop.log).
       - name: Postgres activity and locks
-        if: failure()
+        if: ${{ env.REACHED == 'true' && (failure()) }}
         continue-on-error: true
         run: bash scripts/pg-snapshot.sh clients/ordo-console-web/e2e/.stack/pg-after-failure.log "after the failed run"
 
       - name: Job summary
-        if: always()
+        if: ${{ env.REACHED == 'true' && (always()) }}
         working-directory: clients/ordo-console-web/e2e
         run: |
           node -e '
@@ -137,7 +193,7 @@ jobs:
           '
 
       - name: Upload the report, traces and stack logs
-        if: always()
+        if: ${{ env.REACHED == 'true' && (always()) }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: console-e2e-report

@@ -119,7 +119,20 @@ test keys. It needs the internet, so it is off by default.
 
 ## Run it from GitHub
 
-The workflow runs on every push to `main` and on every pull request.
+When CI runs (owner ruling, 2026-11-01):
+
+- **A push to `bleeding`** runs what the change reaches.
+  `scripts/ci-affected.mjs` works it out from the diff. A job it does not
+  reach still runs, says "Not reached by this change" and passes.
+- **A pull request to `main`** runs every job in full. Every job is a
+  required check. `main` moves only through this pull request.
+- **Nightly**, 09:00 UTC, every job runs in full on `main`.
+- **A full run on `bleeding`**: put the line `ci: full` in a commit
+  message, as a trailer. Or start the workflow by hand (below).
+
+The notes e2e runs on a push when the change reaches ordo-host, ordo-cli
+or a crate they build on, `examples/notes`, `examples/notes-v2`,
+`clients/ordo-sdk` or `clients/ordo-react`.
 
 To run it by hand:
 
@@ -135,8 +148,8 @@ A run takes about 10 to 15 minutes. Most of it is the Rust build. The job
 installs the three browsers with their system libraries
 (`npx playwright install --with-deps chromium webkit firefox`). Measured on
 the self-hosted runner, 2026-10-20 (warm Rust cache): 2 minutes to install
-the browsers, 1.7 minutes of tests, 4 minutes for the whole job. All five
-projects run on every push and pull request.
+the browsers, 1.7 minutes of tests, 4 minutes for the whole job. Every
+project runs whenever the job runs.
 
 ## Where the results are
 
@@ -316,7 +329,10 @@ stack still serves v1.
 
 The Ordo console has its own end-to-end tests, in
 `clients/ordo-console-web/e2e/`. The workflow is
-`.github/workflows/console-e2e.yml`, on every push and pull request.
+`.github/workflows/console-e2e.yml`. It runs on a push to `bleeding` when
+the change reaches ordo-console, ordo-cli, ordo-identity-service,
+ordo-supervisor or `clients/ordo-console-web`, and in full on a pull
+request to `main` and nightly.
 
 The stack (`stack.sh`) is smaller than the notes one:
 

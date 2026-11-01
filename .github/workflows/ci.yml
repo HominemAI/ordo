@@ -1,9 +1,28 @@
 name: CI
 
+# When this runs (owner ruling, 2026-11-01):
+#
+# - A push to `bleeding` runs what the change reaches. The `changes` job
+#   works it out (scripts/ci-affected.mjs). A job it does not reach still
+#   runs, says "Not reached by this change" and passes, so every check name
+#   exists on every run.
+# - A pull request to `main` runs everything. Every job here is a required
+#   check, and `main` moves only through such a pull request.
+# - The nightly run on `main` (09:00 UTC) runs everything.
+# - A manual run runs everything. So does a push to `bleeding` whose
+#   commits carry the trailer line `ci: full`.
+#
+# Job names are unique across all workflows, since required checks match
+# by name. Rename one only together with the ruleset.
+
 on:
   push:
-    branches: [main, bleeding]
+    branches: [bleeding]
   pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,8 +36,8 @@ env:
   RUST_BACKTRACE: '1'
 
 # A superseded run holds a runner and a Postgres container for a full
-# compile. Pushes to `main` are never cancelled: that run's result is the
-# one that gets recorded.
+# compile. Runs on `main` (the nightly one) are never cancelled: that run's
+# result is the one that gets recorded.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -27,6 +46,42 @@ permissions:
   contents: read
 
 jobs:
+  # What this run must cover (scripts/ci-affected.mjs). Everything, except
+  # on a push to `bleeding`. Every job below needs it, and runs its steps
+  # only when the change reaches it.
+  changes:
+    name: changes (ci)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+    outputs:
+      crates: ${{ steps.affected.outputs.crates }}
+      rest: ${{ steps.affected.outputs.rest }}
+      host: ${{ steps.affected.outputs.host }}
+      s3: ${{ steps.affected.outputs.s3 }}
+      upgrade: ${{ steps.affected.outputs.upgrade }}
+      clients: ${{ steps.affected.outputs.clients }}
+      examples: ${{ steps.affected.outputs.examples }}
+      audit: ${{ steps.affected.outputs.audit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The diff reaches back to the previous `bleeding` head or to main.
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      # `cargo metadata` maps paths to crates. Only a push is filtered.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: github.event_name == 'push'
+      - name: What this change reaches
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: node scripts/ci-affected.mjs
+
   test:
     # **A self-hosted runner in the SMG cluster**, not a GitHub-hosted one.
     #
@@ -55,7 +110,12 @@ jobs:
     # gates: format, clippy, the S3 contract and the inventories. The
     # `host` shards split ordo-host's test files, 76% of the run time, by
     # measured seconds. fail-fast is off so every shard reports.
+    #
+    # On a push to `bleeding`, `rest` tests only the crates the change
+    # reaches (ORDO_CI_CRATES), and the `host` shards run only when it
+    # reaches ordo-host.
     name: test (${{ matrix.shard }})
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
@@ -64,9 +124,12 @@ jobs:
     # The conformance harness executes planned SQL against a real server.
     # A run without one would silently degrade to compile-only coverage,
     # which is the failure mode the harness exists to prevent.
+    #
+    # An empty image skips the service, so a shard the change does not
+    # reach starts no Postgres.
     services:
       postgres:
-        image: postgres:17
+        image: ${{ ((matrix.shard == 'rest' && needs.changes.outputs.rest) || needs.changes.outputs.host) == 'true' && 'postgres:17' || '' }}
         env:
           POSTGRES_USER: ordo
           POSTGRES_PASSWORD: ordo
@@ -111,6 +174,8 @@ jobs:
           --health-retries 5
 
     env:
+      REACHED: ${{ (matrix.shard == 'rest' && needs.changes.outputs.rest) || needs.changes.outputs.host }}
+      ORDO_CI_CRATES: ${{ needs.changes.outputs.crates }}
       ORDO_PG_HOST: localhost
       ORDO_PG_PORT: '5432'
       ORDO_PG_USER: ordo
@@ -124,33 +189,42 @@ jobs:
       ORDO_PG_PASSWORD: ordo
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
 
       # The workspace's build and the Postgres container share the runner's
       # disk. On 2026-09-15 it filled mid-suite and Postgres panicked writing
       # WAL ("No space left on device"), failing every test after it. These
       # are preinstalled SDKs this job never uses.
       - name: Free disk space
+        if: env.REACHED == 'true'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
         with:
           components: rustfmt, clippy
       # Distinct shared-key from the image workflow's buildx cache scopes
       # (`image-cli`/`image-host`/`image-playground`), so a Docker build and
       # a test run cannot evict each other's cache entries.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
         with:
           shared-key: rust-gates
 
       - name: Install psql client
+        if: env.REACHED == 'true'
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
       - name: Postgres without durable commits (CI only)
+        if: env.REACHED == 'true'
         run: bash scripts/ci-pg-fast-commits.sh
 
       # `crates/ordo-host/tests/dev_loop.rs` starts its own Postgres with
@@ -163,6 +237,7 @@ jobs:
       # plainly if this runner ever does; the test would otherwise fail
       # with initdb's own message.
       - name: Install the Postgres server binaries
+        if: env.REACHED == 'true'
         run: |
           sudo mkdir -p /etc/postgresql-common
           echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.conf
@@ -180,6 +255,7 @@ jobs:
       # for good, including against a repository variable someone adds
       # later for a reason that made sense at the time.
       - name: The golden update switch must be off
+        if: env.REACHED == 'true'
         run: |
           if [ -n "${ORDO_UPDATE_GOLDEN:-}" ]; then
             echo "ORDO_UPDATE_GOLDEN is set. CI must COMPARE goldens, never rewrite them:"
@@ -189,11 +265,11 @@ jobs:
           echo "ORDO_UPDATE_GOLDEN unset — goldens will be compared."
 
       - name: Format
-        if: matrix.shard == 'rest'
+        if: ${{ env.REACHED == 'true' && (matrix.shard == 'rest') }}
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        if: matrix.shard == 'rest'
+        if: ${{ env.REACHED == 'true' && (matrix.shard == 'rest') }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # `crates/ordo-host/tests/notes_app.rs` runs the notes page's vitest
@@ -203,16 +279,19 @@ jobs:
       # with its own `npm ci` (its SDK imports are aliases to `clients/*/src`),
       # and ORDO_REQUIRE_WEB_TESTS makes a missing install a failure.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: examples/notes/web/package-lock.json
 
       - name: Install the notes page's packages
+        if: env.REACHED == 'true'
         working-directory: examples/notes/web
         run: npm ci
 
       - name: Test
+        if: env.REACHED == 'true'
         env:
           ORDO_REQUIRE_WEB_TESTS: '1'
           ORDO_REQUIRE_OWNED_PG: '1'
@@ -234,7 +313,7 @@ jobs:
       # MinIO is not used: it left Docker Hub and quay.io refuses these
       # runners (run 39868104415 and its successor).
       - name: Start a local S3 (SeaweedFS) and create the bucket
-        if: ${{ !cancelled() && matrix.shard == 'rest' }}
+        if: ${{ env.REACHED == 'true' && !cancelled() && matrix.shard == 'rest' && needs.changes.outputs.s3 == 'true' }}
         run: |
           docker run -d --name ordo-s3 -p 8333:8333 -p 9333:9333 \
             -e AWS_ACCESS_KEY_ID=ordo-ci-key \
@@ -269,7 +348,7 @@ jobs:
       # throwaway SeaweedFS above. s3.rs picks path-style addressing by
       # itself for a loopback endpoint, so no extra variable is needed.
       - name: S3 contract
-        if: ${{ !cancelled() && matrix.shard == 'rest' }}
+        if: ${{ env.REACHED == 'true' && !cancelled() && matrix.shard == 'rest' && needs.changes.outputs.s3 == 'true' }}
         env:
           ORDO_REQUIRE_S3_TESTS: '1'
           ORDO_BLOB_S3_ENDPOINT: http://localhost:8333
@@ -280,7 +359,7 @@ jobs:
         run: cargo test -p ordo-blob --test contract -- --nocapture
 
       - name: Disk after the suite
-        if: always()
+        if: ${{ env.REACHED == 'true' && (always()) }}
         run: df -h /
 
       # A green run that never reached Postgres would prove nothing, so the
@@ -299,7 +378,7 @@ jobs:
       # grepping for that name's own ok-line fixes both
       # (`docs/plan-ci-images.md` §2.3).
       - name: Prove the execution tier actually ran
-        if: matrix.shard == 'rest'
+        if: ${{ env.REACHED == 'true' && matrix.shard == 'rest' && (env.ORDO_CI_CRATES == 'all' || contains(env.ORDO_CI_CRATES, ' ordo-conformance ')) }}
         run: |
           set -o pipefail
           cargo test -p ordo-conformance --test corpus \
@@ -314,13 +393,13 @@ jobs:
       # Both already run inside `cargo test --workspace`; re-running them
       # costs nothing (everything is built) and buys a legible failure.
       - name: Inventory — engine to document
-        if: matrix.shard == 'rest'
+        if: ${{ env.REACHED == 'true' && matrix.shard == 'rest' && (env.ORDO_CI_CRATES == 'all' || contains(env.ORDO_CI_CRATES, ' ordo-api ')) }}
         run: |
           cargo test -p ordo-api --test inventory_is_closed \
             every_class_the_engine_can_emit_is_in_the_document -- --exact
 
       - name: Inventory — document to engine
-        if: matrix.shard == 'rest'
+        if: ${{ env.REACHED == 'true' && matrix.shard == 'rest' && (env.ORDO_CI_CRATES == 'all' || contains(env.ORDO_CI_CRATES, ' ordo-api ')) }}
         run: |
           cargo test -p ordo-api --test inventory_is_closed \
             every_documented_class_is_one_the_engine_has -- --exact
@@ -329,7 +408,7 @@ jobs:
       # descriptor: every refusal class an op advertises must be a class the
       # wire inventory contains.
       - name: Inventory — descriptor to wire
-        if: matrix.shard == 'rest'
+        if: ${{ env.REACHED == 'true' && matrix.shard == 'rest' && (env.ORDO_CI_CRATES == 'all' || contains(env.ORDO_CI_CRATES, ' ordo-cli ')) }}
         run: |
           cargo test -p ordo-cli --test interface \
             every_refusal_class_named_is_in_the_wire_inventory -- --exact
@@ -375,9 +454,10 @@ jobs:
             from: 556ecc2c
             functions: '1'
     name: upgrade (${{ matrix.previous }})
+    needs: changes
     services:
       postgres:
-        image: postgres:17
+        image: ${{ needs.changes.outputs.upgrade == 'true' && 'postgres:17' || '' }}
         env:
           POSTGRES_USER: ordo
           POSTGRES_PASSWORD: ordo
@@ -390,6 +470,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      REACHED: ${{ needs.changes.outputs.upgrade }}
       ORDO_PG_HOST: localhost
       ORDO_PG_PORT: '5432'
       ORDO_PG_USER: ordo
@@ -400,19 +481,27 @@ jobs:
       # The service container is the database; the script starts none.
       ORDO_UPGRADE_OWN_PG: '0'
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
         with:
           # The previous Ordo is a commit in this history.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
         with:
           shared-key: rust-gates
           # The `test` job saves this cache; this one only reads it.
           save-if: false
       - name: Install psql
+        if: env.REACHED == 'true'
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Upgrade continuity
+        if: env.REACHED == 'true'
         # `runner` is not readable in a job's `env`, only in a step's.
         # An empty `from` is the script's default, the first commit; an
         # empty `functions` lets the script read it from the source.
@@ -445,11 +534,20 @@ jobs:
       fail-fast: false
       matrix:
         package: [ordo-sdk, ordo-cdk, ordo-react]
+    name: clients (${{ matrix.package }})
+    needs: changes
+    env:
+      REACHED: ${{ contains(needs.changes.outputs.clients, format(' {0} ', matrix.package)) }}
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
         with:
           # Every package declares `node >=18`; 20 is the supported LTS above
           # that floor. `npm ci` needs the lockfile each package carries.
@@ -460,11 +558,12 @@ jobs:
       # ordo-react imports ordo-sdk (a `file:` dependency), whose exports
       # point at its built files, so the SDK is built first.
       - name: Build ordo-sdk for ordo-react
-        if: matrix.package == 'ordo-react'
+        if: ${{ env.REACHED == 'true' && (matrix.package == 'ordo-react') }}
         working-directory: clients/ordo-sdk
         run: npm ci && npm run build
 
       - name: Install
+        if: env.REACHED == 'true'
         working-directory: clients/${{ matrix.package }}
         run: npm ci
 
@@ -473,13 +572,14 @@ jobs:
       # needs no cargo build first — what guards the generated files being
       # current is `ordo-gen`'s ratchet in the `test` job.
       - name: Check
+        if: env.REACHED == 'true'
         working-directory: clients/${{ matrix.package }}
         run: npm run check
 
       # The agent skill's ts/tsx examples (`skills/ordo/*.md`) typecheck
       # against the real clients/ordo-sdk and clients/ordo-react sources.
       - name: Typecheck the skill's examples
-        if: matrix.package == 'ordo-react'
+        if: ${{ env.REACHED == 'true' && (matrix.package == 'ordo-react') }}
         run: node scripts/check-skill-examples.mjs
 
   # The example apps' pages, which CI did not run until 2026-10-19. A job of
@@ -498,22 +598,33 @@ jobs:
       fail-fast: false
       matrix:
         app: [notes, notes-v2, teamspace, shopfront]
+    name: examples (${{ matrix.app }})
+    needs: changes
+    env:
+      REACHED: ${{ contains(needs.changes.outputs.examples, format(' {0} ', matrix.app)) }}
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: examples/${{ matrix.app }}/web/package-lock.json
 
       - name: Install
+        if: env.REACHED == 'true'
         working-directory: examples/${{ matrix.app }}/web
         run: npm ci
 
       # Typecheck plus vitest.
       - name: Check
+        if: env.REACHED == 'true'
         working-directory: examples/${{ matrix.app }}/web
         run: npm run check
 
@@ -526,24 +637,43 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
     timeout-minutes: 15
+    name: audit
+    needs: changes
+    env:
+      REACHED: ${{ needs.changes.outputs.audit }}
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
         with:
           node-version: '20'
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
 
       - uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
+        if: env.REACHED == 'true'
         with:
           tool: cargo-audit
 
+      # The `changes` filter's own tests: changed paths in, jobs out. Any
+      # change to scripts/ci-* runs everything, this job included.
+      - name: The CI filter's tests
+        if: env.REACHED == 'true'
+        run: node scripts/ci-affected.test.mjs
+
       - name: cargo audit
+        if: env.REACHED == 'true'
         run: cargo audit
 
       - name: npm audit, runtime dependencies
+        if: env.REACHED == 'true'
         run: |
           set -u
           fail=0
@@ -555,6 +685,7 @@ jobs:
           exit $fail
 
       - name: npm audit, dev dependencies
+        if: env.REACHED == 'true'
         run: |
           set -u
           fail=0

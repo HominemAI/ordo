@@ -1,20 +1,29 @@
 name: Notes end-to-end
 
-# The notes app end to end (owner ruling, 2026-10-19): a throwaway stack on
-# every push, browser flows with a virtual passkey, Discord through a local
-# stand-in provider. How to run it and read it: docs/howto-e2e.md.
+# The notes app end to end (owner ruling, 2026-10-19): a throwaway stack,
+# browser flows with a virtual passkey, Discord through a local stand-in
+# provider. How to run it and read it: docs/howto-e2e.md.
+#
+# When this runs (owner ruling, 2026-11-01), as ci.yml says in full:
+#
+# - A push to `bleeding` runs it when the change reaches it: ordo-host,
+#   ordo-cli or a crate they build on, examples/notes, examples/notes-v2,
+#   clients/ordo-sdk or clients/ordo-react (scripts/ci-affected.mjs). A run
+#   it does not reach says "Not reached by this change" and passes.
+# - A pull request to `main`, the nightly run on `main` (09:00 UTC) and a
+#   manual run run everything. So does a push whose commits carry the
+#   trailer line `ci: full`.
 #
 # Phase 2, not built: a nightly run against a staging deployment with real
-# credentials. The `staging` target below only says so. When it is built,
-# add the schedule here:
-#
-#   schedule:
-#     - cron: '17 3 * * *'
+# credentials. The `staging` target below only says so.
 
 on:
   push:
-    branches: [main, bleeding]
+    branches: [bleeding]
   pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       target:
@@ -37,6 +46,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   RUST_BACKTRACE: '1'
 
+# Runs on `main` (the nightly one) are never cancelled.
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -45,7 +55,34 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: changes (notes e2e)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 10
+    outputs:
+      notes_e2e: ${{ steps.affected.outputs.notes_e2e }}
+      authz: ${{ steps.affected.outputs.authz }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: github.event_name == 'push'
+      - name: What this change reaches
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: node scripts/ci-affected.mjs
+
   throwaway:
+    name: notes e2e
+    needs: changes
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.target == 'throwaway') }}
     # The same runner as ci.yml. Service containers run on its Docker sidecar
     # and share the pod's network, so Postgres is at localhost:5432.
@@ -56,7 +93,8 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17
+        # An empty image skips the service when the change does not reach this.
+        image: ${{ needs.changes.outputs.notes_e2e == 'true' && 'postgres:17' || '' }}
         env:
           POSTGRES_USER: ordo
           POSTGRES_PASSWORD: ordo
@@ -70,6 +108,7 @@ jobs:
           --health-retries 10
 
     env:
+      REACHED: ${{ needs.changes.outputs.notes_e2e }}
       CI: '1'
       # stack.sh uses this Postgres instead of starting its own. The door
       # reads ORDO_PG_PASSWORD; psql reads PGPASSWORD (stack.sh sets it).
@@ -83,16 +122,23 @@ jobs:
       BROWSERS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && 'off' || 'on' }}
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
         with:
           shared-key: e2e-host
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
         with:
           node-version: '20'
           cache: npm
@@ -101,17 +147,21 @@ jobs:
             examples/notes/e2e/package-lock.json
 
       - name: Install psql
+        if: env.REACHED == 'true'
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
       - name: Postgres without durable commits (CI only)
+        if: env.REACHED == 'true'
         run: bash scripts/ci-pg-fast-commits.sh
 
       - name: Build ordo-host and ordo
+        if: env.REACHED == 'true'
         run: cargo build -p ordo-host -p ordo-cli
 
       - name: Install the page and the tests
+        if: env.REACHED == 'true'
         run: |
           (cd examples/notes/web && npm ci)
           (cd examples/notes/e2e && npm ci)
@@ -123,19 +173,20 @@ jobs:
       # job's limit on 2026-10-31. --with-deps still installs the system
       # libraries, and skips a browser it finds here.
       - name: Keep the browsers
-        if: ${{ env.BROWSERS == 'on' }}
+        if: ${{ env.REACHED == 'true' && (env.BROWSERS == 'on') }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-chromium-webkit-firefox-${{ hashFiles('examples/notes/e2e/package-lock.json') }}
 
       - name: Install the browsers
-        if: ${{ env.BROWSERS == 'on' }}
+        if: ${{ env.REACHED == 'true' && (env.BROWSERS == 'on') }}
         working-directory: examples/notes/e2e
         run: npx playwright install --with-deps chromium webkit firefox
 
       # Playwright starts the stack (stack.sh) and stops it at the end.
       - name: Run the use cases
+        if: env.REACHED == 'true'
         working-directory: examples/notes/e2e
         run: npx playwright test $PROJECTS
 
@@ -143,7 +194,7 @@ jobs:
       # report (store-pool-held-blocks-signin). The stack also writes one as
       # it stops, while the door still runs (.stack/pg-at-stop.log).
       - name: Postgres activity and locks
-        if: failure()
+        if: ${{ env.REACHED == 'true' && (failure()) }}
         continue-on-error: true
         run: bash scripts/pg-snapshot.sh examples/notes/e2e/.stack/pg-after-failure.log "after the failed run"
 
@@ -153,7 +204,7 @@ jobs:
       # checked here, in this container, and nowhere else.
       - name: Screenshots (report only)
         id: screenshots
-        if: ${{ env.BROWSERS == 'on' }}
+        if: ${{ env.REACHED == 'true' && (env.BROWSERS == 'on') }}
         continue-on-error: true
         working-directory: examples/notes/e2e
         env:
@@ -166,12 +217,12 @@ jobs:
         run: npx playwright test --project=screenshots --project=screenshots-phone $UPDATING
 
       - name: Job summary
-        if: always()
+        if: ${{ env.REACHED == 'true' && (always()) }}
         working-directory: examples/notes/e2e
         run: node summary.mjs
 
       - name: Screenshots summary (report only)
-        if: ${{ always() && env.BROWSERS == 'on' }}
+        if: ${{ env.REACHED == 'true' && (always() && env.BROWSERS == 'on') }}
         continue-on-error: true
         working-directory: examples/notes/e2e
         env:
@@ -179,7 +230,7 @@ jobs:
         run: node summary.mjs --screenshots
 
       - name: Upload the pictures and what changed
-        if: ${{ always() && env.BROWSERS == 'on' }}
+        if: ${{ env.REACHED == 'true' && (always() && env.BROWSERS == 'on') }}
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -196,7 +247,7 @@ jobs:
             examples/notes/e2e/.stack-screenshots/*.log
 
       - name: Upload the report, traces and stack logs
-        if: always()
+        if: ${{ env.REACHED == 'true' && (always()) }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: notes-e2e-report
@@ -218,13 +269,15 @@ jobs:
   # boots a deployment, so it runs here, by `scripts/authz-matrix.sh`, which
   # on CI uses the service Postgres below.
   authz-matrix:
+    name: authz matrix
+    needs: changes
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.target == 'throwaway') }}
     runs-on: [self-hosted, ordo-k8s]
     timeout-minutes: 20
 
     services:
       postgres:
-        image: postgres:17
+        image: ${{ needs.changes.outputs.authz == 'true' && 'postgres:17' || '' }}
         env:
           POSTGRES_USER: ordo
           POSTGRES_PASSWORD: ordo
@@ -238,6 +291,7 @@ jobs:
           --health-retries 10
 
     env:
+      REACHED: ${{ needs.changes.outputs.authz }}
       CI: '1'
       ORDO_PG_HOST: localhost
       ORDO_PG_PORT: '5432'
@@ -246,23 +300,35 @@ jobs:
       ORDO_PSQL: psql
 
     steps:
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: env.REACHED == 'true'
       - uses: dtolnay/rust-toolchain@stable
+        if: env.REACHED == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: env.REACHED == 'true'
         with:
           shared-key: e2e-host
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install psql
+        if: env.REACHED == 'true'
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Build ordo-host and ordo
+        if: env.REACHED == 'true'
         run: cargo build -p ordo-host -p ordo-cli
       - name: Run the authorization matrix
+        if: env.REACHED == 'true'
         # The suite's own setup runs psql, which reads PGPASSWORD.
         env:
           PGPASSWORD: ordo
         run: bash scripts/authz-matrix.sh
 
+  # Not a required check: it runs only when started by hand with target
+  # `staging`.
   staging:
+    name: notes e2e staging
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'workflow_dispatch' && inputs.target == 'staging') }}
     runs-on: [self-hosted, ordo-k8s]
     timeout-minutes: 2

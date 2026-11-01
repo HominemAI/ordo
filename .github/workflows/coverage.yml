@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   rust:
+    name: coverage
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
     timeout-minutes: 90

@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   publish:
-    name: ${{ matrix.package }}
+    name: publish (${{ matrix.package }})
     # `workflow_dispatch` can be started from any branch, and a feature
     # branch with a bumped `version` would then publish it under the real
     # name. Only `main` publishes (audit 2026-10-08); a dispatch from

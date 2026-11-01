@@ -70,11 +70,60 @@ lines: 0`. Tests had been run locally; fmt and clippy had not. Code inserted
 by a script is the likeliest to need this, because nothing formatted it on
 the way in.
 
+## What CI runs, and when
+
+Owner ruling, 2026-11-01. It holds for ci.yml, e2e.yml, console-e2e.yml
+and identity-e2e.yml.
+
+| Trigger | Runs |
+|---|---|
+| Push to `bleeding` | What the change reaches |
+| Pull request to `main` | Everything. Every job is a required check |
+| Nightly on `main`, 09:00 UTC | Everything |
+| Run by hand (workflow_dispatch) | Everything |
+| Push with a `ci: full` trailer | Everything |
+
+- `main` moves only through a pull request from `bleeding`. Nothing runs on
+  a push to `main` except images.yml and packages.yml.
+- Each workflow's `changes (...)` job runs `scripts/ci-affected.mjs`. It
+  diffs the push against the previous `bleeding` head. On a force-push or
+  a new branch it diffs against where the branch left `origin/main`. With
+  no base it runs everything.
+- A job the change does not reach still runs. It says "Not reached by this
+  change" and passes, so every check name exists on every run.
+- To force a full run on `bleeding`, end a commit message with the line
+  `ci: full`. Any commit in the push counts.
+- To see what a change reaches before pushing:
+  `node scripts/ci-affected.mjs --diff "$(git merge-base origin/bleeding HEAD)"`.
+- The filter's tests: `node scripts/ci-affected.test.mjs`. CI runs them in
+  the `audit` job.
+
+How the filter reads a path:
+
+- Cargo.lock, the root Cargo.toml, rust-toolchain, `.github/`,
+  `.cargo/config.toml`, `docker/`, `scripts/ci-*`, or a path it does not
+  know: everything.
+- A crate's code: that crate and every crate that depends on it. A crate's
+  `tests/` alone: that crate. `test (rest)` gets the list in
+  `ORDO_CI_CRATES`; the `host` shards run only when ordo-host is in it.
+- `clients/<pkg>/`: that client's job. ordo-sdk and ordo-react also run
+  every example, the notes e2e and ordo-host's tests.
+- `examples/<app>/`: that example's job. notes and notes-v2 also run the
+  notes e2e.
+- Docs and `*.md`: nothing, unless a crate's source names the file in a
+  string (`include_str!`, a fixture path). Then that crate's tests run.
+- Each e2e runs when a crate it builds is reached.
+
+Job names are unique across all workflows; required checks match by name.
+Rename a job only together with the ruleset.
+
 ## The full suite: push and watch
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy and
-`cargo test --workspace --no-fail-fast` against a `postgres:17` service on a
-hosted runner.
+`cargo test --workspace --no-fail-fast` against a `postgres:17` service on
+the self-hosted runner. A push to `bleeding` runs only the reached crates;
+open the pull request to `main` for the full suite, or push with
+`ci: full`.
 
 ```
 git push

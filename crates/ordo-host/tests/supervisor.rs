@@ -1041,7 +1041,13 @@ async fn secevent_retain_claims_its_own_schedule_once_per_period() {
     )
     .await
     .expect("starts");
-    assert!(sup.is_leader());
+    // The first claim may time out on a loaded runner (run 41297909915);
+    // the next leadership tick claims again.
+    assert!(
+        wait_for(Duration::from_secs(15), || sup.is_leader()).await,
+        "never led: {}",
+        sup.health()
+    );
 
     let ran = wait_for(Duration::from_secs(5), || {
         sup.health()["secevent.retain"]["runs"]
@@ -1166,7 +1172,13 @@ async fn secevent_checkpoint_claims_its_own_schedule_once_per_period() {
     )
     .await
     .expect("starts");
-    assert!(sup.is_leader());
+    // The first claim may time out on a loaded runner (run 41297909915);
+    // the next leadership tick claims again.
+    assert!(
+        wait_for(Duration::from_secs(15), || sup.is_leader()).await,
+        "never led: {}",
+        sup.health()
+    );
 
     let ran = wait_for(Duration::from_secs(5), || {
         sup.health()["secevent.checkpoint"]["runs"]

@@ -82,86 +82,6 @@ jobs:
           AFTER: ${{ github.sha }}
         run: node scripts/ci-affected.mjs
 
-  # The test build, compiled once (owner ruling 2026-11-01, board task
-  # `cut-test-time-by-building-and`). It builds every test binary the change
-  # reaches, packs them in a cargo-nextest archive and uploads it. The `test`
-  # shards download it and compile nothing. This job also runs the doc
-  # tests, which nextest does not run.
-  #
-  # It saves the `rust-gates` cache; `upgrade` reads it. Not a required
-  # check: `test (...)` fails when this job did not deliver.
-  build:
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 30
-    name: build (tests)
-    needs: changes
-    outputs:
-      archived: ${{ steps.upload.outcome == 'success' }}
-      workspace: ${{ steps.archive.outputs.workspace }}
-    env:
-      REACHED: ${{ needs.changes.outputs.rest }}
-      ORDO_CI_CRATES: ${{ needs.changes.outputs.crates }}
-    steps:
-      - name: Not reached by this change
-        if: env.REACHED != 'true'
-        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: env.REACHED == 'true'
-
-      # The build fills the runner's disk; these are preinstalled SDKs this
-      # job never uses. See the same step in `test`.
-      - name: Free disk space
-        if: env.REACHED == 'true'
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        if: env.REACHED == 'true'
-      # Distinct shared-key from the image workflow's buildx cache scopes
-      # (`image-cli`/`image-host`/`image-playground`), so a Docker build and
-      # a test build cannot evict each other's cache entries.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        if: env.REACHED == 'true'
-        with:
-          shared-key: rust-gates
-
-      - name: Install cargo-nextest
-        if: env.REACHED == 'true'
-        run: bash scripts/ci-install-nextest.sh
-
-      # The shards check the workspace out at this same path. The binaries
-      # hold it: `env!("CARGO_BIN_EXE_...")` and `env!("CARGO_MANIFEST_DIR")`
-      # are compiled in.
-      - name: Build the tests
-        id: archive
-        if: env.REACHED == 'true'
-        run: |
-          bash scripts/ci-test-shard.sh archive "$RUNNER_TEMP/ordo-tests.tar.zst"
-          ls -l "$RUNNER_TEMP/ordo-tests.tar.zst"
-          echo "workspace=$GITHUB_WORKSPACE" >>"$GITHUB_OUTPUT"
-
-      # The archive is zstd already. `overwrite` lets a re-run attempt
-      # upload again under the same name.
-      - name: Upload the test build
-        id: upload
-        if: env.REACHED == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ordo-tests
-          path: ${{ runner.temp }}/ordo-tests.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-          overwrite: true
-
-      # After the upload, so the shards start while these run. They need
-      # no database. `test (rest)` fails when they do.
-      - name: Doc tests
-        if: env.REACHED == 'true'
-        run: bash scripts/ci-test-shard.sh doc
-
   test:
     # **A self-hosted runner in the SMG cluster**, not a GitHub-hosted one.
     #
@@ -181,23 +101,26 @@ jobs:
     # where it is running, which is the property to preserve when editing
     # the steps below.
     #
-    # `!cancelled()`: a job skipped because `build` failed would count as a
-    # passed required check. So this job always runs, and its first step
-    # fails when a job it needs did not deliver.
+    # `!cancelled()`: a job skipped because `changes` failed would count as
+    # a passed required check. So this job always runs, and its first step
+    # fails when `changes` did not deliver.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
     # The default is six hours; the failure shape here is a wait that
     # never ends.
     timeout-minutes: 30
-    # The suite runs as 5 shards at once (`scripts/ci-test-shard.sh`), from
-    # the build `build (tests)` made. Inside a shard, cargo-nextest runs up
+    # The suite runs as 5 shards at once (`scripts/ci-test-shard.sh`). Each
+    # builds what it runs from the warm `rust-gates` cache, about a minute.
+    # Shipping one shared build cost 4.5 min per shard to download (1.74 GB),
+    # so it was dropped (owner, 2026-11-01, board task
+    # `cut-test-time-by-building-and` ask 5). Inside a shard, cargo-nextest runs up
     # to 8 tests from many test files at once, each in its own process;
     # `.config/nextest.toml` caps the deployment-booting files at 4 at once
     # and names the files whose tests take turns.
     #
     # `rest` is every crate but ordo-host, plus ordo-host's unit tests. It
-    # also runs the once-only gates: format, clippy, the S3 contract and
-    # the inventories. The `host` shards each take every 4th of ordo-host's
+    # also runs the once-only gates: format, clippy, the doc tests, the S3
+    # contract and the inventories. The `host` shards each take every 4th of ordo-host's
     # integration tests, then notes_app's `connections_*` tests alone, one
     # at a time. fail-fast is off so every shard reports.
     #
@@ -205,7 +128,7 @@ jobs:
     # reaches (ORDO_CI_CRATES), and the `host` shards run only when it
     # reaches ordo-host.
     name: test (${{ matrix.shard }})
-    needs: [changes, build]
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
@@ -240,32 +163,16 @@ jobs:
       # The `ci` profile in .config/nextest.toml: no fail-fast, and a
       # failing test's output printed.
       NEXTEST_PROFILE: ci
-      # `.cargo/config.toml` sets this for anything cargo runs. The shards
-      # run the tests without cargo, so it is set here too.
-      ORDO_PG_POOL_SIZE: '2'
 
     steps:
-      # Before anything else, and in every shard, so a failed `changes` or
-      # `build` fails this check instead of passing it as "not reached".
+      # Before anything else, and in every shard, so a failed `changes`
+      # fails this check instead of passing it as "not reached".
       - name: The jobs this one needs
         env:
           CHANGES: ${{ needs.changes.result }}
-          BUILD: ${{ needs.build.result }}
-          ARCHIVED: ${{ needs.build.outputs.archived }}
-          SHARD: ${{ matrix.shard }}
         run: |
           if [ "$CHANGES" != success ]; then
             echo "changes (ci) did not succeed ($CHANGES)."
-            exit 1
-          fi
-          [ "$REACHED" = true ] || exit 0
-          if [ "$ARCHIVED" != true ]; then
-            echo "build (tests) uploaded no test build ($BUILD). Its log says why."
-            exit 1
-          fi
-          # The doc tests run there after the upload; `rest` answers for them.
-          if [ "$SHARD" = rest ] && [ "$BUILD" != success ]; then
-            echo "build (tests) failed after the upload, in its doc tests. Its log says why."
             exit 1
           fi
       - name: Not reached by this change
@@ -285,12 +192,19 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      # Only `rest` compiles, for clippy. It does so in target/lint, its own
-      # cache, so the unpacked test build in target/debug is never cached.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        if: ${{ env.REACHED == 'true' && matrix.shard == 'rest' }}
+        if: env.REACHED == 'true'
         with:
           components: rustfmt, clippy
+      # Distinct shared-key from the image workflow's buildx cache scopes
+      # (`image-cli`/`image-host`/`image-playground`), so a Docker build and
+      # a test run cannot evict each other's cache entries. `upgrade` reads
+      # this cache too.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
+        with:
+          shared-key: rust-gates
+      # Clippy builds in target/lint, with a cache of its own.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         if: ${{ env.REACHED == 'true' && matrix.shard == 'rest' }}
         with:
@@ -362,28 +276,6 @@ jobs:
         if: env.REACHED == 'true'
         run: bash scripts/ci-install-nextest.sh
 
-      - name: Download the test build
-        if: env.REACHED == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ordo-tests
-          path: ${{ runner.temp }}
-
-      # The binaries name this checkout's path, compiled in on the build
-      # job. A runner that checks out elsewhere would run tests against
-      # paths that do not exist, so that fails here, plainly.
-      - name: Unpack the test build
-        if: env.REACHED == 'true'
-        env:
-          BUILT_IN: ${{ needs.build.outputs.workspace }}
-        run: |
-          if [ "$BUILT_IN" != "$GITHUB_WORKSPACE" ]; then
-            echo "The tests were built in $BUILT_IN and this checkout is $GITHUB_WORKSPACE."
-            exit 1
-          fi
-          bash scripts/ci-test-shard.sh unpack "$RUNNER_TEMP/ordo-tests.tar.zst"
-          rm "$RUNNER_TEMP/ordo-tests.tar.zst"
-
       # `crates/ordo-host/tests/notes_app.rs` runs the notes page's vitest
       # (`examples/notes/web/test/live.test.ts`) against a real door, and
       # skipped with a printed line when the page had no `node_modules`. That
@@ -412,6 +304,11 @@ jobs:
         # unreported. That hid all of ordo-exec, ordo-host and the corpus
         # behind one ordo-cli failure.
         run: bash scripts/ci-test-shard.sh ${{ matrix.shard }}
+
+      # nextest runs no doc tests. They need no database.
+      - name: Doc tests
+        if: ${{ env.REACHED == 'true' && !cancelled() && matrix.shard == 'rest' }}
+        run: bash scripts/ci-test-shard.sh doc
 
       # `crates/ordo-blob/tests/contract.rs` runs the S3 contract only when
       # ORDO_BLOB_S3_* are set. The stand-in is SeaweedFS (`weed server -s3`),
@@ -601,7 +498,7 @@ jobs:
         if: env.REACHED == 'true'
         with:
           shared-key: rust-gates
-          # `build (tests)` saves this cache; this job only reads it.
+          # The `test` job saves this cache; this one only reads it.
           save-if: false
       - name: Install psql
         if: env.REACHED == 'true'

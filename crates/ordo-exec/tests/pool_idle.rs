@@ -130,13 +130,14 @@ async fn an_idle_pool_holds_nothing_and_dials_again_when_asked() {
     }
     assert_eq!(held(), 3);
 
-    // The bound is 3 periods: a busy CI runner released them after 2.4 s
-    // with a 1 s period (CI 7b974765, 2026-10-12). It still catches a pool
-    // that never lets go.
-    let (left, took) = settle(0, idle * 5).await;
+    // The bound is 8 periods: a busy CI runner released them after 2.4 s
+    // with a 1 s period (CI 7b974765, 2026-10-12), and after 4.0 s with
+    // nextest running 8 tests beside it (run 41297909915). It still catches
+    // a pool that never lets go.
+    let (left, took) = settle(0, idle * 10).await;
     assert_eq!(left, 0, "still holding {left} connections after {took:?}");
     assert!(
-        took <= idle * 3,
+        took <= idle * 8,
         "released after {took:?}, with an idle period of {idle:?}"
     );
 

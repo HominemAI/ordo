@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Build the workspace's tests once and run them in shards with cargo-nextest
-# (owner ruling 2026-11-01, board task `cut-test-time-by-building-and`).
+# Run the workspace's tests in shards with cargo-nextest (owner ruling
+# 2026-11-01, board task `cut-test-time-by-building-and`).
 #
-#   scripts/ci-test-shard.sh archive FILE   build the tests and write a
-#                                           nextest archive to FILE
-#   scripts/ci-test-shard.sh unpack FILE    unpack FILE into this checkout
 #   scripts/ci-test-shard.sh doc            the doc tests (nextest runs none)
 #   scripts/ci-test-shard.sh rest           every crate but ordo-host, and
 #                                           ordo-host's unit tests
@@ -14,22 +11,22 @@
 #   scripts/ci-test-shard.sh run ARGS...    `nextest run ARGS`, for the
 #                                           workflow's named checks
 #
-# After `unpack`, the run modes use the unpacked build and compile nothing.
-# Without it they build what they run, so they work on any machine.
+# Each mode builds what it runs. One build shipped to every shard was
+# tried and dropped (ask 5): its download took longer than the build.
 #
 # The `host` shards take every Nth test of ordo-host's integration tests
 # (`--partition slice`), so a long test file is spread over all shards.
 # Which tests must not run at once is in .config/nextest.toml. The tests
 # that need the server to themselves run in a second pass, alone.
 #
-# ORDO_CI_CRATES narrows `archive`, `doc` and `rest` to the crates a push to
+# ORDO_CI_CRATES narrows `doc` and `rest` to the crates a push to
 # `bleeding` reaches (scripts/ci-affected.mjs, space separated). Unset or
 # `all` means every crate. ordo-host's unit and doc tests run only when it
 # is listed; the workflow runs the `host` shards only then too.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
-mode="${1:?usage: ci-test-shard.sh archive FILE | unpack FILE | doc | rest | host K N [--list] | run ARGS}"
+mode="${1:?usage: ci-test-shard.sh doc | rest | host K N [--list] | run ARGS}"
 crates="${ORDO_CI_CRATES:-all}"
 all=0
 [ "${crates// /}" = all ] && all=1
@@ -41,50 +38,16 @@ for c in $crates; do
   [ "$c" = ordo-host ] && host_reached=1
 done
 
-# `nextest MODE BUILD... -- RUN...`: from the unpacked build when there is
-# one (BUILD is ignored), else built here from BUILD. `cargo-nextest` is
-# called directly so a job without a Rust toolchain can run the build.
+# `nextest MODE BUILD... -- RUN...`: cargo nextest MODE with both lists.
 nextest() {
   local sub=$1 build=()
   shift
   while [ $# -gt 0 ] && [ "$1" != -- ]; do build+=("$1"); shift; done
   shift
-  if [ "${ORDO_NEXTEST_UNPACKED:-}" = 1 ]; then
-    cargo-nextest nextest "$sub" \
-      --binaries-metadata "$here/target/nextest/binaries-metadata.json" \
-      --cargo-metadata "$here/target/nextest/cargo-metadata.json" \
-      --target-dir-remap "$here/target" \
-      --workspace-remap "$here" \
-      "$@"
-  else
-    cargo nextest "$sub" ${build[@]+"${build[@]}"} "$@"
-  fi
+  cargo nextest "$sub" ${build[@]+"${build[@]}"} "$@"
 }
 
 case "$mode" in
-  archive)
-    file="${2:?archive FILE}"
-    if [ "$all" = 1 ]; then
-      cargo nextest archive --workspace --archive-file "$file"
-    else
-      echo "Building the tests of the crates this change reaches: $crates"
-      cargo nextest archive ${pkgs[@]+"${pkgs[@]}"} --archive-file "$file"
-    fi
-    ;;
-  unpack)
-    file="${2:?unpack FILE}"
-    # `list` with --extract-to unpacks the archive and keeps it. The test
-    # binaries were built in this checkout's path on the build job, and
-    # `env!("CARGO_BIN_EXE_…")` and `env!("CARGO_MANIFEST_DIR")` are those
-    # paths, so target/ goes back where it was.
-    cargo-nextest nextest list --archive-file "$file" \
-      --extract-to "$here" --extract-overwrite --workspace-remap "$here" \
-      >/dev/null
-    echo "Unpacked $file into $here/target"
-    if [ -n "${GITHUB_ENV:-}" ]; then
-      echo "ORDO_NEXTEST_UNPACKED=1" >>"$GITHUB_ENV"
-    fi
-    ;;
   doc)
     # --no-fail-fast: one failing crate must not hide the rest.
     if [ "$all" = 1 ]; then
@@ -139,7 +102,7 @@ case "$mode" in
     nextest run --workspace -- "$@"
     ;;
   *)
-    echo "unknown mode: $mode (archive | unpack | doc | rest | host K N | run)" >&2
+    echo "unknown mode: $mode (doc | rest | host K N | run)" >&2
     exit 2
     ;;
 esac

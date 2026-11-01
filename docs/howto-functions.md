@@ -224,8 +224,9 @@ How the read works:
 | `blob_unavailable` | 503 `server_busy` | file storage is busy; try again |
 | `blob_no_store` | 500 `internal` | the deployment has no file storage |
 
-A file sent out passes the egress limits too: a request body is at most
-10 MB. Base64 makes a file a third larger. A large file also needs memory:
+A file sent out passes the egress limits too: one `fetch` body is at most
+`ORDO_FN_FETCH_BODY_BYTES`, 32 MiB by default. Base64 makes a file a third
+larger, so a 20 MiB file fits. Raise both settings together. A large file also needs memory:
 the bytes, the base64 text and the JSON body are each held at once, so give
 such a function `limit memory 256 mb` or more.
 
@@ -377,7 +378,7 @@ another allowed host still cannot carry the key there.
 
 | Limit | Default |
 |---|---|
-| Request body | 10 MB |
+| Request body | 32 MiB, `ORDO_FN_FETCH_BODY_BYTES` |
 | Response body | 25 MB |
 | One request's time | 60 s |
 | A secret's value | 64 KiB |

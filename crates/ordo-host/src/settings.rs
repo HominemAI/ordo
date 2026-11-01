@@ -1538,6 +1538,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"0 to 1073741824"#,
     ),
     s(
+        "ORDO_FN_FETCH_BODY_BYTES",
+        "Storage and blobs",
+        r#"33554432 (32 MiB)"#,
+        r#"1024 to 268435456"#,
+    ),
+    s(
         "ORDO_IMPORT_BUNDLE_DIR",
         "Storage and blobs",
         r#"none"#,

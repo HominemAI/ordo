@@ -219,7 +219,7 @@ jobs:
 
       - name: Install psql client
         if: env.REACHED == 'true'
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
 
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
@@ -499,7 +499,7 @@ jobs:
           save-if: false
       - name: Install psql
         if: env.REACHED == 'true'
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       - name: Upgrade continuity
         if: env.REACHED == 'true'
         # `runner` is not readable in a job's `env`, only in a step's.

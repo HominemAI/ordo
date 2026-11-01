@@ -122,7 +122,7 @@ jobs:
 
       - name: Install psql
         if: env.REACHED == 'true'
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
 
       - name: Postgres without durable commits (CI only)
         if: env.REACHED == 'true'

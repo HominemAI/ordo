@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ordo_api::{AccessChecker, AccessDecision, ApiState, MemoryBus, MemoryReplayCache, PageKey};
+use ordo_api::{
+    AccessChecker, AccessDecision, ApiError, ApiState, MemoryBus, MemoryReplayCache, PageKey,
+};
 use ordo_conformance::{Fixture, Pg};
 use ordo_fn::{FetchError, FnFetch, FnFetchRequest, FnFetchResponse, HeaderValue};
 use ordo_host::fn_runs;
@@ -32,8 +34,10 @@ const SUGGEST: &[u8] = include_bytes!("../../../examples/notes-v2/fn/suggest-tit
 struct People;
 
 impl AccessChecker for People {
-    fn check(&self, token: &str, space: &str, _op: &str) -> AccessDecision {
+    fn check(&self, token: &str, space: &str, op: &str) -> AccessDecision {
         match token.strip_prefix("person:") {
+            // `eve` may call functions and may not read files.
+            Some("eve") if op == ordo_api::blob::BLOB_READ_OP => AccessDecision::Deny,
             Some(id) if space.starts_with("acme") => AccessDecision::allow(id),
             _ => AccessDecision::Deny,
         }
@@ -113,6 +117,17 @@ async fn door_with(
     extra_code: &[(&str, &str)],
     kernel: Option<Kernel>,
 ) -> Door {
+    door_files(db, extra, extra_code, kernel, None).await
+}
+
+/// [`door_with`], with the blob door's port and the increment 2 settings.
+async fn door_files(
+    db: &str,
+    extra: &str,
+    extra_code: &[(&str, &str)],
+    kernel: Option<Kernel>,
+    with_files: Option<(Arc<dyn ordo_api::blob::BlobPort>, functions::FnSettings)>,
+) -> Door {
     let source = format!("{V2}\n{extra}");
     let f = Arc::new(Fixture::from_source(&source, "").expect("the program compiles"));
     let admin = Pg {
@@ -188,14 +203,18 @@ async fn door_with(
             (Arc::new(egress), store)
         }
     };
-    let runner = Arc::new(HostFunctions::new(
+    let mut runner = HostFunctions::new(
         ordo_fn::HostConfig::default(),
         table,
         spaces.clone(),
         pool.clone(),
         fetch,
         scrub,
-    ));
+    );
+    if let Some((port, settings)) = with_files {
+        runner = runner.with_blobs(Some(port)).with_settings(settings);
+    }
+    let runner = Arc::new(runner);
     let pg = Pg {
         db: db.to_string(),
         ..Pg::default()
@@ -1056,4 +1075,343 @@ async fn a_function_checks_a_github_signature_with_a_secret_it_never_holds() {
         .await
         .unwrap();
     assert!(!format!("{raw:?}").contains(GITHUB_SECRET));
+}
+
+// ── files in (increment 2) ───────────────────────────────────────────────
+
+const ANA_FILE: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+const BEA_FILE: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+
+/// The blob door's port, as the platform's: each file has one owner and
+/// the "row guard" shows it to them alone. Keeps every request it was
+/// asked, so a test can see who each read ran as.
+struct Shelf {
+    asked: Mutex<Vec<ordo_api::blob::BlobRequest>>,
+}
+
+impl Shelf {
+    fn new() -> Arc<Shelf> {
+        Arc::new(Shelf {
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn find(&self, req: &ordo_api::blob::BlobRequest) -> Result<(&'static str, Vec<u8>), ApiError> {
+        self.asked.lock().unwrap().push(req.clone());
+        let files: [(&str, &str, &str, &[u8]); 2] = [
+            (
+                ANA_FILE,
+                "ana",
+                "application/pdf",
+                b"%PDF-1.7 ana's invoice",
+            ),
+            (
+                BEA_FILE,
+                "bea",
+                "application/pdf",
+                b"%PDF-1.7 bea's payslip",
+            ),
+        ];
+        files
+            .iter()
+            .find(|(h, owner, _, _)| {
+                Some(*h) == req.handle_hex.as_deref() && *owner == req.principal
+            })
+            .map(|(_, _, mime, bytes)| (*mime, bytes.to_vec()))
+            .ok_or_else(|| ApiError::new(ordo_api::ErrorCode::NotFound, "no such blob"))
+    }
+}
+
+#[async_trait::async_trait]
+impl ordo_api::blob::BlobPort for Shelf {
+    async fn write(
+        &self,
+        _req: &ordo_api::blob::BlobRequest,
+        _declared_len: u64,
+        _mime: &str,
+        _body: ordo_api::blob::BlobBody,
+    ) -> Result<(), ApiError> {
+        panic!("a function never writes a file")
+    }
+
+    async fn meta(
+        &self,
+        req: &ordo_api::blob::BlobRequest,
+    ) -> Result<ordo_api::blob::BlobMeta, ApiError> {
+        let (mime, bytes) = self.find(req)?;
+        Ok(ordo_api::blob::BlobMeta {
+            mime: mime.into(),
+            size: bytes.len() as u64,
+        })
+    }
+
+    async fn read(
+        &self,
+        req: &ordo_api::blob::BlobRequest,
+        from: u64,
+        len: Option<u64>,
+    ) -> Result<ordo_api::blob::BlobRead, ApiError> {
+        assert_eq!((from, len), (0, None), "a function reads the whole file");
+        let (mime, bytes) = self.find(req)?;
+        Ok(ordo_api::blob::BlobRead {
+            mime: mime.into(),
+            plain_len: bytes.len() as u64,
+            bytes,
+            from: 0,
+            partial: false,
+        })
+    }
+}
+
+const EXTRACT: &str = "\
+secret mistralKey for api.mistral.ai
+
+function extractDocument in notes {
+  call($file: blob) -> json by member
+  code \"fn/extract-document.js\"
+  egress api.mistral.ai
+  secrets mistralKey
+}
+";
+
+/// The shape of ellanor's `api/extract-document` (plan §11.2): the file
+/// in, out to the OCR service as base64, JSON back.
+const EXTRACT_CODE: &[(&str, &str)] = &[(
+    "fn/extract-document.js",
+    r#"
+export default {
+  async call(input, ctx) {
+    const file = await ctx.blob(input.file);
+    const b64 = (await file.bytes()).toBase64();
+    const r = await fetch("https://api.mistral.ai/v1/ocr", {
+      method: "POST",
+      headers: { authorization: ctx.secret("mistralKey").bearer(), "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mistral-ocr-latest",
+        document: { type: "document_url", document_url: "data:" + file.type + ";base64," + b64 },
+      }),
+    });
+    const j = await r.json();
+    return { type: file.type, size: file.size, text: j.content[0].text };
+  },
+};
+"#,
+)];
+
+fn files(
+    shelf: &Arc<Shelf>,
+    settings: functions::FnSettings,
+) -> Option<(Arc<dyn ordo_api::blob::BlobPort>, functions::FnSettings)> {
+    Some((shelf.clone() as Arc<dyn ordo_api::blob::BlobPort>, settings))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extract_document_reads_the_callers_file_and_answers_json() {
+    let shelf = Shelf::new();
+    let d = door_files(
+        "ordo_fn_extract",
+        EXTRACT,
+        EXTRACT_CODE,
+        None,
+        files(&shelf, Default::default()),
+    )
+    .await;
+    let (st, body) = d
+        .post(
+            "extractDocument",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "file": ANA_FILE }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["result"],
+        json!({ "type": "application/pdf", "size": 22, "text": "Groceries for the week" })
+    );
+
+    // The read ran as ana, in her tenant, and was attributed to the function.
+    {
+        let asked = shelf.asked.lock().unwrap();
+        assert!(!asked.is_empty());
+        for r in asked.iter() {
+            assert_eq!(r.principal, "ana");
+            assert_eq!(r.space, "acme");
+            assert_eq!(r.verb, ordo_api::blob::BlobVerb::Read);
+            assert_eq!(
+                r.correlation,
+                format!("fn.extractDocument.blob:ana:{ANA_FILE}")
+            );
+        }
+    }
+    // The file went out as its exact bytes, base64, to the declared host.
+    {
+        let seen = d.model.seen.lock().unwrap();
+        let sent: Value = serde_json::from_slice(&seen[0].body).unwrap();
+        let url = sent["document"]["document_url"].as_str().unwrap();
+        let b64 = url.strip_prefix("data:application/pdf;base64,").unwrap();
+        assert_eq!(b64, "JVBERi0xLjcgYW5hJ3MgaW52b2ljZQ==");
+        assert_eq!(seen[0].url, "https://api.mistral.ai/v1/ocr");
+    }
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "ok");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_the_caller_may_not_read_is_refused_as_not_found() {
+    let shelf = Shelf::new();
+    let d = door_files(
+        "ordo_fn_blob_guard",
+        EXTRACT,
+        EXTRACT_CODE,
+        None,
+        files(&shelf, Default::default()),
+    )
+    .await;
+    // Ana names Bea's file. The function reads as Ana, the guard hides
+    // Bea's row from her, and she gets the blob door's own answer.
+    let (st, body) = d
+        .post(
+            "extractDocument",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "file": BEA_FILE }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(!body.to_string().contains("payslip"), "{body}");
+    assert!(d.model.seen.lock().unwrap().is_empty(), "nothing went out");
+    assert!(shelf
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.principal == "ana"));
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "blob_not_found");
+
+    // Eve may call functions and may not read files at all: refused at the
+    // door, before the code runs or the port is asked.
+    let asked_before = shelf.asked.lock().unwrap().len();
+    let (st, body) = d
+        .post(
+            "extractDocument",
+            "acme",
+            Some("person:eve"),
+            None,
+            json!({ "file": ANA_FILE }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "access_denied");
+    assert_eq!(shelf.asked.lock().unwrap().len(), asked_before);
+    assert_eq!(functions::runs(&d.pool, "acme").await.unwrap().len(), 1);
+
+    // A value that is not a handle is refused as input.
+    let (st, body) = d
+        .post(
+            "extractDocument",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "file": "../etc/passwd" }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_param");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_body_and_file_caps_refuse_and_name_their_settings() {
+    let shelf = Shelf::new();
+    let d = door_files(
+        "ordo_fn_caps",
+        EXTRACT,
+        EXTRACT_CODE,
+        None,
+        files(
+            &shelf,
+            functions::FnSettings {
+                body_bytes: 2048,
+                blob_bytes: 10,
+            },
+        ),
+    )
+    .await;
+
+    // A body over ORDO_FN_BODY_BYTES, refused before the code runs.
+    let (st, body) = d
+        .post(
+            "suggestTitle",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "text": "x".repeat(4096) }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "bound_violation");
+    assert!(body.to_string().contains("ORDO_FN_BODY_BYTES"), "{body}");
+    assert!(d.model.seen.lock().unwrap().is_empty());
+
+    // A file over ORDO_FN_BLOB_BYTES, refused on its size alone: the port
+    // was asked for the size and never for the bytes.
+    let (st, body) = d
+        .post(
+            "extractDocument",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "file": ANA_FILE }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_param");
+    assert!(body.to_string().contains("ORDO_FN_BLOB_BYTES"), "{body}");
+    assert_eq!(shelf.asked.lock().unwrap().len(), 1, "meta only");
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "blob_too_large");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_with_a_declared_length_over_the_cap_is_refused_unread() {
+    let d = door_files(
+        "ordo_fn_declared",
+        "",
+        &[],
+        None,
+        files(
+            &Shelf::new(),
+            functions::FnSettings {
+                body_bytes: 1024,
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+    let text = json!({ "text": "y".repeat(3000) }).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/fn/suggestTitle")
+        .header("x-ordo-space", "acme")
+        .header("authorization", "Bearer person:ana")
+        .header("content-type", "application/json")
+        .header("content-length", text.len().to_string())
+        .body(Body::from(text))
+        .unwrap();
+    let app = ordo_api::function_routes(d.state.clone(), d.runner.clone());
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("3011 bytes") && msg.contains("ORDO_FN_BODY_BYTES"),
+        "{msg}"
+    );
 }

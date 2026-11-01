@@ -127,7 +127,7 @@ jobs:
     #
     # The server is one of the cluster's CI Postgres servers, leased for the
     # job by `scripts/ci-pg-lease.sh` (owner ruling 2026-11-01). Each runs
-    # with max_connections 300 (the runtime suite alone peaks at 99), 1 GB
+    # with max_connections 100 (the whole workspace peaks at 25 since 25g), 1 GB
     # of shared memory, and no durable commits. They are defined in
     # smg_infrastructure, gha-runner/ci-postgres.yaml.
     env:

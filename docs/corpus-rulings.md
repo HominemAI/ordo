@@ -11719,3 +11719,22 @@ work flow without a second reviewer.
   verifies with a secret by its name, and the host does the HMAC. The key
   never enters the function, as with `fetch`. Built before v1, since
   checking a webhook's signature is a main use of functions.
+
+## 2026-11-01: bleeding runs what a change reaches; main needs everything
+
+Owner: *"So bleeding requires some, and only merge to main requires all"*,
+then *"ok lets try this"* to all four asks on
+`ci-runs-each-workflow-only-when`.
+
+- `main` moves only through a pull request from `bleeding`, and every
+  workflow is a required check. Rebase-merge keeps history linear.
+- That pull request needs no approval, and the admin bypass is removed, so
+  green is the only gate. The owner is the only reviewer and cannot approve
+  their own pull request; the bypass skipped every check.
+- A push to `bleeding` runs the crates a change reaches, from Cargo's
+  dependency graph. Docs-only changes run the docs checks alone.
+- The full suite runs nightly on `main`. A failure there becomes a
+  Reported fixes task and blocks nothing.
+- CI Postgres (same day, `ci-postgres-a-dedicated-instance-on`): runner
+  pods reserve no memory (ask 1: *"no"*), and CI moves to a dedicated
+  Postgres on the cluster (ask 2: *"ok"*), after this change.

@@ -1138,7 +1138,12 @@ async fn guest_blob(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, BlobError> {
     }
     let blobs = g.blobs.clone().ok_or(BlobError::NoStore)?;
     let left = g.blob_limit.saturating_sub(g.blob_bytes);
-    let file = blobs.read(&handle, left).await?;
+    let limit = g.blob_limit;
+    let file = blobs.read(&handle, left).await.map_err(|e| match e {
+        // The seam knows what was left, not the call's whole cap.
+        BlobError::TooLarge { size, left, .. } => BlobError::TooLarge { size, left, limit },
+        other => other,
+    })?;
     // The seam refuses a file over `left` before reading it. Held again
     // here, so a seam that read it anyway still cannot pass the cap.
     let size = file.bytes.len() as u64;

@@ -1978,6 +1978,7 @@ pub fn manifest(spec: &OpSpec) -> serde_json::Value {
                 ParamTy::Datetime => "datetime",
                 ParamTy::Uri => "uri",
                 ParamTy::Json => "json",
+                ParamTy::Blob => "blob",
             },
             "required": p.required,
             // The one bound a platform op has, and the document used to say

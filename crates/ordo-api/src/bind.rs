@@ -261,6 +261,21 @@ fn validate_value(op: &OpSpec, p: &ParamSpec, v: &Value) -> Result<(), ApiError>
             )
             .with_param(p.name.clone())),
         },
+        // A file handle, as the blob door mints and an op answers it. Only
+        // its shape is checked here; whether it names a file the caller
+        // may read is the row guard's, when the function reads it.
+        ParamTy::Blob => {
+            let ok = v
+                .as_str()
+                .is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+            if !ok {
+                return invalid(
+                    "a file handle: the 32 hex characters an op answers for a `blob` field \
+                     after the upload",
+                );
+            }
+            Ok(())
+        }
         ParamTy::Uri => {
             let Some(s) = v.as_str() else {
                 return invalid("a URI string like `https://example.com/x`");

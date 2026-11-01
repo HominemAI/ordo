@@ -42,7 +42,8 @@ pub enum BlobError {
         size: u64,
         /// What the call had left to read.
         left: u64,
-        /// The call's cap.
+        /// The call's cap. A seam knows only `left` and may put it here;
+        /// the host sets the cap before the function sees the refusal.
         limit: u64,
     },
     /// This deployment has no file storage.

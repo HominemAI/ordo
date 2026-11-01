@@ -190,20 +190,87 @@ pub fn router_with_blobs(state: ApiState, blobs: crate::blob::BlobState) -> Rout
 
 // ── backend functions ───────────────────────────────────────────────────
 
-/// A function's JSON input, at most (`plan-backend-functions.md` §7).
+/// A function's JSON input, at most, by default (`plan-backend-functions.md`
+/// §7). [`crate::functions::FunctionRunner::body_limit`] is the bound that
+/// holds; a host sets it from `ORDO_FN_BODY_BYTES`.
 pub const FN_BODY_LIMIT: usize = 1024 * 1024;
 
 /// `POST /fn/<name>`, merged into the door by a host that runs functions
 /// (`crate::functions`). Its own `Router` for the same reason the blob
-/// routes are: its body limit is its own.
+/// routes are: its body limit is its own. axum's limit is off here because
+/// [`fn_body`] enforces the runner's, with a refusal that names the setting.
 pub fn function_routes(
     state: ApiState,
     functions: Arc<dyn crate::functions::FunctionRunner>,
 ) -> Router {
     Router::new()
         .route("/fn/{name}", any(fn_dispatch))
-        .layer(axum::extract::DefaultBodyLimit::max(FN_BODY_LIMIT))
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state((state, functions))
+}
+
+/// `bound_violation` for a function call's body over `limit`, naming the
+/// setting and pointing a file at the blob door.
+fn fn_body_too_large(limit: usize, size: Option<u64>) -> ApiError {
+    let size = match size {
+        Some(n) => format!("{n} bytes"),
+        None => format!("over {limit} bytes"),
+    };
+    ApiError::new(
+        ErrorCode::BoundViolation,
+        format!(
+            "this call's body is {size}; a function call takes at most {limit}. Send a file \
+             to the blob door and pass its handle as a `blob` parameter, or raise {}",
+            crate::functions::FN_BODY_BYTES_ENV
+        ),
+    )
+}
+
+/// Reads a function call's body, refusing one over `limit`: by its
+/// `Content-Length` before a byte is read, else as soon as the bytes pass it.
+async fn fn_body(
+    headers: &HeaderMap,
+    body: axum::body::Body,
+    limit: usize,
+) -> Result<Bytes, ApiError> {
+    if let Some(n) = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        if n > limit as u64 {
+            return Err(fn_body_too_large(limit, Some(n)));
+        }
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            ApiError::new(
+                ErrorCode::InvalidParam,
+                format!("the call's body could not be read: {e}"),
+            )
+        })?;
+        if out.len() + chunk.len() > limit {
+            return Err(fn_body_too_large(limit, None));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(out))
+}
+
+/// The caller may read files, checked as `GET /blob/{handle}` checks it
+/// (`std.$blob.get`), before a function with a `blob` argument runs. The
+/// row guard is the second half, when the runner reads each file.
+fn fn_blob_access(state: &ApiState, headers: &HeaderMap, space: &str) -> Result<(), ApiError> {
+    let op = crate::blob::BLOB_READ_OP;
+    match bearer(headers) {
+        Some(t) => match state.access.check(t, space, op) {
+            AccessDecision::Allow { .. } => Ok(()),
+            AccessDecision::Deny => Err(access_refusal(state, t, space, op)),
+        },
+        None => Err(denied_after_check(op, None)),
+    }
 }
 
 /// The op door's steps, in its order, for a function: the token gate, the
@@ -217,7 +284,7 @@ async fn fn_dispatch(
     method: Method,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Response {
     if let Some(refusal) = token_refusal(&state, &headers, &name).await {
         return refusal.into_response();
@@ -229,6 +296,10 @@ async fn fn_dispatch(
             Some(_) => DoorRefusal::UnregisteredOp,
         };
         return door_refusal(&state, &name, token, named_space(&headers), why).into_response();
+    };
+    let body = match fn_body(&headers, body, functions.body_limit()).await {
+        Ok(b) => b,
+        Err(e) => return e.with_op(&spec.name).into_response(),
     };
     let gate = match gate(&state, &spec, &method, &query, &headers, &body) {
         Ok(g) => g,
@@ -250,6 +321,13 @@ async fn run_function(
     let space = gate.approved_space(spec)?.to_string();
     let keyed_as = gate.keyed_as();
     let bound = bind::bind_params(spec, &gate.params)?;
+    if spec
+        .params
+        .iter()
+        .any(|p| p.ty == crate::spec::ParamTy::Blob && bound.0.contains_key(&p.name))
+    {
+        fn_blob_access(state, headers, &space).map_err(|e| e.with_op(&spec.name))?;
+    }
     let idem_key = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -418,14 +496,19 @@ async fn blob_gate(
     }
     match state.access.check(token, &space, &op) {
         AccessDecision::Allow { principal, agent } => Ok((space, principal, agent)),
-        AccessDecision::Deny => match state.access.not_ready(token, &space) {
-            Some(wait) => Err(ApiError::tenant_not_ready(&op, wait)),
-            None if state.access.behind(token, &space) => Err(ApiError::server_busy().with_op(&op)),
-            None if state.access.presence_required(token, &space, &op) => {
-                Err(ApiError::presence_required(&op))
-            }
-            None => Err(denied_after_check(&op, Some(token))),
-        },
+        AccessDecision::Deny => Err(access_refusal(state, token, &space, &op)),
+    }
+}
+
+/// The answer to an access check that said no, as the blob door gives it:
+/// a tenant not ready, a store behind, a presence touch owed, or the
+/// door's one denial.
+fn access_refusal(state: &ApiState, token: &str, space: &str, op: &str) -> ApiError {
+    match state.access.not_ready(token, space) {
+        Some(wait) => ApiError::tenant_not_ready(op, wait),
+        None if state.access.behind(token, space) => ApiError::server_busy().with_op(op),
+        None if state.access.presence_required(token, space, op) => ApiError::presence_required(op),
+        None => denied_after_check(op, Some(token)),
     }
 }
 

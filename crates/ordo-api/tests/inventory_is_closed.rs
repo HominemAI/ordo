@@ -200,6 +200,7 @@ fn every_parameter_type_the_engine_binds_is_documented() {
         ParamTy::Duration,
         ParamTy::Uri,
         ParamTy::Json,
+        ParamTy::Blob,
     ];
     for ty in &all {
         let name = match ty {
@@ -214,6 +215,7 @@ fn every_parameter_type_the_engine_binds_is_documented() {
             ParamTy::Duration => "duration",
             ParamTy::Uri => "uri",
             ParamTy::Json => "json",
+            ParamTy::Blob => "blob",
         };
         assert!(
             documented.contains(&name.to_string()),

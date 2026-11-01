@@ -375,7 +375,9 @@ impl Drop for Deployment {
 }
 
 fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
-    for _ in 0..300 {
+    // 60 s: under nextest several deployments boot at once on one node
+    // (run 41294339083 ran out at 15 s).
+    for _ in 0..1200 {
         if let Ok(Some(status)) = child.try_wait() {
             let said = std::fs::read_to_string(log).unwrap_or_default();
             panic!("the binary exited before serving: {status}\n{said}");
@@ -385,7 +387,8 @@ fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("the binary never bound {port}");
+    let said = std::fs::read_to_string(log).unwrap_or_default();
+    panic!("the binary never bound {port} in 60 s\n{said}");
 }
 
 /// The browser's authenticator for one person.

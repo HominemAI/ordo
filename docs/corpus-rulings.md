@@ -11742,3 +11742,23 @@ then *"ok lets try this"* to all four asks on
   smg_infrastructure `gha-runner/ci-postgres.yaml`). A job leases a whole
   server, so the fixed test database names need no prefix, and one crash
   fails one job.
+- The servers run at Postgres's default 100 connections (ask 4: *"ok"*).
+  `thirty_people_sign_up_on_a_default_server` stays in every run
+  (`ci-max-connections` ask 2: *"ok"*): it guards fix 25g by counting
+  connections, and times nothing.
+
+## 2026-11-01: tests build once and set up once
+
+Owner, on `cut-test-time-by-building-and`: *"yes"* to ask 1 and *"ok"* to
+asks 2 to 4. Measured that day: 32 min of tests across the shards, about
+1 min of cached compiling per shard.
+
+- CI moves to cargo-nextest. Test binaries are built once and shipped to
+  the shards, and tests from many files run at once.
+- Test setup is measured first. If it is a large share, each file sets up
+  its app once and copies it per test with a Postgres template database.
+- The exhaustive `refine_audit` cases run in full on pull requests and
+  nightly, with a small sample on `bleeding`. This follows the earlier
+  ruling that stress runs need not run every time.
+- `notes_app` tests run in parallel unless they share state. The tests
+  that count connections keep running one at a time.

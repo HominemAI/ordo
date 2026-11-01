@@ -16,8 +16,8 @@
 // How a path is read:
 //
 // 1. Cargo.lock, the root Cargo.toml, rust-toolchain, .github/, .cargo/
-//    config, docker/, scripts/ci-* and any path it does not know: run
-//    everything.
+//    config, .config/nextest.toml, docker/, scripts/ci-* and any path it
+//    does not know: run everything.
 // 2. A path in a workspace crate (from `cargo metadata`): that crate's
 //    tests. Outside tests/, benches/, examples/ and e2e/ it is the crate's
 //    code, so every crate that depends on it runs too, transitively.
@@ -51,6 +51,8 @@ const RUN_EVERYTHING = [
   /^rust-toolchain/,
   /^\.github\//,
   /^\.cargo\/config/,
+  // Which tests take turns under cargo-nextest.
+  /^\.config\/nextest\.toml$/,
   /^docker\//,
   /^scripts\/ci-/,
   // The Postgres the suites and e2e stacks start when CI gives none.

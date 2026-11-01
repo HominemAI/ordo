@@ -137,7 +137,7 @@ const cases = [
   },
 ];
 
-const everything = ['Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml', 'scripts/ci-test-shard.sh', 'docker/Dockerfile', 'rust-toolchain.toml', 'crates/ordo-wasm/src/lib.rs', 'clients/ordo-new/x.ts', 'a-new-top-level-thing/x'];
+const everything = ['Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml', 'scripts/ci-test-shard.sh', '.config/nextest.toml', 'docker/Dockerfile', 'rust-toolchain.toml', 'crates/ordo-wasm/src/lib.rs', 'clients/ordo-new/x.ts', 'a-new-top-level-thing/x'];
 
 let failed = 0;
 const check = (name, got, want) => {

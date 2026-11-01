@@ -11738,3 +11738,7 @@ then *"ok lets try this"* to all four asks on
 - CI Postgres (same day, `ci-postgres-a-dedicated-instance-on`): runner
   pods reserve no memory (ask 1: *"no"*), and CI moves to a dedicated
   Postgres on the cluster (ask 2: *"ok"*), after this change.
+- Built as 8 throwaway servers, one per runner (ask 3: *"yes"*, to push
+  smg_infrastructure `gha-runner/ci-postgres.yaml`). A job leases a whole
+  server, so the fixed test database names need no prefix, and one crash
+  fails one job.

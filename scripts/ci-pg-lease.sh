@@ -15,7 +15,8 @@
 # ordo_conformance is made fresh. Tests use fixed database names, so a job
 # needs a clean server to itself.
 #
-# Writes ORDO_PG_HOST to $GITHUB_ENV (or prints it outside Actions).
+# Writes the server's address as ORDO_PG_HOST to $GITHUB_ENV (or prints it
+# outside Actions).
 #
 # Settings:
 #   ORDO_CI_PG_SERVERS  how many servers there are (default 8)
@@ -101,9 +102,20 @@ CREATE DATABASE ordo_conformance;
 SQL
 echo "Dropped $count database(s) left on $host"
 
+# Hand the tests the server's address, not its name. On 2026-11-01 (run
+# 41285450540) hundreds of test psql calls resolving the name at once got
+# "could not translate host name" from the cluster DNS in two jobs at the
+# same second. The address lasts as long as the pod, and so does its data.
+addr=$(getent hosts "$host" | awk '{print $1; exit}')
+if [ -z "$addr" ]; then
+  echo "Could not resolve $host." >&2
+  exit 1
+fi
+echo "$host is $addr"
+
 if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "ORDO_PG_HOST=$host" >>"$GITHUB_ENV"
-  echo "PGHOST=$host" >>"$GITHUB_ENV"
+  echo "ORDO_PG_HOST=$addr" >>"$GITHUB_ENV"
+  echo "PGHOST=$addr" >>"$GITHUB_ENV"
 else
-  echo "ORDO_PG_HOST=$host"
+  echo "ORDO_PG_HOST=$addr"
 fi

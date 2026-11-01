@@ -121,3 +121,9 @@ secret key for api.two.example
 
 A function is not a way round the language. Reads and writes of your own
 rows are ops. A function holds no database access and cannot call an op.
+
+**A file reaches a function only as a `blob` argument, read as the
+caller.** Do not put file bytes or base64 in the call's JSON: the body
+stops at 1 MiB. Upload to the blob door, pass the handle, and read it with
+`ctx.blob(input.file)`. The function cannot read a file the caller could
+not, nor a handle it was not passed.

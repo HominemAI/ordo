@@ -342,7 +342,14 @@ secret llmKey for api.anthropic.com
 - The code is `export default { async call(input, ctx) { ... } }`. It
   gets `ctx.secret("llmKey")` as a handle to put in a header. It never
   reads the value.
+- A `call` parameter may be `blob` (`call($file: blob)`); an op parameter
+  may not. The page uploads to the blob door first and passes the handle.
+  `await ctx.blob(input.file)` answers a `Blob`, read as the caller. A file
+  the caller may not read is `not_found`. One call reads at most
+  `ORDO_FN_BLOB_BYTES` (20 MiB); `(await file.bytes()).toBase64()` makes
+  it JSON-ready.
 - The page calls it by name (`client.callFunction`, `useFunction`).
+  The body is at most `ORDO_FN_BODY_BYTES` (1 MiB).
   `ordo fn runs` and `ordo fn log` show what happened.
 
 ## Commands
@@ -502,6 +509,12 @@ secret key for api.two.example
 
 A function is not a way round the language. Reads and writes of your own
 rows are ops. A function holds no database access and cannot call an op.
+
+**A file reaches a function only as a `blob` argument, read as the
+caller.** Do not put file bytes or base64 in the call's JSON: the body
+stops at 1 MiB. Upload to the blob door, pass the handle, and read it with
+`ctx.blob(input.file)`. The function cannot read a file the caller could
+not, nor a handle it was not passed.
 
 # Guards, roles and membership
 
@@ -1148,6 +1161,12 @@ whose class is `function_error` (the code threw; the message is its own),
 `function_timeout`, `function_oom`, `function_busy` (retry later),
 `egress_refused` or `space_paused`. Wire: `POST /fn/<name>` with the
 parameters as a JSON body. In React use `useFunction(name)`.
+
+A file goes in by handle, never in the body. Upload it to the row's `blob`
+field first (`uploadFile`, `useFileUpload`), read the row back for the
+handle, then pass it: `client.callFunction('extractDocument', { file:
+row.file })`. A file the caller may not read is `not_found`. A body over
+`ORDO_FN_BODY_BYTES` (1 MiB) is `bound_violation`.
 
 ## The wire
 

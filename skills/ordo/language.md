@@ -248,7 +248,14 @@ secret llmKey for api.anthropic.com
 - The code is `export default { async call(input, ctx) { ... } }`. It
   gets `ctx.secret("llmKey")` as a handle to put in a header. It never
   reads the value.
+- A `call` parameter may be `blob` (`call($file: blob)`); an op parameter
+  may not. The page uploads to the blob door first and passes the handle.
+  `await ctx.blob(input.file)` answers a `Blob`, read as the caller. A file
+  the caller may not read is `not_found`. One call reads at most
+  `ORDO_FN_BLOB_BYTES` (20 MiB); `(await file.bytes()).toBase64()` makes
+  it JSON-ready.
 - The page calls it by name (`client.callFunction`, `useFunction`).
+  The body is at most `ORDO_FN_BODY_BYTES` (1 MiB).
   `ordo fn runs` and `ordo fn log` show what happened.
 
 ## Commands

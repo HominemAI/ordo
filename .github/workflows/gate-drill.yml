@@ -60,7 +60,7 @@ jobs:
         with:
           shared-key: rust-gates-drill
       - name: Install psql client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       - name: Attempt the executed-case assertion with no Postgres reachable
         id: attempt
         continue-on-error: true
@@ -112,7 +112,7 @@ jobs:
         with:
           shared-key: rust-gates-drill
       - name: Install psql client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
       - name: Postgres without durable commits (CI only)
@@ -179,7 +179,7 @@ jobs:
         with:
           shared-key: rust-gates-drill
       - name: Install psql client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
       - name: Postgres without durable commits (CI only)

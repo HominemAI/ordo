@@ -148,7 +148,7 @@ jobs:
 
       - name: Install psql
         if: env.REACHED == 'true'
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
 
       # Runner disk noise only; the product fix is the store pool's size
       # and wait (board task `store-pool-held-blocks-signin`). See the script.
@@ -314,7 +314,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install psql
         if: env.REACHED == 'true'
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       - name: Build ordo-host and ordo
         if: env.REACHED == 'true'
         run: cargo build -p ordo-host -p ordo-cli

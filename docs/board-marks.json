@@ -335,6 +335,14 @@
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
  },
+ "ci-postgres-a-dedicated-instance-on:1": {
+  "mark": "done",
+  "at": "2026-11-01T01:57:27+00:00"
+ },
+ "ci-postgres-a-dedicated-instance-on:2": {
+  "mark": "done",
+  "at": "2026-11-01T01:57:37+00:00"
+ },
  "cli-audit:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"

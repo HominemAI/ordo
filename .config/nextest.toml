@@ -16,28 +16,28 @@
 # Measured 2026-11-01: ordo-conformance run with nextest's default
 # parallelism failed 49 of 359 tests this way; one at a time, all passed.
 #
-# The groups below run those tests one at a time. A test in a group still
-# runs beside tests outside it. Groups apply to every profile.
+# The groups below cap how many of those tests run at once. A test in a
+# group still runs beside tests outside it. Groups apply to every profile.
 
 [test-groups]
 # Files that hold a file-wide lock because each test boots a whole
 # deployment, counts connections, or both. One group for all of them keeps
 # what cargo gave: at most one such test at a time on the job's server.
 serial-in-file = { max-threads = 1 }
+# notes_app's tests each boot a deployment with a pool of 6 and its
+# tenants' pools. Eight at once ran a 100-connection server out (notes_app
+# agent, 2026-11-01); about 4 deployments at once is the safe figure. This
+# group's 3 and serial-in-file's 1 make 4.
+notes-app = { max-threads = 3 }
 # Files that seed a shared, fixed-name database once per process.
 seeded-once = { max-threads = 1 }
 
-# `notes_app.rs` is in the group while its own lock serialises it. A test
-# file that lets some of its tests run at once needs a group of its own here
-# with `max-threads` above 1: an in-process limit does not reach across
-# nextest's processes.
 [[profile.default.overrides]]
 filter = '''
     binary_id(ordo-exec::pool_idle)
   | binary_id(ordo-host::feed_door)
   | binary_id(ordo-host::guess_limits)
   | binary_id(ordo-host::marketing_site_app)
-  | binary_id(ordo-host::notes_app)
   | binary_id(ordo-host::provision_own)
   | binary_id(ordo-host::share_links)
   | binary_id(ordo-host::shopfront_app)
@@ -46,6 +46,14 @@ filter = '''
   | binary_id(ordo-host::upgrade_continuity)
 '''
 test-group = 'serial-in-file'
+
+# notes_app's own in-process limit (`AT_ONCE`) does not reach across
+# nextest's processes; this group does. Its `connections_*` tests need the
+# server to themselves, which no group can give: scripts/ci-test-shard.sh
+# runs them after the rest, one at a time.
+[[profile.default.overrides]]
+filter = 'binary_id(ordo-host::notes_app)'
+test-group = 'notes-app'
 
 [[profile.default.overrides]]
 filter = '''
@@ -58,7 +66,13 @@ test-group = 'seeded-once'
 # CI's profile, chosen with NEXTEST_PROFILE=ci. Every test runs whatever
 # fails, so one failure cannot hide the rest of the suite. A failing test's
 # output is printed when it fails and again at the end.
+#
+# At most 8 tests at once in a shard, whatever the runner's core count: 4
+# deployment-booting tests from the groups above, and 4 others. The others
+# run with ORDO_PG_POOL_SIZE=2, and under cargo the whole workspace peaked
+# at 25 connections that way. Raise it only with a measured peak.
 [profile.ci]
+test-threads = 8
 fail-fast = false
 failure-output = "immediate-final"
 success-output = "never"

@@ -1212,3 +1212,7 @@
 {"seq": 1212, "item": "ci-postgres-a-dedicated-instance-on", "ask": 2, "at": "2026-11-01T01:57:35Z", "status": "open", "text": "ok", "source": "page", "read": true}
 {"seq": 1213, "item": "ci-postgres-a-dedicated-instance-on", "ask": 1, "at": "2026-11-01", "status": "decided", "text": "no", "source": "record", "read": true}
 {"seq": 1214, "item": "ci-postgres-a-dedicated-instance-on", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1215, "item": "ci-runs-each-workflow-only-when", "ask": 1, "at": "2026-11-01", "status": "decided", "text": "ok lets try this", "source": "record", "read": true}
+{"seq": 1216, "item": "ci-runs-each-workflow-only-when", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok lets try this", "source": "record", "read": true}
+{"seq": 1217, "item": "ci-runs-each-workflow-only-when", "ask": 3, "at": "2026-11-01", "status": "decided", "text": "ok lets try this", "source": "record", "read": true}
+{"seq": 1218, "item": "ci-runs-each-workflow-only-when", "ask": 4, "at": "2026-11-01", "status": "decided", "text": "ok lets try this", "source": "record", "read": true}

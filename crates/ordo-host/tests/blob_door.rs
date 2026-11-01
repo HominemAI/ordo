@@ -118,6 +118,11 @@ struct Harness {
     /// The fixture the door plans against, for the test that drives a
     /// revert rather than a `PUT`.
     fixture: Arc<Fixture>,
+    /// The door's state, the real port and the resolver, for the test that
+    /// merges the function route over the same door.
+    state: ApiState,
+    port: Arc<dyn BlobPort>,
+    spaces: Arc<ordo_host::spaces::Spaces>,
 }
 
 impl Drop for Harness {
@@ -173,7 +178,17 @@ async fn harness_with_resolver(
     dir: PathBuf,
     stores: Arc<dyn ordo_blob::StoreResolver>,
 ) -> Harness {
-    let src = format!("{FIXTURE}\n{DOCS_SCHEMA}");
+    harness_full(db, dir, stores, "").await
+}
+
+/// The rig over the fixture, [`DOCS_SCHEMA`] and `extra` source.
+async fn harness_full(
+    db: &str,
+    dir: PathBuf,
+    stores: Arc<dyn ordo_blob::StoreResolver>,
+    extra: &str,
+) -> Harness {
+    let src = format!("{FIXTURE}\n{DOCS_SCHEMA}\n{extra}");
     let f = Arc::new(
         Fixture::from_source(&src, SEED).expect("the fixture plus the docs entity compiles"),
     );
@@ -245,10 +260,11 @@ async fn harness_with_resolver(
         public: Default::default(),
     };
 
+    let port = port as Arc<dyn BlobPort>;
     let app = router_with_blobs(
-        state,
+        state.clone(),
         BlobState {
-            port: port as Arc<dyn BlobPort>,
+            port: port.clone(),
             limits: BlobLimits::DEFAULT,
         },
     );
@@ -260,6 +276,9 @@ async fn harness_with_resolver(
         dir,
         log,
         fixture: f.clone(),
+        state,
+        port,
+        spaces,
     }
 }
 
@@ -3443,4 +3462,158 @@ async fn a_public_rows_file_is_served_and_a_private_rows_is_not() {
     let (status, body, _) = get_anonymous(&h.app, &public, Some(ordo_host::DEFAULT_SPACE)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body, before);
+}
+
+// ── a backend function reads a file (functions increment 2) ─────────────
+
+/// A function that takes a file, reads it as the caller, and sends its
+/// bytes out as they are.
+const READER: &str = "
+function readScan {
+  call($file: blob) -> json by member
+  code \"fn/read-scan.js\"
+  egress api.ocr.example
+}
+";
+
+const READER_CODE: &str = r#"
+export default {
+  async call(input, ctx) {
+    const file = await ctx.blob(input.file);
+    await fetch("https://api.ocr.example/v1/scan", { method: "POST", body: file });
+    return { type: file.type, size: file.size, text: await file.text() };
+  },
+};
+"#;
+
+/// The OCR service: keeps every body it was sent.
+struct Ocr {
+    bodies: Mutex<Vec<Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl ordo_fn::FnFetch for Ocr {
+    async fn fetch(
+        &self,
+        _space: &str,
+        req: ordo_fn::FnFetchRequest,
+    ) -> Result<ordo_fn::FnFetchResponse, ordo_fn::FetchError> {
+        self.bodies.lock().unwrap().push(req.body);
+        Ok(ordo_fn::FnFetchResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: b"{}".to_vec(),
+        })
+    }
+
+    async fn mac(
+        &self,
+        _space: &str,
+        _req: ordo_fn::FnMacRequest,
+    ) -> Result<ordo_fn::FnMacAnswer, ordo_fn::FetchError> {
+        panic!("no secret here")
+    }
+}
+
+async fn call_reader(app: &axum::Router, who: &str, handle: &str) -> (StatusCode, Value) {
+    let body = serde_json::json!({ "file": handle }).to_string();
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/fn/readScan")
+        .header("authorization", format!("Bearer {}", token(who)))
+        .header("x-ordo-space", ordo_host::DEFAULT_SPACE)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// **A function reads a file as its caller, through the real store and the
+/// real row guard.** OWNER uploads through the real door; the function,
+/// called by OWNER, reads the bytes and sends them out. MANAGER clears the
+/// door for both the function and `std.$blob.get`, names OWNER's handle,
+/// and is refused `not_found` by the row guard: the code never gets the
+/// bytes, and nothing goes out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_function_reads_a_file_as_its_caller_and_the_row_guard_holds() {
+    let db = "ordo_blobdoor_fn_read";
+    let dir = std::env::temp_dir().join(format!("ordo-blob-door-{db}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store: Arc<dyn BlobStore> = FsStore::shared(&dir).expect("store");
+    let h = harness_full(
+        db,
+        dir,
+        Arc::new(ordo_blob::SingleStore::new(store)),
+        READER,
+    )
+    .await;
+    insert_doc(&h.pool, "doc_1", OWNER, "owner's file").await;
+    let bytes = b"%PDF-1.7 owner's scan".to_vec();
+    let (status, body) = put_blob(&h.app, "docs", "scan", "doc_1", OWNER, bytes.clone()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let handle = scan_column(&h.pool, "doc_1").await.expect("set");
+
+    // What `ordo apply` does: the code by hash into the manifest.
+    let mut doc =
+        ordo_plan::artifact::program_artifact(&h.fixture.schema, &h.fixture.registry).unwrap();
+    let hash = ordo_plan::artifact::code_hash(READER_CODE.as_bytes());
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert("fn/read-scan.js".to_string(), hash.clone());
+    ordo_plan::artifact::bind_function_code(&mut doc, &hashes).unwrap();
+    let mut code = std::collections::BTreeMap::new();
+    code.insert(hash, READER_CODE.as_bytes().to_vec());
+    let table = ordo_host::functions::FnTable::build(&h.fixture.schema, &doc, "v1", &code)
+        .expect("the function loads");
+    ordo_host::functions::ensure_tables(&h.pool).await.unwrap();
+    let ocr = Arc::new(Ocr {
+        bodies: Mutex::new(Vec::new()),
+    });
+    let runner = Arc::new(
+        ordo_host::functions::HostFunctions::new(
+            ordo_fn::HostConfig::default(),
+            table,
+            h.spaces.clone(),
+            h.pool.clone(),
+            ocr.clone(),
+            Arc::new(ordo_host::functions::NoCallScrub),
+        )
+        .with_blobs(Some(h.port.clone())),
+    );
+    let app = h
+        .app
+        .clone()
+        .merge(ordo_api::function_routes(h.state.clone(), runner));
+
+    // OWNER: the file is read, answered and sent out unchanged.
+    let (status, out) = call_reader(&app, OWNER, &handle).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(
+        out["result"],
+        serde_json::json!({ "type": "application/pdf", "size": bytes.len(), "text": "%PDF-1.7 owner's scan" })
+    );
+    assert_eq!(*ocr.bodies.lock().unwrap(), vec![bytes.clone()]);
+
+    // MANAGER, with OWNER's handle: the row guard hides the row.
+    let (status, out) = call_reader(&app, MANAGER, &handle).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{out}");
+    assert_eq!(out["error"]["code"], "not_found", "{out}");
+    assert!(!out.to_string().contains("owner's scan"), "{out}");
+    assert_eq!(ocr.bodies.lock().unwrap().len(), 1, "nothing more went out");
+
+    let runs = ordo_host::functions::runs(&h.pool, ordo_host::DEFAULT_SPACE)
+        .await
+        .unwrap();
+    let outcomes: Vec<&str> = runs.iter().map(|r| r.outcome.as_str()).collect();
+    assert_eq!(outcomes, ["ok", "blob_not_found"]);
+    assert!(runs[1]
+        .principal
+        .ends_with(&format!("on behalf of {MANAGER}")));
 }

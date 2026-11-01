@@ -241,8 +241,13 @@ jobs:
         run: |
           sudo mkdir -p /etc/postgresql-common
           echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.conf
-          sudo apt-get update
-          sudo apt-get install -y postgresql
+          # An Ubuntu mirror served mismatched indexes on 2026-11-01: retry
+          # each download, and the whole refresh, before failing the job.
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=5 update && break
+            sleep 20
+          done
+          sudo apt-get -o Acquire::Retries=5 install -y postgresql
           ls -d /usr/lib/postgresql/*/bin/initdb
           if [ "$(id -u)" = 0 ]; then
             echo "The runner user is root and initdb refuses root: run the job as a non-root user."

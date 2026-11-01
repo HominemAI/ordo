@@ -600,7 +600,8 @@ fn spawn(
 }
 
 fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
-    for _ in 0..600 {
+    // 60 s: a restart on a loaded CI node passed 30 s twice on 2026-11-01.
+    for _ in 0..1200 {
         if let Ok(Some(status)) = child.try_wait() {
             let said = std::fs::read_to_string(log).unwrap_or_default();
             panic!("the binary exited before serving: {status}\n{said}");
@@ -610,7 +611,8 @@ fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("the binary never bound {port}");
+    let said = std::fs::read_to_string(log).unwrap_or_default();
+    panic!("the binary never bound {port}; its log:\n{said}");
 }
 
 /// Status line, headers and body; a chunked body is joined.

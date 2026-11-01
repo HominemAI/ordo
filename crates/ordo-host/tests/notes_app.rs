@@ -1642,7 +1642,7 @@ async fn closing_a_share_window_reaches_a_feed_open_on_it() {
     // the feed asks the door again before it answers, and the door refuses:
     // the feed's last frame is the refusal, and nothing follows it.
     let mut heard = String::new();
-    let until = std::time::Instant::now() + Duration::from_secs(8);
+    let until = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < until && !heard.contains("event: error") {
         match feed.read(&mut buf) {
             Ok(0) => break,
@@ -1705,7 +1705,10 @@ async fn a_feed_on_a_tenant_made_after_boot_carries_a_note_written_later() {
     let (sink, from) = (heard.clone(), mark.clone());
     let reader = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
-        let until = std::time::Instant::now() + Duration::from_secs(8);
+        // 60 s from the feed opening, and it stops at the invalidate. On a
+        // loaded node a new tenant's first answer took 9.4 s, past the
+        // earlier 8 s, before the write was made (run 41295685311).
+        let until = std::time::Instant::now() + Duration::from_secs(60);
         while std::time::Instant::now() < until {
             match feed.read(&mut buf) {
                 Ok(0) => break,

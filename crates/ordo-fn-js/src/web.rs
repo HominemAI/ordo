@@ -1,4 +1,5 @@
-//! The natives behind `TextEncoder`, `TextDecoder` and `crypto`.
+//! The natives behind `TextEncoder`, `TextDecoder`, `crypto` and
+//! `Uint8Array`'s base64 methods.
 //!
 //! The prelude (`prelude.js`) holds the Web-shaped classes; the byte work
 //! is here, in Rust. A byte range crosses as three arguments: an
@@ -48,6 +49,16 @@ pub fn install(native: &mut ObjectInitializer<'_>) {
             NativeFunction::from_fn_ptr(fill_random),
             js_string!("fillRandom"),
             3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(base64_encode),
+            js_string!("base64Encode"),
+            5,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(base64_decode),
+            js_string!("base64Decode"),
+            2,
         );
 }
 
@@ -232,4 +243,88 @@ fn fill_random(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
     getrandom::fill(&mut data[off..off + len])
         .map_err(|_| JsNativeError::error().with_message("no randomness from the host"))?;
     Ok(JsValue::undefined())
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// `base64Encode(buffer, offset, length, url, omitPadding) -> string`, for
+/// `Uint8Array.prototype.toBase64`. A file sent to an API inside JSON goes
+/// this way, so it runs in Rust rather than in a JavaScript loop.
+fn base64_encode(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let v = bytes(args, 0, ctx)?;
+    let table = if args.get_or_undefined(3).to_boolean() {
+        B64_URL
+    } else {
+        B64
+    };
+    let pad = !args.get_or_undefined(4).to_boolean();
+    let mut out = String::with_capacity(v.len().div_ceil(3) * 4);
+    for chunk in v.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let chars = chunk.len() + 1;
+        for i in 0..4 {
+            if i < chars {
+                out.push(table[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else if pad {
+                out.push('=');
+            }
+        }
+    }
+    Ok(JsValue::from(JsString::from(out.as_str())))
+}
+
+/// `base64Decode(text, url) -> ArrayBuffer`, for `Uint8Array.fromBase64`.
+/// ASCII whitespace is skipped and padding is optional, as the standard's
+/// default `loose` handling says. Any other stray character throws a
+/// `SyntaxError`.
+fn base64_decode(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let text = args
+        .get_or_undefined(0)
+        .to_string(ctx)?
+        .to_std_string_lossy();
+    let table = if args.get_or_undefined(1).to_boolean() {
+        B64_URL
+    } else {
+        B64
+    };
+    let syntax = || -> boa_engine::JsError {
+        JsNativeError::syntax()
+            .with_message("fromBase64: the input is not base64")
+            .into()
+    };
+    let mut vals: Vec<u8> = Vec::with_capacity(text.len());
+    let mut padding = 0usize;
+    for c in text.bytes() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        if c == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return Err(syntax());
+        }
+        let i = table.iter().position(|&t| t == c).ok_or_else(syntax)?;
+        vals.push(i as u8);
+    }
+    if padding > 2 || vals.len() % 4 == 1 || (padding > 0 && (vals.len() + padding) % 4 != 0) {
+        return Err(syntax());
+    }
+    let mut out = Vec::with_capacity(vals.len() * 3 / 4);
+    for chunk in vals.chunks(4) {
+        let mut n = 0u32;
+        for (i, v) in chunk.iter().enumerate() {
+            n |= u32::from(*v) << (18 - 6 * i);
+        }
+        let b = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&b[..chunk.len() - 1]);
+    }
+    array_buffer(out, ctx)
 }

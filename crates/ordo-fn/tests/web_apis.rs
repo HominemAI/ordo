@@ -48,6 +48,8 @@ async fn run(body: &str) -> Value {
             limits: Limits::default(),
             fetch: Arc::new(NoFetch),
             scrub: Arc::new(NoScrub),
+            blobs: Arc::new(ordo_fn::NoBlobs),
+            blob_args: Vec::new(),
         })
         .await;
     match run.outcome {

@@ -38,6 +38,8 @@ pub enum FnError {
     /// An outbound call was refused or failed, and the function let it end
     /// the call. `code` is the egress outcome class.
     Fetch { code: String, message: String },
+    /// `ctx.blob` refused a file, and the function let it end the call.
+    Blob(crate::blob::BlobError),
     /// Too many calls are running for this tenant or this process.
     Busy { scope: BusyScope },
     /// The input could not be read as JSON, or was over the size limit.
@@ -63,6 +65,7 @@ impl FnError {
             FnError::Timeout { .. } => "function_timeout",
             FnError::OutOfMemory { .. } => "function_oom",
             FnError::Fetch { code, .. } => code,
+            FnError::Blob(e) => e.kind(),
             FnError::Busy { .. } => "function_busy",
             FnError::BadInput { .. } => "function_bad_input",
             FnError::Engine { .. } => "function_engine",
@@ -78,6 +81,7 @@ impl FnError {
                 Remedy::Retry
             }
             FnError::BadInput { .. } => Remedy::FixInput,
+            FnError::Blob(e) => e.remedy(),
             _ => Remedy::Refuse,
         }
     }
@@ -106,6 +110,7 @@ impl std::fmt::Display for FnError {
                 )
             }
             FnError::Fetch { code, message } => write!(f, "{code}: {message}"),
+            FnError::Blob(e) => write!(f, "{}: {e}", e.kind()),
             FnError::Busy {
                 scope: BusyScope::Tenant,
             } => f.write_str("too many calls are running for this tenant; try again shortly"),

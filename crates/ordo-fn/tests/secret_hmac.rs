@@ -65,6 +65,8 @@ async fn run(body: &str, secrets: &[&str], input: Value) -> FnRun {
         limits: Limits::default(),
         fetch: Arc::new(egress),
         scrub: Arc::new(JefeScrub),
+        blobs: Arc::new(ordo_fn::NoBlobs),
+        blob_args: Vec::new(),
     })
     .await
 }

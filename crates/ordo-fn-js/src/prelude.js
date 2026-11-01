@@ -126,14 +126,27 @@
           headers.push([k, { plain: v }]);
         }
       }
-      let body = "";
-      if (init.body !== undefined && init.body !== null) {
-        if (typeof init.body !== "string") {
-          throw new TypeError("fetch: body must be a string (use JSON.stringify)");
+      // The body crosses as bytes: a string as UTF-8, a file or a buffer
+      // as it is. A Blob with a type sends it as content-type, unless the
+      // headers name one, as the Fetch standard does.
+      let body = new Uint8Array(0);
+      const b = init.body;
+      if (b !== undefined && b !== null) {
+        if (typeof b === "string") {
+          body = new Uint8Array(native.utf8Encode(b));
+        } else if (b instanceof Blob) {
+          body = BLOBS.get(b).bytes;
+          if (b.type && !headers.some((h) => h[0] === "content-type")) {
+            headers.push(["content-type", { plain: b.type }]);
+          }
+        } else if (b instanceof ArrayBuffer || ArrayBuffer.isView(b)) {
+          body = view(b, "fetch: the body");
+        } else {
+          throw new TypeError(
+            "fetch: body must be a string, a Blob, an ArrayBuffer or a typed array (use JSON.stringify for an object)");
         }
-        body = init.body;
       }
-      const reply = native.fetch(JSON.stringify({ method, url, headers, body }));
+      const reply = native.fetch(JSON.stringify({ method, url, headers }), body.buffer, body.byteOffset, body.byteLength);
       if (reply.refused !== undefined) {
         const e = JSON.parse(reply.refused);
         return Promise.reject(new FetchRefused(e.code, e.message));
@@ -142,6 +155,84 @@
       return Promise.resolve(
         new Response(r.body, { status: r.status, headers: r.headers, url })
       );
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+
+  // A file. The bytes live here, out of reach of the function's code, so a
+  // Blob cannot be changed after it is made; each read hands out a copy.
+  const BLOBS = new WeakMap();
+  function blobOf(bytes, type) {
+    const o = Object.create(Blob.prototype);
+    BLOBS.set(o, { bytes, type: type ? String(type).toLowerCase() : "" });
+    return Object.freeze(o);
+  }
+  class Blob {
+    constructor(parts, options) {
+      const chunks = [];
+      let n = 0;
+      for (const p of parts === undefined ? [] : parts) {
+        let u;
+        if (p instanceof Blob) u = BLOBS.get(p).bytes;
+        else if (p instanceof ArrayBuffer || ArrayBuffer.isView(p)) u = view(p, "Blob: a part");
+        else u = new Uint8Array(native.utf8Encode(String(p)));
+        chunks.push(u);
+        n += u.length;
+      }
+      const all = new Uint8Array(n);
+      let at = 0;
+      for (const c of chunks) {
+        all.set(c, at);
+        at += c.length;
+      }
+      return blobOf(all, options && options.type);
+    }
+    get size() {
+      return BLOBS.get(this).bytes.length;
+    }
+    get type() {
+      return BLOBS.get(this).type;
+    }
+    async arrayBuffer() {
+      return BLOBS.get(this).bytes.slice().buffer;
+    }
+    async bytes() {
+      return BLOBS.get(this).bytes.slice();
+    }
+    async text() {
+      return native.utf8Decode(BLOBS.get(this).bytes.buffer, BLOBS.get(this).bytes.byteOffset,
+        BLOBS.get(this).bytes.byteLength, false, false);
+    }
+    slice(start, end, type) {
+      const b = BLOBS.get(this).bytes;
+      return blobOf(b.slice(start, end), type);
+    }
+  }
+
+  // The host refused a file: not one of the call's arguments, not readable
+  // by the caller, or over the call's cap. `code` is the reason word.
+  class BlobRefused extends Error {
+    constructor(code, message) {
+      super(message);
+      this.name = "BlobRefused";
+      this.code = code;
+    }
+  }
+
+  // `ctx.blob(input.file)`: the file a `blob` argument names, read by the
+  // host as the person calling.
+  function readBlob(file) {
+    try {
+      if (typeof file !== "string") {
+        throw new TypeError("ctx.blob takes a blob argument's handle: pass input.<name>");
+      }
+      const r = native.blob(JSON.stringify({ handle: file }));
+      if (r.refused !== undefined) {
+        const e = JSON.parse(r.refused);
+        return Promise.reject(new BlobRefused(e.code, e.message));
+      }
+      return Promise.resolve(blobOf(new Uint8Array(r.ok), JSON.parse(r.head).type));
     } catch (e) {
       return Promise.reject(e);
     }
@@ -180,6 +271,7 @@
       secret(name) {
         return new SecretHandle(name, "{}");
       },
+      blob: readBlob,
       log: console.log,
     };
     return Object.freeze(ctx);
@@ -475,11 +567,44 @@
 
   const crypto = Object.freeze({ getRandomValues, randomUUID, subtle: Object.freeze(subtle) });
 
+  // `Uint8Array.prototype.toBase64` and `Uint8Array.fromBase64` (ES2026),
+  // where the engine lacks them: a file goes to most APIs as base64 in JSON.
+  function alphabet(options, what) {
+    const a = options && options.alphabet !== undefined ? String(options.alphabet) : "base64";
+    if (a !== "base64" && a !== "base64url") {
+      throw new TypeError(what + ': alphabet is "base64" or "base64url"');
+    }
+    return a === "base64url";
+  }
+  if (typeof Uint8Array.prototype.toBase64 !== "function") {
+    Object.defineProperty(Uint8Array.prototype, "toBase64", {
+      value: function toBase64(options) {
+        if (!(this instanceof Uint8Array)) throw new TypeError("toBase64: not a Uint8Array");
+        const url = alphabet(options, "toBase64");
+        return native.base64Encode(this.buffer, this.byteOffset, this.byteLength, url,
+          !!(options && options.omitPadding));
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+  if (typeof Uint8Array.fromBase64 !== "function") {
+    Object.defineProperty(Uint8Array, "fromBase64", {
+      value: function fromBase64(text, options) {
+        if (typeof text !== "string") throw new TypeError("fromBase64: the input must be a string");
+        return new Uint8Array(native.base64Decode(text, alphabet(options, "fromBase64")));
+      },
+      writable: true,
+      configurable: true,
+    });
+  }
+
   const define = (k, v) =>
     Object.defineProperty(globalThis, k, { value: v, writable: false, enumerable: false, configurable: false });
   define("fetch", fetch);
   define("Headers", Headers);
   define("Response", Response);
+  define("Blob", Blob);
   define("console", console);
   define("TextEncoder", TextEncoder);
   define("TextDecoder", TextDecoder);

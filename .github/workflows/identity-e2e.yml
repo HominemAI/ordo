@@ -85,6 +85,15 @@ jobs:
         working-directory: crates/ordo-identity-service/e2e
         run: npm ci && npm run typecheck
 
+      # The browsers are kept between runs: their download ran past the
+      # job's limit on 2026-10-31. --with-deps still installs the system
+      # libraries, and skips a browser it finds here.
+      - name: Keep the browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('crates/ordo-identity-service/e2e/package-lock.json') }}
+
       - name: Install Chromium
         working-directory: crates/ordo-identity-service/e2e
         run: npx playwright install --with-deps chromium

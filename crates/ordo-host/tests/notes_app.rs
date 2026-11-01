@@ -94,8 +94,34 @@ const PAGE_KEY: &str = "44444444444444444444444444444444444444444444444444444444
 /// The page, as it runs locally: Vite's dev server.
 const PAGE: &str = "http://localhost:5173";
 
-/// Every test boots a whole deployment with its own pools.
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Every test boots a deployment on a database of its own, a port of its own
+/// and a log file named for its database, so tests share no state and run in
+/// parallel. The exception is a test that counts server connections: it needs
+/// the server to itself, or the headroom under `max_connections` it reads
+/// means nothing. Those tests are named `connections_*`, take the write side
+/// of this lock, and every other test takes the read side. The lock only
+/// orders tests inside one process. Under nextest, which runs one process per
+/// test, the `connections_*` tests are kept to one at a time by a test group
+/// that matches that prefix.
+static SERVER: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+/// How many deployments run at once in one process. Each holds a pool of 6
+/// and its tenants' pools, and the server's `max_connections` is 100. Eight
+/// at once ran it out ("too many clients already"), and a tenant then sat in
+/// provisioning until the test gave up.
+const AT_ONCE: usize = 4;
+static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(AT_ONCE);
+
+/// A place to run a test that does not count connections: the read side of
+/// [`SERVER`] and one of [`AT_ONCE`] slots. Held until the test ends.
+async fn shared() -> (
+    tokio::sync::RwLockReadGuard<'static, ()>,
+    tokio::sync::SemaphorePermit<'static>,
+) {
+    let read = SERVER.read().await;
+    let slot = SLOTS.acquire().await.expect("slots");
+    (read, slot)
+}
 
 fn cfg(db: &str) -> PoolConfig {
     PoolConfig {
@@ -742,7 +768,7 @@ fn create_note(d: &Deployment, s: &Session, title: &str, body: &str) -> String {
 /// other's tenant, and a later sign-in lands in the same tenant.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_people_sign_up_and_each_keeps_notes_in_a_tenant_of_their_own() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_signup", Some(PAGE)).await;
     let ada_device = device(21, "ada");
     let bo_device = device(22, "bo");
@@ -906,7 +932,7 @@ async fn two_people_sign_up_and_each_keeps_notes_in_a_tenant_of_their_own() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_with_no_routing_or_credentials_settings_gives_a_new_tenant_its_own_database_and_serves_it(
 ) {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_first_call", Some(PAGE)).await;
     for (seed, name) in [(61u8, "cy"), (62, "di"), (63, "ed")] {
         let (status, done) = register(&d, &device(seed, name), name);
@@ -985,7 +1011,7 @@ async fn has_column(pool: &Pool, table: &str, column: &str) -> bool {
 /// program's `gone` field did.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_program_update_leaves_the_people_who_signed_up_working() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_update", Some(PAGE)).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
@@ -1048,7 +1074,7 @@ async fn a_program_update_leaves_the_people_who_signed_up_working() {
 /// reads the refusal in `/health/ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_change_one_tenants_data_cannot_take_closes_that_tenant_alone() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot_with(
         "ordo_notes_refused",
         Some(PAGE),
@@ -1137,7 +1163,7 @@ async fn a_change_one_tenants_data_cannot_take_closes_that_tenant_alone() {
 /// is refused, and so is every origin when the variable is unset.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_on_another_origin_reaches_the_door_and_an_unlisted_one_does_not() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_cors", Some(PAGE)).await;
 
     fn preflight(
@@ -1280,7 +1306,7 @@ fn principal_of(token: &str) -> String {
 /// page's own modules under Node against the running binary.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_page_keeps_notes_on_the_device_and_erases_a_closed_share() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let web = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/notes/web");
     if !web.join("node_modules/.bin/vitest").exists() {
         let said =
@@ -1328,7 +1354,7 @@ async fn the_page_keeps_notes_on_the_device_and_erases_a_closed_share() {
 /// unshares one note and then closes the window.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_note_shared_with_another_person_is_read_only_and_can_be_taken_back() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_share", Some(PAGE)).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
@@ -1554,7 +1580,7 @@ async fn a_note_shared_with_another_person_is_read_only_and_can_be_taken_back() 
 /// wait for its next reconnect.
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_share_window_reaches_a_feed_open_on_it() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_window_feed", Some(PAGE)).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
@@ -1638,7 +1664,7 @@ async fn closing_a_share_window_reaches_a_feed_open_on_it() {
 /// `created`, which the page supplies.
 #[tokio::test(flavor = "multi_thread")]
 async fn notes_are_listed_newest_first_past_ten() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_order", Some(PAGE)).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     for i in 0..12 {
@@ -1656,7 +1682,7 @@ async fn notes_are_listed_newest_first_past_ten() {
 /// only heartbeats. Creating the tenant now adds the listener.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_feed_on_a_tenant_made_after_boot_carries_a_note_written_later() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_feed", Some(PAGE)).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
 
@@ -1758,7 +1784,7 @@ fn live(d: &Deployment, what: &str) {
 /// and exits within its grace, and the feed is cut.
 #[tokio::test(flavor = "multi_thread")]
 async fn sigterm_with_a_live_feed_open_ends_the_process_within_its_grace() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let mut d = Deployment::boot_with(
         "ordo_notes_sigterm",
         Some(PAGE),
@@ -1813,7 +1839,7 @@ async fn sigterm_with_a_live_feed_open_ends_the_process_within_its_grace() {
 /// idle.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_share_peeks_never_stop_the_door_accepting() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_peeks", Some(PAGE)).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let note = create_note(&d, &ada, "Groceries", "milk");
@@ -1870,7 +1896,7 @@ async fn concurrent_share_peeks_never_stop_the_door_accepting() {
 /// sign-ups, with a feed open. The door keeps answering.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_door_keeps_answering_through_sign_ups_a_share_and_an_accept_with_a_feed_open() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot_with("ordo_notes_keeps", Some(PAGE), &[]).await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let _feed = open_feed(&d, &ada);
@@ -1965,8 +1991,8 @@ fn tenant_connections(d: &Deployment) -> usize {
 /// connections between them, because a tenant that is not being used holds
 /// none.
 #[tokio::test(flavor = "multi_thread")]
-async fn thirty_people_sign_up_on_a_default_server() {
-    let _serial = SERIAL.lock().await;
+async fn connections_thirty_people_sign_up_on_a_default_server() {
+    let _alone = SERVER.write().await;
     let admin = Pg {
         db: "postgres".into(),
         ..Pg::default()
@@ -2014,8 +2040,8 @@ async fn thirty_people_sign_up_on_a_default_server() {
 /// connections are all released. The tenant then works again, on connections
 /// dialled when it asked, and a new feed still hears a write.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_idle_tenant_releases_its_connections_within_the_idle_period() {
-    let _serial = SERIAL.lock().await;
+async fn connections_an_idle_tenant_releases_its_connections_within_the_idle_period() {
+    let _alone = SERVER.write().await;
     let idle_secs = 2u64;
     let d = Deployment::boot_with(
         "ordo_notes_idle",
@@ -2078,7 +2104,7 @@ async fn an_idle_tenant_releases_its_connections_within_the_idle_period() {
 /// `homework`.
 #[tokio::test(flavor = "multi_thread")]
 async fn notes_tagged_lists_only_the_notes_whose_tags_hold_the_word() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_tags", Some(PAGE)).await;
     let ada = sign_up(&d, &device(31, "ada-tags"), "Ada");
     for (title, tags) in [
@@ -2164,7 +2190,7 @@ fn sign_in_by_email(
 /// their note.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_person_signs_in_with_an_emailed_code_and_a_later_code_finds_the_same_notes() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let relay = mail_support::FakeRelay::start_plaintext().await;
     let port = relay.port.to_string();
     let d = Deployment::boot_with(
@@ -2238,7 +2264,7 @@ fn recipients(s: &mail_support::Session) -> Vec<String> {
 /// reminder fired and sends nothing more.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_due_reminder_fires_once_and_mails_only_the_owner_with_two_servers_running() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let relay = mail_support::FakeRelay::start_plaintext().await;
     let port = relay.port.to_string();
     // v2 keeps files on notes, so the door needs a blob store.
@@ -2395,7 +2421,7 @@ async fn a_due_reminder_fires_once_and_mails_only_the_owner_with_two_servers_run
 /// lists it, so the page stops offering to add one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_guest_adds_a_passkey_and_the_passkey_signs_in_to_the_same_notes() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d =
         Deployment::boot_with("ordo_notes_guest", Some(PAGE), &[("ORDO_AUTH_GUEST", "on")]).await;
 
@@ -2484,7 +2510,7 @@ async fn a_guest_adds_a_passkey_and_the_passkey_signs_in_to_the_same_notes() {
 /// words; only a missing one answers 404 or 405.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_served_door_mounts_the_claim_hand_off_callback_and_identity_routes() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let d = Deployment::boot("ordo_notes_routes", Some(PAGE)).await;
     for (method, path) in [
         ("POST", "/auth/claim/begin"),
@@ -2567,7 +2593,7 @@ fn median_ms(n: usize, mut f: impl FnMut()) -> f64 {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "a benchmark: scripts/guard-index-bench.sh"]
 async fn my_notes_at_five_thousand_notes_uses_the_access_index() {
-    let _serial = SERIAL.lock().await;
+    let _shared = shared().await;
     let blobs = format!(
         "fs:{}",
         std::env::temp_dir()

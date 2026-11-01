@@ -102,8 +102,8 @@ jobs:
     # the steps below.
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
-    # The default is six hours; the failure shape here is a wait on a
-    # service container that never became healthy.
+    # The default is six hours; the failure shape here is a wait that
+    # never ends.
     timeout-minutes: 30
     # The suite runs as 5 shards at once (`scripts/ci-test-shard.sh`).
     # `rest` is every crate but ordo-host, and also runs the once-only
@@ -125,58 +125,15 @@ jobs:
     # A run without one would silently degrade to compile-only coverage,
     # which is the failure mode the harness exists to prevent.
     #
-    # An empty image skips the service, so a shard the change does not
-    # reach starts no Postgres.
-    services:
-      postgres:
-        image: ${{ ((matrix.shard == 'rest' && needs.changes.outputs.rest) || needs.changes.outputs.host) == 'true' && 'postgres:17' || '' }}
-        env:
-          POSTGRES_USER: ordo
-          POSTGRES_PASSWORD: ordo
-          POSTGRES_DB: ordo_conformance
-        ports: ['5432:5432']
-        # **This runs at the image's default `max_connections = 100`, and
-        # one suite alone needs 99.** Measured 2026-09-24:
-        # `crates/ordo-host/tests/runtime.rs` peaks at 99 client backends
-        # by itself, because its ~22 tests run in parallel and each stand
-        # up a real deployment with several pools. Cargo runs test binaries
-        # one at a time, so this is one suite against the ceiling rather
-        # than many suites overlapping. `scripts/conformance-pg.sh` was
-        # raised to 300 for exactly this; at 100 that suite fails four
-        # tests with `FATAL: sorry, too many clients already` even on a
-        # freshly started cluster.
-        #
-        # **It is not fixed here**, and the fix is not a one-line option: a
-        # GitHub Actions service container takes no `command:`, and
-        # `max_connections` needs a restart rather than a reload, so
-        # changing it means dropping this service block and starting
-        # Postgres from a step instead. On the self-hosted runner that
-        # still means Docker — the pod runs a privileged `docker:27-dind`
-        # sidecar, which is the only reason service containers work here at
-        # all, and containers it starts share the pod's network namespace
-        # so a published port is still reachable at `localhost`. Nothing
-        # about it becomes a k3s object.
-        #
-        # Raised rather than made, because it changes how this job gets its
-        # database on a runner that has only just moved. If CI fails with
-        # `too many clients`, this is why.
-        #
-        # **Shared memory is 1 GB.** Docker gives a container 64 MB of
-        # `/dev/shm` by default. On 2026-10-21 (run 39577145887) Postgres ran
-        # out of it mid-suite ("could not resize shared memory segment ... No
-        # space left on device"), crashed into recovery, and 71 tests after
-        # it failed. `--shm-size` is accepted here, unlike `command:`.
-        options: >-
-          --shm-size=1g
-          --health-cmd "pg_isready -U ordo"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
+    # The server is one of the cluster's CI Postgres servers, leased for the
+    # job by `scripts/ci-pg-lease.sh` (owner ruling 2026-11-01). Each runs
+    # with max_connections 300 (the runtime suite alone peaks at 99), 1 GB
+    # of shared memory, and no durable commits. They are defined in
+    # smg_infrastructure, gha-runner/ci-postgres.yaml.
     env:
       REACHED: ${{ (matrix.shard == 'rest' && needs.changes.outputs.rest) || needs.changes.outputs.host }}
       ORDO_CI_CRATES: ${{ needs.changes.outputs.crates }}
-      ORDO_PG_HOST: localhost
+      # ORDO_PG_HOST comes from the lease step.
       ORDO_PG_PORT: '5432'
       ORDO_PG_USER: ordo
       ORDO_PG_DB: ordo_conformance
@@ -221,18 +178,16 @@ jobs:
         if: env.REACHED == 'true'
         run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
 
-      # Runner disk noise only; the product fix is the store pool's size
-      # and wait (board task `store-pool-held-blocks-signin`). See the script.
-      - name: Postgres without durable commits (CI only)
+      - name: Lease a CI Postgres server
         if: env.REACHED == 'true'
-        run: bash scripts/ci-pg-fast-commits.sh
+        run: bash scripts/ci-pg-lease.sh
 
       # `crates/ordo-host/tests/dev_loop.rs` starts its own Postgres with
-      # `initdb` and `pg_ctl`, and skipped without them (the service container
-      # above gives psql and no server binaries). The server package puts them
+      # `initdb` and `pg_ctl`, and skipped without them (the leased server
+      # gives psql and no server binaries). The server package puts them
       # in /usr/lib/postgresql/<n>/bin, which `ordo dev` searches by itself.
       # `create_main_cluster = false` stops Debian creating and starting a
-      # cluster on 5432, where the service container already listens.
+      # cluster of its own on 5432.
       # `initdb` refuses to run as root, so the next step fails early and
       # plainly if this runner ever does; the test would otherwise fail
       # with initdb's own message.
@@ -308,8 +263,8 @@ jobs:
 
       # `crates/ordo-blob/tests/contract.rs` runs the S3 contract only when
       # ORDO_BLOB_S3_* are set. The stand-in is SeaweedFS (`weed server -s3`),
-      # started with docker from a step: a service container takes no
-      # `command:` (see the Postgres note above). The pod's docker sidecar
+      # started with docker from a step, because a service container takes no
+      # `command:`. The pod's docker sidecar
       # shares its network, so the port is reachable at localhost. The keys
       # guard nothing: the server lives for this job only and listens on
       # loopback. SeaweedFS reads its one access key from AWS_ACCESS_KEY_ID
@@ -461,30 +416,16 @@ jobs:
             functions: '1'
     name: upgrade (${{ matrix.previous }})
     needs: changes
-    services:
-      postgres:
-        image: ${{ needs.changes.outputs.upgrade == 'true' && 'postgres:17' || '' }}
-        env:
-          POSTGRES_USER: ordo
-          POSTGRES_PASSWORD: ordo
-          POSTGRES_DB: ordo_conformance
-        ports: ['5432:5432']
-        options: >-
-          --shm-size=1g
-          --health-cmd "pg_isready -U ordo"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       REACHED: ${{ needs.changes.outputs.upgrade }}
-      ORDO_PG_HOST: localhost
+      # ORDO_PG_HOST comes from the lease step.
       ORDO_PG_PORT: '5432'
       ORDO_PG_USER: ordo
       ORDO_PG_DB: ordo_conformance
       PGPASSWORD: ordo
       ORDO_PG_PASSWORD: ordo
       ORDO_PSQL: psql
-      # The service container is the database; the script starts none.
+      # The leased CI server is the database; the script starts none.
       ORDO_UPGRADE_OWN_PG: '0'
     steps:
       - name: Not reached by this change
@@ -506,6 +447,9 @@ jobs:
       - name: Install psql
         if: env.REACHED == 'true'
         run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+      - name: Lease a CI Postgres server
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-pg-lease.sh
       - name: Upgrade continuity
         if: env.REACHED == 'true'
         # `runner` is not readable in a job's `env`, only in a step's.

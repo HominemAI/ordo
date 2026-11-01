@@ -1221,3 +1221,15 @@
 {"seq": 1221, "item": "ci-postgres-a-dedicated-instance-on", "ask": 3, "at": "2026-11-01", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1222, "item": "ci-postgres-a-dedicated-instance-on", "ask": 4, "at": "2026-11-01T08:50:18Z", "status": "open", "text": "ok", "source": "page", "read": true}
 {"seq": 1223, "item": "ci-postgres-a-dedicated-instance-on", "ask": 4, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1224, "item": "ci-max-connections", "ask": 1, "at": "2026-11-01T09:10:39Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1225, "item": "ci-max-connections", "ask": 2, "at": "2026-11-01T09:10:49Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1226, "item": "cut-test-time-by-building-and", "ask": 1, "at": "2026-11-01T09:12:38Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1227, "item": "cut-test-time-by-building-and", "ask": 2, "at": "2026-11-01T09:12:47Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1228, "item": "cut-test-time-by-building-and", "ask": 3, "at": "2026-11-01T09:12:57Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1229, "item": "cut-test-time-by-building-and", "ask": 0, "at": "2026-11-01T09:13:17Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1230, "item": "cut-test-time-by-building-and", "ask": 4, "at": "2026-11-01T09:13:30Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1231, "item": "cut-test-time-by-building-and", "ask": 1, "at": "2026-11-01", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1232, "item": "cut-test-time-by-building-and", "ask": 3, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1233, "item": "cut-test-time-by-building-and", "ask": 4, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1234, "item": "cut-test-time-by-building-and", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1235, "item": "ci-max-connections", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}

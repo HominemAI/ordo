@@ -6483,6 +6483,14 @@ built **on** it.
       **What this leaves owed:** a successful release run. Nothing has
       published a release page yet.
 
+- [ ] **15b · Tests build once and set up once.** Owner, 2026-11-01 (all
+      4 asks ruled yes): cargo-nextest with one build shipped to the
+      shards; per-file app setup copied per test by template database,
+      after measuring; `refine_audit` in full on pull requests and nightly
+      only; `notes_app` tests in parallel unless they share state.
+      Measured: 32 min of tests, ~1 min compile per shard.
+      Board: `cut-test-time-by-building-and`.
+
 - [ ] **16a · The schema-diff engine's own three.** All from `§13a`/`§14a`
       and one from reading the code:
       - **`ordo_schema::diff::same_type` canonicalises the typmod away.**

@@ -1337,6 +1337,7 @@ async fn the_body_and_file_caps_refuse_and_name_their_settings() {
             functions::FnSettings {
                 body_bytes: 2048,
                 blob_bytes: 10,
+                ..Default::default()
             },
         ),
     )

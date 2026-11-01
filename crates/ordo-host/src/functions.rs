@@ -413,13 +413,15 @@ mod engine_cache_tests {
     }
 }
 
-/// The two settings of increment 2, read at boot.
+/// The three settings of increment 2, read at boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FnSettings {
     /// `ORDO_FN_BODY_BYTES`: the largest body `POST /fn/<name>` reads.
     pub body_bytes: usize,
     /// `ORDO_FN_BLOB_BYTES`: bytes one call may read through `ctx.blob`.
     pub blob_bytes: u64,
+    /// `ORDO_FN_FETCH_BODY_BYTES`: the largest body one `fetch` sends.
+    pub fetch_body_bytes: usize,
 }
 
 impl Default for FnSettings {
@@ -427,9 +429,13 @@ impl Default for FnSettings {
         FnSettings {
             body_bytes: ordo_api::router::FN_BODY_LIMIT,
             blob_bytes: ordo_fn::DEFAULT_BLOB_BYTES,
+            fetch_body_bytes: ordo_egress::DEFAULT_REQUEST_BODY_CAP,
         }
     }
 }
+
+/// The largest `ORDO_FN_FETCH_BODY_BYTES`: the body is held in memory whole.
+pub const MAX_FETCH_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The largest `ORDO_FN_BODY_BYTES`: a call's JSON is held in memory whole.
 pub const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
@@ -460,10 +466,25 @@ impl FnSettings {
             0,
             Limits::ceilings().blob_bytes,
         )?;
+        let fetch = bytes(
+            ordo_egress::REQUEST_BODY_ENV,
+            d.fetch_body_bytes as u64,
+            1024,
+            MAX_FETCH_BODY_BYTES,
+        )?;
         Ok(FnSettings {
             body_bytes: body as usize,
             blob_bytes: blob,
+            fetch_body_bytes: fetch as usize,
         })
+    }
+
+    /// The egress kernel's limits for functions, with this request cap.
+    pub fn fetch_limits(&self) -> ordo_egress::FnLimits {
+        ordo_egress::FnLimits {
+            request_body: self.fetch_body_bytes,
+            ..ordo_egress::FnLimits::default()
+        }
     }
 }
 
@@ -484,6 +505,18 @@ mod settings_tests {
         let d = read(&[]).unwrap();
         assert_eq!(d.body_bytes, 1024 * 1024);
         assert_eq!(d.blob_bytes, 20 * 1024 * 1024);
+        assert_eq!(d.fetch_body_bytes, 32 * 1024 * 1024);
+        // A whole default file fits out as base64, with room for its JSON.
+        assert!(d.fetch_body_bytes as u64 > d.blob_bytes.div_ceil(3) * 4 + 4096);
+        assert_eq!(
+            read(&[("ORDO_FN_FETCH_BODY_BYTES", "67108864")])
+                .unwrap()
+                .fetch_limits()
+                .request_body,
+            64 * 1024 * 1024
+        );
+        let (var, _) = read(&[("ORDO_FN_FETCH_BODY_BYTES", "12")]).unwrap_err();
+        assert_eq!(var, "ORDO_FN_FETCH_BODY_BYTES");
         let s = read(&[
             ("ORDO_FN_BODY_BYTES", "2097152"),
             ("ORDO_FN_BLOB_BYTES", "0"),

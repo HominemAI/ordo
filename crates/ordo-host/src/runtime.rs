@@ -5271,8 +5271,9 @@ async fn assemble_program(
         ordo_egress::DenyList::from_vars(&env)
             .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?
     };
-    // `ORDO_FN_BODY_BYTES` and `ORDO_FN_BLOB_BYTES`: a call's body, and the
-    // bytes one call may read through `ctx.blob`.
+    // `ORDO_FN_BODY_BYTES`, `ORDO_FN_BLOB_BYTES` and
+    // `ORDO_FN_FETCH_BODY_BYTES`: a call's body, the bytes one call may read
+    // through `ctx.blob`, and the body one `fetch` may send.
     let functions_settings = {
         let env = |k: &str| std::env::var(k).ok();
         crate::functions::FnSettings::from_vars(&env)
@@ -5384,7 +5385,7 @@ async fn assemble_program(
                     secrets_for_functions.clone(),
                     ordo_egress::TlsRoots::webpki(),
                     functions_deny,
-                    ordo_egress::FnLimits::default(),
+                    functions_settings.fetch_limits(),
                 ),
                 secrets_for_functions,
             )

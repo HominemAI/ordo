@@ -60,8 +60,13 @@ use crate::deny::{DeniedCategory, DenyList};
 use crate::dest::{resolve_and_pin, Allowlist, HttpsUrl, PinnedDestination};
 use crate::refusal::Refusal;
 
-/// Request body, by default: 10 MB (§6).
-pub const DEFAULT_REQUEST_BODY_CAP: usize = 10 * 1024 * 1024;
+/// Request body, by default: 32 MiB. Plan §6 said 10 MB; files in
+/// (increment 2) raised it so a file of the whole default
+/// `ORDO_FN_BLOB_BYTES` (20 MiB) goes out as base64 inside JSON.
+pub const DEFAULT_REQUEST_BODY_CAP: usize = 32 * 1024 * 1024;
+/// The setting that sets [`FnLimits::request_body`]. Named here because the
+/// refusal names it.
+pub const REQUEST_BODY_ENV: &str = "ORDO_FN_FETCH_BODY_BYTES";
 /// Response body, by default: 25 MB (§6).
 pub const DEFAULT_RESPONSE_BODY_CAP: usize = 25 * 1024 * 1024;
 /// One request's time, by default: 60 s (§6). Covers DNS, connect, the
@@ -373,14 +378,18 @@ impl fmt::Display for FetchError {
                 "secret `{secret}` is not bound to `{host}`, so it is not sent there; the \
                  program binds it with `secret {secret} for <host>`"
             ),
-            FetchError::BodyTooLarge { limit, side } => write!(
+            FetchError::BodyTooLarge {
+                limit,
+                side: BodySide::Request,
+            } => write!(
                 f,
-                "the {} body is over its limit of {limit} bytes",
-                match side {
-                    BodySide::Request => "request",
-                    BodySide::Response => "response",
-                }
+                "the request body is over its limit of {limit} bytes; send less, or raise \
+                 {REQUEST_BODY_ENV}"
             ),
+            FetchError::BodyTooLarge {
+                limit,
+                side: BodySide::Response,
+            } => write!(f, "the response body is over its limit of {limit} bytes"),
             FetchError::Timeout { after_ms } => write!(f, "timed out after {after_ms}ms"),
             FetchError::Store { detail } => {
                 write!(f, "the secret store did not answer: {detail}; try again")
@@ -1025,13 +1034,21 @@ mod tests {
         });
         let mut r = req("https://nowhere.invalid/", vec![]);
         r.body = vec![0; 5];
+        let err = e.check(&r).err().unwrap();
         assert_eq!(
-            e.check(&r).err().unwrap(),
+            err,
             FetchError::BodyTooLarge {
                 limit: 4,
                 side: BodySide::Request
             }
         );
+        assert!(
+            err.to_string().contains("ORDO_FN_FETCH_BODY_BYTES"),
+            "the refusal names the setting: {err}"
+        );
+        // At the cap exactly, the body passes the cap check.
+        r.body = vec![0; 4];
+        assert_ne!(e.check(&r).err().map(|e| e.kind()), Some("body_too_large"));
     }
 
     #[test]

@@ -1574,8 +1574,10 @@ async fn a_fresh_database_and_a_master_key_boot_with_a_system_space() {
         "SELECT count(*) FROM \"members\" WHERE \"$space\" = '{}'",
         ordo_host::provision::SYSTEM_SPACE
     );
+    // 30 s, not 5: on a loaded CI node the version swap and the founding
+    // row came after 5 s (2026-11-01). The loop ends as soon as it lands.
     let mut founding = String::new();
-    for _ in 0..100 {
+    for _ in 0..600 {
         founding = pool.rows(&count).await.expect("count")[0][0]
             .clone()
             .unwrap_or_default();
@@ -1588,7 +1590,7 @@ async fn a_fresh_database_and_a_master_key_boot_with_a_system_space() {
     // The node says in `$nodes` that it serves the version and finished
     // its tenant catch-up for it: what `ordo apply` waits on (2026-10-22).
     let mut said = None;
-    for _ in 0..200 {
+    for _ in 0..600 {
         let nodes = ordo_exec::nodes::live(&pool).await.expect("nodes");
         let p = ordo_exec::nodes::progress(&nodes, &art.version);
         if !nodes.is_empty() && p.settled() {

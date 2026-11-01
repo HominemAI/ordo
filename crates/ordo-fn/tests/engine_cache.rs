@@ -57,6 +57,8 @@ async fn answers(h: &FnHost) -> Duration {
             limits: Limits::default(),
             fetch: Arc::new(NoFetch),
             scrub: Arc::new(NoScrub),
+            blobs: Arc::new(ordo_fn::NoBlobs),
+            blob_args: Vec::new(),
         })
         .await;
     // SHA-256("abc") starts with 0xba.

@@ -299,6 +299,11 @@ async fn market_deployment(
     (f, pg, deployment, pool)
 }
 
+/// How long a poll waits before failing. A poll returns as soon as its
+/// condition holds, so this costs nothing on a pass. On 2026-11-01 (run
+/// 41292306761) 6 and 8 s ran out on a loaded CI node.
+const WAIT: Duration = Duration::from_secs(30);
+
 /// Poll an async condition instead of sleeping a guessed duration — every
 /// one of these tests waits on a real `Cadence::Tick` loop, and how long
 /// that takes depends on the machine running it.
@@ -342,7 +347,7 @@ async fn a_flush_writes_one_open_row_per_space_and_closes_the_previous_period() 
     let sup =
         usage_flush_supervisor(DB, metrics.clone(), "r-periods", Duration::from_secs(1)).await;
 
-    let first = poll(Duration::from_secs(4), || async {
+    let first = poll(WAIT, || async {
         let (_, rows) = usage::between(&pool, SPACE, 0, u64::MAX).await.unwrap();
         (!rows.is_empty()).then_some(rows)
     })
@@ -357,7 +362,7 @@ async fn a_flush_writes_one_open_row_per_space_and_closes_the_previous_period() 
     // Feed the ledger again and wait for the period to roll over: a
     // second row appears, for a later period, and the first one closes.
     metrics.usage_request(SPACE, ordo_api::CostClass::Sql, Some(5));
-    let rolled = poll(Duration::from_secs(8), || async {
+    let rolled = poll(WAIT, || async {
         let (_, rows) = usage::between(&pool, SPACE, 0, u64::MAX).await.unwrap();
         // Wait for the close too: the flush writes the new period's row and
         // closes the old one in separate steps, and a loaded machine can
@@ -468,7 +473,7 @@ async fn shutdown_closes_the_current_period() {
     )
     .await;
 
-    let rows = poll(Duration::from_secs(4), || async {
+    let rows = poll(WAIT, || async {
         let (_, rows) = usage::between(&pool, SPACE, 0, u64::MAX).await.unwrap();
         (!rows.is_empty()).then_some(rows)
     })
@@ -663,7 +668,7 @@ async fn a_periods_rows_reconstruct_what_the_test_issued() {
     )
     .await;
 
-    let (space_rows, replica_rows) = poll(Duration::from_secs(8), || async {
+    let (space_rows, replica_rows) = poll(WAIT, || async {
         let (s, r) = usage::between(&pool, SPACE, 0, u64::MAX).await.unwrap();
         (!s.is_empty() && !r.is_empty()).then_some((s, r))
     })
@@ -729,7 +734,7 @@ async fn a_second_rollup_continues_from_chain_to_and_counts_nothing_twice() {
     let metrics = Arc::new(Metrics::new());
     let sup = usage_supervisor(DB, pool.clone(), deployment, metrics, vec![rollup]).await;
 
-    let first = poll(Duration::from_secs(4), || async {
+    let first = poll(WAIT, || async {
         let (rows, _) = usage::between(&pool, SPACE, 0, u64::MAX).await.unwrap();
         (!rows.is_empty()).then_some(rows)
     })
@@ -750,7 +755,7 @@ async fn a_second_rollup_continues_from_chain_to_and_counts_nothing_twice() {
         tx.commit().await.unwrap();
     }
 
-    let second = poll(Duration::from_secs(8), || async {
+    let second = poll(WAIT, || async {
         let (rows, _) = usage::between(&pool, SPACE, 0, u64::MAX).await.unwrap();
         (rows.len() >= 2).then_some(rows)
     })
@@ -903,7 +908,7 @@ async fn bytes_stored_names_its_method_and_the_estimated_column_alone_is_estimat
     let metrics = Arc::new(Metrics::new());
     let sup = usage_supervisor(DB, pool.clone(), deployment, metrics, vec![rollup]).await;
 
-    let row = poll(Duration::from_secs(6), || async {
+    let row = poll(WAIT, || async {
         let (rows, _) = usage::between(&pool, &space_str, 0, u64::MAX)
             .await
             .unwrap();
@@ -1040,7 +1045,7 @@ async fn the_rollup_walks_every_attached_target() {
     )
     .await;
 
-    let (default_row, attached_row) = poll(Duration::from_secs(8), || async {
+    let (default_row, attached_row) = poll(WAIT, || async {
         let (d, _) = usage::between(&control, DEFAULT_SPACE_NAME, 0, u64::MAX)
             .await
             .unwrap();
@@ -1174,7 +1179,7 @@ async fn an_unreachable_target_leaves_a_gap_not_a_zero() {
     // The reachable side must roll up despite the other target being down
     // — this is the half `usage.rollup could not reach every target`
     // used to refuse outright.
-    let default_row = poll(Duration::from_secs(8), || async {
+    let default_row = poll(WAIT, || async {
         let (d, _) = usage::between(&control, DEFAULT_SPACE_NAME, 0, u64::MAX)
             .await
             .unwrap();
@@ -1188,7 +1193,7 @@ async fn an_unreachable_target_leaves_a_gap_not_a_zero() {
     // The unreachable side leaves a gap, and it must be a real, non-empty
     // reason string rather than a placeholder — an operator reading
     // `$usage_gaps` reads why, not just that.
-    let gaps = poll(Duration::from_secs(5), || async {
+    let gaps = poll(WAIT, || async {
         let g = usage::gaps_between(&control, UNREACHABLE_SPACE_NAME, 0, u64::MAX)
             .await
             .unwrap();

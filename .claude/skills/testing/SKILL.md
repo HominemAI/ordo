@@ -36,7 +36,37 @@ Run the crate you changed plus the crates that depend on it:
 
 ```
 cargo test -p <crate>
+cargo nextest run -p <crate>      # what CI runs; same tests, many files at once
 ```
+
+CI runs cargo-nextest (since 2026-11-01). It is not installed by default:
+`bash scripts/ci-install-nextest.sh` fetches the pinned release and prints
+where it put it; copy `cargo-nextest` into `~/.cargo/bin`. `cargo install
+cargo-nextest --locked` also works.
+
+nextest runs each test in its own process, and tests from many test files
+at once. So:
+
+- A file-wide `static SERIAL: Mutex` no longer keeps a file's tests one at a
+  time. Neither does a `static ONCE` that seeds a shared database "once per
+  binary": it now seeds once per test, under the file's other tests.
+- Such files are listed in `.config/nextest.toml`, in a test group with
+  `max-threads = 1`. **A new test file with either pattern goes in that
+  list**, or it races under nextest and passes under `cargo test`.
+- Measured 2026-11-01: ordo-conformance without its group failed 49 of 359
+  tests; with it, all pass.
+- An in-process limit (a `Semaphore`, an `RwLock`) does not reach across
+  processes either. notes_app's deployments are capped by the `notes-app`
+  group (3), and the files that boot deployments one at a time by
+  `serial-in-file` (1): 4 at once against a 100-connection server. CI runs
+  at most 8 tests at once per shard (`test-threads` in the `ci` profile).
+- A test that counts the server's connections needs it to itself, which no
+  group gives. notes_app's `connections_*` tests run in a second pass of the
+  `host` shards, alone and one at a time.
+
+To run one CI shard here: `bash scripts/ci-test-shard.sh rest` (honours
+`ORDO_CI_CRATES`) or `bash scripts/ci-test-shard.sh host 1 4`. Add `--list`
+after `host K N` to see which tests a shard gets.
 
 The dependencies worth knowing:
 
@@ -119,11 +149,21 @@ Rename a job only together with the ruleset.
 
 ## The full suite: push and watch
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy and
-`cargo test --workspace --no-fail-fast` against a `postgres:17` service on
-the self-hosted runner. A push to `bleeding` runs only the reached crates;
-open the pull request to `main` for the full suite, or push with
-`ci: full`.
+CI (`.github/workflows/ci.yml`) runs on the self-hosted runner, each test
+job against its own leased CI Postgres server:
+
+- `build (tests)` compiles the test binaries once
+  (`scripts/ci-test-shard.sh archive`), uploads them as a nextest archive,
+  then runs the doc tests. It is not a required check.
+- `test (rest)` runs fmt, clippy, every crate but ordo-host and ordo-host's
+  unit tests, then the S3 contract, the C001 proof and the inventories.
+- `test (host K 4)` each run every 4th ordo-host integration test
+  (`--partition slice:K/4`).
+- The `test` jobs compile nothing. They fail when `build (tests)` did not
+  deliver; `test (rest)` also fails when the doc tests did.
+
+A push to `bleeding` runs only the reached crates; open the pull request to
+`main` for the full suite, or push with `ci: full`.
 
 ```
 git push
@@ -138,6 +178,8 @@ Reading a result:
 
 - Judge a run by the **result count and the failures**, not by the pass total
   alone. A run that covers half the workspace can still print a large number.
+- nextest prints one `PASS`/`FAIL` line per test and a `Summary` line per
+  shard (`N tests run: N passed`), not cargo's `test result:` lines.
 - `gh run list --commit <short sha>` returns nothing; match the `headSha`
   prefix in the JSON instead.
 - BSD `sed` does not treat `\t` as a tab. Parse logs with Python.
@@ -175,7 +217,9 @@ three are easy to reintroduce:
    usually a clock: a frozen test clock and a live one meet in the same
    second.
 2. **`--no-fail-fast`**, or one failing crate hides the rest of the workspace
-   and the run looks smaller than it is.
+   and the run looks smaller than it is. nextest stops at the first failure
+   by default; CI's `ci` profile (`NEXTEST_PROFILE=ci`) and the shard script
+   both turn that off.
 3. **Disk.** The runner fills up and Postgres dies with
    `PANIC ... No space left on device`. The workflow frees the preinstalled
    SDKs and builds with `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`.

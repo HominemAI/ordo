@@ -1219,3 +1219,5 @@
 {"seq": 1219, "item": "ci-runs-each-workflow-only-when", "ask": 0, "at": "2026-11-01T02:06:22Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1220, "item": "ci-postgres-a-dedicated-instance-on", "ask": 3, "at": "2026-11-01T07:33:06Z", "status": "open", "text": "yes", "source": "page", "read": true}
 {"seq": 1221, "item": "ci-postgres-a-dedicated-instance-on", "ask": 3, "at": "2026-11-01", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1222, "item": "ci-postgres-a-dedicated-instance-on", "ask": 4, "at": "2026-11-01T08:50:18Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1223, "item": "ci-postgres-a-dedicated-instance-on", "ask": 4, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}

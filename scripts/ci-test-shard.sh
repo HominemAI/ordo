@@ -135,7 +135,13 @@ case "$mode" in
     fi
     ;;
   rest)
-    filter=$(narrow "not package(ordo-host) & ((not (kind(lib) | kind(bin)) & not ($no_db)) | ($DB_UNIT))")
+    # These count the server's connections or time a pool's idle period,
+    # so tests beside them change the answer (PR 2, 2026-11-02: pool_idle
+    # saw its in-use connection closed, route_many_tenants counted 6 of 5).
+    # They run after the rest, one at a time, with nothing beside them.
+    alone='binary_id(ordo-exec::pool_idle) | binary_id(ordo-exec::route_many_tenants)'
+    filter=$(narrow "not package(ordo-host) & ((not (kind(lib) | kind(bin)) & not ($no_db)) | ($DB_UNIT)) & not ($alone)")
+    alone=$(narrow "not package(ordo-host) & ($alone)")
     if [ "$all" = 1 ]; then
       build=(--workspace --exclude ordo-host)
     else
@@ -150,7 +156,11 @@ case "$mode" in
       fi
     fi
     # A reached crate may have no tests here at all; that is not a failure.
-    nextest run "${build[@]}" -- --no-fail-fast --no-tests warn -E "$filter"
+    status=0
+    nextest run "${build[@]}" -- --no-fail-fast --no-tests warn -E "$filter" || status=$?
+    nextest run "${build[@]}" -- --no-fail-fast --no-tests warn --test-threads 1 \
+      -E "$alone" || status=$?
+    exit "$status"
     ;;
   host)
     k="${2:?shard number}"

@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { affected, checkMap, outputs, prefixes, testFilter } from './ci-affected.mjs';
+import { affected, checkMap, deferToPullRequest, everything as runAll, outputs, prefixes, testFilter } from './ci-affected.mjs';
 
 const packages = [
   { name: 'ordo-syntax', dir: 'crates/ordo-syntax', deps: [] },
@@ -385,6 +385,18 @@ console.log('ok   testFilter');
     failed += problems.length;
     for (const m of problems) console.log(`FAIL test map: ${m}`);
   } else console.log(`ok   test map: ${src.length} ordo-host source files, ${bins.length} test binaries`);
+}
+
+// A push that would run everything, with a pull request to main open,
+// runs the unit tier alone.
+{
+  const d = deferToPullRequest(outputs(runAll('.github/ changed', packages)));
+  const want = { unit: 'true', rest: 'false', host: 'false', upgrade: 'false', notes_e2e: 'false', console_e2e: 'false', identity_e2e: 'false', authz: 'false', clients: '', examples: '' };
+  const bad = Object.entries(want).filter(([k, v]) => d[k] !== v);
+  if (bad.length) {
+    failed += 1;
+    console.log(`FAIL deferToPullRequest: ${bad.map(([k]) => `${k}=${d[k]}`).join(' ')}`);
+  } else console.log('ok   deferToPullRequest: an open pull request leaves the unit tier alone');
 }
 
 if (failed) {

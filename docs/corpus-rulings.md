@@ -11796,3 +11796,17 @@ Pull requests to `main` still run everything.
   the fast job to the main ruleset as a required check once it lands. Also
   from the owner: "no-instance unit tests should run without much fuss",
   ideally done in under a minute, "and anything else happens behind them."
+
+## 2026-11-02: time-sensitive tests
+
+Board task `time-sensitive-tests-fail-when-other-tests` (15b).
+
+- Ask 2 ("Yes."): while a pull request from `bleeding` to `main` is open,
+  a push that would run everything runs the unit tier alone. The pull
+  request runs everything on the same commits. Two full runs on one node at
+  once had failed timing tests that pass alone.
+- Ask 1, the owner's reply: "I think performance testing should not be part
+  of normal regression testing. So only on merge to dev or main. Like there
+  should be a different path for optimization." Put back as two asks: load
+  and stress tests to a perf job on pull requests and nightly, and
+  behaviour tests that use time kept in regression on a test clock.

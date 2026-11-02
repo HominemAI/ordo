@@ -1252,3 +1252,8 @@
 {"seq": 1252, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 0, "at": "2026-11-02T04:25:12Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1253, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 1, "at": "2026-11-02", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1254, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 3, "at": "2026-11-02", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1255, "item": "test-in-proportion-to-the-change", "ask": 6, "at": "2026-11-02T06:50:58Z", "status": "open", "text": "yep", "source": "page", "read": true}
+{"seq": 1256, "item": "test-in-proportion-to-the-change", "ask": 7, "at": "2026-11-02T06:51:19Z", "status": "open", "text": "yep", "source": "page", "read": true}
+{"seq": 1257, "item": "test-in-proportion-to-the-change", "ask": 0, "at": "2026-11-02T06:51:25Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1258, "item": "test-in-proportion-to-the-change", "ask": 6, "at": "2026-11-02", "status": "decided", "text": "yep", "source": "record", "read": true}
+{"seq": 1259, "item": "test-in-proportion-to-the-change", "ask": 7, "at": "2026-11-02", "status": "decided", "text": "yep", "source": "record", "read": true}

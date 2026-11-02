@@ -31,6 +31,36 @@ serial-in-file = { max-threads = 1 }
 notes-app = { max-threads = 3 }
 # Files that seed a shared, fixed-name database once per process.
 seeded-once = { max-threads = 1 }
+# Behaviour tests whose time lives in Postgres or in a loop no test clock
+# reaches yet (owner ruling 2026-11-02, ask 3 on board task
+# `time-sensitive-tests-fail-when-other-tests`). They run one at a time,
+# and CI runs `group(timing-alone)` after the rest with nothing beside it.
+# A test that moves to a test clock leaves this list.
+timing-alone = { max-threads = 1 }
+
+# Why each is here:
+# - supervisor leadership and secevent claims: leadership is a Postgres
+#   advisory lock, dialled over a fresh connection bounded by the tick.
+# - deploy_apply, undo_space: they wait on a Postgres lock.
+# - reseal, blob_gc, usage, routines: the supervisor's own clock
+#   (`now_secs`) and its worker ticks run on real time, beside real
+#   Postgres I/O. tokio's paused clock skips ahead while a query is in
+#   flight and fires the connect timeout, so it cannot be used. A manual
+#   clock for the supervisor is the seam still owed.
+# - ordo-cli apply_wait: it boots a real ordo-host binary.
+# This override comes first: a test takes the first group that matches.
+[[profile.default.overrides]]
+filter = '''
+    (binary_id(ordo-host::supervisor) & (test(leadership_fails_over_between_two_supervisors) | test(/^secevent_.*_claims_its_own_schedule_once_per_period$/)))
+  | (binary_id(ordo-host::deploy_apply) & test(the_lock_is_held_while_an_apply_is_running))
+  | (binary_id(ordo-exec::undo_space) & test(a_lock_holds_this_space_s_row))
+  | (binary_id(ordo-host::reseal) & test(a_wedged_pass_raises_the_stuck_gauge))
+  | (binary_id(ordo-host::blob_gc) & test(/^the_sweep_runs_on_its_cadence/))
+  | binary_id(ordo-host::usage)
+  | (binary_id(ordo-host::routines) & test(a_scheduled_routine_runs_on_time_and_records_its_act))
+  | (binary_id(ordo-cli::apply_wait) & test(apply_returns_only_after_the_node_serves_and_caught_up))
+'''
+test-group = 'timing-alone'
 
 [[profile.default.overrides]]
 filter = '''

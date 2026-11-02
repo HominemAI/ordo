@@ -943,10 +943,10 @@ async fn leadership_fails_over_between_two_supervisors() {
         ma.render_prometheus()
     );
 
-    // Several ticks of both: only the leader's worker runs.
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Only the leader's worker runs. Wait for it to run rather than guess
+    // how many ticks fit in a fixed sleep on a loaded runner.
     assert!(
-        wa.0.load(Ordering::SeqCst) > 0,
+        wait_for(Duration::from_secs(15), || wa.0.load(Ordering::SeqCst) > 0).await,
         "the leader's worker never ran"
     );
     assert_eq!(

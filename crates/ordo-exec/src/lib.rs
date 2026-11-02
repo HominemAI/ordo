@@ -307,7 +307,74 @@ pub struct PoolLimits {
     /// write. The pause before try `n` is a random time up to
     /// `min(this, 4 ms * 2^n)`.
     pub write_retry_max: Duration,
+    /// Where the pool reads the time when it asks whether a connection has
+    /// sat idle for [`PoolLimits::idle_timeout`]. The system's monotonic
+    /// clock unless a test stands it still ([`PoolClock::manual`]).
+    pub clock: PoolClock,
 }
+
+/// The clock a pool measures idle connections against.
+///
+/// The system's monotonic clock by default. A test takes a manual one and
+/// moves it by hand, so "closed after one idle period" is asserted on the
+/// test's clock and a loaded machine cannot change the answer (owner ruling
+/// 2026-11-02, board task `time-sensitive-tests-fail-when-other-tests`).
+/// The reaper still wakes on the runtime's timer; only the age of a
+/// connection is read here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PoolClock(Option<&'static ManualClock>);
+
+/// A clock that stands still until [`PoolClock::advance`] moves it.
+#[derive(Debug)]
+pub struct ManualClock {
+    start: Instant,
+    moved_ms: std::sync::atomic::AtomicU64,
+}
+
+impl PoolClock {
+    /// The system's monotonic clock.
+    pub const SYSTEM: PoolClock = PoolClock(None);
+
+    /// A clock that stands still until a test moves it. Each one lives
+    /// until the process ends, which keeps [`PoolLimits`] `Copy`.
+    pub fn manual() -> PoolClock {
+        PoolClock(Some(Box::leak(Box::new(ManualClock {
+            start: Instant::now(),
+            moved_ms: std::sync::atomic::AtomicU64::new(0),
+        }))))
+    }
+
+    /// Move a manual clock forward. Does nothing to the system clock.
+    pub fn advance(&self, by: Duration) {
+        if let Some(m) = self.0 {
+            let ms = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+            m.moved_ms
+                .fetch_add(ms, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub fn now(&self) -> Instant {
+        match self.0 {
+            None => Instant::now(),
+            Some(m) => {
+                m.start
+                    + Duration::from_millis(m.moved_ms.load(std::sync::atomic::Ordering::SeqCst))
+            }
+        }
+    }
+}
+
+impl PartialEq for PoolClock {
+    fn eq(&self, other: &PoolClock) -> bool {
+        match (self.0, other.0) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PoolClock {}
 
 /// How many more times a write that lost a serialization race is tried.
 pub const WRITE_RETRIES_ENV: &str = "ORDO_WRITE_RETRIES";
@@ -348,6 +415,7 @@ impl Default for PoolLimits {
             idle_timeout: Some(PoolLimits::DEFAULT_IDLE),
             write_retries: PoolLimits::DEFAULT_WRITE_RETRIES,
             write_retry_max: PoolLimits::DEFAULT_WRITE_RETRY_MAX,
+            clock: PoolClock::SYSTEM,
         }
     }
 }
@@ -420,6 +488,7 @@ impl PoolLimits {
                 .map_or(PoolLimits::DEFAULT_WRITE_RETRY_MAX, |ms| {
                     Duration::from_millis(ms.clamp(1, PoolLimits::MAX_WRITE_RETRY_MAX_MS))
                 }),
+            clock: PoolClock::SYSTEM,
         }
     }
 
@@ -597,15 +666,18 @@ impl Shared {
             self.idle
                 .lock()
                 .await
-                .push((client, Instant::now(), origin));
+                .push((client, self.limits.clock.now(), origin));
         }
     }
 
     /// Close every idle connection that has been idle for `period`, and
     /// every one whose socket has died.
     async fn reap(&self, period: Duration) {
+        let now = self.limits.clock.now();
         let mut idle = self.idle.lock().await;
-        idle.retain(|(c, since, _)| !c.is_closed() && since.elapsed() < period);
+        idle.retain(|(c, since, _)| {
+            !c.is_closed() && now.saturating_duration_since(*since) < period
+        });
     }
 }
 
@@ -1083,7 +1155,11 @@ impl Pool {
         let space_max = limits.space_max(cfg.size);
         let shared = Arc::new(Shared {
             permits: Arc::new(Semaphore::new(cfg.size)),
-            idle: Mutex::new(vec![(first, Instant::now(), Arc::from(holders::here()))]),
+            idle: Mutex::new(vec![(
+                first,
+                limits.clock.now(),
+                Arc::from(holders::here()),
+            )]),
             space_max,
             spaces: std::sync::Mutex::new(HashMap::new()),
             limits,

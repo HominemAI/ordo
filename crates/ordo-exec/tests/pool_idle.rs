@@ -9,14 +9,29 @@
 //! The count is the server's own, from `pg_stat_activity`, which is the
 //! number `max_connections` is enforced against.
 //!
+//! The idle period is measured on a manual clock (`PoolClock::manual`).
+//! Each test moves it by hand, so "kept before one period, closed at it"
+//! holds however loaded the machine is (owner ruling 2026-11-02, board task
+//! `time-sensitive-tests-fail-when-other-tests`). Real time is waited on
+//! only for the reaper's next wake and for the server to list a closed
+//! backend as gone. Those waits fail only after a generous bound.
+//!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
 use std::time::{Duration, Instant};
 
 use ordo_conformance::Pg;
-use ordo_exec::{Pool, PoolConfig, PoolLimits};
+use ordo_exec::{Pool, PoolClock, PoolConfig, PoolLimits};
 
 const DB: &str = "ordo_pool_idle";
+
+/// The idle period on the test's clock. The reaper wakes on the runtime's
+/// timer at a quarter of it, so a short one keeps each test quick.
+const IDLE: Duration = Duration::from_secs(1);
+
+/// How long a real-time wait may take before it fails. It is reached only
+/// when the pool never lets go, so it costs nothing on a pass.
+const EVENTUALLY: Duration = Duration::from_secs(30);
 
 /// Every test here counts the connections on one database.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -30,7 +45,7 @@ fn cfg(size: usize) -> PoolConfig {
     }
 }
 
-async fn pool(size: usize, idle: Option<Duration>) -> Pool {
+async fn pool(size: usize, idle: Option<Duration>, clock: PoolClock) -> Pool {
     let cfg = cfg(size);
     ordo_exec::create_database(&cfg, DB)
         .await
@@ -39,6 +54,7 @@ async fn pool(size: usize, idle: Option<Duration>) -> Pool {
         cfg,
         PoolLimits {
             idle_timeout: idle,
+            clock,
             ..PoolLimits::default()
         },
     )
@@ -50,15 +66,8 @@ async fn pool(size: usize, idle: Option<Duration>) -> Pool {
 /// pool closes its connections at once, but the server lists each backend
 /// until it has exited, which on a busy runner can trail the drop.
 async fn settled() {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while held() != 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the last test's connections never left: {}",
-            held()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let (left, took) = settle(0, EVENTUALLY).await;
+    assert_eq!(left, 0, "the last test's connections never left: {took:?}");
 }
 
 /// Server connections on the test database, not counting this one.
@@ -91,13 +100,28 @@ async fn settle(want: usize, limit: Duration) -> (usize, Duration) {
     }
 }
 
+/// Give the reaper a few wakes on the runtime's timer. It waits for
+/// something that must not happen, so a loaded machine can make it see
+/// less but cannot make it fail.
+async fn let_the_reaper_look() {
+    tokio::time::sleep(IDLE).await;
+}
+
+/// The server process behind the connection a query was served on.
+async fn backend(p: &Pool) -> String {
+    p.rows("SELECT pg_backend_pid()").await.expect("query")[0][0]
+        .clone()
+        .expect("a pid")
+}
+
 /// A pool of eight holds one connection when it is made, and only as many as
 /// were wanted at once when it is used.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pool_dials_on_demand() {
     let _serial = SERIAL.lock().await;
     settled().await;
-    let p = pool(8, Some(Duration::from_secs(60))).await;
+    // A clock that never moves: nothing here may age out.
+    let p = pool(8, Some(IDLE), PoolClock::manual()).await;
     assert_eq!(held(), 1, "a pool of eight is made with one connection");
 
     // Three checkouts at once are three connections, not eight.
@@ -118,8 +142,8 @@ async fn a_pool_dials_on_demand() {
 async fn an_idle_pool_holds_nothing_and_dials_again_when_asked() {
     let _serial = SERIAL.lock().await;
     settled().await;
-    let idle = Duration::from_secs(1);
-    let p = pool(4, Some(idle)).await;
+    let clock = PoolClock::manual();
+    let p = pool(4, Some(IDLE), clock).await;
     let txs = [
         p.begin().await.expect("a"),
         p.begin().await.expect("b"),
@@ -130,16 +154,15 @@ async fn an_idle_pool_holds_nothing_and_dials_again_when_asked() {
     }
     assert_eq!(held(), 3);
 
-    // The bound is 8 periods: a busy CI runner released them after 2.4 s
-    // with a 1 s period (CI 7b974765, 2026-10-12), and after 4.0 s with
-    // nextest running 8 tests beside it (run 41297909915). It still catches
-    // a pool that never lets go.
-    let (left, took) = settle(0, idle * 10).await;
+    // Just short of the period, all three are kept.
+    clock.advance(IDLE - Duration::from_millis(1));
+    let_the_reaper_look().await;
+    assert_eq!(held(), 3, "closed before the idle period ran out");
+
+    // At the period, all three are closed.
+    clock.advance(Duration::from_millis(1));
+    let (left, took) = settle(0, EVENTUALLY).await;
     assert_eq!(left, 0, "still holding {left} connections after {took:?}");
-    assert!(
-        took <= idle * 8,
-        "released after {took:?}, with an idle period of {idle:?}"
-    );
 
     let rows = p.rows("SELECT 1").await.expect("dials again");
     assert_eq!(rows[0][0].as_deref(), Some("1"));
@@ -153,31 +176,38 @@ async fn an_idle_pool_holds_nothing_and_dials_again_when_asked() {
 async fn a_busy_pool_keeps_the_connection_it_is_using() {
     let _serial = SERIAL.lock().await;
     settled().await;
-    // Uses come every 200 ms. The idle period is 15 times that, so a CI
-    // runner that stalls for a second does not close the connection
-    // between two uses (CI c067487d, 2026-10-09).
-    let idle = Duration::from_secs(3);
-    let p = pool(4, Some(idle)).await;
-    let until = Instant::now() + idle * 3;
-    while Instant::now() < until {
-        p.rows("SELECT 1").await.expect("query");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    let clock = PoolClock::manual();
+    let p = pool(4, Some(IDLE), clock).await;
+    let first = backend(&p).await;
+
+    // Nine periods pass in all, but never a whole one between two uses.
+    for _ in 0..10 {
+        clock.advance(IDLE * 9 / 10);
+        let_the_reaper_look().await;
+        assert_eq!(backend(&p).await, first, "the connection was closed");
     }
     assert_eq!(held(), 1, "one connection, kept because it was in use");
+
+    // Left alone for the period, it goes.
+    clock.advance(IDLE);
+    let (left, took) = settle(0, EVENTUALLY).await;
+    assert_eq!(left, 0, "still holding {left} connections after {took:?}");
     drop(p);
 }
 
-/// Zero seconds is the old behaviour: what was dialled is kept.
+/// No idle period is the old behaviour: what was dialled is kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_idle_period_keeps_every_connection() {
     let _serial = SERIAL.lock().await;
     settled().await;
-    let p = pool(4, None).await;
+    let clock = PoolClock::manual();
+    let p = pool(4, None, clock).await;
     let a = p.begin().await.expect("a");
     let b = p.begin().await.expect("b");
     a.commit().await.expect("a");
     b.commit().await.expect("b");
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    clock.advance(Duration::from_secs(3600));
+    let_the_reaper_look().await;
     assert_eq!(held(), 2);
     drop(p);
 }

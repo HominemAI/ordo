@@ -281,13 +281,6 @@ hides the cause.
 The local Postgres test databases stay ("we'll keep the DB now for testing").
 Do not propose replacing them with fakes.
 
-**Template databases are off by default.** `ORDO_TEST_TEMPLATES=1` makes
-`Fixture::reset` clone `ordo_tpl_<hash>` instead of rebuilding in place.
-Measured 2026-11-02: the in-place rebuild takes 60 to 80 ms; a clone takes
-90 to 310 ms, because it copies the whole 9 MB database through the WAL.
-The 10 costliest hand-wired files summed 294 s without and 348 s with.
-Turn it on only to measure on another server.
-
 ## Before a push
 
 Never start a cargo build while a background suite is running; they fight over

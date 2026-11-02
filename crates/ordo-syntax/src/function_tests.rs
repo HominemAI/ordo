@@ -23,6 +23,7 @@ fn a_page_called_function_parses_with_every_clause() {
            code \"fn/suggest-title.js\"\n\
            egress api.anthropic.com, \"my-model.example.com\"\n\
            secrets llmKey, otherKey\n\
+           uses oneNote, retitleNote\n\
            limit wall 30s, cpu 2s, memory 64 mb\n\
            nopause\n\
          }\n");
@@ -37,6 +38,8 @@ fn a_page_called_function_parses_with_every_clause() {
     assert_eq!(hosts, ["api.anthropic.com", "my-model.example.com"]);
     let secrets: Vec<&str> = f.secrets.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(secrets, ["llmKey", "otherKey"]);
+    let uses: Vec<&str> = f.uses.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(uses, ["oneNote", "retitleNote"]);
     assert_eq!(f.limits.wall_ms, Some(30_000));
     assert_eq!(f.limits.cpu_ms, Some(2_000));
     assert_eq!(f.limits.memory_bytes, Some(64 * 1024 * 1024));
@@ -49,6 +52,7 @@ fn a_minimal_function_defaults_to_member_and_no_limits() {
     assert_eq!(f.by.name, "member");
     assert!(f.params.is_empty());
     assert!(f.egress.is_empty());
+    assert!(f.uses.is_empty(), "a function without `uses` reaches no op");
     assert_eq!(f.limits.wall_ms, None);
     assert!(!f.nopause);
 }
@@ -75,7 +79,7 @@ fn a_function_without_call_or_code_is_refused_by_name() {
 #[test]
 fn unbuilt_wake_ups_and_clauses_say_so() {
     assert!(refused("function f {\n  trigger every 5m\n}\n").contains("not built yet"));
-    assert!(refused("function f {\n  call() -> json\n  uses x\n}\n").contains("not built yet"));
+    assert!(refused("function f {\n  call() -> json\n  webhook x\n}\n").contains("not built yet"));
 }
 
 #[test]

@@ -961,6 +961,7 @@ pub struct RoutineNotify {
 ///   code "fn/suggest-title.js"
 ///   egress api.anthropic.com
 ///   secrets llmKey
+///   uses oneNote, retitleNote
 ///   limit wall 30s, memory 64 mb
 /// }
 /// ```
@@ -984,6 +985,9 @@ pub struct FunctionDecl {
     pub egress: Vec<FunctionHost>,
     /// Secrets it may use, by name. It holds a handle, never the value.
     pub secrets: Vec<Ident>,
+    /// The program's ops it may call with `ctx.op`, as the person calling
+    /// (increment 4). Empty reaches no op.
+    pub uses: Vec<Ident>,
     pub limits: FunctionLimits,
     /// Runs in a paused tenant, as `nopause` does on an op.
     pub nopause: bool,

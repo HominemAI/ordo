@@ -785,6 +785,10 @@ pub fn describe_function(f: &ordo_syntax::FunctionDecl) -> String {
         let names: Vec<&str> = f.secrets.iter().map(|n| n.name.as_str()).collect();
         s.push_str(&format!("  secrets {}", names.join(", ")));
     }
+    if !f.uses.is_empty() {
+        let names: Vec<&str> = f.uses.iter().map(|n| n.name.as_str()).collect();
+        s.push_str(&format!("  uses {}", names.join(", ")));
+    }
     if f.nopause {
         s.push_str("  (nopause)");
     }

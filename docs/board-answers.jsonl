@@ -1242,3 +1242,5 @@
 {"seq": 1242, "item": "test-in-proportion-to-the-change", "ask": 1, "at": "2026-11-02", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1243, "item": "test-in-proportion-to-the-change", "ask": 2, "at": "2026-11-02", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1244, "item": "test-in-proportion-to-the-change", "ask": 3, "at": "2026-11-02", "status": "decided", "text": "Yes. If something turns up an instance - a majority of tests that require an instance should happen there, not scattered.", "source": "record", "read": true}
+{"seq": 1245, "item": "test-in-proportion-to-the-change", "ask": 4, "at": "2026-11-02", "status": "decided", "text": "This makes more sense. Lets do it", "source": "record", "read": true}
+{"seq": 1246, "item": "test-in-proportion-to-the-change", "ask": 5, "at": "2026-11-02", "status": "decided", "text": "This makes more sense. Lets do it", "source": "record", "read": true}

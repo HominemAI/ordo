@@ -11816,3 +11816,10 @@ Board task `time-sensitive-tests-fail-when-other-tests` (15b).
 - Ask 3 ("Yes"): behaviour tests that use time (an idle pool lets go,
   slow-down mode, leader failover) stay in regression, rewritten on a test
   clock. Where that cannot be done, they run alone.
+- Asks 6 and 7 ("yep", 2026-11-02), after measuring that only 8 of 144
+  ordo-host test files boot the real binary: the notes, teamspace and
+  shopfront tests on default settings share one running instance per CI
+  job (20 tests); tests that restart it, change settings or count
+  connections keep their own. The 5 notes_app tests that the Playwright
+  notes e2e covers leave ordo-host, keeping the tests that found notes_app's
+  2 real bugs. Template databases (cut-test-time ask 2) come with them.

@@ -916,10 +916,17 @@ async fn leadership_fails_over_between_two_supervisors() {
         Arc::new(LeaderOnly(AtomicU64::new(0))),
         Arc::new(LeaderOnly(AtomicU64::new(0))),
     );
+    // The first leads before the second starts. On a loaded runner its
+    // first dial can miss its tick and the next tick claims (PR 2,
+    // 2026-11-02), so it gets a wait rather than one look.
     let a = contender(DB, &handles, ma.clone(), wa.clone()).await;
+    assert!(
+        wait_for(Duration::from_secs(15), || a.is_leader()).await,
+        "the first supervisor did not lead: {}",
+        a.overview()
+    );
     let b = contender(DB, &handles, mb.clone(), wb.clone()).await;
 
-    assert!(a.is_leader(), "the first supervisor did not lead");
     assert!(!b.is_leader(), "two leaders on one database");
     assert_eq!(
         a.overview()["leadership"]["leader"],

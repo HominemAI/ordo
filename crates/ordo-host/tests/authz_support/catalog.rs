@@ -771,6 +771,20 @@ fn logout_ends_family(d: &Deployment, w: &World, _: &Overlay) -> Answer {
     a
 }
 
+/// The same renewal cookie sent twice at once, as a double-clicked page
+/// does: both are answered. It signs in for its own cookie and spends it
+/// twice in a row. It used to reuse `{COOKIE_GRACE}`, which rows
+/// FID-SESSION-002 had spent minutes earlier in the matrix, so on a loaded
+/// runner it fell past the 10 s grace and saw 401 (PR 2, 2026-11-02).
+fn double_submit_in_grace(d: &Deployment, w: &World, _: &Overlay) -> Answer {
+    let (_, c0) = ann_signs_in(d, w);
+    let first = refresh(d, &c0);
+    if first.status != 200 {
+        return first;
+    }
+    refresh(d, &c0)
+}
+
 /// A cookie whose family a logout ended is refused.
 fn logged_out_cookie(d: &Deployment, w: &World, _: &Overlay) -> Answer {
     let (token, c0) = ann_signs_in(d, w);
@@ -2570,17 +2584,12 @@ pub fn specs() -> Vec<Spec> {
         )
         .hdr("Cookie", "{COOKIE_SPENT}"),
     );
-    v.push(
-        r(
-            "ID-021",
-            "a double-submit inside the grace is honoured",
-            "POST",
-            "/auth/refresh",
-            ANON,
-            Expect::Code(200, ""),
-        )
-        .hdr("Cookie", "{COOKIE_GRACE}"),
-    );
+    v.push(script(
+        "ID-021",
+        "a double-submit inside the grace is honoured",
+        double_submit_in_grace,
+        Expect::Code(200, ""),
+    ));
     v.push(script(
         "ID-022",
         "a logout ends the family and clears the cookie",

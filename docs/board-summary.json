@@ -1,9 +1,9 @@
 {
- "date": "2026-10-31",
- "text": "The repository is public as HominemAI/ordo, from 1 commit, after all 5 workflows passed: [[making-the-repository-public]]. CI's test job runs as 5 shards. Backend functions are v1 work, increment 1 next: [[backend-functions]].",
+ "date": "2026-11-02",
+ "text": "2026-11-02 Backend functions increments 1, 2 and 4 are built: a function now writes through ops as the person who called it [[backend-functions]]. CI tests in proportion to the change, runs a fast unit job first and load tests only on pull requests [[test-in-proportion-to-the-change]] [[time-sensitive-tests-fail-when-other-tests]]. PR 3 to main is green and waiting on re-runs.",
  "tiles": [
   [
-   "3,454",
+   "4,056",
    "Tests green",
    "ok"
   ],
@@ -36,7 +36,11 @@
  "look": [
   {
    "id": "backend-functions",
-   "why": "increment 1 next"
+   "why": "increments 1, 2, 4 built"
+  },
+  {
+   "id": "notes-page-catch-up-flake",
+   "why": "flaky e2e, not started"
   }
  ]
 }

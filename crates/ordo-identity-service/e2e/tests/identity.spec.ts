@@ -280,6 +280,9 @@ test('the CLI is approved with a passkey, the code reaches the loopback port, an
     await page.goto(`/cli?port=${port}&state=${state}&code_challenge=${challenge}`);
     await page.getByRole('button', { name: 'Approve with my passkey' }).click();
     await expect.poll(() => got.length).toBe(1);
+    // The page is still landing on the loopback page. A goto before it
+    // lands is interrupted by that navigation (CI run 41390954363).
+    await page.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/callback/);
     const back = new URL(got[0]!, 'http://127.0.0.1');
     expect(back.pathname).toBe('/callback');
     expect(back.searchParams.get('state')).toBe(state);

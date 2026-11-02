@@ -1,5 +1,5 @@
 {
-  "digest": "e065c609db8302ea",
+  "digest": "50d641c511236f35",
   "domain": "notes",
   "entities": [
     {
@@ -777,6 +777,13 @@
           "required": true
         },
         {
+          "kind": "write",
+          "mode": "converges",
+          "op": "retitleNote",
+          "param": "id",
+          "required": true
+        },
+        {
           "kind": "delete",
           "mode": "bulk deletes",
           "op": "revokeNotesAccess",
@@ -886,6 +893,13 @@
         {
           "kind": "read",
           "mode": null,
+          "op": "oneNote",
+          "param": "id",
+          "required": true
+        },
+        {
+          "kind": "read",
+          "mode": null,
           "op": "std.notes.get",
           "param": "id",
           "required": true
@@ -893,6 +907,11 @@
       ],
       "entity": "notes",
       "get": [
+        {
+          "op": "oneNote",
+          "param": "id",
+          "single_row": false
+        },
         {
           "op": "std.notes.get",
           "param": "id",
@@ -2817,6 +2836,149 @@
     },
     {
       "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "notes",
+            "read": "notesAccess(member == $caller) or notesAccess(member.groupMembers.group(member == $caller))",
+            "source": "acl-derived",
+            "write": "notesAccess(member == $caller and level == \"write\" or member == $caller and level == \"admin\") or notesAccess(member.groupMembers.group(member == $caller) and level == \"write\" or member.groupMembers.group(member == $caller) and level == \"admin\")"
+          },
+          {
+            "entity": "notesAccess",
+            "read": "note.notesAccess(member == $caller) or note.notesAccess(member.groupMembers.group(member == $caller))",
+            "source": "acl-derived",
+            "write": "note.notesAccess(member == $caller and level == \"admin\") or note.notesAccess(member.groupMembers.group(member == $caller) and level == \"admin\")"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "oneNote",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "notes",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "rev",
+          "title",
+          "body"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_param",
+        "invalid_refinement",
+        "method_mismatch",
+        "missing_param",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "notes",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "rev",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          }
+        ],
+        "row_identity": {
+          "entity": "notes",
+          "key": "note"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "af1df3335ad65ecb"
+    },
+    {
+      "call": {
         "cas": true,
         "live": false,
         "method": "POST",
@@ -3048,6 +3210,134 @@
         }
       ],
       "version": "33ee4371b262e493"
+    },
+    {
+      "call": {
+        "cas": true,
+        "live": false,
+        "method": "POST",
+        "paged": false,
+        "refinable": false,
+        "terminal": [
+          "commit"
+        ]
+      },
+      "cost": {
+        "class": null,
+        "rows": null
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "notes",
+            "read": "notesAccess(member == $caller) or notesAccess(member.groupMembers.group(member == $caller))",
+            "source": "acl-derived",
+            "write": "notesAccess(member == $caller and level == \"write\" or member == $caller and level == \"admin\") or notesAccess(member.groupMembers.group(member == $caller) and level == \"write\" or member.groupMembers.group(member == $caller) and level == \"admin\")"
+          },
+          {
+            "entity": "notesAccess",
+            "read": "note.notesAccess(member == $caller) or note.notesAccess(member.groupMembers.group(member == $caller))",
+            "source": "acl-derived",
+            "write": "note.notesAccess(member == $caller and level == \"admin\") or note.notesAccess(member.groupMembers.group(member == $caller) and level == \"admin\")"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "write",
+      "mode": "converges",
+      "op": "retitleNote",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "notes",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        },
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "rev",
+          "places": null,
+          "required": true,
+          "type": "int"
+        },
+        {
+          "enum_values": null,
+          "field_ref": {
+            "entity": "notes",
+            "field": "title"
+          },
+          "filled": false,
+          "id_entity": null,
+          "max": null,
+          "min": null,
+          "name": "title",
+          "places": null,
+          "required": true,
+          "type": "text"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "access_guard",
+        "cas_miss",
+        "idempotency_in_flight",
+        "idempotency_mismatch",
+        "invalid_param",
+        "log_append_failed",
+        "method_mismatch",
+        "missing_param",
+        "not_found",
+        "serialization_conflict",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": null,
+        "outputs": [],
+        "row_identity": null,
+        "shape": "write_summary",
+        "single_row": false,
+        "sync": {
+          "reason": "not_a_read",
+          "syncable": false
+        },
+        "synthetic_rows": false
+      },
+      "statements": [
+        {
+          "cas_param": "rev",
+          "entity": "notes",
+          "label": "converges",
+          "summary": {
+            "keys": [
+              "updated"
+            ],
+            "value": "count"
+          },
+          "verb": "set"
+        }
+      ],
+      "version": "7aaf316d00817e69"
     },
     {
       "call": {

@@ -19,7 +19,7 @@ import type { OpSpec } from '@hominemai/ordo-sdk/core/spec.js';
 export const DESCRIPTOR = {
   schemaVersion: 'ordo.interface/2',
   domain: 'notes',
-  digest: 'e065c609db8302ea',
+  digest: '50d641c511236f35',
 } as const;
 
 export const spec_addAttachment = {
@@ -261,6 +261,25 @@ export const spec_notesTagged = {
     standingError: null,
 } as const satisfies OpSpec;
 
+export const spec_oneNote = {
+    op: 'oneNote',
+    version: 'af1df3335ad65ecb',
+    method: 'GET',
+    kind: 'read',
+    terminal: ['fetch', 'live', 'pages'],
+    paged: true,
+    singleRow: false,
+    sync: { entity: 'notes', key: 'id' },
+    order: { keys: [{ path: 'id', desc: false }], stated: true },
+    refine: { tier: 'basic', fields: ['id', 'rev', 'title', 'body'], decimals: [], types: { id: 'id', rev: 'int', title: 'text', body: 'text' }, sealed: [], limits: { conditions: 16, inValues: 200 } },
+    casParam: null,
+    params: [
+      { name: 'id', type: 'id', required: true, idEntity: 'notes', enumValues: null, min: null, max: null, places: null },
+    ],
+    refusals: ['access_denied', 'invalid_cursor', 'invalid_param', 'invalid_refinement', 'method_mismatch', 'missing_param', 'refinement_unbounded', 'unknown_param', 'version_skew'],
+    standingError: null,
+} as const satisfies OpSpec;
+
 export const spec_pinNote = {
     op: 'pinNote',
     version: '7bdd95510fe07739',
@@ -298,6 +317,27 @@ export const spec_removeAttachment = {
       { name: 'id', type: 'id', required: true, idEntity: 'attachments', enumValues: null, min: null, max: null, places: null },
     ],
     refusals: ['access_denied', 'access_guard', 'idempotency_in_flight', 'idempotency_mismatch', 'invalid_param', 'log_append_failed', 'method_mismatch', 'missing_param', 'not_found', 'serialization_conflict', 'unknown_param', 'version_skew'],
+    standingError: null,
+} as const satisfies OpSpec;
+
+export const spec_retitleNote = {
+    op: 'retitleNote',
+    version: '7aaf316d00817e69',
+    method: 'POST',
+    kind: 'write',
+    terminal: ['commit'],
+    paged: false,
+    singleRow: false,
+    sync: null,
+    order: null,
+    refine: { tier: 'none', fields: [], decimals: [], types: {}, sealed: [], limits: null },
+    casParam: 'rev',
+    params: [
+      { name: 'id', type: 'id', required: true, idEntity: 'notes', enumValues: null, min: null, max: null, places: null },
+      { name: 'rev', type: 'int', required: true, idEntity: null, enumValues: null, min: null, max: null, places: null },
+      { name: 'title', type: 'text', required: true, idEntity: null, enumValues: null, min: null, max: null, places: null },
+    ],
+    refusals: ['access_denied', 'access_guard', 'cas_miss', 'idempotency_in_flight', 'idempotency_mismatch', 'invalid_param', 'log_append_failed', 'method_mismatch', 'missing_param', 'not_found', 'serialization_conflict', 'unknown_param', 'version_skew'],
     standingError: null,
 } as const satisfies OpSpec;
 
@@ -939,8 +979,10 @@ export const SPECS = {
   myNotes: spec_myNotes,
   myReminders: spec_myReminders,
   notesTagged: spec_notesTagged,
+  oneNote: spec_oneNote,
   pinNote: spec_pinNote,
   removeAttachment: spec_removeAttachment,
+  retitleNote: spec_retitleNote,
   revokeNotesAccess: spec_revokeNotesAccess,
   setNotesAccessLevel: spec_setNotesAccessLevel,
   setReminder: spec_setReminder,

@@ -77,6 +77,7 @@
 {"file": "plan-tiers.md", "kind": "plan", "what": "Plan tiers: queries that get faster over time with a human approving. Proposed."}
 {"file": "plan-topology-audit.md", "kind": "plan", "what": "How to audit the settled topology against what buyers expect."}
 {"file": "plan-usability-testing.md", "kind": "plan", "what": "Testing whether a developer can walk the quickstart, automated and with people."}
+{"file": "plan-versions.md", "kind": "plan", "what": "One build plan joining program versions, schema evolution and environments: the shared core, build order, open decisions, conflicts"}
 {"file": "tooling-and-embedding-plan.md", "kind": "plan", "what": "Tooling and embedding, in three tracks."}
 {"file": "usability-script-console.md", "kind": "plan", "what": "Script for a console usability session with a less technical tester: tasks, what to watch, what fails"}
 {"file": "deploying.md", "kind": "guide", "what": "What an operator has to decide, and what the platform decides for them."}

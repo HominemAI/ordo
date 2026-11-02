@@ -28,6 +28,7 @@ use tower::util::ServiceExt;
 
 const V2: &str = include_str!("../../../examples/notes-v2/notes.ordo");
 const SUGGEST: &[u8] = include_bytes!("../../../examples/notes-v2/fn/suggest-title.js");
+const TITLE_NOTE: &[u8] = include_bytes!("../../../examples/notes-v2/fn/title-note.js");
 
 /// `person:<id>` is a signed-in person who belongs to tenant `acme` and to
 /// nothing else. Any other token is refused.
@@ -38,6 +39,8 @@ impl AccessChecker for People {
         match token.strip_prefix("person:") {
             // `eve` may call functions and may not read files.
             Some("eve") if op == ordo_api::blob::BLOB_READ_OP => AccessDecision::Deny,
+            // `gus` may read notes and may not retitle one.
+            Some("gus") if op == "retitleNote" => AccessDecision::Deny,
             Some(id) if space.starts_with("acme") => AccessDecision::allow(id),
             _ => AccessDecision::Deny,
         }
@@ -136,18 +139,40 @@ async fn door_files(
     };
     let _ = admin.exec(&format!("DROP DATABASE IF EXISTS {db}"));
     admin.exec(&format!("CREATE DATABASE {db}")).expect("db");
+    // The program's tables, so the ops a function calls have rows to work on.
+    f.reset(&Pg {
+        db: db.to_string(),
+        ..Pg::default()
+    })
+    .expect("the program's tables");
     let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
         db: db.to_string(),
         ..ordo_exec::PoolConfig::from_env()
     })
     .await
     .expect("pool");
+    // Tenant `acme`, with its keys, so an op a function calls runs there.
+    ordo_host::provision::provision_space(
+        &pool,
+        f.keys.as_ref(),
+        "acme",
+        &ordo_host::provision::FoundingOwner {
+            member_id: "ana",
+            principal: "ana",
+            display_name: "Ana",
+        },
+    )
+    .await
+    .expect("acme provisions");
 
     // What `ordo apply` does: hash each code file into the manifest, store
     // the code by hash, and take the version over both.
     let mut doc = ordo_plan::artifact::program_artifact(&f.schema, &f.registry).unwrap();
     let mut hashes = BTreeMap::new();
-    let mut files: Vec<(&str, &[u8])> = vec![("fn/suggest-title.js", SUGGEST)];
+    let mut files: Vec<(&str, &[u8])> = vec![
+        ("fn/suggest-title.js", SUGGEST),
+        ("fn/title-note.js", TITLE_NOTE),
+    ];
     for (path, code) in extra_code {
         files.push((path, code.as_bytes()));
     }
@@ -1415,4 +1440,453 @@ async fn a_body_with_a_declared_length_over_the_cap_is_refused_unread() {
         msg.contains("3011 bytes") && msg.contains("ORDO_FN_BODY_BYTES"),
         "{msg}"
     );
+}
+
+// ── increment 4: ops from functions ─────────────────────────────────────
+
+impl Door {
+    /// Runs op `name` as `person` in tenant `acme`, the way the page would.
+    async fn op_as(&self, person: &str, name: &str, args: Value) -> Vec<Value> {
+        let spec = self
+            .state
+            .registry
+            .current()
+            .get(name)
+            .unwrap_or_else(|| panic!("no op {name}"));
+        let mut bound =
+            ordo_api::bind::bind_params(&spec, args.as_object().unwrap()).expect("bound");
+        bound
+            .0
+            .insert("$caller".into(), Value::String(person.to_string()));
+        match self
+            .state
+            .executor
+            .execute(&spec, "acme", bound, None, None, None)
+            .await
+            .unwrap_or_else(|e| panic!("{name} as {person}: {e}"))
+        {
+            ordo_api::ExecOutcome::Ran(r) => r.rows,
+            ordo_api::ExecOutcome::AlreadyApplied => Vec::new(),
+        }
+    }
+
+    /// Ana's note, made through `createNote` as her.
+    async fn anas_note(&self, body: &str) -> String {
+        let rows = self
+            .op_as(
+                "ana",
+                "createNote",
+                json!({ "title": "untitled", "body": body, "tags": [], "created": "2026-11-01T09:00:00Z" }),
+            )
+            .await;
+        let id = self.op_as("ana", "allNotes", json!({})).await[0]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no note after {rows:?}"))
+            .to_string();
+        id
+    }
+
+    /// The note as ana reads it.
+    async fn note(&self, id: &str) -> Value {
+        self.op_as("ana", "oneNote", json!({ "id": id })).await[0].clone()
+    }
+
+    /// The actor of each command group in tenant `acme`, oldest first.
+    async fn actors(&self) -> Vec<ordo_commandlog::Actor> {
+        use ordo_commandlog::Store;
+        let store = ordo_exec::commandlog::PgStore::new(
+            self.pool.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let space = ordo_commandlog::SpaceId("acme".into());
+            store
+                .entries(&space, 0, store.len(&space))
+                .into_iter()
+                .map(|e| e.group.actor)
+                .collect()
+        })
+        .await
+        .unwrap()
+    }
+}
+
+/// Notes v2's `titleNote`: it reads the note with `oneNote` and writes the
+/// title with `retitleNote`, both as the person who pressed the button,
+/// and the write is attributed to the function on their behalf.
+#[tokio::test(flavor = "multi_thread")]
+async fn title_note_writes_as_the_person_and_the_chain_names_the_function() {
+    let d = door("ordo_fn_title_note", "", &[]).await;
+    let id = d.anas_note("milk, eggs, bread, coffee").await;
+    let (st, body) = d
+        .post(
+            "titleNote",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "note": id }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["title"], "Groceries for the week");
+    assert_eq!(body["result"]["changed"], true);
+    assert_eq!(d.note(&id).await["title"], "Groceries for the week");
+
+    // The last group is the retitle: the function, on behalf of ana.
+    use ordo_api::functions::FunctionRunner;
+    let version = d.runner.spec("titleNote").unwrap().version_hash;
+    let version = version.split('.').next().unwrap().to_string();
+    let actors = d.actors().await;
+    assert_eq!(
+        actors.last().unwrap(),
+        &ordo_commandlog::Actor::AgentOnBehalfOf {
+            agent: format!("function:titleNote@{version}"),
+            user: "ana".into(),
+        }
+    );
+    assert_eq!(
+        actors.last().unwrap().to_string(),
+        format!("agent:function:titleNote@{version} on behalf of user:ana")
+    );
+    // The note itself was made by ana alone.
+    assert_eq!(actors[0], ordo_commandlog::Actor::User("ana".into()));
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "ok");
+}
+
+/// Writes a title with no read first, so the write meets the door alone.
+const FORCE: &str = "function forceTitle in notes {\n  call($note: id, $rev: int) -> json\n  \
+    code \"fn/force-title.js\"\n  uses retitleNote\n}\n";
+
+const FORCE_CODE: &[(&str, &str)] = &[(
+    "fn/force-title.js",
+    r#"export default { async call(input, ctx) {
+        await ctx.op("retitleNote", { id: input.note, rev: input.rev, title: "forced" });
+        return { forced: true };
+    } }"#,
+)];
+
+/// The function reaches `uses` intersected with what the person can do.
+/// Gus may not call `retitleNote` at all; bea may call it and holds no
+/// grant on ana's note. Neither gets further through a function than they
+/// would from their own page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_person_who_lacks_access_gets_no_further_through_a_function() {
+    let d = door("ordo_fn_op_access", FORCE, FORCE_CODE).await;
+    let id = d.anas_note("milk, eggs").await;
+    let rev = d.note(&id).await["rev"].clone();
+    let groups = d.actors().await.len();
+
+    // Gus: the door says no to `retitleNote`, so the function's op is
+    // refused as a guard's refusal, before anything runs.
+    let (st, body) = d
+        .post(
+            "forceTitle",
+            "acme",
+            Some("person:gus"),
+            None,
+            json!({ "note": id, "rev": rev }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "access_guard");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("may not call op `retitleNote`"),
+        "{body}"
+    );
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "op_access_denied");
+
+    // Bea may call `retitleNote`, and the note's row guard refuses her
+    // write, as it would from her own page.
+    let (st, body) = d
+        .post(
+            "forceTitle",
+            "acme",
+            Some("person:bea"),
+            None,
+            json!({ "note": id, "rev": rev }),
+        )
+        .await;
+    // The guard hides the row from her: `not_found`, the class her page gets.
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+    assert_eq!(
+        functions::runs(&d.pool, "acme")
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .outcome,
+        "not_found"
+    );
+
+    // Through notes v2's own `titleNote`, neither can read the note.
+    for who in ["person:gus", "person:bea"] {
+        let (st, body) = d
+            .post("titleNote", "acme", Some(who), None, json!({ "note": id }))
+            .await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not yours to read"),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        d.note(&id).await["title"],
+        "untitled",
+        "nothing was written"
+    );
+    assert_eq!(d.actors().await.len(), groups, "no group was written");
+    assert!(d.model.seen.lock().unwrap().is_empty(), "nothing went out");
+}
+
+const SNEAKY: &str = "function sneaky in notes {\n  call($note: id) -> json\n  \
+    code \"fn/sneaky.js\"\n  uses oneNote\n}\n\
+    function tidy in notes {\n  call($note: id) -> json\n  \
+    code \"fn/tidy.js\"\n  uses deleteNote\n}\n";
+
+const SNEAKY_CODE: &[(&str, &str)] = &[
+    (
+        "fn/sneaky.js",
+        r#"export default { async call(input, ctx) {
+            await ctx.op("oneNote", { id: input.note });
+            await ctx.op("deleteNote", { id: input.note });
+            return { deleted: true };
+        } }"#,
+    ),
+    (
+        "fn/tidy.js",
+        r#"export default { async call(input, ctx) {
+            await ctx.op("deleteNote", { id: input.note });
+            return { deleted: true };
+        } }"#,
+    ),
+];
+
+/// An op the function does not list is refused before it runs, and a
+/// delete it does list is closed unless the app developer opens it, as for
+/// every caller acting for a person. The refusal names the setting.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_op_not_in_uses_and_a_closed_delete_are_refused_and_name_the_fix() {
+    let d = door("ordo_fn_op_uses", SNEAKY, SNEAKY_CODE).await;
+    let id = d.anas_note("keep me").await;
+
+    let (st, body) = d
+        .post(
+            "sneaky",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "note": id }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["code"], "function_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("add it to the function's `uses` line"),
+        "{body}"
+    );
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "op_not_in_uses");
+
+    let (st, body) = d
+        .post(
+            "tidy",
+            "acme",
+            Some("person:ana"),
+            None,
+            json!({ "note": id }),
+        )
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "access_guard");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ORDO_DELEGABLE_OPS=deleteNote"),
+        "{body}"
+    );
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    assert_eq!(runs.last().unwrap().outcome, "op_not_delegable");
+    assert_eq!(
+        d.note(&id).await["body"],
+        "keep me",
+        "the note is still there"
+    );
+}
+
+/// The delegation lasts one call. A handle kept past it answers
+/// `delegation_ended` and runs nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegation_used_after_its_call_ended_is_refused() {
+    let d = door("ordo_fn_op_ended", "", &[]).await;
+    let id = d.anas_note("milk").await;
+    let call = ordo_api::functions::FnInvocation {
+        name: "titleNote".into(),
+        space: "acme".into(),
+        principal: "ana".into(),
+        agent: None,
+        args: Default::default(),
+        idempotency_key: None,
+        door: Some(ordo_api::functions::CallerDoor::new(
+            d.state.clone(),
+            "person:ana".into(),
+            "acme".into(),
+            "ana".into(),
+        )),
+    };
+    let ops = d.runner.delegation(&call).expect("titleNote is served");
+    assert!(ops.acting().starts_with("function:titleNote@"));
+    let mut args = serde_json::Map::new();
+    args.insert("id".into(), json!(id));
+    use ordo_fn::FnOps;
+    let read = ops.call("oneNote", args.clone()).await.expect("live");
+    assert_eq!(read.rows.len(), 1);
+
+    ops.end();
+    let rev = read.rows[0]["rev"].clone();
+    let mut write = args.clone();
+    write.insert("rev".into(), rev);
+    write.insert("title".into(), json!("too late"));
+    assert_eq!(
+        ops.call("retitleNote", write).await.unwrap_err(),
+        ordo_fn::OpError::Ended
+    );
+    assert_eq!(
+        ops.call("oneNote", args).await.unwrap_err().kind(),
+        "delegation_ended"
+    );
+    assert_eq!(d.note(&id).await["title"], "untitled");
+}
+
+/// Denizens' `face-chat` (plan §11.4), the increment's done-when: the
+/// function reads the recent turns and writes both new ones as the person,
+/// with no service key and no bypass, and the chain names the function on
+/// their behalf.
+const FACE_CHAT: &str = "entity faceTurns {\n  denizen: text\n  said: text\n  \
+    reply: text\n  acl (read, write, admin)\n}\n\
+    op recentTurns($denizen: text) =\n  faceTurns(denizen == $denizen)[id, said, reply]\n\
+    op addTurns($denizen: text, $said: text, $reply: text) =\n  \
+    set faceTurns { denizen: $denizen, said: $said, reply: $reply }\n\
+    function faceChat in notes {\n  call($message: text, $denizen: text) -> json\n  \
+    code \"fn/face-chat.js\"\n  egress api.anthropic.com\n  secrets llmKey\n  \
+    uses recentTurns, addTurns\n}\n";
+
+const FACE_CHAT_CODE: &[(&str, &str)] = &[(
+    "fn/face-chat.js",
+    r#"export default { async call(input, ctx) {
+        const turns = await ctx.op("recentTurns", { denizen: input.denizen });
+        const r = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "x-api-key": ctx.secret("llmKey"), "content-type": "application/json" },
+          body: JSON.stringify({ history: turns.length, message: input.message }),
+        });
+        const reply = (await r.json()).content[0].text;
+        await ctx.op("addTurns", { denizen: input.denizen, said: input.message, reply });
+        return { reply, model: "double" };
+    } }"#,
+)];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn face_chat_writes_its_turns_as_the_person() {
+    let d = door("ordo_fn_face_chat", FACE_CHAT, FACE_CHAT_CODE).await;
+    for message in ["hello", "how are you"] {
+        let (st, body) = d
+            .post(
+                "faceChat",
+                "acme",
+                Some("person:ana"),
+                None,
+                json!({ "message": message, "denizen": "dnz_1" }),
+            )
+            .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(body["result"]["reply"], "Groceries for the week");
+    }
+    let turns = d
+        .op_as("ana", "recentTurns", json!({ "denizen": "dnz_1" }))
+        .await;
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    // The second call saw the first turn: it read as ana.
+    let sent: Value = serde_json::from_slice(&d.model.seen.lock().unwrap()[1].body).unwrap();
+    assert_eq!(sent["history"], 1);
+    // Bea reads none of them: each row is ana's, written as her.
+    assert!(d
+        .op_as("bea", "recentTurns", json!({ "denizen": "dnz_1" }))
+        .await
+        .is_empty());
+    let actors = d.actors().await;
+    assert_eq!(actors.len(), 2);
+    for a in &actors {
+        match a {
+            ordo_commandlog::Actor::AgentOnBehalfOf { agent, user } => {
+                assert!(agent.starts_with("function:faceChat@"), "{agent}");
+                assert_eq!(user, "ana");
+            }
+            other => panic!("{other}"),
+        }
+    }
+}
+
+/// Ellanor's calendar proxy (plan §11.3): a person's token is a sealed
+/// field on their own row. The function reads it through an op, as them,
+/// and holds only a handle: the answer and the logs carry no value, and
+/// `ctx.sealed` hands it to the host for one header.
+const CALENDAR: &str = "entity googleAccounts {\n  email: text\n  token: text sealed\n  \
+    acl (read, write, admin)\n}\n\
+    op linkGoogle($email: text, $token: text) =\n  \
+    set googleAccounts { email: $email, token: $token }\n\
+    op myGoogleAccount =\n  googleAccounts[email, token]\n\
+    function calendar in notes {\n  call() -> json\n  code \"fn/calendar.js\"\n  \
+    egress www.googleapis.com\n  uses myGoogleAccount\n}\n";
+
+const CALENDAR_CODE: &[(&str, &str)] = &[(
+    "fn/calendar.js",
+    r#"export default { async call(input, ctx) {
+        const [account] = await ctx.op("myGoogleAccount", {});
+        console.log("calling as", account.email, "with", account.token);
+        const r = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList", {
+          headers: { authorization: ctx.sealed(account.token).bearer() },
+        });
+        return { email: account.email, token: account.token, status: r.status };
+    } }"#,
+)];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sealed_field_read_through_an_op_reaches_the_function_as_a_handle() {
+    let d = door("ordo_fn_sealed", CALENDAR, CALENDAR_CODE).await;
+    d.op_as(
+        "ana",
+        "linkGoogle",
+        json!({ "email": "ana@example.com", "token": "ya29.anas-token" }),
+    )
+    .await;
+    let (st, body) = d
+        .post("calendar", "acme", Some("person:ana"), None, json!({}))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["result"]["email"], "ana@example.com");
+    assert_eq!(body["result"]["token"], "[sealed]");
+    assert!(!body.to_string().contains("ya29"), "{body}");
+    {
+        let seen = d.model.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].headers.iter().any(|(k, v)| k == "authorization"
+            && matches!(v, HeaderValue::Held { template, .. } if template == "Bearer {}")));
+    }
+    let runs = functions::runs(&d.pool, "acme").await.unwrap();
+    let last = runs.last().unwrap();
+    assert_eq!(last.outcome, "ok");
+    assert!(!last.logs.contains("ya29"), "{}", last.logs);
 }

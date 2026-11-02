@@ -356,6 +356,15 @@ async fn run_function(
             return Ok((outcome.status, outcome.body));
         }
     }
+    // `ctx.op` runs through this door, as this caller (increment 4).
+    let door = bearer(headers).map(|token| {
+        crate::functions::CallerDoor::new(
+            state.clone(),
+            token.to_string(),
+            space.clone(),
+            gate.principal.clone(),
+        )
+    });
     let call = crate::functions::FnInvocation {
         name: spec.name.clone(),
         space,
@@ -363,6 +372,7 @@ async fn run_function(
         agent: gate.agent.clone(),
         args: bound.0,
         idempotency_key: idem_key,
+        door,
     };
     match functions.call(call).await {
         Ok(result) => {
@@ -1554,7 +1564,7 @@ pub(crate) fn check_access(
 /// stops the request, with [`ErrorCode::QuotaExceeded`] (429) naming the
 /// quantity and nothing else — no other space, no raw counters that would
 /// let a caller infer another tenant's traffic.
-fn quota_gate(state: &ApiState, op: &OpSpec, space: &str) -> Result<(), ApiError> {
+pub(crate) fn quota_gate(state: &ApiState, op: &OpSpec, space: &str) -> Result<(), ApiError> {
     match state.quota.check(space, op) {
         QuotaDecision::Within | QuotaDecision::Warn { .. } => Ok(()),
         QuotaDecision::Exceeded { quantity, .. } => Err(ApiError::for_op(

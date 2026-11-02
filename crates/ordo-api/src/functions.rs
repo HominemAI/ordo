@@ -41,6 +41,135 @@ pub struct FnInvocation {
     /// The `Idempotency-Key`, when the page sent one. Stable across retries,
     /// so the function may use it as its own key outside.
     pub idempotency_key: Option<String>,
+    /// The op door bound to this caller, for `ctx.op` (increment 4).
+    /// `None` when the call came with no token to bind it to.
+    pub door: Option<CallerDoor>,
+}
+
+/// The op door, bound to one function call's caller: what a function's
+/// `ctx.op` runs through (`plan-backend-functions.md` increment 4).
+///
+/// Each op meets the steps an op call from the page meets, for the same
+/// token in the same tenant: the access check, the email requirement, the
+/// quota gate, typed parameters, then the executor with `$caller` set to
+/// the person. So a function can never do what the person cannot. The
+/// page's call also passes the token gate and binds the space; the
+/// function's own call already did both.
+///
+/// The token stays in here. It is never shown, and it never reaches the
+/// function's instance.
+#[derive(Clone)]
+pub struct CallerDoor {
+    state: crate::ApiState,
+    token: String,
+    space: String,
+    principal: String,
+}
+
+impl std::fmt::Debug for CallerDoor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallerDoor")
+            .field("space", &self.space)
+            .field("principal", &self.principal)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CallerDoor {
+    /// `token` is the caller's own, which the door already resolved to
+    /// `principal` in `space`.
+    pub fn new(
+        state: crate::ApiState,
+        token: String,
+        space: String,
+        principal: String,
+    ) -> CallerDoor {
+        CallerDoor {
+            state,
+            token,
+            space,
+            principal,
+        }
+    }
+
+    /// The serving program's op `name`, as the door sees it.
+    pub fn spec(&self, name: &str) -> Option<OpSpec> {
+        self.state.registry.current().get(name)
+    }
+
+    /// Runs `op` with `args` as the caller, recorded as `acting` on behalf
+    /// of them: the command group names
+    /// `agent:<acting> on behalf of user:<caller>`. The answer is the op's
+    /// rows: a read's first page, a write's summary.
+    ///
+    /// A caller who may not call `op` is refused `access_denied`, as at the
+    /// door. Every other refusal is the door's or the executor's own.
+    pub async fn run(
+        &self,
+        op: &OpSpec,
+        args: &Map<String, Value>,
+        acting: &str,
+    ) -> Result<Vec<Value>, crate::ApiError> {
+        use crate::spec::{AccessDecision, ExecOutcome};
+        use crate::{ApiError, ErrorCode};
+        match self.state.access.check(&self.token, &self.space, &op.name) {
+            AccessDecision::Allow { principal, .. } if principal == self.principal => {}
+            AccessDecision::Allow { .. } => {
+                return Err(ApiError::new(
+                    ErrorCode::Internal,
+                    "the token answered for another person than the one the function runs as",
+                )
+                .with_op(&op.name))
+            }
+            AccessDecision::Deny => {
+                return Err(ApiError::new(
+                    ErrorCode::AccessDenied,
+                    "the person calling may not call this op",
+                )
+                .with_op(&op.name))
+            }
+        }
+        if let Some(held) = self
+            .state
+            .access
+            .email_required(&self.token, &self.principal, &op.name)
+            .await
+        {
+            return Err(if held.retryable {
+                ApiError::email_unreadable(&op.name, &held.message)
+            } else {
+                ApiError::email_required(&op.name, &held.message)
+            });
+        }
+        crate::router::quota_gate(&self.state, op, &self.space)?;
+        if op.requires_idempotency_key {
+            return Err(ApiError::for_op(
+                ErrorCode::MissingParam,
+                op,
+                "this op requires an `Idempotency-Key`, and an op called from a function \
+                 carries none yet. Nothing ran. Call it from the page instead",
+            ));
+        }
+        let mut bound = crate::bind::bind_params(op, args)?;
+        bound
+            .0
+            .insert("$caller".into(), Value::String(self.principal.clone()));
+        bound.0.insert(
+            crate::router::AGENT_PARAM.into(),
+            Value::String(acting.to_string()),
+        );
+        match self
+            .state
+            .executor
+            .execute(op, &self.space, bound, None, None, None)
+            .await
+        {
+            Ok(ExecOutcome::Ran(r)) => Ok(r.rows),
+            // No lease was sent, so nothing was already applied.
+            Ok(ExecOutcome::AlreadyApplied) => Ok(Vec::new()),
+            Err(e) => Err(ApiError::from_exec(op, e)),
+        }
+    }
 }
 
 /// The program's functions, as the door sees them.

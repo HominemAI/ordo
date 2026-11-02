@@ -2,15 +2,17 @@
 
 A backend function is your own code that the deployment runs on request.
 It runs inside the Ordo binary, in a fresh WebAssembly instance per call.
-It can call outside APIs through `fetch`, use a secret by name, and log.
-It holds no database URL, no service key and no secret value.
+It can call outside APIs through `fetch`, use a secret by name, call the
+program's own ops as the person calling, and log. It holds no database
+URL, no service key and no secret value.
 
 What is built is one kind: a function the page calls, JSON in and JSON
-out, with files in through `blob` parameters. Schedules, change triggers,
-webhooks and calling ops from a function come later
+out, with files in through `blob` parameters and ops through `uses`.
+Schedules, change triggers and webhooks come later
 (`plan-backend-functions.md` §12).
 
-The worked example is `suggestTitle` in `examples/notes-v2`.
+The worked examples are `suggestTitle` and `titleNote` in
+`examples/notes-v2`.
 
 ## Declaring a function
 
@@ -33,6 +35,7 @@ function suggestTitle in notes {
 | `code "fn/x.js"` | The bundled ES module, relative to the program's directory. `.js` or `.mjs`, at most 20 MB. |
 | `egress host, ...` | The hosts it may reach. Any other host is refused before DNS. A name with a hyphen goes in quotes: `"my-model.example.com"`. |
 | `secrets name, ...` | The secrets it may use, by name. Each must be a declared `secret`. A secret bound to hosts must be bound to at least one of its `egress` hosts; `ordo check` refuses it otherwise, naming both lists. A signing key (`secret hookKey`, no host) needs no `egress`. |
+| `uses op, ...` | Optional. The program's ops it may call with `ctx.op`, as the person calling (see [Calling ops](#calling-ops)). Each must be an `op` the program declares, or one `acl` derives. Without it the function reaches no op. |
 | `limit wall 30s, cpu 2s, memory 64 mb` | Optional. Unset limits take the defaults below. Write a size with a space: `64 mb`. |
 | `nopause` | Optional. It keeps answering while the tenant is paused. |
 
@@ -72,6 +75,9 @@ export default {
 - `console.log`, `console.warn` and `console.error` go to the run's log.
 - `ctx.blob(input.file)` reads a file the call was given, as the caller.
   See [Reading a file](#reading-a-file).
+- `ctx.op(name, args)` calls an op in `uses`, as the caller, and answers
+  its rows. `ctx.sealed(row.field)` puts a sealed field it answered in a
+  header. See [Calling ops](#calling-ops).
 - `ctx.tenant`, `ctx.function`, `ctx.version` and `ctx.runId` describe the
   call. `ctx.runId` is the page's `Idempotency-Key` when it sent one.
 - Throwing ends the call with `function_error` and your message.
@@ -135,6 +141,7 @@ its name instead: see [Checking a webhook's signature](#checking-a-webhooks-sign
 | Calls at once, per tenant | 10 | | `function_busy` (429) |
 | Calls at once, per server | 100 | | `function_busy` (429) |
 | Outbound calls per call | 50 | | the `fetch` rejects |
+| Op calls per call | 50 | 500 | `ctx.op` rejects with `op_limit` |
 | Log per call | 64 KB | | the rest is dropped and marked |
 | Answer | 1 MB | | `function_error` |
 | Input | 1 MiB, `ORDO_FN_BODY_BYTES` | 64 MiB | `bound_violation` at the door, naming the setting |
@@ -495,9 +502,9 @@ same `access_denied` as a function the caller may not call. A paused tenant
 answers `space_paused` with its pause answer, unless the function says
 `nopause`.
 
-The call runs as the signed-in person. In this increment a function
-reaches no ops, so that identity shows in the run record:
-`function:suggestTitle@<version> on behalf of <person>`.
+The call runs as the signed-in person. The run record names both:
+`function:suggestTitle@<version> on behalf of <person>`. A function's own
+writes go through ops ([Calling ops](#calling-ops)).
 
 With an `Idempotency-Key`, a repeated call with the same body gets the
 first answer back and the function does not run again. The same key with a
@@ -514,6 +521,7 @@ key, so a retry runs again.
 | `function_busy` | 429 | Too many calls are running. Retry after the `Retry-After` seconds. |
 | `egress_refused` | 400 | An outbound call was refused, and the code let it end the call. The message names the reason. |
 | `not_found` | 404 | A `blob` argument names a file the caller may not read, or none at all. |
+| `access_guard` | 403 | An op the code called is one the caller may not call, or a delete closed to functions. The message names `ORDO_DELEGABLE_OPS` when that would open it. |
 | `bound_violation` | 400 | The body is over `ORDO_FN_BODY_BYTES`. Send a file through the blob door instead. |
 
 ### What is recorded
@@ -523,6 +531,100 @@ function, the version, the tenant, who called, the wall time, CPU, peak
 memory, the number of outbound calls and their hosts, bytes sent and
 received, the outcome class and the log. The input, the answer, request
 bodies and file bytes are never recorded. The log is scrubbed of live secret values.
+
+## Calling ops
+
+A function reads and writes through the program's own ops. It never holds
+a database connection or a service key. `uses` names the ops it may call:
+
+```ordo
+op oneNote($id: id) =
+  notes(id == $id)[id, rev, title, body]
+
+op retitleNote($id: id, $rev: int, $title: text) =
+  set notes { id: $id, rev: $rev, title: $title }
+
+function titleNote in notes {
+  call($note: id) -> json by member
+  code "fn/title-note.js"
+  egress api.anthropic.com
+  secrets llmKey
+  uses oneNote, retitleNote
+}
+```
+
+```js
+export default {
+  async call(input, ctx) {
+    const [note] = await ctx.op("oneNote", { id: input.note });
+    if (!note) throw new Error("no such note, or it is not yours to read");
+    const title = await askTheModel(note.body, ctx);
+    await ctx.op("retitleNote", { id: note.id, rev: note.rev, title });
+    return { title };
+  },
+};
+```
+
+- `ctx.op(name, args)` answers the op's rows: a read's first page, or a
+  write's summary. `args` holds the op's parameters by name.
+- **It runs as the person who called the function.** A delegation lasts
+  this one call. Pressing the button is the consent, so there is no
+  consent screen (ruled 2026-10-08).
+- **It can never do more than the person can.** Each op meets the op
+  door's own steps for the caller's token: the access check, the email
+  requirement, the quota gate and typed parameters. The row guards run
+  with `$caller` set to the person. So the function reaches `uses`
+  intersected with what the person may do.
+- **A delete is closed by default**, as for every caller acting for a
+  person. The app developer opens one by name:
+  `ORDO_DELEGABLE_OPS=deleteNote`.
+- **The chain names both.** A write lands as
+  `agent:function:titleNote@<version> on behalf of user:<person>`.
+- A paused tenant refuses the op unless the op is `nopause`.
+- One call makes at most 50 op calls.
+- A platform op (`std.*`) cannot be listed in `uses`, and a function
+  cannot call another function.
+- An op that requires an `Idempotency-Key` is refused; call it from the
+  page.
+- A function without `uses` reaches no op, and behaves as it did before
+  `uses` existed.
+
+### Sealed fields
+
+A person's own secret, such as a Google refresh token, is a sealed field
+on their own row. A function reads it through an op, as them, and never
+holds the value:
+
+```js
+const [account] = await ctx.op("myGoogleAccount", {});
+const r = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList", {
+  headers: { authorization: ctx.sealed(account.token).bearer() },
+});
+```
+
+- Each sealed field in an op's answer arrives as a handle. Printed,
+  logged or returned, it reads `[sealed]`.
+- `ctx.sealed(handle)` makes a header value, like `ctx.secret`, with
+  `.bearer()` and `.template("Token {}")`. The host fills the value in on
+  the way out, to a host on the function's `egress` list.
+- An answer that echoes the value has it replaced with `[secret]`, as for
+  a secret.
+- `ctx.sealed` takes only a sealed field from this call's `ctx.op`. Any
+  other value is a `TypeError`.
+
+### Op refusals
+
+A refused op rejects with an `OpRefused` error whose `code` is the reason.
+Catch it to handle it. Uncaught, it ends the call:
+
+| Reason | Answer | Means |
+|---|---|---|
+| `op_not_in_uses` | 500 `function_error` | the op is not in `uses`; add it there |
+| `op_access_denied` | 403 `access_guard` | the person calling may not call the op |
+| `op_not_delegable` | 403 `access_guard` | the op deletes rows; the message names `ORDO_DELEGABLE_OPS=<op>` |
+| `op_limit` | 500 `function_error` | more than 50 op calls in one call |
+| `delegation_ended` | 500 `function_error` | the call this delegation was made for has ended |
+| the op's own class | the same | `not_found`, `conflict`, `invalid_param` and the rest, as the page would get |
 
 ## Runs and logs
 

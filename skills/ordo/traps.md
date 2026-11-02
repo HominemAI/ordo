@@ -120,7 +120,8 @@ secret key for api.two.example
 ```
 
 A function is not a way round the language. Reads and writes of your own
-rows are ops. A function holds no database access and cannot call an op.
+rows are ops. A function holds no database access. It calls only the ops
+its `uses` lists, as the person calling, and never a platform op.
 
 **A file reaches a function only as a `blob` argument, read as the
 caller.** Do not put file bytes or base64 in the call's JSON: the body

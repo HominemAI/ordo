@@ -1,8 +1,9 @@
 # Backend functions: custom code the deployment runs
 
-Status: **plan, 2026-10-08.** Nothing built. Board `backend-functions` (18aa),
-step 4 of the onboarding order ruled 2026-10-08. The owner's decisions are
-the numbered questions at the end.
+Status: **plan, 2026-10-08. Increments 1, 2 and 4 built** (4 on
+2026-11-01; see §12). Board `backend-functions` (18aa), step 4 of the
+onboarding order ruled 2026-10-08. The owner's decisions are the numbered
+questions at the end. `howto-functions.md` is the user guide.
 
 The owner's words: *"running actual functions and custom code in the backend,
 deployed through code and infrastructure as code, to fill the last gaps of a
@@ -533,13 +534,45 @@ Each ships alone and is useful alone.
 | 1 | **A page-called function.** `secret` and `function` blocks (`call` only); `$secrets` sealed store and `ordo secret set/ls/rm`; `ordo-egress` `fetch` with host-bound secret injection and body caps; wasmtime with the JS engine component; code stored by hash at apply; `POST /v1/fn/<name>` through the door with auth, access, quotas, idempotency and pause; JSON in and out; limits; `$fnruns` and scrubbed logs | ellanor's `classify-notes` runs in Ordo and its page calls it | Opus | L |
 | 2 | **Files in.** `$x: blob` arguments read through the blob door as the caller; request body caps | `extract-document` moves | Opus | S |
 | 3 | **Streaming.** `-> stream sse`, `fetch` streaming reads, SDK `callStream`, React hook, stream caps | a model's SSE reaches the page unbuffered | Opus | M |
-| 4 | **Ops from functions.** `uses`, `ctx.op`, the per-call delegation, attribution, `ctx.sealed` | `face-chat` writes its turns as the person | Opus | M |
+| 4 | **Ops from functions.** `uses`, `ctx.op`, the per-call delegation, attribution, `ctx.sealed`. **Built 2026-11-01**, see below | `face-chat` writes its turns as the person | Opus | M |
 | 5 | **Schedule and change.** `trigger` on a function through the 12a engine; `function:` principal; retries, dead letters, pause skips | a nightly digest runs per tenant | Opus | M |
 | 6 | **Inbound webhooks.** `webhook` wake-up, `/hooks/...`, `hmac-sha256` and `bearer` verification, `source:` principal | a GitHub push lands as a row | Opus | M |
 | 7 | **Metering.** `function_calls`, `function_ms`, `function_cpu_ms`, `egress_bytes`, declared custom quantities, quotas on them, concurrency caps as settings | a quota on `llm_tokens` refuses at the door | Sonnet | M |
 | 8 | **Private hosts.** `ORDO_EGRESS_PRIVATE_HOSTS`, `http` for those only | ellanor's local model answers | Opus | S |
 | 9 | **Developer loop.** CDK `fn(...)`; `ordo dev` runs functions locally with a dev secret file; the Cloudflare `onRequest` adapter; `ordo fn logs`, `ordo fn runs`; howto | a Pages Function moves with only the declaration and the `env` lines changed | Sonnet | M |
 | 10 | **Any WASI component.** `code "x.wasm"` for Rust or Go, same host interface | a Rust function runs | Sonnet | S |
+
+**Increment 4, as built (2026-11-01).**
+
+- **Where.** `uses` parses in `ordo-syntax` and is checked in
+  `ordo-schema/src/function.rs`. `ctx.op` and `ctx.sealed` are in the
+  engine's prelude (`crates/ordo-fn-js`), the `op` import and the
+  `FnOps` seam in `crates/ordo-fn/src/ops.rs`. The door side is
+  `CallerDoor` in `crates/ordo-api/src/functions.rs` and `CallerOps` in
+  `crates/ordo-host/src/functions.rs`. A held value goes out through
+  `HeaderValue::Held` in `ordo-egress`.
+- **The delegation.** `CallerOps` lives for one call and is ended as the
+  run finishes. An op runs only if it is in `uses`, deletes no row (unless
+  `ORDO_DELEGABLE_OPS` names it), the tenant is not paused, and the op
+  door's own steps let the caller's token call it: access, email, quota,
+  typed parameters, then the executor with `$caller` set to the person.
+- **Attribution.** The existing delegation form,
+  `agent:function:<name>@<version> on behalf of user:<id>`. No new actor
+  kind, so a chain written now still reads in an earlier Ordo. A caller
+  that is itself a delegated token adds `via <agent>` to the agent name.
+- **Sealed fields.** An op's sealed outputs reach the code as handles. The
+  value stays in the host. `ctx.sealed(handle)` puts it in a header to any
+  `egress` host, and an echo of it is scrubbed as a secret's is.
+- **Upgrade.** A function without `uses` writes no `uses` key in its
+  manifest, so its program version does not move. The program upgrade in
+  `tests/upgrade_continuity.rs` runs `jot`, which calls two ops, before and
+  after `ordo apply` of version 1.1.
+- **Notes v2.** `titleNote` reads a note with `oneNote` and saves a title
+  with `retitleNote`, as the person.
+- **Not built.** Paging past an op's first page from a function. A
+  function calling an op that requires an `Idempotency-Key` (refused). A
+  sealed value passed back into an op. Presence-requiring ops are not
+  treated apart; a platform op cannot be listed at all.
 
 **The smallest first increment that moves a real ellanor function is 1.** It
 is large because a function with no secret or no egress is useless to these

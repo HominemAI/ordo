@@ -67,12 +67,13 @@ test-group = 'seeded-once'
 # fails, so one failure cannot hide the rest of the suite. A failing test's
 # output is printed when it fails and again at the end.
 #
-# At most 8 tests at once in a shard, whatever the runner's core count: 4
-# deployment-booting tests from the groups above, and 4 others. The others
-# run with ORDO_PG_POOL_SIZE=2, and under cargo the whole workspace peaked
-# at 25 connections that way. Raise it only with a measured peak.
+# At most 4 tests at once in a shard, whatever the runner's core count.
+# At 8, three full runs on 2026-11-01 and 02 each failed 2 to 4 tests on
+# timing: a pool took 8.6 s to drop connections it drops in 1 s, and a
+# supervisor's first leadership dial missed its tick (run 41368713492).
+# Five shards share one node. Raise it only with a run that stays green.
 [profile.ci]
-test-threads = 8
+test-threads = 4
 fail-fast = false
 failure-output = "immediate-final"
 success-output = "never"

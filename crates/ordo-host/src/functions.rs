@@ -14,9 +14,26 @@
 //!
 //! **Who it runs as.** A page call runs as the signed-in person: the door's
 //! access check resolved them, and the run is recorded as
-//! `function:<name>@<version>` on behalf of that person. In increment 1 a
-//! function reaches no ops, so the delegation has nothing to carry yet;
-//! increment 4 (`ctx.op`) is where it bounds the ops it calls.
+//! `function:<name>@<version>` on behalf of that person.
+//!
+//! **Ops from functions** (increment 4). [`CallerOps`] is the one-call
+//! delegation `ctx.op` runs through (ruled 2026-10-08, ask 4: no consent
+//! screen; pressing the button is the consent). An op runs only when all of
+//! these hold:
+//!
+//! - the call has not ended ([`CallerOps::end`], called as the run
+//!   finishes);
+//! - the function's `uses` lists it;
+//! - it deletes no row, unless the app developer opened it with
+//!   `ORDO_DELEGABLE_OPS`, as for every delegated caller;
+//! - the tenant is not paused, unless the op is `nopause`;
+//! - the person may call it themselves: the op door's own steps, through
+//!   [`ordo_api::functions::CallerDoor`], with `$caller` set to them.
+//!
+//! So the function reaches `uses` intersected with what the person can do,
+//! and never more. Each write lands in the chain as
+//! `agent:function:<name>@<version> on behalf of user:<id>`: the existing
+//! delegation form, so a chain written now reads in any earlier Ordo.
 //!
 //! **Files in** (increment 2). A `$file: blob` argument is a handle from
 //! the blob door. [`CallerBlobs`] reads it through the blob door's own
@@ -25,20 +42,21 @@
 //! `std.$blob.get` before the call reached here.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::BoxFuture;
 use ordo_api::blob::{BlobPort, BlobRequest, BlobVerb};
-use ordo_api::functions::{FnInvocation, FunctionRunner, FN_BODY_BYTES_ENV};
+use ordo_api::functions::{CallerDoor, FnInvocation, FunctionRunner, FN_BODY_BYTES_ENV};
 use ordo_api::spec::{
     ExecError, NotSyncable, OpCost, OpKind, OpSpec, ParamSpec, ParamTy, RefineTier, Syncability,
 };
 use ordo_api::ErrorCode;
 use ordo_exec::{sql_lit, Pool, PoolError};
 use ordo_fn::{
-    BlobError, FnBlob, FnBlobs, FnCall, FnError, FnFetch, FnHost, HostConfig, Limits, NoBlobs,
-    Scrub, BLOB_BYTES_ENV,
+    BlobError, FnBlob, FnBlobs, FnCall, FnError, FnFetch, FnHost, FnOpAnswer, FnOps, HostConfig,
+    Limits, NoBlobs, NoOps, OpError, Scrub, BLOB_BYTES_ENV,
 };
 use ordo_schema::Schema;
 use ordo_syntax::{FunctionDecl, ScalarTy};
@@ -600,6 +618,103 @@ impl FnBlobs for CallerBlobs {
     }
 }
 
+/// The one-call delegation a function's `ctx.op` runs through: the person
+/// calling, bounded by the function's `uses`, alive until the call ends.
+/// See the module notes for every check, in order.
+pub struct CallerOps {
+    door: Option<CallerDoor>,
+    uses: Vec<String>,
+    /// Who the chain names as acting: `function:<name>@<version>`, and
+    /// `via <agent>` when the caller was itself a delegated token.
+    acting: String,
+    spaces: Arc<Spaces>,
+    space: String,
+    live: AtomicBool,
+}
+
+impl CallerOps {
+    /// End the delegation. Every later op call is [`OpError::Ended`].
+    pub fn end(&self) {
+        self.live.store(false, Ordering::SeqCst);
+    }
+
+    /// Who the chain names as acting for the person.
+    pub fn acting(&self) -> &str {
+        &self.acting
+    }
+}
+
+/// The door's answer to an op call, as the function sees it. The door's
+/// class and words are kept.
+fn op_error(op: &str, e: ordo_api::ApiError) -> OpError {
+    match e.code {
+        ErrorCode::AccessDenied => OpError::Denied { op: op.to_string() },
+        code => OpError::Refused {
+            op: op.to_string(),
+            code: code.as_str().to_string(),
+            message: e.message,
+            retry: matches!(code, ErrorCode::ServerBusy | ErrorCode::SpaceUnavailable),
+        },
+    }
+}
+
+#[async_trait::async_trait]
+impl FnOps for CallerOps {
+    async fn call(
+        &self,
+        op: &str,
+        args: serde_json::Map<String, Value>,
+    ) -> Result<FnOpAnswer, OpError> {
+        if !self.live.load(Ordering::SeqCst) {
+            return Err(OpError::Ended);
+        }
+        if !self.uses.iter().any(|u| u == op) {
+            return Err(OpError::NotUsed { op: op.to_string() });
+        }
+        // A call with no token to bind cannot act for anyone.
+        let Some(door) = &self.door else {
+            return Err(OpError::Denied { op: op.to_string() });
+        };
+        let Some(spec) = door.spec(op) else {
+            return Err(OpError::Refused {
+                op: op.to_string(),
+                code: ErrorCode::UnknownOp.as_str().to_string(),
+                message: "the serving program has no such op".into(),
+                retry: false,
+            });
+        };
+        // SH-20, as for every caller acting for a person: a delete is
+        // closed unless the app developer named it.
+        if spec.deletes_rows() && !crate::delegable::current().opens(op) {
+            return Err(OpError::NotDelegable {
+                op: op.to_string(),
+                setting: crate::delegable::ENV,
+            });
+        }
+        if let Err(e) = crate::pause::gate(&self.spaces, op, &self.space) {
+            return Err(OpError::Refused {
+                op: op.to_string(),
+                code: e.code.as_str().to_string(),
+                message: e.message,
+                retry: false,
+            });
+        }
+        let rows = door
+            .run(&spec, &args, &self.acting)
+            .await
+            .map_err(|e| op_error(op, e))?;
+        Ok(FnOpAnswer {
+            rows,
+            sealed: spec
+                .output_fields
+                .iter()
+                .filter(|f| f.sealed)
+                .map(|f| f.name.clone())
+                .collect(),
+        })
+    }
+}
+
 /// The door's function runner.
 pub struct HostFunctions {
     /// Made on the first call: compiling the engine takes about a second,
@@ -701,6 +816,25 @@ impl HostFunctions {
             .get(name)
             .cloned()
     }
+
+    /// The one-call delegation for `call`: its function's `uses`, its
+    /// caller, its tenant. `None` when the serving program has no such
+    /// function. The runner ends it as the run finishes.
+    pub fn delegation(&self, call: &FnInvocation) -> Option<Arc<CallerOps>> {
+        let entry = self.entry(&call.name)?;
+        let mut acting = format!("function:{}@{}", entry.decl.name.name, entry.version);
+        if let Some(agent) = &call.agent {
+            acting.push_str(&format!(" via {agent}"));
+        }
+        Some(Arc::new(CallerOps {
+            door: call.door.clone(),
+            uses: entry.decl.uses.iter().map(|u| u.name.clone()).collect(),
+            acting,
+            spaces: self.spaces.clone(),
+            space: call.space.clone(),
+            live: AtomicBool::new(true),
+        }))
+    }
 }
 
 impl FunctionRunner for HostFunctions {
@@ -752,6 +886,18 @@ impl FunctionRunner for HostFunctions {
             };
             let mut limits = entry.limits();
             limits.blob_bytes = self.settings.blob_bytes;
+            let uses: Vec<String> = entry.decl.uses.iter().map(|u| u.name.clone()).collect();
+            // A function without `uses` reaches no op, and pays for no
+            // delegation.
+            let delegation = if uses.is_empty() {
+                None
+            } else {
+                self.delegation(&call)
+            };
+            let ops: Arc<dyn FnOps> = match &delegation {
+                Some(d) => d.clone(),
+                None => Arc::new(NoOps),
+            };
             let run = host
                 .call(FnCall {
                     space: call.space.clone(),
@@ -767,8 +913,14 @@ impl FunctionRunner for HostFunctions {
                     scrub,
                     blobs,
                     blob_args,
+                    uses,
+                    ops,
                 })
                 .await;
+            // The delegation lasts this one call.
+            if let Some(d) = &delegation {
+                d.end();
+            }
             let principal = match &call.agent {
                 Some(agent) => format!("{} via {agent}", call.principal),
                 None => call.principal.clone(),
@@ -814,6 +966,23 @@ pub fn exec_error(e: FnError) -> ExecError {
         FnError::Blob(BlobError::NoStore | BlobError::Failed { .. }) => ErrorCode::Internal,
         FnError::BadInput { .. } => ErrorCode::InvalidParam,
         FnError::Engine { .. } => ErrorCode::Internal,
+        // The program could fix these: an op not in `uses`, too many op
+        // calls, a delegation used after its call.
+        FnError::Op(OpError::NotUsed { .. } | OpError::TooMany { .. } | OpError::Ended) => {
+            ErrorCode::FunctionError
+        }
+        // The person may not do it, so the function may not do it for
+        // them: a guard's refusal, 403. The message names the setting
+        // when one would open it.
+        FnError::Op(OpError::Denied { .. } | OpError::NotDelegable { .. }) => {
+            ErrorCode::AccessGuard
+        }
+        // The op's own refusal keeps its class when an op may raise it.
+        FnError::Op(OpError::Refused { code, .. }) => ErrorCode::ALL
+            .iter()
+            .copied()
+            .find(|c| c.as_str() == code && c.executor_raisable())
+            .unwrap_or(ErrorCode::FunctionError),
     };
     ExecError::new(code, e.to_string())
 }

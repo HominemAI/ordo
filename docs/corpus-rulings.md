@@ -11823,3 +11823,10 @@ Board task `time-sensitive-tests-fail-when-other-tests` (15b).
   connections keep their own. The 5 notes_app tests that the Playwright
   notes e2e covers leave ordo-host, keeping the tests that found notes_app's
   2 real bugs. Template databases (cut-test-time ask 2) come with them.
+- Cut-test-time ask 6 ("ok", 2026-11-02): template databases are removed.
+  Measured: rebuilding a test's database takes 60 to 80 ms; dropping it and
+  cloning a template takes 90 to 160 ms, 310 ms with 4 at once, because a
+  clone copies the whole 9 MB database through the WAL. The 10 costliest
+  files summed 294 s without templates and 348 s with them. A test's real
+  setup cost is building the engine, about 230 ms. Built opt-in in
+  eb096fc7, removed in the revert after it.

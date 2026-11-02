@@ -60,6 +60,16 @@ at once. So:
   group (3), and the files that boot deployments one at a time by
   `serial-in-file` (1): 4 at once against a 100-connection server. CI runs
   at most 4 tests at once per shard (`test-threads` in the `ci` profile).
+- **One shared instance per run for the app tests** (owner ruling
+  2026-11-02, ask 6). notes_app and teamspace_app tests on default settings
+  call `Deployment::on_shared`: the first to start boots `ordo-host`, the
+  rest find its address in a file named for the nextest run
+  (`tests/shared_instance/mod.rs`). A watchdog stops it and drops its
+  databases when nextest exits. Each test signs up its own people. Under
+  `cargo test`, or with `ORDO_SHARED_INSTANCE=0`, each boots its own. A
+  test that restarts the server, changes settings, runs a replica,
+  applies a program or counts connections keeps `Deployment::boot`.
+  Shared-instance tests are in no test group.
 - A test that counts the server's connections needs it to itself, which no
   group gives. notes_app's `connections_*` tests run in a second pass of the
   `host` shards, alone and one at a time.

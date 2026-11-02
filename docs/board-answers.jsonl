@@ -1235,3 +1235,10 @@
 {"seq": 1235, "item": "ci-max-connections", "ask": 2, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1236, "item": "cut-test-time-by-building-and", "ask": 5, "at": "2026-11-01T23:54:54Z", "status": "open", "text": "ok", "source": "page", "read": true}
 {"seq": 1237, "item": "cut-test-time-by-building-and", "ask": 5, "at": "2026-11-01", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1238, "item": "test-in-proportion-to-the-change", "ask": 1, "at": "2026-11-02T00:50:58Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1239, "item": "test-in-proportion-to-the-change", "ask": 2, "at": "2026-11-02T00:51:21Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1240, "item": "test-in-proportion-to-the-change", "ask": 3, "at": "2026-11-02T00:51:52Z", "status": "open", "text": "Yes. If something turns up an instance - a majority of tests that require an instance should happen there, not scattered.", "source": "page", "read": true}
+{"seq": 1241, "item": "test-in-proportion-to-the-change", "ask": 0, "at": "2026-11-02T00:51:57Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1242, "item": "test-in-proportion-to-the-change", "ask": 1, "at": "2026-11-02", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1243, "item": "test-in-proportion-to-the-change", "ask": 2, "at": "2026-11-02", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1244, "item": "test-in-proportion-to-the-change", "ask": 3, "at": "2026-11-02", "status": "decided", "text": "Yes. If something turns up an instance - a majority of tests that require an instance should happen there, not scattered.", "source": "record", "read": true}

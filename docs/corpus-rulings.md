@@ -11768,3 +11768,24 @@ asks 2 to 4. Measured that day: 32 min of tests across the shards, about
   before. Each shard now builds what it runs, and nextest still runs files
   at once. Debug info was already off on CI (`CARGO_PROFILE_DEV_DEBUG: 0`),
   so the line-tables cut in the recommendation had nothing to cut.
+
+## 2026-11-02: test in proportion to the change
+
+Board task `test-in-proportion-to-the-change` (15b). A bleeding push ran
+far more than its change reached: editing one ordo-host test file ran all
+~1,380 host tests, because 15a filters by crate and ordo-host sits on top.
+The owner: "I still think the amount of testing proportional to any change
+is the problem."
+
+- Ask 1 ("yes"): a change to one test file runs only that file on
+  `bleeding`.
+- Ask 2 ("yes"): a change to ordo-host's code runs only the test files
+  mapped to that code, from a map kept in the repo. An unmapped file runs
+  everything.
+- Ask 3: "Yes. If something turns up an instance - a majority of tests that
+  require an instance should happen there, not scattered." Tests that need
+  a running deployment are grouped to run against one instance, instead of
+  each booting its own. The cuts are proposed from the test-value
+  measurement first.
+
+Pull requests to `main` still run everything.

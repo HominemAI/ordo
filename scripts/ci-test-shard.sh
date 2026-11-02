@@ -153,12 +153,12 @@ case "$mode" in
     fi
     ;;
   rest)
-    # These count the server's connections or time a pool's idle period,
-    # so tests beside them change the answer (PR 2, 2026-11-02: pool_idle
-    # saw its in-use connection closed). They run after the rest, one at a
-    # time, with nothing beside them. route_many_tenants' peak count is in
-    # PERF; its other test stays here.
-    alone='binary_id(ordo-exec::pool_idle) | binary_id(ordo-exec::route_many_tenants)'
+    # These run after the rest, one at a time, with nothing beside them.
+    # route_many_tenants counts the server's connections (its peak count is
+    # in PERF). group(timing-alone) is the tests that wait on real time and
+    # cannot use a test clock, each with its reason in .config/nextest.toml.
+    # pool_idle runs on a test clock now and needs no pass of its own.
+    alone='binary_id(ordo-exec::route_many_tenants) | group(timing-alone)'
     filter=$(narrow "not package(ordo-host) & ((not (kind(lib) | kind(bin)) & not ($no_db)) | ($DB_UNIT)) & not ($alone) & not ($PERF)")
     alone=$(narrow "not package(ordo-host) & ($alone) & not ($PERF)")
     if [ "$all" = 1 ]; then
@@ -188,7 +188,7 @@ case "$mode" in
     # notes_app's `connections_*` tests count the server's connections, so
     # they run after the rest, one at a time, with nothing beside them. The
     # thirty-people sign-up among them is in PERF.
-    alone='binary_id(ordo-host::notes_app) & test(/^connections_/)'
+    alone='(binary_id(ordo-host::notes_app) & test(/^connections_/)) | group(timing-alone)'
     main=$(narrow "package(ordo-host) & kind(test) & not ($alone) & not ($no_db) & not ($PERF)")
     alone=$(narrow "($alone) & not ($PERF)")
     if [ "${4:-}" = "--list" ]; then

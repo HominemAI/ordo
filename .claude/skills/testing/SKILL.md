@@ -63,6 +63,13 @@ at once. So:
 - A test that counts the server's connections needs it to itself, which no
   group gives. notes_app's `connections_*` tests run in a second pass of the
   `host` shards, alone and one at a time.
+- Load and stress tests run in `test (perf)` only (owner ruling 2026-11-02):
+  on pull requests to `main`, nightly, by hand and with `ci: full`, never on
+  a plain `bleeding` push. `PERF` in scripts/ci-test-shard.sh is the one list.
+  A test goes there when its point is capacity or speed (a peak connection
+  count, many people at once, a latency budget). A test that checks a
+  feature works stays in its tier, even when it uses time.
+  `bash scripts/ci-test-shard.sh perf --list` shows the list.
 
 To run one CI shard here: `bash scripts/ci-test-shard.sh unit`, `rest` or
 `host 1 4`. Each honours `ORDO_CI_CRATES` and `ORDO_CI_FILTER` (below). Add

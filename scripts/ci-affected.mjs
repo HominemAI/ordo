@@ -47,6 +47,12 @@
 // test.
 //
 // When unsure it runs. The pull request to `main` runs everything anyway.
+//
+// The load and stress tests (`perf`, owner ruling 2026-11-02, board task
+// `time-sensitive-tests-fail-when-other-tests` ask 1) run on a pull
+// request, the nightly run, a manual run and a push carrying `ci: full`.
+// A push that runs everything because of the paths it changed (rule 1)
+// does not run them.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
@@ -96,10 +102,15 @@ const INERT = [
 
 const TEST_DIRS = /^(tests|benches|examples|e2e)\//;
 
-/** The answer for a run that covers everything. */
-export function everything(reason, packages) {
+/**
+ * The answer for a run that covers everything. `perf`: the load and stress
+ * tests run too, which only a pull request, nightly, manual or `ci: full`
+ * run asks for.
+ */
+export function everything(reason, packages, { perf = false } = {}) {
   return {
     full: true,
+    perf,
     reason,
     crates: new Set(packages.map((p) => p.name)),
     clients: new Set(CLIENT_JOBS),
@@ -459,6 +470,7 @@ export function outputs(r) {
   const testsOnly = r.full ? new Set() : new Set([...r.crates].filter((c) => r.scope?.get(c) && !r.scope.get(c).unit));
   return {
     full: b(r.full),
+    perf: b(r.perf),
     reason: r.reason,
     crates: r.full ? 'all' : list(r.crates),
     test_filter: testFilter(r),
@@ -589,7 +601,7 @@ function decide(argv, env) {
   const local = argv.includes('--files') || argv.includes('--diff');
   if (!local && env.EVENT !== 'push') {
     // Needs neither git history nor cargo.
-    return everything(`a ${env.EVENT || 'local'} run runs everything`, []);
+    return everything(`a ${env.EVENT || 'local'} run runs everything`, [], { perf: true });
   }
   let packages;
   try {
@@ -611,7 +623,7 @@ function decide(argv, env) {
     base = pushBase(env.BEFORE, after);
     if (!base) return everything('no base commit to diff against', packages);
     const messages = git(['log', '--format=%B', `${base}..${after}`]);
-    if (/^ci: full\s*$/m.test(messages)) return everything('a commit asks for it (ci: full)', packages);
+    if (/^ci: full\s*$/m.test(messages)) return everything('a commit asks for it (ci: full)', packages, { perf: true });
   }
   let files;
   try {
@@ -632,7 +644,7 @@ function decide(argv, env) {
  * node at once failed timing tests that pass alone.
  */
 export function deferToPullRequest(out) {
-  const off = ['rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e'];
+  const off = ['perf', 'rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e'];
   const d = { ...out, reason: `a pull request to main is open and runs everything (${out.reason})` };
   for (const k of off) d[k] = 'false';
   d.clients = '';
@@ -664,7 +676,7 @@ async function main() {
     r = decide(process.argv.slice(2), process.env);
   } catch (e) {
     // A filter that cannot decide runs everything rather than nothing.
-    r = everything(`the filter failed (${String(e.message).split('\n')[0]})`, []);
+    r = everything(`the filter failed (${String(e.message).split('\n')[0]})`, [], { perf: process.env.EVENT !== 'push' });
   }
   let out = outputs(r);
   if (process.env.EVENT === 'push' && r.full && (await pullRequestOpen(process.env))) {

@@ -1666,7 +1666,7 @@ fn check_default(entity: &str, field: &str, e: &Expr) -> Result<(), SchemaError>
 /// with the link entity's own name upper-cased at the front — `boards`
 /// derives `boardsAccess`, hence `grantBoardsAccess`, `revokeBoardsAccess`
 /// and `setBoardsAccessLevel` (GC036).
-fn derived_op_names(link_name: &str) -> [String; 3] {
+pub(crate) fn derived_op_names(link_name: &str) -> [String; 3] {
     let mut upper = link_name.to_string();
     if let Some(c) = upper.get(0..1) {
         upper.replace_range(0..1, &c.to_uppercase());

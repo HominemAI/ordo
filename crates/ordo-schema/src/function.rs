@@ -8,7 +8,12 @@
 //!
 //! | Class | Refused |
 //! |---|---|
-//! | `invalid_function` | a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a code path that is absolute, climbs out with `..` or is not `.js`/`.mjs`, a host that is not a DNS name or is listed twice, a secret listed twice, a limit outside the deployment's ceilings |
+//! | `invalid_function` | a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a code path that is absolute, climbs out with `..` or is not `.js`/`.mjs`, a host that is not a DNS name or is listed twice, a secret listed twice, a `uses` name that is not one of the program's ops or is listed twice, a limit outside the deployment's ceilings |
+//!
+//! **`uses`** (increment 4) names the ops `ctx.op` may call: the program's
+//! own `op` declarations and the ops `acl` derives. A platform op
+//! (`std.*`) cannot be named, so a function never writes membership or
+//! tenant state. A function is not an op, so it cannot call another.
 
 use ordo_syntax::decl::{FunctionDecl, Program};
 
@@ -69,6 +74,7 @@ pub fn check(schema: &Schema, program: &Program) -> Result<(), SchemaError> {
         check_code(f)?;
         check_egress(f)?;
         check_secrets(schema, f)?;
+        check_uses(schema, program, f)?;
         check_limits(f)?;
     }
     Ok(())
@@ -251,6 +257,47 @@ fn check_secrets(schema: &Schema, f: &FunctionDecl) -> Result<(), SchemaError> {
     Ok(())
 }
 
+/// Each name in `uses` is one of the program's ops, listed once.
+fn check_uses(schema: &Schema, program: &Program, f: &FunctionDecl) -> Result<(), SchemaError> {
+    let derived: Vec<String> = schema
+        .entities
+        .iter()
+        .filter(|e| e.acl_levels.is_some())
+        .flat_map(|e| crate::derived_op_names(&format!("{}Access", e.name)))
+        .collect();
+    let mut seen: Vec<&str> = Vec::new();
+    for u in &f.uses {
+        let name = u.name.as_str();
+        if seen.contains(&name) {
+            return Err(refuse(
+                u.span,
+                format!("op `{name}` is listed twice in `uses`"),
+            ));
+        }
+        seen.push(name);
+        let is_op =
+            program.ops.iter().any(|o| o.name.name == name) || derived.iter().any(|d| d == name);
+        if is_op {
+            continue;
+        }
+        let what = if program.functions.iter().any(|g| g.name.name == name) {
+            "is a function, and a function calls ops only"
+        } else if program.routines.iter().any(|r| r.name.name == name) {
+            "is a routine, and a function calls ops only"
+        } else {
+            "is not an op in this program"
+        };
+        return Err(refuse(
+            u.span,
+            format!(
+                "function `{}` uses `{name}`, which {what}: name an `op` the program declares",
+                f.name.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn check_limits(f: &FunctionDecl) -> Result<(), SchemaError> {
     let Some(span) = f.limits.span else {
         return Ok(());
@@ -335,6 +382,22 @@ mod tests {
         check(&src).unwrap();
     }
 
+    /// Increment 4: `uses` names the program's ops, and the ops `acl`
+    /// derives.
+    #[test]
+    fn a_function_uses_the_programs_ops() {
+        let src =
+            OK.replace(
+                "entity notes { title: text }",
+                "entity notes { title: text\n acl (read, write) }",
+            )
+            .replace(
+                "  secrets llmKey\n",
+                "  secrets llmKey\n  uses allNotes, grantNotesAccess\n",
+            ) + "op allNotes = notes[title]\n";
+        check(&src).unwrap();
+    }
+
     #[test]
     fn each_refusal_names_its_reason() {
         let cases = [
@@ -368,6 +431,27 @@ mod tests {
                 "no host it may call receives the secret",
             ),
             (OK.replace("memory 64 mb", "memory 2 mb"), "under 8 mb"),
+            (
+                OK.replace("  secrets llmKey\n", "  secrets llmKey\n  uses noSuchOp\n"),
+                "`noSuchOp`, which is not an op in this program",
+            ),
+            (
+                OK.replace(
+                    "  secrets llmKey\n",
+                    "  secrets llmKey\n  uses suggestTitle\n",
+                ),
+                "is a function",
+            ),
+            (
+                format!(
+                    "{}op allNotes = notes[title]\n",
+                    OK.replace(
+                        "  secrets llmKey\n",
+                        "  secrets llmKey\n  uses allNotes, allNotes\n"
+                    )
+                ),
+                "listed twice in `uses`",
+            ),
             (OK.replace("  egress api.example.com\n", ""), "no `egress`"),
             (
                 format!("{OK}op suggestTitle = notes[title]\n"),

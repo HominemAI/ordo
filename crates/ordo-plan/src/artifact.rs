@@ -196,7 +196,7 @@ fn function_artifacts(schema: &Schema) -> Vec<Value> {
                 .iter()
                 .map(|p| json!({ "name": p.name.name, "type": p.ty.spelled() }))
                 .collect();
-            json!({
+            let mut m = json!({
                 "name": f.name.name,
                 "wake": "call",
                 "params": params,
@@ -212,7 +212,15 @@ fn function_artifacts(schema: &Schema) -> Vec<Value> {
                     "memory_bytes": f.limits.memory_bytes,
                 },
                 "nopause": f.nopause,
-            })
+            });
+            // `uses` (increment 4) is written only when the function names
+            // an op. A function without it keeps the manifest, and so the
+            // program version, it had before increment 4: an upgrade of
+            // Ordo moves no deployed version.
+            if !f.uses.is_empty() {
+                m["uses"] = json!(f.uses.iter().map(|u| u.name.clone()).collect::<Vec<_>>());
+            }
+            m
         })
         .collect()
 }

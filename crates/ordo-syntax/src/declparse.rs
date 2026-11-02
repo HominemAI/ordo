@@ -400,7 +400,7 @@ fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
 // ── backend functions ────────────────────────────────────────────────────
 
 /// `function name [in domain] { call(...) -> json [by member]  code "..."
-/// [egress host, …] [secrets name, …] [limit …] [nopause] }`
+/// [egress host, …] [secrets name, …] [uses op, …] [limit …] [nopause] }`
 /// (`plan-backend-functions.md` §4.1). Inside the braces the lexer emits no
 /// line breaks, so each clause is found by its leading word.
 fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError> {
@@ -418,6 +418,7 @@ fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError
     let mut code: Option<(String, Span)> = None;
     let mut egress: Vec<FunctionHost> = Vec::new();
     let mut secrets: Vec<Ident> = Vec::new();
+    let mut uses: Vec<Ident> = Vec::new();
     let mut limits = FunctionLimits::default();
     let mut nopause = false;
 
@@ -544,23 +545,34 @@ fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError
                         break;
                     }
                 }
-                "uses" | "webhook" => {
-                    return Err(p.err_here(format!(
-                        "`{w}` on a function is not built yet; increment 1 builds `call`, \
-                         `code`, `egress`, `secrets`, `limit` and `nopause`"
-                    )));
+                "uses" => {
+                    p.bump();
+                    loop {
+                        uses.push(ident(p, "the name of an op the function calls")?);
+                        if matches!(p.peek(), TokenKind::Comma) {
+                            p.bump();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                "webhook" => {
+                    return Err(p.err_here(
+                        "`webhook` on a function is not built yet; a function is called from \
+                         the page with `call`",
+                    ));
                 }
                 _ => {
                     return Err(p.err_here(format!(
                         "expected a function clause (`call`, `code`, `egress`, `secrets`, \
-                         `limit`, `nopause`), found `{w}`"
+                         `uses`, `limit`, `nopause`), found `{w}`"
                     )))
                 }
             },
             other => {
                 return Err(p.err_here(format!(
                     "expected a function clause (`call`, `code`, `egress`, `secrets`, \
-                     `limit`, `nopause`), found {}",
+                     `uses`, `limit`, `nopause`), found {}",
                     describe(&other)
                 )))
             }
@@ -596,6 +608,7 @@ fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError
         code_span,
         egress,
         secrets,
+        uses,
         limits,
         nopause,
         call_span,

@@ -1247,3 +1247,8 @@
 {"seq": 1247, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 1, "at": "2026-11-02T03:54:00Z", "status": "open", "text": "I think performance testing should not be part of normal regression testing. So only on merge to dev or main. Like there should be a different path for optimization - what are your thoughts?", "source": "page", "read": true}
 {"seq": 1248, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 2, "at": "2026-11-02T03:54:13Z", "status": "open", "text": "Yes.", "source": "page", "read": true}
 {"seq": 1249, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 2, "at": "2026-11-02", "status": "decided", "text": "Yes.", "source": "record", "read": true}
+{"seq": 1250, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 1, "at": "2026-11-02T04:24:03Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1251, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 3, "at": "2026-11-02T04:25:09Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1252, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 0, "at": "2026-11-02T04:25:12Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1253, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 1, "at": "2026-11-02", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1254, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 3, "at": "2026-11-02", "status": "decided", "text": "Yes", "source": "record", "read": true}

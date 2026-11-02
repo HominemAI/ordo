@@ -11810,3 +11810,9 @@ Board task `time-sensitive-tests-fail-when-other-tests` (15b).
   should be a different path for optimization." Put back as two asks: load
   and stress tests to a perf job on pull requests and nightly, and
   behaviour tests that use time kept in regression on a test clock.
+- Ask 1 ("yes"): load and stress tests (peak connections, pool stress,
+  latency budgets) run in a perf job of their own, with the server to
+  itself, on pull requests to `main` and nightly only.
+- Ask 3 ("Yes"): behaviour tests that use time (an idle pool lets go,
+  slow-down mode, leader failover) stay in regression, rewritten on a test
+  clock. Where that cannot be done, they run alone.

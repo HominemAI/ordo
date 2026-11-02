@@ -1,6 +1,6 @@
 # Evolution plans: how a schema change is made, kept and undone
 
-Status: **ruled in part, 2026-10-01** (board `evolution-plans` asks 1, 2, 4, 5; ask 3 open). From the owner's notes on the Grief Remediation tab
+Status: **ruled in part, 2026-10-01** (board `evolution-plans` asks 1, 2, 3, 4, 5). From the owner's notes on the Grief Remediation tab
 
 > **The command is `ordo evolve`** (ruled 2026-10-04, `syntax-additions` ask 1).
 > Where this plan says `ordo plan`, read `ordo evolve`. `ordo plan` stays the
@@ -181,14 +181,19 @@ harm?"* The costs, put on the board with the ask:
   per served version on each node; the interface served per version; a fix to
   the app's ops reaching a tenant only when it moves.
 - **Paid once any old version is served:** every Ordo release must still load
-  every served artifact, so the artifact format becomes a long-term promise;
+  every served version's source. The code stores source and recompiles at
+  each load, so the long-term promise is on the compiler;
   and sharing between tenants (feeds, windows, see-through) needs a rule when
   their versions differ on the shared entity.
 
 New recommendation: **the app developer lists which versions stay served**
 (default: every version a tenant is on). Ordo serves any version its binary
 can load, and refuses sharing across disagreeing versions until a translation
-exists. This replaces D-B2's bound, so it waits for the owner's ruling.
+exists. This replaces D-B2's bound.
+
+**Ruled 2026-10-01** (ask 3, board answer 295): *"Yes they should."* The app
+developer decides which versions stay served. Sharing data across versions
+needs a data agreement. D-B2 is replaced.
 Custom builds for special tenants (beta testers, a promoted dev branch) are
 the same mechanism, filed for after first deployment (`tenant-builds`).
 
@@ -263,6 +268,6 @@ On the board as `evolution-plans`:
 
 1. ~~Render first, apply when ready~~ **Ruled yes; errors are rejected.**
 2. ~~Keep from one before the oldest tenant~~ **Ruled: keep everything; the app developer may prune.**
-3. **Open:** should the app developer decide which versions stay served, replacing D-B2?
+3. ~~Should the app developer decide which versions stay served?~~ **Ruled yes (answer 295); D-B2 is replaced.**
 4. ~~A failing tenant~~ **Ruled: seamless; the old version serves until the new one works.**
 5. ~~Choices in the plan~~ **Ruled: in the plan, with a committable receipt.**

@@ -488,6 +488,10 @@ would accept. The probe must say so in those words.
 
 ## 6 · Every space at once
 
+> **Note (2026-11-02).** Every tenant has its own database (ruled 2026-09-25
+> and 2026-10-06). The shared-tables picture below is superseded, and
+> per-tenant versions are the core. See `plan-versions.md`.
+
 **There is no per-space migration, and the plan must say so on the first
 page of its output.**
 
@@ -866,6 +870,9 @@ Increment 3 grows the same table into the state machine of §7.1.
 
 ### 8.3 25i, a program update reaches every tenant's own database: **landed** (2026-09-29)
 
+> **Current behaviour that 27c replaces.** A tenant behind is held closed
+> (`SchemaBehind`, 15-second catch-up). See `plan-versions.md`.
+
 **What was seen.** The notes program lost its `gone` field. `serve.sh`
 applied the new version, the deployment's database moved, and the owner's
 tenant database stayed at the old version. The tenant was held closed as
@@ -971,6 +978,10 @@ tenant's data cannot take closes that tenant alone) and the unit test of the
 sentence in `crates/ordo-host/src/lib.rs`.
 
 ### Increment 3 — the barrier and the plaintext backfill
+
+> **Changed 2026-10-01.** The write freeze below is replaced by dual writes:
+> during a step's soak the write path writes the new shape and the previous
+> one. The barrier and its drill change to match. Still open.
 
 - `$migrations` state machine with a chunk cursor, attempt count, and
   dead-letter (the `$jobs` table has none of these).

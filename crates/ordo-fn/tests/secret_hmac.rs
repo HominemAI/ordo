@@ -67,6 +67,8 @@ async fn run(body: &str, secrets: &[&str], input: Value) -> FnRun {
         scrub: Arc::new(JefeScrub),
         blobs: Arc::new(ordo_fn::NoBlobs),
         blob_args: Vec::new(),
+        uses: Vec::new(),
+        ops: std::sync::Arc::new(ordo_fn::NoOps),
     })
     .await
 }

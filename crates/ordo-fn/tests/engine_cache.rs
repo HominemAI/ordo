@@ -59,6 +59,8 @@ async fn answers(h: &FnHost) -> Duration {
             scrub: Arc::new(NoScrub),
             blobs: Arc::new(ordo_fn::NoBlobs),
             blob_args: Vec::new(),
+            uses: Vec::new(),
+            ops: std::sync::Arc::new(ordo_fn::NoOps),
         })
         .await;
     // SHA-256("abc") starts with 0xba.

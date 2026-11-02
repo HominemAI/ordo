@@ -50,6 +50,8 @@ async fn run(body: &str) -> Value {
             scrub: Arc::new(NoScrub),
             blobs: Arc::new(ordo_fn::NoBlobs),
             blob_args: Vec::new(),
+            uses: Vec::new(),
+            ops: std::sync::Arc::new(ordo_fn::NoOps),
         })
         .await;
     match run.outcome {

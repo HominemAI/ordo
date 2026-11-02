@@ -122,6 +122,33 @@ pub enum HeaderValue {
         name: String,
         template: String,
     },
+    /// A sealed field's value the function read through an op
+    /// (`ctx.sealed`, increment 4). The function held only a handle; the
+    /// host put the value here. It may go to any host on the function's
+    /// `egress` list, and an answer that echoes it has it replaced, as for
+    /// a secret.
+    Held {
+        value: HeldValue,
+        template: String,
+    },
+}
+
+/// A value the host holds for a function: a person's own sealed field,
+/// read through an op as that person.
+///
+/// **No `Debug`, no `Display`.** Only the request writer and the echo
+/// scrubber here read it.
+#[derive(Clone)]
+pub struct HeldValue(Vec<u8>);
+
+impl HeldValue {
+    pub fn new(bytes: Vec<u8>) -> HeldValue {
+        HeldValue(bytes)
+    }
+
+    fn text(&self) -> Option<&str> {
+        std::str::from_utf8(&self.0).ok()
+    }
 }
 
 /// What the destination answered. Every status comes back, 3xx included:
@@ -582,6 +609,16 @@ impl FnEgress {
                     }
                     handles.push(secret.as_str());
                 }
+                HeaderValue::Held { template, .. } => {
+                    if template.matches("{}").count() != 1 || !client::header_value_ok(template) {
+                        return Err(FetchError::BadRequest {
+                            detail: format!(
+                                "header `{lower}`: a sealed value's template holds `{{}}` \
+                                 exactly once, such as \"Bearer {{}}\""
+                            ),
+                        });
+                    }
+                }
             }
         }
         Ok(Checked {
@@ -638,6 +675,7 @@ impl FnEgress {
             body,
         };
         scrub(&mut out, values);
+        scrub_held(&mut out, &req.headers);
         Ok(out)
     }
 }
@@ -787,6 +825,18 @@ fn build(
                     })?;
                 put(&name, &template.replacen("{}", text, 1));
             }
+            HeaderValue::Held { value, template } => {
+                let text = value
+                    .text()
+                    .filter(|t| client::header_value_ok(t))
+                    .ok_or_else(|| FetchError::BadRequest {
+                        detail: format!(
+                            "a sealed value cannot be written into header `{name}`: it is not \
+                             printable ASCII"
+                        ),
+                    })?;
+                put(&name, &template.replacen("{}", text, 1));
+            }
         }
     }
     if agent {
@@ -828,6 +878,27 @@ fn scrub(out: &mut FnFetchResponse, values: &HashMap<&str, SecretBytes>) {
             for (_, value) in out.headers.iter_mut() {
                 if value.contains(t) {
                     *value = value.replace(t, SCRUBBED);
+                }
+            }
+        }
+    }
+}
+
+/// Each held value the request carried, replaced in the answer as a
+/// secret's is.
+fn scrub_held(out: &mut FnFetchResponse, headers: &[(String, HeaderValue)]) {
+    for (_, h) in headers {
+        let HeaderValue::Held { value, .. } = h else {
+            continue;
+        };
+        if value.0.is_empty() {
+            continue;
+        }
+        out.body = replace_all(&out.body, &value.0, SCRUBBED.as_bytes());
+        if let Some(t) = value.text() {
+            for (_, v) in out.headers.iter_mut() {
+                if v.contains(t) {
+                    *v = v.replace(t, SCRUBBED);
                 }
             }
         }
@@ -1085,6 +1156,54 @@ mod tests {
         scrub(&mut out, &values);
         assert_eq!(out.body, b"{\"auth\":\"Bearer [secret]\"}");
         assert_eq!(out.headers[0].1, "Bearer [secret]");
+    }
+
+    /// `ctx.sealed` (increment 4): a held value goes into its header to a
+    /// host on the egress list, and an echo of it is scrubbed like a
+    /// secret's. No secret binding is asked for.
+    #[test]
+    fn a_held_value_is_written_into_its_header_and_scrubbed_from_an_echo() {
+        let held = || {
+            (
+                "Authorization".to_string(),
+                HeaderValue::Held {
+                    value: HeldValue::new(b"ya29.person-token".to_vec()),
+                    template: "Bearer {}".into(),
+                },
+            )
+        };
+        let e = egress();
+        assert!(e
+            .check(&req("https://api.openai.com/v1", vec![held()]))
+            .is_ok());
+        let bad = (
+            "Authorization".to_string(),
+            HeaderValue::Held {
+                value: HeldValue::new(b"x".to_vec()),
+                template: "Bearer".into(),
+            },
+        );
+        assert_eq!(
+            e.check(&req("https://api.openai.com/v1", vec![bad]))
+                .err()
+                .map(|e| e.kind()),
+            Some("bad_request")
+        );
+        let dest = pin_for_test("api.openai.com", "203.0.113.7:443".parse().unwrap(), "/v1");
+        let r = req("https://api.openai.com/v1", vec![held()]);
+        let text = String::from_utf8(build(&dest, "GET", &r, &HashMap::new()).unwrap()).unwrap();
+        assert!(
+            text.contains("authorization: Bearer ya29.person-token\r\n"),
+            "{text}"
+        );
+        let mut out = FnFetchResponse {
+            status: 200,
+            headers: vec![("x-echo".into(), "ya29.person-token".into())],
+            body: b"{\"t\":\"ya29.person-token\"}".to_vec(),
+        };
+        scrub_held(&mut out, &r.headers);
+        assert_eq!(out.body, b"{\"t\":\"[secret]\"}");
+        assert_eq!(out.headers[0].1, "[secret]");
     }
 
     #[test]

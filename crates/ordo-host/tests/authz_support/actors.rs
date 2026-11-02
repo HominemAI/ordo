@@ -370,15 +370,31 @@ pub fn found(d: &Deployment, seed: u8, name: &str) -> Person {
 }
 
 /// An owner or manager invites someone at `role`; they sign up with it.
+///
+/// An invite needs a recent passkey touch, which ages out after 5 minutes.
+/// A case late in a slow run would find the admin's sign-in too old, so the
+/// admin touches their passkey first (PR 4's authz run, 2026-11-02).
 pub fn join(d: &Deployment, admin: &Person, seed: u8, name: &str, role: &str) -> Person {
-    let row = must(
+    let present = step_up(d, &admin.device, &admin.token);
+    let a = op(
         d,
-        admin,
+        &admin.space,
+        &present,
         "POST",
         "std.space.invite",
-        json!({"role": role, "expires": "7d", "label": "Join"}),
+        &json!({"role": role, "expires": "7d", "label": "Join"}),
     );
-    let ticket = row[0]["ticket"].as_str().expect("a ticket").to_string();
+    assert_eq!(
+        a.status,
+        200,
+        "std.space.invite as {}: {}",
+        admin.name,
+        a.text()
+    );
+    let ticket = a.json()["rows"][0]["ticket"]
+        .as_str()
+        .expect("a ticket")
+        .to_string();
     let dev = device(seed, name);
     let done = register(
         d,

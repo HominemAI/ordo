@@ -41,6 +41,13 @@
 //!   `greet` answers as a name that never existed. The program upgrade
 //!   always has them. The Ordo upgrade has them when the previous Ordo does
 //!   (`ORDO_UPGRADE_FUNCTIONS`, which the script sets).
+//! - **A function that calls ops** (`uses.ordo`, increment 4): `jot` writes
+//!   a journal entry with `writeJournal` and counts the caller's entries
+//!   with `myJournal`, both as the caller. Version 1.1 changes its code.
+//!   In the program upgrade it runs under version 1 and again after 1.1.
+//!   A previous Ordo before increment 4 refuses `uses`, so the Ordo upgrade
+//!   applies version 1 without it and checks `jot` once this build applies
+//!   1.1 over the data the previous one made.
 //!
 //! After the upgrade each item is checked by name (`Check`). A check that
 //! fails is a continuity break. A break that is known and filed goes in
@@ -1517,14 +1524,22 @@ const SECRET_WORDS: &[&str] = &[
 
 /// Version `version` of the fixture with its functions: `app.ordo`, the
 /// matching `functions/<version>/functions.ordo` and its `fn/` code, put
-/// in one directory as `ordo apply` reads a program.
-fn with_functions(version: &str) -> PathBuf {
+/// in one directory as `ordo apply` reads a program. `uses` adds
+/// `uses.ordo`, the function that calls ops, which only an Ordo with
+/// increment 4 compiles.
+fn with_functions(version: &str, uses: bool) -> PathBuf {
     let src = fixture("functions").join(version);
-    let dir = std::env::temp_dir().join(format!("ordo-upg-fn-{version}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "ordo-upg-fn-{version}-{uses}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("fn")).expect("the program directory");
     std::fs::copy(fixture(version).join("app.ordo"), dir.join("app.ordo")).expect("app.ordo");
     std::fs::copy(src.join("functions.ordo"), dir.join("functions.ordo")).expect("functions.ordo");
+    if uses {
+        std::fs::copy(src.join("uses.ordo"), dir.join("uses.ordo")).expect("uses.ordo");
+    }
     for f in std::fs::read_dir(src.join("fn")).expect("fn/") {
         let f = f.expect("a code file").path();
         std::fs::copy(&f, dir.join("fn").join(f.file_name().expect("a name"))).expect("code");
@@ -1851,6 +1866,35 @@ fn functions_after(
     out
 }
 
+/// `jot` calls `writeJournal` and `myJournal` as Kim, in her own tenant,
+/// so Ada's journal check is untouched. It runs the serving
+/// code (`code`), and the entry it wrote is Kim's to read.
+fn jot_works(h: &Host, s: &Seeded, code: &str) -> Check {
+    let body = format!("jotted under {code}");
+    let (status, answer) = call_fn(h, &s.kim, "jot", json!({ "body": body }));
+    let outcome = if status != 200 {
+        Err(format!("{status} {answer}"))
+    } else if answer["result"]["code"] != code {
+        Err(format!("the wrong code ran: {answer}"))
+    } else {
+        match h.rows(&s.kim.space, &s.kim.token, "myJournal") {
+            Ok(rows) if rows.iter().any(|r| r["body"] == body.as_str()) => {
+                Ok(format!("{} entries", answer["result"]["count"]))
+            }
+            Ok(rows) => Err(format!("kim cannot read the entry: {rows:?}")),
+            Err(e) => Err(e),
+        }
+    };
+    check(
+        if code == "one" {
+            "a function that calls ops writes as the person"
+        } else {
+            "a function that calls ops writes as the person after the upgrade"
+        },
+        outcome,
+    )
+}
+
 /// Print every check, and fail on any that is not in `known`. A known break
 /// that now holds fails too, so the list is kept true.
 fn judge(what: &str, checks: &[Check], known: &[(&str, &str)]) {
@@ -1897,12 +1941,18 @@ async fn program_upgrade(known: &[(&str, &str)]) {
     let h = w.boot(Path::new(host), "v1");
     // Each version with its backend functions: 1.1 changes `probe`'s code
     // and renames `greet` to `hello`.
-    w.apply_current(&with_functions("v1")).await;
+    w.apply_current(&with_functions("v1", true)).await;
     let s = seed(&h, &w);
     let fns = seed_functions(&h, &w, &s, false);
+    let jot_before = jot_works(&h, &s, "one");
+    assert!(
+        jot_before.outcome.is_ok(),
+        "jot under v1: {:?}",
+        jot_before.outcome
+    );
     let feed = Feed::open(&h, &s.ada, "myNotes");
 
-    w.apply_current(&with_functions("v1_1")).await;
+    w.apply_current(&with_functions("v1_1", true)).await;
     // The running server serves 1.1 once a new op answers.
     within(60, "the server serves 1.1", || {
         let (status, _) = h.op(&s.ada.space, &s.ada.token, "GET", "myLabels", json!({}));
@@ -1920,6 +1970,7 @@ async fn program_upgrade(known: &[(&str, &str)]) {
     checks.extend(verify(&h, &w, &s).await);
     checks.extend(v1_1_works(&h, &s));
     checks.extend(functions_after(&h, &w, &s, &fns, "two", true));
+    checks.push(jot_works(&h, &s, "two"));
     let log = h.log();
     checks.push(check(
         "no tenant was left closed",
@@ -1981,7 +2032,8 @@ async fn binary_upgrade(known: &[(&str, &str)]) {
     // The previous Ordo serves version 1, and the state is made under it.
     // With functions when the previous Ordo has them.
     let (v1, v1_1) = if functions {
-        (with_functions("v1"), with_functions("v1_1"))
+        // Version 1 without `uses.ordo`: the previous Ordo applies it.
+        (with_functions("v1", false), with_functions("v1_1", true))
     } else {
         (fixture("v1"), fixture("v1_1"))
     };
@@ -2033,6 +2085,7 @@ async fn binary_upgrade(known: &[(&str, &str)]) {
     checks.extend(v1_1_works(&h, &s));
     if let Some(fns) = &fns {
         checks.extend(functions_after(&h, &w, &s, fns, "two", true));
+        checks.push(jot_works(&h, &s, "two"));
     }
     let mut h = h;
     h.stop();

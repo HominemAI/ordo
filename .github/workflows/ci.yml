@@ -63,6 +63,11 @@ jobs:
       clients: ${{ steps.affected.outputs.clients }}
       examples: ${{ steps.affected.outputs.examples }}
       audit: ${{ steps.affected.outputs.audit }}
+      unit: ${{ steps.affected.outputs.unit }}
+      # The tests the change reaches, as a nextest filterset; empty for
+      # every test (rules 6 and 7 in scripts/ci-affected.mjs).
+      test_filter: ${{ steps.affected.outputs.test_filter }}
+      tests_only: ${{ steps.affected.outputs.tests_only }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -81,6 +86,61 @@ jobs:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: node scripts/ci-affected.mjs
+
+  # **The fast tier, first** (owner ruling 2026-11-02, board task
+  # `test-in-proportion-to-the-change` asks 4 and 5). Every crate's unit
+  # tests, and the test files that need no database or running instance
+  # (NO_DATABASE in scripts/ci-test-shard.sh, the one list of them). No
+  # Postgres, no apt, no Node. The `test` shards and `upgrade` wait for
+  # it, so a broken unit test fails in minutes, before the slow tiers
+  # spend their time.
+  #
+  # On a push to `bleeding` it tests only what the change reaches, as the
+  # other tiers do.
+  #
+  # `!cancelled()` and the first step: a job skipped because `changes`
+  # failed would count as a passed required check.
+  unit:
+    name: test (unit)
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 20
+    needs: changes
+    env:
+      REACHED: ${{ needs.changes.outputs.unit }}
+      ORDO_CI_CRATES: ${{ needs.changes.outputs.crates }}
+      ORDO_CI_FILTER: ${{ needs.changes.outputs.test_filter }}
+      NEXTEST_PROFILE: ci
+    steps:
+      - name: The jobs this one needs
+        env:
+          CHANGES: ${{ needs.changes.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "changes (ci) did not succeed ($CHANGES)."
+            exit 1
+          fi
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
+      # Reads the `test` job's cache. It builds less than `test` does, so
+      # it does not save: a smaller cache saved first would leave the
+      # shards building from cold.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
+        with:
+          shared-key: rust-gates
+          save-if: false
+      - name: Install cargo-nextest
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-install-nextest.sh
+      - name: Unit tests
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-test-shard.sh unit
 
   test:
     # **A self-hosted runner in the SMG cluster**, not a GitHub-hosted one.
@@ -118,7 +178,8 @@ jobs:
     # `.config/nextest.toml` caps the deployment-booting files at 4 at once
     # and names the files whose tests take turns.
     #
-    # `rest` is every crate but ordo-host, plus ordo-host's unit tests. It
+    # `rest` is every crate's test files but ordo-host's, and the unit
+    # tests that need Postgres (DB_UNIT in scripts/ci-test-shard.sh). It
     # also runs the once-only gates: format, clippy, the doc tests, the S3
     # contract and the inventories. The `host` shards each take every 4th of ordo-host's
     # integration tests, then notes_app's `connections_*` tests alone, one
@@ -126,9 +187,15 @@ jobs:
     #
     # On a push to `bleeding`, `rest` tests only the crates the change
     # reaches (ORDO_CI_CRATES), and the `host` shards run only when it
-    # reaches ordo-host.
+    # reaches ordo-host. Inside them, only the tests it reaches run
+    # (ORDO_CI_FILTER): one changed test file runs that file, and an
+    # ordo-host source file runs the test files .config/ci-test-map.json
+    # names for it (owner ruling 2026-11-02, asks 1 and 2).
+    #
+    # Unit tests and the NO_DATABASE files run in `test (unit)`, first;
+    # these shards wait for it and never run them again.
     name: test (${{ matrix.shard }})
-    needs: changes
+    needs: [changes, unit]
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +213,8 @@ jobs:
     env:
       REACHED: ${{ (matrix.shard == 'rest' && needs.changes.outputs.rest) || needs.changes.outputs.host }}
       ORDO_CI_CRATES: ${{ needs.changes.outputs.crates }}
+      ORDO_CI_FILTER: ${{ needs.changes.outputs.test_filter }}
+      ORDO_CI_TESTS_ONLY: ${{ needs.changes.outputs.tests_only }}
       # refine_audit's whole matrix runs on pull requests, nightly, by hand
       # and with `ci: full`; a plain push to bleeding sends a sample.
       ORDO_REFINE_AUDIT_FULL: "${{ (github.event_name != 'push' || contains(github.event.head_commit.message, 'ci: full')) && '1' || '' }}"
@@ -166,13 +235,19 @@ jobs:
 
     steps:
       # Before anything else, and in every shard, so a failed `changes`
-      # fails this check instead of passing it as "not reached".
+      # or `test (unit)` fails this check instead of passing it as "not
+      # reached".
       - name: The jobs this one needs
         env:
           CHANGES: ${{ needs.changes.result }}
+          UNIT: ${{ needs.unit.result }}
         run: |
           if [ "$CHANGES" != success ]; then
             echo "changes (ci) did not succeed ($CHANGES)."
+            exit 1
+          fi
+          if [ "$UNIT" != success ]; then
+            echo "test (unit) did not succeed ($UNIT)."
             exit 1
           fi
       - name: Not reached by this change
@@ -456,8 +531,11 @@ jobs:
   # from the `rust-gates` cache. The `functions` entry builds wasmtime and
   # the function engine from cold too, so each entry has 30 minutes. If one
   # nears it, move that entry to a nightly schedule.
+  #
+  # It waits for `test (unit)`. `!cancelled()` and its first step keep a
+  # failed `changes` or `test (unit)` from passing as a skipped check.
   upgrade:
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, ordo-k8s]
     timeout-minutes: 30
     strategy:
@@ -471,7 +549,7 @@ jobs:
             from: 556ecc2c
             functions: '1'
     name: upgrade (${{ matrix.previous }})
-    needs: changes
+    needs: [changes, unit]
     env:
       REACHED: ${{ needs.changes.outputs.upgrade }}
       # ORDO_PG_HOST comes from the lease step.
@@ -484,6 +562,19 @@ jobs:
       # The leased CI server is the database; the script starts none.
       ORDO_UPGRADE_OWN_PG: '0'
     steps:
+      - name: The jobs this one needs
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          UNIT: ${{ needs.unit.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "changes (ci) did not succeed ($CHANGES)."
+            exit 1
+          fi
+          if [ "$UNIT" != success ]; then
+            echo "test (unit) did not succeed ($UNIT)."
+            exit 1
+          fi
       - name: Not reached by this change
         if: env.REACHED != 'true'
         run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"

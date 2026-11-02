@@ -64,9 +64,17 @@ at once. So:
   group gives. notes_app's `connections_*` tests run in a second pass of the
   `host` shards, alone and one at a time.
 
-To run one CI shard here: `bash scripts/ci-test-shard.sh rest` (honours
-`ORDO_CI_CRATES`) or `bash scripts/ci-test-shard.sh host 1 4`. Add `--list`
-after `host K N` to see which tests a shard gets.
+To run one CI shard here: `bash scripts/ci-test-shard.sh unit`, `rest` or
+`host 1 4`. Each honours `ORDO_CI_CRATES` and `ORDO_CI_FILTER` (below). Add
+`--list` after `unit` or `host K N` to see which tests it gets.
+
+The unit tier needs no Postgres: every crate's lib and bin tests, and the
+source-scan test files in `NO_DATABASE` (scripts/ci-test-shard.sh). It ran
+1,110 tests in 1.8 s locally on 2026-11-02, with no database reachable.
+`DB_UNIT` there lists the 3 unit tests (ordo-cli `dev`, `dev_db`) that need
+one; they run in `rest`. A new unit test that needs Postgres goes in
+`DB_UNIT`. A new test file that needs none may go in `NO_DATABASE`, once
+reading it shows it touches no database, server or process.
 
 The dependencies worth knowing:
 
@@ -126,16 +134,26 @@ and identity-e2e.yml.
 - To see what a change reaches before pushing:
   `node scripts/ci-affected.mjs --diff "$(git merge-base origin/bleeding HEAD)"`.
 - The filter's tests: `node scripts/ci-affected.test.mjs`. CI runs them in
-  the `audit` job.
+  the `audit` job. They also check `.config/ci-test-map.json` (below).
 
 How the filter reads a path:
 
 - Cargo.lock, the root Cargo.toml, rust-toolchain, `.github/`,
   `.cargo/config.toml`, `docker/`, `scripts/ci-*`, or a path it does not
   know: everything.
-- A crate's code: that crate and every crate that depends on it. A crate's
-  `tests/` alone: that crate. `test (rest)` gets the list in
-  `ORDO_CI_CRATES`; the `host` shards run only when ordo-host is in it.
+- A crate's code: that crate and every crate that depends on it. The
+  tiers get the list in `ORDO_CI_CRATES`; the `host` shards run only when
+  ordo-host is in it.
+- A test file under `crates/<X>/tests/`: that test binary alone, and no
+  unit or doc tests (owner, 2026-11-02, `test-in-proportion-to-the-change`
+  ask 1). A helper there (`tests/mail_support/`, `tests/fixture/`): the
+  binaries whose source names it; when none does, all of X's binaries.
+- A file under `crates/ordo-host/src/`: the ordo-host test binaries
+  `.config/ci-test-map.json` lists for it, plus ordo-host's unit and doc
+  tests (ask 2). `"all"`, or a file not in the map, runs every one. Crates
+  that depend on ordo-host still run whole.
+- The narrowing reaches the shards as `ORDO_CI_FILTER`, a nextest
+  filterset (the `test_filter` output). Empty means every test.
 - `clients/<pkg>/`: that client's job. ordo-sdk and ordo-react also run
   every example, the notes e2e and ordo-host's tests.
 - `examples/<app>/`: that example's job. notes and notes-v2 also run the
@@ -143,6 +161,18 @@ How the filter reads a path:
 - Docs and `*.md`: nothing, unless a crate's source names the file in a
   string (`include_str!`, a fixture path). Then that crate's tests run.
 - Each e2e runs when a crate it builds is reached.
+
+The test map (`.config/ci-test-map.json`):
+
+- A new file under `crates/ordo-host/src/` must be added, or
+  `node scripts/ci-affected.test.mjs` fails and says so. `"all"` is
+  always safe.
+- A list names test binaries (`tests/<name>.rs`). Err toward more: a test
+  left off a list does not run on `bleeding` when that file changes. The
+  pull request to `main` still runs it.
+- Files every request goes through (lib.rs, runtime.rs, serve.rs, auth/,
+  settings.rs and the like) are `"all"`.
+- Changing the map runs everything.
 
 Job names are unique across all workflows; required checks match by name.
 Rename a job only together with the ruleset.
@@ -152,9 +182,11 @@ Rename a job only together with the ruleset.
 CI (`.github/workflows/ci.yml`) runs on the self-hosted runner, each test
 job against its own leased CI Postgres server:
 
-- `test (rest)` runs fmt, clippy, every crate but ordo-host and ordo-host's
-  unit tests, then the doc tests, the S3 contract, the C001 proof and the
-  inventories.
+- `test (unit)` runs first: the unit tier, no Postgres, no Node. The
+  `test` shards and `upgrade` wait for it and fail when it fails.
+- `test (rest)` runs fmt, clippy, every crate's tests but ordo-host's and
+  the unit tier's, then the doc tests, the S3 contract, the C001 proof and
+  the inventories.
 - `test (host K 4)` each run every 4th ordo-host integration test
   (`--partition slice:K/4`).
 - Each `test` job builds what it runs from the warm `rust-gates` cache.

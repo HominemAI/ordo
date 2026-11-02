@@ -24,8 +24,10 @@ import {
   spec_myNotes,
   spec_myReminders,
   spec_notesTagged,
+  spec_oneNote,
   spec_pinNote,
   spec_removeAttachment,
+  spec_retitleNote,
   spec_revokeNotesAccess,
   spec_setNotesAccessLevel,
   spec_setReminder,
@@ -626,6 +628,62 @@ export function notesTagged(client: OrdoClient, params: NotesTaggedParams): Read
 }
 
 /**
+ * One row of `oneNote`.
+ *
+ * Row identity: `notes`. `synthetic_rows` is false.
+ */
+export interface OneNoteRow {
+  /** `id` */
+  readonly id: Ids.NotesId;
+  /** `int` */
+  readonly rev: number;
+  /** `text` */
+  readonly title: string;
+  /** `text` */
+  readonly body: string;
+}
+
+/**
+ * The parameters of `oneNote`.
+ *
+ * A type alias rather than an `interface`, deliberately: only an object type alias carries an implicit index signature, and the client's `request` takes the parameters as a record. An `interface` here would need a cast at every generated call site — a hole in exactly the code nobody reviews.
+ */
+export type OneNoteParams = {
+  /** `id` */
+  readonly id: Ids.NotesId;
+};
+
+/**
+ * The fields a `.where` on `oneNote` may test.
+ *
+ * One per output in `refine.fields`, typed as the row types it. An open field takes all 8 operators; a sealed one takes `eq` and `in`, because a sealed condition rides the blind index. An output that is not here is not refinable, and naming it does not compile.
+ */
+export interface OneNoteFields {
+  readonly id: OpenField<'id', Ids.NotesId>;
+  readonly rev: OpenField<'rev', number>;
+  readonly title: OpenField<'title', string>;
+  readonly body: OpenField<'body', string>;
+}
+
+/**
+ * The refusals `oneNote` declares.
+ *
+ * The op's own set, not the whole table. The door has refusals that precede any op (`missing_space`, `caller_supplied`, `delegation_required`), so a caught refusal outside this union is not a bug — it is the door speaking before the op did, and `Refusal.declared` says which happened.
+ */
+export type OneNoteRefusal = Extract<RefusalClass, 'access_denied' | 'invalid_cursor' | 'invalid_param' | 'invalid_refinement' | 'method_mismatch' | 'missing_param' | 'refinement_unbounded' | 'unknown_param' | 'version_skew'>;
+
+/**
+ * `oneNote` — read.
+ * Cost class `sql`, rows: <= 1.
+ * Terminates in `.fetch()` / `.live()` / `.pages()`.
+ * `.live()` is **not generated**: the descriptor carries no log position on the read path, so a subscription cannot be ordered against its own first frame. See the package README.
+ * Narrow it with `.where(v => …)` and `.pick(…)` before the verb.
+ */
+export function oneNote(client: OrdoClient, params: OneNoteParams): ReadCall<OneNoteRow, OneNoteRefusal, OneNoteFields> {
+  return new ReadCall(client, spec_oneNote, params);
+}
+
+/**
  * The row shape of `pinNote`.
  *
  * A write's rows are the summary `api-engine-design.md` §3 describes; the descriptor declares no output shape for it (`outputs: []`), so this is the honest type rather than an invented one.
@@ -695,6 +753,44 @@ export type RemoveAttachmentRefusal = Extract<RefusalClass, 'access_denied' | 'a
  */
 export function removeAttachment(client: OrdoClient, params: RemoveAttachmentParams): WriteCall<RemoveAttachmentRow, RemoveAttachmentRefusal> {
   return new WriteCall(client, spec_removeAttachment, params);
+}
+
+/**
+ * The row shape of `retitleNote`.
+ *
+ * A write's rows are the summary `api-engine-design.md` §3 describes; the descriptor declares no output shape for it (`outputs: []`), so this is the honest type rather than an invented one.
+ */
+export type RetitleNoteRow = Readonly<Record<string, unknown>>;
+
+/**
+ * The parameters of `retitleNote`.
+ *
+ * A type alias rather than an `interface`, deliberately: only an object type alias carries an implicit index signature, and the client's `request` takes the parameters as a record. An `interface` here would need a cast at every generated call site — a hole in exactly the code nobody reviews.
+ */
+export type RetitleNoteParams = {
+  /** `id` */
+  readonly id: Ids.NotesId;
+  /** `int` */
+  readonly rev: number;
+  /** `text` · fills `notes.title` */
+  readonly title: string;
+};
+
+/**
+ * The refusals `retitleNote` declares.
+ *
+ * The op's own set, not the whole table. The door has refusals that precede any op (`missing_space`, `caller_supplied`, `delegation_required`), so a caught refusal outside this union is not a bug — it is the door speaking before the op did, and `Refusal.declared` says which happened.
+ */
+export type RetitleNoteRefusal = Extract<RefusalClass, 'access_denied' | 'access_guard' | 'cas_miss' | 'idempotency_in_flight' | 'idempotency_mismatch' | 'invalid_param' | 'log_append_failed' | 'method_mismatch' | 'missing_param' | 'not_found' | 'serialization_conflict' | 'unknown_param' | 'version_skew'>;
+
+/**
+ * `retitleNote` — write.
+ *
+ * Mode: **converges**.
+ * Terminates in `.commit()`.
+ */
+export function retitleNote(client: OrdoClient, params: RetitleNoteParams): WriteCall<RetitleNoteRow, RetitleNoteRefusal> {
+  return new WriteCall(client, spec_retitleNote, params);
 }
 
 /**
@@ -2071,8 +2167,10 @@ export const ops = {
   myNotes: myNotes,
   myReminders: myReminders,
   notesTagged: notesTagged,
+  oneNote: oneNote,
   pinNote: pinNote,
   removeAttachment: removeAttachment,
+  retitleNote: retitleNote,
   revokeNotesAccess: revokeNotesAccess,
   setNotesAccessLevel: setNotesAccessLevel,
   setReminder: setReminder,

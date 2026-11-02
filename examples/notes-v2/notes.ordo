@@ -173,3 +173,26 @@ function suggestTitle in notes {
   secrets llmKey
   limit wall 30s, memory 64 mb
 }
+
+# One note, by id, for `titleNote`. The note's guard applies: a person
+# reads only a note they may read.
+op oneNote($id: id) =
+  notes(id == $id)[id, rev, title, body]
+
+# A new title for a note, and nothing else.
+op retitleNote($id: id, $rev: int, $title: text) =
+  set notes { id: $id, rev: $rev, title: $title }
+
+# Give a saved note a title from a language model, and save it. It reads
+# the note with `oneNote` and writes the title with `retitleNote`, both as
+# the person who pressed the button: a note they may not read or write is
+# refused, and the write lands in the note's history as this function on
+# behalf of that person. `uses` lists every op it may call.
+function titleNote in notes {
+  call($note: id) -> json by member
+  code "fn/title-note.js"
+  egress api.anthropic.com
+  secrets llmKey
+  uses oneNote, retitleNote
+  limit wall 30s, memory 64 mb
+}

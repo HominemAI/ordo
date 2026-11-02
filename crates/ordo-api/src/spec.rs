@@ -25,15 +25,19 @@ pub enum OpKind {
 ///
 /// # It mirrors the language; it is not a copy of it
 ///
-/// Two members of `ScalarTy` are deliberately absent, and their absence is
-/// the inventory saying something rather than forgetting something.
+/// Two members of `ScalarTy` were deliberately absent, and their absence
+/// was the inventory saying something rather than forgetting something.
 ///
-/// - **`blob`** is refused as a parameter by the compiler
+/// - **`blob`** is refused as an *op* parameter by the compiler
 ///   (`ordo_sema`'s `blob_parameter`). Bytes are not a JSON wire value;
-///   they arrive through the blob door, which is why that door exists. A
-///   `ParamTy::Blob` would be a slot for a value that has no wire form,
-///   and the first thing anybody would put in it is a handle — which is a
-///   caller naming an object it did not upload.
+///   they arrive through the blob door, which is why that door exists.
+///   An op that took a handle would be a caller naming an object it did
+///   not upload. A **function** takes one ([`ParamTy::Blob`], increment 2
+///   of `plan-backend-functions.md`): the bytes still arrive through the
+///   blob door, the function gets the handle, and it reads the file as
+///   the caller, through the same `std.$blob.get` check and row guard as
+///   `GET /blob/{handle}`. So a handle the caller names grants nothing
+///   the caller could not read already.
 ///
 /// [`Datetime`](ParamTy::Datetime) is present and **was not**, and that was
 /// a real defect rather than a tidy gap: `$t: datetime` parsed, and
@@ -80,6 +84,9 @@ pub enum ParamTy {
     /// checks it against the deployment's size and depth limits
     /// ([`crate::json::JsonLimits`]); the type itself bounds nothing.
     Json,
+    /// A file handle from the blob door, as 32 hex characters. A function
+    /// parameter only; see above for why an op never has one.
+    Blob,
 }
 
 /// Declared parameter bounds, enforced at the door before planning.

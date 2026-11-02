@@ -325,6 +325,16 @@ mod tests {
         check(src).unwrap();
     }
 
+    /// Increment 2: a function takes a file as a `blob` parameter. An op
+    /// still may not (`ordo-sema`, `check_content_params`: `blob_parameter`).
+    /// The function reads it as the caller, so a handle grants nothing the
+    /// caller could not read already.
+    #[test]
+    fn a_function_takes_a_blob_parameter() {
+        let src = OK.replace("call($text: text)", "call($file: blob, $hint: text)");
+        check(&src).unwrap();
+    }
+
     #[test]
     fn each_refusal_names_its_reason() {
         let cases = [

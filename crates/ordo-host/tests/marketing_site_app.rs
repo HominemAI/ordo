@@ -357,7 +357,9 @@ impl Drop for Deployment {
 }
 
 fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
-    for _ in 0..300 {
+    // 60 s: under nextest several deployments boot at once on one node
+    // (run 41294339083 ran out at 15 s).
+    for _ in 0..1200 {
         if let Ok(Some(status)) = child.try_wait() {
             let said = std::fs::read_to_string(log).unwrap_or_default();
             panic!("the binary exited before serving: {status}\n{said}");
@@ -367,7 +369,8 @@ fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("the binary never bound {port}");
+    let said = std::fs::read_to_string(log).unwrap_or_default();
+    panic!("the binary never bound {port} in 60 s\n{said}");
 }
 
 fn code_of(body: &Value) -> String {
@@ -606,11 +609,13 @@ async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
             ("ORDO_PROXY_HEADER", "X-Forwarded-For"),
             ("ORDO_PROXY_TRUSTED", "127.0.0.1"),
             ("ORDO_PROXY_SLOW_AFTER", "2"),
-            ("ORDO_PROXY_SLOW_MS", "500"),
+            ("ORDO_PROXY_SLOW_MS", "2000"),
         ],
     )
     .await;
     assert!(d.log().contains("proxy mode: on"), "{}", d.log());
+    // A 2 s slow-down: an unslowed visit took over 500 ms on a loaded CI
+    // runner (run 41297909915), so a 500 ms one could not tell them apart.
     let timed = |visitor: &str| {
         let started = std::time::Instant::now();
         let (status, _, body) = d.visit("/op/pricing", &[("X-Forwarded-For", visitor)]);
@@ -618,14 +623,14 @@ async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
         started.elapsed()
     };
     for _ in 0..2 {
-        assert!(timed("203.0.113.9") < Duration::from_millis(500));
+        assert!(timed("203.0.113.9") < Duration::from_millis(2000));
     }
     assert!(
-        timed("203.0.113.9") >= Duration::from_millis(500),
+        timed("203.0.113.9") >= Duration::from_millis(2000),
         "slowed, still served"
     );
     assert!(
-        timed("203.0.113.10") < Duration::from_millis(500),
+        timed("203.0.113.10") < Duration::from_millis(2000),
         "another visitor"
     );
     d.stop_quietly();

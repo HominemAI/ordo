@@ -950,10 +950,12 @@ async fn leadership_fails_over_between_two_supervisors() {
     assert!(!b.is_leader());
 
     // The leader goes away; the follower takes over within a few ticks.
+    // A dial can miss its tick on a loaded runner (run 41364786104), so
+    // the waits allow 15 s.
     a.shutdown(Duration::from_secs(5)).await;
-    let took_over = wait_for(Duration::from_secs(3), || b.is_leader()).await;
+    let took_over = wait_for(Duration::from_secs(15), || b.is_leader()).await;
     assert!(took_over, "the follower never took over: {}", b.overview());
-    let ran = wait_for(Duration::from_secs(3), || wb.0.load(Ordering::SeqCst) > 0).await;
+    let ran = wait_for(Duration::from_secs(15), || wb.0.load(Ordering::SeqCst) > 0).await;
     assert!(ran, "the new leader's worker never started");
 
     // Kill the new leader's lock session from outside. The overseer's probe
@@ -969,7 +971,7 @@ async fn leadership_fails_over_between_two_supervisors() {
         .await
         .expect("terminate");
     assert_eq!(killed.len(), 1, "exactly one session held leadership");
-    let lost = wait_for(Duration::from_secs(3), || {
+    let lost = wait_for(Duration::from_secs(15), || {
         mb.render_prometheus()
             .contains(r#"ordo_supervisor_leadership_changes_total{to="follower"} 1"#)
     })
@@ -979,7 +981,7 @@ async fn leadership_fails_over_between_two_supervisors() {
         "the loss was not noticed:\n{}",
         mb.render_prometheus()
     );
-    let back = wait_for(Duration::from_secs(3), || b.is_leader()).await;
+    let back = wait_for(Duration::from_secs(15), || b.is_leader()).await;
     assert!(back, "the lock was not retaken: {}", b.overview());
     assert!(
         b.overview()["leadership"]["changes"].as_u64().unwrap_or(0) >= 3,
@@ -1041,7 +1043,13 @@ async fn secevent_retain_claims_its_own_schedule_once_per_period() {
     )
     .await
     .expect("starts");
-    assert!(sup.is_leader());
+    // The first claim may time out on a loaded runner (run 41297909915);
+    // the next leadership tick claims again.
+    assert!(
+        wait_for(Duration::from_secs(15), || sup.is_leader()).await,
+        "never led: {}",
+        sup.health()
+    );
 
     let ran = wait_for(Duration::from_secs(5), || {
         sup.health()["secevent.retain"]["runs"]
@@ -1166,7 +1174,13 @@ async fn secevent_checkpoint_claims_its_own_schedule_once_per_period() {
     )
     .await
     .expect("starts");
-    assert!(sup.is_leader());
+    // The first claim may time out on a loaded runner (run 41297909915);
+    // the next leadership tick claims again.
+    assert!(
+        wait_for(Duration::from_secs(15), || sup.is_leader()).await,
+        "never led: {}",
+        sup.health()
+    );
 
     let ran = wait_for(Duration::from_secs(5), || {
         sup.health()["secevent.checkpoint"]["runs"]

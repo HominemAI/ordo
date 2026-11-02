@@ -226,6 +226,8 @@ fn placeholder(ty: &ParamTy) -> Option<&'static str> {
         // not to the type inventory the door sees. Rather than guess one,
         // the op is named undescribable and stays visible in the report.
         ParamTy::Duration => None,
+        // A function's parameter only; no op statement takes one.
+        ParamTy::Blob => None,
     }
 }
 

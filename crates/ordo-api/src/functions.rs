@@ -11,6 +11,13 @@
 //! executor answers. [`crate::ApiError::from_exec`] turns it into the HTTP
 //! answer, so a function's refusals are mapped in the one place an op's are
 //! (AGENTS.md rule 9).
+//!
+//! **Files in** (increment 2). A `$file: blob` parameter carries a handle
+//! the page got from the blob door. Before the runner is asked, the door
+//! checks that the caller may read files at all (`std.$blob.get`, the
+//! check `GET /blob/{handle}` makes), and refuses as that route would. The
+//! runner then reads each file as the caller, so the row guard decides,
+//! exactly as it does on `GET /blob/{handle}`.
 
 use futures::future::BoxFuture;
 use serde_json::{Map, Value};
@@ -47,7 +54,17 @@ pub trait FunctionRunner: Send + Sync {
     /// Runs the call. The pause check, the run and its `$fnruns` row are
     /// the runner's.
     fn call<'a>(&'a self, call: FnInvocation) -> BoxFuture<'a, Result<Value, ExecError>>;
+
+    /// The largest body `POST /fn/<name>` reads, in bytes. A larger one is
+    /// refused before it is read, naming [`FN_BODY_BYTES_ENV`].
+    fn body_limit(&self) -> usize {
+        crate::router::FN_BODY_LIMIT
+    }
 }
+
+/// The setting that sets [`FunctionRunner::body_limit`]. Named here because
+/// the door's refusal names it.
+pub const FN_BODY_BYTES_ENV: &str = "ORDO_FN_BODY_BYTES";
 
 /// A door with no functions: every name is unknown.
 pub struct NoFunctions;

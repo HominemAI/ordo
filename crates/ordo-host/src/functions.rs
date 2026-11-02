@@ -17,21 +17,31 @@
 //! `function:<name>@<version>` on behalf of that person. In increment 1 a
 //! function reaches no ops, so the delegation has nothing to carry yet;
 //! increment 4 (`ctx.op`) is where it bounds the ops it calls.
+//!
+//! **Files in** (increment 2). A `$file: blob` argument is a handle from
+//! the blob door. [`CallerBlobs`] reads it through the blob door's own
+//! port ([`BlobPort`]) as that same person: the row guard runs, and a file
+//! they may not see is `not_found`. The door already checked
+//! `std.$blob.get` before the call reached here.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::BoxFuture;
-use ordo_api::functions::{FnInvocation, FunctionRunner};
+use ordo_api::blob::{BlobPort, BlobRequest, BlobVerb};
+use ordo_api::functions::{FnInvocation, FunctionRunner, FN_BODY_BYTES_ENV};
 use ordo_api::spec::{
-    ExecError, NotSyncable, OpCost, OpKind, OpSpec, ParamSpec, RefineTier, Syncability,
+    ExecError, NotSyncable, OpCost, OpKind, OpSpec, ParamSpec, ParamTy, RefineTier, Syncability,
 };
 use ordo_api::ErrorCode;
 use ordo_exec::{sql_lit, Pool, PoolError};
-use ordo_fn::{FnCall, FnError, FnFetch, FnHost, HostConfig, Limits, Scrub};
+use ordo_fn::{
+    BlobError, FnBlob, FnBlobs, FnCall, FnError, FnFetch, FnHost, HostConfig, Limits, NoBlobs,
+    Scrub, BLOB_BYTES_ENV,
+};
 use ordo_schema::Schema;
-use ordo_syntax::FunctionDecl;
+use ordo_syntax::{FunctionDecl, ScalarTy};
 use serde_json::Value;
 
 use crate::spaces::Spaces;
@@ -228,7 +238,12 @@ fn door_spec(f: &FunctionDecl, version: &str, code_hash: &str) -> OpSpec {
         .filter_map(|p| {
             Some(ParamSpec {
                 name: p.name.name.clone(),
-                ty: crate::param_ty_of(p)?,
+                // A function takes a file's handle; an op never does
+                // (`crate::param_ty_of`'s `None`).
+                ty: match p.ty {
+                    ScalarTy::Blob => ParamTy::Blob,
+                    _ => crate::param_ty_of(p)?,
+                },
                 required: p.default.is_none(),
                 bounds: None,
             })
@@ -398,6 +413,193 @@ mod engine_cache_tests {
     }
 }
 
+/// The three settings of increment 2, read at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FnSettings {
+    /// `ORDO_FN_BODY_BYTES`: the largest body `POST /fn/<name>` reads.
+    pub body_bytes: usize,
+    /// `ORDO_FN_BLOB_BYTES`: bytes one call may read through `ctx.blob`.
+    pub blob_bytes: u64,
+    /// `ORDO_FN_FETCH_BODY_BYTES`: the largest body one `fetch` sends.
+    pub fetch_body_bytes: usize,
+}
+
+impl Default for FnSettings {
+    fn default() -> Self {
+        FnSettings {
+            body_bytes: ordo_api::router::FN_BODY_LIMIT,
+            blob_bytes: ordo_fn::DEFAULT_BLOB_BYTES,
+            fetch_body_bytes: ordo_egress::DEFAULT_REQUEST_BODY_CAP,
+        }
+    }
+}
+
+/// The largest `ORDO_FN_FETCH_BODY_BYTES`: the body is held in memory whole.
+pub const MAX_FETCH_BODY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The largest `ORDO_FN_BODY_BYTES`: a call's JSON is held in memory whole.
+pub const MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
+impl FnSettings {
+    /// Reads both through `get`. Each is a whole number of bytes. A value
+    /// out of range refuses the boot and names the setting.
+    pub fn from_vars(
+        get: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<FnSettings, (&'static str, String)> {
+        let d = FnSettings::default();
+        let bytes = |var: &'static str, default: u64, min: u64, max: u64| {
+            match get(var).map(|v| v.trim().to_owned()) {
+                None => Ok(default),
+                Some(v) => match v.parse::<u64>() {
+                    Ok(n) if (min..=max).contains(&n) => Ok(n),
+                    _ => Err((
+                        var,
+                        format!("`{v}` is not a number of bytes from {min} to {max}; the default is {default}"),
+                    )),
+                },
+            }
+        };
+        let body = bytes(FN_BODY_BYTES_ENV, d.body_bytes as u64, 1024, MAX_BODY_BYTES)?;
+        let blob = bytes(
+            BLOB_BYTES_ENV,
+            d.blob_bytes,
+            0,
+            Limits::ceilings().blob_bytes,
+        )?;
+        let fetch = bytes(
+            ordo_egress::REQUEST_BODY_ENV,
+            d.fetch_body_bytes as u64,
+            1024,
+            MAX_FETCH_BODY_BYTES,
+        )?;
+        Ok(FnSettings {
+            body_bytes: body as usize,
+            blob_bytes: blob,
+            fetch_body_bytes: fetch as usize,
+        })
+    }
+
+    /// The egress kernel's limits for functions, with this request cap.
+    pub fn fetch_limits(&self) -> ordo_egress::FnLimits {
+        ordo_egress::FnLimits {
+            request_body: self.fetch_body_bytes,
+            ..ordo_egress::FnLimits::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::FnSettings;
+
+    fn read(vars: &[(&str, &str)]) -> Result<FnSettings, (&'static str, String)> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        FnSettings::from_vars(&move |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()))
+    }
+
+    #[test]
+    fn the_body_and_blob_caps_have_defaults_and_refuse_by_name() {
+        let d = read(&[]).unwrap();
+        assert_eq!(d.body_bytes, 1024 * 1024);
+        assert_eq!(d.blob_bytes, 20 * 1024 * 1024);
+        assert_eq!(d.fetch_body_bytes, 32 * 1024 * 1024);
+        // A whole default file fits out as base64, with room for its JSON.
+        assert!(d.fetch_body_bytes as u64 > d.blob_bytes.div_ceil(3) * 4 + 4096);
+        assert_eq!(
+            read(&[("ORDO_FN_FETCH_BODY_BYTES", "67108864")])
+                .unwrap()
+                .fetch_limits()
+                .request_body,
+            64 * 1024 * 1024
+        );
+        let (var, _) = read(&[("ORDO_FN_FETCH_BODY_BYTES", "12")]).unwrap_err();
+        assert_eq!(var, "ORDO_FN_FETCH_BODY_BYTES");
+        let s = read(&[
+            ("ORDO_FN_BODY_BYTES", "2097152"),
+            ("ORDO_FN_BLOB_BYTES", "0"),
+        ])
+        .unwrap();
+        assert_eq!(s.body_bytes, 2 * 1024 * 1024);
+        assert_eq!(s.blob_bytes, 0, "0 turns file reads off");
+        let (var, why) = read(&[("ORDO_FN_BODY_BYTES", "1mb")]).unwrap_err();
+        assert_eq!(var, "ORDO_FN_BODY_BYTES");
+        assert!(why.contains("number of bytes"), "{why}");
+        let (var, _) = read(&[("ORDO_FN_BLOB_BYTES", "99999999999")]).unwrap_err();
+        assert_eq!(var, "ORDO_FN_BLOB_BYTES");
+    }
+}
+
+/// Reads one call's files as the person calling, through the blob door's
+/// port. The row guard runs inside the port on both the size check and the
+/// read, so a file the person may not see is [`BlobError::NotFound`].
+pub struct CallerBlobs {
+    pub port: Arc<dyn BlobPort>,
+    pub space: String,
+    pub principal: String,
+    pub agent: Option<String>,
+    /// The function, for the key release's correlation.
+    pub function: String,
+}
+
+impl CallerBlobs {
+    fn request(&self, handle: &str) -> BlobRequest {
+        BlobRequest {
+            space: self.space.clone(),
+            principal: self.principal.clone(),
+            agent: self.agent.clone(),
+            verb: BlobVerb::Read,
+            entity: None,
+            field: None,
+            row_id: None,
+            handle_hex: Some(handle.to_string()),
+            // Derived, never the caller's: the key release is attributed to
+            // this function's read for this person.
+            correlation: format!("fn.{}.blob:{}:{handle}", self.function, self.principal),
+        }
+    }
+}
+
+/// The blob door's answer as the function sees it. The door's own words
+/// are kept as the cause.
+fn blob_error(e: ordo_api::ApiError) -> BlobError {
+    match e.code {
+        ErrorCode::NotFound | ErrorCode::AccessDenied | ErrorCode::AccessGuard => {
+            BlobError::NotFound
+        }
+        ErrorCode::ServerBusy | ErrorCode::SpaceUnavailable => BlobError::Unavailable {
+            cause: format!("{}: {}", e.code.as_str(), e.message),
+        },
+        _ => BlobError::Failed {
+            cause: format!("{}: {}", e.code.as_str(), e.message),
+        },
+    }
+}
+
+#[async_trait::async_trait]
+impl FnBlobs for CallerBlobs {
+    async fn read(&self, handle: &str, max: u64) -> Result<FnBlob, BlobError> {
+        let req = self.request(handle);
+        // The size first, under the same guard, so a file over the cap is
+        // refused before a byte of it is opened.
+        let meta = self.port.meta(&req).await.map_err(blob_error)?;
+        if meta.size > max {
+            return Err(BlobError::TooLarge {
+                size: meta.size,
+                left: max,
+                limit: max,
+            });
+        }
+        let read = self.port.read(&req, 0, None).await.map_err(blob_error)?;
+        Ok(FnBlob {
+            mime: read.mime,
+            bytes: read.bytes,
+        })
+    }
+}
+
 /// The door's function runner.
 pub struct HostFunctions {
     /// Made on the first call: compiling the engine takes about a second,
@@ -410,6 +612,9 @@ pub struct HostFunctions {
     control: Pool,
     fetch: Arc<dyn FnFetch>,
     scrub: Arc<dyn CallScrub>,
+    /// The blob door's port, when the deployment stores files.
+    blobs: Option<Arc<dyn BlobPort>>,
+    settings: FnSettings,
 }
 
 impl HostFunctions {
@@ -429,7 +634,22 @@ impl HostFunctions {
             control,
             fetch,
             scrub,
+            blobs: None,
+            settings: FnSettings::default(),
         }
+    }
+
+    /// Reads `blob` arguments through `port`, the blob door's own. Without
+    /// it a function's `ctx.blob` answers `blob_no_store`.
+    pub fn with_blobs(mut self, port: Option<Arc<dyn BlobPort>>) -> HostFunctions {
+        self.blobs = port;
+        self
+    }
+
+    /// The body and file caps (`ORDO_FN_BODY_BYTES`, `ORDO_FN_BLOB_BYTES`).
+    pub fn with_settings(mut self, settings: FnSettings) -> HostFunctions {
+        self.settings = settings;
+        self
     }
 
     /// Serve another version's functions. Calls in flight finish on the
@@ -488,6 +708,10 @@ impl FunctionRunner for HostFunctions {
         self.entry(name).map(|e| e.spec)
     }
 
+    fn body_limit(&self) -> usize {
+        self.settings.body_bytes
+    }
+
     fn call<'a>(&'a self, call: FnInvocation) -> BoxFuture<'a, Result<Value, ExecError>> {
         Box::pin(async move {
             let entry = self
@@ -507,6 +731,27 @@ impl FunctionRunner for HostFunctions {
                 .map_err(exec_error)?;
             let secrets: Vec<String> = entry.decl.secrets.iter().map(|s| s.name.clone()).collect();
             let scrub = self.scrub.for_call(&call.space, &secrets).await;
+            // The handles in the call's `blob` arguments: the only files
+            // its `ctx.blob` may read, each as this person.
+            let blob_args: Vec<String> = entry
+                .spec
+                .params
+                .iter()
+                .filter(|p| p.ty == ParamTy::Blob)
+                .filter_map(|p| call.args.get(&p.name)?.as_str().map(str::to_string))
+                .collect();
+            let blobs: Arc<dyn FnBlobs> = match &self.blobs {
+                Some(port) => Arc::new(CallerBlobs {
+                    port: port.clone(),
+                    space: call.space.clone(),
+                    principal: call.principal.clone(),
+                    agent: call.agent.clone(),
+                    function: entry.decl.name.name.clone(),
+                }),
+                None => Arc::new(NoBlobs),
+            };
+            let mut limits = entry.limits();
+            limits.blob_bytes = self.settings.blob_bytes;
             let run = host
                 .call(FnCall {
                     space: call.space.clone(),
@@ -517,9 +762,11 @@ impl FunctionRunner for HostFunctions {
                     input: Value::Object(call.args.clone()),
                     egress: entry.decl.egress.iter().map(|h| h.name.clone()).collect(),
                     secrets,
-                    limits: entry.limits(),
+                    limits,
                     fetch: self.fetch.clone(),
                     scrub,
+                    blobs,
+                    blob_args,
                 })
                 .await;
             let principal = match &call.agent {
@@ -557,6 +804,14 @@ pub fn exec_error(e: FnError) -> ExecError {
         FnError::OutOfMemory { .. } => ErrorCode::FunctionOom,
         FnError::Busy { .. } => ErrorCode::FunctionBusy,
         FnError::Fetch { .. } => ErrorCode::EgressRefused,
+        // A file the caller may not read is the blob door's own answer.
+        FnError::Blob(BlobError::NotFound) => ErrorCode::NotFound,
+        // The page sent a file over the cap; the message names the setting.
+        FnError::Blob(BlobError::TooLarge { .. }) => ErrorCode::InvalidParam,
+        FnError::Blob(BlobError::Unavailable { .. }) => ErrorCode::ServerBusy,
+        // The code read a file it was not given: the function's own fault.
+        FnError::Blob(BlobError::NotArgument) => ErrorCode::FunctionError,
+        FnError::Blob(BlobError::NoStore | BlobError::Failed { .. }) => ErrorCode::Internal,
         FnError::BadInput { .. } => ErrorCode::InvalidParam,
         FnError::Engine { .. } => ErrorCode::Internal,
     };

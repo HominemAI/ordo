@@ -11738,3 +11738,61 @@ then *"ok lets try this"* to all four asks on
 - CI Postgres (same day, `ci-postgres-a-dedicated-instance-on`): runner
   pods reserve no memory (ask 1: *"no"*), and CI moves to a dedicated
   Postgres on the cluster (ask 2: *"ok"*), after this change.
+- Built as 8 throwaway servers, one per runner (ask 3: *"yes"*, to push
+  smg_infrastructure `gha-runner/ci-postgres.yaml`). A job leases a whole
+  server, so the fixed test database names need no prefix, and one crash
+  fails one job.
+- The servers run at Postgres's default 100 connections (ask 4: *"ok"*).
+  `thirty_people_sign_up_on_a_default_server` stays in every run
+  (`ci-max-connections` ask 2: *"ok"*): it guards fix 25g by counting
+  connections, and times nothing.
+
+## 2026-11-01: tests build once and set up once
+
+Owner, on `cut-test-time-by-building-and`: *"yes"* to ask 1 and *"ok"* to
+asks 2 to 4. Measured that day: 32 min of tests across the shards, about
+1 min of cached compiling per shard.
+
+- CI moves to cargo-nextest. Test binaries are built once and shipped to
+  the shards, and tests from many files run at once.
+- Test setup is measured first. If it is a large share, each file sets up
+  its app once and copies it per test with a Postgres template database.
+- The exhaustive `refine_audit` cases run in full on pull requests and
+  nightly, with a small sample on `bleeding`. This follows the earlier
+  ruling that stress runs need not run every time.
+- `notes_app` tests run in parallel unless they share state. The tests
+  that count connections keep running one at a time.
+- Ask 5 ("ok"): the shared test build is dropped. Its archive was 1.74 GB
+  and took 4.5 min to download in each shard, against about 1 min to build
+  from the warm cache. The first nextest run took 25 min, slower than
+  before. Each shard now builds what it runs, and nextest still runs files
+  at once. Debug info was already off on CI (`CARGO_PROFILE_DEV_DEBUG: 0`),
+  so the line-tables cut in the recommendation had nothing to cut.
+
+## 2026-11-02: test in proportion to the change
+
+Board task `test-in-proportion-to-the-change` (15b). A bleeding push ran
+far more than its change reached: editing one ordo-host test file ran all
+~1,380 host tests, because 15a filters by crate and ordo-host sits on top.
+The owner: "I still think the amount of testing proportional to any change
+is the problem."
+
+- Ask 1 ("yes"): a change to one test file runs only that file on
+  `bleeding`.
+- Ask 2 ("yes"): a change to ordo-host's code runs only the test files
+  mapped to that code, from a map kept in the repo. An unmapped file runs
+  everything.
+- Ask 3: "Yes. If something turns up an instance - a majority of tests that
+  require an instance should happen there, not scattered." Tests that need
+  a running deployment are grouped to run against one instance, instead of
+  each booting its own. The cuts are proposed from the test-value
+  measurement first.
+
+Pull requests to `main` still run everything.
+- Asks 4 and 5, in conversation: "This makes more sense. Lets do it." A
+  fast job runs the unit tests and the tests that need no database first,
+  with no Postgres and no installs; the instance tests wait for it to pass.
+  The unit tests took 48 test-seconds in all on 2026-11-01. The owner adds
+  the fast job to the main ruleset as a required check once it lands. Also
+  from the owner: "no-instance unit tests should run without much fuss",
+  ideally done in under a minute, "and anything else happens behind them."

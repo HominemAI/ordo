@@ -310,6 +310,7 @@ mirroring the language:
 | `datetime` | `"YYYY-MM-DDTHH:MM:SSZ"`, UTC, the `Z` mandatory, no offset and no fractional seconds |
 | `uri` | JSON string: a scheme, then a body; no whitespace or control characters; at most 2048 bytes |
 | `json` | any JSON value, carried as JSON and never as a string holding JSON (28b). Larger than `ORDO_JSON_MAX_BYTES` (default 262144, the compact serialization) or deeper than `ORDO_JSON_MAX_DEPTH` (default 64) ⇒ `bound_violation`; a NUL in a string or key ⇒ `invalid_param`. Results carry the stored document as JSON |
+| `blob` | a file handle, 32 hex characters, as an op answers a `blob` field after the upload. A **function** parameter only; an op refuses `$f: blob` (`blob_parameter`). The function reads the file as the caller: the door checks `std.$blob.get` and the row guard runs on the read, so a handle the caller cannot read is `not_found` |
 
 **`datetime` was missing, and it was not a documentation gap.** `$t:
 datetime` has always parsed, and `ordo_host::param_ty` had a wildcard arm

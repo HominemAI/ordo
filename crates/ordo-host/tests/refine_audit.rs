@@ -42,6 +42,8 @@ fn dummy(ty: &ParamTy) -> &'static str {
         ParamTy::Uri => "https://example.test/x",
         // A JSON string is a document like any other.
         ParamTy::Json => "x",
+        // A function's only; no op has one.
+        ParamTy::Blob => "0123456789abcdef0123456789abcdef",
     }
 }
 
@@ -189,7 +191,7 @@ const SAMPLE: [&str; 2] = ["eq", "lt"];
 
 /// Every operator on every field of every read, against values of the
 /// wrong shape and type, hostile size and hostile nesting. The requests
-/// are built first and sent 16 at a time; each answer is a success, within
+/// are built first (a sample of them outside a full run) and sent 16 at a time; each answer is a success, within
 /// the op's outputs, or a typed refusal.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_operator_on_every_field_against_hostile_values_is_never_a_500() {
@@ -266,6 +268,26 @@ async fn every_operator_on_every_field_against_hostile_values_is_never_a_500() {
             }
         }
     }
+    // The whole matrix runs on pull requests and nightly
+    // (ORDO_REFINE_AUDIT_FULL=1). A push to `bleeding` sends 1 request in 10,
+    // offset by the day of the year, so 10 days of pushes cover it all
+    // (owner ruling 2026-11-01, board task `cut-test-time-by-building-and`).
+    let full = std::env::var("ORDO_REFINE_AUDIT_FULL").as_deref() == Ok("1");
+    let offset = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 86_400) as usize
+        % 10;
+    if !full {
+        requests = requests
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| i % 10 == offset)
+            .map(|(_, r)| r)
+            .collect();
+        eprintln!("a sample: 1 request in 10, offset {offset}; ORDO_REFINE_AUDIT_FULL=1 runs all");
+    }
     let total = requests.len();
 
     let answers: Vec<(ordo_api::OpSpec, String, StatusCode, Value)> =
@@ -298,7 +320,8 @@ async fn every_operator_on_every_field_against_hostile_values_is_never_a_500() {
             within_outputs(op, body, what);
         }
     }
-    assert!(served > 100, "{served} of {total} requests served");
+    let least = if full { 100 } else { 10 };
+    assert!(served > least, "{served} of {total} requests served");
     assert!(
         failures.is_empty(),
         "{} of {total} requests were not typed:\n{}",

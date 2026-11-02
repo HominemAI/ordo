@@ -70,6 +70,8 @@ fn call(code: &str, input: Value, fetch: Arc<dyn FnFetch>) -> FnCall {
         limits: Limits::default(),
         fetch,
         scrub: Arc::new(OneSecret),
+        blobs: Arc::new(ordo_fn::NoBlobs),
+        blob_args: Vec::new(),
     }
 }
 

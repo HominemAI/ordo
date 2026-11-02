@@ -471,13 +471,36 @@ async fn a_lock_released_during_the_retries_lets_the_validate_through() {
         .rows("LOCK TABLE \"widgets\" IN ACCESS EXCLUSIVE MODE")
         .await
         .expect("the holder takes the lock");
+    // The holder lets go once the server has shown one attempt waiting on
+    // the lock and then not waiting: that attempt timed out, so at least
+    // one retry follows. Read from `pg_stat_activity`, not from a guessed
+    // delay, so a loaded machine cannot change the order (owner ruling
+    // 2026-11-02, board task `time-sensitive-tests-fail-when-other-tests`).
+    let watcher = pool.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(350)).await;
+        let mut seen_waiting = false;
+        loop {
+            let rows = watcher
+                .rows(
+                    "SELECT count(*) FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock'",
+                )
+                .await
+                .expect("pg_stat_activity");
+            let waiting = rows[0][0].as_deref() != Some("0");
+            if waiting {
+                seen_waiting = true;
+            } else if seen_waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let _ = holder.rollback().await;
     });
+    // Enough tries that the watcher's pace never runs them out.
     let patient = LockPolicy {
         lock_timeout: Duration::from_millis(100),
-        retries: 20,
+        retries: 200,
         backoff: Duration::from_millis(50),
     };
     let done = sa::execute_with(&pool, &[add_check_not_valid(), validate_check()], &patient)

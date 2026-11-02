@@ -287,7 +287,14 @@ async fn rename_board(h: &H, name: &str) {
 
 /// The feed ended on a refusal naming `code`, and sent nothing else after
 /// `mark`: no change, no invalidate, none of the rows written since.
-fn ended_refused(feed: &Feed, mark: usize, code: &str, secret: &str, what: &str) {
+/// Waits for the feed to end, then checks how. The wait is bounded only by
+/// the feed's own 30 s, so a loaded machine cannot fail it early (owner
+/// ruling 2026-11-02, board task `time-sensitive-tests-fail-when-other-tests`).
+async fn ended_refused(feed: &Feed, mark: usize, code: &str, secret: &str, what: &str) {
+    let until = std::time::Instant::now() + Duration::from_secs(30);
+    while !feed.ended() && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let after = feed.since(mark);
     assert!(
         after.contains("event: error") && after.contains(&format!("\"code\":\"{code}\"")),
@@ -355,8 +362,9 @@ async fn a_withdrawn_delegation_ends_the_agents_feeds() {
         "delegation_required",
         "after-withdraw-secret",
         "sync",
-    );
-    ended_refused(&live, m_live, "delegation_required", "", "?live=1");
+    )
+    .await;
+    ended_refused(&live, m_live, "delegation_required", "", "?live=1").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -389,7 +397,8 @@ async fn a_revoked_share_ends_a_members_window_feed() {
         "access_denied",
         "after-revoke-member",
         "window sync",
-    );
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -426,9 +435,9 @@ async fn logout_ends_every_feed_kind_within_one_idle_tick_with_no_write() {
     // No write. One tick, and room for the frame to arrive.
     tokio::time::sleep(RECHECK * 2 + Duration::from_millis(500)).await;
 
-    ended_refused(&sync, m1, "access_denied", "", "sync");
-    ended_refused(&live, m2, "access_denied", "", "?live=1");
-    ended_refused(&shared, m3, "access_denied", "", "/live");
+    ended_refused(&sync, m1, "access_denied", "", "sync").await;
+    ended_refused(&live, m2, "access_denied", "", "?live=1").await;
+    ended_refused(&shared, m3, "access_denied", "", "/live").await;
     assert!(
         shared.since(m3).contains("\"key\":\"r1\""),
         "/live names the read that was refused"

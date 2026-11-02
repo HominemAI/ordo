@@ -233,6 +233,19 @@ impl Deployment {
         headers: &[(&str, &str)],
         body: &str,
     ) -> (u16, String, Value) {
+        let (status, head, body) = self.send_text(method, path, headers, body);
+        let json = serde_json::from_str(body.trim()).unwrap_or(Value::Null);
+        (status, head, json)
+    }
+
+    /// [`Deployment::send`], with the body as the server wrote it.
+    fn send_text(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, String, String) {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         s.set_read_timeout(Some(Duration::from_secs(20))).ok();
         let mut req = format!(
@@ -253,8 +266,24 @@ impl Deployment {
             .and_then(|c| c.parse().ok())
             .unwrap_or(0);
         let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
-        let json = serde_json::from_str(body.trim()).unwrap_or(Value::Null);
-        (status, head.to_ascii_lowercase(), json)
+        (status, head.to_ascii_lowercase(), body.to_string())
+    }
+
+    /// How many requests the server has slowed in `window`, from its own
+    /// `ordo_public_slowed_total` counter, read as the owner.
+    fn slowed(&self, o: &Owner, window: &str) -> u64 {
+        let bearer = format!("Bearer {}", o.token);
+        let (status, _, text) = self.send_text(
+            "GET",
+            "/metrics",
+            &[("Authorization", bearer.as_str()), ("X-Ordo-Space", HOME)],
+            "",
+        );
+        assert_eq!(status, 200, "metrics: {text}");
+        let series = format!("ordo_public_slowed_total{{window=\"{window}\"}} ");
+        text.lines()
+            .find_map(|l| l.strip_prefix(series.as_str()))
+            .map_or(0, |n| n.trim().parse().expect("a count"))
     }
 
     /// A POST to `/auth/...`, as `auth/passkey.ts` sends it.
@@ -439,9 +468,9 @@ fn write(d: &Deployment, o: &Owner, op: &str, params: Value) -> String {
         .to_string()
 }
 
-/// Boot, sign the owner in, start again naming them, and seed three
-/// products, two plans and two testimonials, as `dev/seed` does.
-async fn seeded_site(db: &str, extra: &[(&str, &str)]) -> (Deployment, Owner) {
+/// Boot, sign the owner in, and start again naming them, as `dev/seed`
+/// does.
+async fn owned_site(db: &str, extra: &[(&str, &str)]) -> (Deployment, Owner) {
     let first = Deployment::boot(db, extra).await;
     let owner = sign_in_owner(&first);
     let mut settings: Vec<(&str, &str)> = extra.to_vec();
@@ -451,6 +480,13 @@ async fn seeded_site(db: &str, extra: &[(&str, &str)]) -> (Deployment, Owner) {
         let (status, _) = d.op(&owner.token, "GET", "enquiryList", json!({}));
         (status == 200).then_some(())
     });
+    (d, owner)
+}
+
+/// [`owned_site`], seeded with three products, two plans and two
+/// testimonials, as `dev/seed` does.
+async fn seeded_site(db: &str, extra: &[(&str, &str)]) -> (Deployment, Owner) {
+    let (d, owner) = owned_site(db, extra).await;
     for (i, slug) in ["alpha", "beta", "gamma"].iter().enumerate() {
         write(
             &d,
@@ -600,22 +636,26 @@ async fn the_human_check_is_on_unless_the_deployment_turns_it_off() {
     d.stop_quietly();
 }
 
+// Which request is slowed is read from the server's own counter, so a
+// loaded machine cannot change the answer (owner ruling 2026-11-02, board
+// task `time-sensitive-tests-fail-when-other-tests`). Time is checked only
+// from below: a slowed request waits at least the delay, and load can only
+// make it wait longer.
 #[tokio::test(flavor = "multi_thread")]
 async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot(
+    const DELAY: Duration = Duration::from_millis(500);
+    let (d, owner) = owned_site(
         "ordo_site_proxy",
         &[
             ("ORDO_PROXY_HEADER", "X-Forwarded-For"),
             ("ORDO_PROXY_TRUSTED", "127.0.0.1"),
             ("ORDO_PROXY_SLOW_AFTER", "2"),
-            ("ORDO_PROXY_SLOW_MS", "2000"),
+            ("ORDO_PROXY_SLOW_MS", "500"),
         ],
     )
     .await;
     assert!(d.log().contains("proxy mode: on"), "{}", d.log());
-    // A 2 s slow-down: an unslowed visit took over 500 ms on a loaded CI
-    // runner (run 41297909915), so a 500 ms one could not tell them apart.
     let timed = |visitor: &str| {
         let started = std::time::Instant::now();
         let (status, _, body) = d.visit("/op/pricing", &[("X-Forwarded-For", visitor)]);
@@ -623,15 +663,21 @@ async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
         started.elapsed()
     };
     for _ in 0..2 {
-        assert!(timed("203.0.113.9") < Duration::from_millis(2000));
+        timed("203.0.113.9");
     }
-    assert!(
-        timed("203.0.113.9") >= Duration::from_millis(2000),
-        "slowed, still served"
+    assert_eq!(
+        d.slowed(&owner, "visit"),
+        0,
+        "two visits are within the limit"
     );
-    assert!(
-        timed("203.0.113.10") < Duration::from_millis(2000),
-        "another visitor"
+    let took = timed("203.0.113.9");
+    assert_eq!(d.slowed(&owner, "visit"), 1, "the third is slowed");
+    assert!(took >= DELAY, "slowed, still served: {took:?}");
+    timed("203.0.113.10");
+    assert_eq!(
+        d.slowed(&owner, "visit"),
+        1,
+        "another visitor is not slowed"
     );
     d.stop_quietly();
 }
@@ -642,12 +688,13 @@ async fn proxy_mode_slows_a_busy_visitor_through_the_real_socket() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_address_limits_slow_and_never_refuse_in_proxy_mode() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot(
+    const DELAY: Duration = Duration::from_millis(500);
+    let (d, owner) = owned_site(
         "ordo_site_limits",
         &[
             ("ORDO_PROXY_HEADER", "X-Forwarded-For"),
             ("ORDO_PROXY_TRUSTED", "127.0.0.1"),
-            ("ORDO_PROXY_SLOW_MS", "3000"),
+            ("ORDO_PROXY_SLOW_MS", "500"),
             ("ORDO_SHARE_LINK_MISS_LIMIT", "2"),
             ("ORDO_PROVISION_SIGNUPS_PER_ADDRESS_PER_HOUR", "1"),
         ],
@@ -667,28 +714,43 @@ async fn the_address_limits_slow_and_never_refuse_in_proxy_mode() {
         );
         (status, answer, started.elapsed())
     };
-    // The slow-down is 3 s so that a busy runner's ordinary request (well
-    // under a second) never looks slowed; the line between the two is half.
-    const SLOWED: Duration = Duration::from_millis(1500);
     let wrong = json!({"link": "not-a-real-link-secret"});
     for _ in 0..2 {
-        let (status, _, took) = post("/auth/link", wrong.clone(), "203.0.113.9");
+        let (status, _, _) = post("/auth/link", wrong.clone(), "203.0.113.9");
         assert_eq!(status, 403);
-        assert!(took < SLOWED, "{took:?}");
     }
+    assert_eq!(
+        d.slowed(&owner, "link_miss"),
+        0,
+        "two misses are within the limit"
+    );
     let (status, answer, took) = post("/auth/link", wrong.clone(), "203.0.113.9");
     assert_eq!(status, 403, "the same refusal, never 429: {answer}");
-    assert!(took >= SLOWED, "slowed: {took:?}");
-    let (_, _, took) = post("/auth/link", wrong, "203.0.113.10");
-    assert!(took < SLOWED, "another address: {took:?}");
+    assert_eq!(d.slowed(&owner, "link_miss"), 1, "the third miss is slowed");
+    assert!(took >= DELAY, "slowed: {took:?}");
+    post("/auth/link", wrong, "203.0.113.10");
+    assert_eq!(
+        d.slowed(&owner, "link_miss"),
+        1,
+        "another address is not slowed"
+    );
 
     let begin = json!({"method": "passkey"});
-    let (status, answer, took) = post("/auth/register", begin.clone(), "198.51.100.7");
+    let (status, answer, _) = post("/auth/register", begin.clone(), "198.51.100.7");
     assert_eq!(status, 200, "{answer}");
-    assert!(took < SLOWED, "{took:?}");
+    assert_eq!(
+        d.slowed(&owner, "signup"),
+        0,
+        "the first sign-up is not slowed"
+    );
     let (status, answer, took) = post("/auth/register", begin, "198.51.100.7");
     assert_eq!(status, 200, "slowed, still served: {answer}");
-    assert!(took >= SLOWED, "slowed: {took:?}");
+    assert_eq!(
+        d.slowed(&owner, "signup"),
+        1,
+        "the second sign-up is slowed"
+    );
+    assert!(took >= DELAY, "slowed: {took:?}");
     d.stop_quietly();
 }
 

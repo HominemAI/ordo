@@ -101,6 +101,8 @@ fn call(code: &str, input: Value, blobs: Arc<dyn FnBlobs>, ocr: Arc<Ocr>) -> FnC
         scrub: Arc::new(NoScrub),
         blobs,
         blob_args: vec![FILE.into()],
+        uses: Vec::new(),
+        ops: std::sync::Arc::new(ordo_fn::NoOps),
     }
 }
 

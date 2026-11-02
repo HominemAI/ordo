@@ -72,6 +72,8 @@ fn call(code: &str, input: Value, fetch: Arc<dyn FnFetch>) -> FnCall {
         scrub: Arc::new(OneSecret),
         blobs: Arc::new(ordo_fn::NoBlobs),
         blob_args: Vec::new(),
+        uses: Vec::new(),
+        ops: std::sync::Arc::new(ordo_fn::NoOps),
     }
 }
 

@@ -13,12 +13,14 @@
 //! - **Limits** (plan §9): memory through a resource limiter, CPU as fuel, and
 //!   wall time through epoch interruption plus a timeout around the network
 //!   waits.
-//! - **Eight imports** and nothing else: `fetch` and `mac` (both through
-//!   [`FnFetch`]), `blob` (through [`FnBlobs`]), `take_reply`, `log`,
-//!   `result`, `now_ms`, `random`. No file, socket, environment or secret
-//!   value is reachable. `mac` signs or verifies an HMAC with a secret as the
-//!   key; the key stays in the host. `blob` reads a file the call was given
-//!   as a `blob` argument, as the person calling (`src/blob.rs`).
+//! - **Nine imports** and nothing else: `fetch` and `mac` (both through
+//!   [`FnFetch`]), `blob` (through [`FnBlobs`]), `op` (through [`FnOps`]),
+//!   `take_reply`, `log`, `result`, `now_ms`, `random`. No file, socket,
+//!   environment or secret value is reachable. `mac` signs or verifies an
+//!   HMAC with a secret as the key; the key stays in the host. `blob` reads
+//!   a file the call was given as a `blob` argument, as the person calling
+//!   (`src/blob.rs`). `op` calls an op in the function's `uses`, as the
+//!   person calling (`src/ops.rs`).
 //!
 //! The door (`ordo-api`) does sign-in, access, quotas, idempotency and pause
 //! before a call gets here, and turns an [`FnError`] into an HTTP answer.
@@ -26,6 +28,7 @@
 pub mod blob;
 mod cache;
 pub mod error;
+pub mod ops;
 pub mod seam;
 
 use std::collections::HashMap;
@@ -45,9 +48,10 @@ use wasmtime_wizer::{InstanceState, SnapshotVal, ValType, Wizer};
 pub use blob::{BlobError, FnBlob, FnBlobs, NoBlobs, BLOB_BYTES_ENV, DEFAULT_BLOB_BYTES};
 pub use cache::{CacheOutcome, CacheWrite};
 pub use error::{BusyScope, FnError, Limit, Remedy};
+pub use ops::{FnOpAnswer, FnOps, NoOps, OpError, DEFAULT_MAX_OPS};
 pub use seam::{
     FetchError, FnFetch, FnFetchRequest, FnFetchResponse, FnMacAnswer, FnMacRequest, HeaderValue,
-    MacHash,
+    HeldValue, MacHash,
 };
 
 /// The engine module, built by `scripts/build-fn-engine.sh`.
@@ -71,6 +75,8 @@ pub struct Limits {
     /// Bytes read through `ctx.blob`, all files together
     /// ([`BLOB_BYTES_ENV`]).
     pub blob_bytes: u64,
+    /// Op calls through `ctx.op` per call.
+    pub max_ops: u32,
 }
 
 impl Default for Limits {
@@ -83,6 +89,7 @@ impl Default for Limits {
             log_bytes: 64 * 1024,
             output_bytes: 1024 * 1024,
             blob_bytes: DEFAULT_BLOB_BYTES,
+            max_ops: DEFAULT_MAX_OPS,
         }
     }
 }
@@ -99,6 +106,7 @@ impl Limits {
             log_bytes: 1024 * 1024,
             output_bytes: 16 * 1024 * 1024,
             blob_bytes: 1024 * 1024 * 1024,
+            max_ops: 500,
         }
     }
 
@@ -112,6 +120,7 @@ impl Limits {
             log_bytes: self.log_bytes.min(ceiling.log_bytes),
             output_bytes: self.output_bytes.min(ceiling.output_bytes),
             blob_bytes: self.blob_bytes.min(ceiling.blob_bytes),
+            max_ops: self.max_ops.min(ceiling.max_ops),
         }
     }
 }
@@ -181,6 +190,12 @@ pub struct FnCall {
     /// The handles in the call's `blob` arguments: the only files
     /// `ctx.blob` may read.
     pub blob_args: Vec<String>,
+    /// The ops `ctx.op` may call: the function's `uses`, exactly as
+    /// declared. Empty reaches no op.
+    pub uses: Vec<String>,
+    /// Calls ops as the person calling. [`NoOps`] for a function with no
+    /// `uses`.
+    pub ops: Arc<dyn FnOps>,
 }
 
 /// Removes every live secret value of a tenant from text the function
@@ -223,6 +238,8 @@ pub struct RunReport {
     /// Files read through `ctx.blob`, and their bytes.
     pub blob_reads: u32,
     pub blob_bytes: u64,
+    /// Ops called through `ctx.op`, refused ones included.
+    pub op_calls: u32,
     pub logs: Vec<LogLine>,
     pub logs_truncated: bool,
 }
@@ -552,6 +569,7 @@ impl FnHost {
         report.bytes_in = guest.bytes_in;
         report.blob_reads = guest.blob_reads;
         report.blob_bytes = guest.blob_bytes;
+        report.op_calls = guest.op_calls;
         report.logs = guest.logs;
         report.logs_truncated = guest.logs_truncated;
         FnRun { outcome, report }
@@ -617,7 +635,7 @@ async fn run_in(
     let raw = match &guest.scrub {
         Some(f) => {
             let text = String::from_utf8_lossy(&raw);
-            let clean = f.scrub(&guest.space, &text);
+            let clean = guest.scrub_held(&f.scrub(&guest.space, &text));
             if clean == text {
                 raw
             } else {
@@ -640,6 +658,9 @@ async fn run_in(
     if let Some(e) = guest.blob_refusals.iter().find(|e| e.kind() == code) {
         return Err(FnError::Blob(e.clone()));
     }
+    if let Some(e) = guest.op_refusals.iter().find(|e| e.kind() == code) {
+        return Err(FnError::Op(e.clone()));
+    }
     if !code.is_empty() && guest.issued.contains(&code) {
         return Err(FnError::Fetch {
             code,
@@ -647,8 +668,8 @@ async fn run_in(
         });
     }
     Err(FnError::Threw {
-        message: text("message"),
-        stack: text("stack"),
+        message: guest.scrub_held(&text("message")),
+        stack: guest.scrub_held(&text("stack")),
     })
 }
 
@@ -758,6 +779,15 @@ struct Guest {
     blob_bytes: u64,
     /// The `ctx.blob` refusals issued during the call.
     blob_refusals: Vec<BlobError>,
+    ops: Option<Arc<dyn FnOps>>,
+    uses: Vec<String>,
+    max_ops: u32,
+    op_calls: u32,
+    /// The `ctx.op` refusals issued during the call.
+    op_refusals: Vec<OpError>,
+    /// Sealed values ops answered, by handle number. They never enter the
+    /// instance.
+    held: Vec<Vec<u8>>,
     result: Option<Vec<u8>>,
     limits_output: usize,
     output_over: bool,
@@ -795,6 +825,12 @@ impl Guest {
             blob_reads: 0,
             blob_bytes: 0,
             blob_refusals: Vec::new(),
+            ops: None,
+            uses: Vec::new(),
+            max_ops: 0,
+            op_calls: 0,
+            op_refusals: Vec::new(),
+            held: Vec::new(),
             result: None,
             limits_output: 0,
             output_over: false,
@@ -820,10 +856,29 @@ impl Guest {
             .map(|h| h.to_ascii_lowercase())
             .collect();
         g.blob_limit = limits.blob_bytes;
+        g.ops = Some(call.ops.clone());
+        g.uses = call.uses.clone();
+        g.max_ops = limits.max_ops;
         g.max_fetches = limits.max_fetches;
         g.limits_output = limits.output_bytes;
         g.log_limit = limits.log_bytes;
         g
+    }
+
+    /// `text` with each held value replaced, as a live secret's is. The
+    /// instance never holds one, so this is a second line, for a value an
+    /// outside answer or another field carried in.
+    fn scrub_held(&self, text: &str) -> String {
+        let mut out = text.to_owned();
+        for v in &self.held {
+            let Ok(v) = std::str::from_utf8(v) else {
+                continue;
+            };
+            if v.len() >= 4 && out.contains(v) {
+                out = out.replace(v, "[secret]");
+            }
+        }
+        out
     }
 
     fn push_log(&mut self, level: u8, text: String) {
@@ -942,6 +997,34 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
             })
         },
     )?;
+    linker.func_wrap_async(
+        "ordo",
+        "op",
+        |mut caller: Caller<'_, Guest>, (ptr, len): (i32, i32)| {
+            Box::new(async move {
+                let req = guest_bytes(&mut caller, ptr, len).unwrap_or_default();
+                let reply = guest_op(caller.data_mut(), &req).await;
+                let g = caller.data_mut();
+                let (bytes, refused) = match reply {
+                    Ok(b) => (b, false),
+                    Err(e) => {
+                        let b = serde_json::json!({ "code": e.kind(), "message": e.to_string() })
+                            .to_string()
+                            .into_bytes();
+                        g.op_refusals.push(e);
+                        (b, true)
+                    }
+                };
+                let n = bytes.len() as i32;
+                g.reply = bytes;
+                if refused {
+                    -n
+                } else {
+                    n
+                }
+            })
+        },
+    )?;
     linker.func_wrap(
         "ordo",
         "take_reply",
@@ -966,6 +1049,7 @@ fn define_imports(linker: &mut Linker<Guest>) -> wasmtime::Result<()> {
                 Some(f) => f.scrub(&g.space, &text),
                 None => text,
             };
+            let text = g.scrub_held(&text);
             g.push_log(level.clamp(0, 3) as u8, text);
         },
     )?;
@@ -1025,8 +1109,18 @@ struct WireRequest {
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum WireHeader {
-    Plain { plain: String },
-    Secret { secret: String, template: String },
+    Plain {
+        plain: String,
+    },
+    Secret {
+        secret: String,
+        template: String,
+    },
+    /// `ctx.sealed(handle)`: the number of a value an op answered.
+    Held {
+        held: usize,
+        template: String,
+    },
 }
 
 /// One `fetch` from the guest: checked against the declaration, then handed
@@ -1080,6 +1174,18 @@ async fn guest_fetch(g: &mut Guest, raw: &[u8], body: Vec<u8>) -> Result<Vec<u8>
                 }
                 HeaderValue::Secret {
                     name: secret,
+                    template,
+                }
+            }
+            WireHeader::Held { held, template } => {
+                let value = g.held.get(held).cloned().ok_or_else(|| {
+                    Refused::new(
+                        "bad_request",
+                        "ctx.sealed takes a sealed field from this call's ctx.op answer",
+                    )
+                })?;
+                HeaderValue::Held {
+                    value: HeldValue::new(value),
                     template,
                 }
             }
@@ -1162,6 +1268,55 @@ async fn guest_blob(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, BlobError> {
     out.extend_from_slice(head.as_bytes());
     out.extend_from_slice(&file.bytes);
     Ok(out)
+}
+
+/// The wire shape of a guest `ctx.op` request, as the prelude writes it.
+#[derive(serde::Deserialize)]
+struct WireOp {
+    op: String,
+    #[serde(default)]
+    args: serde_json::Map<String, Value>,
+}
+
+/// One `ctx.op` from the guest: the name checked against `uses`, the count
+/// against the call's limit, then the call through the seam, as the person
+/// calling. The reply is `{"rows": [...], "sealed": [...]}`, with each
+/// sealed field's value held here and replaced by `{"$sealed": n}`.
+async fn guest_op(g: &mut Guest, raw: &[u8]) -> Result<Vec<u8>, OpError> {
+    let req: WireOp =
+        serde_json::from_slice(raw).map_err(|_| OpError::NotUsed { op: String::new() })?;
+    g.op_calls += 1;
+    if !g.uses.contains(&req.op) {
+        return Err(OpError::NotUsed { op: req.op });
+    }
+    if g.op_calls > g.max_ops {
+        return Err(OpError::TooMany { limit: g.max_ops });
+    }
+    let ops = g.ops.clone().ok_or(OpError::Ended)?;
+    let mut answer = ops.call(&req.op, req.args).await?;
+    for row in &mut answer.rows {
+        let Value::Object(fields) = row else {
+            continue;
+        };
+        for name in &answer.sealed {
+            let Some(v) = fields.get_mut(name) else {
+                continue;
+            };
+            let bytes = match &*v {
+                Value::Null => continue,
+                Value::String(s) => s.as_bytes().to_vec(),
+                other => other.to_string().into_bytes(),
+            };
+            let n = g.held.len();
+            g.held.push(bytes);
+            *v = serde_json::json!({ "$sealed": n });
+        }
+    }
+    Ok(
+        serde_json::json!({ "rows": answer.rows, "sealed": answer.sealed })
+            .to_string()
+            .into_bytes(),
+    )
 }
 
 /// The wire shape of a guest HMAC request, as the prelude writes it. The

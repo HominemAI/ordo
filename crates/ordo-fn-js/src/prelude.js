@@ -10,20 +10,22 @@
 
   // A secret is a handle that names it. The value never enters the guest:
   // the host fills it in on the way out, for the secret's bound hosts only.
+  // A handle from ctx.sealed holds the number of a sealed value an op
+  // answered instead of a name; the host fills that in for any egress host.
   class SecretHandle {
-    constructor(name, template) {
-      this[SECRET] = { name: String(name), template: String(template) };
+    constructor(name, template, held) {
+      this[SECRET] = { name: String(name), template: String(template), held };
       Object.freeze(this);
     }
     bearer() {
-      return new SecretHandle(this[SECRET].name, "Bearer {}");
+      return new SecretHandle(this[SECRET].name, "Bearer {}", this[SECRET].held);
     }
     template(t) {
       t = String(t);
       if (t.split("{}").length !== 2) {
         throw new TypeError("a secret template holds {} exactly once, where the value goes");
       }
-      return new SecretHandle(this[SECRET].name, t);
+      return new SecretHandle(this[SECRET].name, t, this[SECRET].held);
     }
     toString() {
       return "[secret " + this[SECRET].name + "]";
@@ -120,7 +122,9 @@
       const method = String(init.method || "GET").toUpperCase();
       const headers = [];
       for (const [k, v] of new Headers(init.headers)._h) {
-        if (v instanceof SecretHandle) {
+        if (v instanceof SecretHandle && v[SECRET].held !== undefined) {
+          headers.push([k, { held: v[SECRET].held, template: v[SECRET].template }]);
+        } else if (v instanceof SecretHandle) {
           headers.push([k, { secret: v[SECRET].name, template: v[SECRET].template }]);
         } else {
           headers.push([k, { plain: v }]);
@@ -238,6 +242,76 @@
     }
   }
 
+  // A sealed field an op answered. The value stays in the host; this
+  // object only numbers it. ctx.sealed turns it into a handle for a header.
+  const SEALED = new WeakMap();
+  class Sealed {
+    constructor() {
+      throw new TypeError("a sealed value comes only from ctx.op");
+    }
+    toString() {
+      return "[sealed]";
+    }
+    toJSON() {
+      return "[sealed]";
+    }
+  }
+  function sealedOf(n) {
+    const o = Object.create(Sealed.prototype);
+    SEALED.set(o, n);
+    return Object.freeze(o);
+  }
+
+  // The host refused an op: not in uses, not open to the person, or the
+  // op's own refusal. `code` is the reason word.
+  class OpRefused extends Error {
+    constructor(code, message) {
+      super(message);
+      this.name = "OpRefused";
+      this.code = code;
+    }
+  }
+
+  // `ctx.op(name, args)`: one op in the function's `uses`, run by the host
+  // as the person calling. Resolves to its rows.
+  function callOp(name, args) {
+    try {
+      if (typeof name !== "string") {
+        throw new TypeError("ctx.op takes an op's name and its arguments: ctx.op(\"addTurn\", { ... })");
+      }
+      const a = args === undefined ? {} : args;
+      if (a === null || typeof a !== "object" || Array.isArray(a)) {
+        throw new TypeError("ctx.op: the arguments are an object of the op's parameters by name");
+      }
+      const r = native.op(JSON.stringify({ op: name, args: a }));
+      if (r.refused !== undefined) {
+        const e = JSON.parse(r.refused);
+        return Promise.reject(new OpRefused(e.code, e.message));
+      }
+      const answer = JSON.parse(r.ok);
+      for (const row of answer.rows) {
+        if (row === null || typeof row !== "object") continue;
+        for (const f of answer.sealed) {
+          const v = row[f];
+          if (v !== null && typeof v === "object" && typeof v.$sealed === "number") {
+            row[f] = sealedOf(v.$sealed);
+          }
+        }
+      }
+      return Promise.resolve(answer.rows);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+
+  // `ctx.sealed(row.token)`: a handle for a header, filled in by the host.
+  function sealed(v) {
+    if (!SEALED.has(v)) {
+      throw new TypeError("ctx.sealed takes a sealed field from a ctx.op answer");
+    }
+    return new SecretHandle("sealed", "{}", SEALED.get(v));
+  }
+
   function show(v) {
     if (typeof v === "string") return v;
     if (v instanceof Error) return v.name + ": " + v.message;
@@ -272,6 +346,8 @@
         return new SecretHandle(name, "{}");
       },
       blob: readBlob,
+      op: callOp,
+      sealed,
       log: console.log,
     };
     return Object.freeze(ctx);

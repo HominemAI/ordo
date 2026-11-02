@@ -14,6 +14,7 @@
 //! | `fetch(req, req_len, body, body_len) -> i32` | one outbound request: its method, URL and headers as JSON, its body as bytes; the reply length, negative for a refusal |
 //! | `mac(req, req_len, data, data_len) -> i32` | an HMAC keyed by a secret: the request as JSON, the data as bytes; the reply length, negative for a refusal |
 //! | `blob(ptr, len) -> i32` | one file the call was given, read as the caller: the handle as JSON; the reply length, negative for a refusal |
+//! | `op(ptr, len) -> i32` | one op in the function's `uses`, run as the caller: the name and arguments as JSON; the reply length, negative for a refusal |
 //! | `take_reply(ptr)` | copies the pending reply into guest memory |
 //! | `log(level, ptr, len)` | one log line; the host scrubs and caps it |
 //! | `result(ptr, len)` | the call's answer, as JSON |
@@ -40,6 +41,7 @@ use boa_engine::{
 extern "C" {
     fn fetch(req_ptr: *const u8, req_len: usize, body_ptr: *const u8, body_len: usize) -> i32;
     fn blob(ptr: *const u8, len: usize) -> i32;
+    fn op(ptr: *const u8, len: usize) -> i32;
     fn mac(req_ptr: *const u8, req_len: usize, data_ptr: *const u8, data_len: usize) -> i32;
     fn take_reply(ptr: *mut u8);
     fn log(level: i32, ptr: *const u8, len: usize);
@@ -162,6 +164,7 @@ fn boot() -> JsResult<Context> {
     let mut init = boa_engine::object::ObjectInitializer::new(&mut ctx);
     init.function(NativeFunction::from_fn_ptr(native_fetch), js_string!("fetch"), 4)
         .function(NativeFunction::from_fn_ptr(native_blob), js_string!("blob"), 1)
+        .function(NativeFunction::from_fn_ptr(native_op), js_string!("op"), 1)
         .function(NativeFunction::from_fn_ptr(native_log), js_string!("log"), 2)
         .function(NativeFunction::from_fn_ptr(native_mac), js_string!("hostMac"), 4);
     web::install(&mut init);
@@ -309,6 +312,25 @@ fn native_blob(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsV
     )?;
     let v = web::array_buffer(bytes, ctx)?;
     o.set(js_string!("ok"), v, false, ctx)?;
+    Ok(o.into())
+}
+
+/// `__ordo_native.op(requestJson) -> { ok: answerJson } | { refused: errorJson }`
+///
+/// One op, run by the host as the person calling.
+fn native_op(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let req = args.get_or_undefined(0).to_string(ctx)?.to_std_string_escaped();
+    // SAFETY: a pointer and length into a live string.
+    let n = unsafe { op(req.as_ptr(), req.len()) };
+    let buf = take(n);
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let o = boa_engine::object::ObjectInitializer::new(ctx).build();
+    let key = if n >= 0 {
+        js_string!("ok")
+    } else {
+        js_string!("refused")
+    };
+    o.set(key, JsValue::from(JsString::from(text)), false, ctx)?;
     Ok(o.into())
 }
 

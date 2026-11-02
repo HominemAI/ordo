@@ -14,5 +14,5 @@
 
 pub use ordo_egress::{
     FetchError, FnFetch, FnFetchRequest, FnFetchResponse, FnMacAnswer, FnMacRequest, HeaderValue,
-    MacHash,
+    HeldValue, MacHash,
 };

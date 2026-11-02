@@ -90,7 +90,7 @@ test-group = 'serial-in-file'
 [[profile.default.overrides]]
 filter = '''
     binary_id(ordo-host::notes_app)
-  & not test(/^(the_page_keeps_notes_on_the_device|a_note_shared_with_another_person|closing_a_share_window|notes_are_listed_newest_first|a_feed_on_a_tenant_made_after_boot|concurrent_share_peeks|the_door_keeps_answering|notes_tagged_lists_only|the_served_door_mounts)/)
+  & not test(/^(the_page_keeps_notes_on_the_device|closing_a_share_window|notes_are_listed_newest_first|concurrent_share_peeks|the_door_keeps_answering|notes_tagged_lists_only|the_served_door_mounts)/)
 '''
 test-group = 'notes-app'
 

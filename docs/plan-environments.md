@@ -30,10 +30,17 @@ The owner's picture, made concrete:
 ### 2.1 Apply moves up one environment at a time
 
 ```
-ordo apply              to dev (the default)
-ordo apply --staging    refused until dev runs this version
-ordo apply --prod       refused until staging runs this version
+ordo apply              to the dev deployment (the default)
+ordo apply --staging    to the staging deployment; refused until dev runs this version
+ordo apply --prod       to the production deployment; refused until staging runs this version
 ```
+
+Each environment is its own deployment (ruled 2026-10-31). There is no
+`--env` flag. `--staging` and `--prod` name the target deployment.
+
+`ordo dev` labels its versions `dev-` plus part of the source hash and writes
+no `$artifacts` row. Promotion by hash needs the real hash (increment 1 of
+`plan-versions.md`).
 
 "Runs this version" is checked by hash. The same source compiles to the same
 hash only if compiling is byte-stable across machines, which is unproven. A

@@ -5688,7 +5688,9 @@ read-only one and it has landed.
       `Executor::write_attempt` with an advisory-lock backstop; chunked
       backfill on `($space, id)`; verify by count and per-entity content
       hash; and `verify_candidate` refusing to activate over a
-      `backfilling` migration. **Unblocked 2026-09-08** by the backfill audit
+      `backfilling` migration. **Changed 2026-10-01:** the write freeze is
+      replaced by dual writes (`corpus-rulings.md`), so the barrier changes.
+      **Unblocked 2026-09-08** by the backfill audit
       ruling (a summarised default, full images per creator;
       `corpus-rulings.md`). Not built. (Corrected 2026-09-29 by the board
       audit: this line said "Blocked on §9" after the ruling.)
@@ -13186,7 +13188,8 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       `react-live-device`.
 - [ ] **27t · Custom builds for chosen tenants.** Beta builds, a promoted
       dev branch serving named production tenants. After first deployment;
-      depends on serving more than one version (`evolution-plans` ask 3).
+      depends on serving more than one version (`evolution-plans` ask 3,
+      ruled 2026-10-01: the app developer decides which versions stay served).
       Board: `tenant-builds`.
 - [ ] **27u · Grant-based read-only SQL views of Ordo entities.** The
       owner: *"could be possible, maybe."* Not planned. Board:

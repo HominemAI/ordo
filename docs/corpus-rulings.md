@@ -9722,6 +9722,13 @@ views *"could be possible, maybe"*, not planned. **Not deferred**: *"they're
 independent. If there is an issue at first-apply Ordo will error and will
 also show existing untracked tables as well."*
 
+## 2026-10-01 · Which versions stay served (`evolution-plans` ask 3)
+
+Board answer 295: *"Yes they should."* The app developer decides which
+versions stay served. Sharing data across versions needs a data agreement.
+Ruling D-B2 (one version back) is replaced. 27t depends on this and is no
+longer waiting on a ruling.
+
 ## 2026-10-01 · One live stream per client (`react-live-device` ask 1, 27s)
 
 On whether every read hook opens a `?live=1` stream by default: *"1 per

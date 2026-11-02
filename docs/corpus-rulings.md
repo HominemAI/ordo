@@ -11789,3 +11789,10 @@ is the problem."
   measurement first.
 
 Pull requests to `main` still run everything.
+- Asks 4 and 5, in conversation: "This makes more sense. Lets do it." A
+  fast job runs the unit tests and the tests that need no database first,
+  with no Postgres and no installs; the instance tests wait for it to pass.
+  The unit tests took 48 test-seconds in all on 2026-11-01. The owner adds
+  the fast job to the main ruleset as a required check once it lands. Also
+  from the owner: "no-instance unit tests should run without much fuss",
+  ideally done in under a minute, "and anything else happens behind them."

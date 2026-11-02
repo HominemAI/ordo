@@ -348,6 +348,14 @@ secret llmKey for api.anthropic.com
   the caller may not read is `not_found`. One call reads at most
   `ORDO_FN_BLOB_BYTES` (20 MiB); `(await file.bytes()).toBase64()` makes
   it JSON-ready.
+- `uses op, op` lists the program's ops the code may call:
+  `await ctx.op("retitleNote", { id, rev, title })` answers the op's rows.
+  Each op runs as the person calling, through the door's own checks, so a
+  function never does what that person cannot. A write is recorded as
+  `agent:function:<name>@<version> on behalf of user:<id>`. A delete is
+  refused unless `ORDO_DELEGABLE_OPS` names it.
+- A sealed field an op answers arrives as a handle. `ctx.sealed(row.token)`
+  puts it in a header for an `egress` host; the code never holds the value.
 - The page calls it by name (`client.callFunction`, `useFunction`).
   The body is at most `ORDO_FN_BODY_BYTES` (1 MiB).
   `ordo fn runs` and `ordo fn log` show what happened.
@@ -508,7 +516,8 @@ secret key for api.two.example
 ```
 
 A function is not a way round the language. Reads and writes of your own
-rows are ops. A function holds no database access and cannot call an op.
+rows are ops. A function holds no database access. It calls only the ops
+its `uses` lists, as the person calling, and never a platform op.
 
 **A file reaches a function only as a `blob` argument, read as the
 caller.** Do not put file bytes or base64 in the call's JSON: the body

@@ -3212,7 +3212,7 @@ out, egress declared on the consent page. Short code the deployment owns runs
 in the platform as backend functions (next section). Long-running services
 stay outside it until v2.
 
-### Functions and secrets [built, increments 1 and 2]
+### Functions and secrets [built, increments 1, 2 and 4]
 
 A `function` is for what the language cannot express, such as calling an
 outside API. Its code is a JavaScript file bundled with the program. It runs
@@ -3240,6 +3240,7 @@ clause = call(<param>, ...) -> json [by member]
        | code "<path>.js"
        | egress <host>, <host>, ...
        | secrets <name>, <name>, ...
+       | uses <op>, <op>, ...
        | limit <wall|cpu> <duration> | memory <size>, ...
        | nopause
 secret <name> for <host>, <host>, ...
@@ -3271,6 +3272,16 @@ secret <name>
   `memory` (a size with a space, `64 mb`). Defaults: wall 60 s, cpu 10 s,
   memory 128 MB. Ceilings: 15 min, 60 s, 512 MB. Memory under 8 mb and a
   zero `wall` or `cpu` are refused.
+- `uses` lists the ops the code may call with `ctx.op(name, args)`. Each
+  is an `op` the program declares, or one `acl` derives, listed once. A
+  platform op cannot be named, and a function is not an op. Each call runs
+  as the person who called the function, through the door's own checks, so
+  the function reaches `uses` intersected with what that person may do. The
+  chain records `agent:function:<name>@<version> on behalf of user:<id>`.
+  A sealed field an op answers reaches the code only as a handle;
+  `ctx.sealed(handle)` puts it in a header for an `egress` host. Without
+  `uses` a function reaches no op, and its manifest is what it was before
+  `uses` existed.
 - `nopause` keeps the function answering while the tenant is paused.
 - `secret name for host, host` binds the value to exact host names. A
   URL, a port or a wildcard is `invalid_secret_host`.
@@ -3280,14 +3291,14 @@ secret <name>
   `secret name host` without `for` is refused. A host whose first label starts with a digit is
   quoted. The value is never in the program. The deployment owner sets it
   with `ordo secret set`, from standard input.
-- `trigger`, `uses` and `webhook` on a function are not built. The parser
-  refuses them and says so.
+- `trigger` and `webhook` on a function are not built. The parser refuses
+  them and says so.
 
 Refusals:
 
 | Class | When |
 |---|---|
-| `invalid_function` | a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a bad code path, a bad or repeated host, a repeated secret, a limit outside its bounds, or a listed secret that is undeclared or not bound to an `egress` host |
+| `invalid_function` | a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a bad code path, a bad or repeated host, a repeated secret, a limit outside its bounds, a listed secret that is undeclared or not bound to an `egress` host, or a `uses` name that is not one of the program's ops or is listed twice |
 | `duplicate_secret` | two `secret` lines name one secret. Put every host on one line |
 | `invalid_secret_host` | a host that is a URL, has a port or a wildcard, or is not a DNS name |
 

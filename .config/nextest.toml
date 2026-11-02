@@ -50,7 +50,8 @@ test-group = 'serial-in-file'
 # notes_app's own in-process limit (`AT_ONCE`) does not reach across
 # nextest's processes; this group does. Its `connections_*` tests need the
 # server to themselves, which no group can give: scripts/ci-test-shard.sh
-# runs them after the rest, one at a time.
+# runs them after the rest, one at a time. The thirty-people sign-up among
+# them is a load test and runs in its `perf` mode only.
 [[profile.default.overrides]]
 filter = 'binary_id(ordo-host::notes_app)'
 test-group = 'notes-app'

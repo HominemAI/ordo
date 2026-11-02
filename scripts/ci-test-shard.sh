@@ -10,6 +10,8 @@
 #   scripts/ci-test-shard.sh host K N       ordo-host's other test files,
 #                                           shard K of N (1-based)
 #   scripts/ci-test-shard.sh host K N --list    print shard K's tests only
+#   scripts/ci-test-shard.sh perf           the load and stress tests, alone
+#   scripts/ci-test-shard.sh perf --list    print the perf tests only
 #   scripts/ci-test-shard.sh run ARGS...    `nextest run ARGS`, for the
 #                                           workflow's named checks
 #
@@ -30,6 +32,15 @@
 # (`--partition slice`), so a long test file is spread over all shards.
 # Which tests must not run at once is in .config/nextest.toml. The tests
 # that need the server to themselves run in a second pass, alone.
+#
+# Load and stress tests (owner ruling 2026-11-02, board task
+# `time-sensitive-tests-fail-when-other-tests` ask 1) run in `perf` and in
+# no other mode. PERF below is the one list of them. CI runs `perf` in a
+# job of its own, on pull requests to `main`, nightly, by hand and with
+# `ci: full`; a plain push to `bleeding` runs none of them. A test belongs
+# there when its point is capacity or speed: a peak connection count, many
+# people at once, a latency budget. A test that checks a feature works
+# stays in its tier, even when it uses time.
 #
 # On a push to `bleeding`, scripts/ci-affected.mjs narrows each mode:
 #
@@ -60,6 +71,13 @@ ordo-host::provider_client_scan
 ordo-host::stored_bytes_scan
 "
 
+# The load and stress tests, by name. `perf` runs them one at a time with
+# the server to itself, ignored ones included; every other mode leaves
+# them out.
+PERF='(binary_id(ordo-exec::route_many_tenants) & test(=walking_many_tenants_at_boot_holds_only_a_few_connections))
+  | (binary_id(ordo-host::notes_app) & test(=connections_thirty_people_sign_up_on_a_default_server))
+  | (binary_id(ordo-host::store_pool_stress) & test(=the_store_pool_stays_free_under_the_e2e_shape))'
+
 # Unit tests that need Postgres. They run in `rest`, beside the test files
 # that need it too, and never in `unit`.
 DB_UNIT='binary_id(ordo-cli) & (
@@ -67,7 +85,7 @@ DB_UNIT='binary_id(ordo-cli) & (
   | test(=dev::tests::the_printed_token_calls_a_real_op_over_real_http)
   | test(=dev_db::tests::a_foreign_table_survives_a_reset_and_ordos_own_are_reset))'
 
-mode="${1:?usage: ci-test-shard.sh unit | doc | rest | host K N [--list] | run ARGS}"
+mode="${1:?usage: ci-test-shard.sh unit | doc | rest | host K N [--list] | perf [--list] | run ARGS}"
 crates="${ORDO_CI_CRATES:-all}"
 reach="${ORDO_CI_FILTER:-}"
 tests_only=" ${ORDO_CI_TESTS_ONLY:-} "
@@ -111,7 +129,7 @@ case "$mode" in
     for b in $NO_DATABASE; do
       if reached "${b%%::*}"; then build+=(--test "${b#*::}"); fi
     done
-    filter=$(narrow "(kind(lib) | kind(bin) | $no_db) & not ($DB_UNIT)")
+    filter=$(narrow "(kind(lib) | kind(bin) | $no_db) & not ($DB_UNIT) & not ($PERF)")
     if [ "${2:-}" = "--list" ]; then
       nextest list "${build[@]}" -- -E "$filter"
       exit 0
@@ -137,11 +155,12 @@ case "$mode" in
   rest)
     # These count the server's connections or time a pool's idle period,
     # so tests beside them change the answer (PR 2, 2026-11-02: pool_idle
-    # saw its in-use connection closed, route_many_tenants counted 6 of 5).
-    # They run after the rest, one at a time, with nothing beside them.
+    # saw its in-use connection closed). They run after the rest, one at a
+    # time, with nothing beside them. route_many_tenants' peak count is in
+    # PERF; its other test stays here.
     alone='binary_id(ordo-exec::pool_idle) | binary_id(ordo-exec::route_many_tenants)'
-    filter=$(narrow "not package(ordo-host) & ((not (kind(lib) | kind(bin)) & not ($no_db)) | ($DB_UNIT)) & not ($alone)")
-    alone=$(narrow "not package(ordo-host) & ($alone)")
+    filter=$(narrow "not package(ordo-host) & ((not (kind(lib) | kind(bin)) & not ($no_db)) | ($DB_UNIT)) & not ($alone) & not ($PERF)")
+    alone=$(narrow "not package(ordo-host) & ($alone) & not ($PERF)")
     if [ "$all" = 1 ]; then
       build=(--workspace --exclude ordo-host)
     else
@@ -167,10 +186,11 @@ case "$mode" in
     n="${3:?shard count}"
     part=(--partition "slice:$k/$n")
     # notes_app's `connections_*` tests count the server's connections, so
-    # they run after the rest, one at a time, with nothing beside them.
+    # they run after the rest, one at a time, with nothing beside them. The
+    # thirty-people sign-up among them is in PERF.
     alone='binary_id(ordo-host::notes_app) & test(/^connections_/)'
-    main=$(narrow "package(ordo-host) & kind(test) & not ($alone) & not ($no_db)")
-    alone=$(narrow "$alone")
+    main=$(narrow "package(ordo-host) & kind(test) & not ($alone) & not ($no_db) & not ($PERF)")
+    alone=$(narrow "($alone) & not ($PERF)")
     if [ "${4:-}" = "--list" ]; then
       nextest list -p ordo-host -- -E "$main" "${part[@]}"
       nextest list -p ordo-host -- -E "$alone" "${part[@]}"
@@ -182,12 +202,22 @@ case "$mode" in
       -E "$alone" "${part[@]}" || status=$?
     exit "$status"
     ;;
+  perf)
+    # Never narrowed: CI runs this job only when it runs everything.
+    build=(-p ordo-exec -p ordo-host)
+    if [ "${2:-}" = "--list" ]; then
+      nextest list "${build[@]}" -- --run-ignored all -E "$PERF"
+      exit 0
+    fi
+    nextest run "${build[@]}" -- --no-fail-fast --no-tests fail --test-threads 1 \
+      --run-ignored all -E "$PERF"
+    ;;
   run)
     shift
     nextest run --workspace -- "$@"
     ;;
   *)
-    echo "unknown mode: $mode (unit | doc | rest | host K N | run)" >&2
+    echo "unknown mode: $mode (unit | doc | rest | host K N | perf | run)" >&2
     exit 2
     ;;
 esac

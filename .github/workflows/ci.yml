@@ -11,6 +11,9 @@ name: CI
 # - The nightly run on `main` (09:00 UTC) runs everything.
 # - A manual run runs everything. So does a push to `bleeding` whose
 #   commits carry the trailer line `ci: full`.
+# - The load and stress tests run in `test (perf)`, on pull requests,
+#   nightly, by hand and with `ci: full` only (owner ruling 2026-11-02).
+#   No other job runs them.
 #
 # Job names are unique across all workflows, since required checks match
 # by name. Rename one only together with the ruleset.
@@ -59,6 +62,7 @@ jobs:
     outputs:
       crates: ${{ steps.affected.outputs.crates }}
       rest: ${{ steps.affected.outputs.rest }}
+      perf: ${{ steps.affected.outputs.perf }}
       host: ${{ steps.affected.outputs.host }}
       s3: ${{ steps.affected.outputs.s3 }}
       upgrade: ${{ steps.affected.outputs.upgrade }}
@@ -186,7 +190,9 @@ jobs:
     # also runs the once-only gates: format, clippy, the doc tests, the S3
     # contract and the inventories. The `host` shards each take every 4th of ordo-host's
     # integration tests, then notes_app's `connections_*` tests alone, one
-    # at a time. fail-fast is off so every shard reports.
+    # at a time. fail-fast is off so every shard reports. The load and
+    # stress tests (PERF in scripts/ci-test-shard.sh) run in `test (perf)`
+    # and never here.
     #
     # On a push to `bleeding`, `rest` tests only the crates the change
     # reaches (ORDO_CI_CRATES), and the `host` shards run only when it
@@ -507,6 +513,81 @@ jobs:
         run: |
           bash scripts/ci-test-shard.sh run --no-tests fail \
             -E 'binary_id(ordo-cli::interface) & test(=every_refusal_class_named_is_in_the_wire_inventory)'
+
+  # **The load and stress tests, in a job of their own** (owner ruling
+  # 2026-11-02, board task `time-sensitive-tests-fail-when-other-tests`
+  # ask 1). Their point is capacity: a peak connection count, thirty
+  # people signing up at once, the store pool under the notes e2e's load.
+  # PERF in scripts/ci-test-shard.sh is the one list of them, and no other
+  # job runs them.
+  #
+  # They run on pull requests to `main`, nightly, by hand and on a push
+  # carrying `ci: full` (the `perf` output of scripts/ci-affected.mjs). A
+  # plain push to `bleeding` runs none: the job says so and passes, so the
+  # check exists on every run.
+  #
+  # The job leases a Postgres server of its own and runs one test at a
+  # time, so each test has the server to itself.
+  #
+  # `!cancelled()` and the first step keep a failed `changes` or
+  # `test (unit)` from passing as a skipped check.
+  perf:
+    name: test (perf)
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 30
+    needs: [changes, unit]
+    env:
+      REACHED: ${{ needs.changes.outputs.perf }}
+      # ORDO_PG_HOST comes from the lease step.
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_DB: ordo_conformance
+      ORDO_PSQL: psql
+      PGPASSWORD: ordo
+      ORDO_PG_PASSWORD: ordo
+      NEXTEST_PROFILE: ci
+    steps:
+      - name: The jobs this one needs
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          UNIT: ${{ needs.unit.result }}
+        run: |
+          if [ "$CHANGES" != success ]; then
+            echo "changes (ci) did not succeed ($CHANGES)."
+            exit 1
+          fi
+          if [ "$UNIT" != success ]; then
+            echo "test (unit) did not succeed ($UNIT)."
+            exit 1
+          fi
+      - name: Not run on bleeding pushes
+        if: env.REACHED != 'true'
+        run: echo "Not run on bleeding pushes. The load and stress tests run on pull requests to main, nightly, by hand and with ci full." | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
+      # Reads the `test` job's cache and saves none, as `test (unit)` does.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
+        with:
+          shared-key: rust-gates
+          save-if: false
+      - name: Install psql client
+        if: env.REACHED == 'true'
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+      - name: Lease a CI Postgres server
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-pg-lease.sh
+      - name: Install cargo-nextest
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-install-nextest.sh
+      # One test at a time, ignored ones included (the store pool stress
+      # test is ignored in every other run).
+      - name: Load and stress tests
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-test-shard.sh perf
 
   # **Ordo upgraded under a live deployment** (owner, 2026-10-27: users are
   # still there and logins have not changed). The previous Ordo, pinned in

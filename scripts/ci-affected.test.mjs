@@ -391,12 +391,30 @@ console.log('ok   testFilter');
 // runs the unit tier alone.
 {
   const d = deferToPullRequest(outputs(runAll('.github/ changed', packages)));
-  const want = { unit: 'true', rest: 'false', host: 'false', upgrade: 'false', notes_e2e: 'false', console_e2e: 'false', identity_e2e: 'false', authz: 'false', clients: '', examples: '' };
+  const want = { unit: 'true', perf: 'false', rest: 'false', host: 'false', upgrade: 'false', notes_e2e: 'false', console_e2e: 'false', identity_e2e: 'false', authz: 'false', clients: '', examples: '' };
   const bad = Object.entries(want).filter(([k, v]) => d[k] !== v);
   if (bad.length) {
     failed += 1;
     console.log(`FAIL deferToPullRequest: ${bad.map(([k]) => `${k}=${d[k]}`).join(' ')}`);
   } else console.log('ok   deferToPullRequest: an open pull request leaves the unit tier alone');
+}
+
+// The load and stress tests run only when asked for: a pull request,
+// nightly, manual or `ci: full` run. A push that runs everything because
+// of its paths, or a narrowed push, does not run them.
+{
+  const got = {
+    asked: outputs(runAll('a pull_request run', packages, { perf: true })).perf,
+    byPath: outputs(runAll('.github/ changed', packages)).perf,
+    narrowed: run('crates/ordo-host/src/tickets.rs').perf,
+    deferred: deferToPullRequest(outputs(runAll('ci: full', packages, { perf: true }))).perf,
+  };
+  const want = { asked: 'true', byPath: 'false', narrowed: 'false', deferred: 'false' };
+  const bad = Object.keys(want).filter((k) => got[k] !== want[k]);
+  if (bad.length) {
+    failed += 1;
+    console.log(`FAIL perf: ${bad.map((k) => `${k}=${got[k]}`).join(' ')}`);
+  } else console.log('ok   perf: only a pull request, nightly, manual or ci: full run runs the perf tests');
 }
 
 if (failed) {

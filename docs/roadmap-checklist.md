@@ -11763,7 +11763,7 @@ Items the owner has explicitly placed AFTER the first deployment. Listed so
       `ORDO_FN_BLOB_BYTES` (20 MiB), `ORDO_FN_FETCH_BODY_BYTES` (32 MiB).
       Guard: `a_function_reads_a_file_as_its_caller_and_the_row_guard_holds`
       in `crates/ordo-host/tests/blob_door.rs`. Increment 4, ops from
-      functions, is built (2026-11-01): `uses` lists the ops `ctx.op` may
+      functions, is built (2026-11-02): `uses` lists the ops `ctx.op` may
       call, each run as the person through a one-call delegation and the
       op door's own checks, so a function never does what the person
       cannot. A write is recorded `agent:function:<name>@<version> on

@@ -44,6 +44,7 @@
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
 mod mail_support;
+mod shared_instance;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -211,12 +212,15 @@ async fn deployment_with_program(db: &str, program: &str) {
     .expect("activate");
 }
 
-/// A running deployment. Killed when dropped.
+/// A running deployment. Killed when dropped, unless it is the run's shared
+/// instance, which outlives every test on it.
 struct Deployment {
     port: u16,
-    child: Child,
+    /// `None` on the shared instance: this test did not start it.
+    child: Option<Child>,
     db: String,
     log: std::path::PathBuf,
+    shared: bool,
 }
 
 impl Deployment {
@@ -232,9 +236,45 @@ impl Deployment {
         let (port, child, log) = spawn_host(db, "", cors, extra);
         Deployment {
             port,
-            child,
+            child: Some(child),
             db: db.to_string(),
             log,
+            shared: false,
+        }
+    }
+
+    /// The run's shared instance, on `boot(db, Some(PAGE))`'s settings
+    /// (`shared_instance`). A test on it signs up people of its own and
+    /// touches nothing of the server's. Outside nextest it boots its own on
+    /// `db`, as `boot` does.
+    async fn on_shared(db: &str) -> Deployment {
+        let booting = match shared_instance::claim("notes") {
+            shared_instance::Claim::Own => return Self::boot(db, Some(PAGE)).await,
+            shared_instance::Claim::Ready(i) => return Self::of_shared(i),
+            shared_instance::Claim::Boot(b) => b,
+        };
+        deployment_with_notes(&booting.db).await;
+        let c = shared_instance::server_command(env!("CARGO_BIN_EXE_ordo-host"), &booting);
+        let log = booting.log.clone();
+        // The child is the watchdog. Dropping its handle leaves it running.
+        let (port, _) = spawn_host_with(
+            c,
+            &booting.db,
+            log,
+            Some(PAGE),
+            // Several tests at once share its pool.
+            &[("ORDO_PG_POOL_SIZE", "10")],
+        );
+        Self::of_shared(booting.publish(port))
+    }
+
+    fn of_shared(i: shared_instance::Instance) -> Deployment {
+        Deployment {
+            port: i.port,
+            child: None,
+            db: i.db,
+            log: i.log,
+            shared: true,
         }
     }
 
@@ -249,9 +289,10 @@ impl Deployment {
         let (port, child, log) = spawn_host(db, "", cors, extra);
         Deployment {
             port,
-            child,
+            child: Some(child),
             db: db.to_string(),
             log,
+            shared: false,
         }
     }
 
@@ -303,11 +344,25 @@ fn spawn_host(
     cors: Option<&str>,
     extra: &[(&str, &str)],
 ) -> (u16, Child, std::path::PathBuf) {
-    let port = free_port();
-    let base = PoolConfig::from_env();
     // The server writes to a file, so a full pipe never stops it and a
     // failing test can print what it said.
     let log = std::env::temp_dir().join(format!("ordo-notes-{db}{tag}.log"));
+    let c = Command::new(env!("CARGO_BIN_EXE_ordo-host"));
+    let (port, child) = spawn_host_with(c, db, log.clone(), cors, extra);
+    (port, child, log)
+}
+
+/// `spawn_host` with the command to run (the binary, or the shared
+/// instance's watchdog around it) and the log file given.
+fn spawn_host_with(
+    mut c: Command,
+    db: &str,
+    log: std::path::PathBuf,
+    cors: Option<&str>,
+    extra: &[(&str, &str)],
+) -> (u16, Child) {
+    let port = free_port();
+    let base = PoolConfig::from_env();
     let _ = std::fs::remove_file(&log);
     let out = std::fs::OpenOptions::new()
         .create(true)
@@ -315,7 +370,6 @@ fn spawn_host(
         .open(&log)
         .expect("log");
     let err = out.try_clone().expect("log");
-    let mut c = Command::new(env!("CARGO_BIN_EXE_ordo-host"));
     c.env("ORDO_PG_POOL_SIZE", "6")
         .env("ORDO_PG_HOST", &base.host)
         .env("ORDO_PG_PORT", base.port.to_string())
@@ -356,7 +410,7 @@ fn spawn_host(
     }
     let mut child = c.spawn().expect("spawn");
     wait_for_live(port, &mut child, &log);
-    (port, child, log)
+    (port, child)
 }
 
 impl Deployment {
@@ -517,21 +571,29 @@ impl Deployment {
 
 impl Drop for Deployment {
     fn drop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            // The shared instance runs on for the other tests, and its
+            // watchdog drops its databases when the run ends.
+            if self.shared && std::thread::panicking() {
+                eprintln!("--- the shared server's log is {} ---", self.log.display());
+            }
+            return;
+        };
         let _ = Command::new("kill")
             .arg("-TERM")
-            .arg(self.child.id().to_string())
+            .arg(child.id().to_string())
             .status();
         // A server that does not answer its stop signal is killed, so a hung
         // one fails a test instead of hanging the run.
         let told = std::time::Instant::now();
         while told.elapsed() < Duration::from_secs(40) {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
+            if matches!(child.try_wait(), Ok(Some(_))) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
         if std::thread::panicking() {
             let _ = std::fs::write(std::env::temp_dir().join("ordo-notes-last.log"), self.log());
             eprintln!("--- the server log is in ordo-notes-last.log ---");
@@ -572,10 +634,13 @@ fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
 
 /// The browser's authenticator for one person: its own key and credential,
 /// reporting the page's origin under the relying party `localhost`.
+///
+/// The credential id carries this process's tag, so two tests on the shared
+/// instance never register the same credential.
 fn device(seed: u8, name: &str) -> TestAuthenticator {
     TestAuthenticator {
         key: TestKey::es256(seed),
-        credential_id: name.as_bytes().to_vec(),
+        credential_id: format!("{name}-{}", shared_instance::process_tag()).into_bytes(),
         rp_id: "localhost".to_string(),
         origin: PAGE.to_string(),
         ..TestAuthenticator::es256()
@@ -1318,7 +1383,7 @@ async fn the_page_keeps_notes_on_the_device_and_erases_a_closed_share() {
         eprintln!("SKIPPED: {said}");
         return;
     }
-    let d = Deployment::boot("ordo_notes_device", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_device").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
     let live = json!({
@@ -1358,7 +1423,7 @@ async fn the_page_keeps_notes_on_the_device_and_erases_a_closed_share() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_note_shared_with_another_person_is_read_only_and_can_be_taken_back() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_share", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_share").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
 
@@ -1584,7 +1649,7 @@ async fn a_note_shared_with_another_person_is_read_only_and_can_be_taken_back() 
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_share_window_reaches_a_feed_open_on_it() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_window_feed", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_window_feed").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
     let groceries = create_note(&d, &ada, "Groceries", "milk");
@@ -1668,7 +1733,7 @@ async fn closing_a_share_window_reaches_a_feed_open_on_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn notes_are_listed_newest_first_past_ten() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_order", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_order").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     for i in 0..12 {
         create_note(&d, &ada, &format!("n{i}"), "b");
@@ -1686,7 +1751,7 @@ async fn notes_are_listed_newest_first_past_ten() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_feed_on_a_tenant_made_after_boot_carries_a_note_written_later() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_feed", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_feed").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
 
     // The feed, opened before the write, on a raw socket the test keeps.
@@ -1806,12 +1871,21 @@ async fn sigterm_with_a_live_feed_open_ends_the_process_within_its_grace() {
 
     let told = std::time::Instant::now();
     Command::new("kill")
-        .args(["-TERM", &d.child.id().to_string()])
+        .args([
+            "-TERM",
+            &d.child.as_ref().expect("its own server").id().to_string(),
+        ])
         .status()
         .expect("kill");
     let mut exited = None;
     while told.elapsed() < Duration::from_secs(15) {
-        if let Some(status) = d.child.try_wait().expect("wait") {
+        if let Some(status) = d
+            .child
+            .as_mut()
+            .expect("its own server")
+            .try_wait()
+            .expect("wait")
+        {
             exited = Some(status);
             break;
         }
@@ -1846,7 +1920,7 @@ async fn sigterm_with_a_live_feed_open_ends_the_process_within_its_grace() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_share_peeks_never_stop_the_door_accepting() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_peeks", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_peeks").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let note = create_note(&d, &ada, "Groceries", "milk");
     let (status, out) = d.op(
@@ -1903,7 +1977,7 @@ async fn concurrent_share_peeks_never_stop_the_door_accepting() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_door_keeps_answering_through_sign_ups_a_share_and_an_accept_with_a_feed_open() {
     let _shared = shared().await;
-    let d = Deployment::boot_with("ordo_notes_keeps", Some(PAGE), &[]).await;
+    let d = Deployment::on_shared("ordo_notes_keeps").await;
     let ada = sign_up(&d, &device(21, "ada"), "Ada");
     let _feed = open_feed(&d, &ada);
     live(&d, "after the first sign-up");
@@ -2111,7 +2185,7 @@ async fn connections_an_idle_tenant_releases_its_connections_within_the_idle_per
 #[tokio::test(flavor = "multi_thread")]
 async fn notes_tagged_lists_only_the_notes_whose_tags_hold_the_word() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_tags", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_tags").await;
     let ada = sign_up(&d, &device(31, "ada-tags"), "Ada");
     for (title, tags) in [
         ("Standup", json!(["work"])),
@@ -2517,7 +2591,7 @@ async fn a_guest_adds_a_passkey_and_the_passkey_signs_in_to_the_same_notes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_served_door_mounts_the_claim_hand_off_callback_and_identity_routes() {
     let _shared = shared().await;
-    let d = Deployment::boot("ordo_notes_routes", Some(PAGE)).await;
+    let d = Deployment::on_shared("ordo_notes_routes").await;
     for (method, path) in [
         ("POST", "/auth/claim/begin"),
         ("POST", "/auth/claim/passkey"),

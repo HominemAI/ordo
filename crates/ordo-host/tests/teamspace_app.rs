@@ -28,6 +28,8 @@
 //!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
+mod shared_instance;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -147,10 +149,12 @@ async fn deployment_with_teamspace(db: &str, program: &str) {
     .expect("activate");
 }
 
-/// A running deployment. Killed, and its databases dropped, when dropped.
+/// A running deployment. Killed, and its databases dropped, when dropped,
+/// unless it is the run's shared instance, which outlives every test on it.
 struct Deployment {
     port: u16,
-    child: Child,
+    /// `None` on the shared instance: this test did not start it.
+    child: Option<Child>,
     db: String,
     log: std::path::PathBuf,
     /// False while the deployment is being restarted on the same database.
@@ -158,6 +162,39 @@ struct Deployment {
 }
 
 impl Deployment {
+    /// The run's shared instance, on `boot(db, "auto-onboard")`'s settings
+    /// (`shared_instance`). A test on it founds teams of its own and touches
+    /// nothing of the server's. Outside nextest it boots its own on `db`.
+    async fn on_shared(db: &str) -> Deployment {
+        let booting = match shared_instance::claim("teamspace") {
+            shared_instance::Claim::Own => return Self::boot(db, "auto-onboard").await,
+            shared_instance::Claim::Ready(i) => return Self::of_shared(i),
+            shared_instance::Claim::Boot(b) => b,
+        };
+        deployment_with_teamspace(&booting.db, SOURCE).await;
+        let c = shared_instance::server_command(env!("CARGO_BIN_EXE_ordo-host"), &booting);
+        // The child is the watchdog. Dropping its handle leaves it running.
+        let (port, _) = Self::spawn(
+            c,
+            &booting.db,
+            booting.log.clone(),
+            "auto-onboard",
+            // Several tests at once share its pool.
+            "10",
+        );
+        Self::of_shared(booting.publish(port))
+    }
+
+    fn of_shared(i: shared_instance::Instance) -> Deployment {
+        Deployment {
+            port: i.port,
+            child: None,
+            db: i.db,
+            log: i.log,
+            owns_db: false,
+        }
+    }
+
     /// The README's settings, with `provisioning` as
     /// `ORDO_AUTH_PROVISIONING`.
     async fn boot(db: &str, provisioning: &str) -> Deployment {
@@ -177,9 +214,32 @@ impl Deployment {
 
     /// `start`, with `ORDO_PG_POOL_SIZE` set to `pool`.
     fn start_sized(db: &str, provisioning: &str, pool: &str) -> Deployment {
+        let c = Command::new(env!("CARGO_BIN_EXE_ordo-host"));
+        let log = std::env::temp_dir().join(format!(
+            "ordo-teamspace-{db}-{}.log",
+            shared_instance::process_tag()
+        ));
+        let (port, child) = Self::spawn(c, db, log.clone(), provisioning, pool);
+        Deployment {
+            port,
+            child: Some(child),
+            db: db.to_string(),
+            log,
+            owns_db: true,
+        }
+    }
+
+    /// Run `c` (the binary, or the shared instance's watchdog around it)
+    /// with the README's settings, and wait until it serves.
+    fn spawn(
+        mut c: Command,
+        db: &str,
+        log: std::path::PathBuf,
+        provisioning: &str,
+        pool: &str,
+    ) -> (u16, Child) {
         let port = free_port();
         let base = PoolConfig::from_env();
-        let log = std::env::temp_dir().join(format!("ordo-teamspace-{db}-{port}.log"));
         let _ = std::fs::remove_file(&log);
         let out = std::fs::OpenOptions::new()
             .create(true)
@@ -187,7 +247,6 @@ impl Deployment {
             .open(&log)
             .expect("log");
         let err = out.try_clone().expect("log");
-        let mut c = Command::new(env!("CARGO_BIN_EXE_ordo-host"));
         c.env("ORDO_PG_POOL_SIZE", pool)
             .env("ORDO_PG_HOST", &base.host)
             .env("ORDO_PG_PORT", base.port.to_string())
@@ -220,13 +279,7 @@ impl Deployment {
             .stderr(Stdio::from(err));
         let mut child = c.spawn().expect("spawn");
         wait_for_live(port, &mut child, &log);
-        Deployment {
-            port,
-            child,
-            db: db.to_string(),
-            log,
-            owns_db: true,
-        }
+        (port, child)
     }
 
     /// Stop the binary and start it again on the same database, under
@@ -334,19 +387,27 @@ impl Deployment {
 
 impl Drop for Deployment {
     fn drop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            // The shared instance runs on for the other tests, and its
+            // watchdog drops its databases when the run ends.
+            if std::thread::panicking() {
+                eprintln!("--- the shared server's log is {} ---", self.log.display());
+            }
+            return;
+        };
         let _ = Command::new("kill")
             .arg("-TERM")
-            .arg(self.child.id().to_string())
+            .arg(child.id().to_string())
             .status();
         let told = std::time::Instant::now();
         while told.elapsed() < Duration::from_secs(40) {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
+            if matches!(child.try_wait(), Ok(Some(_))) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
         if std::thread::panicking() {
             let _ = std::fs::write(
                 std::env::temp_dir().join("ordo-teamspace-last.log"),
@@ -391,11 +452,13 @@ fn wait_for_live(port: u16, child: &mut Child, log: &std::path::Path) {
     panic!("the binary never bound {port} in 60 s\n{said}");
 }
 
-/// The browser's authenticator for one person.
+/// The browser's authenticator for one person. The credential id carries
+/// this process's tag, so two tests on the shared instance never register
+/// the same credential.
 fn device(seed: u8, name: &str) -> TestAuthenticator {
     TestAuthenticator {
         key: TestKey::es256(seed),
-        credential_id: name.as_bytes().to_vec(),
+        credential_id: format!("{name}-{}", shared_instance::process_tag()).into_bytes(),
         rp_id: "localhost".to_string(),
         origin: PAGE.to_string(),
         ..TestAuthenticator::es256()
@@ -657,7 +720,7 @@ fn move_task(d: &Deployment, s: &Session, task: &(String, i64), status: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_founder_gets_a_team_and_an_invited_colleague_joins_it_as_a_member() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot("ordo_teamspace_join", "auto-onboard").await;
+    let d = Deployment::on_shared("ordo_teamspace_join").await;
 
     let maya = found(&d, &device(31, "maya"), "Maya");
     assert_ne!(maya.space, HOME);
@@ -708,7 +771,7 @@ async fn a_founder_gets_a_team_and_an_invited_colleague_joins_it_as_a_member() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_cannot_change_roles_manage_projects_or_read_the_admin_report() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot("ordo_teamspace_roles", "auto-onboard").await;
+    let d = Deployment::on_shared("ordo_teamspace_roles").await;
     let maya = found(&d, &device(41, "maya"), "Maya");
     let ticket = invite(&d, &maya, "editor");
     let ravi = join(&d, &device(42, "ravi"), "Ravi", &maya.space, &ticket);
@@ -815,7 +878,7 @@ async fn a_member_cannot_change_roles_manage_projects_or_read_the_admin_report()
 #[tokio::test(flavor = "multi_thread")]
 async fn the_admin_report_totals_every_project_and_person() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot("ordo_teamspace_report", "auto-onboard").await;
+    let d = Deployment::on_shared("ordo_teamspace_report").await;
     let maya = found(&d, &device(51, "maya"), "Maya");
     let ticket = invite(&d, &maya, "manager");
     let lena = join(&d, &device(52, "lena"), "Lena", &maya.space, &ticket);
@@ -952,7 +1015,7 @@ async fn the_admin_report_totals_every_project_and_person() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tenant_owner_opens_the_report_to_a_group() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot("ordo_teamspace_group", "auto-onboard").await;
+    let d = Deployment::on_shared("ordo_teamspace_group").await;
     let maya = found(&d, &device(61, "maya"), "Maya");
     let ticket = invite(&d, &maya, "editor");
     let ravi = join(&d, &device(62, "ravi"), "Ravi", &maya.space, &ticket);
@@ -1042,7 +1105,7 @@ async fn under_invite_only_an_invited_newcomer_joins_and_a_stranger_is_refused()
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_adds_tasks_only_to_projects_they_are_on() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot_program("ordo_teamspace_guarded", "auto-onboard", SOURCE).await;
+    let d = Deployment::on_shared("ordo_teamspace_guarded").await;
     let maya = found(&d, &device(81, "maya"), "Maya");
     let ticket = invite(&d, &maya, "editor");
     let ravi = join(&d, &device(82, "ravi"), "Ravi", &maya.space, &ticket);
@@ -1068,7 +1131,7 @@ async fn a_member_adds_tasks_only_to_projects_they_are_on() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invited_colleague_is_shown_by_the_name_they_gave() {
     let _serial = SERIAL.lock().await;
-    let d = Deployment::boot("ordo_teamspace_names", "auto-onboard").await;
+    let d = Deployment::on_shared("ordo_teamspace_names").await;
     let maya = found(&d, &device(71, "maya"), "Maya");
     let ticket = invite(&d, &maya, "editor");
     let ravi = join(&d, &device(72, "ravi"), "Ravi", &maya.space, &ticket);

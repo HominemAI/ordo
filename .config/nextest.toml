@@ -71,7 +71,7 @@ filter = '''
   | binary_id(ordo-host::provision_own)
   | binary_id(ordo-host::share_links)
   | binary_id(ordo-host::shopfront_app)
-  | binary_id(ordo-host::teamspace_app)
+  | (binary_id(ordo-host::teamspace_app) & not test(/^(a_founder_gets_a_team|a_member_cannot_change_roles|the_admin_report_totals|a_tenant_owner_opens_the_report|a_member_adds_tasks_only|an_invited_colleague_is_shown)/))
   | binary_id(ordo-host::tenant_forward)
   | binary_id(ordo-host::upgrade_continuity)
 '''
@@ -82,8 +82,16 @@ test-group = 'serial-in-file'
 # server to themselves, which no group can give: scripts/ci-test-shard.sh
 # runs them after the rest, one at a time. The thirty-people sign-up among
 # them is a load test and runs in its `perf` mode only.
+#
+# The tests on the run's shared instance (`Deployment::on_shared`, owner
+# ruling 2026-11-02, ask 6) boot nothing of their own, so they are in no
+# group: teamspace's six above, and notes' below. The first of them to
+# start boots the instance (tests/shared_instance/mod.rs).
 [[profile.default.overrides]]
-filter = 'binary_id(ordo-host::notes_app)'
+filter = '''
+    binary_id(ordo-host::notes_app)
+  & not test(/^(the_page_keeps_notes_on_the_device|a_note_shared_with_another_person|closing_a_share_window|notes_are_listed_newest_first|a_feed_on_a_tenant_made_after_boot|concurrent_share_peeks|the_door_keeps_answering|notes_tagged_lists_only|the_served_door_mounts)/)
+'''
 test-group = 'notes-app'
 
 [[profile.default.overrides]]

@@ -988,13 +988,16 @@ fn removed_member_live(d: &Deployment, w: &World, _: &Overlay) -> Answer {
         return verdict(false, &format!("add: {} {}", added.status, added.text()));
     }
     s.read_for(STREAM_OPEN);
-    actors::must(
+    let present = actors::step_up(d, &olga.device, &olga.token);
+    let removed = actors::op(
         d,
-        olga,
+        &olga.space,
+        &present,
         "POST",
         "std.space.remove",
-        json!({"member": zed.member}),
+        &json!({"member": zed.member}),
     );
+    assert_eq!(removed.status, 200, "std.space.remove: {}", removed.text());
     ann_writes(d, w);
     let after = s.read_for(STREAM_WAIT);
     let ok = after.contains("event: error")

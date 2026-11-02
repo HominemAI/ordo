@@ -44,6 +44,8 @@ concurrency:
 
 permissions:
   contents: read
+  # scripts/ci-affected.mjs asks whether a pull request to main is open.
+  pull-requests: read
 
 jobs:
   # What this run must cover (scripts/ci-affected.mjs). Everything, except
@@ -83,6 +85,7 @@ jobs:
         id: affected
         env:
           EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: node scripts/ci-affected.mjs

@@ -624,7 +624,41 @@ function decide(argv, env) {
   return r;
 }
 
-function main() {
+/**
+ * A push that would run everything while a pull request from `bleeding` to
+ * `main` is open runs the unit tier alone: the pull request runs everything
+ * on the same commits (owner ruling 2026-11-02, board task
+ * `time-sensitive-tests-fail-when-other-tests` ask 2). Two full runs on one
+ * node at once failed timing tests that pass alone.
+ */
+export function deferToPullRequest(out) {
+  const off = ['rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e'];
+  const d = { ...out, reason: `a pull request to main is open and runs everything (${out.reason})` };
+  for (const k of off) d[k] = 'false';
+  d.clients = '';
+  d.examples = '';
+  d.unit = 'true';
+  return d;
+}
+
+/** Whether a pull request from `bleeding` to `main` is open. Unsure means no. */
+async function pullRequestOpen(env) {
+  if (!env.GH_TOKEN || !env.GITHUB_REPOSITORY) return false;
+  const owner = env.GITHUB_REPOSITORY.split('/')[0];
+  const url = `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/pulls?state=open&base=main&head=${owner}:bleeding`;
+  try {
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return false;
+    return (await res.json()).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function main() {
   let r;
   try {
     r = decide(process.argv.slice(2), process.env);
@@ -632,7 +666,10 @@ function main() {
     // A filter that cannot decide runs everything rather than nothing.
     r = everything(`the filter failed (${String(e.message).split('\n')[0]})`, []);
   }
-  const out = outputs(r);
+  let out = outputs(r);
+  if (process.env.EVENT === 'push' && r.full && (await pullRequestOpen(process.env))) {
+    out = deferToPullRequest(out);
+  }
   const text = Object.entries(out)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');

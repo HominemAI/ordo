@@ -59,7 +59,7 @@ at once. So:
   processes either. notes_app's deployments are capped by the `notes-app`
   group (3), and the files that boot deployments one at a time by
   `serial-in-file` (1): 4 at once against a 100-connection server. CI runs
-  at most 8 tests at once per shard (`test-threads` in the `ci` profile).
+  at most 4 tests at once per shard (`test-threads` in the `ci` profile).
 - A test that counts the server's connections needs it to itself, which no
   group gives. notes_app's `connections_*` tests run in a second pass of the
   `host` shards, alone and one at a time.

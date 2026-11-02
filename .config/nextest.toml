@@ -48,6 +48,8 @@ timing-alone = { max-threads = 1 }
 #   flight and fires the connect timeout, so it cannot be used. A manual
 #   clock for the supervisor is the seam still owed.
 # - ordo-cli apply_wait: it boots a real ordo-host binary.
+# - store_pool_slow_commit: it checks another store is served while one
+#   statement is slow, by wall time (2.47 s on a loaded runner, PR 3).
 # This override comes first: a test takes the first group that matches.
 [[profile.default.overrides]]
 filter = '''
@@ -59,6 +61,7 @@ filter = '''
   | binary_id(ordo-host::usage)
   | (binary_id(ordo-host::routines) & test(a_scheduled_routine_runs_on_time_and_records_its_act))
   | (binary_id(ordo-cli::apply_wait) & test(apply_returns_only_after_the_node_serves_and_caught_up))
+  | (binary_id(ordo-host::store_pool_slow_commit) & test(another_store_is_served_while_one_statement_is_slow))
 '''
 test-group = 'timing-alone'
 

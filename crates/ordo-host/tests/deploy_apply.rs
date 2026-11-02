@@ -550,7 +550,8 @@ async fn the_lock_is_held_while_an_apply_is_running() {
         .expect("take")
         .expect("free");
     let second = tokio::time::timeout(
-        std::time::Duration::from_millis(apply_op::LOCK_WAIT_MS + 5_000),
+        // 30 s of slack: a loaded runner took over 5 s (run 41364786104).
+        std::time::Duration::from_millis(apply_op::LOCK_WAIT_MS + 30_000),
         apply_op::ApplyLock::take(&h.target),
     )
     .await

@@ -542,8 +542,10 @@ async fn a_lock_holds_this_space_s_row() {
         .await
         .expect("the holder locks shadow's row");
 
+    // A lock wait never ends while the holder is open, so any bound tells
+    // the two apart. 2 s was too tight on a loaded runner (run 41366725869).
     let outcome = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(20),
         undo::revert(
             &e.pool,
             &e.schema,

@@ -892,6 +892,7 @@ fn dev_runtime_config(
         addr,
         shutdown_grace: Duration::from_secs(2),
         space: ordo_crypto::SpaceId("dev".into()),
+        tightened: Vec::new(),
         custody: ordo_host::runtime::CustodyChoice::Test,
         token_secret,
         page_key: ordo_api::PageKey::from_secret(&ephemeral_secret("ordo-dev-page", root)),

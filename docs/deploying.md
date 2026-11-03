@@ -265,7 +265,7 @@ credential is not on the wire.
 | `ORDO_KEY_PROVIDER` | **refuse** | `sealed-master` \| `local` \| `test`. Explicit, never inferred from which other variables are set. A deployment uses `sealed-master`. `local` and `test` are development only. |
 | `ORDO_MASTER_KEY_FILE`, `ORDO_MASTER_KEY_PASSPHRASE_FILE` | required by `sealed-master` | the file `ordo keys seal-master` wrote, and its passphrase file (keep the passphrase in the secret store) |
 | `ORDO_MASTER_KEY` | required by `local` | development only. One HMAC is the whole stretch, so a short secret can be guessed offline from a database backup. |
-| `ORDO_DEV_UNSAFE_TEST_KEYS` | default off | the development flag. It makes `ORDO_KEY_PROVIDER=test` selectable and is required by `ORDO_KEY_PROVIDER=local`, which refuses to boot without it (S6-009). |
+| `ORDO_DEV_UNSAFE_TEST_KEYS` | default off | the development flag. It makes `ORDO_KEY_PROVIDER=test` selectable and is required by `ORDO_KEY_PROVIDER=local` for a new deployment, which refuses to boot without it (S6-009). A deployment that already holds keys keeps serving under `local` with a warning (owner, 2026-11-02). |
 | `ORDO_TOKEN_KEY` | **refuse** | 64 hex characters. A defaulted token key means every deployment built from this source can mint tokens every other one accepts. |
 | `ORDO_PAGE_KEY` | **refuse** | 64 hex characters. A shared page key makes a cursor minted in one deployment valid in another. |
 | `ORDO_CHECKPOINT_KEY`, `_KEY_ID` | refuse the **feature** | unset disables checkpointing and attestation, and the startup log says so. `ordo checkpoint` still works by hand. |
@@ -678,7 +678,12 @@ clients one restart, which is the correct price for a key rotation.
 > environment, and guessable offline from a database backup if the secret is
 > short. **The server refuses `ORDO_KEY_PROVIDER=local` unless
 > `ORDO_DEV_UNSAFE_TEST_KEYS=1` is set** (S6-009, ruled 2026-09-28), and so
-> do the `ordo keys` commands when they are given no key file. A deployment
+> do the `ordo keys` commands when they are given no key file. Since
+> 2026-11-02 the server refuses only a new deployment: one that already
+> holds keys in `$keycustody` keeps serving, warns at startup, and lists
+> the warning under `warnings` on `/health/deep` and on the console's
+> Health screen. An upgrade that tightens a setting never stops a running
+> deployment. A deployment
 > uses `sealed-master`: run `ordo keys seal-master`, then set
 > `ORDO_KEY_PROVIDER=sealed-master`, `ORDO_MASTER_KEY_FILE` and
 > `ORDO_MASTER_KEY_PASSPHRASE_FILE`. `ordo dev` needs no setting.

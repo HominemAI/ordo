@@ -6,7 +6,14 @@ import { LogLines, StatusFacts } from './runtimeParts';
 /** Health from the deployment's door (docs/plan-console.md 4.1). */
 interface DoorHealth {
   ready: { status?: string; error?: string; message?: string };
-  deep: { status?: string; boot?: { revision?: string | null; applied_by?: string | null }; error?: string; message?: string };
+  deep: {
+    status?: string;
+    boot?: { revision?: string | null; applied_by?: string | null };
+    /** Settings an upgrade tightened that this running deployment still sets (owner, 2026-11-02). */
+    warnings?: { setting: string; value: string; since: string; message: string }[];
+    error?: string;
+    message?: string;
+  };
   deploy: { nodes?: unknown[]; error?: string; message?: string };
   link: Link;
 }
@@ -143,6 +150,18 @@ export function Health(props: { onSignedOut: () => void; onRuntime: () => void; 
               <dt>Nodes</dt>
               <dd>{door.deploy.error ? <span className="error">{door.deploy.message}</span> : (door.deploy.nodes?.length ?? 0)}</dd>
             </dl>
+          )}
+          {door.deep.warnings && door.deep.warnings.length > 0 && (
+            <div className="note" role="status" aria-label="Warnings from the deployment">
+              <h3>Warnings</h3>
+              <ul>
+                {door.deep.warnings.map((w) => (
+                  <li key={w.setting}>
+                    <strong>{w.setting}</strong>: {w.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           {door.link.rotateDue && (
             <p className="note" role="status">

@@ -517,6 +517,20 @@ impl PgKeyStore {
     }
 }
 
+/// Whether `$keycustody` holds any wrapped space key at all.
+///
+/// Every boot mints the system space's SMK, and `ordo keys init` mints a
+/// tenant's, so a row here means a deployment has already run and holds
+/// data under some master. The boot reads it to tell a running deployment
+/// from a new one (owner ruling 2026-11-02). It stops at the first row.
+pub async fn holds_custody(pool: &Pool) -> Result<bool, KeyError> {
+    let rows = pool
+        .rows(r#"SELECT 1 FROM "$keycustody" WHERE "kind" = 'smk' LIMIT 1"#)
+        .await
+        .map_err(store_error)?;
+    Ok(!rows.is_empty())
+}
+
 /// The epochs a space holds a wrapped DEK for, ascending.
 ///
 /// Read from the table rather than through the provider, because the

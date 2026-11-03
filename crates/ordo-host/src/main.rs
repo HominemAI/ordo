@@ -21,7 +21,12 @@ use ordo_host::runtime::{assemble, serve, BootRefusal, RuntimeConfig};
 async fn main() {
     if std::env::args().nth(1).as_deref() == Some("check-config") {
         match RuntimeConfig::from_env() {
-            Ok(_) => {
+            Ok(cfg) => {
+                // It never dials, so a tightened setting cannot be settled
+                // here; it passes with the warning (owner, 2026-11-02).
+                for t in &cfg.tightened {
+                    eprintln!("ordo-host: {}", ordo_host::tightened::check_config_note(t));
+                }
                 println!("ordo-host: the settings would boot");
                 return;
             }
@@ -38,7 +43,9 @@ async fn main() {
 }
 
 async fn run() -> Result<(), BootRefusal> {
-    // Every environment refusal happens here, before the first dial.
+    // Every environment refusal happens here, before the first dial, except
+    // a tightened setting, which `assemble` settles once it can read the
+    // database (owner, 2026-11-02).
     let cfg = RuntimeConfig::from_env()?;
     let rt = assemble(cfg).await?;
     rt.print_startup();

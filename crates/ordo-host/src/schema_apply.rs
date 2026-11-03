@@ -110,8 +110,14 @@ pub struct Program {
     /// The byte-stable artifact document.
     pub doc: serde_json::Value,
     pub ddl: String,
-    /// `ordo_plan::artifact::program_version` of the document and the DDL.
+    /// The name this program is stored and served under: its
+    /// [`source_id`](Self::source_id), or the 16-hex name a version stored
+    /// before 2026-11-03 keeps (`ordo_exec::registry::name_for`).
     pub version: String,
+    /// `ordo_plan::artifact::source_identity`: what the developer wrote.
+    pub source_id: String,
+    /// `ordo_plan::artifact::build_identity`: what this release built.
+    pub build_id: String,
     pub source: String,
 }
 
@@ -124,52 +130,76 @@ impl Program {
         let doc = ordo_plan::artifact::program_artifact(&fixture.schema, &fixture.registry)
             .map_err(|e| format!("artifact: {e}"))?;
         let ddl = ordo_schema::ddl_for(&fixture.schema).map_err(|e| format!("ddl: {e}"))?;
-        let version = ordo_plan::artifact::program_version(&doc, &ddl);
-        Ok(Program {
-            schema: fixture.schema,
+        Ok(Program::assemble(
+            fixture.schema,
             doc,
             ddl,
-            version,
-            source: source.to_string(),
-        })
+            source.to_string(),
+        ))
+    }
+
+    /// A program from its compiled parts, with both identities taken and
+    /// the version named by the source identity.
+    pub fn assemble(
+        schema: Schema,
+        doc: serde_json::Value,
+        ddl: String,
+        source: String,
+    ) -> Program {
+        let mut p = Program {
+            schema,
+            doc,
+            ddl,
+            version: String::new(),
+            source_id: String::new(),
+            build_id: String::new(),
+            source,
+        };
+        p.identify();
+        p
+    }
+
+    fn identify(&mut self) {
+        use ordo_plan::artifact as a;
+        self.source_id =
+            a::source_identity(&self.source, a::FIRST_EDITION, &a::code_hashes(&self.doc));
+        self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
+        self.version = self.source_id.clone();
     }
 
     /// Fills in each function's `code_hash` from `hashes` (code path to
-    /// hash) and takes the version again, so a change to a function's code
-    /// alone is a new version (`plan-backend-functions.md` §4.3). A program
-    /// with no functions is unchanged.
+    /// hash) and takes the identities again, so a change to a function's
+    /// code alone is a new version (`plan-backend-functions.md` §4.3). A
+    /// program with no functions is unchanged.
     pub fn bind_code(&mut self, hashes: &BTreeMap<String, String>) -> Result<(), String> {
         if self.schema.functions.is_empty() {
             return Ok(());
         }
         ordo_plan::artifact::bind_function_code(&mut self.doc, hashes)?;
-        self.version = ordo_plan::artifact::program_version(&self.doc, &self.ddl);
+        self.identify();
         Ok(())
     }
 
     /// The program a stored artifact holds: its source compiled, with each
-    /// function's code hash read back from the stored document. Compiling
-    /// the source alone loses the hashes, and with them the version.
+    /// function's code hash read back from the stored document, under the
+    /// name it was stored under. Compiling the source alone loses the
+    /// hashes, and with them the identity.
     pub fn from_artifact(a: &ordo_exec::registry::Artifact) -> Result<Program, String> {
         let mut program = Program::compile(&a.source)?;
-        if program.schema.functions.is_empty() {
-            return Ok(program);
+        if !program.schema.functions.is_empty() {
+            let stored: serde_json::Value = serde_json::from_str(&a.artifact)
+                .map_err(|e| format!("the stored artifact {} is not JSON: {e}", a.version))?;
+            program.bind_code(&ordo_plan::artifact::code_hashes(&stored))?;
         }
-        let stored: serde_json::Value = serde_json::from_str(&a.artifact)
-            .map_err(|e| format!("the stored artifact {} is not JSON: {e}", a.version))?;
-        let hashes: BTreeMap<String, String> = stored["functions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|f| {
-                Some((
-                    f["code"].as_str()?.to_string(),
-                    f["code_hash"].as_str()?.to_string(),
-                ))
-            })
-            .collect();
-        program.bind_code(&hashes)?;
+        program.version = a.version.clone();
         Ok(program)
+    }
+
+    /// Whether this release builds `a` to the bytes stored for it. A
+    /// release that renders the same source differently has a new build of
+    /// the same version (`plan-versions.md` §1.1).
+    pub fn builds_as(&self, a: &ordo_exec::registry::Artifact) -> bool {
+        ordo_plan::artifact::to_bytes(&self.doc) == a.artifact && self.ddl == a.ddl
     }
 }
 

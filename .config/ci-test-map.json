@@ -521,6 +521,9 @@
       "tenant_identities",
       "two_instances"
     ],
+    "crates/ordo-host/src/tightened.rs": [
+      "runtime"
+    ],
     "crates/ordo-host/src/tenant_ops.rs": "all",
     "crates/ordo-host/src/tenant_origins.rs": "all",
     "crates/ordo-host/src/tenant_providers.rs": "all",

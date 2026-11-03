@@ -13015,6 +13015,15 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
 - [ ] **27e · Compiling is byte-stable across machines.** A test that the
       same source gives the same version hash anywhere; promotion by hash
       depends on it. `plan-environments.md` §2.1. Board: `environments`.
+      Built 2026-11-03 as increment 1 of `plan-versions.md`: a version is
+      named by its source identity, the full SHA-256 of the source (line
+      endings evened out), edition and function code hashes. Builds are
+      recorded apart in `$builds`. A version stored earlier keeps its
+      16-hex name. Tests `crates/ordo-plan/tests/version_identity.rs`
+      (`the_digest_is_fixed` pins the digest to a literal) and
+      `crates/ordo-host/tests/version_identity.rs`. Closes when Linux CI
+      passes `the_digest_is_fixed`. Board:
+      `program-versions-the-core-under-schema`.
 - [ ] **27f · Apply moves up one environment at a time.** dev by default,
       `--staging` and `--prod` refused until the step before runs the
       version. §2.1. Board: `environments`.

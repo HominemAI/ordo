@@ -217,9 +217,9 @@ jobs:
             echo "- \`ghcr.io/$repo_lc/ordo-cli\`   — the operator tool"
             echo "- \`ghcr.io/$repo_lc/ordo-playground\` — the browser surface"
             echo
-            echo "**Deploy by digest, not by tag.** The digest is the image's identity the"
-            echo "same way an artifact version hash is a program's; a tag is a pointer that"
-            echo "can be moved. The digest for each image is in that workflow's run summary."
+            echo "**Deploy by the release tag** (\`:${TAG#v}\`), not \`:main\` or \`:latest\`."
+            echo "A release tag names this release and is never moved (owner, 2026-11-02)."
+            echo "Each image's digest is in that workflow's run summary, to check against."
             echo
             echo "### Not included"
             echo

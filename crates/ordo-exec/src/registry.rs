@@ -15,6 +15,20 @@
 //! from. `$activations` records which version the deployment points at, one
 //! row per re-point, newest wins.
 //!
+//! # Source identity and builds (2026-11-03)
+//!
+//! A version is named by its **source identity**
+//! (`ordo_plan::artifact::source_identity`), the full SHA-256 of what the
+//! developer wrote, so an Ordo release moves no version (`plan-versions.md`
+//! §1.1). Each row carries it in `source_id`. A version stored before then
+//! keeps its 16-hex name, and [`ensure_tables`] fills in its `source_id`
+//! from the stored source, so the same program applied again finds it by
+//! [`name_for`] and nothing moves.
+//!
+//! What a release compiled a version to is a **build**, one `$builds` row
+//! each. A release that builds a stored version differently updates the
+//! row's document and DDL, which loads read, and records the new build.
+//!
 //! The obvious alternative — a single-row pointer table updated in place —
 //! was rejected for the reason every other record in this platform is
 //! append-only: an operator investigating an incident needs to know *what
@@ -77,6 +91,18 @@ CREATE TABLE IF NOT EXISTS \"$activations\" ( \
   \"version\" text NOT NULL REFERENCES \"$artifacts\" (\"version\"), \
   \"at\" bigint NOT NULL, \
   \"actor\" text NOT NULL \
+); \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"source_id\" text; \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"edition\" integer NOT NULL DEFAULT 1; \
+CREATE INDEX IF NOT EXISTS \"$artifacts_source_id\" ON \"$artifacts\" (\"source_id\"); \
+CREATE TABLE IF NOT EXISTS \"$builds\" ( \
+  \"version\" text NOT NULL REFERENCES \"$artifacts\" (\"version\"), \
+  \"build_id\" text NOT NULL, \
+  \"ordo_release\" text NOT NULL, \
+  \"artifact\" text NOT NULL, \
+  \"ddl\" text NOT NULL, \
+  \"recorded_at\" bigint NOT NULL, \
+  PRIMARY KEY (\"version\", \"build_id\") \
 )";
 
 /// The channel a replica listens on to learn a new version is active.
@@ -126,6 +152,10 @@ pub enum Applied {
     /// rather than silently no-oped, because re-running a deploy script and
     /// deploying something new are different facts to whoever is watching.
     AlreadyStored(String),
+    /// The same source as the version stored under this name, built
+    /// differently by this Ordo release. The row now holds this build, and
+    /// `$builds` keeps both. No version moved.
+    Rebuilt(String),
 }
 
 /// What activating did.
@@ -145,9 +175,11 @@ pub enum Activated {
 pub enum RegistryRefusal {
     /// This version hash is stored, with **different bytes**.
     ///
-    /// The version is a truncated digest, so it is a *name* rather than a
-    /// security boundary — and this refusal is what stops a name collision
-    /// from silently replacing a program that is deployed. Whichever of the
+    /// A version stored before 2026-11-03 is named by a truncated digest,
+    /// so that name is not a security boundary — and this refusal is what
+    /// stops a name collision from silently replacing a program that is
+    /// deployed. A newer name is the full source identity, and reaches here
+    /// only from a hand-assembled `Artifact`. Whichever of the
     /// two documents is right, overwriting the other in place would leave
     /// every activation row pointing at a version whose content changed
     /// underneath it, which is the one thing a content address must not do.
@@ -187,14 +219,87 @@ impl From<PoolError> for RegistryRefusal {
     }
 }
 
-/// Create the tables if they are not there. Idempotent.
+/// Create the tables if they are not there, and give every stored version
+/// its source identity. Idempotent.
+///
+/// A row stored before `source_id` existed gets it computed from its own
+/// stored source and document, in edition 1 (`plan-versions.md` §1.1). Its
+/// name stays: every tenant database records it.
 pub async fn ensure_tables(pool: &Pool) -> Result<(), PoolError> {
-    pool.rows(REGISTRY_DDL).await.map(|_| ())
+    pool.rows(REGISTRY_DDL).await?;
+    let unnamed = pool
+        .rows("SELECT \"version\", \"artifact\", \"source\" FROM \"$artifacts\" WHERE \"source_id\" IS NULL")
+        .await?;
+    for row in unnamed {
+        let (Some(Some(version)), Some(Some(artifact)), Some(Some(source))) =
+            (row.first(), row.get(1), row.get(2))
+        else {
+            continue;
+        };
+        pool.rows(&format!(
+            "UPDATE \"$artifacts\" SET \"source_id\" = {} WHERE \"version\" = {} AND \"source_id\" IS NULL",
+            sql_lit(&source_id_of(artifact, source)),
+            sql_lit(version),
+        ))
+        .await?;
+    }
+    Ok(())
 }
 
-/// Store a version. Idempotent on identical bytes, refused on different
-/// ones — see [`RegistryRefusal::VersionCollision`].
+/// The source identity of a stored row: its source, edition 1, and the
+/// code hashes its document carries.
+fn source_id_of(artifact: &str, source: &str) -> String {
+    use ordo_plan::artifact as a;
+    let doc: serde_json::Value = serde_json::from_str(artifact).unwrap_or_default();
+    a::source_identity(source, a::FIRST_EDITION, &a::code_hashes(&doc))
+}
+
+/// The name a source identity is stored under, if any: the identity
+/// itself, or the 16-hex name of a version stored before 2026-11-03. Where
+/// two old builds of one source were stored under two names, the one
+/// applied last.
+pub async fn name_for(pool: &Pool, source_id: &str) -> Result<Option<String>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT \"version\" FROM \"$artifacts\" WHERE \"source_id\" = {} \
+             ORDER BY \"applied_at\" DESC, \"version\" DESC LIMIT 1",
+            sql_lit(source_id)
+        ))
+        .await?;
+    Ok(rows.first().and_then(|r| r.first().cloned().flatten()))
+}
+
+/// Record that this release built `version` to `artifact` and `ddl`. A
+/// build already recorded is left as it is.
+async fn record_build(
+    pool: &Pool,
+    version: &str,
+    artifact: &str,
+    ddl: &str,
+    at: Timestamp,
+) -> Result<(), PoolError> {
+    use ordo_plan::artifact as a;
+    pool.rows(&format!(
+        "INSERT INTO \"$builds\" \
+           (\"version\", \"build_id\", \"ordo_release\", \"artifact\", \"ddl\", \"recorded_at\") \
+         VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT DO NOTHING",
+        sql_lit(version),
+        sql_lit(&a::build_identity_of(artifact, ddl, a::ORDO_RELEASE)),
+        sql_lit(a::ORDO_RELEASE),
+        sql_lit(artifact),
+        sql_lit(ddl),
+        at.0,
+    ))
+    .await
+    .map(|_| ())
+}
+
+/// Store a version. Idempotent on identical bytes; a new build of the same
+/// source replaces the row's document and DDL ([`Applied::Rebuilt`]); any
+/// other difference is refused — see [`RegistryRefusal::VersionCollision`].
+/// Every build stored is recorded in `$builds`.
 pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal> {
+    let source_id = source_id_of(&a.artifact, &a.source);
     if let Some(existing) = get(pool, &a.version).await? {
         // The artifact document AND the DDL decide identity: together they
         // are what the version hashes
@@ -212,25 +317,44 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
         // change, so reaching here with a differing `ddl` means either a
         // truncated-digest collision or a hand-assembled `Artifact`; both
         // are refusals, for the reason on `VersionCollision`.
-        if existing.artifact != a.artifact || existing.ddl != a.ddl {
+        //
+        // Since 2026-11-03 one difference is not a collision: the same
+        // source, built differently by this Ordo release. That is a new
+        // build of the same version, and it moves nothing
+        // (`plan-versions.md` §1.1).
+        if existing.artifact == a.artifact && existing.ddl == a.ddl {
+            record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
+            return Ok(Applied::AlreadyStored(a.version.clone()));
+        }
+        if source_id_of(&existing.artifact, &existing.source) != source_id {
             return Err(RegistryRefusal::VersionCollision {
                 version: a.version.clone(),
             });
         }
-        return Ok(Applied::AlreadyStored(a.version.clone()));
+        pool.rows(&format!(
+            "UPDATE \"$artifacts\" SET \"artifact\" = {}, \"ddl\" = {} WHERE \"version\" = {}",
+            sql_lit(&a.artifact),
+            sql_lit(&a.ddl),
+            sql_lit(&a.version),
+        ))
+        .await?;
+        record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
+        return Ok(Applied::Rebuilt(a.version.clone()));
     }
     pool.rows(&format!(
         "INSERT INTO \"$artifacts\" \
-           (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\") \
-         VALUES ({}, {}, {}, {}, {}, {})",
+           (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\", \"source_id\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {})",
         sql_lit(&a.version),
         sql_lit(&a.artifact),
         sql_lit(&a.source),
         sql_lit(&a.ddl),
         a.applied_at.0,
         sql_lit(&a.actor),
+        sql_lit(&source_id),
     ))
     .await?;
+    record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
     Ok(Applied::Stored(a.version.clone()))
 }
 

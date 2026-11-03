@@ -370,11 +370,15 @@ pub enum Activation {
     Staged,
 }
 
-/// Whether the artifact was written or was already there byte-identical.
+/// Whether the artifact was written, was already there byte-identical, or
+/// was there and this Ordo release built it differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stored {
     Written,
     AlreadyPresent,
+    /// The same source as the stored version, a new build of it. No
+    /// version moved (`plan-versions.md` §1.1).
+    Rebuilt,
 }
 
 /// What one apply did, as data.
@@ -633,6 +637,23 @@ async fn sequence(
         .await
         .map_err(|e| ApplyRefused::Internal(format!("registry tables: {e}")))?;
 
+    // **The name, before anything records it.** A source stored before
+    // 2026-11-03 keeps its 16-hex name, and the schema step below writes
+    // that name into `$migrations`. Taking the new one would mark every
+    // tenant behind an unchanged program (`plan-versions.md` §1.1, board
+    // `program-versions-the-core-under-schema` ask 7).
+    let renamed;
+    let program = match registry::name_for(pool, &program.source_id).await {
+        Ok(Some(name)) if name != program.version => {
+            let mut p = program.clone();
+            p.version = name;
+            renamed = p;
+            &renamed
+        }
+        Ok(_) => program,
+        Err(e) => return Err(ApplyRefused::Internal(format!("registry: {e}"))),
+    };
+
     // The schema, before the artifact: a first apply creates it, a match
     // proceeds, and a database that is behind stores but does not activate.
     let mut behind: Vec<(String, String)> = Vec::new();
@@ -697,6 +718,7 @@ async fn sequence(
     let stored = match registry::store(pool, &artifact).await {
         Ok(registry::Applied::Stored(_)) => Stored::Written,
         Ok(registry::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
+        Ok(registry::Applied::Rebuilt(_)) => Stored::Rebuilt,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
 
@@ -1067,7 +1089,13 @@ pub struct Preview {
 /// apply makes. Takes no lock: it writes nothing, and an apply that lands
 /// meanwhile is what the next preview reads.
 pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused> {
-    let (program, broken, notes) = compile_checked(source)?;
+    let (mut program, broken, notes) = compile_checked(source)?;
+    // The name the apply would store it under (see `sequence`). A registry
+    // no apply has touched since 2026-11-03 has no `source_id` column yet,
+    // which reads as "not stored", and the apply then fills it in.
+    if let Ok(Some(name)) = registry::name_for(pool, &program.source_id).await {
+        program.version = name;
+    }
     let serving = registry::active_version(pool).await.ok().flatten();
     let already_stored = registry::get(pool, &program.version)
         .await
@@ -1208,6 +1236,7 @@ impl Report {
             "stored": match self.stored {
                 Stored::Written => "written",
                 Stored::AlreadyPresent => "alreadyPresent",
+                Stored::Rebuilt => "rebuilt",
             },
             "activation": activation,
             "tenants": {
@@ -1298,6 +1327,7 @@ impl Report {
         let stored = match v["stored"].as_str() {
             Some("written") => Stored::Written,
             Some("alreadyPresent") => Stored::AlreadyPresent,
+            Some("rebuilt") => Stored::Rebuilt,
             other => {
                 return Err(format!(
                     "the apply's result named stored state {other:?}, which this client does \

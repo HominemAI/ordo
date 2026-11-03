@@ -161,22 +161,21 @@ pub fn render_diagnostic(src: &Sources, diag: &LoadDiagnostic) -> String {
 }
 
 /// A version label for [`ordo_host::deploy::Verified`] that is a pure
-/// function of the compiled source: identical source gets the identical
-/// label, so an unrelated re-save with unchanged content correctly reports
+/// function of the source: identical source gets the identical label, so
+/// an unrelated re-save with unchanged content correctly reports
 /// [`ordo_host::deploy::Swapped::AlreadyServing`] rather than swapping in an
 /// identical `Loaded` under a fresh name every time (which would defeat
 /// `Deployment::swap`'s own "nothing changed" check).
-fn dev_version(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(text.as_bytes());
-    format!(
-        "dev-{}",
-        digest
-            .iter()
-            .take(6)
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    )
+///
+/// It is the source identity `ordo apply` names the version by
+/// (`plan-versions.md` §1.1), function code included, so `ordo dev` serves
+/// under the name the program will deploy as.
+fn dev_version(root: &Path, text: &str, schema: &ordo_schema::Schema) -> String {
+    use ordo_plan::artifact as a;
+    let code = crate::function_code(root, schema)
+        .map(|c| c.hashes)
+        .unwrap_or_default();
+    a::source_identity(text, a::FIRST_EDITION, &code)
 }
 
 /// What one compile produced: the journal so far, the rendered diagnostic
@@ -253,14 +252,14 @@ pub fn compile_once(root: &Path, file: &str, descriptor: bool) -> CompileOutcome
 
     let t = Instant::now();
     let result = load_sources_diag(&src);
-    let (fixture, version, interface) = if result.is_ok() {
+    let (fixture, version, interface) = if let Ok((schema, _)) = &result {
         // `""` for the seed: `ordo dev`'s own seeding is `dev_db::reset`
         // reading `seed.sql` straight into the pool (§4.3); a `Fixture`'s
         // compiled-in seed is a fixture-harness convenience this path
         // never calls.
         (
             ordo_conformance::Fixture::from_source(src.text(), "").ok(),
-            Some(dev_version(src.text())),
+            Some(dev_version(root, src.text(), schema)),
             if descriptor {
                 crate::interface_json(&src).ok()
             } else {

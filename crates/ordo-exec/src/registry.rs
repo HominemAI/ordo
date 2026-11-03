@@ -15,19 +15,19 @@
 //! from. `$activations` records which version the deployment points at, one
 //! row per re-point, newest wins.
 //!
-//! # Source identity and builds (2026-11-03)
+//! # Declared versions and builds (2026-11-03)
 //!
-//! A version is named by its **source identity**
-//! (`ordo_plan::artifact::source_identity`), the full SHA-256 of what the
-//! developer wrote, so an Ordo release moves no version (`plan-versions.md`
-//! §1.1). Each row carries it in `source_id`. A version stored before then
-//! keeps its 16-hex name, and [`ensure_tables`] fills in its `source_id`
-//! from the stored source, so the same program applied again finds it by
-//! [`name_for`] and nothing moves.
+//! A version is named by the `@` version its source declares (owner,
+//! 2026-11-03, `plan-versions.md` §1.1). The apply decides the name, by
+//! comparing compiled programs ([`revisions`]); this module stores what it
+//! decided. Each row carries its `declared` version and a `source_id`
+//! fingerprint. A version stored before then keeps its 16-hex name, and
+//! [`ensure_tables`] fills in both columns from its stored source.
 //!
 //! What a release compiled a version to is a **build**, one `$builds` row
-//! each. A release that builds a stored version differently updates the
-//! row's document and DDL, which loads read, and records the new build.
+//! each, with the release that made it. A release that builds a stored
+//! version differently updates the row's document and DDL, which loads
+//! read, and records the new build ([`rebuild`]).
 //!
 //! The obvious alternative — a single-row pointer table updated in place —
 //! was rejected for the reason every other record in this platform is
@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS \"$activations\" ( \
 ); \
 ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"source_id\" text; \
 ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"edition\" integer NOT NULL DEFAULT 1; \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"declared\" text; \
+CREATE INDEX IF NOT EXISTS \"$artifacts_declared\" ON \"$artifacts\" (\"declared\"); \
 CREATE INDEX IF NOT EXISTS \"$artifacts_source_id\" ON \"$artifacts\" (\"source_id\"); \
 CREATE TABLE IF NOT EXISTS \"$builds\" ( \
   \"version\" text NOT NULL REFERENCES \"$artifacts\" (\"version\"), \
@@ -152,7 +154,7 @@ pub enum Applied {
     /// rather than silently no-oped, because re-running a deploy script and
     /// deploying something new are different facts to whoever is watching.
     AlreadyStored(String),
-    /// The same source as the version stored under this name, built
+    /// The same program as the version stored under this name, built
     /// differently by this Ordo release. The row now holds this build, and
     /// `$builds` keeps both. No version moved.
     Rebuilt(String),
@@ -178,8 +180,9 @@ pub enum RegistryRefusal {
     /// A version stored before 2026-11-03 is named by a truncated digest,
     /// so that name is not a security boundary — and this refusal is what
     /// stops a name collision from silently replacing a program that is
-    /// deployed. A newer name is the full source identity, and reaches here
-    /// only from a hand-assembled `Artifact`. Whichever of the
+    /// deployed. A newer name is a declared version the apply chose after
+    /// comparing programs, and reaches here only from a hand-assembled
+    /// `Artifact`. Whichever of the
     /// two documents is right, overwriting the other in place would leave
     /// every activation row pointing at a version whose content changed
     /// underneath it, which is the one thing a content address must not do.
@@ -219,26 +222,28 @@ impl From<PoolError> for RegistryRefusal {
     }
 }
 
-/// Create the tables if they are not there, and give every stored version
-/// its source identity. Idempotent.
-///
-/// A row stored before `source_id` existed gets it computed from its own
-/// stored source and document, in edition 1 (`plan-versions.md` §1.1). Its
-/// name stays: every tenant database records it.
+/// Create the tables if they are not there, and fill in what a row stored
+/// before 2026-11-03 lacks: its declared version and its source
+/// fingerprint, both read from its own stored source. Its name stays: every
+/// tenant database records it (`plan-versions.md` §1.1, ask 7). Idempotent.
 pub async fn ensure_tables(pool: &Pool) -> Result<(), PoolError> {
     pool.rows(REGISTRY_DDL).await?;
-    let unnamed = pool
-        .rows("SELECT \"version\", \"artifact\", \"source\" FROM \"$artifacts\" WHERE \"source_id\" IS NULL")
+    let unfilled = pool
+        .rows(
+            "SELECT \"version\", \"artifact\", \"source\" FROM \"$artifacts\" \
+             WHERE \"source_id\" IS NULL OR \"declared\" IS NULL",
+        )
         .await?;
-    for row in unnamed {
+    for row in unfilled {
         let (Some(Some(version)), Some(Some(artifact)), Some(Some(source))) =
             (row.first(), row.get(1), row.get(2))
         else {
             continue;
         };
         pool.rows(&format!(
-            "UPDATE \"$artifacts\" SET \"source_id\" = {} WHERE \"version\" = {} AND \"source_id\" IS NULL",
+            "UPDATE \"$artifacts\" SET \"source_id\" = {}, \"declared\" = {} WHERE \"version\" = {}",
             sql_lit(&source_id_of(artifact, source)),
+            sql_lit(&declared_of(source)),
             sql_lit(version),
         ))
         .await?;
@@ -246,7 +251,7 @@ pub async fn ensure_tables(pool: &Pool) -> Result<(), PoolError> {
     Ok(())
 }
 
-/// The source identity of a stored row: its source, edition 1, and the
+/// The source fingerprint of a stored row: its source, edition 1, and the
 /// code hashes its document carries.
 fn source_id_of(artifact: &str, source: &str) -> String {
     use ordo_plan::artifact as a;
@@ -254,19 +259,47 @@ fn source_id_of(artifact: &str, source: &str) -> String {
     a::source_identity(source, a::FIRST_EDITION, &a::code_hashes(&doc))
 }
 
-/// The name a source identity is stored under, if any: the identity
-/// itself, or the 16-hex name of a version stored before 2026-11-03. Where
-/// two old builds of one source were stored under two names, the one
-/// applied last.
-pub async fn name_for(pool: &Pool, source_id: &str) -> Result<Option<String>, PoolError> {
+/// The declared version as the `declared` column holds it: the `@` version,
+/// or the empty string for a source that declares none.
+fn declared_of(source: &str) -> String {
+    ordo_plan::artifact::declared_version(source).unwrap_or_default()
+}
+
+/// One stored version under a declared version, with the Ordo release that
+/// recorded its newest build. `None` for a row stored before `$builds`.
+#[derive(Debug, Clone)]
+pub struct Revision {
+    pub artifact: Artifact,
+    pub release: Option<String>,
+}
+
+/// Every version stored under one declared version, newest first: what an
+/// apply compares a program against to name it. `declared` is `None` for a
+/// source with no `@`.
+pub async fn revisions(pool: &Pool, declared: Option<&str>) -> Result<Vec<Revision>, PoolError> {
     let rows = pool
         .rows(&format!(
-            "SELECT \"version\" FROM \"$artifacts\" WHERE \"source_id\" = {} \
-             ORDER BY \"applied_at\" DESC, \"version\" DESC LIMIT 1",
-            sql_lit(source_id)
+            "SELECT a.\"version\", ( \
+               SELECT b.\"ordo_release\" FROM \"$builds\" b WHERE b.\"version\" = a.\"version\" \
+               ORDER BY b.\"recorded_at\" DESC LIMIT 1) \
+             FROM \"$artifacts\" a WHERE a.\"declared\" = {} \
+             ORDER BY a.\"applied_at\" DESC, a.\"version\" DESC",
+            sql_lit(declared.unwrap_or_default())
         ))
         .await?;
-    Ok(rows.first().and_then(|r| r.first().cloned().flatten()))
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(Some(version)) = row.first() else {
+            continue;
+        };
+        if let Some(artifact) = get(pool, version).await? {
+            out.push(Revision {
+                artifact,
+                release: row.get(1).cloned().flatten(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Record that this release built `version` to `artifact` and `ddl`. A
@@ -294,12 +327,10 @@ async fn record_build(
     .map(|_| ())
 }
 
-/// Store a version. Idempotent on identical bytes; a new build of the same
-/// source replaces the row's document and DDL ([`Applied::Rebuilt`]); any
-/// other difference is refused — see [`RegistryRefusal::VersionCollision`].
-/// Every build stored is recorded in `$builds`.
+/// Store a version. Idempotent on identical bytes, refused on different
+/// ones — see [`RegistryRefusal::VersionCollision`]. The build is recorded
+/// in `$builds`.
 pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal> {
-    let source_id = source_id_of(&a.artifact, &a.source);
     if let Some(existing) = get(pool, &a.version).await? {
         // The artifact document AND the DDL decide identity: together they
         // are what the version hashes
@@ -318,44 +349,59 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
         // truncated-digest collision or a hand-assembled `Artifact`; both
         // are refusals, for the reason on `VersionCollision`.
         //
-        // Since 2026-11-03 one difference is not a collision: the same
-        // source, built differently by this Ordo release. That is a new
-        // build of the same version, and it moves nothing
-        // (`plan-versions.md` §1.1).
-        if existing.artifact == a.artifact && existing.ddl == a.ddl {
-            record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
-            return Ok(Applied::AlreadyStored(a.version.clone()));
-        }
-        if source_id_of(&existing.artifact, &existing.source) != source_id {
+        // A new build of a stored version, decided by the apply that
+        // compared them, goes through [`rebuild`] instead.
+        if existing.artifact != a.artifact || existing.ddl != a.ddl {
             return Err(RegistryRefusal::VersionCollision {
                 version: a.version.clone(),
             });
         }
-        pool.rows(&format!(
-            "UPDATE \"$artifacts\" SET \"artifact\" = {}, \"ddl\" = {} WHERE \"version\" = {}",
-            sql_lit(&a.artifact),
-            sql_lit(&a.ddl),
-            sql_lit(&a.version),
-        ))
-        .await?;
         record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
-        return Ok(Applied::Rebuilt(a.version.clone()));
+        return Ok(Applied::AlreadyStored(a.version.clone()));
     }
     pool.rows(&format!(
         "INSERT INTO \"$artifacts\" \
-           (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\", \"source_id\") \
-         VALUES ({}, {}, {}, {}, {}, {}, {})",
+           (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\", \
+            \"source_id\", \"declared\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
         sql_lit(&a.version),
         sql_lit(&a.artifact),
         sql_lit(&a.source),
         sql_lit(&a.ddl),
         a.applied_at.0,
         sql_lit(&a.actor),
-        sql_lit(&source_id),
+        sql_lit(&source_id_of(&a.artifact, &a.source)),
+        sql_lit(&declared_of(&a.source)),
     ))
     .await?;
     record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
     Ok(Applied::Stored(a.version.clone()))
+}
+
+/// Store this release's build of a version already stored, which the apply
+/// has found to compile to the same program (`plan-versions.md` §1.1).
+///
+/// Identical bytes are [`Applied::AlreadyStored`]. Different bytes mean an
+/// Ordo release built the same program differently: the row takes this
+/// build, which loads read, and `$builds` keeps both
+/// ([`Applied::Rebuilt`]). The stored source is kept, so an edit to
+/// comments or spacing alone leaves the row as it was.
+pub async fn rebuild(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal> {
+    let Some(existing) = get(pool, &a.version).await? else {
+        return Err(RegistryRefusal::UnknownVersion(a.version.clone()));
+    };
+    record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
+    if existing.artifact == a.artifact && existing.ddl == a.ddl {
+        return Ok(Applied::AlreadyStored(a.version.clone()));
+    }
+    pool.rows(&format!(
+        "UPDATE \"$artifacts\" SET \"artifact\" = {}, \"ddl\" = {} WHERE \"version\" = {}",
+        sql_lit(&a.artifact),
+        sql_lit(&a.ddl),
+        sql_lit(&a.version),
+    ))
+    .await?;
+    Ok(Applied::Rebuilt(a.version.clone()))
 }
 
 /// Point the deployment at a stored version, and nudge every replica.

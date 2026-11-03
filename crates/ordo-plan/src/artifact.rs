@@ -373,8 +373,8 @@ fn declaration_digest(r: &ordo_syntax::RoutineDecl) -> String {
 /// 2026-11-03 carries, and the comparison a catch-up makes to ask "does this
 /// release build the stored version the same way".
 ///
-/// It is no longer a version's identity. That is [`source_identity`], which
-/// an Ordo release cannot move (`plan-versions.md` §1.1, ruled 2026-11-02).
+/// It is no longer how a version is named. That is the declared `@`
+/// version ([`declared_version`], owner, 2026-11-03).
 /// A version stored under this name keeps it (board
 /// `program-versions-the-core-under-schema` ask 7), because every tenant
 /// database records the name it is at.
@@ -433,24 +433,16 @@ pub const FIRST_EDITION: u32 = 1;
 /// The Ordo release this build is, as `$builds` records it.
 pub const ORDO_RELEASE: &str = env!("CARGO_PKG_VERSION");
 
-/// A version's **source identity**: the full SHA-256 of what the developer
-/// wrote, in 64 hex (`plan-versions.md` §1.1, ruled 2026-11-02, D1).
+/// A version's **source fingerprint**: the full SHA-256 of what the
+/// developer wrote, in 64 hex. It does not name the version; the declared
+/// `@` version does ([`declared_version`], owner, 2026-11-03, ask 6). It is
+/// kept as a check: promotion asks whether two environments hold the same
+/// bytes (`plan-versions.md` §3.1).
 ///
 /// It covers the `.ordo` text, the language edition, and each function's
-/// code by its [`code_hash`], keyed by its path. The compiler's output is
-/// not in it, so an Ordo release that renders the same source differently
-/// moves no version; that is [`build_identity`]'s job.
-///
-/// The text is hashed as the lexer reads it: each token's text, in order,
-/// with comments, spacing and blank lines gone, so an edit to those alone
-/// is not a new version (owner, 2026-11-03, ask 6). A newline that
-/// separates statements is a token and counts. CRLF and LF read the same.
-/// The lexer is release code, so a change to how it splits a source is an
-/// edition change; `the_digest_is_fixed` fails if one slips in. A source
-/// that does not lex is hashed as written; it does not compile either.
-///
-/// Settings values sit outside it (D6): nothing bound at the target is an
-/// input here.
+/// code by its [`code_hash`], keyed by its path. The text is hashed as
+/// written, with only a byte-order mark dropped and CRLF read as LF, so no
+/// release code sits between the file and the digest.
 ///
 /// Each part is length-prefixed, so no text, path or hash can be re-cut
 /// into another set with the same bytes.
@@ -460,6 +452,7 @@ pub fn source_identity(
     code: &std::collections::BTreeMap<String, String>,
 ) -> String {
     let text = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let text = text.replace("\r\n", "\n");
     let mut h = Sha256::new();
     let mut part = |bytes: &[u8]| {
         h.update((bytes.len() as u64).to_be_bytes());
@@ -467,27 +460,31 @@ pub fn source_identity(
     };
     part(b"ordo source identity 1");
     part(&edition.to_be_bytes());
-    match ordo_syntax::lex(text) {
-        Ok(tokens) => {
-            part(b"tokens");
-            for t in &tokens {
-                match t.kind {
-                    ordo_syntax::TokenKind::Newline => part(b"\n"),
-                    _ => part(&text.as_bytes()[t.span.start..t.span.end]),
-                }
-            }
-        }
-        Err(_) => {
-            part(b"text");
-            part(text.replace("\r\n", "\n").as_bytes());
-        }
-    }
-    part(b"code");
+    part(text.as_bytes());
     for (path, hash) in code {
         part(path.as_bytes());
         part(hash.as_bytes());
     }
     hex(&h.finalize())
+}
+
+/// The version a source declares: its `domain name @ x.y.z` header, as
+/// written. `None` when it has no header or no `@`, or does not parse.
+pub fn declared_version(source: &str) -> Option<String> {
+    ordo_syntax::parse_program(source).ok()?.domain?.version
+}
+
+/// The name of the `n`th revision of a declared version, from 1.
+///
+/// The first is the declared version itself. A later one is stored when the
+/// compiled program changed under the same number: `0.2.0+r2`, semver's
+/// build-metadata form, "the same version, built again". A program that
+/// declares no `@` version is named by [`program_version`] instead.
+pub fn revision_name(declared: &str, n: u32) -> String {
+    match n {
+        1 => declared.to_string(),
+        n => format!("{declared}+r{n}"),
+    }
 }
 
 /// A version's **build identity**: the full SHA-256 of what this Ordo

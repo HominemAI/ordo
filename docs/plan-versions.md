@@ -2,8 +2,9 @@
 
 Status: **build plan, revised 2026-11-02 after review.** The owner ruled the
 plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Asks 5 to
-7, from building increment 1: 5 and 7 ruled 2026-11-03, 6 open (§5). The rehearsal design (§3.2) is
-provisional. Increment 1 built 2026-11-03.
+7, from building increment 1, were ruled 2026-11-03; ask 6 made the
+declared `@` version the name (§1.1). Ask 8 is open (§5). The rehearsal
+design (§3.2) is provisional. Increment 1 built 2026-11-03.
 Review: `review-plan-versions.md` (54 findings). Rulings:
 `corpus-rulings.md`, "2026-11-02: program versions plan and its review".
 Joins `plan-schema-evolution.md`, `plan-evolution-plans.md` and
@@ -31,48 +32,59 @@ Read this first:
 
 ### 1.1 What a version is
 
-Ruled 2026-11-02 (D1, D6, V-1).
+Ruled 2026-11-02 (D1, D6, V-1). Revised 2026-11-03 by the owner (ask 6):
+the developer's declared version names a version. Built 2026-11-03
+(increment 1).
 
-A version has two identities:
+What runs is the app's source times the Ordo release that compiles it.
+Each side owns its own changes:
 
-| Identity | Hash of | Drives |
+| | Names or records | Decided by |
 |---|---|---|
-| **Source identity** (the version) | the `.ordo` sources, each function's code bytes, and the language edition | pins, plans, promotion, sharing |
-| **Build identity** | the compiled `ordo plan` document and DDL, plus the Ordo release | a record per environment; checked at every load |
+| **Version** | `domain notes @ 0.2.0`, as declared | the developer |
+| **Revision** | `0.2.0+r2`, when the program changed under the same number | the apply's comparison |
+| **Build** | the compiled document and DDL, plus the Ordo release, one `$builds` row each | the Ordo release |
+| **Source fingerprint** | full SHA-256 of the files as written; a check, never a name | promotion (§3.1) |
 
-- Every comparison uses the full SHA-256 digest. 16 hex characters are kept
-  for display only.
-- An Ordo release that changes only the build identity moves no pin.
+How an apply names a program (`schema_apply::name_version`):
+
+- It compiles the new source and compares the compiled program with each
+  stored version under the same number, newest first.
+- When the stored build came from this Ordo release, the stored bytes are
+  compared directly.
+- When it came from another release, the stored source is compiled under
+  this one first. Only the developer's changes then count, never Ordo's.
+- A match is that version. Comments, spacing and blank lines never reach
+  the compiled program, so a lint pass is not a release.
+- No match under a new number is that number.
+- No match under a used number is the next revision, with a warning to
+  raise the number. **Nothing about versioning is ever refused** (owner,
+  2026-11-03: "I don't want any hard blocks on versioning").
+- A program with no `@` is named as before, by the 16-hex digest of what
+  it compiles to (ask 8).
+- A version stored before 2026-11-03 keeps its 16-hex name (ask 7). The
+  registry fills in its declared version and fingerprint from its source.
+
+Also:
+
 - A change to ops alone is a new version with no schema change (ruled
   2026-10-03).
-- The source names its **language edition** (§2.6).
-- **Settings** (D6): per-environment and runtime values sit outside the
-  hash and are bound at the target. Their declaration sits inside it.
+- A source with no edition line is edition 1, for good (ask 5). Later
+  editions are named in the source (§2.6).
+- **Settings** (D6): per-environment and runtime values sit outside every
+  comparison and are bound at the target. Their declaration sits inside.
   Rollout settings are per environment.
-
-Built 2026-11-03 (increment 1):
-
-- `ordo_plan::artifact::source_identity` hashes the source text, the
-  edition and each function's code hash by path. Each part is
-  length-prefixed.
-- The text is hashed as the lexer's tokens, so comments, spacing and
-  blank lines are not a new version (owner, 2026-11-03, ask 6). A newline
-  between statements counts. A lexer change is an edition change.
-- A source with no edition line is edition 1 (ask 5, ruled 2026-11-03).
-- `build_identity` hashes the document, the DDL and the Ordo release. Each
-  build is a `$builds` row.
-- A version stored before keeps its 16-hex name. The registry fills in
-  its `source_id`, and an apply of the same source finds it (ask 7).
-- The same source built differently by a release updates the stored
-  document and DDL and records the build. It is not a collision.
-- Command output still prints the whole name, because `ordo rollback`
-  takes it exactly. The 16-hex display comes with labels in increment 2.
+- **One side moves at a time.** An apply that changes the program while an
+  Ordo upgrade's release check is open cannot tell whose change is whose.
+  The release check (§2.6, increment 6) reports a stored version whose
+  source compiles differently under the new release, with its tenants.
+- Command output prints the whole name, which `ordo rollback` takes.
 
 ### 1.2 Where versions are stored
 
 | Table | Database | Holds |
 |---|---|---|
-| `$artifacts` | the deployment's own | source identity, parent versions, source, sequence number, label, git commit, who applied it |
+| `$artifacts` | the deployment's own | name, declared version, source fingerprint, parent versions, source, sequence number, label, git commit, who applied it |
 | `$builds` | the deployment's own | build identity per version: document, DDL, Ordo release, the minimum Ordo release that loads it |
 | `$code` | the deployment's own | function code by code hash, under `Versions` |
 | `$activations` | the deployment's own | each re-point of the deployment, append-only |
@@ -550,16 +562,17 @@ What sets the pace:
 ## 5 · Open decisions
 
 The plan's asks 1 to 4 and the review's D1 to D17 were ruled 2026-11-02.
-See `corpus-rulings.md`. Building increment 1 raised three, on the board
-task `program-versions-the-core-under-schema`. Increment 1 is built on
-their recommendations:
+See `corpus-rulings.md`. Building increment 1 raised four, on the board
+task `program-versions-the-core-under-schema`:
 
 - Ask 5, ruled 2026-11-03: a source with no edition line is edition 1 for
   good.
-- Ask 6: the owner does not want a comment or spacing change to be a new
-  version. Built that way 2026-11-03 by hashing the lexer's tokens; the
-  mechanism is put back to the owner.
+- Ask 6, ruled 2026-11-03: the declared `@` version names a version; a
+  change under the same number is a revision with a warning, never a
+  refusal.
 - Ask 7, ruled 2026-11-03: a version stored under a 16-hex name keeps it.
+- Ask 8, open, built on its recommendation: a program with no `@` is named
+  by the 16-hex digest of what it compiles to, as before.
 
 ---
 
@@ -575,11 +588,12 @@ Still open:
    15-second catch-up are what 27c replaces. `plan-schema-evolution.md`
    §8.3 reads as current behaviour.
 2. **`ordo dev` versions are not hashes.** Fixed 2026-11-03: `dev.rs`
-   names a save by its source identity, function code included. It still
+   labels a save `0.2.0+dev.` and 12 hex of its source fingerprint, so it
+   reads as the declared version and swaps on every change. It still
    writes no `$artifacts` row, because dev saves are ephemeral (§3.3).
-3. **The version is 64 bits.** Fixed 2026-11-03 for new versions: the name
-   is the full source identity. A version stored earlier keeps its 16-hex
-   name, and its full identity sits beside it in `source_id`.
+3. **The version is 64 bits.** Resolved 2026-11-03 by the owner's ruling:
+   a version is named by its declared `@` version, not a digest. The full
+   SHA-256 fingerprint is kept as a check for promotion.
 4. **A load does not check the version.** `deploy.rs:466-505` passes
    `stored.version` through as a label. Increment 3 recomputes it.
 5. **`plan-environments.md` gates on activation.** Its §2.1 refuses

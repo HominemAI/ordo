@@ -333,7 +333,7 @@ async fn a_refused_tenant_is_held_and_the_others_are_brought_forward() {
         },
     ]);
     let v1 = Program::compile(PROGRAM).expect("v1 compiles");
-    ordo_host::apply_op::run_program(&control, &fleet, &v1, vec![], "t", "t", true)
+    let v1 = ordo_host::apply_op::run_program(&control, &fleet, &v1, vec![], "t", "t", true)
         .await
         .expect("v1 applies everywhere");
     full.rows(
@@ -375,7 +375,7 @@ async fn a_refused_tenant_is_held_and_the_others_are_brought_forward() {
         ordo_exec::spacedb::recorded_version(&empty)
             .await
             .expect("v"),
-        ordo_exec::spacedb::TargetVersion::At(v2.version.clone())
+        ordo_exec::spacedb::TargetVersion::At(report.version.clone())
     );
 }
 

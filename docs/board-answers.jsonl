@@ -1259,3 +1259,29 @@
 {"seq": 1259, "item": "test-in-proportion-to-the-change", "ask": 7, "at": "2026-11-02", "status": "decided", "text": "yep", "source": "record", "read": true}
 {"seq": 1260, "item": "cut-test-time-by-building-and", "ask": 6, "at": "2026-11-02T08:01:36Z", "status": "open", "text": "ok", "source": "page", "read": true}
 {"seq": 1261, "item": "cut-test-time-by-building-and", "ask": 6, "at": "2026-11-02", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1262, "item": "versions-plan-review-rollouts-and-day-to-day", "ask": 5, "at": "2026-11-03T03:44:29Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1263, "item": "versions-plan-review-rollouts-and-day-to-day", "ask": 4, "at": "2026-11-03T03:44:41Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1264, "item": "versions-plan-review-rollouts-and-day-to-day", "ask": 3, "at": "2026-11-03T03:44:52Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1265, "item": "versions-plan-review-rollouts-and-day-to-day", "ask": 2, "at": "2026-11-03T03:45:00Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1266, "item": "versions-plan-review-rollouts-and-day-to-day", "ask": 1, "at": "2026-11-03T03:45:18Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1267, "item": "versions-plan-review-serving-sharing-and", "ask": 1, "at": "2026-11-03T03:45:44Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1268, "item": "versions-plan-review-serving-sharing-and", "ask": 2, "at": "2026-11-03T03:46:31Z", "status": "open", "text": "This has a distinct problem. What is a security flaw? How is it known\n? who knows it? Does it act without the developers consent?", "source": "page", "read": true}
+{"seq": 1269, "item": "versions-plan-review-serving-sharing-and", "ask": 3, "at": "2026-11-03T03:46:44Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1270, "item": "versions-plan-review-serving-sharing-and", "ask": 4, "at": "2026-11-03T03:47:02Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1271, "item": "versions-plan-review-serving-sharing-and", "ask": 5, "at": "2026-11-03T03:47:06Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1272, "item": "versions-plan-review-serving-sharing-and", "ask": 0, "at": "2026-11-03T03:47:24Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1273, "item": "versions-plan-review-identity-and-promotion", "ask": 1, "at": "2026-11-03T03:49:18Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1274, "item": "versions-plan-review-identity-and-promotion", "ask": 2, "at": "2026-11-03T03:49:56Z", "status": "open", "text": "ok - document this explicitly - it may likely need to be revised in the future.", "source": "page", "read": true}
+{"seq": 1275, "item": "versions-plan-review-identity-and-promotion", "ask": 3, "at": "2026-11-03T03:50:00Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1276, "item": "versions-plan-review-identity-and-promotion", "ask": 4, "at": "2026-11-03T03:50:13Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1277, "item": "versions-plan-review-identity-and-promotion", "ask": 5, "at": "2026-11-03T03:50:19Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1278, "item": "versions-plan-review-identity-and-promotion", "ask": 6, "at": "2026-11-03T03:50:24Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1279, "item": "program-versions-the-core-under-schema", "ask": 1, "at": "2026-11-03T03:50:44Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1280, "item": "program-versions-the-core-under-schema", "ask": 2, "at": "2026-11-03T03:50:52Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1281, "item": "program-versions-the-core-under-schema", "ask": 3, "at": "2026-11-03T03:51:04Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1282, "item": "program-versions-the-core-under-schema", "ask": 4, "at": "2026-11-03T03:51:19Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1283, "item": "program-versions-the-core-under-schema", "ask": 0, "at": "2026-11-03T03:53:17Z", "status": "decided", "text": "Some additional notes. Make sure to avoid hardcoded values and elevate to potential configuration where possible.\nAlso I don't see any explicit mentions of blue green - but it is something to be considered possibly more eleborate rollout strategies - possibly for V2", "source": "page", "read": true}
+{"seq": 1284, "item": "program-versions-the-core-under-schema", "ask": 0, "at": "2026-11-02", "status": "decided", "text": "All four asks ok. Avoid hardcoded values and elevate them to configuration where possible. Blue-green and more elaborate rollout strategies are to be considered, possibly for V2.", "source": "record", "read": true}
+{"seq": 1285, "item": "versions-plan-review-identity-and-promotion", "ask": 0, "at": "2026-11-02", "status": "decided", "text": "All six asks ok. Ask 2 (signed rehearsal): document it explicitly; it may need revising in the future.", "source": "record", "read": true}
+{"seq": 1286, "item": "versions-plan-review-rollouts-and-day-to-day", "ask": 0, "at": "2026-11-02", "status": "decided", "text": "All five asks ok; ask 5 yes.", "source": "record", "read": true}
+{"seq": 1287, "item": "versions-plan-review-serving-sharing-and", "ask": 0, "at": "2026-11-02", "status": "decided", "text": "Asks 1, 3, 4, 5 ok. Ask 2 (revoked versions) has questions: what is a security flaw, how is it known, who knows it, and does it act without the developer's consent?", "source": "record", "read": true}

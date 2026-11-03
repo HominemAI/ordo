@@ -11952,3 +11952,19 @@ Board tasks `sploosh-froze-under-ci-load-and` and
   Ordo never decides a flaw and only warns, and its warnings are visible in
   the Ordo console. After the mark, tenants move in their maintenance
   windows.
+
+## 2026-11-03: version identity, from building increment 1
+
+Board `program-versions-the-core-under-schema`, asks 5 to 7.
+
+- **Ask 5, "Yes".** A source with no edition line is edition 1, today's
+  language, for good. A missing line then means the same under every
+  release, so an upgrade cannot reread an old source.
+- **Ask 7, "ok".** A version stored under the old 16-hex name keeps it.
+  Tenant databases record the name, so a rename would mark every tenant
+  behind on upgrade. The full identity is kept beside it.
+- **Ask 6, open.** The owner: "I personally don't think it should warrant a
+  new version." Built that way: the identity hashes the existing lexer's
+  tokens, which already drop comments and spacing. The mechanism is put
+  back to the owner.
+

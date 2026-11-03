@@ -1303,3 +1303,9 @@
 {"seq": 1304, "item": "the-live-deployment-stopped-starting-after", "ask": 0, "at": "2026-11-03T06:33:18Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1305, "item": "sploosh-froze-under-ci-load-and", "ask": 5, "at": "2026-11-03T06:33:26Z", "status": "open", "text": "yes", "source": "page", "read": true}
 {"seq": 1306, "item": "sploosh-froze-under-ci-load-and", "ask": 0, "at": "2026-11-03T06:33:31Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1307, "item": "program-versions-the-core-under-schema", "ask": 5, "at": "2026-11-03T20:28:26Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1308, "item": "program-versions-the-core-under-schema", "ask": 6, "at": "2026-11-03T20:29:35Z", "status": "open", "text": "I personally don't think it should warrant a new version - is your argument that we'd need to build new parsing for just that?", "source": "page", "read": true}
+{"seq": 1309, "item": "program-versions-the-core-under-schema", "ask": 7, "at": "2026-11-03T20:29:42Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1310, "item": "program-versions-the-core-under-schema", "ask": 0, "at": "2026-11-03T20:29:47Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1311, "item": "program-versions-the-core-under-schema", "ask": 5, "at": "2026-11-03", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1312, "item": "program-versions-the-core-under-schema", "ask": 7, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}

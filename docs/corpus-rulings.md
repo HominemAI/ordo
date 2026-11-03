@@ -11837,3 +11837,88 @@ Board task `time-sensitive-tests-fail-when-other-tests` (15b).
   files summed 294 s without templates and 348 s with them. A test's real
   setup cost is building the engine, about 230 ms. Built opt-in in
   eb096fc7, removed in the revert after it.
+
+## 2026-11-02: program versions plan and its review
+
+Board tasks `program-versions-the-core-under-schema`,
+`versions-plan-review-identity-and-promotion`,
+`versions-plan-review-serving-sharing-and` and
+`versions-plan-review-rollouts-and-day-to-day`. The plan is
+`plan-versions.md`; the review is `review-plan-versions.md` (54 findings,
+decisions D1 to D17).
+
+Plan asks, all accepted as recommended:
+
+- Ask 1: before an Ordo upgrade, check that every served version loads. If
+  one slips through, close only the affected tenants. Others keep serving.
+- Ask 2: a new tenant starts on the last version that finished a rollout. A
+  setting names another. No request picks its own version, so a signup page
+  cannot choose one.
+- Ask 3: `prev` cleanup waits for every environment. The stored plan holds
+  the rename for lagging tenants.
+- Ask 4: dual writes soak 7 days, a setting per plan. Revert inside the soak
+  is a pin switch.
+
+Identity and promotion:
+
+- D1: a version is a hash of the source plus its language edition. The
+  compiled build is recorded apart, so an Ordo upgrade alone moves no
+  tenant.
+- D2: promotion needs a signed rehearsal on a clone before production
+  accepts, promoted by a named deployment owner. The owner: "document this
+  explicitly - it may likely need to be revised in the future." The plan
+  marks it provisional (§3.2).
+- D3: each environment re-renders the plan from source and compares its
+  digest with the rehearsed one. Shipping SQL from dev would sit outside
+  the hash.
+- D4: language editions with a stated load window, and `ordo fix`. Old
+  sources need not compile forever, and an upgrade is never blocked.
+- D5: versions form a graph with parent links. A branch's additions are
+  kept unused on return to main, never dropped silently.
+- D6: per-environment and runtime setting values sit outside the hash. Their
+  declaration sits inside, so promotion by hash still holds.
+
+Serving, sharing and data safety:
+
+- D7: the data owner's version and guards decide shared reads. Shape is
+  compared on the fields read, so additive changes keep sharing. Differing
+  guards refuse.
+- D9: a sealing step skips the plaintext dual write and drops the plaintext
+  column once the seal verifies. Keeping it is an opt-in that names the
+  risk. Plaintext in WAL and backups cannot be undone.
+- D10: dual writes go through Ordo's write path only. Both versions' guards
+  are checked and the audit chain sees every write.
+- D17: staging copies are masked deny-by-default inside production before
+  export. Credentials, sessions and invites are never copied. Mail, push
+  and egress go to sinks.
+- D8 (revocation) is not ruled. The owner asked: what is a security flaw,
+  how is it known, who knows it, and does Ordo act without the developer's
+  consent? Re-asked: only the deployment owner marks a version revoked;
+  Ordo never decides a flaw and only warns.
+
+Rollouts and day-to-day control:
+
+- D11: a new step may start during a soak. It closes the earlier soak after
+  a one-way confirmation. One open soak per tenant. Soak length per plan, 0
+  allowed.
+- D12: `ordo rollback` moves every pin on Y back to X at once. A dry run
+  lists what each tenant loses past the soak.
+- D13: a declared environment chain, default dev, staging, production.
+  Skipping staging is a setting, off by default, named in the refusal.
+- D15: a minimum version moves stragglers in their maintenance window.
+  Removing a version with tenants needs `--move-to`. Nothing strands a
+  tenant.
+- D16: a step may name a backfill backend function by code hash, with an
+  optional reverse. No raw SQL. The menu stays the default.
+
+Without a decision, as fixes: the version uses the full SHA-256 for
+identity (V-1); a load recomputes and compares the version (V-4); every
+other non-decision finding in the review's §4 is applied.
+
+Owner comments:
+
+- "avoid hardcoded values and elevate to potential configuration where
+  possible." Every fixed number or behaviour in the plan becomes a named
+  setting with a secure default (`plan-versions.md` §7).
+- Blue-green and more elaborate rollout strategies are to be considered,
+  possibly for V2. They are kept out of the V1 build order (§3.6).

@@ -22,8 +22,6 @@ on:
     branches: [bleeding]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       target:
@@ -37,6 +35,22 @@ on:
         default: true
       update-screenshots:
         description: 'Make the screenshot pictures again (--update-snapshots=changed) and upload them as the artifact notes-e2e-screenshots. Nothing is committed; a person commits them.'
+        type: boolean
+        default: false
+  # Called by nightly.yml (owner ruling 2026-11-02). A called workflow reads
+  # its own inputs, not the caller's, so these repeat the defaults of the
+  # manual run above. Without them `inputs.target` is empty and the
+  # throwaway jobs would skip, and `inputs.browser` is false and the browser
+  # projects would not run. `choice` does not exist here, so target is a string.
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        default: throwaway
+      browser:
+        type: boolean
+        default: true
+      update-screenshots:
         type: boolean
         default: false
 

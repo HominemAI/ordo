@@ -8,7 +8,8 @@ name: CI
 #   exists on every run.
 # - A pull request to `main` runs everything. Every job here is a required
 #   check, and `main` moves only through such a pull request.
-# - The nightly run on `main` (09:00 UTC) runs everything.
+# - The nightly run on `main` (09:00 UTC) runs everything. nightly.yml
+#   calls this workflow, and only when the code changed since the last one.
 # - A manual run runs everything. So does a push to `bleeding` whose
 #   commits carry the trailer line `ci: full`.
 # - The load and stress tests run in `test (perf)`, on pull requests,
@@ -23,9 +24,9 @@ on:
     branches: [bleeding]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: '0 9 * * *'
   workflow_dispatch:
+  # Called by nightly.yml, one suite after another (owner ruling 2026-11-02).
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

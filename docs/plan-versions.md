@@ -1,8 +1,8 @@
 # Program versions: the core under schema evolution and environments
 
 Status: **build plan, revised 2026-11-02 after review.** The owner ruled the
-plan's 4 asks and 16 of the review's 17 decisions on 2026-11-02. One stays
-open: revocation (D8, §5). The rehearsal design (§3.2) is provisional.
+plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Nothing is
+open. The rehearsal design (§3.2) is provisional.
 Review: `review-plan-versions.md` (54 findings). Rulings:
 `corpus-rulings.md`, "2026-11-02: program versions plan and its review".
 Joins `plan-schema-evolution.md`, `plan-evolution-plans.md` and
@@ -65,7 +65,7 @@ A version has two identities:
 
 - Every artifact is kept until the app developer prunes it (27b, ruled
   2026-10-01). Pruning follows §2.7 and leaves a tombstone.
-- A `revoked` mark waits on D8 (§1.11).
+- A `revoked` mark, set only by the deployment owner (D8, §1.11).
 
 ### 1.3 The pin
 
@@ -199,16 +199,19 @@ Routines, schedules, functions, mail and webhooks:
 
 ### 1.11 Revocation and end of life
 
-**Pending D8 (§5).** The owner asked who decides a version is flawed, how
-it is known, and whether Ordo acts without the developer's consent. The
-proposal re-asked:
+**Ruled 2026-11-02 (D8).** The owner first asked who decides a version is
+flawed, how it is known, and whether Ordo acts without the developer's
+consent. The answer:
 
-- Only the deployment owner marks a version revoked, with a reason.
-- Ordo never decides a version is flawed. It only warns, for example when a
-  version's Ordo release has a published advisory.
+- Only the deployment owner marks a version revoked:
+  `ordo version revoke <v> --reason "..."`.
+- Ordo never decides a version is flawed and acts on nothing before that
+  mark. It only warns, for example when an Ordo release fixes a flaw an old
+  version relies on, naming the versions and tenants affected.
+- Warnings are visible in the Ordo console (owner, 2026-11-02).
+- After the mark, its tenants move off it in their maintenance windows.
 - A revoked version is never pinned, activated, rolled back to, promoted or
   given to new tenants.
-- What happens to tenants already on it is the open part.
 - A report lists tenants on revoked versions.
 
 End of life without a flaw goes through `versions.minimum` (§1.6).
@@ -494,7 +497,7 @@ round is about 35 minutes for the full suite.
 |---|---|---|---|---|---|
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
-| 2b | **Revocation.** Waits on D8. | M | 2, D8 | per D8's answer | none |
+| 2b | **Revocation.** Owner-set mark, console warnings, tenants move in their windows (D8). | M | 2 | a revoked version cannot be pinned; its tenants move at their window; the console shows the warning | none |
 | 3 | **Multi-version serving, dev first.** Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
@@ -519,7 +522,6 @@ What sets the pace:
 - Increment 3 is research on memory: say 2 tries.
 - Increments 10b and 11 are research: say 2 to 3 tries, with a rehearsal
   against a real tenant's data.
-- Increment 2b waits on the owner's answer to D8.
 - Increment 12b may change with the provisional design.
 - Increment 15 waits on the syntax design (`forward-gaps` ask 23).
 - 27z (the `acl` security audit) is outside this plan.
@@ -528,19 +530,8 @@ What sets the pace:
 
 ## 5 · Open decisions
 
-The plan's asks 1 to 4 and the review's D1 to D17 were ruled 2026-11-02,
-except D8. See `corpus-rulings.md`.
-
-**D8. What happens to tenants on a revoked version?**
-
-The owner asked: what is a security flaw, how is it known, who knows it,
-and does Ordo act without the developer's consent? Re-asked with this
-proposal:
-
-- Only the deployment owner marks a version revoked.
-- Ordo never decides a flaw. It only warns.
-- Open: once marked, are its tenants moved, closed, or left for the
-  deployment owner to move?
+None. The plan's asks 1 to 4 and the review's D1 to D17 were ruled
+2026-11-02. See `corpus-rulings.md`.
 
 ---
 

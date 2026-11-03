@@ -1,0 +1,94 @@
+name: Nightly
+
+# The one nightly trigger (owner ruling, 2026-11-02). On 2026-11-02 the four
+# suites each had their own 09:00 UTC schedule, ran at once on the
+# self-hosted runners and froze the node from memory exhaustion. Now:
+#
+# - The nightly runs only when the code changed. `decide` compares this
+#   run's commit with the commit of the last completed run of this
+#   workflow. Same commit: it stops there and every later job skips.
+# - The suites run one after another: ci, notes e2e, identity e2e, console
+#   e2e. A failing suite does not stop the next one (`always()`), so one
+#   red suite never hides another.
+# - A called workflow sees this run's event name (`schedule` or
+#   `workflow_dispatch`), never `pull_request` or `push`, so
+#   scripts/ci-affected.mjs runs everything, perf included, as before.
+# - A manual run follows the same rule. Tick `force` to run on the same
+#   commit again.
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run the suites even when the code has not changed since the last nightly run'
+        type: boolean
+        default: false
+
+# The most a called workflow may ask for is what this caller grants.
+# `actions: read` is for `decide`. `pull-requests: read` is for the
+# affected step in each suite (scripts/ci-affected.mjs).
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+# Never cancel a nightly in flight. Each suite keeps its own concurrency
+# group (ci-, e2e-, identity-e2e-, console-e2e-), none equal to this one.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    name: changed since last nightly
+    runs-on: [self-hosted, ordo-k8s]
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - name: Has the code changed since the last completed nightly
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          # This run is in progress, so `--status completed` never returns it.
+          last=$(gh run list --repo "$REPO" --workflow nightly.yml --status completed \
+            --limit 1 --json headSha --jq '.[0].headSha // ""')
+          echo "this run: $HEAD_SHA"
+          echo "last completed nightly: ${last:-none}"
+          if [ "$FORCE" = "true" ] || [ "$last" != "$HEAD_SHA" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Code changed since the last nightly (or forced). Running the suites." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Code unchanged since the last nightly run. Nothing to run." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+  ci:
+    needs: [decide]
+    if: ${{ always() && needs.decide.outputs.changed == 'true' }}
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  e2e:
+    needs: [decide, ci]
+    if: ${{ always() && needs.decide.outputs.changed == 'true' }}
+    uses: ./.github/workflows/e2e.yml
+    secrets: inherit
+
+  identity-e2e:
+    needs: [decide, e2e]
+    if: ${{ always() && needs.decide.outputs.changed == 'true' }}
+    uses: ./.github/workflows/identity-e2e.yml
+    secrets: inherit
+
+  console-e2e:
+    needs: [decide, identity-e2e]
+    if: ${{ always() && needs.decide.outputs.changed == 'true' }}
+    uses: ./.github/workflows/console-e2e.yml
+    secrets: inherit

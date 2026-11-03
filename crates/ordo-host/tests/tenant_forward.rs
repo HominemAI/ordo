@@ -394,7 +394,7 @@ async fn a_program_with_a_function_reaches_tenants_by_the_catch_up() {
     let _serial = SERIAL.lock().await;
     let v1 = Program::compile(V1).expect("v1");
     let mut v2 = Program::compile(V2_FN).expect("v2");
-    let source_only = v2.version.clone();
+    let source_only = v2.build_id.clone();
     let code = b"export default { async call() { return {}; } };\n";
     let hashes = [(
         "fn/hello.js".to_string(),
@@ -403,7 +403,9 @@ async fn a_program_with_a_function_reaches_tenants_by_the_catch_up() {
     .into_iter()
     .collect();
     v2.bind_code(&hashes).expect("the code binds");
-    assert_ne!(v2.version, source_only, "the code hash is in the version");
+    // The code hash is in the compiled program, which the catch-up compares
+    // with the stored build (`Program::builds_as`).
+    assert_ne!(v2.build_id, source_only, "the code hash is in the build");
 
     let w = World::new("withfn", &v1, &v2, V2_FN).await;
     let a = tenant_db_at("ordo_tf_withfn_a", &v1).await;

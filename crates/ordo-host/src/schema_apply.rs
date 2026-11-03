@@ -110,11 +110,16 @@ pub struct Program {
     /// The byte-stable artifact document.
     pub doc: serde_json::Value,
     pub ddl: String,
-    /// The name this program is stored and served under: its
-    /// [`source_id`](Self::source_id), or the 16-hex name a version stored
-    /// before 2026-11-03 keeps (`ordo_exec::registry::name_for`).
+    /// The name this program is stored and served under. Compiled, it is
+    /// the declared version, or for a program that declares none the
+    /// 16-hex digest of what it compiles to. An apply settles it with
+    /// [`name_version`], which may answer a stored name or a revision
+    /// (`0.2.0+r2`).
     pub version: String,
-    /// `ordo_plan::artifact::source_identity`: what the developer wrote.
+    /// The `@` version the source declares, if any.
+    pub declared: Option<String>,
+    /// `ordo_plan::artifact::source_identity`: a fingerprint of what the
+    /// developer wrote. A check, not a name.
     pub source_id: String,
     /// `ordo_plan::artifact::build_identity`: what this release built.
     pub build_id: String,
@@ -151,6 +156,7 @@ impl Program {
             doc,
             ddl,
             version: String::new(),
+            declared: None,
             source_id: String::new(),
             build_id: String::new(),
             source,
@@ -164,7 +170,11 @@ impl Program {
         self.source_id =
             a::source_identity(&self.source, a::FIRST_EDITION, &a::code_hashes(&self.doc));
         self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
-        self.version = self.source_id.clone();
+        self.declared = a::declared_version(&self.source);
+        self.version = match &self.declared {
+            Some(d) => a::revision_name(d, 1),
+            None => a::program_version(&self.doc, &self.ddl),
+        };
     }
 
     /// Fills in each function's `code_hash` from `hashes` (code path to
@@ -201,6 +211,103 @@ impl Program {
     pub fn builds_as(&self, a: &ordo_exec::registry::Artifact) -> bool {
         ordo_plan::artifact::to_bytes(&self.doc) == a.artifact && self.ddl == a.ddl
     }
+
+    /// Whether this and `other` are the same program: the same compiled
+    /// document and DDL. Comments and spacing do not reach either.
+    fn same_program(&self, other: &Program) -> bool {
+        self.doc == other.doc && self.ddl == other.ddl
+    }
+}
+
+/// What [`name_version`] decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Naming {
+    pub version: String,
+    /// An earlier version under this declared version compiles to this
+    /// program, so this is a new build of it at most.
+    pub existing: bool,
+    /// The warning for a program that changed under the same declared
+    /// version. Never a refusal (owner, 2026-11-03).
+    pub note: Option<String>,
+}
+
+/// **Name a program before an apply stores it** (`plan-versions.md` §1.1,
+/// owner, 2026-11-03, ask 6).
+///
+/// The declared `@` version names it. Each version already stored under
+/// that number, newest first, is compared with this program as compiled
+/// programs, so comments and spacing never count:
+///
+/// - When the stored build came from this Ordo release, its stored bytes
+///   are compared directly.
+/// - When it came from another release, or predates `$builds`, its stored
+///   source is compiled under this release first. Only the developer's
+///   changes then count, never Ordo's.
+///
+/// A match is that version, under its stored name. No match, with the
+/// number unused, is the declared version itself. No match under a used
+/// number is the next revision, `0.2.0+r2`, with a warning to bump the
+/// number.
+///
+/// A program that declares no `@` version is named as before 2026-11-03,
+/// by the 16-hex digest of what it compiles to, and never warned about:
+/// there is no number for it to disagree with.
+pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, String> {
+    use ordo_exec::registry;
+    let declared = program.declared.as_deref();
+    let stored = registry::revisions(pool, declared)
+        .await
+        .map_err(|e| format!("registry: {e}"))?;
+    for r in &stored {
+        let same = if r.release.as_deref() == Some(ordo_plan::artifact::ORDO_RELEASE) {
+            program.builds_as(&r.artifact)
+        } else {
+            Program::from_artifact(&r.artifact)
+                .map(|old| old.same_program(program))
+                .unwrap_or(false)
+        };
+        if same {
+            return Ok(Naming {
+                version: r.artifact.version.clone(),
+                existing: true,
+                note: None,
+            });
+        }
+    }
+    let Some(d) = declared else {
+        // The digest names one compiled program, so a row stored under it
+        // already is this program.
+        let existing = registry::get(pool, &program.version)
+            .await
+            .map_err(|e| format!("registry: {e}"))?
+            .is_some();
+        return Ok(Naming {
+            version: program.version.clone(),
+            existing,
+            note: None,
+        });
+    };
+    let mut n = stored.len() as u32 + 1;
+    let mut name = ordo_plan::artifact::revision_name(d, n);
+    while registry::get(pool, &name)
+        .await
+        .map_err(|e| format!("registry: {e}"))?
+        .is_some()
+    {
+        n += 1;
+        name = ordo_plan::artifact::revision_name(d, n);
+    }
+    let note = (!stored.is_empty()).then(|| {
+        format!(
+            "this program changes version {d} without a new `@` version; it is stored as \
+             {name}. Raise `domain … @ {d}` to give it a version of its own"
+        )
+    });
+    Ok(Naming {
+        version: name,
+        existing: false,
+        note,
+    })
 }
 
 /// The artifact the deployment is serving, or `None` when there is no
@@ -2491,6 +2598,20 @@ pub async fn apply_with(
     op: &str,
     choices: &Choices,
 ) -> (Result<Plan, String>, Result<Applied, ApplyRefusal>) {
+    // The name `ordo apply` will store it under, so the `$migrations` row
+    // written here names the same version (`name_version`). A database with
+    // no registry, or one no apply has touched since 2026-11-03, keeps the
+    // declared name, and the next apply's own record settles it.
+    let named;
+    let program = match name_version(pool, program).await {
+        Ok(n) if n.version != program.version => {
+            let mut p = program.clone();
+            p.version = n.version;
+            named = p;
+            &named
+        }
+        _ => program,
+    };
     let plan = match self::plan_with(pool, program, choices, None).await {
         Ok(p) => p,
         Err(e) => return (Err(e.clone()), Err(ApplyRefusal::Internal(e))),

@@ -156,10 +156,8 @@ async fn a_rollback_is_a_re_point_and_leaves_a_record() {
     assert_eq!(registry::stored(&pool).await.expect("stored").len(), 2);
 }
 
-/// A version hash is a content address, so the same name with a different
-/// source and different bytes is refused rather than overwritten. The same
-/// source built differently is a new build, not a collision
-/// (`tests/version_identity.rs`).
+/// A version hash is a content address, so the same name with different
+/// bytes is refused rather than overwritten.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_version_may_not_be_re_stored_with_different_bytes() {
     let db = "ordo_5f_collision";
@@ -169,7 +167,6 @@ async fn a_version_may_not_be_re_stored_with_different_bytes() {
     let mut a = artifact_of(WIDE, "operator:a");
     registry::store(&pool, &a).await.expect("stored");
     a.artifact.push_str("  \n");
-    a.source.push_str("\n-- edited\n");
     let refusal = registry::store(&pool, &a)
         .await
         .expect_err("a changed document under a stored version is refused");

@@ -167,15 +167,20 @@ pub fn render_diagnostic(src: &Sources, diag: &LoadDiagnostic) -> String {
 /// identical `Loaded` under a fresh name every time (which would defeat
 /// `Deployment::swap`'s own "nothing changed" check).
 ///
-/// It is the source identity `ordo apply` names the version by
-/// (`plan-versions.md` §1.1), function code included, so `ordo dev` serves
-/// under the name the program will deploy as.
+/// It reads as the version `ordo apply` would name (`plan-versions.md`
+/// §1.1): the declared `@` version, then `+dev.` and 12 hex of the source
+/// fingerprint, function code included, so each change to the files swaps.
 fn dev_version(root: &Path, text: &str, schema: &ordo_schema::Schema) -> String {
     use ordo_plan::artifact as a;
     let code = crate::function_code(root, schema)
         .map(|c| c.hashes)
         .unwrap_or_default();
-    a::source_identity(text, a::FIRST_EDITION, &code)
+    let print = a::source_identity(text, a::FIRST_EDITION, &code);
+    format!(
+        "{}+dev.{}",
+        a::declared_version(text).as_deref().unwrap_or("0.0.0"),
+        &print[..12]
+    )
 }
 
 /// What one compile produced: the journal so far, the rendered diagnostic

@@ -11963,8 +11963,28 @@ Board `program-versions-the-core-under-schema`, asks 5 to 7.
 - **Ask 7, "ok".** A version stored under the old 16-hex name keeps it.
   Tenant databases record the name, so a rename would mark every tenant
   behind on upgrade. The full identity is kept beside it.
-- **Ask 6, open.** The owner: "I personally don't think it should warrant a
-  new version." Built that way: the identity hashes the existing lexer's
-  tokens, which already drop comments and spacing. The mechanism is put
-  back to the owner.
+- **Ask 6, ruled in conversation.** The owner first: "I personally don't
+  think it should warrant a new version." Hashing the lexer's tokens was
+  built for that, then found to tie the identity to the lexer, which ships
+  with each release. The owner asked whether explicit versioning had been
+  dropped, then: "If it says it is different it is different....BUt if it
+  says its the same when somethign has changed is the problem. If it was
+  the same would we end up with the same generated content during the dry
+  run/plan", and "It can be compared to what already is and what ordo
+  version it was compiled against?" Then: "I don't want any hard blocks on
+  versioning - if someone is just changing spaces you know. It shouldnt be
+  a release to do a little linting." Ruled: "Alright make it so".
+  - The developer's declared `@` version names a version.
+  - An apply compiles the new source and compares the output with the
+    stored build of that number. When the stored build came from another
+    Ordo release, the stored source is recompiled under the running one
+    first, so only the developer's changes count.
+  - Same output: the same version. Lint and comments move nothing.
+  - Different output under the same number: kept as a revision
+    (`0.2.0+r2`) with a warning to bump. Never refused.
+  - A content fingerprint stays only as a check, for promotion between
+    environments.
+  - Reasoning: the result is the app's source times the Ordo release.
+    Each side owns its own changes, and comparing under one release keeps
+    Ordo's changes out of the developer's version.
 

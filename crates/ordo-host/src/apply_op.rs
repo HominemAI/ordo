@@ -637,21 +637,25 @@ async fn sequence(
         .await
         .map_err(|e| ApplyRefused::Internal(format!("registry tables: {e}")))?;
 
-    // **The name, before anything records it.** A source stored before
-    // 2026-11-03 keeps its 16-hex name, and the schema step below writes
-    // that name into `$migrations`. Taking the new one would mark every
-    // tenant behind an unchanged program (`plan-versions.md` §1.1, board
-    // `program-versions-the-core-under-schema` ask 7).
+    // **The name, before anything records it.** The declared `@` version
+    // names the program, settled by comparing it with what is stored under
+    // that number (`sa::name_version`, owner 2026-11-03). The schema step
+    // below writes the name into `$migrations`, so an unchanged program
+    // must keep the name it has, a 16-hex one included (ask 7), or every
+    // tenant would read as behind it.
+    let naming = sa::name_version(pool, program)
+        .await
+        .map_err(ApplyRefused::Internal)?;
+    let mut notes = notes;
+    notes.extend(naming.note.clone());
     let renamed;
-    let program = match registry::name_for(pool, &program.source_id).await {
-        Ok(Some(name)) if name != program.version => {
-            let mut p = program.clone();
-            p.version = name;
-            renamed = p;
-            &renamed
-        }
-        Ok(_) => program,
-        Err(e) => return Err(ApplyRefused::Internal(format!("registry: {e}"))),
+    let program = if naming.version != program.version {
+        let mut p = program.clone();
+        p.version = naming.version.clone();
+        renamed = p;
+        &renamed
+    } else {
+        program
     };
 
     // The schema, before the artifact: a first apply creates it, a match
@@ -715,7 +719,12 @@ async fn sequence(
         applied_at: ordo_commandlog::Timestamp(now_secs()),
         actor: actor.to_string(),
     };
-    let stored = match registry::store(pool, &artifact).await {
+    let stored = if naming.existing {
+        registry::rebuild(pool, &artifact).await
+    } else {
+        registry::store(pool, &artifact).await
+    };
+    let stored = match stored {
         Ok(registry::Applied::Stored(_)) => Stored::Written,
         Ok(registry::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
         Ok(registry::Applied::Rebuilt(_)) => Stored::Rebuilt,
@@ -1091,10 +1100,12 @@ pub struct Preview {
 pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused> {
     let (mut program, broken, notes) = compile_checked(source)?;
     // The name the apply would store it under (see `sequence`). A registry
-    // no apply has touched since 2026-11-03 has no `source_id` column yet,
+    // no apply has touched since 2026-11-03 has no `declared` column yet,
     // which reads as "not stored", and the apply then fills it in.
-    if let Ok(Some(name)) = registry::name_for(pool, &program.source_id).await {
-        program.version = name;
+    let mut notes = notes;
+    if let Ok(naming) = sa::name_version(pool, &program).await {
+        program.version = naming.version;
+        notes.extend(naming.note);
     }
     let serving = registry::active_version(pool).await.ok().flatten();
     let already_stored = registry::get(pool, &program.version)
@@ -1564,10 +1575,16 @@ mod tests {
         let parsed = parse_code(Some(&code_text(&code))).expect("round trips");
         assert_eq!(parsed, code);
         let mut program = Program::compile(WITH_FN).expect("compiles");
-        let before = program.version.clone();
+        let before = (program.source_id.clone(), program.build_id.clone());
         let store = bind_code(&mut program, &parsed).expect("binds");
         assert_eq!(store.len(), 1);
-        assert_ne!(program.version, before, "the code hash is in the version");
+        // The code hash is in the compiled program, which naming compares,
+        // and in both fingerprints.
+        assert_ne!(
+            program.source_id, before.0,
+            "the code hash is in the source fingerprint"
+        );
+        assert_ne!(program.build_id, before.1, "the code hash is in the build");
     }
 
     #[test]

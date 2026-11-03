@@ -13015,15 +13015,17 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
 - [x] **27e · Compiling is byte-stable across machines.** A test that the
       same source gives the same version hash anywhere; promotion by hash
       depends on it. `plan-environments.md` §2.1. Board: `environments`.
-      Built 2026-11-03 as increment 1 of `plan-versions.md`: a version is
-      named by its source identity, the full SHA-256 of the source (line
-      endings evened out), edition and function code hashes. Builds are
-      recorded apart in `$builds`. A version stored earlier keeps its
-      16-hex name. Tests `crates/ordo-plan/tests/version_identity.rs`
-      (`the_digest_is_fixed` pins the digest to a literal) and
-      `crates/ordo-host/tests/version_identity.rs`. Linux CI passed
-      `the_digest_is_fixed` 2026-11-03 (run 41713423054). Since ask 6
-      (2026-11-03) the text is hashed as the lexer's tokens. Board:
+      Built 2026-11-03 as increment 1 of `plan-versions.md`. The owner
+      ruled the same day that the declared `@` version names a version
+      (ask 6). An apply compares compiled programs under one Ordo release
+      to decide the name, so comments never count; a change under a used
+      number is a revision (`0.2.0+r2`) with a warning. The source
+      fingerprint, full SHA-256 of the files, is the byte-stable check
+      this item asks for; Linux CI matched its pinned value 2026-11-03
+      (run 41708525773).
+      Builds are recorded in `$builds`. Tests
+      `crates/ordo-plan/tests/version_identity.rs` and
+      `crates/ordo-host/tests/version_identity.rs`. Board:
       `program-versions-the-core-under-schema`.
 - [ ] **27f · Apply moves up one environment at a time.** dev by default,
       `--staging` and `--prod` refused until the step before runs the

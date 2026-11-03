@@ -190,6 +190,7 @@ async fn boot(stem: &str) -> (ordo_host::runtime::Runtime, Pg) {
         addr: free_addr(),
         shutdown_grace: Duration::from_secs(1),
         space: fixture_space(),
+        tightened: Vec::new(),
         custody: CustodyChoice::Test,
         token_secret: SECRET,
         page_key: ordo_api::PageKey::from_secret(&[8u8; 32]),

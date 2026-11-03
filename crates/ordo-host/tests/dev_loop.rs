@@ -523,6 +523,7 @@ async fn d3_hot_swap_serves_a_new_op_through_the_same_door() {
         addr: free_addr(),
         shutdown_grace: Duration::from_secs(1),
         space: fixture_space(),
+        tightened: Vec::new(),
         custody: CustodyChoice::Test,
         token_secret,
         page_key: ordo_api::PageKey::from_secret(&[8u8; 32]),

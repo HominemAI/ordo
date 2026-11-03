@@ -496,16 +496,18 @@ fn every_secret_setting_is_read_from_its_file_form() {
 }
 
 /// S6-009, ruled 2026-09-28: `ORDO_KEY_PROVIDER=local` is refused outside
-/// development. The refusal names both variables and points at the sealed
-/// file, and it lands before the dial. With the development flag the same
-/// configuration gets past custody, so the flag is proven to mean something.
+/// development. Since 2026-11-02 that holds for a new deployment only: one
+/// whose `$keycustody` is empty. The refusal names both variables and
+/// points at the sealed file, and it mints nothing. With the development
+/// flag the same configuration boots, so the flag is proven to mean
+/// something.
 #[test]
-fn the_local_provider_is_refused_outside_development() {
+fn the_local_provider_is_refused_for_a_new_deployment() {
+    const DB: &str = "ordo_rt_host_local_new";
+    let pg = empty_database(DB);
     let port = free_port();
-    let mut c = host("ordo_rt_host_never_dialled", port);
-    c.env_remove("ORDO_DEV_UNSAFE_TEST_KEYS")
-        .env("ORDO_PG_HOST", "203.0.113.1")
-        .env("ORDO_PG_PORT", "5432");
+    let mut c = host(DB, port);
+    c.env_remove("ORDO_DEV_UNSAFE_TEST_KEYS");
     let ran = run_to_completion(c);
     assert_ne!(ran.code, 0, "the local provider was accepted");
     for needle in [
@@ -520,7 +522,29 @@ fn the_local_provider_is_refused_outside_development() {
             ran.stderr
         );
     }
-    assert!(ran.elapsed < Duration::from_secs(3), "it dialled first");
+    let rows = pg
+        .query(r#"SELECT 1 FROM "$keycustody""#)
+        .expect("$keycustody exists");
+    assert!(
+        rows.is_empty(),
+        "a refused boot minted {} key(s)",
+        rows.len()
+    );
+
+    // `check-config` cannot tell new from running without a dial, so it
+    // passes and warns, rather than blocking an apply to a running one.
+    let mut c = host(DB, port);
+    c.arg("check-config")
+        .env_remove("ORDO_DEV_UNSAFE_TEST_KEYS")
+        .env("ORDO_PG_HOST", "203.0.113.1");
+    let ran = run_to_completion(c);
+    assert_eq!(ran.code, 0, "check-config refused: {}", ran.stderr);
+    assert!(
+        ran.stderr.contains("WARNING: ORDO_KEY_PROVIDER=`local`"),
+        "check-config did not warn: {}",
+        ran.stderr
+    );
+    assert!(ran.elapsed < Duration::from_secs(3), "check-config dialled");
 
     let mut c = host("ordo_rt_host_never_dialled", port);
     c.env("ORDO_DEV_UNSAFE_TEST_KEYS", "1")
@@ -536,6 +560,54 @@ fn the_local_provider_is_refused_outside_development() {
         ran.stderr.contains("database"),
         "expected the dial to be the next failure: {}",
         ran.stderr
+    );
+}
+
+/// Owner ruling 2026-11-02: "Upgrade should affect nothing." A deployment
+/// that already holds keys under `local` keeps serving after the upgrade
+/// that refuses it, warns at startup with the refusal's own text, and
+/// reports the warning on `/health/deep`, which the console shows.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_deployment_on_local_serves_and_warns() {
+    const DB: &str = "ordo_rt_host_local_running";
+    let _pool = deployment_ready(DB).await;
+    let port = free_port();
+    let mut c = host(DB, port);
+    c.env_remove("ORDO_DEV_UNSAFE_TEST_KEYS");
+    let mut child = c.spawn().expect("spawn");
+    wait_for_live(port, &mut child);
+
+    let (status, raw) = request(
+        port,
+        "GET",
+        "/health/deep",
+        &[(
+            "authorization",
+            &format!("Bearer {}", token_for("mem_o", true)),
+        )],
+        "",
+    );
+    assert_eq!(status, 200, "/health/deep: {raw}");
+    let body = json_body(&raw);
+    let warnings = body["warnings"].as_array().expect("a warnings list");
+    assert_eq!(warnings.len(), 1, "{body}");
+    assert_eq!(warnings[0]["setting"], "ORDO_KEY_PROVIDER");
+    assert_eq!(warnings[0]["value"], "local");
+    let message = warnings[0]["message"].as_str().unwrap_or("");
+    assert!(message.contains("sealed-master"), "{message}");
+
+    kill(&mut child, "TERM");
+    let out = child.wait_with_output().expect("wait");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stderr.contains("WARNING: ORDO_KEY_PROVIDER=`local`")
+            && stderr.contains("ORDO_MASTER_KEY_PASSPHRASE_FILE"),
+        "the boot did not warn: {stderr}"
+    );
+    assert!(
+        stdout.contains("WARNING     ORDO_KEY_PROVIDER"),
+        "the startup log did not repeat it: {stdout}"
     );
 }
 

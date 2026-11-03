@@ -301,8 +301,8 @@ what a provider can make the deployment read) and the group name limit of 120
 
 | Setting | What it does | Default | Built? | Deployment | App developer | Tenant | Person | Where |
 |---|---|---|---|---|---|---|---|---|
-| `ORDO_KEY_PROVIDER` | Selects custody: `local` (dev only), `sealed-master`, `test` (dev only) | none, required | built | sets | | | | host/runtime.rs:632-694 |
-| `ORDO_MASTER_KEY` | Plaintext master key in the environment, or under `local` a file holding it in `ORDO_MASTER_KEY_FILE` (both set refuses the boot). Refused outside development | none | built | sets | | | | crypto/master.rs:125-156; host/runtime.rs:641 |
+| `ORDO_KEY_PROVIDER` | Selects custody: `local` (dev only), `sealed-master`, `test` (dev only). Outside development `local` refuses a new deployment (empty `$keycustody`). A running one keeps serving and warns at startup and under `warnings` on `/health/deep`, shown on the console's Health screen (owner, 2026-11-02). `check-config` passes it with the warning | none, required | built | sets | | | | host/runtime.rs:632-694 |
+| `ORDO_MASTER_KEY` | Plaintext master key in the environment, or under `local` a file holding it in `ORDO_MASTER_KEY_FILE` (both set refuses the boot). Refused outside development for a new deployment; a running one serves with a warning (see `ORDO_KEY_PROVIDER`) | none | built | sets | | | | crypto/master.rs:125-156; host/runtime.rs:641 |
 | `ORDO_MASTER_KEY_FILE` | The sealed master key file from `ordo keys seal-master`. Under `local`, a file holding the plaintext key | none, required for `sealed-master` | built | sets | | | | host/runtime.rs:659; crypto/master.rs:128 |
 | `ORDO_MASTER_KEY_PASSPHRASE_FILE` | The passphrase file that opens the sealed master | none, required for `sealed-master` | built | sets | | | | host/runtime.rs:663; crypto/master.rs:129 |
 | `ORDO_DEV_UNSAFE_TEST_KEYS` | Allows the local and test providers | off | built | sets | | | | crypto/master.rs:109; host/runtime.rs:636 |

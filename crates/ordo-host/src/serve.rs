@@ -205,6 +205,10 @@ pub struct PlatformState {
     /// drain's `wired: false` exists: a surface missing because nobody wired
     /// it must not look like one with nothing in it.
     pub pools: Option<Arc<dyn ordo_exec::route::PoolResolver>>,
+    /// Tightened settings this running deployment still sets (owner,
+    /// 2026-11-02), listed under `warnings` on `/health/deep`, which the
+    /// console's Health screen shows. Empty is the ordinary answer.
+    pub warnings: Vec<crate::tightened::Tightened>,
 }
 
 impl PlatformState {
@@ -243,6 +247,7 @@ impl PlatformState {
             access_kept_stale: None,
             credential_labels: None,
             pools: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -326,6 +331,12 @@ impl PlatformState {
     /// the deployment does.
     pub fn with_pools(mut self, pools: Arc<dyn ordo_exec::route::PoolResolver>) -> PlatformState {
         self.pools = Some(pools);
+        self
+    }
+
+    /// Attach the warnings the boot settled ([`crate::tightened::settle`]).
+    pub fn with_warnings(mut self, warnings: Vec<crate::tightened::Tightened>) -> PlatformState {
+        self.warnings = warnings;
         self
     }
 }
@@ -888,6 +899,11 @@ async fn health_deep(State(state): State<PlatformState>, headers: HeaderMap) -> 
             "supervisor": state.supervisor.as_ref().map(|s| s.overview()),
             "asked_by": principal,
             "space": state.space,
+            // Owner, 2026-11-02: a setting an upgrade tightened that this
+            // running deployment still sets, each naming the setting and
+            // the fix. It does not colour the status: the deployment
+            // serves correctly, and the ruling is that it keeps serving.
+            "warnings": state.warnings.iter().map(|w| w.json()).collect::<Vec<_>>(),
             // P3: how many people hold a tenant of their own, `null` when
             // the registry cannot be read.
             "own_tenants": crate::self_serve::count_own_tenants(&state.pool).await,

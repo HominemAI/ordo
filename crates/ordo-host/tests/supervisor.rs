@@ -54,6 +54,7 @@ fn config(db: &str) -> RuntimeConfig {
         addr: "127.0.0.1:0".parse().expect("addr"),
         shutdown_grace: Duration::from_secs(5),
         space: ordo_crypto::SpaceId(SPACE.into()),
+        tightened: Vec::new(),
         custody: CustodyChoice::SealedMaster {
             path: key_file(),
             passphrase: pass_file(),

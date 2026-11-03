@@ -152,6 +152,11 @@ pub struct RuntimeConfig {
     pub shutdown_grace: Duration,
     pub space: SpaceId,
     pub custody: CustodyChoice,
+    /// Settings this release refuses that the deployment still sets
+    /// (owner ruling 2026-11-02). Settled at boot by
+    /// [`crate::tightened::settle_on`]: a new deployment is refused, a
+    /// running one serves with a warning. Empty in every in-process harness.
+    pub tightened: Vec<crate::tightened::Tightened>,
     /// The 32 bytes behind the token key. Held rather than the `TokenKey`
     /// itself because a program swap rebuilds the door and `TokenKey` is
     /// deliberately not `Clone`.
@@ -1408,17 +1413,22 @@ impl RuntimeConfig {
             "custody is selected explicitly, never inferred from which other variables are set",
         )?;
         let dev_unsafe = ordo_crypto::master::dev_unsafe_from_env();
+        let mut tightened = Vec::new();
         let custody = match provider.trim() {
-            // S6-009, ruled 2026-09-28: one HMAC is the whole stretch, so
-            // outside development the env master is refused, before the
-            // secret is read and before any dial.
-            "local" if !dev_unsafe => {
-                return Err(BootRefusal::Invalid {
-                    var: "ORDO_KEY_PROVIDER",
-                    detail: format!("`local`: {}", ordo_crypto::master::env_master_refusal()),
-                })
-            }
             "local" => {
+                // S6-009, ruled 2026-09-28: one HMAC is the whole stretch,
+                // so outside development the env master is refused. Since
+                // 2026-11-02 that refusal reaches a new deployment only; a
+                // running one serves with a warning. Which it is needs the
+                // database, so it is settled after the dial.
+                if !dev_unsafe {
+                    tightened.push(crate::tightened::Tightened::new(
+                        "ORDO_KEY_PROVIDER",
+                        "local",
+                        "2026-09-29",
+                        ordo_crypto::master::env_master_refusal(),
+                    ));
+                }
                 // Opened here rather than at construction so the refusal
                 // lands before the dial, with every other refusal. The
                 // bytes are dropped; `build_custody` opens the source again
@@ -1748,6 +1758,7 @@ impl RuntimeConfig {
             shutdown_grace,
             space,
             custody,
+            tightened,
             token_secret,
             page_key,
             checkpoint,
@@ -3323,6 +3334,10 @@ pub fn now_secs() -> u64 {
 pub struct Runtime {
     /// What the startup log prints for custody. A label, never material.
     pub custody_label: &'static str,
+    /// Tightened settings this running deployment still sets, printed last
+    /// in the startup log and reported on `/health/deep`
+    /// ([`crate::tightened`]).
+    pub warnings: Vec<crate::tightened::Tightened>,
     /// Recorded, printed, and acted on by nothing — see
     /// [`RuntimeConfig::from_env`].
     pub apex_domain: Option<String>,
@@ -3654,6 +3669,11 @@ async fn assemble_program(
     ordo_exec::keystore::ensure_tables(&pool)
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
+    // Owner, 2026-11-02: a setting this release tightened refuses a new
+    // deployment and warns a running one. Here, after the dial and before
+    // custody mints the system space's key, so a refused deployment holds
+    // no key afterwards and a running one is told apart by the keys it has.
+    let warnings = crate::tightened::settle_on(&cfg.tightened, &pool).await?;
     // The security recorder is made here, ahead of the custody that records
     // each release into it, the auth state that writes to it, and the drain
     // and door that read it: one recorder, so a key release, a refusal at
@@ -4983,7 +5003,8 @@ async fn assemble_program(
     // parsed — `blob_label` is `Some` only once `blob_from_env` produced a
     // working `BlobBinding` above.
     .with_blob_label(blob_label.clone())
-    .with_credential_labels(credential_labels);
+    .with_credential_labels(credential_labels)
+    .with_warnings(warnings.clone());
     // What enrolment adds to the sign-in routes: tickets, the admission a
     // sign-in that names a tenant runs, and the credential ops a forced
     // password change needs. They are the platform ops' own, so a ticket
@@ -5291,6 +5312,7 @@ async fn assemble_program(
     Ok(Runtime {
         mail: cfg.mail.clone(),
         custody_label: custody_choice.label(),
+        warnings,
         auth_label: cfg.auth.as_ref().map(|a| {
             format!(
                 "{} over $credential; session {}s, ceiling {}s; {}",
@@ -5935,6 +5957,11 @@ impl Runtime {
             self.usage_flush.as_secs(),
             self.usage_rollup.as_secs(),
         );
+        // Last, so it is the line a deployment owner reads first in a
+        // tail. The boot already said it on stderr; this is stdout's copy.
+        for w in &self.warnings {
+            println!("  WARNING     {}", w.warning());
+        }
     }
 
     /// The door's signing secret. Not the field itself (kept private so an

@@ -11922,3 +11922,33 @@ Owner comments:
   setting with a secure default (`plan-versions.md` §7).
 - Blue-green and more elaborate rollout strategies are to be considered,
   possibly for V2. They are kept out of the V1 build order (§3.6).
+
+## 2026-11-02: the sploosh freeze and the live deployment's restart
+
+Board tasks `sploosh-froze-under-ci-load-and` and
+`the-live-deployment-stopped-starting-after`, and ask 2 of
+`versions-plan-review-serving-sharing-and`.
+
+- **Runner memory.** Runner pods request and cap memory: runner 3Gi and 8Gi,
+  dind 1Gi and 4Gi. sploosh stalled with 4 nightly runs on unbounded pods
+  and no swap. A capped job is killed; an unbounded one stalls the node.
+  This replaces the earlier "no" on reserving runner memory, given before
+  the freeze.
+- **k3s reserves memory** for the node's own processes, Tailscale among
+  them, and evicts pods before memory runs out.
+- **Nightly runs** happen only when the code changed since the last one, and
+  run one after another. Unchanged code gives the same result, so a rerun
+  buys nothing.
+- **ordo-host gets no priority class.** The owner said no.
+- **The live deployment** had nothing to recover, so it restarts on a fresh
+  sealed master key. The development key flag is used only if needed to
+  confirm behaviour.
+- **An upgrade that tightens a setting** keeps a running deployment serving
+  with a loud warning and refuses only new ones. "Upgrade should affect
+  nothing."
+- **Images are pinned by tag, not digest.** The live deployment pins a
+  release tag (`v0.5.0` cut 2026-11-02).
+- **Revocation (D8).** Only the deployment owner marks a version revoked.
+  Ordo never decides a flaw and only warns, and its warnings are visible in
+  the Ordo console. After the mark, tenants move in their maintenance
+  windows.

@@ -2,7 +2,7 @@
 
 Status: **build plan, revised 2026-11-02 after review.** The owner ruled the
 plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Asks 5 to
-7, from building increment 1, are open (§5). The rehearsal design (§3.2) is
+7, from building increment 1: 5 and 7 ruled 2026-11-03, 6 open (§5). The rehearsal design (§3.2) is
 provisional. Increment 1 built 2026-11-03.
 Review: `review-plan-versions.md` (54 findings). Rulings:
 `corpus-rulings.md`, "2026-11-02: program versions plan and its review".
@@ -55,9 +55,10 @@ Built 2026-11-03 (increment 1):
 - `ordo_plan::artifact::source_identity` hashes the source text, the
   edition and each function's code hash by path. Each part is
   length-prefixed.
-- The text is hashed as written. A byte-order mark is dropped and CRLF
-  becomes LF. Comments count (ask 6).
-- A source with no edition line is edition 1 (ask 5).
+- The text is hashed as the lexer's tokens, so comments, spacing and
+  blank lines are not a new version (owner, 2026-11-03, ask 6). A newline
+  between statements counts. A lexer change is an edition change.
+- A source with no edition line is edition 1 (ask 5, ruled 2026-11-03).
 - `build_identity` hashes the document, the DDL and the Ordo release. Each
   build is a `$builds` row.
 - A version stored before keeps its 16-hex name. The registry fills in
@@ -553,9 +554,12 @@ See `corpus-rulings.md`. Building increment 1 raised three, on the board
 task `program-versions-the-core-under-schema`. Increment 1 is built on
 their recommendations:
 
-- Ask 5: a source with no edition line is edition 1 for good.
-- Ask 6: a comment or spacing change is a new version.
-- Ask 7: a version stored under a 16-hex name keeps it.
+- Ask 5, ruled 2026-11-03: a source with no edition line is edition 1 for
+  good.
+- Ask 6: the owner does not want a comment or spacing change to be a new
+  version. Built that way 2026-11-03 by hashing the lexer's tokens; the
+  mechanism is put back to the owner.
+- Ask 7, ruled 2026-11-03: a version stored under a 16-hex name keeps it.
 
 ---
 

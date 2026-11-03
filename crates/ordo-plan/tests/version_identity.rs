@@ -23,13 +23,13 @@ fn no_code() -> BTreeMap<String, String> {
 /// literal, so macOS (where it is written) and Linux (where CI runs it) must
 /// both produce these exact bytes. A change here is a change to every
 /// version's name: it needs a new encoding tag, not a new literal.
-/// The literal was checked against a separate Python computation of the
-/// same length-prefixed encoding.
+/// The literal was checked against a separate Python computation over
+/// the lexer's 19 tokens for `SOURCE`.
 #[test]
 fn the_digest_is_fixed() {
     assert_eq!(
         source_identity(SOURCE, FIRST_EDITION, &no_code()),
-        "723bf4f210a67eedeac0d908d1a0fed7dca94605a0ab0e384db6dee2b0552ee6"
+        "7f188f86ef775afb08e7195178ecb9c410c77f0b3fe5958e51bf77a930fc8a26"
     );
 }
 
@@ -52,14 +52,34 @@ fn line_endings_and_a_byte_order_mark_are_evened_out() {
     assert_eq!(source_identity(&bom, FIRST_EDITION, &no_code()), lf);
 }
 
-/// Ask 6: the text is hashed as written, so a comment is a new version.
+/// Ask 6 (owner, 2026-11-03): comments, spacing and blank lines are not a
+/// new version.
 #[test]
-fn a_comment_is_a_new_version() {
-    let commented = format!("-- the notes app\n{SOURCE}");
-    assert_ne!(
-        source_identity(&commented, FIRST_EDITION, &no_code()),
-        source_identity(SOURCE, FIRST_EDITION, &no_code())
-    );
+fn comments_and_spacing_are_not_a_new_version() {
+    let base = source_identity(SOURCE, FIRST_EDITION, &no_code());
+    let edited = "# the notes app\ndomain notes @ 1.0.0\n\n\n\
+                  entity note {   # one entity\n\tbody:   text(200)\n}\n";
+    assert_eq!(source_identity(edited, FIRST_EDITION, &no_code()), base);
+}
+
+/// What the program says still counts, a newline between statements
+/// included.
+#[test]
+fn a_changed_token_is_a_new_version() {
+    let base = source_identity(SOURCE, FIRST_EDITION, &no_code());
+    let wider = SOURCE.replace("200", "300");
+    assert_ne!(source_identity(&wider, FIRST_EDITION, &no_code()), base);
+    let joined = "domain notes @ 1.0.0 entity note {\n  body: text(200)\n}\n";
+    assert_ne!(source_identity(joined, FIRST_EDITION, &no_code()), base);
+}
+
+/// A source the lexer refuses is still named, by its text.
+#[test]
+fn a_source_that_does_not_lex_is_named_by_its_text() {
+    let a = source_identity("Bad_name", FIRST_EDITION, &no_code());
+    let b = source_identity("Bad_name ", FIRST_EDITION, &no_code());
+    assert_eq!(a.len(), 64);
+    assert_ne!(a, b);
 }
 
 #[test]

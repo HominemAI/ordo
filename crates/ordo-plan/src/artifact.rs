@@ -441,10 +441,13 @@ pub const ORDO_RELEASE: &str = env!("CARGO_PKG_VERSION");
 /// not in it, so an Ordo release that renders the same source differently
 /// moves no version; that is [`build_identity`]'s job.
 ///
-/// The text is hashed as written, with only its line endings evened out:
-/// a byte-order mark is dropped and CRLF becomes LF, so a Windows checkout
-/// and a Linux one agree. Comments and spacing count (ask 6). Stripping
-/// them needs the parser, and the parser changes between releases.
+/// The text is hashed as the lexer reads it: each token's text, in order,
+/// with comments, spacing and blank lines gone, so an edit to those alone
+/// is not a new version (owner, 2026-11-03, ask 6). A newline that
+/// separates statements is a token and counts. CRLF and LF read the same.
+/// The lexer is release code, so a change to how it splits a source is an
+/// edition change; `the_digest_is_fixed` fails if one slips in. A source
+/// that does not lex is hashed as written; it does not compile either.
 ///
 /// Settings values sit outside it (D6): nothing bound at the target is an
 /// input here.
@@ -457,7 +460,6 @@ pub fn source_identity(
     code: &std::collections::BTreeMap<String, String>,
 ) -> String {
     let text = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let text = text.replace("\r\n", "\n");
     let mut h = Sha256::new();
     let mut part = |bytes: &[u8]| {
         h.update((bytes.len() as u64).to_be_bytes());
@@ -465,7 +467,22 @@ pub fn source_identity(
     };
     part(b"ordo source identity 1");
     part(&edition.to_be_bytes());
-    part(text.as_bytes());
+    match ordo_syntax::lex(text) {
+        Ok(tokens) => {
+            part(b"tokens");
+            for t in &tokens {
+                match t.kind {
+                    ordo_syntax::TokenKind::Newline => part(b"\n"),
+                    _ => part(&text.as_bytes()[t.span.start..t.span.end]),
+                }
+            }
+        }
+        Err(_) => {
+            part(b"text");
+            part(text.replace("\r\n", "\n").as_bytes());
+        }
+    }
+    part(b"code");
     for (path, hash) in code {
         part(path.as_bytes());
         part(hash.as_bytes());

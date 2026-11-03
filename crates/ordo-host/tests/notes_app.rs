@@ -447,7 +447,9 @@ impl Deployment {
             ),
             "{report:?}"
         );
-        let swapped = format!("-> {}", program.version);
+        // The name the apply stored it under: a program stored before under
+        // its 16-hex name keeps that name (plan-versions.md §1.1, ask 7).
+        let swapped = format!("-> {}", report.version);
         eventually("the server swaps to the new version", || {
             self.log().contains(&swapped).then_some(())
         });

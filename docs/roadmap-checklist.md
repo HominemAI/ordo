@@ -13012,7 +13012,7 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       over existing rows (no `NOT VALID` form). Tests
       `crates/ordo-host/tests/apply_lock_timeout.rs`, `apply_not_valid.rs`.
       Board: `apply-lock-timeout`.
-- [ ] **27e · Compiling is byte-stable across machines.** A test that the
+- [x] **27e · Compiling is byte-stable across machines.** A test that the
       same source gives the same version hash anywhere; promotion by hash
       depends on it. `plan-environments.md` §2.1. Board: `environments`.
       Built 2026-11-03 as increment 1 of `plan-versions.md`: a version is
@@ -13021,8 +13021,9 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       recorded apart in `$builds`. A version stored earlier keeps its
       16-hex name. Tests `crates/ordo-plan/tests/version_identity.rs`
       (`the_digest_is_fixed` pins the digest to a literal) and
-      `crates/ordo-host/tests/version_identity.rs`. Closes when Linux CI
-      passes `the_digest_is_fixed`. Board:
+      `crates/ordo-host/tests/version_identity.rs`. Linux CI passed
+      `the_digest_is_fixed` 2026-11-03 (run 41713423054). Since ask 6
+      (2026-11-03) the text is hashed as the lexer's tokens. Board:
       `program-versions-the-core-under-schema`.
 - [ ] **27f · Apply moves up one environment at a time.** dev by default,
       `--staging` and `--prod` refused until the step before runs the

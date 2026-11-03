@@ -1,8 +1,9 @@
 # Program versions: the core under schema evolution and environments
 
 Status: **build plan, revised 2026-11-02 after review.** The owner ruled the
-plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Nothing is
-open. The rehearsal design (§3.2) is provisional.
+plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Asks 5 to
+7, from building increment 1, are open (§5). The rehearsal design (§3.2) is
+provisional. Increment 1 built 2026-11-03.
 Review: `review-plan-versions.md` (54 findings). Rulings:
 `corpus-rulings.md`, "2026-11-02: program versions plan and its review".
 Joins `plan-schema-evolution.md`, `plan-evolution-plans.md` and
@@ -48,6 +49,23 @@ A version has two identities:
 - **Settings** (D6): per-environment and runtime values sit outside the
   hash and are bound at the target. Their declaration sits inside it.
   Rollout settings are per environment.
+
+Built 2026-11-03 (increment 1):
+
+- `ordo_plan::artifact::source_identity` hashes the source text, the
+  edition and each function's code hash by path. Each part is
+  length-prefixed.
+- The text is hashed as written. A byte-order mark is dropped and CRLF
+  becomes LF. Comments count (ask 6).
+- A source with no edition line is edition 1 (ask 5).
+- `build_identity` hashes the document, the DDL and the Ordo release. Each
+  build is a `$builds` row.
+- A version stored before keeps its 16-hex name. The registry fills in
+  its `source_id`, and an apply of the same source finds it (ask 7).
+- The same source built differently by a release updates the stored
+  document and DDL and records the build. It is not a collision.
+- Command output still prints the whole name, because `ordo rollback`
+  takes it exactly. The 16-hex display comes with labels in increment 2.
 
 ### 1.2 Where versions are stored
 
@@ -530,8 +548,14 @@ What sets the pace:
 
 ## 5 · Open decisions
 
-None. The plan's asks 1 to 4 and the review's D1 to D17 were ruled
-2026-11-02. See `corpus-rulings.md`.
+The plan's asks 1 to 4 and the review's D1 to D17 were ruled 2026-11-02.
+See `corpus-rulings.md`. Building increment 1 raised three, on the board
+task `program-versions-the-core-under-schema`. Increment 1 is built on
+their recommendations:
+
+- Ask 5: a source with no edition line is edition 1 for good.
+- Ask 6: a comment or spacing change is a new version.
+- Ask 7: a version stored under a 16-hex name keeps it.
 
 ---
 
@@ -546,12 +570,12 @@ Still open:
 1. **The code holds behind tenants closed.** 25i's `SchemaBehind` and the
    15-second catch-up are what 27c replaces. `plan-schema-evolution.md`
    §8.3 reads as current behaviour.
-2. **`ordo dev` versions are not hashes.** `dev.rs` labels them `dev-` plus
-   6 bytes of the source's SHA-256 and writes no `$artifacts` row.
-   Increment 1 fixes it.
-3. **The version is 64 bits.** `artifact.rs:412-417` keeps 8 bytes, and
-   `registry.rs:147` says the version is "a *name* rather than a security
-   boundary". Ruled 2026-11-02: the full digest is the identity.
+2. **`ordo dev` versions are not hashes.** Fixed 2026-11-03: `dev.rs`
+   names a save by its source identity, function code included. It still
+   writes no `$artifacts` row, because dev saves are ephemeral (§3.3).
+3. **The version is 64 bits.** Fixed 2026-11-03 for new versions: the name
+   is the full source identity. A version stored earlier keeps its 16-hex
+   name, and its full identity sits beside it in `source_id`.
 4. **A load does not check the version.** `deploy.rs:466-505` passes
    `stored.version` through as a label. Increment 3 recomputes it.
 5. **`plan-environments.md` gates on activation.** Its §2.1 refuses

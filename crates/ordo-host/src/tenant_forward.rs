@@ -166,7 +166,7 @@ impl CatchUp {
             return None;
         }
         // From the artifact and not from its source alone: a function's
-        // code hash is in the stored document, and without it the version
+        // code hash is in the stored document, and without it the build
         // differs and no tenant is ever brought forward.
         let program = match Program::from_artifact(&artifact) {
             Ok(p) => Arc::new(p),
@@ -175,11 +175,10 @@ impl CatchUp {
                 return None;
             }
         };
-        if program.version != serving {
+        if !program.builds_as(&artifact) {
             eprintln!(
-                "tenant catch-up: the serving artifact {serving} compiles to {} with this \
-                 build, so no tenant database is brought forward",
-                program.version
+                "tenant catch-up: this Ordo release builds the serving version {serving} \
+                 differently from the stored build, so no tenant database is brought forward"
             );
             return None;
         }

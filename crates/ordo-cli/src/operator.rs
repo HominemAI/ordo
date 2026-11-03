@@ -1907,14 +1907,8 @@ async fn apply(flags: Flags) -> Outcome {
         Ok(d) => d,
         Err(e) => return Outcome::failed(format!("ddl: {e}\n")),
     };
-    let version = ordo_plan::artifact::program_version(&doc, &ddl);
-    let program = ordo_host::schema_apply::Program {
-        schema,
-        doc,
-        ddl,
-        version,
-        source: src.text().to_string(),
-    };
+    let program =
+        ordo_host::schema_apply::Program::assemble(schema, doc, ddl, src.text().to_string());
 
     let pool = match connect(&flags).await {
         Ok(p) => p,
@@ -2035,6 +2029,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
         Stored::Written => format!("stored     {}\n", report.version),
         Stored::AlreadyPresent => format!(
             "stored     {}  (already present, byte-identical)\n",
+            report.version
+        ),
+        Stored::Rebuilt => format!(
+            "stored     {}  (already present; this Ordo release built it anew)\n",
             report.version
         ),
     });

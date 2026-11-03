@@ -369,8 +369,15 @@ fn declaration_digest(r: &ordo_syntax::RoutineDecl) -> String {
     hex(&Sha256::digest(kept.as_bytes())[..8])
 }
 
-/// The **program version hash** — what `ordo apply` keys the artifact
-/// registry on, and what a rollback re-points at.
+/// The **build digest, 16 hex**: the name every version stored before
+/// 2026-11-03 carries, and the comparison a catch-up makes to ask "does this
+/// release build the stored version the same way".
+///
+/// It is no longer a version's identity. That is [`source_identity`], which
+/// an Ordo release cannot move (`plan-versions.md` §1.1, ruled 2026-11-02).
+/// A version stored under this name keeps it (board
+/// `program-versions-the-core-under-schema` ask 7), because every tenant
+/// database records the name it is at.
 ///
 /// It is the digest of the byte-stable document, **and of the DDL that
 /// document's schema generates**, not a fold of the per-op `version` hashes.
@@ -415,6 +422,96 @@ pub fn program_version(doc: &Value, ddl: &str) -> String {
     h.update([0u8]);
     h.update(ddl.as_bytes());
     hex(&h.finalize()[..8])
+}
+
+/// The language edition a source with no edition line is written in:
+/// today's language, for good (board `program-versions-the-core-under-schema`
+/// ask 5). A missing line then means the same thing under every Ordo
+/// release. Later editions are named in the source (increment 6b).
+pub const FIRST_EDITION: u32 = 1;
+
+/// The Ordo release this build is, as `$builds` records it.
+pub const ORDO_RELEASE: &str = env!("CARGO_PKG_VERSION");
+
+/// A version's **source identity**: the full SHA-256 of what the developer
+/// wrote, in 64 hex (`plan-versions.md` §1.1, ruled 2026-11-02, D1).
+///
+/// It covers the `.ordo` text, the language edition, and each function's
+/// code by its [`code_hash`], keyed by its path. The compiler's output is
+/// not in it, so an Ordo release that renders the same source differently
+/// moves no version; that is [`build_identity`]'s job.
+///
+/// The text is hashed as written, with only its line endings evened out:
+/// a byte-order mark is dropped and CRLF becomes LF, so a Windows checkout
+/// and a Linux one agree. Comments and spacing count (ask 6). Stripping
+/// them needs the parser, and the parser changes between releases.
+///
+/// Settings values sit outside it (D6): nothing bound at the target is an
+/// input here.
+///
+/// Each part is length-prefixed, so no text, path or hash can be re-cut
+/// into another set with the same bytes.
+pub fn source_identity(
+    source: &str,
+    edition: u32,
+    code: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let text = text.replace("\r\n", "\n");
+    let mut h = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        h.update((bytes.len() as u64).to_be_bytes());
+        h.update(bytes);
+    };
+    part(b"ordo source identity 1");
+    part(&edition.to_be_bytes());
+    part(text.as_bytes());
+    for (path, hash) in code {
+        part(path.as_bytes());
+        part(hash.as_bytes());
+    }
+    hex(&h.finalize())
+}
+
+/// A version's **build identity**: the full SHA-256 of what this Ordo
+/// release compiled it to, the document and the DDL, and the release
+/// itself. Recorded per build in `$builds`; it drives no pin.
+pub fn build_identity(doc: &Value, ddl: &str, release: &str) -> String {
+    build_identity_of(&to_bytes(doc), ddl, release)
+}
+
+/// [`build_identity`] of a document already in its [`to_bytes`] form, as
+/// the registry stores it.
+pub fn build_identity_of(doc_bytes: &str, ddl: &str, release: &str) -> String {
+    let mut h = Sha256::new();
+    for bytes in [doc_bytes.as_bytes(), ddl.as_bytes(), release.as_bytes()] {
+        h.update((bytes.len() as u64).to_be_bytes());
+        h.update(bytes);
+    }
+    hex(&h.finalize())
+}
+
+/// Each function's code hash in a compiled document, by code path: the
+/// part of [`source_identity`] a stored artifact carries in its document
+/// rather than its source.
+pub fn code_hashes(doc: &Value) -> std::collections::BTreeMap<String, String> {
+    doc["functions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            Some((
+                f["code"].as_str()?.to_string(),
+                f["code_hash"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// A version as a person reads it: 16 hex characters. Display only; every
+/// comparison uses the whole name.
+pub fn short(version: &str) -> &str {
+    version.get(..16).unwrap_or(version)
 }
 
 /// One op's artifact. Filtering (`ordo plan <dir> <op>`) selects from

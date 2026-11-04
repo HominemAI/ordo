@@ -12080,3 +12080,11 @@ Board task `program-versions-the-core-under-schema`, asks 16 and 17. The owner a
 - **Ask 16.** The check that a tenant's pin did not move mid-write (the pin epoch, V-19) is built in increment 3. Until then every tenant is served one version, so the check guards nothing. A tenant's data can sit in its own database, apart from `$spaces`, so increment 3 also decides where the check reads its epoch.
 - **Ask 17.** The pin stream that other nodes tail (V-54) is built in increment 3 with the node code that reads it. Built now, it would be tested only against itself.
 - **What this closes.** Increment 2 is complete: pins with history, labels, the git commit, `ordo versions list|show|label|diff`.
+
+## 2026-11-04: revoking a version
+
+Board task `program-versions-the-core-under-schema`, asks 18 to 20. These build on D8 (2026-11-02).
+
+- **Ask 18, "ok".** Revoking the version tenants are on now is refused unless the command names where they go (`--move-to`). Ordo never picks a replacement.
+- **Ask 19, "Lets bring maintenance window in now."** The recommendation was to move tenants off a revoked version at once until windows exist in increment 10. The owner chose to build the per-tenant maintenance window now (ruled 2026-09-21, review V-26) instead. Until increment 3 one version serves every tenant, so asks 21 and 22 put when window-timed moves can work, and what a window is.
+- **Ask 20, "ok".** A revoke can be undone (`ordo versions unrevoke`). Both acts and their reasons stay on record.

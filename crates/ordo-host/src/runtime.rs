@@ -2060,6 +2060,8 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             apply_op::APPLY => true,
             // G1 to G3, wired with `APPLY`'s state.
             name if crate::deploy_ops::OPS.contains(&name) => true,
+            // Maintenance windows, wired with the same state.
+            name if crate::window_ops::OPS.contains(&name) => true,
             // 17aa piece 3 and 11-15: wired unconditionally in `assemble`
             // (`with_tenants`, `with_reap`), and until 2026-09-29 missing
             // here, so the binary answered 404 for both.
@@ -3771,7 +3773,10 @@ async fn assemble_program(
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
     versions.check_new_tenant().await.map_err(|e| match e {
-        crate::versions::VersionRefusal::Setting { .. } => BootRefusal::Invalid {
+        crate::versions::VersionRefusal::Setting { .. }
+        | crate::versions::VersionRefusal::Revoked {
+            setting: Some(_), ..
+        } => BootRefusal::Invalid {
             var: crate::versions::NEW_TENANT_ENV,
             detail: e.to_string(),
         },

@@ -13,6 +13,14 @@
 //! - `std.deployment.diff($a, $b)`: what changed between two stored
 //!   versions. What `ordo versions diff --host` prints
 //!   ([`crate::versions_diff`]).
+//! - `std.deployment.revoke($version, $reason, $moveTo?)`: mark a stored
+//!   version revoked, moving the deployment to `$moveTo` first when it is
+//!   the active one (`plan-versions.md` §1.11). What `ordo versions revoke
+//!   --host` does ([`apply_op::revoke`]).
+//! - `std.deployment.unrevoke($version, $reason)`: lift the mark. What
+//!   `ordo versions unrevoke --host` does.
+//! - `std.deployment.revoked`: each revoked version and the tenants pinned
+//!   to it. What `ordo versions revoked --host` prints.
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -50,8 +58,16 @@ pub const PLAN: &str = "std.deployment.plan";
 pub const LABEL: &str = "std.deployment.label";
 /// Two stored versions, compared.
 pub const DIFF: &str = "std.deployment.diff";
+/// Mark a stored version revoked (D8).
+pub const REVOKE: &str = "std.deployment.revoke";
+/// Lift a revoke mark (ask 20).
+pub const UNREVOKE: &str = "std.deployment.unrevoke";
+/// The revoked versions and the tenants pinned to them.
+pub const REVOKED: &str = "std.deployment.revoked";
 
-pub const OPS: [&str; 5] = [VERSIONS, ACTIVATE, PLAN, LABEL, DIFF];
+pub const OPS: [&str; 8] = [
+    VERSIONS, ACTIVATE, PLAN, LABEL, DIFF, REVOKE, UNREVOKE, REVOKED,
+];
 
 /// The activation log's length when the caller names none.
 pub const DEFAULT_LIMIT: i64 = 20;
@@ -166,7 +182,44 @@ pub fn specs() -> Vec<OpSpec> {
             ],
             &["a", "b", "schema", "source"],
         ),
+        spec(
+            REVOKE,
+            OpKind::Write,
+            vec![
+                version_param("version"),
+                reason_param(),
+                ParamSpec {
+                    // Required by the `Versions` client when `version` is
+                    // the active one, and refused when it is not.
+                    name: "moveTo".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: false,
+                    bounds: None,
+                },
+            ],
+            &["version", "ordinal", "revoked", "moved"],
+        ),
+        spec(
+            UNREVOKE,
+            OpKind::Write,
+            vec![version_param("version"), reason_param()],
+            &["version", "ordinal", "revoked"],
+        ),
+        spec(REVOKED, OpKind::Read, vec![], &["versions"]),
     ]
+}
+
+fn reason_param() -> ParamSpec {
+    ParamSpec {
+        // At most 500 characters, which the `Versions` client checks and
+        // names; this bound is only a ceiling.
+        name: "reason".to_string(),
+        ty: ParamTy::Text {
+            max_len: Some(4096),
+        },
+        required: true,
+        bounds: None,
+    }
 }
 
 fn version_param(name: &str) -> ParamSpec {
@@ -187,7 +240,7 @@ fn flag_param(name: &str) -> ParamSpec {
     }
 }
 
-/// Run one of the three. `caller` is the principal the door proved.
+/// Run one of them. `caller` is the principal the door proved.
 pub async fn execute(
     ops: &ApplyOps,
     name: &str,
@@ -291,12 +344,127 @@ pub async fn execute(
             .map_err(|e| e.to_exec_error("the two versions could not be compared"))?
             .to_json()
         }
+        REVOKE => {
+            let version = text(bound, "version").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let move_to = text(bound, "moveTo").filter(|m| !m.is_empty());
+            let r = apply_op::revoke(&ops.pool, version, reason, move_to, caller)
+                .await
+                .map_err(|e| e.to_exec_error("the version was not revoked"))?;
+            if let Some((from, to)) = &r.moved {
+                ops.record(
+                    caller,
+                    REVOKE,
+                    "activated",
+                    format!("version={to} was={from} by={caller}"),
+                );
+            }
+            ops.record(
+                caller,
+                REVOKE,
+                "revoked",
+                format!("version={} by={caller}", r.version),
+            );
+            revoked_row(ops, &r.version, r.moved.as_ref().map(|(_, to)| to.as_str())).await?
+        }
+        UNREVOKE => {
+            let version = text(bound, "version").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let version = crate::versions::Versions::on(&ops.pool)
+                .unrevoke(version, reason, caller, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the revoke mark was not lifted"))?;
+            ops.record(
+                caller,
+                UNREVOKE,
+                "unrevoked",
+                format!("version={version} by={caller}"),
+            );
+            let mut row = revoked_row(ops, &version, None).await?;
+            if let Some(o) = row.as_object_mut() {
+                o.remove("moved");
+            }
+            row
+        }
+        REVOKED => {
+            let list = crate::versions::Versions::on(&ops.pool)
+                .pinned_to_revoked()
+                .await
+                .map_err(|e| e.to_exec_error("the revoked versions could not be read"))?;
+            json!({ "versions": list.iter().map(revoked_json).collect::<Vec<_>>() })
+        }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),
     };
     Ok(ExecResult {
         position: None,
         rows: vec![row],
         next_cursor: None,
+    })
+}
+
+/// What `revoke` and `unrevoke` answer: the version, its order number,
+/// its mark now (`null` when lifted) and where the deployment moved.
+async fn revoked_row(
+    ops: &ApplyOps,
+    version: &str,
+    moved: Option<&str>,
+) -> Result<serde_json::Value, ExecError> {
+    let v = crate::versions::Versions::on(&ops.pool);
+    let read =
+        |e: crate::versions::VersionRefusal| e.to_exec_error("the version could not be read");
+    let ordinal = v.ordinal_of(version).await.map_err(read)?;
+    let mark = v.revocation_of(version).await.map_err(read)?;
+    Ok(json!({
+        "version": version,
+        "ordinal": ordinal,
+        "revoked": mark.map(|m| json!({ "reason": m.reason, "actor": m.actor, "at": m.at })),
+        "moved": moved,
+    }))
+}
+
+/// One entry of `std.deployment.revoked`.
+pub fn revoked_json(r: &crate::versions::RevokedVersion) -> serde_json::Value {
+    json!({
+        "version": r.mark.version,
+        "ordinal": r.ordinal,
+        "reason": r.mark.reason,
+        "actor": r.mark.actor,
+        "at": r.mark.at,
+        "tenantCount": r.tenant_count,
+        "tenants": r.tenants.iter().map(|t| json!({
+            "space": t.space,
+            "name": t.name,
+            "state": t.state,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// [`revoked_json`] read back, so `ordo versions revoked --host` prints
+/// what the direct path prints.
+pub fn revoked_from_json(v: &serde_json::Value) -> Option<crate::versions::RevokedVersion> {
+    use crate::versions::{Revocation, RevokeAct, RevokedPin, RevokedVersion};
+    Some(RevokedVersion {
+        mark: Revocation {
+            seq: 0,
+            version: v["version"].as_str()?.to_string(),
+            act: RevokeAct::Revoke,
+            actor: v["actor"].as_str()?.to_string(),
+            reason: v["reason"].as_str()?.to_string(),
+            at: v["at"].as_u64()?,
+        },
+        ordinal: v["ordinal"].as_u64(),
+        tenants: v["tenants"]
+            .as_array()?
+            .iter()
+            .filter_map(|t| {
+                Some(RevokedPin {
+                    space: t["space"].as_str()?.to_string(),
+                    name: t["name"].as_str()?.to_string(),
+                    state: t["state"].as_str()?.to_string(),
+                })
+            })
+            .collect(),
+        tenant_count: v["tenantCount"].as_u64()?,
     })
 }
 
@@ -319,6 +487,9 @@ mod tests {
         assert_eq!(kind(PLAN), Some(OpKind::Write));
         assert_eq!(kind(LABEL), Some(OpKind::Write));
         assert_eq!(kind(DIFF), Some(OpKind::Read));
+        assert_eq!(kind(REVOKE), Some(OpKind::Write));
+        assert_eq!(kind(UNREVOKE), Some(OpKind::Write));
+        assert_eq!(kind(REVOKED), Some(OpKind::Read));
         assert_eq!(specs.len(), OPS.len());
     }
 

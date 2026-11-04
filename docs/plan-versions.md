@@ -101,6 +101,7 @@ Also:
 | `$builds` | the deployment's own | build identity per version: document, DDL, Ordo release, the minimum Ordo release that loads it |
 | `$code` | the deployment's own | function code by code hash, under `Versions` |
 | `$activations` | the deployment's own | each re-point of the deployment, append-only |
+| `$revocations` | the deployment's own | **new (2b):** each revoke and unrevoke of a version: act, actor, reason, time. Append-only |
 | `$pins` | the control database | **new:** each pin change: tenant, from, to, actor, cause, rollout id, time. Append-only, written in the pin's transaction, with a stream event |
 | `$moves` | the control database | **new:** one open move per tenant: from, to, phase, soak deadline |
 | `$migrations` | each tenant's own | the shape the data is in, and the set of versions that shape supports |
@@ -317,6 +318,51 @@ consent. The answer:
 - A report lists tenants on revoked versions.
 
 End of life without a flaw goes through `versions.minimum` (§1.6).
+
+**Ruled 2026-11-04 (asks 18 to 22, 24).** Revoking the active version is
+refused unless the deployment owner names where tenants go. A revoke can be
+undone, and both acts stay on record. Moves timed to a window wait for
+increment 3, when each tenant is served its own pin. Maintenance windows
+are built now: a range or a cron with a length, with a message, for every
+tenant, only some, or all but some. A window is only a block of time; it
+changes nothing by itself (ask 24). Windows are their own feature and know
+nothing of versions.
+
+**As built in increment 2b** (2026-11-04, `versions.rs`, `windows.rs`,
+`deploy_ops.rs`, `window_ops.rs`):
+
+- `ordo versions revoke <v> --reason "..." [--move-to <w>]`, `unrevoke <v>
+  --reason "..."` and `revoked`, locally or through `std.deployment.revoke`,
+  `unrevoke` and `revoked`, deployment owner only. A reason is 1 to 500
+  characters.
+- The mark is the newest `$revocations` row of the version. Every revoke
+  and unrevoke takes the pin lock (`PIN_LOCK_NS`), so none interleaves
+  with a pin change.
+- Revoking the active version without `--move-to` is refused, naming the
+  flag and every stored version not revoked. With it, the move passes
+  `ordo rollback`'s load gate under the apply lock, then the activation,
+  the pins and the revoke are one transaction. The pins' cause is
+  `activate` or `rollback`, as any activation's is.
+- `--move-to` with a version not active is refused: nothing would move.
+- A revoked version is refused, naming the revoke and `ordo versions
+  unrevoke`, as an activation, a rollback, an apply's activation, a
+  `--move-to`, `versions.new_tenant` at boot and at pin time, and any pin
+  target (the backfill included). Class `version_revoked`, wire code
+  `apply_refused`.
+- A tenant on a version revoked while it was not active stays there:
+  `ordo versions revoked` lists it, up to 1,000 per version with the full
+  count.
+- `std.deployment.versions` carries `revoked: {reason, actor, at}` per
+  stored version. `ordo versions list` marks it; `show` lists every
+  revoke and unrevoke.
+- Windows: `$windows`, `$window_tenants`, `$window_skips` in the control
+  database, behind `Windows` (one typed error, `WindowRefusal`).
+  `$window_tenants` is an erasure attachment, so erasing a tenant removes
+  it from every window. `ordo windows set|delete|skip|unskip|list`, and
+  `std.deployment.windows`, `setWindow`, `deleteWindow`, `skipWindow`,
+  `deleteSkip`. `howto-operating.md` has the rules and caps.
+- Not built: console warnings and screens (the console step), moves at a
+  window (increment 3), a time zone on a cron (a later extension).
 
 ---
 
@@ -599,7 +645,7 @@ round is about 35 minutes for the full suite.
 |---|---|---|---|---|---|
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
-| 2b | **Revocation.** Owner-set mark, console warnings, tenants move in their windows (D8). | M | 2 | a revoked version cannot be pinned; its tenants move at their window; the console shows the warning | none |
+| 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04, backend, door and CLI. Console screens and warnings are the console step; moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
 | 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
@@ -729,7 +775,7 @@ refusal a setting can fix names the setting and the value.
 | `rollout.health_error_rate` | 1% | environment |
 | `rollout.alert_channel` | the deployment's stream | environment |
 | `apply.wait` | until the rollout starts; 300 seconds at most | command |
-| `tenant.maintenance_window` | any time | tenant |
+| `tenant.maintenance_window` | none: no window; set by `ordo windows set` for every tenant, some, or all but some (2b) | deployment, tenant |
 | `promotion.chain` | dev, staging, production | deployment |
 | `promotion.skip_staging` | off | deployment |
 | `promotion.release_mismatch` | refuse | environment |

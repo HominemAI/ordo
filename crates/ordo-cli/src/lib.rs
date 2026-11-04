@@ -49,6 +49,7 @@ pub mod signin;
 pub mod skill;
 pub mod sources;
 pub mod triggers;
+pub mod windows;
 // 17u: the CLI talking to a deployment rather than to its database.
 pub mod wire;
 pub use operator::Outcome;

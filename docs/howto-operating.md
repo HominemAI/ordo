@@ -215,6 +215,57 @@ ordo versions diff '#3' '#4' --source       # the source diff only
 - `label` and `diff` take `--db`, or `--host --token --space` to go through the door (`std.deployment.label`, `std.deployment.diff`). Over the door both answer only the deployment owner, in the deployment's own space.
 - A name that is not stored is refused, naming every version that is.
 
+**Revoking a version:**
+
+Only the deployment owner marks a version revoked. Ordo never decides a version is flawed.
+
+```
+ordo versions revoke '#3' --reason "drops orders on retry"
+ordo versions revoke '#4' --reason "bad migration" --move-to '#3'
+ordo versions unrevoke '#3' --reason "fixed in the client"
+ordo versions revoked                       # each revoked version and the tenants on it
+```
+
+- A revoked version is refused as an `ordo rollback` or activation target, as the version an apply activates, as `versions.new_tenant` (`ORDO_VERSIONS_NEW_TENANT`) and as any pin. The refusal names who revoked it, why, and the `ordo versions unrevoke` command.
+- Revoking the active version is refused without `--move-to`. Ordo never picks where tenants go. With it, the activation to that version and the revoke happen in one change, and every tenant's pin moves as an activation moves it. The version moved to passes the same load gate as `ordo rollback`.
+- A version that is not active is only marked. A tenant `versions.new_tenant` started on it stays there until the next activation; `ordo versions revoked` lists it.
+- If `ORDO_VERSIONS_NEW_TENANT` names a version you revoke, new tenants are left unpinned and the next boot refuses, naming the variable. Set it to another version or unset it.
+- A reason is 1 to 500 characters. Every revoke and unrevoke is kept with who, why and when; `ordo versions show` lists them.
+- `ordo versions list` and `std.deployment.versions` show the mark and its reason.
+- Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door (`std.deployment.revoke`, `std.deployment.unrevoke`, `std.deployment.revoked`), deployment owner only.
+- Moving tenants off a revoked version in their maintenance windows comes with increment 3 of `plan-versions.md`, when each tenant is served its own version.
+
+## Maintenance Windows
+
+A maintenance window is a block of time you have agreed with a tenant. Ordo stores it and lists it. It changes nothing by itself; features that need it read it.
+
+```
+# Once, for two tenants.
+ordo windows set --id upgrade --only spc_a,spc_b \
+  --starts 2026-11-20T02:00Z --ends 2026-11-20T04:00Z --message "Upgrade. Back by 04:00."
+
+# Sundays 02:00 to 04:00 UTC, for every tenant but one.
+ordo windows set --id weekly --except spc_vip --cron "0 2 * * sun" --length 2h \
+  --message "Weekly upkeep."
+
+ordo windows skip weekly --id freeze --starts 2026-12-20T00:00Z --ends 2027-01-04T00:00Z \
+  --reason "holiday freeze"
+ordo windows unskip freeze
+ordo windows list                           # every tenant
+ordo windows list spc_a                     # the windows that cover spc_a
+ordo windows delete upgrade
+```
+
+- **When:** a range (`--starts`, `--ends`), or a standard 5-field cron in UTC with a `--length` (`2h`, `90m`, `1h30m` or seconds). Times are written `2026-11-20T02:00Z`.
+- **Who:** `--all` tenants, `--only` the tenants named, or `--except` the tenants named. The rule is stored, so a tenant created later is in `--all` and `--except` windows.
+- **Message:** any text, markdown included, at most 2,000 characters. Ordo never renders it.
+- **Id:** `--id` names the window, and setting it again replaces it. Without `--id` one is made (`win_...`).
+- **Checks:** a range ends after it starts. A cron has 5 fields that parse and gives a time within 8 years. Its length is above 0 and shorter than the closest two of its times, so two never overlap. It gives at most 20,000 times in the 24 months the list covers, about once an hour.
+- **Skips** suppress a cron window's times that start inside the skip's range. A range window has none; delete or replace it.
+- **The list** covers 12 months back to 12 months ahead. A cron window is listed as each time it gives. A skipped time stays in the list, marked with the skip. The list holds at most 100,000 times and says when it was cut.
+- A tenant named that does not exist, or was reaped, is refused by name. Erasing a tenant removes it from every window that lists it. An `--only` window whose last tenant was erased covers nobody until you delete it.
+- Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door, deployment owner only: `std.deployment.windows`, `setWindow`, `deleteWindow`, `skipWindow`, `deleteSkip`.
+
 ## Every tenant's database follows the program
 
 With one database per tenant, an update has to reach each person's database as well as the deployment's own. It does, in three ways.

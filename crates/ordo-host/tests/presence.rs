@@ -153,6 +153,12 @@ const READS: &[&str] = &[
     "std.deployment.functionRuns",
     "std.deployment.functionRun",
     "std.deployment.versions",
+    // Two stored versions compared; deployment owner only, home space.
+    "std.deployment.diff",
+    // The revoked versions and the tenants on them; deployment owner only.
+    "std.deployment.revoked",
+    // Every maintenance window and its times; deployment owner only.
+    "std.deployment.windows",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

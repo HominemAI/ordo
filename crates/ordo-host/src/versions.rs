@@ -40,6 +40,26 @@
 //! of at most [`MAX_LABEL_CHARS`] characters, and the **git commit** of the
 //! source it was applied from ([`Provenance`]). Neither is part of the
 //! version's identity.
+//!
+//! # Revoking a version (increment 2b)
+//!
+//! Only the deployment owner marks a version revoked (D8, owner
+//! 2026-11-02), with a reason, and may lift the mark again (owner
+//! 2026-11-04, ask 20). Both acts are rows in `$revocations`, append-only,
+//! with actor, reason and time. A version is revoked when its newest row
+//! is a revoke.
+//!
+//! - A revoked version is refused as an activation or rollback target, as
+//!   `versions.new_tenant` (at boot and when a tenant is pinned), and as
+//!   any pin target. Each refusal names the revoke and the command that
+//!   lifts it ([`VersionRefusal::Revoked`]).
+//! - Revoking the active version is refused unless the deployment owner
+//!   names where its tenants go (ask 18). With it, the activation and the
+//!   revoke are one transaction, and the pins move as any activation moves
+//!   them. Ordo never picks the version.
+//! - Tenants on a revoked version stay there. Moving them in their
+//!   maintenance windows needs each tenant served its own pin, which is
+//!   increment 3 (ask 21).
 
 use std::collections::BTreeMap;
 
@@ -58,6 +78,13 @@ pub const NEW_TENANT_ENV: &str = "ORDO_VERSIONS_NEW_TENANT";
 
 /// The longest label a version may carry, in characters.
 pub const MAX_LABEL_CHARS: usize = 80;
+
+/// The longest reason a revoke or unrevoke may carry, in characters.
+pub const MAX_REASON_CHARS: usize = 500;
+
+/// The most tenants [`Versions::pinned_to_revoked`] names for one version.
+/// The count is always whole.
+pub const MAX_REVOKED_TENANTS: usize = 1_000;
 
 /// The longest git commit a version may record: a SHA-256 commit and
 /// `-dirty`.
@@ -114,6 +141,26 @@ pub fn check_git_commit(text: &str) -> Result<String, VersionRefusal> {
     )))
 }
 
+/// A revoke's or unrevoke's reason as stored: trimmed, 1 to
+/// [`MAX_REASON_CHARS`] characters, any text. Anything else is refused,
+/// saying the limit.
+pub fn check_reason(text: &str) -> Result<String, VersionRefusal> {
+    let reason = text.trim();
+    let n = reason.chars().count();
+    if n == 0 {
+        return Err(VersionRefusal::Reason(format!(
+            "a reason is 1 to {MAX_REASON_CHARS} characters; this one is empty. \
+             `--reason \"...\"` says why, and stays on record"
+        )));
+    }
+    if n > MAX_REASON_CHARS {
+        return Err(VersionRefusal::Reason(format!(
+            "a reason is at most {MAX_REASON_CHARS} characters; this one is {n}"
+        )));
+    }
+    Ok(reason.to_string())
+}
+
 /// A commit as a person reads it: 12 hex digits, and `-dirty` when it was.
 pub fn short_commit(commit: &str) -> String {
     let (hex, dirty) = match commit.strip_suffix("-dirty") {
@@ -160,6 +207,62 @@ CREATE TABLE IF NOT EXISTS \"$moves\" ( \
   \"soak_until\" bigint NOT NULL DEFAULT 0, \
   \"started_at\" bigint NOT NULL \
 )";
+
+/// `$revocations`, beside `$artifacts`: each revoke and unrevoke of a
+/// version, append-only. A version is revoked when its newest row says
+/// `revoke`.
+const REVOCATIONS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$revocations\" ( \
+  \"seq\" bigserial PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"act\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+); \
+CREATE INDEX IF NOT EXISTS \"$revocations_version\" ON \"$revocations\" (\"version\", \"seq\")";
+
+/// Create `$revocations`. Every transaction that pins reads it, and a
+/// statement that fails inside a transaction aborts it, so each makes sure
+/// of the table first. Retried once, for [`ensure_pin_tables`]' reason.
+async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
+    if pool.rows(REVOCATIONS_DDL).await.is_err() {
+        pool.rows(REVOCATIONS_DDL).await?;
+    }
+    Ok(())
+}
+
+/// The current mark on `version`, read inside `tx`, after its pin lock.
+async fn mark_in(tx: &ordo_exec::TxConn, version: &str) -> Result<Option<Revocation>, PoolError> {
+    let rows = tx.rows(&mark_sql(Some(version))).await?;
+    Ok(rows.first().and_then(|r| revocation_row(r)))
+}
+
+/// The newest `$revocations` row of each version whose newest is a revoke.
+fn mark_sql(version: Option<&str>) -> String {
+    format!(
+        "SELECT \"seq\", \"version\", \"act\", \"actor\", \"reason\", \"at\" FROM ( \
+           SELECT DISTINCT ON (\"version\") * FROM \"$revocations\" {} \
+           ORDER BY \"version\", \"seq\" DESC) m WHERE \"act\" = 'revoke'",
+        version
+            .map(|v| format!("WHERE \"version\" = {}", sql_lit(v)))
+            .unwrap_or_default()
+    )
+}
+
+fn revocation_row(r: &[Option<String>]) -> Option<Revocation> {
+    Some(Revocation {
+        seq: r.first()?.clone()?.parse().ok()?,
+        version: r.get(1)?.clone()?,
+        act: match r.get(2)?.as_deref()? {
+            "revoke" => RevokeAct::Revoke,
+            _ => RevokeAct::Unrevoke,
+        },
+        actor: r.get(3)?.clone()?,
+        reason: r.get(4)?.clone()?,
+        at: r.get(5)?.clone()?.parse().ok()?,
+    })
+}
 
 /// Create `$pins` and `$moves`. Called from `crate::tenants::ensure_table`,
 /// so the pins' history exists wherever `$spaces` does. Retried once for
@@ -243,6 +346,63 @@ pub struct PinChange {
     pub at: u64,
 }
 
+/// A revoke or an unrevoke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeAct {
+    Revoke,
+    Unrevoke,
+}
+
+impl RevokeAct {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RevokeAct::Revoke => "revoke",
+            RevokeAct::Unrevoke => "unrevoke",
+        }
+    }
+}
+
+/// One `$revocations` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revocation {
+    pub seq: i64,
+    pub version: String,
+    pub act: RevokeAct,
+    pub actor: String,
+    pub reason: String,
+    pub at: u64,
+}
+
+/// What [`Versions::revoke`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revoked {
+    /// The version now revoked.
+    pub version: String,
+    /// The activation made first, when the version was the active one:
+    /// `(from, to)`.
+    pub moved: Option<(String, String)>,
+}
+
+/// A tenant pinned to a revoked version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedPin {
+    pub space: String,
+    pub name: String,
+    pub state: String,
+}
+
+/// One revoked version and the tenants pinned to it
+/// ([`Versions::pinned_to_revoked`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedVersion {
+    pub mark: Revocation,
+    pub ordinal: Option<u64>,
+    /// Every tenant pinned to it, up to [`MAX_REVOKED_TENANTS`].
+    pub tenants: Vec<RevokedPin>,
+    /// How many there are in all.
+    pub tenant_count: u64,
+}
+
 /// What a caller can do about a [`VersionRefusal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Remedy {
@@ -281,6 +441,33 @@ pub enum VersionRefusal {
     Label(String),
     /// A git commit that is not one. Fix the input.
     GitCommit(String),
+    /// The version is revoked (D8), so it is not activated, rolled back
+    /// to, pinned or given to new tenants. `setting` is set when
+    /// `versions.new_tenant` named it: `(setting, variable)`.
+    Revoked {
+        named: String,
+        mark: Box<Revocation>,
+        setting: Option<(&'static str, &'static str)>,
+    },
+    /// The active version, revoked with no `--move-to` (ask 18).
+    /// `candidates` names every stored version that is not revoked.
+    RevokeActive {
+        named: String,
+        candidates: Vec<String>,
+    },
+    /// `--move-to` that cannot be used: the version itself, or a version
+    /// that is not active. Fix the input.
+    MoveTo(String),
+    /// A revoke of a version already revoked. The mark there stays.
+    AlreadyRevoked {
+        named: String,
+        mark: Box<Revocation>,
+    },
+    /// An unrevoke of a version that is not revoked.
+    NotRevoked { named: String },
+    /// A reason that is empty or longer than [`MAX_REASON_CHARS`]. Fix the
+    /// input.
+    Reason(String),
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -292,8 +479,17 @@ impl VersionRefusal {
             | VersionRefusal::Setting { .. }
             | VersionRefusal::NotStored { .. }
             | VersionRefusal::Label(_)
-            | VersionRefusal::GitCommit(_) => Remedy::FixInput,
-            VersionRefusal::Collision { .. } => Remedy::Refuse,
+            | VersionRefusal::GitCommit(_)
+            | VersionRefusal::RevokeActive { .. }
+            | VersionRefusal::MoveTo(_)
+            | VersionRefusal::Reason(_)
+            | VersionRefusal::Revoked {
+                setting: Some(_), ..
+            } => Remedy::FixInput,
+            VersionRefusal::Collision { .. }
+            | VersionRefusal::Revoked { .. }
+            | VersionRefusal::AlreadyRevoked { .. }
+            | VersionRefusal::NotRevoked { .. } => Remedy::Refuse,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
                 // same call may pass once it is.
@@ -326,10 +522,19 @@ impl VersionRefusal {
             VersionRefusal::UnknownVersion(_) | VersionRefusal::NotStored { .. } => {
                 ExecError::new(ErrorCode::NotFound, message)
             }
-            VersionRefusal::Label(_) | VersionRefusal::GitCommit(_) => {
-                ExecError::new(ErrorCode::InvalidParam, message)
+            VersionRefusal::Label(_)
+            | VersionRefusal::GitCommit(_)
+            | VersionRefusal::MoveTo(_)
+            | VersionRefusal::Reason(_) => ExecError::new(ErrorCode::InvalidParam, message),
+            VersionRefusal::Collision { .. } | VersionRefusal::AlreadyRevoked { .. } => {
+                ExecError::new(ErrorCode::Duplicate, message)
             }
-            VersionRefusal::Collision { .. } => ExecError::new(ErrorCode::Duplicate, message),
+            // The deployment's program refused, as `apply_refused` is: the
+            // same call lands once the mark is lifted or the move named.
+            VersionRefusal::Revoked { .. } | VersionRefusal::RevokeActive { .. } => {
+                ExecError::new(ErrorCode::ApplyRefused, message)
+            }
+            VersionRefusal::NotRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
             VersionRefusal::Setting { .. } => ExecError::new(ErrorCode::Internal, message),
             VersionRefusal::Store(e) => {
                 ExecError::of_fault(e.class(), ErrorCode::SpaceUnavailable, message)
@@ -379,6 +584,50 @@ impl std::fmt::Display for VersionRefusal {
             ),
             VersionRefusal::Label(why) => write!(f, "label refused: {why}"),
             VersionRefusal::GitCommit(why) => write!(f, "git commit refused: {why}"),
+            VersionRefusal::Revoked {
+                named,
+                mark,
+                setting,
+            } => {
+                write!(
+                    f,
+                    "version_revoked: {named} was revoked by {} at {}: \"{}\". \
+                     `ordo versions unrevoke {} --reason \"...\"` lifts the mark",
+                    mark.actor, mark.at, mark.reason, mark.version
+                )?;
+                if let Some((setting, var)) = setting {
+                    write!(
+                        f,
+                        ". {setting} ({var}) names it: set it to a version that is not \
+                         revoked, or unset it to start new tenants on the active version"
+                    )?;
+                }
+                Ok(())
+            }
+            VersionRefusal::RevokeActive { named, candidates } => write!(
+                f,
+                "revoke_needs_move_to: {named} is the active version, and every tenant is \
+                 on it. Name where they go with `--move-to <version>` (`moveTo` on \
+                 `std.deployment.revoke`); Ordo never picks one. Stored and not revoked: {}",
+                if candidates.is_empty() {
+                    "none".to_string()
+                } else {
+                    candidates.join(", ")
+                }
+            ),
+            VersionRefusal::MoveTo(why) => write!(f, "--move-to refused: {why}"),
+            VersionRefusal::AlreadyRevoked { named, mark } => write!(
+                f,
+                "already_revoked: {named} was revoked by {} at {}: \"{}\". The mark stays \
+                 as it is",
+                mark.actor, mark.at, mark.reason
+            ),
+            VersionRefusal::NotRevoked { named } => write!(
+                f,
+                "not_revoked: {named} carries no revoke mark; `ordo versions revoked` lists \
+                 the versions that do"
+            ),
+            VersionRefusal::Reason(why) => write!(f, "reason refused: {why}"),
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
     }
@@ -448,6 +697,7 @@ impl<'a> Versions<'a> {
     /// every tenant lookup queued behind it (review, 2026-11-04).
     pub async fn ensure(&self) -> Result<(), VersionRefusal> {
         registry::ensure_tables(self.pool).await?;
+        ensure_revocations(self.pool).await?;
         let shaped = self
             .pool
             .rows(
@@ -760,8 +1010,13 @@ impl<'a> Versions<'a> {
             }
             None => PinCause::Activate,
         };
+        ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
         registry::record_activation(&tx, version, actor, at).await?;
         tx.rows(&repin_sql(version, actor, cause, at.0, None))
             .await?;
@@ -798,7 +1053,12 @@ impl<'a> Versions<'a> {
             return Ok(());
         };
         if registry::get(self.pool, value).await?.is_some() {
-            return Ok(());
+            return match self.revocation_of(value).await? {
+                Some(mark) => Err(self
+                    .revoked(mark, Some((NEW_TENANT_SETTING, NEW_TENANT_ENV)))
+                    .await),
+                None => Ok(()),
+            };
         }
         Err(VersionRefusal::Setting {
             setting: NEW_TENANT_SETTING,
@@ -822,6 +1082,7 @@ impl<'a> Versions<'a> {
         actor: &str,
         at: u64,
     ) -> Result<Option<String>, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         // The turn first, then the version: an activation that started
         // before this has committed by now, and is the one read.
@@ -838,6 +1099,14 @@ impl<'a> Versions<'a> {
         let Some(version) = version else {
             return Ok(None);
         };
+        if let Some(mark) = mark_in(&tx, &version).await? {
+            tx.rollback().await?;
+            let setting = self
+                .new_tenant
+                .is_some()
+                .then_some((NEW_TENANT_SETTING, NEW_TENANT_ENV));
+            return Err(self.revoked(mark, setting).await);
+        }
         let filter = format!(
             "AND \"$space\" = {} AND \"version\" IS NULL",
             sql_lit(space)
@@ -857,11 +1126,18 @@ impl<'a> Versions<'a> {
     /// Pin every tenant that has no pin to the active version, cause
     /// `backfill`. The tenants pinned. Idempotent: a second call finds none.
     pub async fn backfill(&self, actor: &str, at: u64) -> Result<usize, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         let Some(active) = active_in(&tx).await? else {
             return Ok(0);
         };
+        // The active version is never revoked: a revoke of it moves the
+        // deployment first. Checked all the same, as every pin target is.
+        if let Some(mark) = mark_in(&tx, &active).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
         let moved = tx
             .rows(&repin_sql(
                 &active,
@@ -944,6 +1220,277 @@ impl<'a> Versions<'a> {
             .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?.parse().ok()?)))
             .collect())
     }
+}
+
+impl<'a> Versions<'a> {
+    // ── revoking ───────────────────────────────────────────────────────
+
+    /// A version as a person reads it, `#4 · 0.2.1`.
+    pub async fn named(&self, version: &str) -> Result<String, VersionRefusal> {
+        Ok(match registry::ordinal_of(self.pool, version).await? {
+            Some(n) => format!("#{n} · {version}"),
+            None => version.to_string(),
+        })
+    }
+
+    /// The refusal for a revoked version, named as a person reads it.
+    async fn revoked(
+        &self,
+        mark: Revocation,
+        setting: Option<(&'static str, &'static str)>,
+    ) -> VersionRefusal {
+        let named = self
+            .named(&mark.version)
+            .await
+            .unwrap_or_else(|_| mark.version.clone());
+        VersionRefusal::Revoked {
+            named,
+            mark: Box::new(mark),
+            setting,
+        }
+    }
+
+    /// **Mark the version a person named revoked** (D8), with a reason.
+    ///
+    /// When it is the active version, `move_to` must name a stored version
+    /// that is not revoked (ask 18). The activation to it, the pins it
+    /// moves and the revoke are then one transaction. A version that is not
+    /// active is only marked, and `move_to` is refused for it: nothing
+    /// would move.
+    ///
+    /// The checks an activation makes of the database (the load gate) are
+    /// the caller's, before this: `crate::apply_op::revoke`.
+    pub async fn revoke(
+        &self,
+        name: &str,
+        reason: &str,
+        move_to: Option<&str>,
+        actor: &str,
+        at: u64,
+    ) -> Result<Revoked, VersionRefusal> {
+        let reason = check_reason(reason)?;
+        let version = self.resolve(name).await?;
+        let move_to = match move_to {
+            Some(m) => Some(self.resolve(m).await?),
+            None => None,
+        };
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, &version).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::AlreadyRevoked {
+                named: self.named(&version).await?,
+                mark: Box::new(mark),
+            });
+        }
+        let active = active_in(&tx).await?;
+        let moved = match (active.as_deref() == Some(version.as_str()), move_to) {
+            (true, None) => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::RevokeActive {
+                    named: self.named(&version).await?,
+                    candidates: self.unrevoked().await?,
+                });
+            }
+            (true, Some(to)) if to == version => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::MoveTo(format!(
+                    "it names {}, the version being revoked; name another",
+                    self.named(&version).await?
+                )));
+            }
+            (true, Some(to)) => {
+                if let Some(mark) = mark_in(&tx, &to).await? {
+                    tx.rollback().await?;
+                    return Err(self.revoked(mark, None).await);
+                }
+                let ordinals = registry::ordinals(self.pool).await?;
+                let cause = match (ordinals.get(&version), ordinals.get(&to)) {
+                    (Some(was), Some(now)) if now < was => PinCause::Rollback,
+                    _ => PinCause::Activate,
+                };
+                registry::record_activation(&tx, &to, actor, Timestamp(at)).await?;
+                tx.rows(&repin_sql(&to, actor, cause, at, None)).await?;
+                Some((version.clone(), to))
+            }
+            (false, Some(_)) => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::MoveTo(format!(
+                    "{} is not the active version, so revoking it moves nothing. Leave \
+                     `--move-to` out; `ordo rollback --version <v>` moves the deployment",
+                    self.named(&version).await?
+                )));
+            }
+            (false, None) => None,
+        };
+        tx.rows(&revocation_sql(
+            &version,
+            RevokeAct::Revoke,
+            actor,
+            &reason,
+            at,
+        ))
+        .await?;
+        tx.commit().await?;
+        Ok(Revoked { version, moved })
+    }
+
+    /// **Lift the revoke mark** from the version a person named (ask 20),
+    /// with a reason. It can be activated and pinned again. Both acts stay
+    /// in `$revocations`. Answers the version it was.
+    pub async fn unrevoke(
+        &self,
+        name: &str,
+        reason: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<String, VersionRefusal> {
+        let reason = check_reason(reason)?;
+        let version = self.resolve(name).await?;
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if mark_in(&tx, &version).await?.is_none() {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NotRevoked {
+                named: self.named(&version).await?,
+            });
+        }
+        tx.rows(&revocation_sql(
+            &version,
+            RevokeAct::Unrevoke,
+            actor,
+            &reason,
+            at,
+        ))
+        .await?;
+        tx.commit().await?;
+        Ok(version)
+    }
+
+    /// Every revoked version's mark. A database with no `$revocations`
+    /// answers empty.
+    pub async fn revocations(&self) -> Result<BTreeMap<String, Revocation>, VersionRefusal> {
+        match self.pool.rows(&mark_sql(None)).await {
+            Ok(rows) => Ok(rows
+                .iter()
+                .filter_map(|r| revocation_row(r))
+                .map(|r| (r.version.clone(), r))
+                .collect()),
+            Err(e) if e.is_missing_table() => Ok(BTreeMap::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// One version's mark, `None` when it is not revoked.
+    pub async fn revocation_of(&self, version: &str) -> Result<Option<Revocation>, VersionRefusal> {
+        match self.pool.rows(&mark_sql(Some(version))).await {
+            Ok(rows) => Ok(rows.first().and_then(|r| revocation_row(r))),
+            Err(e) if e.is_missing_table() => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Every revoke and unrevoke of one version, oldest first.
+    pub async fn revocation_history(
+        &self,
+        version: &str,
+    ) -> Result<Vec<Revocation>, VersionRefusal> {
+        let rows = match self
+            .pool
+            .rows(&format!(
+                "SELECT \"seq\", \"version\", \"act\", \"actor\", \"reason\", \"at\" \
+                 FROM \"$revocations\" WHERE \"version\" = {} ORDER BY \"seq\"",
+                sql_lit(version)
+            ))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) if e.is_missing_table() => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(rows.iter().filter_map(|r| revocation_row(r)).collect())
+    }
+
+    /// Every stored version that is not revoked, `#n · name`, oldest first.
+    async fn unrevoked(&self) -> Result<Vec<String>, VersionRefusal> {
+        let marks = self.revocations().await?;
+        let ordinals = registry::ordinals(self.pool).await?;
+        let mut out: Vec<(Option<u64>, String)> = registry::stored(self.pool)
+            .await?
+            .into_iter()
+            .map(|(v, _, _)| v)
+            .filter(|v| !marks.contains_key(v))
+            .map(|v| (ordinals.get(&v).copied(), v))
+            .collect();
+        out.sort();
+        Ok(out
+            .into_iter()
+            .map(|(n, v)| match n {
+                Some(n) => format!("#{n} · {v}"),
+                None => v,
+            })
+            .collect())
+    }
+
+    /// **The report D8 asks for**: each revoked version, and the tenants
+    /// pinned to it in a pinned state, oldest version first.
+    pub async fn pinned_to_revoked(&self) -> Result<Vec<RevokedVersion>, VersionRefusal> {
+        let marks = self.revocations().await?;
+        let ordinals = registry::ordinals(self.pool).await?;
+        let mut out = Vec::with_capacity(marks.len());
+        for (version, mark) in marks {
+            let rows = match self
+                .pool
+                .rows(&format!(
+                    "SELECT \"$space\", coalesce(\"name\", ''), \"state\", \
+                       count(*) OVER () FROM \"$spaces\" \
+                     WHERE \"version\" = {} AND \"state\" IN {PINNED_STATES} \
+                     ORDER BY \"$space\" LIMIT {MAX_REVOKED_TENANTS}",
+                    sql_lit(&version)
+                ))
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) if e.is_missing_table() || e.is_missing_column() => vec![],
+                Err(e) => return Err(e.into()),
+            };
+            let tenant_count = rows
+                .first()
+                .and_then(|r| r.get(3).cloned().flatten())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            out.push(RevokedVersion {
+                ordinal: ordinals.get(&version).copied(),
+                tenants: rows
+                    .iter()
+                    .filter_map(|r| {
+                        Some(RevokedPin {
+                            space: r.first()?.clone()?,
+                            name: r.get(1)?.clone()?,
+                            state: r.get(2)?.clone()?,
+                        })
+                    })
+                    .collect(),
+                tenant_count,
+                mark,
+            });
+        }
+        out.sort_by_key(|r| r.ordinal);
+        Ok(out)
+    }
+}
+
+fn revocation_sql(version: &str, act: RevokeAct, actor: &str, reason: &str, at: u64) -> String {
+    format!(
+        "INSERT INTO \"$revocations\" (\"version\", \"act\", \"actor\", \"reason\", \"at\") \
+         VALUES ({}, {}, {}, {}, {at})",
+        sql_lit(version),
+        sql_lit(act.as_str()),
+        sql_lit(actor),
+        sql_lit(reason),
+    )
 }
 
 /// One statement that moves every tenant in a pinned state, and not yet on

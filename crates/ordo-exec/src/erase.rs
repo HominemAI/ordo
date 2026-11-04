@@ -533,7 +533,17 @@ async fn space_scoped_tables(
 /// `$moves` joined it on 2026-11-03 (`plan-versions.md` §1.3): it says
 /// which version the space is moving to, not what it holds. `$pins` is
 /// [`RETAINED`], so neither count reaches it.
-pub const ATTACHMENTS: &[&str] = &["$spacedb", "$spacebucket", "$spaces", "$moves"];
+///
+/// `$window_tenants` joined it on 2026-11-04: it names the tenants a
+/// maintenance window lists, not what a tenant holds. Erasure deletes a
+/// tenant's rows there, so a window no longer names it.
+pub const ATTACHMENTS: &[&str] = &[
+    "$spacedb",
+    "$spacebucket",
+    "$spaces",
+    "$moves",
+    "$window_tenants",
+];
 
 /// How many rows `space` holds in `pool`'s database, across every table an
 /// erasure would delete from except [`ATTACHMENTS`].

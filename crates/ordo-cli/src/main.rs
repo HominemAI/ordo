@@ -225,6 +225,34 @@ fn usage() -> ! {
          take `--host <h> --token <t> --space <s>` to go through the door,\n      \
          deployment owner only. A version not stored is refused, naming\n      \
          those that are.\n  \
+         ordo versions  revoke <version> --reason \"<text>\" [--move-to <version>]\n      \
+         mark a version revoked: it is never activated, rolled back to,\n      \
+         pinned or given to new tenants. The active version needs\n      \
+         `--move-to`, a stored version that is not revoked; the activation\n      \
+         and the revoke are one change. `--as <who>` names you on the\n      \
+         database path.\n  \
+         ordo versions  unrevoke <version> --reason \"<text>\"\n      \
+         lift the mark. Both acts stay on record with who, why and when.\n  \
+         ordo versions  revoked\n      \
+         each revoked version, its reason, and the tenants pinned to it.\n      \
+         `revoke`, `unrevoke` and `revoked` also take `--host ...`.\n  \
+         ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \
+         (--starts <utc> --ends <utc> | --cron \"<m h dom mon dow>\" --length <len>)\n                 \
+         --message \"<text>\"\n      \
+         set a maintenance window, or replace the one under `--id`: a range,\n      \
+         or a cron in UTC repeated for `--length` (`2h`, `90m`). It covers\n      \
+         every tenant, only those named, or all but those named; a tenant\n      \
+         created later is in `--all` and `--except`. The message is any\n      \
+         text, at most 2000 characters, never rendered. A window changes\n      \
+         nothing by itself.\n  \
+         ordo windows   delete <id> | unskip <skip-id>\n  \
+         ordo windows   skip <window> --starts <utc> --ends <utc> [--id <id>] [--reason \"<text>\"]\n      \
+         suppress a cron window's times that start in that range.\n  \
+         ordo windows   list [<tenant>]\n      \
+         every time from 12 months back to 12 months ahead, skipped ones\n      \
+         marked; with a tenant, the windows that cover it. Times are UTC,\n      \
+         `2026-11-20T02:00Z`. Each takes `--db <name> [--as <who>]` or\n      \
+         `--host ...`, deployment owner only.\n  \
          ordo verify     --identity [--security-key-id <id> --security-public-key <hex>]\n      \
          verify the deployment's security stream, then reconcile every link in\n      \
          `$authenticator` against it: a link no event explains (a sign-up, a\n      \
@@ -463,6 +491,7 @@ fn main() {
             | "rollback"
             | "deploys"
             | "versions"
+            | "windows"
             | "prune"
             | "restore"
             | "keys"

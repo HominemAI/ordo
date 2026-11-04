@@ -703,3 +703,156 @@ fn a_label_and_a_commit_travel_and_versions_answer_over_the_wire() {
     let denied = operator::run("versions", &m);
     assert_ne!(denied.code, 0, "{}", denied.report);
 }
+
+/// `ordo versions revoke|unrevoke|revoked` and `ordo windows` over the door
+/// print what the database path prints (`plan-versions.md` §4 row 2b).
+#[test]
+fn revokes_and_windows_answer_the_same_over_the_wire() {
+    let db = "ordo_wire_revoke";
+    empty(db);
+    let path = program("revoke", V1);
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
+    let with_door = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(door(addr, &owner));
+        v
+    };
+    let direct = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(["--db".to_string(), db.to_string()]);
+        v
+    };
+    let first = operator::run("apply", &with_door(&[&path, "--no-wait"]));
+    assert_eq!(first.code, 0, "{}", first.report);
+    std::fs::write(&path, V2).expect("write");
+    let second = operator::run("apply", &with_door(&[&path, "--no-wait"]));
+    assert!(second.report.contains("not_activated"), "{}", second.report);
+
+    // #1 serves. Revoking it needs `--move-to`, and #2 cannot be loaded
+    // over this database, so the move is refused by the load gate.
+    let bare = operator::run("versions", &with_door(&["revoke", "#1", "--reason", "x"]));
+    assert_ne!(bare.code, 0);
+    assert!(bare.report.contains("--move-to"), "{}", bare.report);
+    let gated = operator::run(
+        "versions",
+        &with_door(&["revoke", "#1", "--reason", "x", "--move-to", "#2"]),
+    );
+    assert!(gated.report.contains("not_activated"), "{}", gated.report);
+
+    // #2 is only marked. Over the door, lifted, then again on the database.
+    let over = operator::run(
+        "versions",
+        &with_door(&["revoke", "#2", "--reason", "drops a column"]),
+    );
+    assert_eq!(over.code, 0, "{}", over.report);
+    let report_over = operator::run("versions", &with_door(&["revoked"]));
+    let report_direct = operator::run("versions", &direct(&["revoked"]));
+    assert_eq!(report_over.code, 0, "{}", report_over.report);
+    assert_eq!(report_over.report, report_direct.report, "one rendering");
+    assert!(report_over.report.contains("drops a column"));
+    let lifted = operator::run(
+        "versions",
+        &with_door(&["unrevoke", "#2", "--reason", "ok"]),
+    );
+    assert_eq!(lifted.code, 0, "{}", lifted.report);
+    let lifted_direct = operator::run("versions", &direct(&["unrevoke", "#2", "--reason", "ok"]));
+    assert!(
+        lifted_direct.report.contains("not_revoked"),
+        "{}",
+        lifted_direct.report
+    );
+    let again = operator::run(
+        "versions",
+        &direct(&["revoke", "#2", "--reason", "drops a column"]),
+    );
+    assert_eq!(over.report, again.report, "one rendering, two paths");
+    let list = operator::run("versions", &direct(&["list"]));
+    assert!(
+        list.report.contains("REVOKED \"drops a column\""),
+        "{}",
+        list.report
+    );
+
+    // A manager may not revoke.
+    let manager = token(DEP_MANAGER);
+    let mut m = vec![
+        "unrevoke".to_string(),
+        "#2".into(),
+        "--reason".into(),
+        "x".into(),
+    ];
+    m.extend(door(addr, &manager));
+    assert_ne!(operator::run("versions", &m).code, 0);
+
+    // Windows: a tenant to name, then the same window both ways.
+    rt.block_on(async {
+        let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
+            db: db.to_string(),
+            size: 1,
+            ..ordo_exec::PoolConfig::from_env()
+        })
+        .await
+        .expect("pool");
+        ordo_host::tenants::ensure_table(&pool)
+            .await
+            .expect("$spaces");
+        ordo_host::tenants::reserve(&pool, "spc_w", "w", "dev:ada", 1, None)
+            .await
+            .expect("tenant");
+    });
+    let set = [
+        "set",
+        "--id",
+        "weekly",
+        "--except",
+        "spc_w",
+        "--cron",
+        "0 2 * * sun",
+        "--length",
+        "2h",
+        "--message",
+        "weekly upkeep",
+    ];
+    let over = operator::run("windows", &with_door(&set));
+    assert_eq!(over.code, 0, "{}", over.report);
+    let again = operator::run("windows", &direct(&set));
+    assert_eq!(over.report, again.report, "one rendering, two paths");
+    let skip = [
+        "skip",
+        "weekly",
+        "--id",
+        "freeze",
+        "--starts",
+        "2026-12-01T00:00Z",
+        "--ends",
+        "2026-12-31T00:00Z",
+    ];
+    let over = operator::run("windows", &with_door(&skip));
+    assert_eq!(over.code, 0, "{}", over.report);
+    assert_eq!(over.report, operator::run("windows", &direct(&skip)).report);
+    // The span's first line carries this second's time; the rest agrees.
+    let body = |o: &operator::Outcome| o.report.lines().skip(1).collect::<Vec<_>>().join("\n");
+    let over = operator::run("windows", &with_door(&["list"]));
+    let here = operator::run("windows", &direct(&["list"]));
+    assert_eq!(over.code, 0, "{}", over.report);
+    assert_eq!(body(&over), body(&here));
+    assert!(over.report.contains("skipped by freeze"), "{}", over.report);
+    // spc_w is left out of the window.
+    let w = operator::run("windows", &with_door(&["list", "spc_w"]));
+    assert!(w.report.contains("TIMES (0)"), "{}", w.report);
+    let ghost = operator::run("windows", &with_door(&["list", "spc_ghost"]));
+    assert_ne!(ghost.code, 0);
+    assert!(ghost.report.contains("spc_ghost"), "{}", ghost.report);
+    let gone = operator::run("windows", &with_door(&["unskip", "freeze"]));
+    assert_eq!(gone.code, 0, "{}", gone.report);
+    let gone = operator::run("windows", &with_door(&["delete", "weekly"]));
+    assert_eq!(gone.code, 0, "{}", gone.report);
+    let missing = operator::run("windows", &direct(&["delete", "weekly"]));
+    assert!(
+        missing.report.contains("ordo windows list"),
+        "{}",
+        missing.report
+    );
+}

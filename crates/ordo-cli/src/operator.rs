@@ -129,6 +129,7 @@ const SWITCHES: &[&str] = &[
 fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
+        "windows" => &["--all"],
         _ => &[],
     }
 }
@@ -381,6 +382,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "rollback" => rt.block_on(rollback(flags)),
         "deploys" => rt.block_on(deploys(flags)),
         "versions" => rt.block_on(versions_cmd(flags)),
+        "windows" => rt.block_on(crate::windows::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -2399,9 +2401,12 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "show" => versions_show(flags).await,
         "label" => versions_label(flags).await,
         "diff" => versions_diff(flags).await,
+        "revoke" => versions_revoke(flags).await,
+        "unrevoke" => versions_unrevoke(flags).await,
+        "revoked" => versions_revoked(flags).await,
         other => Outcome::usage(format!(
             "unknown `ordo versions` subcommand `{other}`; there are `list`, `show`, \
-             `label` and `diff`\n"
+             `label`, `diff`, `revoke`, `unrevoke` and `revoked`\n"
         )),
     }
 }
@@ -2410,7 +2415,256 @@ const VERSIONS_USAGE: &str = "ordo versions list [--db <name>]\n\
      ordo versions show <version> [--db <name>]\n\
      ordo versions label <version> \"<text>\" | --clear  [--db <name> | --host <h> ...]\n\
      ordo versions diff <a> <b> [--source | --schema]  [--db <name> | --host <h> ...]\n\
+     ordo versions revoke <version> --reason \"<text>\" [--move-to <version>]  \
+     [--db <name> --as <who> | --host <h> ...]\n\
+     ordo versions unrevoke <version> --reason \"<text>\"  [--db <name> --as <who> | --host <h> ...]\n\
+     ordo versions revoked  [--db <name> | --host <h> ...]\n\
      a version is its name or its order number, `#4`";
+
+/// Who a revoke made on the database is recorded as, when `--as` is not
+/// given.
+const UNATTRIBUTED_OWNER: &str = "deployment-owner:unattributed";
+
+/// `ordo versions revoke <version> --reason "..." [--move-to <w>]`: mark a
+/// stored version revoked (`plan-versions.md` §1.11). Locally through
+/// `ordo_host::apply_op::revoke`, or over the door through
+/// `std.deployment.revoke`, deployment owner only.
+async fn versions_revoke(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--db", "--as", "--reason", "--move-to"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let [version] = flags.positional.as_slice() else {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    };
+    let reason = match flags.require("--reason") {
+        Ok(r) => r.to_string(),
+        Err(e) => return Outcome::usage(format!("{e}: a revoke says why, and stays on record\n")),
+    };
+    let move_to = flags.named_value("--move-to").map(str::to_string);
+    if let Some(host) = crate::wire::requested(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        if flags.named_value("--as").is_some() {
+            return Outcome::usage(
+                "`--as` names who acted on the database; over the door it is the token's \
+                 principal\n"
+                    .into(),
+            );
+        }
+        let row = match crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::REVOKE,
+            serde_json::json!({ "version": version, "reason": reason, "moveTo": move_to }),
+            true,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        return Outcome::ok(revoked_report(
+            row["ordinal"].as_u64(),
+            row["version"].as_str().unwrap_or(version),
+            row["revoked"]["reason"].as_str().unwrap_or(&reason),
+            row["moved"].as_str(),
+        ));
+    }
+    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let r = match ordo_host::apply_op::revoke(&pool, version, &reason, move_to.as_deref(), actor)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    };
+    let v = ordo_host::versions::Versions::on(&pool);
+    let ordinal = v.ordinal_of(&r.version).await.ok().flatten();
+    let mark = match v.revocation_of(&r.version).await {
+        Ok(m) => m,
+        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    };
+    Outcome::ok(revoked_report(
+        ordinal,
+        &r.version,
+        mark.as_ref().map(|m| m.reason.as_str()).unwrap_or(&reason),
+        r.moved.as_ref().map(|(_, to)| to.as_str()),
+    ))
+}
+
+/// What `ordo versions revoke` prints, on both paths.
+pub(crate) fn revoked_report(
+    ordinal: Option<u64>,
+    version: &str,
+    reason: &str,
+    moved: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    if let Some(to) = moved {
+        out.push_str(&format!(
+            "activated  {to}, and every tenant pinned to it\nnodes      nudged on `{}`\n",
+            ordo_host::versions::DEPLOY_CHANNEL
+        ));
+    }
+    out.push_str(&format!(
+        "revoked    {}  \"{reason}\"\n",
+        numbered(ordinal, version)
+    ));
+    out
+}
+
+/// `ordo versions unrevoke <version> --reason "..."`: lift the mark (ask
+/// 20). Both acts stay on record.
+async fn versions_unrevoke(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--db", "--as", "--reason"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let [version] = flags.positional.as_slice() else {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    };
+    let reason = match flags.require("--reason") {
+        Ok(r) => r.to_string(),
+        Err(e) => {
+            return Outcome::usage(format!("{e}: an unrevoke says why, and stays on record\n"))
+        }
+    };
+    if let Some(host) = crate::wire::requested(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        if flags.named_value("--as").is_some() {
+            return Outcome::usage(
+                "`--as` names who acted on the database; over the door it is the token's \
+                 principal\n"
+                    .into(),
+            );
+        }
+        let row = match crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::UNREVOKE,
+            serde_json::json!({ "version": version, "reason": reason }),
+            true,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        return Outcome::ok(format!(
+            "unrevoked  {}\n",
+            numbered(
+                row["ordinal"].as_u64(),
+                row["version"].as_str().unwrap_or(version)
+            )
+        ));
+    }
+    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let v = ordo_host::versions::Versions::on(&pool);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let version = match v.unrevoke(version, &reason, actor, now).await {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    };
+    let ordinal = v.ordinal_of(&version).await.ok().flatten();
+    Outcome::ok(format!("unrevoked  {}\n", numbered(ordinal, &version)))
+}
+
+/// `ordo versions revoked`: each revoked version, its reason, and the
+/// tenants pinned to it (D8's report).
+async fn versions_revoked(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--db"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    if !flags.positional.is_empty() {
+        return Outcome::usage("`ordo versions revoked` takes no version\n".into());
+    }
+    if let Some(host) = crate::wire::requested(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        let row = match crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::REVOKED,
+            serde_json::json!({}),
+            false,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        let list: Option<Vec<_>> = row["versions"].as_array().map(|a| {
+            a.iter()
+                .filter_map(ordo_host::deploy_ops::revoked_from_json)
+                .collect()
+        });
+        return match list {
+            Some(l) => Outcome::ok(revoked_list(&l)),
+            None => Outcome::failed("REFUSED  the door's answer has no `versions`\n".into()),
+        };
+    }
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    match ordo_host::versions::Versions::on(&pool)
+        .pinned_to_revoked()
+        .await
+    {
+        Ok(l) => Outcome::ok(revoked_list(&l)),
+        Err(e) => Outcome::failed(format!("database: {e}\n")),
+    }
+}
+
+/// What `ordo versions revoked` prints, on both paths.
+pub(crate) fn revoked_list(list: &[ordo_host::versions::RevokedVersion]) -> String {
+    let mut out = format!("REVOKED ({})\n", list.len());
+    if list.is_empty() {
+        out.push_str("  none\n");
+    }
+    for r in list {
+        out.push_str(&format!(
+            "  {}  by {} at {}  \"{}\"\n    tenants pinned: {}\n",
+            numbered(r.ordinal, &r.mark.version),
+            r.mark.actor,
+            r.mark.at,
+            r.mark.reason,
+            r.tenant_count
+        ));
+        for t in &r.tenants {
+            out.push_str(&format!("      {}  {}  {}\n", t.space, t.state, t.name));
+        }
+        if (r.tenants.len() as u64) < r.tenant_count {
+            out.push_str(&format!(
+                "      and {} more\n",
+                r.tenant_count - r.tenants.len() as u64
+            ));
+        }
+    }
+    out
+}
 
 /// The door flags a `versions` subcommand takes besides its own.
 const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
@@ -2528,7 +2782,7 @@ async fn versions_list(flags: Flags) -> Outcome {
             Err(e) => return Outcome::failed(format!("database: {e}\n")),
         };
         out.push_str(&format!(
-            "  {}  declared {declared}  tenants {}{}{}\n",
+            "  {}  declared {declared}  tenants {}{}{}{}\n",
             numbered(history.ordinals.get(v).copied(), v),
             history.tenants.get(v).copied().unwrap_or(0),
             provenance_inline(history.provenance.get(v)),
@@ -2536,7 +2790,12 @@ async fn versions_list(flags: Flags) -> Outcome {
                 "  <- serving"
             } else {
                 ""
-            }
+            },
+            history
+                .revoked
+                .get(v)
+                .map(|r| format!("  REVOKED \"{}\"", r.reason))
+                .unwrap_or_default()
         ));
     }
     Outcome::ok(out)
@@ -2576,19 +2835,30 @@ async fn versions_show(flags: Flags) -> Outcome {
             versions.active_version().await?,
             versions.activations_of(version).await?,
             versions.provenance(version).await?,
+            versions.revocation_history(version).await?,
         )))
     };
-    let (declared, source_id, ordinal, stored, builds, tenants, active, activations, provenance) =
-        match read.await {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                return Outcome::failed(format!(
-                    "REFUSED no version is stored under `{version}`; `ordo versions list` \
+    let (
+        declared,
+        source_id,
+        ordinal,
+        stored,
+        builds,
+        tenants,
+        active,
+        activations,
+        provenance,
+        revocations,
+    ) = match read.await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Outcome::failed(format!(
+                "REFUSED no version is stored under `{version}`; `ordo versions list` \
                      names them\n"
-                ))
-            }
-            Err(e) => return Outcome::failed(format!("database: {e}\n")),
-        };
+            ))
+        }
+        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    };
     let mut out = format!(
         "version    {}{}\n",
         numbered(ordinal, version),
@@ -2618,6 +2888,16 @@ async fn versions_show(flags: Flags) -> Outcome {
         "tenants    {} pinned\n",
         tenants.get(version.as_str()).copied().unwrap_or(0)
     ));
+    if let Some(last) = revocations.last() {
+        out.push_str(&format!(
+            "revoked    {}\n",
+            if last.act == ordo_host::versions::RevokeAct::Revoke {
+                format!("yes, \"{}\"", last.reason)
+            } else {
+                "no".to_string()
+            }
+        ));
+    }
     out.push_str(&format!("\nBUILDS ({})\n", builds.len()));
     for (id, release, at) in &builds {
         out.push_str(&format!(
@@ -2631,6 +2911,21 @@ async fn versions_show(flags: Flags) -> Outcome {
     ));
     for a in &activations {
         out.push_str(&format!("  {}.  at {} by {}\n", a.seq, a.at.0, a.actor));
+    }
+    if !revocations.is_empty() {
+        out.push_str(&format!(
+            "\nREVOCATIONS ({}, oldest first)\n",
+            revocations.len()
+        ));
+        for r in &revocations {
+            out.push_str(&format!(
+                "  {:<8}  at {} by {}  \"{}\"\n",
+                r.act.as_str(),
+                r.at,
+                r.actor,
+                r.reason
+            ));
+        }
     }
     Outcome::ok(out)
 }

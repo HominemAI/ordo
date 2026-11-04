@@ -1,6 +1,6 @@
 ---
 name: cleanup-rust-repo
-description: Reclaim disk from Rust build artifacts (./clean-build-artifacts.sh) and from the Postgres test clusters agents leave behind (scripts/clean-test-clusters.sh). Use when the disk is filling, when target/ has grown large, when a build or test run fails on no space left on device, after parallel agents finish, or when asked to clean up the repo.
+description: Reclaim disk from Rust build artifacts (./clean-build-artifacts.sh), from the Postgres test clusters agents leave behind (scripts/clean-test-clusters.sh), and from Docker's images, volumes and build cache. Use when the disk is filling, when target/ has grown large, when a build or test run fails on no space left on device, after parallel agents finish, or when asked to clean up the repo.
 ---
 
 # Reclaiming disk from `target/`
@@ -43,16 +43,17 @@ another pane. Wait rather than overriding it.
 -E "[r]ustc|[c]argo"`. A build that lost its parent can sit for hours, and
 this repository has had one burn CPU for 29 hours.
 
-## Always check all three places
+## Always check all four places
 
-A disk that is filling has three usual causes here, and on 2026-09-29 all
-three were present at once, with 5.2G free:
+A disk that is filling has four usual causes here. On 2026-09-29 the first
+three were present at once, with 5.2G free; on 2026-11-04 Docker held 32G.
 
 | Where | What grows | Seen |
 |---|---|---|
 | `target/` at the root | `deps` and the incremental cache | 89G (28G incremental) |
 | an agent worktree's `target/` | the same, per worktree | 8 to 9G each |
 | `~/.ordo-pg/<name>` | one Postgres test cluster per agent | 2 to 9G each, ten of them: 57G |
+| Docker | image build cache, rehearsal volumes, pulled images | 32G: 14.6G cache, 9.5G volumes, 8.8G images |
 
 Measure first, all at once:
 
@@ -61,6 +62,7 @@ df -h .
 ./clean-build-artifacts.sh --dry-run
 scripts/clean-test-clusters.sh
 ps -axo pid,etime,command | grep -E "[c]argo|[r]ustc|[p]ostgres -D"
+docker system df
 ```
 
 `df -h /` shows the small system volume on macOS; `df -h .` from the repo
@@ -87,6 +89,39 @@ sometimes still running**.
 **When launching test-running agents, tell each to stop its cluster when it
 finishes.** Most did on 2026-09-29; one left its cluster running.
 
+## Docker
+
+Ordo's image builds, upgrade rehearsals (`scripts/rehearse/`) and the
+token benchmark's Supabase stack all use Docker, and none of them clean up.
+On 2026-11-04 it held 32G with no container running:
+
+- **Build cache, 14.6G.** Release builds of `ordo-host`, the console, the
+  supervisor and the identity service, layer by layer.
+- **Volumes, 9.5G.** 52 unnamed Postgres 17 data volumes left by
+  rehearsals. The largest held 904 databases, one per test tenant.
+- **Images, 8.8G.** Playwright, the Supabase images, `rust`, `postgres:17`,
+  Caddy, and `ordo:step7`-style rehearsal tags.
+
+Docker Desktop is often not running. `docker system df` then fails with
+"Cannot connect to the Docker daemon", and the space shows only as
+`~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw`.
+Start it with `open -a Docker` to see inside.
+
+**To reclaim it**, with no container running that anyone needs:
+
+```
+docker system prune -a --volumes -f
+docker builder prune -a -f
+```
+
+**It is the user's call, like `--deep`.** It costs a cold Docker build of
+Ordo (10 to 15 minutes), images pulled again on first use, and every
+unnamed volume, which may be a rehearsal someone is still reading. A volume
+in use by a container, running or stopped, is kept; check `docker ps -a`
+first. `Docker.raw` shrinks to match over a few minutes.
+
+Quit Docker afterwards if it was not running before.
+
 ## A worktree's `target/`
 
 A finished agent's worktree holds a full `target/`. Removing the worktree
@@ -96,8 +131,8 @@ is the user's call only when the worktree may hold uncommitted work.
 
 ## What it will not touch
 
-Source, `.git`, and the Postgres test clusters. Those are
-`scripts/clean-test-clusters.sh`'s, above. The default cluster lives in
+Source, `.git`, Docker, and the Postgres test clusters. The clusters are
+`scripts/clean-test-clusters.sh`'s and Docker is pruned by hand, both above. The default cluster lives in
 `$TMPDIR` and has its own failure mode; see `scripts/conformance-pg.sh` and
 note that macOS reaps it independently.
 

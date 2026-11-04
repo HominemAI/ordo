@@ -135,12 +135,16 @@ async fn an_untagged_handle_is_bounded_by_the_pool_alone() {
 
 // ── the statement bound ─────────────────────────────────────────────────
 
+/// A pool bounded at `statement_timeout`, booted without the platform's
+/// tables. Their DDL ran under the bound too, and on a loaded CI Postgres
+/// it took longer than 200 ms and failed the boot (`boot:
+/// StatementTimeout`, 2026-11-04). These tests need no table.
 async fn bounded_pool(statement_timeout: Option<Duration>) -> Pool {
     let cfg = cfg(2);
     ordo_exec::create_database(&cfg, DB)
         .await
         .expect("database");
-    Pool::connect_with(
+    Pool::connect_own(
         cfg,
         PoolLimits {
             space_reserve: None,

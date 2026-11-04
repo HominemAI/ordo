@@ -1,6 +1,6 @@
 {
  "date": "2026-11-04",
- "text": "Versions increments 2 and 2b are built on bleeding, with console screens: pins, labels, diff, revoking a version, and a Maintenance screen for windows set for all, only or all-except tenants [[program-versions-the-core-under-schema]]. Increment 3 is next.",
+ "text": "Versions increments 2 and 2b are built and green on bleeding (a7b590b6), with console screens: pins, labels, diff, revoking a version, and a Maintenance screen for windows [[program-versions-the-core-under-schema]]. A share-link failure in the authz matrix was the test's, fixed [[authz-link-refused-flake]]. Increment 3 is next.",
  "tiles": [
   [
    "4,056",

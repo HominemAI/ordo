@@ -354,7 +354,7 @@ fn header(
     r: &mut String,
     path: &str,
     db: &str,
-    deployed: Option<&ordo_exec::registry::Artifact>,
+    deployed: Option<&ordo_host::versions::Artifact>,
     version: &str,
     recompiled: bool,
 ) {

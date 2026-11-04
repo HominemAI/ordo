@@ -203,6 +203,12 @@ fn usage() -> ! {
          activation log, never a rewrite of it.\n  \
          ordo deploys   [--limit <n>]\n      \
          what is stored, what is serving, and every re-point in order.\n  \
+         ordo versions  list [--db <name>]\n      \
+         each stored version, newest first: its order number, name, declared\n      \
+         version, how many tenants are pinned to it, and which one serves.\n  \
+         ordo versions  show <version> [--db <name>]\n      \
+         one version: order number, declared version, source fingerprint,\n      \
+         its builds and the Ordo release of each, tenants pinned, activations.\n  \
          ordo verify     --identity [--security-key-id <id> --security-public-key <hex>]\n      \
          verify the deployment's security stream, then reconcile every link in\n      \
          `$authenticator` against it: a link no event explains (a sign-up, a\n      \
@@ -440,6 +446,7 @@ fn main() {
             | "apply"
             | "rollback"
             | "deploys"
+            | "versions"
             | "prune"
             | "restore"
             | "keys"

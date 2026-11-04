@@ -511,7 +511,7 @@ fn deployed_schema(s: &Session) -> Result<(ordo_schema::Schema, Option<String>),
     // that never applied has no program and no entities, and an error
     // reading the table is that same absence.
     let active =
-        s.rt.block_on(ordo_exec::registry::active(&s.pool))
+        s.rt.block_on(ordo_host::versions::Versions::on(&s.pool).active())
             .unwrap_or_default();
     let (text, note) = match active {
         Some(a) => (a.source, None),

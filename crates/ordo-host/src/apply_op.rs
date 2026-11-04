@@ -91,11 +91,12 @@
 use std::sync::Arc;
 
 use ordo_api::{BoundParams, ErrorCode, ExecError, ExecResult};
-use ordo_exec::{registry, Pool};
+use ordo_exec::Pool;
 use ordo_schema::diff::Change;
 use serde_json::{json, Value};
 
 use crate::schema_apply::{self as sa, Program, SchemaState};
+use crate::versions::{self, Versions};
 
 /// `std.deployment.apply` — apply a program to this deployment.
 ///
@@ -692,7 +693,8 @@ async fn sequence(
     op: &str,
     activate: bool,
 ) -> Result<Report, ApplyRefused> {
-    registry::ensure_tables(pool)
+    Versions::on(pool)
+        .ensure()
         .await
         .map_err(|e| ApplyRefused::Internal(format!("registry tables: {e}")))?;
 
@@ -768,7 +770,7 @@ async fn sequence(
         }
     };
 
-    let artifact = registry::Artifact {
+    let artifact = versions::Artifact {
         version: program.version.clone(),
         artifact: ordo_plan::artifact::to_bytes(&program.doc),
         source: program.source.clone(),
@@ -777,17 +779,18 @@ async fn sequence(
         actor: actor.to_string(),
     };
     let stored = if naming.existing {
-        registry::rebuild(pool, &artifact).await
+        Versions::on(pool).rebuild(&artifact).await
     } else {
-        registry::store(pool, &artifact).await
+        Versions::on(pool).store(&artifact).await
     };
     let stored = match stored {
-        Ok(registry::Applied::Stored(_)) => Stored::Written,
-        Ok(registry::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
-        Ok(registry::Applied::Rebuilt(_)) => Stored::Rebuilt,
+        Ok(versions::Applied::Stored(_)) => Stored::Written,
+        Ok(versions::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
+        Ok(versions::Applied::Rebuilt(_)) => Stored::Rebuilt,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
-    let ordinal = registry::ordinal_of(pool, &program.version)
+    let ordinal = Versions::on(pool)
+        .ordinal_of(&program.version)
         .await
         .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
 
@@ -887,16 +890,18 @@ async fn sequence(
     let activation = if !activate {
         Activation::Staged
     } else {
-        match registry::activate(
-            pool,
-            &program.version,
-            actor,
-            ordo_commandlog::Timestamp(now_secs()),
-        )
-        .await
+        // Every tenant is re-pinned to it in the same transaction
+        // (`plan-versions.md` §1.3).
+        match Versions::on(pool)
+            .activate(
+                &program.version,
+                actor,
+                ordo_commandlog::Timestamp(now_secs()),
+            )
+            .await
         {
-            Ok(registry::Activated::Switched { from, to }) => Activation::Switched { from, to },
-            Ok(registry::Activated::AlreadyActive(version)) => {
+            Ok(versions::Activated::Switched { from, to }) => Activation::Switched { from, to },
+            Ok(versions::Activated::AlreadyActive(version)) => {
                 Activation::AlreadyActive { version }
             }
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
@@ -1008,10 +1013,12 @@ async fn activate_locked(
     version: &str,
     actor: &str,
 ) -> Result<Activation, ApplyRefused> {
-    registry::ensure_tables(pool)
+    Versions::on(pool)
+        .ensure()
         .await
         .map_err(|e| ApplyRefused::Internal(format!("registry tables: {e}")))?;
-    let stored = registry::get(pool, version)
+    let stored = Versions::on(pool)
+        .get(version)
         .await
         .map_err(|e| ApplyRefused::Internal(e.to_string()))?
         .ok_or_else(|| ApplyRefused::UnknownVersion(version.to_string()))?;
@@ -1045,12 +1052,16 @@ async fn activate_locked(
             })
         }
     }
-    match registry::activate(pool, version, actor, ordo_commandlog::Timestamp(now_secs())).await {
-        Ok(registry::Activated::Switched { from, to }) => Ok(Activation::Switched { from, to }),
-        Ok(registry::Activated::AlreadyActive(version)) => {
+    // The same re-point as an apply's, pins included.
+    match Versions::on(pool)
+        .activate(version, actor, ordo_commandlog::Timestamp(now_secs()))
+        .await
+    {
+        Ok(versions::Activated::Switched { from, to }) => Ok(Activation::Switched { from, to }),
+        Ok(versions::Activated::AlreadyActive(version)) => {
             Ok(Activation::AlreadyActive { version })
         }
-        Err(registry::RegistryRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
+        Err(versions::VersionRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
         Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }
 }
@@ -1063,28 +1074,34 @@ pub struct History {
     pub ordinals: std::collections::BTreeMap<String, u64>,
     /// `(version, applied at, by whom)`, newest first.
     pub stored: Vec<(String, u64, String)>,
-    pub activations: Vec<registry::Activation>,
+    pub activations: Vec<versions::Activation>,
+    /// How many tenants are pinned to each version (`plan-versions.md`
+    /// §1.3). A version no tenant is pinned to is absent.
+    pub tenants: std::collections::BTreeMap<String, u64>,
 }
 
 /// The deployment's program history: `std.deployment.versions` and `ordo
 /// deploys`. `limit` bounds the activation log. A database no apply has
 /// reached has no registry yet, and answers an empty history.
-pub async fn history(pool: &Pool, limit: usize) -> Result<History, ordo_exec::PoolError> {
-    let empty_when_new = |r: Result<History, ordo_exec::PoolError>| match r {
+pub async fn history(pool: &Pool, limit: usize) -> Result<History, versions::VersionRefusal> {
+    let empty_when_new = |r: Result<History, versions::VersionRefusal>| match r {
         Err(e) if e.is_missing_table() => Ok(History::default()),
         other => other,
     };
+    let v = Versions::on(pool);
     empty_when_new(
         async {
             Ok(History {
-                active: registry::active_version(pool).await?,
-                ordinals: registry::ordinals(pool).await?,
-                stored: registry::stored(pool)
+                active: v.active_version().await?,
+                ordinals: v.ordinals().await?,
+                stored: v
+                    .stored()
                     .await?
                     .into_iter()
                     .map(|(v, at, by)| (v, at.0, by))
                     .collect(),
-                activations: registry::activations(pool, limit).await?,
+                activations: v.activations(limit).await?,
+                tenants: v.tenants_per_version().await?,
             })
         }
         .await,
@@ -1102,6 +1119,7 @@ impl History {
                 "appliedAt": at,
                 "actor": by,
                 "serving": Some(v) == self.active.as_ref(),
+                "tenants": self.tenants.get(v).copied().unwrap_or(0),
             })).collect::<Vec<_>>(),
             "activations": self.activations.iter().map(|a| json!({
                 "seq": a.seq,
@@ -1176,8 +1194,9 @@ pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused>
         Err(sa::NameRefusal::Registry(_)) => {}
         Err(e) => return Err(refused(e)),
     }
-    let serving = registry::active_version(pool).await.ok().flatten();
-    let already_stored = registry::get(pool, &program.version)
+    let serving = Versions::on(pool).active_version().await.ok().flatten();
+    let already_stored = Versions::on(pool)
+        .get(&program.version)
         .await
         .ok()
         .flatten()

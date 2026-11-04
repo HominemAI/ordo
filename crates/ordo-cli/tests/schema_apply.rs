@@ -760,3 +760,72 @@ fn a_change_under_a_used_version_is_refused_and_bump_raises_it() {
         "0.2.1"
     );
 }
+
+/// `ordo versions list` and `show` (`plan-versions.md` increment 2): each
+/// stored version with the tenants pinned to it, and one version in full.
+#[test]
+fn versions_list_and_show_name_the_tenants_pinned() {
+    let _g = SETTING.lock().unwrap_or_else(|e| e.into_inner());
+    let db = "ordo_sapply_versions";
+    let pg = empty(db);
+    let v1 = program(db, "v1", V1);
+    let v2 = program(db, "v2", V2);
+    assert_eq!(apply(&v1, db).code, 0);
+    let latest = "SELECT version FROM \"$activations\" ORDER BY seq DESC LIMIT 1";
+    let first = one(&pg, latest);
+    // A tenant, as `std.space.create` leaves one once it is built.
+    pg.exec(
+        "INSERT INTO \"$spaces\" (\"$space\", \"name\", \"created_at\", \"created_by\", \
+           \"state\", \"phase\", \"state_at\") \
+         VALUES ('spc_t1', 't1', 1, 'test', 'active', 'founded', 1)",
+    )
+    .expect("a tenant");
+    let out = apply(&v2, db);
+    assert_eq!(out.code, 0, "{}", out.report);
+    let second = one(&pg, latest);
+    assert_ne!(first, second);
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT \"version\" FROM \"$spaces\" WHERE \"$space\" = 'spc_t1'"
+        ),
+        second,
+        "the activation pinned the tenant"
+    );
+
+    let list = operator::run("versions", &["list".into(), "--db".into(), db.into()]);
+    assert_eq!(list.code, 0, "{}", list.report);
+    let newer = list
+        .report
+        .find(&format!(
+            "#2 · {second}  declared none  tenants 1  <- serving"
+        ))
+        .unwrap_or_else(|| panic!("the serving version, with its tenant:\n{}", list.report));
+    let older = list
+        .report
+        .find(&format!("#1 · {first}  declared none  tenants 0\n"))
+        .unwrap_or_else(|| panic!("the older version, with none:\n{}", list.report));
+    assert!(newer < older, "newest first:\n{}", list.report);
+
+    let show = operator::run(
+        "versions",
+        &["show".into(), second.clone(), "--db".into(), db.into()],
+    );
+    assert_eq!(show.code, 0, "{}", show.report);
+    for want in [
+        format!("version    #2 · {second}  <- serving"),
+        "declared   none".to_string(),
+        "tenants    1 pinned".to_string(),
+        "BUILDS (1)".to_string(),
+        "ACTIVATIONS (1, newest first)".to_string(),
+    ] {
+        assert!(show.report.contains(&want), "`{want}` in:\n{}", show.report);
+    }
+
+    let unknown = operator::run(
+        "versions",
+        &["show".into(), "nope".into(), "--db".into(), db.into()],
+    );
+    assert_ne!(unknown.code, 0);
+    assert!(unknown.report.contains("REFUSED"), "{}", unknown.report);
+}

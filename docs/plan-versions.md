@@ -4,7 +4,8 @@ Status: **build plan, revised 2026-11-02 after review.** The owner ruled the
 plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Asks 5 to
 7, from building increment 1, were ruled 2026-11-03; ask 6 made the
 declared `@` version the name (§1.1). Ask 8 is open (§5). The rehearsal
-design (§3.2) is provisional. Increment 1 built 2026-11-03.
+design (§3.2) is provisional. Increment 1 built 2026-11-03. Increment 2,
+session 1 (pins, `Versions`, `ordo versions list|show`) built 2026-11-03.
 Review: `review-plan-versions.md` (54 findings). Rulings:
 `corpus-rulings.md`, "2026-11-02: program versions plan and its review".
 Joins `plan-schema-evolution.md`, `plan-evolution-plans.md` and
@@ -139,6 +140,25 @@ The pin this plan adds:
 - "Active" flips when a rollout finishes. A running rollout re-reads its
   tenant set, so a tenant created mid-rollout is moved too.
 
+**As built in increment 2, session 1** (2026-11-03, `ordo-host/src/versions.rs`):
+
+- Pins are recorded, not served on. The door serves the one loaded
+  version until increment 3.
+- Rollouts do not exist, so the active version stands in for "last version
+  that finished a rollout".
+- Every activation (apply, `std.deployment.activate`, `ordo rollback`)
+  re-pins every `provisioning`, `active` and `paused` tenant in the
+  activation's transaction. A tenant `versions.new_tenant` started on a
+  beta build moves too.
+- A rollback's pins say `rollback`: the target was stored before the
+  version it replaces.
+- A new tenant is pinned right after its row is written, in its own
+  transaction. A pin that fails is logged, and boot's backfill pins it.
+- A space attached by hand with no `$spaces` row is not pinned.
+- Not yet built: the pin epoch check in the write transaction, the
+  principal check on who may pin, the stream event, and the rollout id on
+  `$pins`.
+
 ### 1.4 How the door picks the version per request
 
 1. The door binds the space, as now.
@@ -217,6 +237,11 @@ Ruled 2026-11-02 (D7).
   direct database connection to another environment.
 - Pin changes are also a stream any node can tail, so a second region needs
   no shared `NOTIFY`.
+
+As built (2026-11-03): `Versions` owns `$artifacts`, `$builds`,
+`$activations`, the pins, `$pins` and `$moves`, over `ordo_exec::registry`
+as its SQL layer. `$code` stays with `functions.rs` and `$plans` does not
+exist yet. `VersionRefusal::to_exec_error` is the one door mapping.
 
 ### 1.9 Clients across versions
 
@@ -538,7 +563,7 @@ round is about 35 minutes for the full suite.
 | # | Increment | Size | Needs | Done when | Closes |
 |---|---|---|---|---|---|
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
-| 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
+| 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2: labels, `diff`, the epoch check, the pin stream. | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation.** Owner-set mark, console warnings, tenants move in their windows (D8). | M | 2 | a revoked version cannot be pinned; its tenants move at their window; the console shows the warning | none |
 | 3 | **Multi-version serving, dev first.** Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |

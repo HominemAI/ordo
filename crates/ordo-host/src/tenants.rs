@@ -355,6 +355,11 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), PoolError> {
         "\"attempts\" bigint NOT NULL DEFAULT 0",
         "\"retry_at\" bigint NOT NULL DEFAULT 0",
         "\"stuck_at\" bigint NOT NULL DEFAULT 0",
+        // The pin (`plan-versions.md` §1.3): the version this tenant is
+        // served, and the count of times it changed. NULL until
+        // `crate::versions` pins it. Only `Versions` writes either.
+        "\"version\" text NULL",
+        "\"pin_epoch\" bigint NOT NULL DEFAULT 0",
     ] {
         pool.rows(&format!(
             "ALTER TABLE \"{SPACES_TABLE}\" ADD COLUMN IF NOT EXISTS {column}"
@@ -385,7 +390,8 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), PoolError> {
     if pool.rows(OWN_OF_INDEX_DDL).await.is_err() {
         pool.rows(OWN_OF_INDEX_DDL).await?;
     }
-    Ok(())
+    // The pin history and the moves table sit beside the pins they record.
+    crate::versions::ensure_pin_tables(pool).await
 }
 
 /// Record a minted tenant. Written **after** provisioning succeeded, never

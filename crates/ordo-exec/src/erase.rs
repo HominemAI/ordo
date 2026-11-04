@@ -112,7 +112,13 @@ use crate::{sql_lit, OpClass, Pool, PoolError};
 /// a subject can erase is not an audit spine. Retention of the stream is
 /// governed by `policy retention`, which is where a jurisdiction's answer
 /// belongs.
-pub const RETAINED: &[&str] = &["$secevents", "$seccheckpoints"];
+///
+/// `$pins`, the history of which version each tenant was served, joined
+/// it on 2026-11-03 (owner, board `program-versions-the-core-under-schema`
+/// ask 15). It holds no personal data: the space id, version names, and the
+/// deployment owner who moved the pin. It answers "what was this tenant
+/// served, and when" after the tenant is gone.
+pub const RETAINED: &[&str] = &["$secevents", "$seccheckpoints", "$pins"];
 
 /// Why an erasure did not happen.
 #[derive(Debug)]
@@ -524,11 +530,10 @@ async fn space_scoped_tables(
 /// already holds rows on the default database". The row is not rows the
 /// space holds; it is the record that the space is being made.
 ///
-/// `$pins` and `$moves` joined it on 2026-11-03 (`plan-versions.md` §1.3),
-/// for the same reason: a new tenant is pinned when its row is written, so
-/// its first `$pins` row exists before anything is provisioned. They say
-/// which version the space is served, not what it holds.
-pub const ATTACHMENTS: &[&str] = &["$spacedb", "$spacebucket", "$spaces", "$pins", "$moves"];
+/// `$moves` joined it on 2026-11-03 (`plan-versions.md` §1.3): it says
+/// which version the space is moving to, not what it holds. `$pins` is
+/// [`RETAINED`], so neither count reaches it.
+pub const ATTACHMENTS: &[&str] = &["$spacedb", "$spacebucket", "$spaces", "$moves"];
 
 /// How many rows `space` holds in `pool`'s database, across every table an
 /// erasure would delete from except [`ATTACHMENTS`].

@@ -12023,3 +12023,28 @@ source line means.
   then the true record of what runs, for people and agents alike. A
   change to a function's code alone is a real change and needs a number
   too. `ordo dev` keeps no registry and is never refused.
+
+## 2026-11-03: version order a person can read
+
+Board task `program-versions-the-core-under-schema`, asks 8, 9 and 10, each
+answered "ok" on its recommendation. The owner's reasoning, given while
+discussing them: "as long as something is getting a version we're good -
+but ... it ideally should have an obvious incremental aspect - since the
+migration from any one to another is linear", and "We can still have a
+hash but their should be an intelligeable and human friendly descriptor
+that shows the linear correlation".
+
+- **Ask 8:** every stored version gets an order number, `#1`, `#2`, ...,
+  in the order it was first stored, and it is shown beside the name
+  (`#4 · 0.2.1`) in `ordo deploys` and the apply report. Numbers are
+  stored, never reused. Rows from before are numbered by when they were
+  applied.
+- **Ask 9:** new content under an `@` number lower than the highest
+  applied is refused, naming the next number. Going back to a version
+  already stored is not new content and goes through.
+- **Ask 10:** a program with no `@` is still applied, named by its
+  compiled digest, with a note saying how to declare a version. With `#n`
+  showing its place, a refusal would only cost test edits.
+- **Reasoning:** the hash tells a machine whether two builds are the same;
+  a person needs to tell which came first. `#n` gives every version that,
+  and rising declared numbers keep the names in the same order.

@@ -225,6 +225,8 @@ pub struct Naming {
     /// An earlier version under this declared version compiles to this
     /// program, so this is a new build of it at most.
     pub existing: bool,
+    /// The warning for a new program that declares no `@` version (ask 10).
+    pub note: Option<String>,
 }
 
 /// Why [`name_version`] could not name a program.
@@ -235,6 +237,13 @@ pub enum NameRefusal {
     /// stored numbers read as `x.y.z`.
     Taken {
         version: String,
+        next: Option<String>,
+    },
+    /// The declared `@` version is lower than one already applied, so the
+    /// numbers would stop rising in the order changes were made (ask 9).
+    Behind {
+        version: String,
+        highest: String,
         next: Option<String>,
     },
     /// Reading the registry failed.
@@ -260,6 +269,25 @@ impl std::fmt::Display for NameRefusal {
                     None => write!(f, "Raise `domain … @ {version}` in the source."),
                 }
             }
+            NameRefusal::Behind {
+                version,
+                highest,
+                next,
+            } => {
+                write!(
+                    f,
+                    "version_behind: version {version} is lower than {highest}, which is \
+                     already applied. Version numbers rise in the order changes are made. "
+                )?;
+                match next {
+                    Some(n) => write!(
+                        f,
+                        "Set `domain … @ {n}` in the source, or run `ordo apply --bump` to \
+                         have the file changed for you."
+                    ),
+                    None => write!(f, "Raise `domain … @ {version}` above {highest}."),
+                }
+            }
             NameRefusal::Registry(e) => write!(f, "registry: {e}"),
         }
     }
@@ -271,7 +299,10 @@ impl NameRefusal {
     /// `ordo apply --bump` reads it back here, beside the one place that
     /// writes it.
     pub fn read_taken(text: &str) -> Option<(String, String)> {
-        let rest = &text[text.find("version_taken: version ")? + 23..];
+        let at = ["version_taken: version ", "version_behind: version "]
+            .iter()
+            .find_map(|m| text.find(m).map(|i| i + m.len()))?;
+        let rest = &text[at..];
         let version = rest.split(' ').next()?.to_string();
         let set = &rest[rest.find("Set `domain … @ ")? + "Set `domain … @ ".len()..];
         let next = set.split('`').next()?.to_string();
@@ -297,8 +328,13 @@ impl NameRefusal {
 /// number is refused, naming the next number to use: the source must
 /// always name what is applied (owner, 2026-11-03, ask 13).
 ///
+/// A new number lower than the highest already applied is refused too, so
+/// numbers rise in the order changes were made (ask 9). Going back to
+/// content already stored is a match, never refused.
+///
 /// A program that declares no `@` version is named as before 2026-11-03,
-/// by the 16-hex digest of what it compiles to.
+/// by the 16-hex digest of what it compiles to, with a note saying how to
+/// declare one (ask 10).
 pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
     use ordo_exec::registry;
     let registry_err = |e: ordo_exec::PoolError| NameRefusal::Registry(e.to_string());
@@ -318,6 +354,7 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
             return Ok(Naming {
                 version: r.artifact.version.clone(),
                 existing: true,
+                note: None,
             });
         }
     }
@@ -328,9 +365,23 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
             .await
             .map_err(registry_err)?
             .is_some();
+        let note = (!existing).then(|| {
+            let name = ordo_syntax::parse_program(&program.source)
+                .ok()
+                .and_then(|p| p.domain)
+                .map(|d| d.name.name)
+                .unwrap_or_else(|| "<name>".into());
+            format!(
+                "this program declares no `@` version, so it is named by its compiled \
+                 digest {}. Give it a number a person can read: start the source with \
+                 `domain {name} @ 0.1.0`",
+                ordo_plan::artifact::short(&program.version)
+            )
+        });
         return Ok(Naming {
             version: program.version.clone(),
             existing,
+            note,
         });
     };
     let taken = !stored.is_empty()
@@ -338,21 +389,30 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
             .await
             .map_err(registry_err)?
             .is_some();
+    let numbers = registry::declared_versions(pool)
+        .await
+        .map_err(registry_err)?;
+    let next = ordo_plan::artifact::next_version(
+        numbers.iter().map(String::as_str).chain(std::iter::once(d)),
+    );
     if taken {
-        let numbers = registry::declared_versions(pool)
-            .await
-            .map_err(registry_err)?;
-        let next = ordo_plan::artifact::next_version(
-            numbers.iter().map(String::as_str).chain(std::iter::once(d)),
-        );
         return Err(NameRefusal::Taken {
             version: d.to_string(),
+            next,
+        });
+    }
+    if let Some(highest) = ordo_plan::artifact::highest_above(d, numbers.iter().map(String::as_str))
+    {
+        return Err(NameRefusal::Behind {
+            version: d.to_string(),
+            highest,
             next,
         });
     }
     Ok(Naming {
         version: d.to_string(),
         existing: false,
+        note: None,
     })
 }
 
@@ -2661,7 +2721,7 @@ pub async fn apply_with(
             named = p;
             &named
         }
-        Err(e @ NameRefusal::Taken { .. }) => {
+        Err(e @ (NameRefusal::Taken { .. } | NameRefusal::Behind { .. })) => {
             let e = e.to_string();
             return (Err(e.clone()), Err(ApplyRefusal::VersionTaken(e)));
         }

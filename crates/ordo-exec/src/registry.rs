@@ -97,6 +97,8 @@ ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"edition\" integer NOT NULL
 ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"declared\" text; \
 CREATE INDEX IF NOT EXISTS \"$artifacts_declared\" ON \"$artifacts\" (\"declared\"); \
 CREATE INDEX IF NOT EXISTS \"$artifacts_source_id\" ON \"$artifacts\" (\"source_id\"); \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"ordinal\" bigint; \
+CREATE UNIQUE INDEX IF NOT EXISTS \"$artifacts_ordinal\" ON \"$artifacts\" (\"ordinal\"); \
 CREATE TABLE IF NOT EXISTS \"$builds\" ( \
   \"version\" text NOT NULL REFERENCES \"$artifacts\" (\"version\"), \
   \"build_id\" text NOT NULL, \
@@ -248,7 +250,46 @@ pub async fn ensure_tables(pool: &Pool) -> Result<(), PoolError> {
         ))
         .await?;
     }
+    // Rows stored before 2026-11-03 take their order numbers from when
+    // they were applied, after any number already given.
+    pool.rows(
+        "UPDATE \"$artifacts\" a SET \"ordinal\" = n.\"o\" FROM ( \
+           SELECT \"version\", \
+             (SELECT coalesce(max(\"ordinal\"), 0) FROM \"$artifacts\") \
+               + row_number() OVER (ORDER BY \"applied_at\", \"version\") AS \"o\" \
+           FROM \"$artifacts\" WHERE \"ordinal\" IS NULL) n \
+         WHERE a.\"version\" = n.\"version\"",
+    )
+    .await?;
     Ok(())
+}
+
+/// Each stored version's **order number**: 1 for the first version this
+/// deployment stored, counting up, never reused (owner, 2026-11-03, ask 8).
+/// A person reads which version came first from it, whatever the versions
+/// are named.
+pub async fn ordinals(pool: &Pool) -> Result<std::collections::BTreeMap<String, u64>, PoolError> {
+    let rows = pool
+        .rows("SELECT \"version\", \"ordinal\" FROM \"$artifacts\" WHERE \"ordinal\" IS NOT NULL")
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?.parse().ok()?)))
+        .collect())
+}
+
+/// One stored version's order number (see [`ordinals`]).
+pub async fn ordinal_of(pool: &Pool, version: &str) -> Result<Option<u64>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT \"ordinal\" FROM \"$artifacts\" WHERE \"version\" = {}",
+            sql_lit(version)
+        ))
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .and_then(|o| o.parse().ok()))
 }
 
 /// The source fingerprint of a stored row: its source, edition 1, and the
@@ -374,8 +415,9 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
     pool.rows(&format!(
         "INSERT INTO \"$artifacts\" \
            (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\", \
-            \"source_id\", \"declared\") \
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+            \"source_id\", \"declared\", \"ordinal\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, \
+           (SELECT coalesce(max(\"ordinal\"), 0) + 1 FROM \"$artifacts\"))",
         sql_lit(&a.version),
         sql_lit(&a.artifact),
         sql_lit(&a.source),

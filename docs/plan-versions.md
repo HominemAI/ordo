@@ -61,6 +61,13 @@ How an apply names a program (`schema_apply::name_version`):
   need to block on version in the same file if the file has changed",
   formatting excepted). The source then always names what is applied.
   A change to a function's code alone is a real change too.
+- New content under a number lower than the highest applied is refused
+  too, naming the next number, so numbers rise in the order changes were
+  made (ask 9). Going back to stored content is a match, not new content.
+- Every stored version has an order number, `#1`, `#2`, ..., in the order
+  it was first stored, never reused (ask 8). `ordo deploys` and the apply
+  report show it beside the name: `#4 · 0.2.1`. Rows stored before are
+  numbered by when they were applied.
 - `ordo apply --bump` writes that number into the file and applies again,
   over the door as well (ask 12). A plain apply never edits files.
   `ordo dev` uses no registry and is never refused.
@@ -573,17 +580,19 @@ task `program-versions-the-core-under-schema`:
   good.
 - Ask 6, ruled 2026-11-03: the declared `@` version names a version.
   Its "revision with a warning" half was replaced the same day by ask 13.
-- Ask 9, open: refuse new content under a number lower than the newest.
-- Ask 10, open: refuse or warn when a program declares no `@`.
+- Ask 9, ruled 2026-11-03: new content under a number lower than the
+  highest applied is refused, naming the next.
+- Ask 10, ruled 2026-11-03: a program with no `@` is applied with a note
+  saying how to declare one, never refused.
 - Ask 11, moot after ask 13: promotion needs no rule for `+r` names.
 - Ask 12, ruled 2026-11-03: `ordo apply --bump` raises the number in the
   file, opt-in.
 - Ask 13, ruled 2026-11-03: a real change under a used number is refused
   on every path, naming the next number; comments and spacing never are.
 - Ask 7, ruled 2026-11-03: a version stored under a 16-hex name keeps it.
-- Ask 8, open: show an order number (#1, #2, ...) beside every version.
-  A program with no `@` is still named by the 16-hex digest of what it
-  compiles to, as before.
+- Ask 8, ruled 2026-11-03: every version shows its order number (#1, #2,
+  ...). A program with no `@` is still named by the 16-hex digest of what
+  it compiles to.
 
 ---
 

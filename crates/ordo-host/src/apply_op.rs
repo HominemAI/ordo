@@ -389,6 +389,10 @@ pub enum Stored {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub version: String,
+    /// The version's order number in this deployment, `#4`: which came
+    /// first, whatever the versions are named (owner, 2026-11-03, ask 8).
+    /// `None` from a host older than that.
+    pub ordinal: Option<u64>,
     /// Ops the artifact records an error for that bind correctly when a
     /// caller is supplied. Not a reason to refuse; said out loud anyway.
     pub notes: Vec<String>,
@@ -461,6 +465,13 @@ pub enum ApplyRefused {
         version: String,
         next: Option<String>,
     },
+    /// The declared `@` version is lower than one already applied (owner,
+    /// 2026-11-03, ask 9). `next` is the number to use.
+    VersionBehind {
+        version: String,
+        highest: String,
+        next: Option<String>,
+    },
 }
 
 impl ApplyRefused {
@@ -476,6 +487,7 @@ impl ApplyRefused {
             ApplyRefused::Code(_) => "function_code_refused",
             ApplyRefused::Internal(_) => "internal",
             ApplyRefused::VersionTaken { .. } => "version_taken",
+            ApplyRefused::VersionBehind { .. } => "version_behind",
         }
     }
 
@@ -489,7 +501,8 @@ impl ApplyRefused {
             ApplyRefused::Broken { .. }
             | ApplyRefused::DoesNotCompile(_)
             | ApplyRefused::Code(_)
-            | ApplyRefused::VersionTaken { .. } => ErrorCode::ApplyRefused,
+            | ApplyRefused::VersionTaken { .. }
+            | ApplyRefused::VersionBehind { .. } => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -554,6 +567,19 @@ impl std::fmt::Display for ApplyRefused {
                     next: next.clone(),
                 }
             ),
+            ApplyRefused::VersionBehind {
+                version,
+                highest,
+                next,
+            } => write!(
+                f,
+                "{}",
+                sa::NameRefusal::Behind {
+                    version: version.clone(),
+                    highest: highest.clone(),
+                    next: next.clone(),
+                }
+            ),
         }
     }
 }
@@ -561,6 +587,15 @@ impl std::fmt::Display for ApplyRefused {
 fn refused(e: sa::NameRefusal) -> ApplyRefused {
     match e {
         sa::NameRefusal::Taken { version, next } => ApplyRefused::VersionTaken { version, next },
+        sa::NameRefusal::Behind {
+            version,
+            highest,
+            next,
+        } => ApplyRefused::VersionBehind {
+            version,
+            highest,
+            next,
+        },
         sa::NameRefusal::Registry(e) => ApplyRefused::Internal(format!("registry: {e}")),
     }
 }
@@ -668,6 +703,8 @@ async fn sequence(
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
     let naming = sa::name_version(pool, program).await.map_err(refused)?;
+    let mut notes = notes;
+    notes.extend(naming.note.clone());
     let renamed;
     let program = if naming.version != program.version {
         let mut p = program.clone();
@@ -750,6 +787,9 @@ async fn sequence(
         Ok(registry::Applied::Rebuilt(_)) => Stored::Rebuilt,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
+    let ordinal = registry::ordinal_of(pool, &program.version)
+        .await
+        .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
 
     // **Every tenant's own database** (R-S3, and 25i).
     //
@@ -865,6 +905,7 @@ async fn sequence(
 
     Ok(Report {
         version: program.version.clone(),
+        ordinal,
         notes,
         schema,
         stored,
@@ -1018,6 +1059,8 @@ async fn activate_locked(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
     pub active: Option<String>,
+    /// Each stored version's order number (ask 8).
+    pub ordinals: std::collections::BTreeMap<String, u64>,
     /// `(version, applied at, by whom)`, newest first.
     pub stored: Vec<(String, u64, String)>,
     pub activations: Vec<registry::Activation>,
@@ -1035,6 +1078,7 @@ pub async fn history(pool: &Pool, limit: usize) -> Result<History, ordo_exec::Po
         async {
             Ok(History {
                 active: registry::active_version(pool).await?,
+                ordinals: registry::ordinals(pool).await?,
                 stored: registry::stored(pool)
                     .await?
                     .into_iter()
@@ -1054,6 +1098,7 @@ impl History {
             "active": self.active,
             "stored": self.stored.iter().map(|(v, at, by)| json!({
                 "version": v,
+                "ordinal": self.ordinals.get(v),
                 "appliedAt": at,
                 "actor": by,
                 "serving": Some(v) == self.active.as_ref(),
@@ -1122,10 +1167,14 @@ pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused>
     // The name the apply would store it under (see `sequence`). A registry
     // no apply has touched since 2026-11-03 has no `declared` column yet,
     // which reads as "not stored", and the apply then fills it in.
+    let mut notes = notes;
     match sa::name_version(pool, &program).await {
-        Ok(naming) => program.version = naming.version,
-        Err(e @ sa::NameRefusal::Taken { .. }) => return Err(refused(e)),
+        Ok(naming) => {
+            program.version = naming.version;
+            notes.extend(naming.note);
+        }
         Err(sa::NameRefusal::Registry(_)) => {}
+        Err(e) => return Err(refused(e)),
     }
     let serving = registry::active_version(pool).await.ok().flatten();
     let already_stored = registry::get(pool, &program.version)
@@ -1262,6 +1311,7 @@ impl Report {
         };
         json!({
             "version": self.version,
+            "ordinal": self.ordinal,
             "notes": self.notes,
             "schema": schema,
             "stored": match self.stored {
@@ -1368,6 +1418,7 @@ impl Report {
         };
         Ok(Report {
             version: s("version")?,
+            ordinal: v["ordinal"].as_u64(),
             notes: v["notes"]
                 .as_array()
                 .into_iter()
@@ -1643,6 +1694,7 @@ mod tests {
         for report in [
             Report {
                 version: "v_1".into(),
+                ordinal: Some(4),
                 notes: vec!["a note".into()],
                 schema: SchemaOutcome::Created {
                     tables: 3,
@@ -1665,6 +1717,7 @@ mod tests {
             },
             Report {
                 version: "v_2".into(),
+                ordinal: None,
                 notes: vec![],
                 schema: SchemaOutcome::Matches { pending: 2 },
                 stored: Stored::AlreadyPresent,
@@ -1675,6 +1728,7 @@ mod tests {
             },
             Report {
                 version: "v_3".into(),
+                ordinal: None,
                 notes: vec![],
                 schema: SchemaOutcome::Behind {
                     changes: vec![("A2".into(), "new field `x`".into())],
@@ -1729,6 +1783,11 @@ mod tests {
             ApplyRefused::VersionTaken {
                 version: "0.2.0".into(),
                 next: None,
+            },
+            ApplyRefused::VersionBehind {
+                version: "0.1.0".into(),
+                highest: "0.2.0".into(),
+                next: Some("0.2.1".into()),
             },
         ];
         for r in &all {

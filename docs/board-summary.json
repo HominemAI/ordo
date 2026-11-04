@@ -1,6 +1,6 @@
 {
  "date": "2026-11-04",
- "text": "Versions increments 2 and 2b are built on bleeding: pins, labels, diff, revoking a version, and maintenance windows set for all, only or all-except tenants [[program-versions-the-core-under-schema]]. Console screens for windows come next.",
+ "text": "Versions increments 2 and 2b are built on bleeding, with console screens: pins, labels, diff, revoking a version, and a Maintenance screen for windows set for all, only or all-except tenants [[program-versions-the-core-under-schema]]. Increment 3 is next.",
  "tiles": [
   [
    "4,056",
@@ -36,7 +36,7 @@
  "look": [
   {
    "id": "program-versions-the-core-under-schema",
-   "why": "2b built; console next"
+   "why": "2b and console built"
   },
   {
    "id": "notes-page-catch-up-flake",

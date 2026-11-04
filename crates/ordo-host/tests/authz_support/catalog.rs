@@ -870,12 +870,30 @@ fn feed_refused_after(
 /// A share link revoked while its holder's feed is open.
 fn link_feed(d: &Deployment, w: &World, path: &str) -> Answer {
     let ann = &w.people["ann"];
-    let (secret, id) = actors::link(d, ann, w.var("NOTE_LINKED"), json!({}));
+    // Minting and revoking are platform writes, which want presence no
+    // older than 300 s. Ann's sign-in presence is as old as the build, and
+    // on a slow CI node this script runs more than 300 s after it, where
+    // the door answers `access_denied` (seen 3 times, 2026-11-03 and 04).
+    let present = actors::step_up(d, &ann.device, &ann.token);
+    let (secret, id) = actors::link_with(d, ann, &present, w.var("NOTE_LINKED"), json!({}));
     let opened = actors::open_link(d, &secret, None, Some("stream-device"));
     assert_eq!(opened.status, 200, "open link: {}", opened.text());
     let token = opened.json()["token"].as_str().expect("token").to_string();
     feed_refused_after(d, path, &token, &ann.space, &|| {
-        actors::must(d, ann, "POST", "std.space.revokeLink", json!({"link": id}));
+        let revoked = actors::op(
+            d,
+            &ann.space,
+            &present,
+            "POST",
+            "std.space.revokeLink",
+            &json!({"link": id}),
+        );
+        assert_eq!(
+            revoked.status,
+            200,
+            "std.space.revokeLink: {}",
+            revoked.text()
+        );
         ann_writes(d, w);
     })
 }

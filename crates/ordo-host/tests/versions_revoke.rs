@@ -342,3 +342,16 @@ async fn the_door_revokes_as_the_client_does() {
         assert_eq!(e.code, ordo_api::ErrorCode::NotFound, "{op}");
     }
 }
+
+/// The revoked report on a deployment with nothing applied is empty, not a
+/// refusal: the console's Deploys screen reads it on open (found in the
+/// console's end-to-end run, 2026-11-04).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_revoked_report_on_a_deployment_with_nothing_applied_is_empty() {
+    let pool = fresh("ordo_revoke_empty").await;
+    let report = Versions::on(&pool)
+        .pinned_to_revoked()
+        .await
+        .expect("an empty report");
+    assert!(report.is_empty(), "{report:?}");
+}

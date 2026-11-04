@@ -69,9 +69,10 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::versions::{self as artifacts, Versions};
 use ordo_api::{OpRegistry, OpSpec, RegistryHandle, SpecError};
 use ordo_conformance::Fixture;
-use ordo_exec::registry::{self as artifacts, RegistryRefusal};
+use ordo_exec::registry::RegistryRefusal;
 use ordo_exec::shape::Drift;
 use ordo_exec::{Pool, PoolConfig};
 use serde_json::Value;
@@ -433,6 +434,21 @@ impl From<RegistryRefusal> for LoadRefusal {
     }
 }
 
+impl From<crate::versions::VersionRefusal> for LoadRefusal {
+    fn from(e: crate::versions::VersionRefusal) -> LoadRefusal {
+        use crate::versions::VersionRefusal as V;
+        match e {
+            V::Store(e) => LoadRefusal::Store(e),
+            V::UnknownVersion(v) => LoadRefusal::Registry(RegistryRefusal::UnknownVersion(v)),
+            V::Collision { version } => {
+                LoadRefusal::Registry(RegistryRefusal::VersionCollision { version })
+            }
+            // A load reads; it meets no setting. Kept as the text it carries.
+            other => LoadRefusal::Store(ordo_exec::PoolError::db(other.to_string())),
+        }
+    }
+}
+
 /// Compile a stored artifact, gate it, and hand back something swappable.
 ///
 /// Runs, in this order and for these reasons:
@@ -641,7 +657,7 @@ pub async fn load_active(
     keys: Arc<dyn ordo_crypto::KeyProvider>,
     space: ordo_crypto::SpaceId,
 ) -> Result<Verified, LoadRefusal> {
-    let Some(stored) = artifacts::active(pool).await? else {
+    let Some(stored) = Versions::on(pool).active().await? else {
         return Err(LoadRefusal::NoActiveVersion);
     };
     verify_candidate(&stored, pool, cfg, keys, space).await
@@ -656,7 +672,7 @@ pub async fn load_version(
     keys: Arc<dyn ordo_crypto::KeyProvider>,
     space: ordo_crypto::SpaceId,
 ) -> Result<Verified, LoadRefusal> {
-    let Some(stored) = artifacts::get(pool, version).await? else {
+    let Some(stored) = Versions::on(pool).get(version).await? else {
         return Err(LoadRefusal::Registry(RegistryRefusal::UnknownVersion(
             version.to_string(),
         )));

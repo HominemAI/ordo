@@ -787,7 +787,8 @@ impl HostFunctions {
             return Ok(0);
         }
         let loaded = async {
-            let stored = ordo_exec::registry::get(pool, version)
+            let stored = crate::versions::Versions::on(pool)
+                .get(version)
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("version {version} is not in the registry"))?;

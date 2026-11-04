@@ -2994,6 +2994,9 @@ async fn platform_ops_for(
         // Owner, 2026-10-21: the setup settings, and the door's view of the
         // own tenants being set up.
         tenants.set_setup(w.provisioning.setup);
+        // `versions.new_tenant`, which boot has checked names a stored
+        // version.
+        tenants.set_new_tenant_version(crate::versions::new_tenant_from_env());
         w.access.wire_not_ready(tenants.not_ready());
         let members = Arc::new(crate::member_ops::MemberOps {
             control: w.pool.clone(),
@@ -3757,7 +3760,25 @@ async fn assemble_program(
     // run `ordo apply` against has none, and the binary must boot there
     // into the no-program state rather than die on a missing relation:
     // that is the database the first deploy is made to.
-    ordo_exec::registry::ensure_tables(&pool)
+    //
+    // Then the pins (`plan-versions.md` §1.3): `versions.new_tenant` must
+    // name a stored version, or no tenant could be started on it, and a
+    // tenant made before pins existed is pinned to the active version.
+    let new_tenant = crate::versions::new_tenant_from_env();
+    let versions = crate::versions::Versions::on(&pool).with_new_tenant(new_tenant.as_deref());
+    versions
+        .ensure()
+        .await
+        .map_err(|e| BootRefusal::Database(e.to_string()))?;
+    versions.check_new_tenant().await.map_err(|e| match e {
+        crate::versions::VersionRefusal::Setting { .. } => BootRefusal::Invalid {
+            var: crate::versions::NEW_TENANT_ENV,
+            detail: e.to_string(),
+        },
+        other => BootRefusal::Database(other.to_string()),
+    })?;
+    versions
+        .backfill(crate::versions::SYSTEM_ACTOR, now_secs())
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
     let deployment = match program {

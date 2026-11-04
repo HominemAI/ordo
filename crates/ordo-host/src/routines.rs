@@ -439,7 +439,10 @@ impl Tenants {
         if let Some(at) = *self.since.lock().expect("since is not poisoned") {
             return at;
         }
-        let at = match ordo_exec::registry::activated_at(control, &self.version).await {
+        let at = match crate::versions::Versions::on(control)
+            .activated_at(&self.version)
+            .await
+        {
             Ok(Some(at)) => at,
             _ => self.made_at,
         };

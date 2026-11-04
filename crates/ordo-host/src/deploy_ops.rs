@@ -28,8 +28,8 @@
 //! follows within 300 seconds.
 
 use ordo_api::{
-    BoundParams, Bounds, ErrorCode, ExecError, ExecResult, FieldSpec, NotSyncable, OpCost, OpKind,
-    OpSpec, ParamSpec, ParamTy, RefineTier, Syncability,
+    BoundParams, Bounds, ExecError, ExecResult, FieldSpec, NotSyncable, OpCost, OpKind, OpSpec,
+    ParamSpec, ParamTy, RefineTier, Syncability,
 };
 use serde_json::json;
 
@@ -141,12 +141,7 @@ pub async fn execute(
                 .clamp(1, MAX_LIMIT);
             apply_op::history(&ops.pool, usize::try_from(limit).unwrap_or(20))
                 .await
-                .map_err(|e| {
-                    ExecError::new(
-                        ErrorCode::SpaceUnavailable,
-                        format!("the deployment's program history could not be read: {e}"),
-                    )
-                })?
+                .map_err(|e| e.to_exec_error("the deployment's program history could not be read"))?
                 .to_json()
         }
         ACTIVATE => {
@@ -201,6 +196,7 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ordo_api::ErrorCode;
 
     #[test]
     fn the_read_is_a_read_and_the_two_that_post_are_changes() {

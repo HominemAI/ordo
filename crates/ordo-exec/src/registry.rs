@@ -478,6 +478,25 @@ pub async fn activate(
         return Ok(Activated::AlreadyActive(version.to_string()));
     }
     let tx = pool.begin().await?;
+    record_activation(&tx, version, actor, at).await?;
+    tx.commit().await?;
+    Ok(Activated::Switched {
+        from,
+        to: version.to_string(),
+    })
+}
+
+/// The activation row and its nudge, inside a transaction the caller
+/// holds, so other writes that belong to the same re-point commit with it
+/// or not at all. `ordo_host::versions` re-pins every tenant here
+/// (`plan-versions.md` §1.3). Checks nothing: [`activate`]'s checks are
+/// the caller's to make first.
+pub async fn record_activation(
+    tx: &crate::TxConn,
+    version: &str,
+    actor: &str,
+    at: Timestamp,
+) -> Result<(), PoolError> {
     tx.rows(&format!(
         "INSERT INTO \"$activations\" (\"version\", \"at\", \"actor\") VALUES ({}, {}, {})",
         sql_lit(version),
@@ -485,12 +504,7 @@ pub async fn activate(
         sql_lit(actor),
     ))
     .await?;
-    tx.notify(DEPLOY_CHANNEL, version).await?;
-    tx.commit().await?;
-    Ok(Activated::Switched {
-        from,
-        to: version.to_string(),
-    })
+    tx.notify(DEPLOY_CHANNEL, version).await
 }
 
 /// The version the deployment currently points at, if any.
@@ -591,8 +605,23 @@ pub async fn activations(pool: &Pool, limit: usize) -> Result<Vec<Activation>, P
              ORDER BY \"seq\" DESC LIMIT {limit}"
         ))
         .await?;
-    Ok(rows
-        .into_iter()
+    Ok(activation_rows(rows))
+}
+
+/// Every activation of one version, newest first.
+pub async fn activations_of(pool: &Pool, version: &str) -> Result<Vec<Activation>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT \"seq\", \"version\", \"at\", \"actor\" FROM \"$activations\" \
+             WHERE \"version\" = {} ORDER BY \"seq\" DESC",
+            sql_lit(version)
+        ))
+        .await?;
+    Ok(activation_rows(rows))
+}
+
+fn activation_rows(rows: Vec<crate::TextRow>) -> Vec<Activation> {
+    rows.into_iter()
         .filter_map(|r| {
             Some(Activation {
                 seq: r.first()?.clone()?.parse().ok()?,
@@ -601,5 +630,5 @@ pub async fn activations(pool: &Pool, limit: usize) -> Result<Vec<Activation>, P
                 actor: r.get(3)?.clone()?,
             })
         })
-        .collect())
+        .collect()
 }

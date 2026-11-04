@@ -395,7 +395,8 @@ async fn health_deploy(
     let owner = authorize(&state, &headers, HEALTH_DEEP_OP).await.is_some();
     let version = match query.get("version").filter(|v| !v.is_empty()) {
         Some(v) => v.clone(),
-        None => ordo_exec::registry::active_version(&state.pool)
+        None => crate::versions::Versions::on(&state.pool)
+            .active_version()
             .await
             .ok()
             .flatten()

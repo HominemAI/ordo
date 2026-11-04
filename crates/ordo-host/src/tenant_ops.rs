@@ -114,6 +114,9 @@ pub struct TenantOps {
     /// The intervals and caps of setting up an own tenant. Set once by the
     /// runtime from the environment; the defaults otherwise.
     setup: std::sync::OnceLock<crate::tenant_setup::SetupSettings>,
+    /// `versions.new_tenant`: the version a new tenant is pinned to. Set
+    /// once by the runtime; unset, the active version.
+    new_tenant: std::sync::OnceLock<Option<String>>,
     /// This server's name on a setup lease. Random per process, so a
     /// restarted server waits out its old lease like any other.
     holder: String,
@@ -254,6 +257,7 @@ impl TenantOps {
             refresh: std::sync::OnceLock::new(),
             in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
             setup: std::sync::OnceLock::new(),
+            new_tenant: std::sync::OnceLock::new(),
             holder: format!("setup-{}", tenants::mint_space_id()),
             not_ready: std::sync::OnceLock::new(),
         })
@@ -275,6 +279,7 @@ impl TenantOps {
             refresh: std::sync::OnceLock::new(),
             in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
             setup: std::sync::OnceLock::new(),
+            new_tenant: std::sync::OnceLock::new(),
             holder: format!("setup-{}", tenants::mint_space_id()),
             not_ready: std::sync::OnceLock::new(),
         })
@@ -283,6 +288,28 @@ impl TenantOps {
     /// Give this server the setup settings. Once; a second call is ignored.
     pub fn set_setup(&self, settings: crate::tenant_setup::SetupSettings) {
         let _ = self.setup.set(settings);
+    }
+
+    /// Give this server `versions.new_tenant`. Once; a second call is
+    /// ignored.
+    pub fn set_new_tenant_version(&self, version: Option<String>) {
+        let _ = self.new_tenant.set(version);
+    }
+
+    /// **Pin a tenant whose row this call just wrote** (`plan-versions.md`
+    /// §1.3, owner 2026-11-02, D14). A pin that could not be written is
+    /// logged and the creation goes on: pins are recorded and not yet
+    /// served on, and boot's backfill pins a tenant left without one.
+    async fn pin_new(&self, id: &str, by: &str) {
+        let setting = self.new_tenant.get().cloned().flatten();
+        let versions =
+            crate::versions::Versions::on(&self.pool).with_new_tenant(setting.as_deref());
+        if let Err(e) = versions
+            .pin_new_tenant(id, by, crate::runtime::now_secs())
+            .await
+        {
+            eprintln!("tenant {id}: its version pin was not written ({e}); boot will pin it");
+        }
     }
 
     /// The setup settings in force.
@@ -728,6 +755,9 @@ impl TenantOps {
             }
         };
         let reserved = tenants::reserve(&self.pool, &id, name, caller, now, None).await;
+        if let Ok(true) = reserved {
+            self.pin_new(&id, caller).await;
+        }
         let targeted = match reserved {
             Ok(_) => {
                 tenants::at_phase(&self.pool, &id, tenants::Phase::Targeted, &label, now).await
@@ -928,6 +958,9 @@ impl TenantOps {
         let reserved = tenants::reserve(&self.pool, &id, &name, principal, now, Some(principal))
             .await
             .map_err(registry_unavailable)?;
+        if reserved {
+            self.pin_new(&id, principal).await;
+        }
         if !reserved {
             // The latch held: another request won between the look and the
             // write. Answer with the winner's row.
@@ -983,6 +1016,9 @@ impl TenantOps {
         let reserved = tenants::reserve(&self.pool, &id, &name, principal, now, Some(principal))
             .await
             .map_err(registry_unavailable)?;
+        if reserved {
+            self.pin_new(&id, principal).await;
+        }
         if !reserved {
             // Two sign-ups for one person at the same moment: the index let
             // one row in, and this answers with it.

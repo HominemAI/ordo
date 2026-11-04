@@ -370,6 +370,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "apply" => rt.block_on(apply(flags)),
         "rollback" => rt.block_on(rollback(flags)),
         "deploys" => rt.block_on(deploys(flags)),
+        "versions" => rt.block_on(versions_cmd(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -2104,7 +2105,7 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
         Activation::Switched { from, to } => out.push_str(&format!(
             "activated  {to}  (was {})\nnodes      nudged on `{}`\n",
             from.as_deref().unwrap_or("nothing"),
-            ordo_exec::registry::DEPLOY_CHANNEL,
+            ordo_host::versions::DEPLOY_CHANNEL,
         )),
         Activation::AlreadyActive { version } => out.push_str(&format!(
             "activated  {version}  (already active; nothing re-pointed)\n"
@@ -2197,7 +2198,7 @@ async fn rollback(flags: Flags) -> Outcome {
         Ok(Activation::Switched { from, to }) => Outcome::ok(format!(
             "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n",
             from.as_deref().unwrap_or("nothing"),
-            ordo_exec::registry::DEPLOY_CHANNEL,
+            ordo_host::versions::DEPLOY_CHANNEL,
         )),
         Ok(Activation::AlreadyActive { version }) => {
             Outcome::ok(format!("UNCHANGED  {version} is already active\n"))
@@ -2231,6 +2232,7 @@ async fn deploys(flags: Flags) -> Outcome {
         ordinals,
         stored,
         activations: log,
+        ..
     } = match ordo_host::apply_op::history(&pool, limit).await {
         Ok(h) => h,
         Err(e) => return Outcome::failed(format!("database: {e}\n")),
@@ -2279,6 +2281,155 @@ pub(crate) fn numbered(ordinal: Option<u64>, version: &str) -> String {
         Some(n) => format!("#{n} · {version}"),
         None => version.to_string(),
     }
+}
+
+// ── versions ─────────────────────────────────────────────────────────────
+
+/// `ordo versions list|show`: the stored versions and the tenants pinned
+/// to each (`plan-versions.md` §1.3, increment 2). Read through
+/// `ordo_host::versions::Versions`, the one client for both.
+async fn versions_cmd(flags: Flags) -> Outcome {
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage("ordo versions <list | show <version>> [--db <name>]\n".into());
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    match sub.as_str() {
+        "list" => versions_list(flags).await,
+        "show" => versions_show(flags).await,
+        other => Outcome::usage(format!(
+            "unknown `ordo versions` subcommand `{other}`; there are `list` and `show`\n"
+        )),
+    }
+}
+
+/// `ordo versions list`: each stored version, newest first, with its
+/// declared version, the tenants pinned to it, and which one serves.
+async fn versions_list(flags: Flags) -> Outcome {
+    if let Err(e) = flags.only(&["--db"]) {
+        return Outcome::usage(e);
+    }
+    if !flags.positional.is_empty() {
+        return Outcome::usage("`ordo versions list` takes no version\n".into());
+    }
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let history = match ordo_host::apply_op::history(&pool, 1).await {
+        Ok(h) => h,
+        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    };
+    let versions = ordo_host::versions::Versions::on(&pool);
+    let mut out = format!(
+        "VERSIONS ({}, newest first, #n is the order each was first stored in)\n",
+        history.stored.len()
+    );
+    // Newest by order number: two applies in one second share a time.
+    let mut stored: Vec<&String> = history.stored.iter().map(|(v, _, _)| v).collect();
+    stored.sort_by_key(|v| std::cmp::Reverse(history.ordinals.get(*v).copied()));
+    for v in stored {
+        let declared = match versions.identity(v).await {
+            Ok(Some((d, _))) if !d.is_empty() => d,
+            Ok(_) => "none".to_string(),
+            Err(e) => return Outcome::failed(format!("database: {e}\n")),
+        };
+        out.push_str(&format!(
+            "  {}  declared {declared}  tenants {}{}\n",
+            numbered(history.ordinals.get(v).copied(), v),
+            history.tenants.get(v).copied().unwrap_or(0),
+            if Some(v) == history.active.as_ref() {
+                "  <- serving"
+            } else {
+                ""
+            }
+        ));
+    }
+    Outcome::ok(out)
+}
+
+/// `ordo versions show <version>`: one version in full.
+async fn versions_show(flags: Flags) -> Outcome {
+    if let Err(e) = flags.only(&["--db"]) {
+        return Outcome::usage(e);
+    }
+    let [version] = flags.positional.as_slice() else {
+        return Outcome::usage("ordo versions show <version> [--db <name>]\n".into());
+    };
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let versions = ordo_host::versions::Versions::on(&pool);
+    let read = async {
+        let Some((declared, source_id)) = versions.identity(version).await? else {
+            return Ok(None);
+        };
+        Ok::<_, ordo_host::versions::VersionRefusal>(Some((
+            declared,
+            source_id,
+            versions.ordinal_of(version).await?,
+            versions.get(version).await?,
+            versions.builds(version).await?,
+            versions.tenants_per_version().await?,
+            versions.active_version().await?,
+            versions.activations_of(version).await?,
+        )))
+    };
+    let (declared, source_id, ordinal, stored, builds, tenants, active, activations) =
+        match read.await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return Outcome::failed(format!(
+                    "REFUSED no version is stored under `{version}`; `ordo versions list` \
+                     names them\n"
+                ))
+            }
+            Err(e) => return Outcome::failed(format!("database: {e}\n")),
+        };
+    let mut out = format!(
+        "version    {}{}\n",
+        numbered(ordinal, version),
+        if active.as_deref() == Some(version.as_str()) {
+            "  <- serving"
+        } else {
+            ""
+        }
+    );
+    out.push_str(&format!(
+        "declared   {}\n",
+        if declared.is_empty() {
+            "none"
+        } else {
+            &declared
+        }
+    ));
+    out.push_str(&format!(
+        "source     {}\n",
+        ordo_plan::artifact::short(&source_id)
+    ));
+    if let Some(a) = &stored {
+        out.push_str(&format!("applied    {} by {}\n", a.applied_at.0, a.actor));
+    }
+    out.push_str(&format!(
+        "tenants    {} pinned\n",
+        tenants.get(version.as_str()).copied().unwrap_or(0)
+    ));
+    out.push_str(&format!("\nBUILDS ({})\n", builds.len()));
+    for (id, release, at) in &builds {
+        out.push_str(&format!(
+            "  {}  Ordo {release}  at {at}\n",
+            ordo_plan::artifact::short(id)
+        ));
+    }
+    out.push_str(&format!(
+        "\nACTIVATIONS ({}, newest first)\n",
+        activations.len()
+    ));
+    for a in &activations {
+        out.push_str(&format!("  {}.  at {} by {}\n", a.seq, a.at.0, a.actor));
+    }
+    Outcome::ok(out)
 }
 
 // ── revert ───────────────────────────────────────────────────────────────

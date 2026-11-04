@@ -193,7 +193,7 @@ impl Program {
     /// function's code hash read back from the stored document, under the
     /// name it was stored under. Compiling the source alone loses the
     /// hashes, and with them the identity.
-    pub fn from_artifact(a: &ordo_exec::registry::Artifact) -> Result<Program, String> {
+    pub fn from_artifact(a: &crate::versions::Artifact) -> Result<Program, String> {
         let mut program = Program::compile(&a.source)?;
         if !program.schema.functions.is_empty() {
             let stored: serde_json::Value = serde_json::from_str(&a.artifact)
@@ -207,7 +207,7 @@ impl Program {
     /// Whether this release builds `a` to the bytes stored for it. A
     /// release that renders the same source differently has a new build of
     /// the same version (`plan-versions.md` §1.1).
-    pub fn builds_as(&self, a: &ordo_exec::registry::Artifact) -> bool {
+    pub fn builds_as(&self, a: &crate::versions::Artifact) -> bool {
         ordo_plan::artifact::to_bytes(&self.doc) == a.artifact && self.ddl == a.ddl
     }
 
@@ -336,12 +336,10 @@ impl NameRefusal {
 /// by the 16-hex digest of what it compiles to, with a note saying how to
 /// declare one (ask 10).
 pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
-    use ordo_exec::registry;
-    let registry_err = |e: ordo_exec::PoolError| NameRefusal::Registry(e.to_string());
+    let versions = crate::versions::Versions::on(pool);
+    let registry_err = |e: crate::versions::VersionRefusal| NameRefusal::Registry(e.to_string());
     let declared = program.declared.as_deref();
-    let stored = registry::revisions(pool, declared)
-        .await
-        .map_err(registry_err)?;
+    let stored = versions.revisions(declared).await.map_err(registry_err)?;
     for r in &stored {
         let same = if r.release.as_deref() == Some(ordo_plan::artifact::ORDO_RELEASE) {
             program.builds_as(&r.artifact)
@@ -361,7 +359,8 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
     let Some(d) = declared else {
         // The digest names one compiled program, so a row stored under it
         // already is this program.
-        let existing = registry::get(pool, &program.version)
+        let existing = versions
+            .get(&program.version)
             .await
             .map_err(registry_err)?
             .is_some();
@@ -384,14 +383,8 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
             note,
         });
     };
-    let taken = !stored.is_empty()
-        || registry::get(pool, d)
-            .await
-            .map_err(registry_err)?
-            .is_some();
-    let numbers = registry::declared_versions(pool)
-        .await
-        .map_err(registry_err)?;
+    let taken = !stored.is_empty() || versions.get(d).await.map_err(registry_err)?.is_some();
+    let numbers = versions.declared_versions().await.map_err(registry_err)?;
     let next = ordo_plan::artifact::next_version(
         numbers.iter().map(String::as_str).chain(std::iter::once(d)),
     );
@@ -422,12 +415,13 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
 /// Errors are folded into `None` on purpose: a database with no `$artifacts`
 /// table is a database that has never been applied to, which is a state a
 /// plan must report on rather than fail at.
-pub async fn deployed_artifact(pool: &Pool) -> Option<ordo_exec::registry::Artifact> {
-    let v = ordo_exec::registry::active_version(pool).await.ok()??;
-    ordo_exec::registry::get(pool, &v).await.ok()?
+pub async fn deployed_artifact(pool: &Pool) -> Option<crate::versions::Artifact> {
+    let versions = crate::versions::Versions::on(pool);
+    let v = versions.active_version().await.ok()??;
+    versions.get(&v).await.ok()?
 }
 
-fn recompile(a: &ordo_exec::registry::Artifact) -> Option<Schema> {
+fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
     crate::Fixture::from_source(&a.source, "")
         .ok()
         .map(|f| f.schema)
@@ -515,7 +509,7 @@ pub struct Assessed {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub program: Program,
-    pub deployed: Option<ordo_exec::registry::Artifact>,
+    pub deployed: Option<crate::versions::Artifact>,
     /// The serving artifact's source, recompiled. `None` when nothing is
     /// deployed or it no longer compiles.
     pub prior: Option<Schema>,
@@ -3114,7 +3108,8 @@ pub async fn bring_forward_from(
         None => (None, Choices::default()),
         Some(registry) => {
             let written = match &before {
-                Some(v) => ordo_exec::registry::get(registry, v)
+                Some(v) => crate::versions::Versions::on(registry)
+                    .get(v)
                     .await
                     .ok()
                     .flatten()

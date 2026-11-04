@@ -64,13 +64,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::versions::{self as registry, Versions};
 use ordo_api::{BoundParams, ErrorCode, ExecError, ExecResult};
 use ordo_crypto::{KeyProvider, SpaceId};
 use ordo_exec::cadence::LogPolicy;
 use ordo_exec::erase::{self, EraseRefusal};
 use ordo_exec::export::{self, DirectoryBundle, ExportError, SealedMode};
 use ordo_exec::route::PoolResolver;
-use ordo_exec::{registry, Pool};
+use ordo_exec::Pool;
 use serde_json::json;
 
 /// `std.space.export` — the whole space as a bundle on disk.
@@ -187,7 +188,8 @@ impl ExitOps {
     /// almost always and wrong exactly during a swap, which is the moment
     /// nobody would be watching.
     async fn deployed(&self) -> Result<(registry::Artifact, ordo_schema::Schema), ExecError> {
-        let stored = registry::active(&self.pool)
+        let stored = Versions::on(&self.pool)
+            .active()
             .await
             .map_err(|e| {
                 ExecError::of_fault(
@@ -232,7 +234,8 @@ impl ExitOps {
         &self,
         space: &str,
     ) -> Result<(registry::Artifact, Arc<crate::Fixture>), ExecError> {
-        let stored = registry::active(&self.pool)
+        let stored = Versions::on(&self.pool)
+            .active()
             .await
             .map_err(|e| {
                 ExecError::of_fault(

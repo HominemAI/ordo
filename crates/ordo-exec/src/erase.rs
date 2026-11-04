@@ -523,7 +523,12 @@ async fn space_scoped_tables(
 /// very next step refused the create it had just started, with "this space
 /// already holds rows on the default database". The row is not rows the
 /// space holds; it is the record that the space is being made.
-pub const ATTACHMENTS: &[&str] = &["$spacedb", "$spacebucket", "$spaces"];
+///
+/// `$pins` and `$moves` joined it on 2026-11-03 (`plan-versions.md` §1.3),
+/// for the same reason: a new tenant is pinned when its row is written, so
+/// its first `$pins` row exists before anything is provisioned. They say
+/// which version the space is served, not what it holds.
+pub const ATTACHMENTS: &[&str] = &["$spacedb", "$spacebucket", "$spaces", "$pins", "$moves"];
 
 /// How many rows `space` holds in `pool`'s database, across every table an
 /// erasure would delete from except [`ATTACHMENTS`].

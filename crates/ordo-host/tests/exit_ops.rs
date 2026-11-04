@@ -639,6 +639,18 @@ async fn deletion_needs_the_spaces_own_id_and_then_ends_the_space() {
         "the fixture seeded nothing, so this proves little"
     );
 
+    // A pin change, which erasure keeps (owner, 2026-11-03, ask 15).
+    ordo_host::versions::ensure_pin_tables(&h.pool)
+        .await
+        .expect("$pins");
+    h.pool
+        .rows(&format!(
+            "INSERT INTO \"$pins\" (\"space\", \"from\", \"to\", \"epoch\", \"actor\", \"cause\", \"at\") \
+             VALUES ('{DEFAULT_SPACE}', NULL, 'v1', 1, 'dev:ada', 'activate', 1)"
+        ))
+        .await
+        .expect("a pin row");
+
     // Right.
     let (status, body) = delete(&h.state, DEFAULT_SPACE, Some(&t)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -659,6 +671,16 @@ async fn deletion_needs_the_spaces_own_id_and_then_ends_the_space() {
             .and_then(|s| s.parse().ok())
             .expect("a number");
     assert_eq!(after, 0);
+    let pins =
+        h.pg.query(&format!(
+            "SELECT count(*) FROM \"$pins\" WHERE \"space\" = '{DEFAULT_SPACE}'"
+        ))
+        .expect("count");
+    assert_eq!(
+        pins[0][0].as_deref(),
+        Some("1"),
+        "the pin history outlives the space"
+    );
     // The artifact registry is deployment state, not the space's. A
     // deleted space must not take the deployment's program with it.
     assert!(registry::active(&h.pool).await.expect("registry").is_some());

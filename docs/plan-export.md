@@ -356,7 +356,9 @@ append to a chain that is being deleted.
 ### 4.6 The one thing not erased [built]
 
 `ordo_exec::erase::RETAINED` = `$secevents`, `$seccheckpoints` — the
-security-event stream. Two reasons, both on the constant:
+security-event stream — and `$pins`, the history of which version each
+tenant was served (owner, 2026-11-03: it holds no personal data). The
+stream's two reasons, both on the constant:
 
 - **It is a hash chain.** Deleting a prefix of one is the act `prune`
   refuses as *"deleting it would destroy the evidence"*. Here the evidence

@@ -74,6 +74,58 @@ const CALLS: &[(&str, Rule)] = &[
             test: "deploy_apply.rs",
         },
     ),
+    // Revoking a version (versions increment 2b, owner 2026-11-04).
+    ("std.deployment.revoked", Read),
+    (
+        "std.deployment.revoke",
+        Write {
+            act: "revoked",
+            src: "deploy_ops.rs",
+            test: "versions_revoke.rs",
+        },
+    ),
+    (
+        "std.deployment.unrevoke",
+        Write {
+            act: "unrevoked",
+            src: "deploy_ops.rs",
+            test: "versions_revoke.rs",
+        },
+    ),
+    // Maintenance windows (owner, 2026-11-04).
+    ("std.deployment.windows", Read),
+    (
+        "std.deployment.setWindow",
+        Write {
+            act: "window-set",
+            src: "window_ops.rs",
+            test: "windows.rs",
+        },
+    ),
+    (
+        "std.deployment.deleteWindow",
+        Write {
+            act: "window-deleted",
+            src: "window_ops.rs",
+            test: "windows.rs",
+        },
+    ),
+    (
+        "std.deployment.skipWindow",
+        Write {
+            act: "window-skipped",
+            src: "window_ops.rs",
+            test: "windows.rs",
+        },
+    ),
+    (
+        "std.deployment.deleteSkip",
+        Write {
+            act: "skip-deleted",
+            src: "window_ops.rs",
+            test: "windows.rs",
+        },
+    ),
     // Tenants (step 5).
     ("std.deployment.tenants", Read),
     (

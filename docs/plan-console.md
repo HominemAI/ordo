@@ -188,6 +188,23 @@ settings revision; rolling back the image is the platform's.
 | Stored versions and activation history | nothing; `ordo deploys` reads the database | **G1** |
 | Roll back (activate a stored version) | nothing; `ordo rollback` reads the database | **G2** |
 | Prune old versions | `ordo prune` | v2 |
+| Each version's `#n`, label and commit; revoke with a reason, unrevoke (versions 2b) | `std.deployment.versions`, `revoke`, `unrevoke` | none |
+| Warning: revoked versions that still have tenants (D8) | `std.deployment.revoked` | none |
+
+Revoking the version that serves asks where to move. The door refuses a
+revoke without one, and the screen shows its words as given.
+
+### 4.3a Maintenance windows (versions 2b, owner 2026-11-04)
+
+| Shows or does | Calls | Gap |
+|---|---|---|
+| Every time from 12 months back to 12 months ahead, upcoming and past, in local time or UTC | `std.deployment.windows` | none |
+| Add or edit a window: once (start, end) or a cron in UTC with a length; all, only or except tenants; a message | `std.deployment.setWindow` | none |
+| Delete a window, with an in-page confirm | `std.deployment.deleteWindow` | none |
+| Skip a range of a repeating window; remove a skip | `std.deployment.skipWindow`, `deleteSkip` | none |
+
+A window is only a block of time; it changes nothing by itself. Its
+message is any text, shown as written, never as markdown.
 
 A program rollback (G2) and a runtime rollback (4.2) are different acts.
 The screens say "Roll back the app" and "Roll back the server".

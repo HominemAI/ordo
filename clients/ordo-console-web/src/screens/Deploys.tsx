@@ -6,9 +6,14 @@ import {
   apply,
   history,
   preview,
+  revoke,
+  revokedInUse,
+  unrevoke,
   untilServed,
   type History,
   type Preview,
+  type RevokedInUse,
+  type StoredVersion,
   type Serving,
   type Would,
 } from '../deploys';
@@ -21,6 +26,13 @@ function when(secs: number): string {
 /** A version hash, short enough to read; the full one is in the title. */
 function short(v: string): string {
   return v.length > 16 ? `${v.slice(0, 16)}…` : v;
+}
+
+/** `#3 v1.4 (abc1234)`: the order number, label and commit, where known. */
+function named(v: StoredVersion): string {
+  return [v.ordinal ? `#${v.ordinal}` : '', v.label ?? '', v.gitCommit ? `(${v.gitCommit.slice(0, 12)})` : '']
+    .filter(Boolean)
+    .join(' ');
 }
 
 function wouldWords(w: Would, p: Preview): string {
@@ -45,8 +57,10 @@ function wouldWords(w: Would, p: Preview): string {
 /**
  * The app's program (docs/plan-console.md 4.3): choose a .ordo file,
  * preview what it does to the database, apply it, wait until every node
- * serves it, and roll the app back to a stored version. Every change at
- * the deployment asks for the owner's own touch there.
+ * serves it, and roll the app back to a stored version. Revoke a version
+ * with a reason, or lift the mark (docs/plan-versions.md 4, 2b), and see
+ * which revoked versions still have tenants on them. Every change at the
+ * deployment asks for the owner's own touch there.
  */
 export function Deploys(props: { onSignedOut: () => void }) {
   const [state, setState] = useState<Link | null>(null);
@@ -55,6 +69,11 @@ export function Deploys(props: { onSignedOut: () => void }) {
   const [planned, setPlanned] = useState<Preview | null>(null);
   const [activateNow, setActivateNow] = useState(true);
   const [rollbackTo, setRollbackTo] = useState<string | null>(null);
+  const [inUse, setInUse] = useState<RevokedInUse[] | null>(null);
+  const [inUseError, setInUseError] = useState<string | null>(null);
+  const [marking, setMarking] = useState<{ version: string; lift: boolean } | null>(null);
+  const [reason, setReason] = useState('');
+  const [moveTo, setMoveTo] = useState('');
   const [waiting, setWaiting] = useState<{ version: string; seen: Serving | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +83,17 @@ export function Deploys(props: { onSignedOut: () => void }) {
   const load = useCallback(async () => {
     const s = await link();
     setState(s);
-    if (s.linked) setPast(await history());
+    if (!s.linked) return;
+    setPast(await history());
+    // The warning is best effort: the versions still show without it.
+    try {
+      setInUse((await revokedInUse()).versions.filter((v) => v.tenantCount > 0));
+      setInUseError(null);
+    } catch (e) {
+      if (e instanceof ConsoleCallError && SIGNED_OUT.has(e.code)) throw e;
+      setInUse(null);
+      setInUseError(explain(e));
+    }
   }, []);
 
   const act = useCallback(
@@ -146,6 +175,30 @@ export function Deploys(props: { onSignedOut: () => void }) {
         const nodes = await waitFor(version);
         setDone(`Rolled the app back to ${short(version)}. ${nodes === 0 ? 'No node is running.' : `Every node serves it (${nodes}).`}`);
       }
+      await load();
+    });
+
+  const openMark = (version: string, lift: boolean) => {
+    setMarking({ version, lift });
+    setReason('');
+    setMoveTo('');
+    setRollbackTo(null);
+  };
+
+  const mark = (v: StoredVersion, lift: boolean) =>
+    act(async () => {
+      if (lift) {
+        await atDeployment(() => unrevoke(v.version, reason.trim()));
+        setDone(`Lifted the revoke on ${short(v.version)}.`);
+      } else {
+        const r = await atDeployment(() => revoke(v.version, reason.trim(), v.serving ? moveTo : null));
+        setDone(
+          r.moved
+            ? `Revoked ${short(v.version)}. The deployment moved to ${short(r.moved)}.`
+            : `Revoked ${short(v.version)}.`,
+        );
+      }
+      setMarking(null);
       await load();
     });
 
@@ -276,6 +329,29 @@ export function Deploys(props: { onSignedOut: () => void }) {
             </p>
           )}
 
+          {inUseError && (
+            <p className="muted small">The list of revoked versions in use did not load: {inUseError}</p>
+          )}
+          {inUse && inUse.length > 0 && (
+            <div className="note revoked-warning" role="region" aria-label="Revoked versions in use">
+              <h3>Revoked versions still in use</h3>
+              <ul>
+                {inUse.map((r) => (
+                  <li key={r.version}>
+                    <span className="mono" title={r.version}>
+                      {r.ordinal ? `#${r.ordinal} ` : ''}
+                      {short(r.version)}
+                    </span>
+                    : {r.tenantCount} tenant(s) on it. Revoked: {r.reason}
+                    {r.tenants.length > 0 && (
+                      <span className="muted small"> ({r.tenants.map((t) => t.name || t.space).join(', ')})</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <h2>Versions</h2>
           {past === null ? (
             <p className="muted">Loading…</p>
@@ -289,15 +365,89 @@ export function Deploys(props: { onSignedOut: () => void }) {
                     <strong className="mono" title={v.version}>
                       {short(v.version)}
                     </strong>
+                    {named(v) && <span>{named(v)}</span>}
                     {v.serving && <span className="tag">serving</span>}
+                    {v.revoked && <span className="tag tag-revoked">revoked</span>}
                   </div>
                   <div className="muted small">
                     Applied {when(v.appliedAt)} by {v.actor}
                   </div>
-                  {!v.serving && rollbackTo !== v.version && (
-                    <button type="button" disabled={busy} onClick={() => setRollbackTo(v.version)}>
-                      Roll back the app to this
-                    </button>
+                  {v.revoked && (
+                    <div className="small error">
+                      Revoked {when(v.revoked.at)} by {v.revoked.actor}: {v.revoked.reason}
+                    </div>
+                  )}
+                  {marking?.version !== v.version && rollbackTo !== v.version && (
+                    <div className="row-buttons">
+                      {!v.serving && !v.revoked && (
+                        <button type="button" disabled={busy} onClick={() => setRollbackTo(v.version)}>
+                          Roll back the app to this
+                        </button>
+                      )}
+                      {v.revoked ? (
+                        <button type="button" disabled={busy} onClick={() => openMark(v.version, true)}>
+                          Lift the revoke
+                        </button>
+                      ) : (
+                        <button type="button" disabled={busy} onClick={() => openMark(v.version, false)}>
+                          Revoke
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {marking?.version === v.version && (
+                    <form
+                      className="confirm"
+                      aria-label={`${marking.lift ? 'Lift the revoke on' : 'Revoke'} ${short(v.version)}`}
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void mark(v, marking.lift);
+                      }}
+                    >
+                      <p>
+                        {marking.lift
+                          ? `Lift the revoke on ${short(v.version)}? It can serve again.`
+                          : `Revoke ${short(v.version)}? It will not serve again until the revoke is lifted.`}
+                      </p>
+                      {!marking.lift && v.serving && (
+                        <>
+                          <label htmlFor={`move-to-${v.version}`}>It serves now. Move to</label>
+                          <select
+                            id={`move-to-${v.version}`}
+                            name="moveTo"
+                            required
+                            value={moveTo}
+                            onChange={(e) => setMoveTo(e.target.value)}
+                          >
+                            <option value="">Choose a version</option>
+                            {past.stored
+                              .filter((o) => o.version !== v.version && !o.revoked)
+                              .map((o) => (
+                                <option key={o.version} value={o.version}>
+                                  {[named(o), short(o.version)].filter(Boolean).join(' ')}
+                                </option>
+                              ))}
+                          </select>
+                        </>
+                      )}
+                      <label htmlFor={`reason-${v.version}`}>Reason</label>
+                      <input
+                        id={`reason-${v.version}`}
+                        name="reason"
+                        required
+                        maxLength={2048}
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                      />
+                      <div className="actions">
+                        <button type="submit" className={marking.lift ? 'primary' : 'danger'} disabled={busy}>
+                          {marking.lift ? 'Lift the revoke' : 'Revoke'}
+                        </button>
+                        <button type="button" className="link" onClick={() => setMarking(null)}>
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
                   )}
                   {rollbackTo === v.version && (
                     <div className="confirm" role="group" aria-label={`Confirm roll back the app to ${short(v.version)}`}>

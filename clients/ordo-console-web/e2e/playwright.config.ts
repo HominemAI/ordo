@@ -63,6 +63,10 @@ export default defineConfig({
     // `shares`: the Shares and security screen (step 9), after `people`, so two specs
     // never hold the one door link at once. It links the stack's door afresh with its own passkey.
     { name: 'shares', testMatch: /shares\.spec\.ts/, dependencies: ['people'], use: { ...devices['Desktop Chrome'] } },
+    // `windows`: the Maintenance windows screen and the Deploys screen's
+    // revoke (versions 2b), after `shares`, so two specs never hold the one
+    // door link at once. It links the stack's door afresh.
+    { name: 'windows', testMatch: /windows\.spec\.ts/, dependencies: ['shares'], use: { ...devices['Desktop Chrome'] } },
     // `identity`: the console on the identity service (identity plan, step
     // 6), against its own stack (stack-identity.sh, the second web server).
     { name: 'identity', testMatch: /identity\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },

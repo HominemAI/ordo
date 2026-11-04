@@ -1,16 +1,31 @@
 /**
  * The app's program at the deployment (docs/plan-console.md 4.3): the
  * console's `deploys` routes, which reach the deployment's
- * `std.deployment.versions`, `plan`, `apply` and `activate`.
+ * `std.deployment.versions`, `plan`, `apply`, `activate`, and the revoke
+ * ops `revoke`, `unrevoke` and `revoked` (docs/plan-versions.md 4, 2b).
  */
 
 import { get, post } from './api';
 
+/** A version's revoke mark. */
+export interface RevokeMark {
+  reason: string;
+  actor: string;
+  at: number;
+}
+
 export interface StoredVersion {
   version: string;
+  /** Its order number, `#n`. */
+  ordinal: number | null;
+  label: string | null;
+  gitCommit: string | null;
   appliedAt: number;
   actor: string;
   serving: boolean;
+  /** How many tenants are on it. */
+  tenants?: number;
+  revoked: RevokeMark | null;
 }
 
 export interface ActivationRow {
@@ -72,6 +87,25 @@ export interface Activated {
   from: string | null;
 }
 
+/** `std.deployment.revoke` and `unrevoke`. */
+export interface Revoked {
+  version: string;
+  ordinal: number | null;
+  revoked: RevokeMark | null;
+  moved?: string | null;
+}
+
+/** One revoked version and the tenants still on it (`std.deployment.revoked`). */
+export interface RevokedInUse {
+  version: string;
+  ordinal: number | null;
+  reason: string;
+  actor: string;
+  at: number;
+  tenantCount: number;
+  tenants: { space: string; name: string; state: string }[];
+}
+
 /** `GET /health/deploy`: which version each node serves. */
 export interface Serving {
   version: string;
@@ -87,6 +121,12 @@ export const preview = (program: string): Promise<Preview> => post<Preview>('dep
 export const apply = (program: string, activate: boolean): Promise<ApplyReport> =>
   post<ApplyReport>('deploys/apply', { program, activate });
 export const activate = (version: string): Promise<Activated> => post<Activated>('deploys/activate', { version });
+export const revokedInUse = (): Promise<{ versions: RevokedInUse[] }> =>
+  get<{ versions: RevokedInUse[] }>('deploys/revoked');
+export const revoke = (version: string, reason: string, moveTo: string | null): Promise<Revoked> =>
+  post<Revoked>('deploys/revoke', { version, reason, ...(moveTo ? { moveTo } : {}) });
+export const unrevoke = (version: string, reason: string): Promise<Revoked> =>
+  post<Revoked>('deploys/unrevoke', { version, reason });
 
 /** How long the screen waits for every node to serve a version. */
 export const WAIT_SECS = 120;

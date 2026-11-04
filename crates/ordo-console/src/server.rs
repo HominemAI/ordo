@@ -406,6 +406,8 @@ mod shares; // Shares and links, and the security log (step 9).
 /// The Tenants screen's routes (step 5).
 mod tenants;
 mod usage; // The Usage screen (step 7).
+/// The Maintenance windows screen's routes (owner, 2026-11-04).
+mod windows;
 
 impl Console {
     /// Open the database, run migrations, file the deployment, and print
@@ -704,6 +706,7 @@ impl Console {
             .merge(usage::routes())
             .merge(shares::routes())
             .merge(admins::routes())
+            .merge(windows::routes())
             .layer(axum::middleware::map_response_with_state(
                 self.clone(),
                 strict_headers,

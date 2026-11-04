@@ -12,6 +12,7 @@ import { Settings } from './Settings';
 import { Shares } from './Shares';
 import { Tenants } from './Tenants';
 import { Usage } from './Usage';
+import { Windows } from './Windows';
 
 /**
  * The signed-in console: a bar with the nav, and one screen. The nav lists
@@ -21,6 +22,7 @@ const SCREENS = [
   { path: '', name: 'Health' },
   { path: 'runtime', name: 'Runtime' },
   { path: 'deploys', name: 'Deploys' },
+  { path: 'windows', name: 'Maintenance' },
   { path: 'deployment', name: 'Deployment' },
   { path: 'tenants', name: 'Tenants' },
   { path: 'people', name: 'People' },
@@ -94,6 +96,7 @@ export function Home(props: { session: Session; onSignedOut: () => void; onSignO
         {screen === 'deployment' && <Deployment onSignedOut={props.onSignedOut} />}
         {screen === 'runtime' && <Runtime onSignedOut={props.onSignedOut} />}
         {screen === 'deploys' && <Deploys onSignedOut={props.onSignedOut} />}
+        {screen === 'windows' && <Windows onSignedOut={props.onSignedOut} />}
         {screen === 'tenants' && <Tenants onSignedOut={props.onSignedOut} />}
         {screen === 'people' && <People onSignedOut={props.onSignedOut} />}
         {screen === 'sign-in' && <Settings key="sign-in" scope="signin" onSignedOut={props.onSignedOut} />}

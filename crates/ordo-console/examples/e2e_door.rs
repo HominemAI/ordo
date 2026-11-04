@@ -14,8 +14,8 @@
 //! `std.deployment.settings` answers from the stand-in host's own
 //! environment file (`support/settings_door.rs`).
 //!
-//! The deploy ops (`std.deployment.apply`, `versions`, `activate`, `plan`)
-//! are `ordo-host`'s own over a real Postgres database, the one
+//! The deploy ops (`std.deployment.apply`, `versions`, `activate`, `plan`,
+//! the revoke ops) and the maintenance window ops are `ordo-host`'s own over a real Postgres database, the one
 //! `ORDO_PG_HOST`, `ORDO_PG_PORT`, `ORDO_PG_USER` and `ORDO_PG_DB` name
 //! (stack.sh makes it fresh). `/health/deploy` answers for one node that
 //! serves whatever is active when asked.
@@ -49,7 +49,15 @@ use ordo_api::{AccessChecker, AccessDecision, BoundParams};
 use ordo_host::apply_op::{ApplyOps, APPLY};
 use ordo_host::auth::AuthState;
 use ordo_host::console_keys::{ConsoleKeyOps, ConsoleKeyStore, ConsoleKeys, ADD, LIST, REVOKE};
-use ordo_host::deploy_ops::{ACTIVATE, PLAN, VERSIONS};
+use ordo_host::deploy_ops::{ACTIVATE, PLAN, REVOKED, VERSIONS};
+use ordo_host::window_ops;
+
+/// The revoke ops: `ordo-host`'s own, as the deploy ops are.
+const VERSION_OPS: [&str; 3] = [
+    ordo_host::deploy_ops::REVOKE,
+    ordo_host::deploy_ops::UNREVOKE,
+    REVOKED,
+];
 use ordo_host::node_status::NodeStatus;
 use ordo_identity::directory::{Directory, Provisioning};
 use ordo_identity::{
@@ -136,6 +144,21 @@ impl Door {
                     .allow(Role::Owner, SETTINGS),
             ))),
         );
+        // The revoke ops and the maintenance window ops (versions 2b).
+        let profile = engine.profile(&space).cloned().map(|p| {
+            VERSION_OPS
+                .iter()
+                .chain(window_ops::OPS.iter())
+                .fold(p, |p, op| p.allow(Role::Owner, op))
+        });
+        if let Some(p) = profile {
+            engine.set_profile(&space, p);
+        }
+        for op in VERSION_OPS.iter().chain(window_ops::OPS.iter()) {
+            if ![REVOKED, window_ops::WINDOWS].contains(op) {
+                engine.require_step_up(op);
+            }
+        }
         let owner = self.owner.lock().unwrap().clone();
         if let Some(o) = &owner {
             engine.set_membership(&space, o, Role::Owner);
@@ -214,7 +237,9 @@ async fn op(
     if name == SETTINGS {
         return Json(json!({"rows": d.settings.rows()})).into_response();
     }
-    let deploy_op = name == APPLY || ordo_host::deploy_ops::OPS.contains(&name.as_str());
+    let deploy_op = name == APPLY
+        || ordo_host::deploy_ops::OPS.contains(&name.as_str())
+        || window_ops::OPS.contains(&name.as_str());
     if shares_door::OPS.contains(&name.as_str()) {
         return match d.shares.execute(&name, &params) {
             Ok(rows) => Json(json!({"rows": rows})).into_response(),
@@ -242,6 +267,8 @@ async fn op(
     let bound = BoundParams(params);
     let done = if name == APPLY {
         d.deploys.apply(&space, &bound, &principal).await
+    } else if window_ops::OPS.contains(&name.as_str()) {
+        window_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
     } else if deploy_op {
         ordo_host::deploy_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
     } else {

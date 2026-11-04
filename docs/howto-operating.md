@@ -229,7 +229,7 @@ ordo versions revoked                       # each revoked version and the tenan
 - A revoked version is refused as an `ordo rollback` or activation target, as the version an apply activates, as `versions.new_tenant` (`ORDO_VERSIONS_NEW_TENANT`) and as any pin. The refusal names who revoked it, why, and the `ordo versions unrevoke` command.
 - Revoking the active version is refused without `--move-to`. Ordo never picks where tenants go. With it, the activation to that version and the revoke happen in one change, and every tenant's pin moves as an activation moves it. The version moved to passes the same load gate as `ordo rollback`.
 - A version that is not active is only marked. A tenant `versions.new_tenant` started on it stays there until the next activation; `ordo versions revoked` lists it.
-- If `ORDO_VERSIONS_NEW_TENANT` names a version you revoke, new tenants are left unpinned and the next boot refuses, naming the variable. Set it to another version or unset it.
+- A revoke of the version `ORDO_VERSIONS_NEW_TENANT` names is refused, naming the variable. Set it to another version or unset it, then revoke. The check reads the variable on the host that runs the revoke, so set it the same on every node.
 - A reason is 1 to 500 characters. Every revoke and unrevoke is kept with who, why and when; `ordo versions show` lists them.
 - `ordo versions list` and `std.deployment.versions` show the mark and its reason.
 - Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door (`std.deployment.revoke`, `std.deployment.unrevoke`, `std.deployment.revoked`), deployment owner only.

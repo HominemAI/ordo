@@ -465,6 +465,14 @@ pub enum VersionRefusal {
     },
     /// An unrevoke of a version that is not revoked.
     NotRevoked { named: String },
+    /// A revoke of the version `versions.new_tenant` names. Revoked, it
+    /// would leave new tenants unpinned and refuse the next boot, so the
+    /// setting changes first.
+    NamedBySetting {
+        named: String,
+        setting: &'static str,
+        var: &'static str,
+    },
     /// A reason that is empty or longer than [`MAX_REASON_CHARS`]. Fix the
     /// input.
     Reason(String),
@@ -483,6 +491,7 @@ impl VersionRefusal {
             | VersionRefusal::RevokeActive { .. }
             | VersionRefusal::MoveTo(_)
             | VersionRefusal::Reason(_)
+            | VersionRefusal::NamedBySetting { .. }
             | VersionRefusal::Revoked {
                 setting: Some(_), ..
             } => Remedy::FixInput,
@@ -531,7 +540,9 @@ impl VersionRefusal {
             }
             // The deployment's program refused, as `apply_refused` is: the
             // same call lands once the mark is lifted or the move named.
-            VersionRefusal::Revoked { .. } | VersionRefusal::RevokeActive { .. } => {
+            VersionRefusal::Revoked { .. }
+            | VersionRefusal::RevokeActive { .. }
+            | VersionRefusal::NamedBySetting { .. } => {
                 ExecError::new(ErrorCode::ApplyRefused, message)
             }
             VersionRefusal::NotRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
@@ -628,6 +639,16 @@ impl std::fmt::Display for VersionRefusal {
                  the versions that do"
             ),
             VersionRefusal::Reason(why) => write!(f, "reason refused: {why}"),
+            VersionRefusal::NamedBySetting {
+                named,
+                setting,
+                var,
+            } => write!(
+                f,
+                "revoke_named_by_setting: {setting} ({var}) names {named}, so new tenants \
+                 start on it. Set it to another version, or unset it to start them on the \
+                 active version, then revoke"
+            ),
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
     }

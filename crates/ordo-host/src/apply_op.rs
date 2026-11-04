@@ -1216,6 +1216,19 @@ pub async fn revoke(
         // here first so the gate runs only for a move that would happen.
         versions::check_reason(reason).map_err(RevokeRefused::Version)?;
         let named = v.resolve(version).await.map_err(RevokeRefused::Version)?;
+        // This host's `versions.new_tenant`: revoking what it names would
+        // leave new tenants unpinned and refuse the next boot.
+        if let Some(setting) = versions::new_tenant_from_env() {
+            if v.resolve(&setting).await.ok().as_deref() == Some(named.as_str()) {
+                return Err(RevokeRefused::Version(
+                    versions::VersionRefusal::NamedBySetting {
+                        named: v.named(&named).await.map_err(RevokeRefused::Version)?,
+                        setting: versions::NEW_TENANT_SETTING,
+                        var: versions::NEW_TENANT_ENV,
+                    },
+                ));
+            }
+        }
         let active = v.active_version().await.map_err(RevokeRefused::Version)?;
         if let (Some(to), true) = (move_to, active.as_deref() == Some(named.as_str())) {
             let to = v.resolve(to).await.map_err(RevokeRefused::Version)?;

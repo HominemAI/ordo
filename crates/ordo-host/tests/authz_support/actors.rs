@@ -584,6 +584,21 @@ fn file_with(
 /// A share link on `note`, minted by `p` with `extra` (password, maxOpens,
 /// expires). Answers `(secret, id)`.
 pub fn link(d: &Deployment, p: &Person, note: &str, extra: Value) -> (String, String) {
+    link_with(d, p, &p.token, note, extra)
+}
+
+/// [`link`], minted with `token` in place of the sign-in token. Minting is
+/// a platform write, so it needs presence no older than 300 s
+/// (`DEFAULT_STEP_UP_MAX_AGE_SECS`); a script that runs late in the matrix
+/// passes a fresh [`step_up`] here, because the sign-in's presence is as old
+/// as the build.
+pub fn link_with(
+    d: &Deployment,
+    p: &Person,
+    token: &str,
+    note: &str,
+    extra: Value,
+) -> (String, String) {
     let mut params = json!({
         "ops": "myNotes,noteById,std.notes.get",
         "rows": json!([{"entity": "notes", "id": note, "level": "read"}]).to_string(),
@@ -592,7 +607,15 @@ pub fn link(d: &Deployment, p: &Person, note: &str, extra: Value) -> (String, St
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         params[k] = v;
     }
-    let rows = must(d, p, "POST", "std.space.shareLink", params);
+    let a = op(d, &p.space, token, "POST", "std.space.shareLink", &params);
+    assert_eq!(
+        a.status,
+        200,
+        "std.space.shareLink as {}: {}",
+        p.name,
+        a.text()
+    );
+    let rows = a.json()["rows"].as_array().cloned().unwrap_or_default();
     (
         rows[0]["link"].as_str().expect("a secret").to_string(),
         rows[0]["id"].as_str().expect("a link id").to_string(),
@@ -624,6 +647,28 @@ fn link_token(d: &Deployment, secret: &str, password: Option<&str>) -> String {
     let a = open_link(d, secret, password, Some("matrix-device"));
     assert_eq!(a.status, 200, "open link: {}", a.text());
     a.json()["token"].as_str().expect("token").to_string()
+}
+
+/// A link that ends 5 s after its mint, opened once. Answers `(secret,
+/// token)`.
+///
+/// The 5 s start at the mint's clock read, and the mint answers only after
+/// it rebuilds the door. On a loaded CI node that rebuild can take most of
+/// the 5 s, so the open can find the link already expired (`link_refused`,
+/// 2026-11-04). The host is right to refuse it; a refused open mints a
+/// fresh link and tries again, a few times.
+fn short_link(d: &Deployment, ann: &Person, note: &str) -> (String, String) {
+    let mut last = String::new();
+    for _ in 0..4 {
+        let (secret, _) = link(d, ann, note, json!({"expires": "5s"}));
+        let a = open_link(d, &secret, None, Some("matrix-device"));
+        if a.status == 200 {
+            let token = a.json()["token"].as_str().expect("token").to_string();
+            return (secret, token);
+        }
+        last = format!("{} {}", a.status, a.text());
+    }
+    panic!("a 5 s link was refused at every open: {last}");
 }
 
 fn actor(token: &str, space: &str) -> Actor {
@@ -804,11 +849,10 @@ pub fn build(d: &mut Deployment) -> World {
     let (link_pwd, _) = link(d, &ann, &note_linked, json!({"password": "correct horse"}));
     let (link_lock, _) = link(d, &ann, &note_linked, json!({"password": "battery staple"}));
     let (link_once, _) = link(d, &ann, &note_linked, json!({"maxOpens": "1"}));
-    let (link_short, _) = link(d, &ann, &note_linked, json!({"expires": "5s"}));
     // Opened now, while it is live, so the token is real; its grant and the
     // token both lapse in 5 s, well before the matrix runs (a GRACE sleep
     // and more setup follow). The actor is then a dead one, refused.
-    let tok_link_short = link_token(d, &link_short, None);
+    let (link_short, tok_link_short) = short_link(d, &ann, &note_linked);
     let (link_revoked, link_revoked_id) = link(d, &ann, &note_linked, json!({}));
     let tok_link = link_token(d, &link_ok, None);
     let tok_link_pwd = link_token(d, &link_pwd, Some("correct horse"));

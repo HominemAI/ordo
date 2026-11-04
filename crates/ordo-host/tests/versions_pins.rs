@@ -317,3 +317,46 @@ async fn a_paused_tenant_is_pinned_and_a_failed_or_reaped_one_is_not() {
         .expect("history")
         .is_empty());
 }
+
+/// A tenant whose row commits while an activation is running is pinned to
+/// the version that activation makes active, not the one it replaces
+/// (review, 2026-11-04). The activation is held open by hand here: its turn
+/// taken and its `$activations` row written, not yet committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_made_during_an_activation_gets_the_new_version() {
+    let pool = fresh("ordo_pins_race").await;
+    apply(&pool, V010, true).await;
+    apply(&pool, V020, false).await;
+    tenant(&pool, "spc_mid", "provisioning").await;
+
+    let activation = pool.begin().await.expect("begin");
+    activation
+        .rows(&format!(
+            "SELECT pg_advisory_xact_lock({}, 0)",
+            ordo_host::versions::PIN_LOCK_NS
+        ))
+        .await
+        .expect("the turn");
+    ordo_exec::registry::record_activation(
+        &activation,
+        "0.2.0",
+        "dev:ada",
+        ordo_commandlog::Timestamp(50),
+    )
+    .await
+    .expect("activation row");
+
+    let p = pool.clone();
+    let pinning = tokio::spawn(async move {
+        Versions::on(&p)
+            .pin_new_tenant("spc_mid", "dev:cy", 51)
+            .await
+            .expect("pinned")
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!pinning.is_finished(), "the pin waits its turn");
+    activation.commit().await.expect("commit");
+
+    assert_eq!(pinning.await.expect("joined").as_deref(), Some("0.2.0"));
+    assert_eq!(pin(&pool, "spc_mid").await, (Some("0.2.0".into()), 1));
+}

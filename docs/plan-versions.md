@@ -155,6 +155,11 @@ The pin this plan adds:
 - A new tenant is pinned right after its row is written, in its own
   transaction. A pin that fails is logged, and boot's backfill pins it.
 - A space attached by hand with no `$spaces` row is not pinned.
+- Every pin change takes one advisory lock (`PIN_LOCK_NS`) first, so a
+  tenant created during an activation gets the version it makes active
+  (review, 2026-11-04).
+- An apply adds `$spaces`' columns only when the pin's are missing: the
+  table's setup locks it exclusively once per column.
 - Not yet built: the pin epoch check in the write transaction, the
   principal check on who may pin, the stream event, and the rollout id on
   `$pins`.

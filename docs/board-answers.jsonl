@@ -1328,3 +1328,8 @@
 {"seq": 1329, "item": "program-versions-the-core-under-schema", "ask": 8, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1330, "item": "program-versions-the-core-under-schema", "ask": 9, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1331, "item": "program-versions-the-core-under-schema", "ask": 10, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1332, "item": "program-versions-the-core-under-schema", "ask": 14, "at": "2026-11-04T05:00:03Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1333, "item": "program-versions-the-core-under-schema", "ask": 15, "at": "2026-11-04T05:00:07Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1334, "item": "program-versions-the-core-under-schema", "ask": 0, "at": "2026-11-04T05:00:18Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1335, "item": "program-versions-the-core-under-schema", "ask": 14, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1336, "item": "program-versions-the-core-under-schema", "ask": 15, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}

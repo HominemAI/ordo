@@ -12048,3 +12048,18 @@ that shows the linear correlation".
 - **Reasoning:** the hash tells a machine whether two builds are the same;
   a person needs to tell which came first. `#n` gives every version that,
   and rising declared numbers keep the names in the same order.
+
+## 2026-11-03: pins before rollouts, and pin history after erasure
+
+Board task `program-versions-the-core-under-schema`, asks 14 and 15, raised
+while building increment 2. Both answered "ok" on their recommendations.
+
+- **Ask 14:** until rollouts exist (increment 10), every activation re-pins
+  every tenant, one started on another version by `versions.new_tenant`
+  included. Reasoning: the door serves one version until increment 3, so a
+  pin elsewhere would say something the door does not do.
+- **Ask 15:** erasing a tenant keeps its `$pins` history. It joins
+  `ordo_exec::erase::RETAINED` beside the security stream. Reasoning: it
+  holds no personal data (the space id, version names, the deployment owner
+  who moved the pin), and it answers what a tenant was served, and when,
+  after the tenant is gone.

@@ -10,7 +10,10 @@
 //! - Applying `0.2.0`'s content again finds `0.2.0`.
 //! - A stored build from another Ordo release is compared after compiling
 //!   its source under this one, so a release's own changes move nothing.
-//! - A program with no `@` is named as before, by its compiled digest.
+//! - A new number lower than one already applied is refused (ask 9).
+//! - Every version carries its order number, `#1`, `#2`, ... (ask 8).
+//! - A program with no `@` is named as before, by its compiled digest,
+//!   with a note saying how to declare one (ask 10).
 //! - A version stored before 2026-11-03 keeps its 16-hex name (ask 7).
 //!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
@@ -125,6 +128,7 @@ async fn the_declared_version_names_the_first_apply() {
     let pool = fresh("ordo_vid_first").await;
     let report = apply(&pool, V020).await;
     assert_eq!(report.version, "0.2.0");
+    assert_eq!(report.ordinal, Some(1));
     assert_eq!(report.stored, Stored::Written);
     assert!(report.notes.is_empty(), "{:?}", report.notes);
     let release = one(&pool, "SELECT \"ordo_release\" FROM \"$builds\"").await;
@@ -189,6 +193,8 @@ async fn a_change_under_the_same_number_is_refused_naming_the_next() {
     // The raised number is a version of its own.
     let raised = apply(&pool, &V020_CHANGED.replace("@ 0.2.0", "@ 0.2.1")).await;
     assert_eq!(raised.version, "0.2.1");
+    assert_eq!(raised.ordinal, Some(2), "the second version stored");
+    assert_eq!(back.ordinal, Some(1), "going back keeps its number");
     assert_eq!(raised.stored, Stored::Written);
     assert!(matches!(raised.activation, Activation::Switched { .. }));
 
@@ -212,6 +218,32 @@ async fn a_program_with_no_declared_version_is_named_by_its_compiled_digest() {
     let pool = fresh("ordo_vid_undeclared").await;
     let bare = V020.replace("domain tasks @ 0.2.0\n", "");
     let first = apply(&pool, &bare).await;
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.contains("no `@` version") && n.contains("domain <name> @ 0.1.0")),
+        "the note says how to declare one: {:?}",
+        first.notes
+    );
+    let named = apply(
+        &pool,
+        &format!(
+            "domain tasks\n{}",
+            V020_CHANGED
+                .replace("domain tasks @ 0.2.0\n", "")
+                .replace("done:  bool", "done:  bool\n  size:  int?")
+        ),
+    )
+    .await;
+    assert!(
+        named
+            .notes
+            .iter()
+            .any(|n| n.contains("domain tasks @ 0.1.0")),
+        "the domain's own name: {:?}",
+        named.notes
+    );
     let program = Program::compile(&bare).expect("compiles");
     assert_eq!(
         first.version,
@@ -220,8 +252,42 @@ async fn a_program_with_no_declared_version_is_named_by_its_compiled_digest() {
     let linted = apply(&pool, &format!("# tasks\n\n{bare}")).await;
     assert_eq!(linted.version, first.version);
     assert_eq!(linted.stored, Stored::AlreadyPresent);
+    assert!(linted.notes.is_empty(), "said once: {:?}", linted.notes);
     let changed = apply(&pool, &V020_CHANGED.replace("domain tasks @ 0.2.0\n", "")).await;
     assert_ne!(changed.version, first.version);
+}
+
+/// **Numbers rise in the order changes are made** (ask 9). New content
+/// under a lower number is refused, naming the next; going back to a lower
+/// version already stored is not new content, and goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_number_lower_than_one_applied_is_refused() {
+    let pool = fresh("ordo_vid_behind").await;
+    apply(&pool, V020).await;
+    apply(&pool, &V020_CHANGED.replace("@ 0.2.0", "@ 0.3.0")).await;
+
+    let lower = V020_CHANGED
+        .replace("@ 0.2.0", "@ 0.2.5")
+        .replace("due:   int?", "due:   int?\n  size:  int?");
+    let refused = try_apply(&pool, &lower).await.expect_err("refused");
+    assert_eq!(
+        refused,
+        ApplyRefused::VersionBehind {
+            version: "0.2.5".into(),
+            highest: "0.3.0".into(),
+            next: Some("0.3.1".into())
+        }
+    );
+    assert_eq!(refused.class(), "version_behind");
+    assert_eq!(
+        ordo_host::schema_apply::NameRefusal::read_taken(&refused.to_string()),
+        Some(("0.2.5".into(), "0.3.1".into())),
+        "`--bump` reads this refusal too"
+    );
+
+    let back = apply(&pool, V020).await;
+    assert_eq!(back.version, "0.2.0", "a rollback to stored content");
+    assert!(matches!(back.activation, Activation::Switched { .. }));
 }
 
 /// **An Ordo release's own changes move nothing.** The stored build of
@@ -286,6 +352,11 @@ async fn a_version_stored_before_keeps_its_name() {
     )
     .await;
     assert_eq!(declared.as_deref(), Some("0.2.0"));
+    assert_eq!(
+        report.ordinal,
+        Some(1),
+        "an older row is numbered by when it was applied"
+    );
     let at = ordo_exec::spacedb::recorded_version(&pool)
         .await
         .expect("reads");

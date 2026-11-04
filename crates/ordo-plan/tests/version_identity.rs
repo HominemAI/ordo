@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use ordo_plan::artifact::{
-    build_identity, build_identity_of, code_hashes, declared_version, next_version, short,
-    source_identity, to_bytes, with_declared, FIRST_EDITION,
+    build_identity, build_identity_of, code_hashes, declared_version, highest_above, next_version,
+    short, source_identity, to_bytes, with_declared, FIRST_EDITION,
 };
 use serde_json::json;
 
@@ -44,6 +44,19 @@ fn the_next_number_is_one_patch_above_the_highest() {
         Some("1.0.1")
     );
     assert_eq!(next_version(["v2", "1.0"]), None);
+}
+
+#[test]
+fn a_lower_number_names_the_highest_above_it() {
+    let stored = ["0.1.0", "0.10.0", "0.2.0"];
+    assert_eq!(highest_above("0.1.5", stored).as_deref(), Some("0.10.0"));
+    assert_eq!(highest_above("0.10.0", stored), None, "the highest itself");
+    assert_eq!(highest_above("1.0.0", stored), None);
+    assert_eq!(
+        highest_above("next", stored),
+        None,
+        "not x.y.z: not compared"
+    );
 }
 
 /// `--bump` changes the number and not one other byte.

@@ -1321,3 +1321,10 @@
 {"seq": 1322, "item": "program-versions-the-core-under-schema", "ask": 13, "at": "2026-11-03", "status": "decided", "text": "Lets retract. We need to block on version in the same file if the file has changed , the exeption being formatting like white space and comments - similar to our previous work the proper comparisons", "source": "record", "read": true}
 {"seq": 1323, "item": "program-versions-the-core-under-schema", "ask": 12, "at": "2026-11-03", "status": "decided", "text": "That version needs to be bumped, and optionally the apply offers the ability to bump that version in file.", "source": "record", "read": true}
 {"seq": 1324, "item": "program-versions-the-core-under-schema", "ask": 11, "at": "2026-11-03", "status": "decided", "text": "Moot: the owner ruled on ask 13 that an unbumped change is refused, so no +r revision reaches another environment.", "source": "record", "read": true}
+{"seq": 1325, "item": "program-versions-the-core-under-schema", "ask": 8, "at": "2026-11-04T03:47:39Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1326, "item": "program-versions-the-core-under-schema", "ask": 10, "at": "2026-11-04T03:47:47Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1327, "item": "program-versions-the-core-under-schema", "ask": 0, "at": "2026-11-04T03:47:53Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1328, "item": "program-versions-the-core-under-schema", "ask": 9, "at": "2026-11-04T03:48:03Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1329, "item": "program-versions-the-core-under-schema", "ask": 8, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1330, "item": "program-versions-the-core-under-schema", "ask": 9, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1331, "item": "program-versions-the-core-under-schema", "ask": 10, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}

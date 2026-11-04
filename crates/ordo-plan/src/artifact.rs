@@ -483,6 +483,23 @@ pub fn next_version<'a>(taken: impl IntoIterator<Item = &'a str>) -> Option<Stri
     Some(format!("{major}.{minor}.{}", patch + 1))
 }
 
+/// The highest of `others` when it is above `version`, compared as
+/// `x.y.z`: what a version numbered below one already applied is refused
+/// over (owner, 2026-11-03, ask 9). `None` when `version` is the highest, or
+/// does not read as `x.y.z`.
+pub fn highest_above<'a>(
+    version: &str,
+    others: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mine = numbers_of(version)?;
+    others
+        .into_iter()
+        .filter_map(|o| Some((numbers_of(o)?, o)))
+        .filter(|(n, _)| *n > mine)
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, o)| o.to_string())
+}
+
 fn numbers_of(version: &str) -> Option<(u64, u64, u64)> {
     let core = version.split(['-', '+']).next()?;
     let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());

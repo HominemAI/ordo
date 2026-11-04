@@ -2075,16 +2075,15 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
         )),
         SchemaOutcome::Behind { changes } => behind = changes,
     }
+    let version = numbered(report.ordinal, &report.version);
     out.push_str(&match report.stored {
-        Stored::Written => format!("stored     {}\n", report.version),
-        Stored::AlreadyPresent => format!(
-            "stored     {}  (already present, byte-identical)\n",
-            report.version
-        ),
-        Stored::Rebuilt => format!(
-            "stored     {}  (already present; this Ordo release built it anew)\n",
-            report.version
-        ),
+        Stored::Written => format!("stored     {version}\n"),
+        Stored::AlreadyPresent => {
+            format!("stored     {version}  (already present, byte-identical)\n")
+        }
+        Stored::Rebuilt => {
+            format!("stored     {version}  (already present; this Ordo release built it anew)\n")
+        }
     });
     if !behind.is_empty() {
         out.push_str(&format!(
@@ -2229,22 +2228,26 @@ async fn deploys(flags: Flags) -> Outcome {
     // The one body, which `std.deployment.versions` answers from too.
     let ordo_host::apply_op::History {
         active,
+        ordinals,
         stored,
         activations: log,
     } = match ordo_host::apply_op::history(&pool, limit).await {
         Ok(h) => h,
         Err(e) => return Outcome::failed(format!("database: {e}\n")),
     };
+    let named = |v: &str| numbered(ordinals.get(v).copied(), v);
     let mut out = format!(
-        "active     {}\n\nSTORED ({})\n",
+        "active     {}\n\nSTORED ({}, #n is the order each was first stored in)\n",
         active
             .as_deref()
-            .unwrap_or("nothing has ever been activated"),
+            .map(named)
+            .unwrap_or_else(|| "nothing has ever been activated".into()),
         stored.len()
     );
     for (v, at, actor) in &stored {
         out.push_str(&format!(
-            "  {v}  applied {at} by {actor}{}\n",
+            "  {}  applied {at} by {actor}{}\n",
+            named(v),
             if Some(v.as_str()) == active.as_deref() {
                 "  <- serving"
             } else {
@@ -2258,11 +2261,24 @@ async fn deploys(flags: Flags) -> Outcome {
     ));
     for a in &log {
         out.push_str(&format!(
-            "  #{}  {}  at {} by {}\n",
-            a.seq, a.version, a.at.0, a.actor
+            "  {}.  {}  at {} by {}\n",
+            a.seq,
+            named(&a.version),
+            a.at.0,
+            a.actor
         ));
     }
     Outcome::ok(out)
+}
+
+/// A version as a person reads it: its order number, then its name,
+/// `#4 · 0.2.1` (owner, 2026-11-03, ask 8). The name alone when the number
+/// is not known, from a host older than that.
+pub(crate) fn numbered(ordinal: Option<u64>, version: &str) -> String {
+    match ordinal {
+        Some(n) => format!("#{n} · {version}"),
+        None => version.to_string(),
+    }
 }
 
 // ── revert ───────────────────────────────────────────────────────────────

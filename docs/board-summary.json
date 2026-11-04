@@ -1,6 +1,6 @@
 {
  "date": "2026-11-04",
- "text": "Versions increments 2 and 2b are built and green on bleeding (a7b590b6), with console screens: pins, labels, diff, revoking a version, and a Maintenance screen for windows [[program-versions-the-core-under-schema]]. A share-link failure in the authz matrix was the test's, fixed [[authz-link-refused-flake]]. Increment 3 is next.",
+ "text": "Versions increments 2 and 2b are on main (PR #6, 3a28847b), with console screens: pins, labels, diff, revoking a version, and a Maintenance screen for windows [[program-versions-the-core-under-schema]]. On the PR, 3 notes e2e tests failed once and passed on re-run [[notes-page-catch-up-flake]]. Increment 3 is next.",
  "tiles": [
   [
    "4,056",

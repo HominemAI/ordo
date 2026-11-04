@@ -12088,3 +12088,16 @@ Board task `program-versions-the-core-under-schema`, asks 18 to 20. These build 
 - **Ask 18, "ok".** Revoking the version tenants are on now is refused unless the command names where they go (`--move-to`). Ordo never picks a replacement.
 - **Ask 19, "Lets bring maintenance window in now."** The recommendation was to move tenants off a revoked version at once until windows exist in increment 10. The owner chose to build the per-tenant maintenance window now (ruled 2026-09-21, review V-26) instead. Until increment 3 one version serves every tenant, so asks 21 and 22 put when window-timed moves can work, and what a window is.
 - **Ask 20, "ok".** A revoke can be undone (`ordo versions unrevoke`). Both acts and their reasons stay on record.
+
+## 2026-11-04: maintenance windows
+
+Board task `program-versions-the-core-under-schema`, asks 21 and 22.
+
+- **Ask 21, "ok".** Window-timed moves off a revoked version are built with increment 3, when each tenant is served its own pin. Now: windows, the revoke mark, unrevoke and the refusals.
+- **Ask 22.** The recommendation was weekly slots in a named time zone. The owner ruled against fixing a cadence: *"That is a contract between the Dev and a tenant. We cannot know. We cannot imagine that cadence at all."* What he ruled instead:
+  - A window is a range with a start and an end timestamp, or a cron that repeats it.
+  - Each carries a message. It may hold markdown, but Ordo never renders it: it is any text.
+  - An API endpoint sets a window and another deletes it.
+  - A query lists the scheduled windows from 12 months back to 12 months ahead. A cron window is listed as each time the cron gives.
+  - An optional skip endpoint suppresses windows over a time range, as an exception to a cron.
+- **Read as.** The endpoints belong to the deployment owner, since the window is the app developer's contract with the tenant and the tenant has no say through Ordo. A cron window needs a length and a time zone; this build takes both, UTC by default. The hold flag in the recommendation was not ruled; it stays with rollouts (increment 10).

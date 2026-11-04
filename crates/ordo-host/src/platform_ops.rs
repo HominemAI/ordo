@@ -786,6 +786,30 @@ pub fn specs() -> Vec<OpSpec> {
                     required: false,
                     bounds: None,
                 },
+                ParamSpec {
+                    // `ordo apply --label`: one line of at most 80
+                    // characters, which `run_with` checks and names. The
+                    // bound here is only a ceiling, wide enough that the
+                    // refusal a person reads is that one.
+                    name: "label".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(1024),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+                ParamSpec {
+                    // The git commit the CLI read where the source lives,
+                    // `-dirty` when the applied files had changes not in
+                    // it. Asserted by the caller, as `--as` is on the
+                    // direct path; checked for shape.
+                    name: "gitCommit".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(crate::versions::MAX_COMMIT_CHARS as u32),
+                    },
+                    required: false,
+                    bounds: None,
+                },
             ],
             output_fields: vec![
                 FieldSpec::new("version"),

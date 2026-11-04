@@ -829,3 +829,157 @@ fn versions_list_and_show_name_the_tenants_pinned() {
     assert_ne!(unknown.code, 0);
     assert!(unknown.report.contains("REFUSED"), "{}", unknown.report);
 }
+
+/// Run git in `dir`, with no signing and a fixed author.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .status()
+        .expect("git runs")
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+/// Labels, commits and `ordo versions label|diff` (`plan-versions.md` §4
+/// row 2, review V-32): an apply stores both, the commit is `-dirty` when
+/// the file changed since it, a label changes later by `#n`, and two
+/// versions compare by schema and by source.
+#[test]
+fn a_version_carries_its_label_and_commit_and_two_compare() {
+    let _g = SETTING.lock().unwrap_or_else(|e| e.into_inner());
+    let db = "ordo_sapply_labels";
+    let pg = empty(db);
+    let path = program(db, "git", V1);
+    let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "v1"]);
+    let head = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let run = |args: &[&str]| {
+        let mut argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        argv.extend(["--db".to_string(), db.to_string()]);
+        operator::run(argv.remove(0).as_str(), &argv)
+    };
+    let first = run(&["apply", &path, "--label", "first cut", "--as", "test"]);
+    assert_eq!(first.code, 0, "{}", first.report);
+    assert!(
+        first.report.contains("label      first cut\n"),
+        "{}",
+        first.report
+    );
+    assert!(
+        first
+            .report
+            .contains(&format!("commit     {}\n", &head[..12])),
+        "{}",
+        first.report
+    );
+    assert_eq!(
+        one(&pg, "SELECT \"git_commit\" FROM \"$artifacts\""),
+        head,
+        "the whole commit is stored"
+    );
+
+    // A change not committed: the commit says so.
+    std::fs::write(&path, V2).expect("write");
+    let second = run(&["apply", &path, "--as", "test"]);
+    assert_eq!(second.code, 0, "{}", second.report);
+    assert!(
+        second
+            .report
+            .contains(&format!("commit     {}-dirty\n", &head[..12])),
+        "{}",
+        second.report
+    );
+    assert!(!second.report.contains("label "), "{}", second.report);
+
+    let long = run(&["apply", &path, "--label", &"x".repeat(81), "--as", "test"]);
+    assert_ne!(long.code, 0);
+    assert!(long.report.contains("at most 80"), "{}", long.report);
+
+    // A label later, by order number; then cleared.
+    let labelled = run(&["versions", "label", "#2", "second cut"]);
+    assert_eq!(labelled.code, 0, "{}", labelled.report);
+    assert!(
+        labelled.report.starts_with("labelled   #2 · ")
+            && labelled.report.contains("\"second cut\""),
+        "{}",
+        labelled.report
+    );
+    let list = run(&["versions", "list"]);
+    assert!(
+        list.report
+            .contains(&format!("commit {}-dirty  \"second cut\"", &head[..12])),
+        "{}",
+        list.report
+    );
+    assert!(list.report.contains("\"first cut\""), "{}", list.report);
+    let show = run(&["versions", "show", "#1"]);
+    assert!(
+        show.report.contains("label      first cut\n"),
+        "{}",
+        show.report
+    );
+    assert!(show.report.contains("version    #1 · "), "{}", show.report);
+    let deploys = run(&["deploys"]);
+    assert!(
+        deploys.report.contains("\"second cut\""),
+        "{}",
+        deploys.report
+    );
+    let cleared = run(&["versions", "label", "#1", "--clear"]);
+    assert!(
+        cleared.report.starts_with("unlabelled #1 · "),
+        "{}",
+        cleared.report
+    );
+    let missing = run(&["versions", "label", "#7", "x"]);
+    assert_ne!(missing.code, 0);
+    assert!(
+        missing.report.contains("`#7`") && missing.report.contains("#2 · "),
+        "{}",
+        missing.report
+    );
+
+    // Two versions compared: both parts, then each alone.
+    let diff = run(&["versions", "diff", "#1", "#2"]);
+    assert_eq!(diff.code, 0, "{}", diff.report);
+    for want in [
+        "SCHEMA  (3 change(s))",
+        "  A2  ",
+        "\nSOURCE\n",
+        "+  tag:   text?",
+    ] {
+        assert!(diff.report.contains(want), "`{want}` in:\n{}", diff.report);
+    }
+    let schema = run(&["versions", "diff", "#1", "#2", "--schema"]);
+    assert!(!schema.report.contains("SOURCE"), "{}", schema.report);
+    let source = run(&["versions", "diff", "#1", "#2", "--source"]);
+    assert!(!source.report.contains("SCHEMA"), "{}", source.report);
+    assert!(source.report.contains("@@ "), "{}", source.report);
+    let nope = run(&["versions", "diff", "#1", "0.0.9"]);
+    assert_ne!(nope.code, 0);
+    assert!(nope.report.contains("`0.0.9`"), "{}", nope.report);
+}

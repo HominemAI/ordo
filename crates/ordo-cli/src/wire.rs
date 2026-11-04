@@ -252,6 +252,7 @@ pub async fn apply_over_the_wire(
     source: &str,
     code: Option<String>,
     activate: bool,
+    provenance: &ordo_host::versions::Provenance,
     path: &str,
     db: &str,
     wait: Option<std::time::Duration>,
@@ -275,6 +276,12 @@ pub async fn apply_over_the_wire(
     });
     if let Some(code) = code {
         body["code"] = Value::String(code);
+    }
+    if let Some(label) = &provenance.label {
+        body["label"] = Value::String(label.clone());
+    }
+    if let Some(commit) = &provenance.git_commit {
+        body["gitCommit"] = Value::String(commit.clone());
     }
     let body = body.to_string();
 
@@ -1160,6 +1167,91 @@ pub async fn show_fn_run_over_the_wire(flags: &Flags, seq: u64) -> Outcome {
         }
     }
     Outcome::ok(out)
+}
+
+/// `ordo versions label --host`: set or clear a stored version's label
+/// through `std.deployment.label`, deployment owner only. Prints what the
+/// direct path prints.
+pub async fn label_over_the_wire(
+    host: &Host,
+    flags: &Flags,
+    version: &str,
+    label: Option<&str>,
+) -> Outcome {
+    let token = match token(flags).await {
+        Ok(t) => t,
+        Err(e) => return Outcome::usage(e),
+    };
+    let space = match space(flags) {
+        Ok(s) => s,
+        Err(e) => return Outcome::usage(e),
+    };
+    let op_path = format!("/op/{}", ordo_host::deploy_ops::LABEL);
+    let mut body = json!({ "$space": space, "version": version });
+    if let Some(l) = label {
+        body["label"] = Value::String(l.to_string());
+    }
+    let (status, value) = match post_touching(
+        host,
+        &op_path,
+        flags,
+        &token,
+        &space,
+        body.to_string(),
+        None,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+    };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    let row = &value["rows"][0];
+    Outcome::ok(crate::operator::labelled(
+        row["ordinal"].as_u64(),
+        row["version"].as_str().unwrap_or(version),
+        row["label"].as_str(),
+    ))
+}
+
+/// `ordo versions diff --host`: two stored versions compared by the
+/// deployment (`std.deployment.diff`), rendered as the direct path renders
+/// them.
+pub async fn diff_over_the_wire(
+    host: &Host,
+    flags: &Flags,
+    a: &str,
+    b: &str,
+    schema: bool,
+    source: bool,
+) -> Outcome {
+    let token = match token(flags).await {
+        Ok(t) => t,
+        Err(e) => return Outcome::usage(e),
+    };
+    let space = match space(flags) {
+        Ok(s) => s,
+        Err(e) => return Outcome::usage(e),
+    };
+    let op_path = format!(
+        "/op/{}?a={}&b={}&schema={schema}&source={source}",
+        ordo_host::deploy_ops::DIFF,
+        query_escape(a),
+        query_escape(b),
+    );
+    let (status, value) = match get_json_in(host, &op_path, &token, Some(&space)).await {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&op_path))),
+    };
+    if status >= 400 {
+        return door_refusal(status, &value);
+    }
+    match ordo_host::versions_diff::VersionDiff::from_json(&value["rows"][0]) {
+        Ok(d) => Outcome::ok(d.render()),
+        Err(e) => Outcome::failed(format!("REFUSED  {e}\n")),
+    }
 }
 
 /// A program version cut to 12 characters for a table.

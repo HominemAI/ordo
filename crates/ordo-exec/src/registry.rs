@@ -29,6 +29,13 @@
 //! version differently updates the row's document and DDL, which loads
 //! read, and records the new build ([`rebuild`]).
 //!
+//! # Labels and commits (2026-11-04)
+//!
+//! Each row may carry a `label` a person wrote and the `git_commit` of the
+//! source it was applied from (`plan-versions.md` §1.2). Both are
+//! provenance, not identity: neither moves a version. `ordo_host::versions`
+//! reads and writes them.
+//!
 //! The obvious alternative — a single-row pointer table updated in place —
 //! was rejected for the reason every other record in this platform is
 //! append-only: an operator investigating an incident needs to know *what
@@ -99,6 +106,8 @@ CREATE INDEX IF NOT EXISTS \"$artifacts_declared\" ON \"$artifacts\" (\"declared
 CREATE INDEX IF NOT EXISTS \"$artifacts_source_id\" ON \"$artifacts\" (\"source_id\"); \
 ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"ordinal\" bigint; \
 CREATE UNIQUE INDEX IF NOT EXISTS \"$artifacts_ordinal\" ON \"$artifacts\" (\"ordinal\"); \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"label\" text; \
+ALTER TABLE \"$artifacts\" ADD COLUMN IF NOT EXISTS \"git_commit\" text; \
 CREATE TABLE IF NOT EXISTS \"$builds\" ( \
   \"version\" text NOT NULL REFERENCES \"$artifacts\" (\"version\"), \
   \"build_id\" text NOT NULL, \

@@ -123,13 +123,23 @@ const SWITCHES: &[&str] = &[
     "--force",
 ];
 
-fn parse_flags(args: &[String]) -> Result<Flags, String> {
+/// Switches one command takes that another takes a value for:
+/// `ordo versions diff --source` shows the source alone, and `ordo restore
+/// --source <dir>` names where to restore from.
+fn command_switches(cmd: &str) -> &'static [&'static str] {
+    match cmd {
+        "versions" => &["--source", "--schema", "--clear"],
+        _ => &[],
+    }
+}
+
+fn parse_flags_for(cmd: &str, args: &[String]) -> Result<Flags, String> {
     let mut f = Flags::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if let Some(name) = a.strip_prefix("--") {
             let flag = format!("--{name}");
-            if SWITCHES.contains(&flag.as_str()) {
+            if SWITCHES.contains(&flag.as_str()) || command_switches(cmd).contains(&flag.as_str()) {
                 f.switches.push(flag);
                 continue;
             }
@@ -297,7 +307,7 @@ pub fn run_with_input(cmd: &str, args: &[String], input: &[u8]) -> Outcome {
 }
 
 fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
-    let flags = match parse_flags(args) {
+    let flags = match parse_flags_for(cmd, args) {
         Ok(f) => f,
         Err(e) => return Outcome::usage(e),
     };
@@ -1841,6 +1851,7 @@ fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, S
 async fn apply_once(flags: &Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--bump",
+        "--label",
         "--db",
         "--as",
         "--no-activate",
@@ -1870,6 +1881,9 @@ async fn apply_once(flags: &Flags) -> Outcome {
     // environment names. The refusal prints it in the command it suggests.
     let db = pool_config(flags).db;
     let activate = !flags.has("--no-activate");
+    // The label is checked by the apply itself, on both paths, so the
+    // refusal reads the same. The commit is read where the source lives.
+    let label = flags.named_value("--label").map(str::to_string);
 
     // **17u: the endpoint, when one is named.** The whole difference is
     // which side of the wire compiles and applies — the rendering below is
@@ -1905,6 +1919,10 @@ async fn apply_once(flags: &Flags) -> Outcome {
             },
             Err(_) => crate::FunctionCode::default(),
         };
+        let provenance = ordo_host::versions::Provenance {
+            label,
+            git_commit: source_commit(std::path::Path::new(&path), &code),
+        };
         let code = match crate::wire::code_param(&code) {
             Ok(c) => c,
             Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
@@ -1915,6 +1933,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
             src.text(),
             code,
             activate,
+            &provenance,
             &path,
             &db,
             wait,
@@ -1947,6 +1966,10 @@ async fn apply_once(flags: &Flags) -> Outcome {
     if let Err(e) = ordo_plan::artifact::bind_function_code(&mut doc, &code.hashes) {
         return Outcome::failed(format!("REFUSED  {e}\n"));
     }
+    let provenance = ordo_host::versions::Provenance {
+        label,
+        git_commit: source_commit(std::path::Path::new(&path), &code),
+    };
     let (broken, notes) = ordo_host::apply_op::triage_errors(&doc, &schema, &registry);
     if !broken.is_empty() {
         return Outcome::failed(format!(
@@ -1985,7 +2008,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
             return Outcome::failed(format!("REFUSED  storing function code: {e}\n"));
         }
     }
-    match ordo_host::apply_op::run_program(
+    match ordo_host::apply_op::run_program_with(
         &pool,
         pools.as_ref(),
         &program,
@@ -1993,6 +2016,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
         &actor,
         "ordo apply",
         activate,
+        &provenance,
     )
     .await
     {
@@ -2014,6 +2038,44 @@ async fn apply_once(flags: &Flags) -> Outcome {
         }
         Err(refusal) => Outcome::failed(render_refusal(&refusal, &path, &db)),
     }
+}
+
+/// The git commit of the source at `path`, for the version an apply
+/// stores: `git rev-parse HEAD` where the source lives, with `-dirty` when
+/// `git status --porcelain` shows the applied files (the source and its
+/// functions' code) changed from it. `None` with no git or outside a
+/// repository: nothing is recorded, and nothing is refused.
+pub(crate) fn source_commit(path: &std::path::Path, code: &crate::FunctionCode) -> Option<String> {
+    let path = path.canonicalize().ok()?;
+    let dir = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let git = |args: &[&std::ffi::OsStr]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let head = git(&["rev-parse".as_ref(), "HEAD".as_ref()])?;
+    // A source under a repository's own ignore rules is not in its commit.
+    let mut status: Vec<&std::ffi::OsStr> =
+        vec!["status".as_ref(), "--porcelain".as_ref(), "--".as_ref()];
+    let files: Vec<std::path::PathBuf> = std::iter::once(path.clone())
+        .chain(code.files.keys().map(|k| dir.join(k)))
+        .collect();
+    status.extend(files.iter().map(|f| f.as_os_str()));
+    let dirty = !git(&status)?.is_empty();
+    ordo_host::versions::check_git_commit(&head).ok()?;
+    Some(if dirty { format!("{head}-dirty") } else { head })
 }
 
 /// The version an apply made active, which is the one to wait for. `None`
@@ -2086,6 +2148,7 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
             format!("stored     {version}  (already present; this Ordo release built it anew)\n")
         }
     });
+    out.push_str(&provenance_lines(&report.provenance));
     if !behind.is_empty() {
         out.push_str(&format!(
             "schema     behind   {} change(s) the load gate would refuse on:\n",
@@ -2128,6 +2191,41 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
                  forward; the deployment retries the ones that were unreachable\n",
             );
         }
+    }
+    out
+}
+
+/// A version's label and commit, one line each, as the apply report and
+/// `ordo versions show` print them. Nothing for one that has neither.
+pub(crate) fn provenance_lines(p: &ordo_host::versions::Provenance) -> String {
+    let mut out = String::new();
+    if let Some(l) = &p.label {
+        out.push_str(&format!("label      {l}\n"));
+    }
+    if let Some(c) = &p.git_commit {
+        out.push_str(&format!(
+            "commit     {}\n",
+            ordo_host::versions::short_commit(c)
+        ));
+    }
+    out
+}
+
+/// A version's label and commit on one line, after its name, as `ordo
+/// deploys` and `ordo versions list` print them.
+fn provenance_inline(p: Option<&ordo_host::versions::Provenance>) -> String {
+    let Some(p) = p else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if let Some(c) = &p.git_commit {
+        out.push_str(&format!(
+            "  commit {}",
+            ordo_host::versions::short_commit(c)
+        ));
+    }
+    if let Some(l) = &p.label {
+        out.push_str(&format!("  \"{l}\""));
     }
     out
 }
@@ -2230,6 +2328,7 @@ async fn deploys(flags: Flags) -> Outcome {
     let ordo_host::apply_op::History {
         active,
         ordinals,
+        provenance,
         stored,
         activations: log,
         ..
@@ -2248,8 +2347,9 @@ async fn deploys(flags: Flags) -> Outcome {
     );
     for (v, at, actor) in &stored {
         out.push_str(&format!(
-            "  {}  applied {at} by {actor}{}\n",
+            "  {}  applied {at} by {actor}{}{}\n",
             named(v),
+            provenance_inline(provenance.get(v)),
             if Some(v.as_str()) == active.as_deref() {
                 "  <- serving"
             } else {
@@ -2290,16 +2390,109 @@ pub(crate) fn numbered(ordinal: Option<u64>, version: &str) -> String {
 /// `ordo_host::versions::Versions`, the one client for both.
 async fn versions_cmd(flags: Flags) -> Outcome {
     let Some(sub) = flags.positional.first().cloned() else {
-        return Outcome::usage("ordo versions <list | show <version>> [--db <name>]\n".into());
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
     };
     let mut flags = flags;
     flags.positional.remove(0);
     match sub.as_str() {
         "list" => versions_list(flags).await,
         "show" => versions_show(flags).await,
+        "label" => versions_label(flags).await,
+        "diff" => versions_diff(flags).await,
         other => Outcome::usage(format!(
-            "unknown `ordo versions` subcommand `{other}`; there are `list` and `show`\n"
+            "unknown `ordo versions` subcommand `{other}`; there are `list`, `show`, \
+             `label` and `diff`\n"
         )),
+    }
+}
+
+const VERSIONS_USAGE: &str = "ordo versions list [--db <name>]\n\
+     ordo versions show <version> [--db <name>]\n\
+     ordo versions label <version> \"<text>\" | --clear  [--db <name> | --host <h> ...]\n\
+     ordo versions diff <a> <b> [--source | --schema]  [--db <name> | --host <h> ...]\n\
+     a version is its name or its order number, `#4`";
+
+/// The door flags a `versions` subcommand takes besides its own.
+const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
+
+/// `ordo versions label <version> "<text>"`, or `--clear`: change a stored
+/// version's label. Locally through the `Versions` client, or over the
+/// door through `std.deployment.label`, deployment owner only.
+async fn versions_label(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--db", "--clear"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let (version, label) = match (flags.positional.as_slice(), flags.has("--clear")) {
+        ([v, l], false) => (v.clone(), Some(l.clone())),
+        ([v], true) => (v.clone(), None),
+        _ => return Outcome::usage(format!("{VERSIONS_USAGE}\n")),
+    };
+    if let Some(host) = crate::wire::requested(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        return crate::wire::label_over_the_wire(&host, &flags, &version, label.as_deref()).await;
+    }
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let versions = ordo_host::versions::Versions::on(&pool);
+    let version = match versions.set_label(&version, label.as_deref()).await {
+        Ok(v) => v,
+        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    };
+    let ordinal = versions.ordinal_of(&version).await.ok().flatten();
+    let label = match versions.provenance(&version).await {
+        Ok(p) => p.label,
+        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    };
+    Outcome::ok(labelled(ordinal, &version, label.as_deref()))
+}
+
+/// What `ordo versions label` prints, on both paths.
+pub(crate) fn labelled(ordinal: Option<u64>, version: &str, label: Option<&str>) -> String {
+    match label {
+        Some(l) => format!("labelled   {}  \"{l}\"\n", numbered(ordinal, version)),
+        None => format!("unlabelled {}\n", numbered(ordinal, version)),
+    }
+}
+
+/// `ordo versions diff <a> <b>`: the schema change and the source diff
+/// between two stored versions, or one of them with `--schema` or
+/// `--source`. One body (`ordo_host::versions_diff`) for both paths.
+async fn versions_diff(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--db", "--source", "--schema"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let [a, b] = flags.positional.as_slice() else {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    };
+    // Neither or both: both parts.
+    let (schema, source) = match (flags.has("--schema"), flags.has("--source")) {
+        (true, false) => (true, false),
+        (false, true) => (false, true),
+        _ => (true, true),
+    };
+    if let Some(host) = crate::wire::requested(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        return crate::wire::diff_over_the_wire(&host, &flags, a, b, schema, source).await;
+    }
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    match ordo_host::versions_diff::diff(&pool, a, b, schema, source).await {
+        Ok(d) => Outcome::ok(d.render()),
+        Err(e) => Outcome::failed(format!("REFUSED  {e}\n")),
     }
 }
 
@@ -2335,9 +2528,10 @@ async fn versions_list(flags: Flags) -> Outcome {
             Err(e) => return Outcome::failed(format!("database: {e}\n")),
         };
         out.push_str(&format!(
-            "  {}  declared {declared}  tenants {}{}\n",
+            "  {}  declared {declared}  tenants {}{}{}\n",
             numbered(history.ordinals.get(v).copied(), v),
             history.tenants.get(v).copied().unwrap_or(0),
+            provenance_inline(history.provenance.get(v)),
             if Some(v) == history.active.as_ref() {
                 "  <- serving"
             } else {
@@ -2354,13 +2548,20 @@ async fn versions_show(flags: Flags) -> Outcome {
         return Outcome::usage(e);
     }
     let [version] = flags.positional.as_slice() else {
-        return Outcome::usage("ordo versions show <version> [--db <name>]\n".into());
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
     };
     let pool = match connect(&flags).await {
         Ok(p) => p,
         Err(o) => return o,
     };
     let versions = ordo_host::versions::Versions::on(&pool);
+    let version = &match versions.resolve(version).await {
+        Ok(v) => v,
+        Err(e @ ordo_host::versions::VersionRefusal::NotStored { .. }) => {
+            return Outcome::failed(format!("REFUSED  {e}\n"))
+        }
+        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    };
     let read = async {
         let Some((declared, source_id)) = versions.identity(version).await? else {
             return Ok(None);
@@ -2374,9 +2575,10 @@ async fn versions_show(flags: Flags) -> Outcome {
             versions.tenants_per_version().await?,
             versions.active_version().await?,
             versions.activations_of(version).await?,
+            versions.provenance(version).await?,
         )))
     };
-    let (declared, source_id, ordinal, stored, builds, tenants, active, activations) =
+    let (declared, source_id, ordinal, stored, builds, tenants, active, activations, provenance) =
         match read.await {
             Ok(Some(v)) => v,
             Ok(None) => {
@@ -2411,6 +2613,7 @@ async fn versions_show(flags: Flags) -> Outcome {
     if let Some(a) = &stored {
         out.push_str(&format!("applied    {} by {}\n", a.applied_at.0, a.actor));
     }
+    out.push_str(&provenance_lines(&provenance));
     out.push_str(&format!(
         "tenants    {} pinned\n",
         tenants.get(version.as_str()).copied().unwrap_or(0)

@@ -8,6 +8,11 @@
 //!   does.
 //! - `std.deployment.plan($program)` (G3): what an apply of this program
 //!   would do to the schema, with nothing stored.
+//! - `std.deployment.label($version, $label?)`: set or clear a stored
+//!   version's label. What `ordo versions label --host` does.
+//! - `std.deployment.diff($a, $b)`: what changed between two stored
+//!   versions. What `ordo versions diff --host` prints
+//!   ([`crate::versions_diff`]).
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -41,15 +46,19 @@ pub const VERSIONS: &str = "std.deployment.versions";
 pub const ACTIVATE: &str = "std.deployment.activate";
 /// G3.
 pub const PLAN: &str = "std.deployment.plan";
+/// A stored version's label (`plan-versions.md` §4 row 2).
+pub const LABEL: &str = "std.deployment.label";
+/// Two stored versions, compared.
+pub const DIFF: &str = "std.deployment.diff";
 
-pub const OPS: [&str; 3] = [VERSIONS, ACTIVATE, PLAN];
+pub const OPS: [&str; 5] = [VERSIONS, ACTIVATE, PLAN, LABEL, DIFF];
 
 /// The activation log's length when the caller names none.
 pub const DEFAULT_LIMIT: i64 = 20;
 /// The longest activation log one call returns.
 pub const MAX_LIMIT: i64 = 200;
 
-/// The three ops' specs.
+/// The deploy door's specs, apart from `APPLY`'s.
 pub fn specs() -> Vec<OpSpec> {
     let spec = |name: &str, kind: OpKind, params: Vec<ParamSpec>, fields: &[&str]| OpSpec {
         name: name.to_string(),
@@ -119,7 +128,63 @@ pub fn specs() -> Vec<OpSpec> {
                 "changes",
             ],
         ),
+        spec(
+            LABEL,
+            OpKind::Write,
+            vec![
+                ParamSpec {
+                    // A version's name or `#n`.
+                    name: "version".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: true,
+                    bounds: None,
+                },
+                ParamSpec {
+                    // Absent clears the label. One line of at most 80
+                    // characters, which the `Versions` client checks and
+                    // names; this bound is only a ceiling.
+                    name: "label".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(1024),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+            ],
+            &["version", "ordinal", "label"],
+        ),
+        spec(
+            DIFF,
+            OpKind::Read,
+            vec![
+                version_param("a"),
+                version_param("b"),
+                // Each part is shown unless it is turned off: `ordo
+                // versions diff --source` sends `schema=false`.
+                flag_param("schema"),
+                flag_param("source"),
+            ],
+            &["a", "b", "schema", "source"],
+        ),
     ]
+}
+
+fn version_param(name: &str) -> ParamSpec {
+    ParamSpec {
+        name: name.to_string(),
+        ty: ParamTy::Text { max_len: Some(128) },
+        required: true,
+        bounds: None,
+    }
+}
+
+fn flag_param(name: &str) -> ParamSpec {
+    ParamSpec {
+        name: name.to_string(),
+        ty: ParamTy::Bool,
+        required: false,
+        bounds: None,
+    }
 }
 
 /// Run one of the three. `caller` is the principal the door proved.
@@ -184,6 +249,48 @@ pub async fn execute(
                 .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?
                 .to_json()
         }
+        LABEL => {
+            let version = text(bound, "version").unwrap_or_default();
+            let label = text(bound, "label");
+            let v = crate::versions::Versions::on(&ops.pool);
+            let version = v
+                .set_label(version, label)
+                .await
+                .map_err(|e| e.to_exec_error("the version's label was not changed"))?;
+            ops.record(
+                caller,
+                LABEL,
+                if label.is_some() {
+                    "labelled"
+                } else {
+                    "unlabelled"
+                },
+                format!("version={version} by={caller}"),
+            );
+            let ordinal = v
+                .ordinal_of(&version)
+                .await
+                .map_err(|e| e.to_exec_error("the version's order number could not be read"))?;
+            let label = v
+                .provenance(&version)
+                .await
+                .map_err(|e| e.to_exec_error("the version's label could not be read"))?
+                .label;
+            json!({ "version": version, "ordinal": ordinal, "label": label })
+        }
+        DIFF => {
+            let on = |k: &str| bound.0.get(k).and_then(|v| v.as_bool()).unwrap_or(true);
+            crate::versions_diff::diff(
+                &ops.pool,
+                text(bound, "a").unwrap_or_default(),
+                text(bound, "b").unwrap_or_default(),
+                on("schema"),
+                on("source"),
+            )
+            .await
+            .map_err(|e| e.to_exec_error("the two versions could not be compared"))?
+            .to_json()
+        }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),
     };
     Ok(ExecResult {
@@ -191,6 +298,11 @@ pub async fn execute(
         rows: vec![row],
         next_cursor: None,
     })
+}
+
+/// A text parameter, trimmed.
+fn text<'b>(bound: &'b BoundParams, k: &str) -> Option<&'b str> {
+    bound.0.get(k).and_then(|v| v.as_str()).map(str::trim)
 }
 
 #[cfg(test)]
@@ -205,6 +317,8 @@ mod tests {
         assert_eq!(kind(VERSIONS), Some(OpKind::Read));
         assert_eq!(kind(ACTIVATE), Some(OpKind::Write));
         assert_eq!(kind(PLAN), Some(OpKind::Write));
+        assert_eq!(kind(LABEL), Some(OpKind::Write));
+        assert_eq!(kind(DIFF), Some(OpKind::Read));
         assert_eq!(specs.len(), OPS.len());
     }
 

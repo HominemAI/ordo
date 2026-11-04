@@ -32,6 +32,14 @@
 //! A space the deployment owner named and attached by hand, with no
 //! `$spaces` row, has nowhere to hold a pin and is not pinned. It is
 //! served the active version, as every space is until increment 3.
+//!
+//! # Labels, commits and names (increment 2, session 2)
+//!
+//! A person names a stored version by its name or by its order number,
+//! `#4` ([`Versions::resolve`]). A version may carry a **label**, one line
+//! of at most [`MAX_LABEL_CHARS`] characters, and the **git commit** of the
+//! source it was applied from ([`Provenance`]). Neither is part of the
+//! version's identity.
 
 use std::collections::BTreeMap;
 
@@ -47,6 +55,73 @@ pub use ordo_exec::registry::{Activated, Activation, Applied, Artifact, Revision
 pub const NEW_TENANT_SETTING: &str = "versions.new_tenant";
 /// Its environment variable.
 pub const NEW_TENANT_ENV: &str = "ORDO_VERSIONS_NEW_TENANT";
+
+/// The longest label a version may carry, in characters.
+pub const MAX_LABEL_CHARS: usize = 80;
+
+/// The longest git commit a version may record: a SHA-256 commit and
+/// `-dirty`.
+pub const MAX_COMMIT_CHARS: usize = 64 + "-dirty".len();
+
+/// What a person said about a version, apart from its content: its label
+/// and the git commit of the source it was applied from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provenance {
+    pub label: Option<String>,
+    pub git_commit: Option<String>,
+}
+
+/// A label as stored: trimmed, one line, at most [`MAX_LABEL_CHARS`]
+/// characters. Anything else is refused, saying the limit.
+pub fn check_label(text: &str) -> Result<String, VersionRefusal> {
+    let label = text.trim();
+    let n = label.chars().count();
+    if n == 0 {
+        return Err(VersionRefusal::Label(format!(
+            "a label is 1 to {MAX_LABEL_CHARS} characters; this one is empty. \
+             `ordo versions label <version> --clear` removes a label"
+        )));
+    }
+    if label.chars().any(char::is_control) {
+        return Err(VersionRefusal::Label(format!(
+            "a label is one line of at most {MAX_LABEL_CHARS} characters; this one has a \
+             line break or another control character"
+        )));
+    }
+    if n > MAX_LABEL_CHARS {
+        return Err(VersionRefusal::Label(format!(
+            "a label is at most {MAX_LABEL_CHARS} characters; this one is {n}"
+        )));
+    }
+    Ok(label.to_string())
+}
+
+/// A git commit as stored: 7 to 64 lowercase hex digits, then `-dirty`
+/// when the applied files had changes not in it.
+pub fn check_git_commit(text: &str) -> Result<String, VersionRefusal> {
+    let commit = text.trim();
+    let hex = commit.strip_suffix("-dirty").unwrap_or(commit);
+    if (7..=64).contains(&hex.len())
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Ok(commit.to_string());
+    }
+    Err(VersionRefusal::GitCommit(format!(
+        "`{}` is not a git commit: 7 to 64 lowercase hex digits, then `-dirty` or nothing",
+        commit.chars().take(MAX_COMMIT_CHARS).collect::<String>()
+    )))
+}
+
+/// A commit as a person reads it: 12 hex digits, and `-dirty` when it was.
+pub fn short_commit(commit: &str) -> String {
+    let (hex, dirty) = match commit.strip_suffix("-dirty") {
+        Some(h) => (h, "-dirty"),
+        None => (commit, ""),
+    };
+    format!("{}{dirty}", hex.get(..12).unwrap_or(hex))
+}
 
 /// Who a pin change made at boot, by no person, is recorded as.
 pub const SYSTEM_ACTOR: &str = "ordo:versions";
@@ -198,6 +273,14 @@ pub enum VersionRefusal {
         value: String,
         stored: Vec<String>,
     },
+    /// No version is stored under the name or `#n` a person gave. Fix the
+    /// input; `stored` names every version there is, `#n · name`.
+    NotStored { asked: String, stored: Vec<String> },
+    /// A label that is empty, longer than [`MAX_LABEL_CHARS`], or more than
+    /// one line. Fix the input.
+    Label(String),
+    /// A git commit that is not one. Fix the input.
+    GitCommit(String),
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -205,7 +288,11 @@ pub enum VersionRefusal {
 impl VersionRefusal {
     pub fn remedy(&self) -> Remedy {
         match self {
-            VersionRefusal::UnknownVersion(_) | VersionRefusal::Setting { .. } => Remedy::FixInput,
+            VersionRefusal::UnknownVersion(_)
+            | VersionRefusal::Setting { .. }
+            | VersionRefusal::NotStored { .. }
+            | VersionRefusal::Label(_)
+            | VersionRefusal::GitCommit(_) => Remedy::FixInput,
             VersionRefusal::Collision { .. } => Remedy::Refuse,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
@@ -236,7 +323,12 @@ impl VersionRefusal {
     pub fn to_exec_error(&self, what: &str) -> ExecError {
         let message = format!("{what}: {self}");
         match self {
-            VersionRefusal::UnknownVersion(_) => ExecError::new(ErrorCode::NotFound, message),
+            VersionRefusal::UnknownVersion(_) | VersionRefusal::NotStored { .. } => {
+                ExecError::new(ErrorCode::NotFound, message)
+            }
+            VersionRefusal::Label(_) | VersionRefusal::GitCommit(_) => {
+                ExecError::new(ErrorCode::InvalidParam, message)
+            }
             VersionRefusal::Collision { .. } => ExecError::new(ErrorCode::Duplicate, message),
             VersionRefusal::Setting { .. } => ExecError::new(ErrorCode::Internal, message),
             VersionRefusal::Store(e) => {
@@ -276,6 +368,17 @@ impl std::fmt::Display for VersionRefusal {
                     stored.join(", ")
                 }
             ),
+            VersionRefusal::NotStored { asked, stored } => write!(
+                f,
+                "no version is stored under `{asked}`. Stored: {}",
+                if stored.is_empty() {
+                    "none".to_string()
+                } else {
+                    stored.join(", ")
+                }
+            ),
+            VersionRefusal::Label(why) => write!(f, "label refused: {why}"),
+            VersionRefusal::GitCommit(why) => write!(f, "git commit refused: {why}"),
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
     }
@@ -470,6 +573,156 @@ impl<'a> Versions<'a> {
                 r.get(1).cloned().flatten().unwrap_or_default(),
             )
         }))
+    }
+
+    // ── names, labels and commits ──────────────────────────────────────
+
+    /// The stored version a person named: by its name, or by its order
+    /// number as `#4`. Refused naming every stored version when there is
+    /// none.
+    pub async fn resolve(&self, name: &str) -> Result<String, VersionRefusal> {
+        let name = name.trim();
+        let found = match name.strip_prefix('#').map(str::parse::<u64>) {
+            Some(Ok(n)) => self
+                .pool
+                .rows(&format!(
+                    "SELECT \"version\" FROM \"$artifacts\" WHERE \"ordinal\" = {n}"
+                ))
+                .await?
+                .first()
+                .and_then(|r| r.first().cloned().flatten()),
+            Some(Err(_)) => None,
+            None => registry::get(self.pool, name).await?.map(|a| a.version),
+        };
+        match found {
+            Some(v) => Ok(v),
+            None => Err(VersionRefusal::NotStored {
+                asked: name.to_string(),
+                stored: self.named_all().await?,
+            }),
+        }
+    }
+
+    /// Every stored version as `#n · name`, oldest first.
+    async fn named_all(&self) -> Result<Vec<String>, VersionRefusal> {
+        let rows = self
+            .pool
+            .rows(
+                "SELECT \"version\", \"ordinal\" FROM \"$artifacts\" \
+                 ORDER BY \"ordinal\" NULLS LAST, \"version\"",
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let v = r.first()?.clone()?;
+                Some(match r.get(1).cloned().flatten() {
+                    Some(n) => format!("#{n} · {v}"),
+                    None => v,
+                })
+            })
+            .collect())
+    }
+
+    /// Set or clear the label of the version a person named ([`resolve`]),
+    /// and answer the version it was. `None` clears it. The label is
+    /// checked first ([`check_label`]).
+    ///
+    /// [`resolve`]: Versions::resolve
+    pub async fn set_label(
+        &self,
+        name: &str,
+        label: Option<&str>,
+    ) -> Result<String, VersionRefusal> {
+        let label = label.map(check_label).transpose()?;
+        let version = self.resolve(name).await?;
+        self.pool
+            .rows(&format!(
+                "UPDATE \"$artifacts\" SET \"label\" = {} WHERE \"version\" = {}",
+                label
+                    .as_deref()
+                    .map(sql_lit)
+                    .unwrap_or_else(|| "NULL".into()),
+                sql_lit(&version),
+            ))
+            .await?;
+        Ok(version)
+    }
+
+    /// Record what an apply said about the version it stored. A label
+    /// given replaces the one there. A commit is kept from the first apply
+    /// that gave one: it says where the version came from, and a later
+    /// apply of the same program from another checkout does not change
+    /// that. Both are checked first.
+    pub async fn record_provenance(
+        &self,
+        version: &str,
+        p: &Provenance,
+    ) -> Result<(), VersionRefusal> {
+        if let Some(label) = &p.label {
+            let label = check_label(label)?;
+            self.pool
+                .rows(&format!(
+                    "UPDATE \"$artifacts\" SET \"label\" = {} WHERE \"version\" = {}",
+                    sql_lit(&label),
+                    sql_lit(version),
+                ))
+                .await?;
+        }
+        if let Some(commit) = &p.git_commit {
+            let commit = check_git_commit(commit)?;
+            self.pool
+                .rows(&format!(
+                    "UPDATE \"$artifacts\" SET \"git_commit\" = {} \
+                     WHERE \"version\" = {} AND \"git_commit\" IS NULL",
+                    sql_lit(&commit),
+                    sql_lit(version),
+                ))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// One version's label and commit. Default when nothing is stored
+    /// under it.
+    pub async fn provenance(&self, version: &str) -> Result<Provenance, VersionRefusal> {
+        let rows = self
+            .pool
+            .rows(&format!(
+                "SELECT \"label\", \"git_commit\" FROM \"$artifacts\" WHERE \"version\" = {}",
+                sql_lit(version)
+            ))
+            .await?;
+        Ok(rows
+            .first()
+            .map(|r| Provenance {
+                label: r.first().cloned().flatten(),
+                git_commit: r.get(1).cloned().flatten(),
+            })
+            .unwrap_or_default())
+    }
+
+    /// Every version that carries a label or a commit, with them.
+    pub async fn provenances(&self) -> Result<BTreeMap<String, Provenance>, VersionRefusal> {
+        let rows = self
+            .pool
+            .rows(
+                "SELECT \"version\", \"label\", \"git_commit\" FROM \"$artifacts\" \
+                 WHERE \"label\" IS NOT NULL OR \"git_commit\" IS NOT NULL",
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                Some((
+                    r.first()?.clone()?,
+                    Provenance {
+                        label: r.get(1).cloned().flatten(),
+                        git_commit: r.get(2).cloned().flatten(),
+                    },
+                ))
+            })
+            .collect())
     }
 
     // ── activation and the pins ────────────────────────────────────────
@@ -748,6 +1001,46 @@ mod tests {
         };
         assert_eq!(collision.to_exec_error("x").code, ErrorCode::Duplicate);
         assert_eq!(collision.remedy(), Remedy::Refuse);
+    }
+
+    #[test]
+    fn a_label_is_one_line_of_at_most_80_characters() {
+        assert_eq!(check_label("  launch day  ").unwrap(), "launch day");
+        assert!(check_label(&"x".repeat(80)).is_ok());
+        let long = check_label(&"x".repeat(81)).unwrap_err();
+        assert!(long.to_string().contains("at most 80"), "{long}");
+        assert_eq!(long.remedy(), Remedy::FixInput);
+        assert_eq!(long.to_exec_error("x").code, ErrorCode::InvalidParam);
+        let two = check_label("one\ntwo").unwrap_err().to_string();
+        assert!(two.contains("one line"), "{two}");
+        assert!(check_label("   ")
+            .unwrap_err()
+            .to_string()
+            .contains("--clear"));
+        // Characters, not bytes: 80 of them in a script of 3 bytes each.
+        assert!(check_label(&"é".repeat(80)).is_ok());
+    }
+
+    #[test]
+    fn a_commit_is_hex_and_may_be_dirty() {
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(check_git_commit(full).unwrap(), full);
+        assert!(check_git_commit(&format!("{full}-dirty")).is_ok());
+        assert!(check_git_commit("main").is_err());
+        assert!(check_git_commit("ABCDEF0").is_err());
+        assert_eq!(short_commit(full), "0123456789ab");
+        assert_eq!(short_commit(&format!("{full}-dirty")), "0123456789ab-dirty");
+    }
+
+    #[test]
+    fn a_missing_name_lists_what_is_stored() {
+        let e = VersionRefusal::NotStored {
+            asked: "#9".into(),
+            stored: vec!["#1 · 0.1.0".into(), "#2 · 0.2.0".into()],
+        };
+        let text = e.to_string();
+        assert!(text.contains("#9") && text.contains("#2 · 0.2.0"), "{text}");
+        assert_eq!(e.to_exec_error("x").code, ErrorCode::NotFound);
     }
 
     #[test]

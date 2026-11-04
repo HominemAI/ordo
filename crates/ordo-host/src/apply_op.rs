@@ -394,6 +394,9 @@ pub struct Report {
     /// first, whatever the versions are named (owner, 2026-11-03, ask 8).
     /// `None` from a host older than that.
     pub ordinal: Option<u64>,
+    /// The version's label and git commit as stored after this apply
+    /// (`plan-versions.md` §1.2). Empty from a host older than them.
+    pub provenance: versions::Provenance,
     /// Ops the artifact records an error for that bind correctly when a
     /// caller is supplied. Not a reason to refuse; said out loud anyway.
     pub notes: Vec<String>,
@@ -473,6 +476,10 @@ pub enum ApplyRefused {
         highest: String,
         next: Option<String>,
     },
+    /// The label or git commit sent with the apply is not one: a label is
+    /// one line of at most 80 characters. The caller's to fix; nothing was
+    /// applied.
+    Provenance(String),
 }
 
 impl ApplyRefused {
@@ -489,6 +496,7 @@ impl ApplyRefused {
             ApplyRefused::Internal(_) => "internal",
             ApplyRefused::VersionTaken { .. } => "version_taken",
             ApplyRefused::VersionBehind { .. } => "version_behind",
+            ApplyRefused::Provenance(_) => "provenance_refused",
         }
     }
 
@@ -510,6 +518,7 @@ impl ApplyRefused {
             // is anywhere else, and the executor may say it.
             ApplyRefused::UnknownVersion(_) => ErrorCode::NotFound,
             ApplyRefused::Internal(_) => ErrorCode::Internal,
+            ApplyRefused::Provenance(_) => ErrorCode::InvalidParam,
         }
     }
 }
@@ -559,6 +568,7 @@ impl std::fmt::Display for ApplyRefused {
                  the program to store it first."
             ),
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
+            ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
             ApplyRefused::Internal(e) => write!(f, "{e}"),
             ApplyRefused::VersionTaken { version, next } => write!(
                 f,
@@ -622,6 +632,24 @@ pub async fn run(
     op: &str,
     activate: bool,
 ) -> Result<Report, ApplyRefused> {
+    let none = versions::Provenance::default();
+    run_with(pool, pools, source, code, actor, op, activate, &none).await
+}
+
+/// [`run`], storing a label and a git commit with the version
+/// ([`versions::Provenance`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with(
+    pool: &Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    source: &str,
+    code: &CodeFiles,
+    actor: &str,
+    op: &str,
+    activate: bool,
+    provenance: &versions::Provenance,
+) -> Result<Report, ApplyRefused> {
+    checked(provenance)?;
     let (mut program, broken, notes) = compile_checked(source)?;
     if !broken.is_empty() {
         return Err(ApplyRefused::Broken { ops: broken });
@@ -632,7 +660,22 @@ pub async fn run(
             .await
             .map_err(|e| ApplyRefused::Internal(format!("storing function code: {e}")))?;
     }
-    run_program(pool, pools, &program, notes, actor, op, activate).await
+    run_program_with(
+        pool, pools, &program, notes, actor, op, activate, provenance,
+    )
+    .await
+}
+
+/// Refuse a label or commit that is not one, before anything is applied.
+fn checked(p: &versions::Provenance) -> Result<(), ApplyRefused> {
+    let refused = |e: versions::VersionRefusal| ApplyRefused::Provenance(e.to_string());
+    if let Some(l) = &p.label {
+        versions::check_label(l).map_err(refused)?;
+    }
+    if let Some(c) = &p.git_commit {
+        versions::check_git_commit(c).map_err(refused)?;
+    }
+    Ok(())
 }
 
 /// Compile `source` and split the artifact's op errors (see
@@ -663,6 +706,23 @@ pub async fn run_program(
     op: &str,
     activate: bool,
 ) -> Result<Report, ApplyRefused> {
+    let none = versions::Provenance::default();
+    run_program_with(pool, pools, program, notes, actor, op, activate, &none).await
+}
+
+/// [`run_program`], storing a label and a git commit with the version.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_program_with(
+    pool: &Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+    provenance: &versions::Provenance,
+) -> Result<Report, ApplyRefused> {
+    checked(provenance)?;
     // **The lock, before anything reads the schema.** Taken here rather
     // than around the DDL alone, because what must not interleave is the
     // *decision*: two applies that both read an empty target and then both
@@ -673,7 +733,10 @@ pub async fn run_program(
         Ok(None) => return Err(ApplyRefused::InProgress),
         Err(e) => return Err(ApplyRefused::Internal(e)),
     };
-    let out = sequence(&lock, pool, pools, program, notes, actor, op, activate).await;
+    let out = sequence(
+        &lock, pool, pools, program, notes, actor, op, activate, provenance,
+    )
+    .await;
     lock.release().await;
     out
 }
@@ -692,6 +755,7 @@ async fn sequence(
     actor: &str,
     op: &str,
     activate: bool,
+    provenance: &versions::Provenance,
 ) -> Result<Report, ApplyRefused> {
     Versions::on(pool)
         .ensure()
@@ -791,6 +855,16 @@ async fn sequence(
     };
     let ordinal = Versions::on(pool)
         .ordinal_of(&program.version)
+        .await
+        .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
+    // The label and commit, on the version just stored or found. A label
+    // given replaces the one a version already stored had.
+    Versions::on(pool)
+        .record_provenance(&program.version, provenance)
+        .await
+        .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
+    let provenance = Versions::on(pool)
+        .provenance(&program.version)
         .await
         .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
 
@@ -911,6 +985,7 @@ async fn sequence(
     Ok(Report {
         version: program.version.clone(),
         ordinal,
+        provenance,
         notes,
         schema,
         stored,
@@ -1072,6 +1147,8 @@ pub struct History {
     pub active: Option<String>,
     /// Each stored version's order number (ask 8).
     pub ordinals: std::collections::BTreeMap<String, u64>,
+    /// Each version's label and git commit, when it has either.
+    pub provenance: std::collections::BTreeMap<String, versions::Provenance>,
     /// `(version, applied at, by whom)`, newest first.
     pub stored: Vec<(String, u64, String)>,
     pub activations: Vec<versions::Activation>,
@@ -1094,6 +1171,7 @@ pub async fn history(pool: &Pool, limit: usize) -> Result<History, versions::Ver
             Ok(History {
                 active: v.active_version().await?,
                 ordinals: v.ordinals().await?,
+                provenance: v.provenances().await?,
                 stored: v
                     .stored()
                     .await?
@@ -1116,6 +1194,8 @@ impl History {
             "stored": self.stored.iter().map(|(v, at, by)| json!({
                 "version": v,
                 "ordinal": self.ordinals.get(v),
+                "label": self.provenance.get(v).and_then(|p| p.label.as_deref()),
+                "gitCommit": self.provenance.get(v).and_then(|p| p.git_commit.as_deref()),
                 "appliedAt": at,
                 "actor": by,
                 "serving": Some(v) == self.active.as_ref(),
@@ -1331,6 +1411,8 @@ impl Report {
         json!({
             "version": self.version,
             "ordinal": self.ordinal,
+            "label": self.provenance.label,
+            "gitCommit": self.provenance.git_commit,
             "notes": self.notes,
             "schema": schema,
             "stored": match self.stored {
@@ -1438,6 +1520,10 @@ impl Report {
         Ok(Report {
             version: s("version")?,
             ordinal: v["ordinal"].as_u64(),
+            provenance: versions::Provenance {
+                label: v["label"].as_str().map(str::to_string),
+                git_commit: v["gitCommit"].as_str().map(str::to_string),
+            },
             notes: v["notes"]
                 .as_array()
                 .into_iter()
@@ -1605,8 +1691,15 @@ impl ApplyOps {
             .unwrap_or(true);
         let code = parse_code(bound.0.get("code").and_then(|v| v.as_str()))
             .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?;
+        // What the CLI says about the source: asserted, as `--as` is on
+        // the direct path, and checked for shape by `run_with`.
+        let text = |k: &str| bound.0.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let provenance = versions::Provenance {
+            label: text("label"),
+            git_commit: text("gitCommit"),
+        };
 
-        match run(
+        match run_with(
             &self.pool,
             self.pools.as_ref(),
             source,
@@ -1614,6 +1707,7 @@ impl ApplyOps {
             caller,
             APPLY_OP_LABEL,
             activate,
+            &provenance,
         )
         .await
         {
@@ -1714,6 +1808,10 @@ mod tests {
             Report {
                 version: "v_1".into(),
                 ordinal: Some(4),
+                provenance: versions::Provenance {
+                    label: Some("launch".into()),
+                    git_commit: Some("0123456789abcdef-dirty".into()),
+                },
                 notes: vec!["a note".into()],
                 schema: SchemaOutcome::Created {
                     tables: 3,
@@ -1737,6 +1835,7 @@ mod tests {
             Report {
                 version: "v_2".into(),
                 ordinal: None,
+                provenance: Default::default(),
                 notes: vec![],
                 schema: SchemaOutcome::Matches { pending: 2 },
                 stored: Stored::AlreadyPresent,
@@ -1748,6 +1847,7 @@ mod tests {
             Report {
                 version: "v_3".into(),
                 ordinal: None,
+                provenance: Default::default(),
                 notes: vec![],
                 schema: SchemaOutcome::Behind {
                     changes: vec![("A2".into(), "new field `x`".into())],
@@ -1808,6 +1908,7 @@ mod tests {
                 highest: "0.2.0".into(),
                 next: Some("0.2.1".into()),
             },
+            ApplyRefused::Provenance("label".into()),
         ];
         for r in &all {
             assert!(!r.class().is_empty());

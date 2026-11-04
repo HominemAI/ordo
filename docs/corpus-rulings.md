@@ -12072,3 +12072,11 @@ Board task `the-statement-bound-also-covered-the`, ask 1. The owner: "agreed", t
 - **The ruling.** The table setup at boot runs with no statement bound. A slow change to a big table, or a wait behind another replica's setup, must not stop the host starting.
 - **What stays bounded.** A wait on a table lock that traffic holds uses `lock_timeout` at the same value. The catalog reads that decide whether anything needs making keep the statement bound.
 - **Where.** `Pool::ensure_platform_tables` (`crates/ordo-exec/src/lib.rs`). Guarded by `noisy_neighbour.rs::the_platform_tables_are_made_outside_the_bound`, which fails without it.
+
+## 2026-11-04: the write check and the pin stream wait for increment 3
+
+Board task `program-versions-the-core-under-schema`, asks 16 and 17. The owner answered "ok" to both recommendations.
+
+- **Ask 16.** The check that a tenant's pin did not move mid-write (the pin epoch, V-19) is built in increment 3. Until then every tenant is served one version, so the check guards nothing. A tenant's data can sit in its own database, apart from `$spaces`, so increment 3 also decides where the check reads its epoch.
+- **Ask 17.** The pin stream that other nodes tail (V-54) is built in increment 3 with the node code that reads it. Built now, it would be tested only against itself.
+- **What this closes.** Increment 2 is complete: pins with history, labels, the git commit, `ordo versions list|show|label|diff`.

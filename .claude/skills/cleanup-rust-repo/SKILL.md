@@ -120,7 +120,10 @@ unnamed volume, which may be a rehearsal someone is still reading. A volume
 in use by a container, running or stopped, is kept; check `docker ps -a`
 first. `Docker.raw` shrinks to match over a few minutes.
 
-Quit Docker afterwards if it was not running before.
+Stop Docker afterwards if it was not running before, with
+`docker desktop stop`. Never `osascript -e 'quit app "Docker"'`: on
+2026-11-04 that stopped the VM under the backend, and Docker reported "the
+Docker Desktop VM stopped unexpectedly" and relaunched itself.
 
 ## A worktree's `target/`
 

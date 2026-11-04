@@ -473,6 +473,47 @@ legend {
   margin-top: 8px;
 }
 
+/* The Deploys screen's revoke mark, its buttons and its warning (versions 2b). */
+.row-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.tag-revoked {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.revoked-warning {
+  margin-top: 16px;
+  border-inline-start: 4px solid var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.revoked-warning h3 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.revoked-warning ul {
+  margin: 0;
+  padding-inline-start: 20px;
+}
+
+.revisions .confirm {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.revisions select {
+  font: inherit;
+  max-inline-size: 100%;
+  padding: 8px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;

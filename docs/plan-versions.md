@@ -361,8 +361,20 @@ nothing of versions.
   it from every window. `ordo windows set|delete|skip|unskip|list`, and
   `std.deployment.windows`, `setWindow`, `deleteWindow`, `skipWindow`,
   `deleteSkip`. `howto-operating.md` has the rules and caps.
-- Not built: console warnings and screens (the console step), moves at a
-  window (increment 3), a time zone on a cron (a later extension).
+- Console (2026-11-04): the Deploys screen shows each version's `#n`,
+  label, commit and revoke mark, revokes and unrevokes with a required
+  reason, asks where to move when the version serves, and warns of
+  revoked versions that still have tenants (D8). The Maintenance screen
+  lists every time, upcoming and past, in local time or UTC, and adds,
+  edits, deletes and skips windows. Door refusals show as given.
+  `crates/ordo-console/src/server/{deploys,windows}.rs`,
+  `clients/ordo-console-web/src/screens/{Deploys,Windows}.tsx`; tests in
+  `crates/ordo-console/tests/door_link.rs` and the e2e `windows` project.
+- `std.deployment.revoked` on a deployment with nothing applied answers
+  an empty list. It was a refusal (`$artifacts` missing), found by the
+  console's e2e run.
+- Not built: moves at a window (increment 3), a time zone on a cron (a
+  later extension).
 
 ---
 
@@ -645,7 +657,7 @@ round is about 35 minutes for the full suite.
 |---|---|---|---|---|---|
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
-| 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04, backend, door and CLI. Console screens and warnings are the console step; moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
+| 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
 | 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |

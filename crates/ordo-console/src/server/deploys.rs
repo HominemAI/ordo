@@ -8,6 +8,16 @@
 //! | `POST deploys/preview` | `std.deployment.plan` (G3) | the owner's touch at the deployment |
 //! | `POST deploys/apply` | `std.deployment.apply` | both touches |
 //! | `POST deploys/activate` | `std.deployment.activate` (G2) | both touches |
+//! | `GET deploys/revoked` | `std.deployment.revoked` (D8) | signed in |
+//! | `POST deploys/revoke` | `std.deployment.revoke` | both touches |
+//! | `POST deploys/unrevoke` | `std.deployment.unrevoke` | both touches |
+//!
+//! A revoke marks a stored version as not to be served, with a reason
+//! (`plan-versions.md` 4, increment 2b). Revoking the version that serves
+//! needs `moveTo`, the version the deployment moves to; the door refuses
+//! it otherwise, and the screen shows that refusal as given. The revoked
+//! list is the screen's warning: each revoked version that still has
+//! tenants on it, and which.
 //!
 //! A change asks for the console owner's own touch, as every console write
 //! does, and for the owner's touch at the deployment, relayed (G15),
@@ -33,6 +43,14 @@ pub const ACTIVATE: &str = "std.deployment.activate";
 pub const PLAN: &str = "std.deployment.plan";
 /// `std.deployment.apply`.
 pub const APPLY: &str = "std.deployment.apply";
+/// `std.deployment.revoke`.
+pub const REVOKE: &str = "std.deployment.revoke";
+/// `std.deployment.unrevoke`.
+pub const UNREVOKE: &str = "std.deployment.unrevoke";
+/// `std.deployment.revoked`.
+pub const REVOKED: &str = "std.deployment.revoked";
+/// The longest reason the console passes on, the door's own bound.
+pub const MAX_REASON_CHARS: usize = 2048;
 
 /// How many activations the screen lists.
 pub const HISTORY_LIMIT: u32 = 50;
@@ -46,6 +64,9 @@ pub(super) fn routes() -> Router<Console> {
         .route("/d/{handle}/api/deploys/preview", post(preview_route))
         .route("/d/{handle}/api/deploys/apply", post(apply_program_route))
         .route("/d/{handle}/api/deploys/activate", post(activate_route))
+        .route("/d/{handle}/api/deploys/revoked", get(revoked_route))
+        .route("/d/{handle}/api/deploys/revoke", post(revoke_route))
+        .route("/d/{handle}/api/deploys/unrevoke", post(unrevoke_route))
 }
 
 read!(deploys_route, deploys_get);
@@ -53,6 +74,9 @@ read!(serving_route, serving_get);
 action!(preview_route, "deploys.preview", deploys_preview);
 action!(apply_program_route, "deploys.apply", deploys_apply);
 action!(activate_route, "deploys.activate", deploys_activate);
+read!(revoked_route, deploys_revoked);
+action!(revoke_route, "deploys.revoke", deploys_revoke);
+action!(unrevoke_route, "deploys.unrevoke", deploys_unrevoke);
 
 #[derive(Deserialize)]
 struct ProgramBody {
@@ -69,6 +93,43 @@ fn yes() -> bool {
 #[derive(Deserialize)]
 struct VersionBody {
     version: String,
+}
+
+#[derive(Deserialize)]
+struct RevokeBody {
+    version: String,
+    reason: String,
+    /// Where the deployment moves when the version revoked is the one that
+    /// serves.
+    #[serde(default, rename = "moveTo")]
+    move_to: Option<String>,
+}
+
+/// A stored version as the door takes one.
+fn version_of(field: &str, v: &str) -> Result<String, ConsoleError> {
+    let v = v.trim();
+    if v.is_empty() || v.len() > 128 {
+        return Err(ConsoleError::BadRequest(format!(
+            "`{field}` must name a stored version"
+        )));
+    }
+    Ok(v.to_string())
+}
+
+/// A reason: required, at most [`MAX_REASON_CHARS`] characters.
+fn reason_of(r: &str) -> Result<String, ConsoleError> {
+    let r = r.trim();
+    if r.is_empty() {
+        return Err(ConsoleError::BadRequest(
+            "`reason` is required: say why, in a few words".into(),
+        ));
+    }
+    if r.chars().count() > MAX_REASON_CHARS {
+        return Err(ConsoleError::BadRequest(format!(
+            "`reason` is at most {MAX_REASON_CHARS} characters"
+        )));
+    }
+    Ok(r.to_string())
 }
 
 fn program(req: &ProgramBody) -> Result<&str, ConsoleError> {
@@ -200,4 +261,65 @@ async fn deploys_activate(
         row["from"].as_str().unwrap_or("none")
     );
     Ok(Reply::json(row))
+}
+
+/// The revoked versions that still have tenants on them (D8's warning).
+async fn deploys_revoked(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Signed).await?;
+    let rows = who.door(c)?.op(REVOKED, true, &json!({})).await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Mark a stored version revoked, moving the deployment off it when it is
+/// the one that serves.
+async fn deploys_revoke(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: RevokeBody = parse(body)?;
+    let version = version_of("version", &req.version)?;
+    let reason = reason_of(&req.reason)?;
+    let mut params = json!({ "version": version, "reason": reason });
+    let move_to = match req.move_to.as_deref().map(str::trim) {
+        Some(m) if !m.is_empty() => Some(version_of("moveTo", m)?),
+        _ => None,
+    };
+    if let Some(m) = &move_to {
+        params["moveTo"] = json!(m);
+    }
+    call.detail = format!(
+        "version={version} move-to={}",
+        move_to.as_deref().unwrap_or("-")
+    );
+    let rows = who
+        .door(c)?
+        .op_present_within(REVOKE, &params, crate::door::DEPLOY_CALL_TIMEOUT)
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Lift a version's revoke mark.
+async fn deploys_unrevoke(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: RevokeBody = parse(body)?;
+    let version = version_of("version", &req.version)?;
+    let reason = reason_of(&req.reason)?;
+    call.detail = format!("version={version}");
+    let rows = who
+        .door(c)?
+        .op_present(UNREVOKE, &json!({ "version": version, "reason": reason }))
+        .await?;
+    Ok(Reply::json(first(rows)))
 }

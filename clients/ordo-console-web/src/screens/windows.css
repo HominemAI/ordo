@@ -1,0 +1,72 @@
+/* The Maintenance windows screen. A window's message is any text, shown as
+   written: its line breaks kept, long words broken so a phone never
+   scrolls sideways. */
+
+.windows .window-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+}
+
+.windows .skipped .rev-head strong {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.windows .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.windows .row-actions button,
+.windows .kv button {
+  margin-top: 0;
+}
+
+.windows .kv li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  overflow-wrap: anywhere;
+}
+
+.windows .confirm {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.windows textarea {
+  display: block;
+  inline-size: 100%;
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+
+.windows .tenant-picks {
+  margin-top: 8px;
+  padding-inline-start: 28px;
+}
+
+.windows .tenant-picks .check {
+  margin-top: 8px;
+}
+
+.windows h2:focus {
+  outline: none;
+}
+
+.windows h2:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

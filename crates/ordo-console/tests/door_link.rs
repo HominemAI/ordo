@@ -52,6 +52,14 @@ const SECRET: &[u8] = b"door-link-test-secret";
 const HEALTH_DEEP: &str = "platform.health.deep";
 const APPLY: &str = ordo_host::apply_op::APPLY;
 use ordo_host::deploy_ops::{ACTIVATE, PLAN, VERSIONS};
+/// The revoke ops and the window ops (versions increment 2b), the real
+/// ones over the test's own database.
+const VERSION_OPS: [&str; 3] = [
+    ordo_host::deploy_ops::REVOKE,
+    ordo_host::deploy_ops::UNREVOKE,
+    ordo_host::deploy_ops::REVOKED,
+];
+use ordo_host::window_ops::OPS as WINDOW_OPS;
 
 /// Where the console and the deployment sit. The default is one site, the
 /// passkey library's test origin; the cross-site rehearsal puts them on two.
@@ -103,18 +111,20 @@ impl Door {
     fn access(&self) -> IdentityAccessHolder {
         let space = SpaceId(HOME.into());
         let mut engine = AccessEngine::new();
-        engine.set_profile(
-            &space,
-            AccessProfile::new()
-                .allow(Role::Owner, ADD)
-                .allow(Role::Owner, LIST)
-                .allow(Role::Owner, REVOKE)
-                .allow(Role::Owner, HEALTH_DEEP)
-                .allow(Role::Owner, APPLY)
-                .allow(Role::Owner, VERSIONS)
-                .allow(Role::Owner, ACTIVATE)
-                .allow(Role::Owner, PLAN),
-        );
+        let profile = AccessProfile::new()
+            .allow(Role::Owner, ADD)
+            .allow(Role::Owner, LIST)
+            .allow(Role::Owner, REVOKE)
+            .allow(Role::Owner, HEALTH_DEEP)
+            .allow(Role::Owner, APPLY)
+            .allow(Role::Owner, VERSIONS)
+            .allow(Role::Owner, ACTIVATE)
+            .allow(Role::Owner, PLAN);
+        let profile = VERSION_OPS
+            .iter()
+            .chain(WINDOW_OPS.iter())
+            .fold(profile, |p, op| p.allow(Role::Owner, op));
+        engine.set_profile(&space, profile);
         if let Some(o) = self.owner.lock().unwrap().clone() {
             engine.set_membership(&space, &o, Role::Owner);
         }
@@ -123,6 +133,16 @@ impl Door {
         engine.require_step_up(REVOKE);
         for change in [APPLY, ACTIVATE, PLAN] {
             engine.require_step_up(change);
+        }
+        for change in VERSION_OPS.iter().chain(WINDOW_OPS.iter()) {
+            if ![
+                ordo_host::deploy_ops::REVOKED,
+                ordo_host::window_ops::WINDOWS,
+            ]
+            .contains(change)
+            {
+                engine.require_step_up(change);
+            }
         }
         let at = self.clock.load(Ordering::SeqCst);
         IdentityAccessHolder(
@@ -181,6 +201,8 @@ async fn op(
         d.deploys.apply(&space, &bound, &principal).await
     } else if ordo_host::deploy_ops::OPS.contains(&name.as_str()) {
         ordo_host::deploy_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
+    } else if WINDOW_OPS.contains(&name.as_str()) {
+        ordo_host::window_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
     } else {
         d.ops.execute(&name, &space, &bound, &principal).await
     };
@@ -1185,6 +1207,11 @@ async fn deploys_preview_apply_wait_and_roll_back_the_app() {
     let empty = h.get("deploys").await;
     assert_eq!(empty.status, StatusCode::OK, "{}", empty.body);
     assert_eq!(empty.body["active"], Value::Null);
+    // The revoked list answers on a deployment with nothing applied: the
+    // screen reads it on open.
+    let none = h.get("deploys/revoked").await;
+    assert_eq!(none.status, StatusCode::OK, "{}", none.body);
+    assert_eq!(none.body["versions"], json!([]), "{}", none.body);
 
     // A preview is a POST at the deployment, so it asks for the touch.
     let refused = h.post("deploys/preview", json!({"program": APP_V1})).await;
@@ -1305,4 +1332,280 @@ async fn a_deploy_needs_the_console_owners_touch_too() {
         .await;
     assert_eq!(foreign.body["error"], "origin_refused", "{}", foreign.body);
     assert_eq!(h.get("deploys").await.body["stored"], json!([]));
+}
+
+// ═══════════════ versions 2b: revoke, and maintenance windows ═════════════
+
+/// The audit rows of `prefix`'s actions, as `action outcome`.
+async fn audit_of(h: &H, prefix: &str) -> Vec<String> {
+    h.console
+        .store()
+        .pool()
+        .rows("SELECT action || ' ' || outcome FROM audit ORDER BY id")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .filter(|a| a.starts_with(prefix))
+        .collect()
+}
+
+/// The Deploys screen's revoke and unrevoke, against the deployment's real
+/// ops: a reason is required, revoking the version that serves is refused
+/// without somewhere to move to (the door's words reach the page), and the
+/// versions list carries the mark, the label, the commit and `#n`.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoke_needs_a_reason_and_somewhere_to_move_and_unrevoke_lifts_it() {
+    let h = boot("door_revoke", None).await;
+    let owner = h.link(53).await;
+    let touched = touch_deployment(&h, &owner).await;
+    assert_eq!(touched.status, StatusCode::OK, "{}", touched.body);
+    let v1 = h.post("deploys/apply", json!({"program": APP_V1})).await;
+    assert_eq!(v1.status, StatusCode::OK, "{}", v1.body);
+    let v1 = v1.body["version"].as_str().unwrap().to_string();
+    let v2 = h.post("deploys/apply", json!({"program": APP_V2})).await;
+    let v2 = v2.body["version"].as_str().unwrap().to_string();
+
+    // The versions list carries each version's order number and its mark.
+    let history = h.get("deploys").await.body;
+    let row = |hist: &Value, v: &str| {
+        hist["stored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["version"] == v)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row(&history, &v1)["ordinal"], 1, "{history}");
+    assert_eq!(row(&history, &v2)["revoked"], Value::Null, "{history}");
+    assert!(row(&history, &v2).get("label").is_some(), "{history}");
+    assert!(row(&history, &v2).get("gitCommit").is_some(), "{history}");
+
+    // No reason: the console refuses before the door.
+    let blank = h
+        .post("deploys/revoke", json!({"version": v2, "reason": "  "}))
+        .await;
+    assert_eq!(blank.status, StatusCode::BAD_REQUEST, "{}", blank.body);
+    assert!(blank.body["message"].as_str().unwrap().contains("reason"));
+
+    // The version that serves, with nowhere to move: the door's refusal,
+    // its message passed on for the page to show.
+    let refused = h
+        .post(
+            "deploys/revoke",
+            json!({"version": v2, "reason": "bad build"}),
+        )
+        .await;
+    assert_eq!(
+        refused.body["error"], "deployment_refused",
+        "{}",
+        refused.body
+    );
+    let message = refused.body["message"].as_str().unwrap();
+    assert!(message.contains("active version"), "{message}");
+
+    // With somewhere to move: revoked, and the deployment moved.
+    let revoked = h
+        .post(
+            "deploys/revoke",
+            json!({"version": v2, "reason": "bad build", "moveTo": v1}),
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::OK, "{}", revoked.body);
+    assert_eq!(revoked.body["revoked"]["reason"], "bad build");
+    let history = h.get("deploys").await.body;
+    assert_eq!(history["active"], v1.as_str());
+    assert_eq!(row(&history, &v2)["revoked"]["reason"], "bad build");
+
+    // The warning list: revoked versions and the tenants still on them.
+    let warn = h.get("deploys/revoked").await;
+    assert_eq!(warn.status, StatusCode::OK, "{}", warn.body);
+    assert!(warn.body["versions"].is_array(), "{}", warn.body);
+
+    // Unrevoke: a reason is required here too.
+    let blank = h
+        .post("deploys/unrevoke", json!({"version": v2, "reason": ""}))
+        .await;
+    assert_eq!(blank.status, StatusCode::BAD_REQUEST, "{}", blank.body);
+    let lifted = h
+        .post(
+            "deploys/unrevoke",
+            json!({"version": v2, "reason": "fixed"}),
+        )
+        .await;
+    assert_eq!(lifted.status, StatusCode::OK, "{}", lifted.body);
+    assert_eq!(lifted.body["revoked"], Value::Null, "{}", lifted.body);
+    assert_eq!(
+        row(&h.get("deploys").await.body, &v2)["revoked"],
+        Value::Null
+    );
+
+    let audit = audit_of(&h, "deploys.").await;
+    assert!(
+        audit.contains(&"deploys.revoke ok".to_string()),
+        "{audit:?}"
+    );
+    assert!(
+        audit.contains(&"deploys.unrevoke ok".to_string()),
+        "{audit:?}"
+    );
+}
+
+/// The Maintenance windows screen's routes, against the deployment's real
+/// ops: set a one-off window and a cron one, skip a range of the cron one
+/// and remove the skip, delete both. Refusals carry the door's words.
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_set_skip_and_delete_with_the_doors_refusals() {
+    let h = boot("door_windows", None).await;
+    let owner = h.link(54).await;
+
+    // Nothing set yet: an empty list, read with the console key.
+    let empty = h.get("windows").await;
+    assert_eq!(empty.status, StatusCode::OK, "{}", empty.body);
+    assert_eq!(empty.body["windows"], json!([]), "{}", empty.body);
+
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let at = ordo_host::windows::format_utc;
+    let one_off = json!({
+        "target": "all",
+        "starts": at(now + 86_400),
+        "ends": at(now + 86_400 + 3_600),
+        "message": "Upgrade. <b>Not</b> markdown.",
+    });
+
+    // A change asks for the touch at the deployment.
+    let refused = h.post("windows/set", one_off.clone()).await;
+    assert_eq!(
+        refused.body["error"], "deployment_touch_required",
+        "{}",
+        refused.body
+    );
+    let touched = touch_deployment(&h, &owner).await;
+    assert_eq!(touched.status, StatusCode::OK, "{}", touched.body);
+
+    let set = h.post("windows/set", one_off).await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    assert_eq!(set.body["target"], "all");
+    assert_eq!(set.body["message"], "Upgrade. <b>Not</b> markdown.");
+    let once = set.body["id"].as_str().unwrap().to_string();
+
+    // The door's refusals, as given: an end before the start, and a tenant
+    // that does not exist.
+    let backwards = h
+        .post(
+            "windows/set",
+            json!({"target": "all", "starts": at(now + 7_200), "ends": at(now + 3_600),
+                   "message": "x"}),
+        )
+        .await;
+    assert_eq!(
+        backwards.body["error"], "deployment_refused",
+        "{}",
+        backwards.body
+    );
+    assert!(
+        backwards.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("ends after it starts"),
+        "{}",
+        backwards.body
+    );
+    let unknown = h
+        .post(
+            "windows/set",
+            json!({"target": "only", "tenants": ["spc_none"], "cron": "0 3 * * 0",
+                   "lengthSecs": 3600, "message": "x"}),
+        )
+        .await;
+    assert_eq!(unknown.body["doorError"], "not_found", "{}", unknown.body);
+    assert!(
+        unknown.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("spc_none"),
+        "{}",
+        unknown.body
+    );
+
+    // A cron window, then edited in place under its id.
+    let cron = h
+        .post(
+            "windows/set",
+            json!({"target": "all", "cron": "0 3 * * 0", "lengthSecs": 3600,
+                   "message": "Weekly"}),
+        )
+        .await;
+    assert_eq!(cron.status, StatusCode::OK, "{}", cron.body);
+    let weekly = cron.body["id"].as_str().unwrap().to_string();
+    let edited = h
+        .post(
+            "windows/set",
+            json!({"id": weekly, "target": "all", "cron": "0 4 * * 0", "lengthSecs": 1800,
+                   "message": "Weekly, later"}),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    assert_eq!(edited.body["id"], weekly.as_str());
+
+    // Skip the next 8 days of it.
+    let skip = h
+        .post(
+            "windows/skip",
+            json!({"window": weekly, "starts": at(now), "ends": at(now + 8 * 86_400),
+                   "reason": "Holiday"}),
+        )
+        .await;
+    assert_eq!(skip.status, StatusCode::OK, "{}", skip.body);
+    let skip_id = skip.body["id"].as_str().unwrap().to_string();
+    let list = h.get("windows").await.body;
+    assert_eq!(list["windows"].as_array().unwrap().len(), 2, "{list}");
+    assert_eq!(list["skips"].as_array().unwrap().len(), 1, "{list}");
+    let occurrences = list["occurrences"].as_array().unwrap();
+    assert!(
+        occurrences.iter().any(|o| o["window"] == once.as_str()),
+        "{list}"
+    );
+    assert!(
+        occurrences
+            .iter()
+            .any(|o| o["window"] == weekly.as_str() && o["skippedBy"] == skip_id.as_str()),
+        "{list}"
+    );
+
+    // Remove the skip, then both windows; an unknown id is the door's.
+    let gone = h.post("windows/delete-skip", json!({"id": skip_id})).await;
+    assert_eq!(gone.status, StatusCode::OK, "{}", gone.body);
+    for id in [&once, &weekly] {
+        let gone = h.post("windows/delete", json!({"id": id})).await;
+        assert_eq!(gone.status, StatusCode::OK, "{}", gone.body);
+    }
+    let missing = h.post("windows/delete", json!({"id": "win_none"})).await;
+    assert_eq!(missing.body["doorError"], "not_found", "{}", missing.body);
+    assert!(
+        missing.body["message"]
+            .as_str()
+            .unwrap()
+            .contains("win_none"),
+        "{}",
+        missing.body
+    );
+    assert_eq!(h.get("windows").await.body["windows"], json!([]));
+
+    let audit = audit_of(&h, "windows.").await;
+    for want in [
+        "windows.set ok",
+        "windows.skip ok",
+        "windows.delete_skip ok",
+        "windows.delete ok",
+    ] {
+        assert!(audit.contains(&want.to_string()), "{want}: {audit:?}");
+    }
 }

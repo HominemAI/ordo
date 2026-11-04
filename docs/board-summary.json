@@ -1,6 +1,6 @@
 {
- "date": "2026-11-02",
- "text": "2026-11-02 Backend functions increments 1, 2 and 4 are built: a function now writes through ops as the person who called it [[backend-functions]]. CI tests in proportion to the change, runs a fast unit job first and load tests only on pull requests [[test-in-proportion-to-the-change]] [[time-sensitive-tests-fail-when-other-tests]]. PR 3 to main is green and waiting on re-runs.",
+ "date": "2026-11-04",
+ "text": "PR 5 is merged: a changed program needs a new version number, refused otherwise, and versions show their order as #n. Increment 2 session 1 of versions is built: every tenant is pinned to a version, with history kept after erasure [[program-versions-the-core-under-schema]]. CI on it is running.",
  "tiles": [
   [
    "4,056",
@@ -35,8 +35,8 @@
  ],
  "look": [
   {
-   "id": "backend-functions",
-   "why": "increments 1, 2, 4 built"
+   "id": "program-versions-the-core-under-schema",
+   "why": "inc 2 session 1 built, CI running"
   },
   {
    "id": "notes-page-catch-up-flake",

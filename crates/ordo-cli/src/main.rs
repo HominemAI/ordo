@@ -114,7 +114,8 @@ fn usage() -> ! {
          database deliberately: verify, checkpoint, prune, revert and keys\n\
          must work when the door does not, and a verification that can only\n\
          be performed by the thing under suspicion is not a verification.\n  \
-         ordo apply     <dir|file.ordo> [--as <actor>] [--no-activate] [--bump]\n      \
+         ordo apply     <dir|file.ordo> [--as <actor>] [--no-activate] [--bump]\n                \
+         [--label \"<text>\"]\n      \
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
@@ -124,6 +125,10 @@ fn usage() -> ! {
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \
          `--bump` writes that number into the source and applies again.\n      \
+         `--label` stores a label with the version: one line, at most 80\n      \
+         characters. The git commit of the source is recorded too, with\n      \
+         `-dirty` when the applied files changed since it; outside a git\n      \
+         repository nothing is recorded.\n      \
          It then waits until every running node serves the new version and\n      \
          has brought the tenants' databases to it, and names any tenant\n      \
          held closed. `--wait-secs <n>` (or ORDO_APPLY_WAIT_SECS, default\n      \
@@ -205,10 +210,21 @@ fn usage() -> ! {
          what is stored, what is serving, and every re-point in order.\n  \
          ordo versions  list [--db <name>]\n      \
          each stored version, newest first: its order number, name, declared\n      \
-         version, how many tenants are pinned to it, and which one serves.\n  \
+         version, how many tenants are pinned to it, its commit and label,\n      \
+         and which one serves.\n  \
          ordo versions  show <version> [--db <name>]\n      \
          one version: order number, declared version, source fingerprint,\n      \
-         its builds and the Ordo release of each, tenants pinned, activations.\n  \
+         label, commit, its builds and the Ordo release of each, tenants\n      \
+         pinned, activations. A version is its name or its order number, `#4`.\n  \
+         ordo versions  label <version> \"<text>\" | --clear [--db <name>]\n      \
+         set or remove a stored version's label (one line, at most 80\n      \
+         characters).\n  \
+         ordo versions  diff <a> <b> [--schema | --source] [--db <name>]\n      \
+         what changed from <a> to <b>: the schema change, as `ordo plan`\n      \
+         names it, then a unified diff of the source. `label` and `diff`\n      \
+         take `--host <h> --token <t> --space <s>` to go through the door,\n      \
+         deployment owner only. A version not stored is refused, naming\n      \
+         those that are.\n  \
          ordo verify     --identity [--security-key-id <id> --security-public-key <hex>]\n      \
          verify the deployment's security stream, then reconcile every link in\n      \
          `$authenticator` against it: a link no event explains (a sign-up, a\n      \

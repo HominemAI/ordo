@@ -5,7 +5,8 @@ plan's 4 asks and all 17 of the review's decisions on 2026-11-02. Asks 5 to
 7, from building increment 1, were ruled 2026-11-03; ask 6 made the
 declared `@` version the name (§1.1). Ask 8 is open (§5). The rehearsal
 design (§3.2) is provisional. Increment 1 built 2026-11-03. Increment 2,
-session 1 (pins, `Versions`, `ordo versions list|show`) built 2026-11-03.
+session 1 (pins, `Versions`, `ordo versions list|show`) built 2026-11-03;
+session 2's labels, commits and `ordo versions label|diff` built 2026-11-04.
 Review: `review-plan-versions.md` (54 findings). Rulings:
 `corpus-rulings.md`, "2026-11-02: program versions plan and its review".
 Joins `plan-schema-evolution.md`, `plan-evolution-plans.md` and
@@ -163,6 +164,35 @@ The pin this plan adds:
 - Not yet built: the pin epoch check in the write transaction, the
   principal check on who may pin, the stream event, and the rollout id on
   `$pins`.
+
+**As built in increment 2, session 2** (2026-11-04, `versions.rs`,
+`versions_diff.rs`):
+
+- `$artifacts.label` and `$artifacts.git_commit`, both nullable, added
+  idempotently like `ordinal`. Neither moves a version.
+- A version is named by its name or its order number, `#4`
+  (`Versions::resolve`). A name not stored is refused, naming every
+  stored version.
+- `ordo apply --label "<text>"` stores a label, on both paths. A re-apply
+  of the same version with a label replaces it; with none, keeps it.
+- A label is one line of at most 80 characters, trimmed. Anything else is
+  refused before the apply starts, saying the limit.
+- The CLI records the source's git commit: `git rev-parse HEAD` where the
+  source lives, `-dirty` when `git status --porcelain` shows the program
+  or its function code changed. No git or no repository: nothing.
+- The first commit recorded for a version stays. A re-apply from another
+  checkout does not change where the version came from.
+- `ordo versions label <version> "<text>"` or `--clear`, locally or
+  through `std.deployment.label`, deployment owner only, like activate.
+- `ordo versions diff <a> <b>` shows the schema change and a unified
+  source diff; `--schema` or `--source` shows one. Locally or through
+  `std.deployment.diff`.
+- The schema change is `ordo_schema::diff`, the differ `ordo plan` uses,
+  run against `<a>`'s DDL built empty in a shadow namespace
+  (`ordo_shadow_diff_<random>`), dropped after.
+- The apply report, `ordo deploys`, `versions list|show` print label and
+  a 12-character commit. `std.deployment.versions` carries `label` and
+  `gitCommit`, camel case like its other keys.
 
 ### 1.4 How the door picks the version per request
 
@@ -568,7 +598,7 @@ round is about 35 minutes for the full suite.
 | # | Increment | Size | Needs | Done when | Closes |
 |---|---|---|---|---|---|
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
-| 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2: labels, `diff`, the epoch check, the pin stream. | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
+| 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. The epoch check and the pin stream remain (board asks 16 and 17). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation.** Owner-set mark, console warnings, tenants move in their windows (D8). | M | 2 | a revoked version cannot be pinned; its tenants move at their window; the console shows the warning | none |
 | 3 | **Multi-version serving, dev first.** Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |

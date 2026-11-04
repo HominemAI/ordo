@@ -53,6 +53,12 @@ pub const SHADOW: &str = "ordo_shadow";
 /// `pg_namespace` when an operator is looking.
 pub const EXPORT_SHADOW: &str = "ordo_shadow_export";
 
+/// The prefix of the shadow `ordo versions diff` builds a stored version's
+/// schema in, to read its shape back (`ordo_host::versions_diff`). Each
+/// diff adds a random hex suffix and drops the namespace after, so two
+/// diffs at once never share one.
+pub const DIFF_SHADOW: &str = "ordo_shadow_diff";
+
 impl Pool {
     /// Build the shadow schema from the deployment's own DDL.
     pub async fn build_shadow(&self, ddl: &str) -> Result<(), PoolError> {
@@ -62,7 +68,8 @@ impl Pool {
     /// Build a shadow schema under a caller-chosen name.
     ///
     /// `schema` is interpolated into DDL, so it is **not** caller data:
-    /// every call site passes one of this module's own constants. It is a
+    /// every call site passes one of this module's own constants, or
+    /// [`DIFF_SHADOW`] with a hex suffix the caller drew. It is a
     /// parameter so the two shadows cannot collide, not so a name can come
     /// from a request.
     pub async fn build_shadow_in(&self, schema: &str, ddl: &str) -> Result<(), PoolError> {

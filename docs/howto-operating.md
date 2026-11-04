@@ -194,6 +194,27 @@ ordo deploys --limit 30
 
 Output shows the artifact registry and the activation log in order, so you can see which version was serving at a given time.
 
+**Naming, labelling and comparing versions:**
+
+A version is named by its name or by its order number, `#4`. `ordo versions` reads them:
+
+```
+ordo versions list                          # each version, newest first
+ordo versions show '#4'                     # one version in full
+ordo versions label '#4' "launch day"       # give it a label
+ordo versions label '#4' --clear            # remove the label
+ordo versions diff '#3' '#4'                # what changed: schema, then source
+ordo versions diff '#3' '#4' --schema       # the schema change only
+ordo versions diff '#3' '#4' --source       # the source diff only
+```
+
+- `ordo apply --label "<text>"` stores a label with the version it applies. Applying the same version again with a new label replaces it.
+- A label is one line of at most 80 characters. Anything else is refused, saying so.
+- `ordo apply` records the git commit of the source: `git rev-parse HEAD` where the source lives, with `-dirty` when the applied files have changes not in it. Outside a git repository nothing is recorded. The first commit recorded for a version stays.
+- The apply report, `ordo deploys`, `ordo versions list` and `show` print the label and the first 12 characters of the commit.
+- `label` and `diff` take `--db`, or `--host --token --space` to go through the door (`std.deployment.label`, `std.deployment.diff`). Over the door both answer only the deployment owner, in the deployment's own space.
+- A name that is not stored is refused, naming every version that is.
+
 ## Every tenant's database follows the program
 
 With one database per tenant, an update has to reach each person's database as well as the deployment's own. It does, in three ways.

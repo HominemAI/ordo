@@ -589,3 +589,117 @@ fn a_code_change_alone_is_a_new_version_over_the_wire() {
         "a change to the code alone stores a new version"
     );
 }
+
+/// The door flags every `--host` command here takes.
+fn door(addr: std::net::SocketAddr, tok: &str) -> Vec<String> {
+    vec![
+        "--host".into(),
+        format!("http://{addr}"),
+        "--token".into(),
+        tok.into(),
+        "--space".into(),
+        HOME.into(),
+    ]
+}
+
+/// `--label` and the source's git commit reach the door with the program,
+/// and `ordo versions label|diff --host` print what the database path
+/// prints (`plan-versions.md` §4 row 2).
+#[test]
+fn a_label_and_a_commit_travel_and_versions_answer_over_the_wire() {
+    let db = "ordo_wire_labels";
+    empty(db);
+    let path = program("labels", V1);
+    let dir = std::path::Path::new(&path).parent().unwrap().to_path_buf();
+    let git = |args: &[&str]| {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .status()
+            .expect("git")
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "v1"]);
+
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
+    let with_door = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(door(addr, &owner));
+        v
+    };
+
+    let mut args = with_door(&[&path, "--label", "over the wire", "--no-wait"]);
+    let first = operator::run("apply", &args);
+    assert_eq!(first.code, 0, "{}", first.report);
+    assert!(
+        first.report.contains("label      over the wire\n"),
+        "{}",
+        first.report
+    );
+    assert!(first.report.contains("commit     "), "{}", first.report);
+
+    // V2 is refused activation over V1's schema, and stored all the same:
+    // a second version to compare with.
+    std::fs::write(&path, V2).expect("write");
+    args.retain(|a| a != "--label" && a != "over the wire");
+    let second = operator::run("apply", &args);
+    assert!(second.report.contains("not_activated"), "{}", second.report);
+
+    let label = operator::run("versions", &with_door(&["label", "#2", "staged"]));
+    assert_eq!(label.code, 0, "{}", label.report);
+    let direct = operator::run(
+        "versions",
+        &[
+            "label".into(),
+            "#2".into(),
+            "staged".into(),
+            "--db".into(),
+            db.into(),
+        ],
+    );
+    assert_eq!(label.report, direct.report, "one rendering, two paths");
+
+    let long = "x".repeat(81);
+    let refused = operator::run("versions", &with_door(&["label", "#2", &long]));
+    assert_ne!(refused.code, 0);
+    assert!(refused.report.contains("at most 80"), "{}", refused.report);
+
+    let over = operator::run("versions", &with_door(&["diff", "#1", "#2"]));
+    assert_eq!(over.code, 0, "{}", over.report);
+    let direct = operator::run(
+        "versions",
+        &[
+            "diff".into(),
+            "#1".into(),
+            "#2".into(),
+            "--db".into(),
+            db.into(),
+        ],
+    );
+    assert_eq!(over.report, direct.report, "one rendering, two paths");
+    assert!(over.report.contains("  B2  "), "{}", over.report);
+
+    let source = operator::run("versions", &with_door(&["diff", "#1", "#2", "--source"]));
+    assert!(!source.report.contains("SCHEMA"), "{}", source.report);
+    let missing = operator::run("versions", &with_door(&["diff", "#1", "#9"]));
+    assert_ne!(missing.code, 0);
+    assert!(
+        missing.report.contains("not_found") && missing.report.contains("#2 · "),
+        "{}",
+        missing.report
+    );
+
+    // A manager may not label the deployment's versions.
+    let manager = token(DEP_MANAGER);
+    let mut m = vec!["label".to_string(), "#1".into(), "nope".into()];
+    m.extend(door(addr, &manager));
+    let denied = operator::run("versions", &m);
+    assert_ne!(denied.code, 0, "{}", denied.report);
+}

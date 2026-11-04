@@ -97,6 +97,25 @@ pub async fn ensure_pin_tables(pool: &Pool) -> Result<(), PoolError> {
     Ok(())
 }
 
+/// The advisory lock every pin change takes first, in its own
+/// transaction: an activation, a new tenant's pin and the backfill. A new
+/// tenant whose row committed while an activation's re-pin was running is
+/// not in that statement's view, so without the turn it read the old active
+/// version and kept it until the next activation (review, 2026-11-04).
+pub const PIN_LOCK_NS: i32 = 0x4F52_5049;
+
+fn pin_lock_sql() -> String {
+    format!("SELECT pg_advisory_xact_lock({PIN_LOCK_NS}, 0)")
+}
+
+/// The active version, read inside `tx`, after its pin lock.
+async fn active_in(tx: &ordo_exec::TxConn) -> Result<Option<String>, PoolError> {
+    let rows = tx
+        .rows("SELECT \"version\" FROM \"$activations\" ORDER BY \"seq\" DESC LIMIT 1")
+        .await?;
+    Ok(rows.first().and_then(|r| r.first().cloned().flatten()))
+}
+
 /// `versions.new_tenant` as the environment sets it. Empty is unset.
 pub fn new_tenant_from_env() -> Option<String> {
     std::env::var(NEW_TENANT_ENV)
@@ -318,9 +337,31 @@ impl<'a> Versions<'a> {
 
     /// Create every table this client reads, and fill in what a row stored
     /// before a column existed lacks. Idempotent.
+    ///
+    /// `$spaces`' columns are added only when the pin's are missing. Its
+    /// setup alters the table 18 times, each under `ACCESS EXCLUSIVE` even
+    /// when the column is there, and this runs on every apply and
+    /// activation: one slow reader of `$spaces` then queued the apply, and
+    /// every tenant lookup queued behind it (review, 2026-11-04).
     pub async fn ensure(&self) -> Result<(), VersionRefusal> {
         registry::ensure_tables(self.pool).await?;
-        crate::tenants::ensure_table(self.pool).await?;
+        let shaped = self
+            .pool
+            .rows(
+                "SELECT to_regclass('\"$pins\"') IS NOT NULL AND EXISTS ( \
+                 SELECT 1 FROM information_schema.columns \
+                 WHERE table_schema = current_schema() AND table_name = '$spaces' \
+                 AND column_name = 'pin_epoch')",
+            )
+            .await?;
+        if shaped
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .as_deref()
+            != Some("t")
+        {
+            crate::tenants::ensure_table(self.pool).await?;
+        }
         Ok(())
     }
 
@@ -467,6 +508,7 @@ impl<'a> Versions<'a> {
             None => PinCause::Activate,
         };
         let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
         registry::record_activation(&tx, version, actor, at).await?;
         tx.rows(&repin_sql(version, actor, cause, at.0, None))
             .await?;
@@ -527,10 +569,22 @@ impl<'a> Versions<'a> {
         actor: &str,
         at: u64,
     ) -> Result<Option<String>, VersionRefusal> {
-        let Some(version) = self.new_tenant_version().await? else {
+        let tx = self.pool.begin().await?;
+        // The turn first, then the version: an activation that started
+        // before this has committed by now, and is the one read.
+        tx.rows(&pin_lock_sql()).await?;
+        let version = match self.new_tenant {
+            Some(v) => Some(v.to_string()),
+            None => match active_in(&tx).await {
+                Ok(v) => v,
+                // No registry: nothing has ever been applied here.
+                Err(e) if e.is_missing_table() => None,
+                Err(e) => return Err(e.into()),
+            },
+        };
+        let Some(version) = version else {
             return Ok(None);
         };
-        let tx = self.pool.begin().await?;
         let filter = format!(
             "AND \"$space\" = {} AND \"version\" IS NULL",
             sql_lit(space)
@@ -550,10 +604,11 @@ impl<'a> Versions<'a> {
     /// Pin every tenant that has no pin to the active version, cause
     /// `backfill`. The tenants pinned. Idempotent: a second call finds none.
     pub async fn backfill(&self, actor: &str, at: u64) -> Result<usize, VersionRefusal> {
-        let Some(active) = registry::active_version(self.pool).await? else {
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let Some(active) = active_in(&tx).await? else {
             return Ok(0);
         };
-        let tx = self.pool.begin().await?;
         let moved = tx
             .rows(&repin_sql(
                 &active,

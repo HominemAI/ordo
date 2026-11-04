@@ -1334,3 +1334,8 @@
 {"seq": 1335, "item": "program-versions-the-core-under-schema", "ask": 14, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1336, "item": "program-versions-the-core-under-schema", "ask": 15, "at": "2026-11-03", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1337, "item": "the-statement-bound-also-covered-the", "ask": 1, "at": "2026-11-04", "status": "decided", "text": "agreed", "source": "record", "read": true}
+{"seq": 1338, "item": "program-versions-the-core-under-schema", "ask": 16, "at": "2026-11-04T09:34:25Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1339, "item": "program-versions-the-core-under-schema", "ask": 17, "at": "2026-11-04T09:34:27Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1340, "item": "program-versions-the-core-under-schema", "ask": 0, "at": "2026-11-04T09:34:37Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1341, "item": "program-versions-the-core-under-schema", "ask": 16, "at": "2026-11-04", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1342, "item": "program-versions-the-core-under-schema", "ask": 17, "at": "2026-11-04", "status": "decided", "text": "ok", "source": "record", "read": true}

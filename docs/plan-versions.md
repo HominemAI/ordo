@@ -161,9 +161,9 @@ The pin this plan adds:
   (review, 2026-11-04).
 - An apply adds `$spaces`' columns only when the pin's are missing: the
   table's setup locks it exclusively once per column.
-- Not yet built: the pin epoch check in the write transaction, the
-  principal check on who may pin, the stream event, and the rollout id on
-  `$pins`.
+- Not yet built: the pin epoch check in the write transaction and the
+  stream event (increment 3, asks 16 and 17), the principal check on who
+  may pin, and the rollout id on `$pins` (increment 10).
 
 **As built in increment 2, session 2** (2026-11-04, `versions.rs`,
 `versions_diff.rs`):
@@ -598,9 +598,9 @@ round is about 35 minutes for the full suite.
 | # | Increment | Size | Needs | Done when | Closes |
 |---|---|---|---|---|---|
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
-| 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. The epoch check and the pin stream remain (board asks 16 and 17). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
+| 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation.** Owner-set mark, console warnings, tenants move in their windows (D8). | M | 2 | a revoked version cannot be pinned; its tenants move at their window; the console shows the warning | none |
-| 3 | **Multi-version serving, dev first.** Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
+| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |

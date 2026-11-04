@@ -1,6 +1,6 @@
 {
  "date": "2026-11-04",
- "text": "PR 5 is merged: a changed program needs a new version number, refused otherwise, and versions show their order as #n. Increment 2 session 1 of versions is built: every tenant is pinned to a version, with history kept after erasure [[program-versions-the-core-under-schema]]. CI on it is running.",
+ "text": "Versions increment 2 is built on bleeding: every tenant pinned to a version, labels, the git commit, and ordo versions diff [[program-versions-the-core-under-schema]]. Asks 16 and 17 ask whether the write check and the pin stream wait for increment 3. Ordo's own boot setup is now outside the statement bound [[the-statement-bound-also-covered-the]].",
  "tiles": [
   [
    "4,056",
@@ -36,7 +36,7 @@
  "look": [
   {
    "id": "program-versions-the-core-under-schema",
-   "why": "inc 2 session 1 built, CI running"
+   "why": "asks 16, 17"
   },
   {
    "id": "notes-page-catch-up-flake",

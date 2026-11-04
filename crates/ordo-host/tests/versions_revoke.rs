@@ -255,13 +255,27 @@ async fn the_active_version_is_revoked_only_with_somewhere_to_go() {
     assert_eq!(v.pinned_to_revoked().await.unwrap()[0].tenant_count, 0);
 }
 
+/// The deploy acts the door wrote to the security record.
+fn acts(stream: &ordo_secevent::Recorder) -> Vec<String> {
+    stream
+        .drain_all(ordo_commandlog::Timestamp(u64::MAX / 2))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            ordo_secevent::EventKind::Deploy { act, .. } => Some(act),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_door_revokes_as_the_client_does() {
     let pool = deployment("ordo_revoke_door").await;
-    let ops = apply_op::ApplyOps::new(
+    let stream = std::sync::Arc::new(ordo_secevent::Recorder::default());
+    let ops = apply_op::ApplyOps::recording(
         pool.clone(),
         std::sync::Arc::new(SinglePool::new(pool.clone())),
         "home",
+        Some(stream.clone()),
     );
     let bound = |v: serde_json::Value| BoundParams(v.as_object().unwrap().clone());
     let run = |name: &'static str, space: &'static str, v: serde_json::Value| {
@@ -325,6 +339,9 @@ async fn the_door_revokes_as_the_client_does() {
     .await
     .expect("lifted");
     assert_eq!(u.rows[0]["revoked"], serde_json::Value::Null);
+    // Each change leaves a record on the security stream (G12): the move
+    // the revoke made, the revoke, and the lift.
+    assert_eq!(acts(&stream), ["activated", "revoked", "unrevoked"]);
 
     // Bound to a tenant's space, none of them is there.
     for op in [

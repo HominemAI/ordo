@@ -264,14 +264,28 @@ async fn bad_windows_are_refused_saying_what_to_change() {
     assert!(w.list(None, now).await.unwrap().windows.is_empty());
 }
 
+/// The deploy acts the door wrote to the security record.
+fn acts(stream: &ordo_secevent::Recorder) -> Vec<String> {
+    stream
+        .drain_all(ordo_commandlog::Timestamp(u64::MAX / 2))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            ordo_secevent::EventKind::Deploy { act, .. } => Some(act),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_door_sets_and_lists_as_the_client_does() {
     let pool = fresh("ordo_windows_door").await;
     tenant(&pool, "spc_a").await;
-    let ops = apply_op::ApplyOps::new(
+    let stream = std::sync::Arc::new(ordo_secevent::Recorder::default());
+    let ops = apply_op::ApplyOps::recording(
         pool.clone(),
         std::sync::Arc::new(SinglePool::new(pool.clone())),
         "home",
+        Some(stream.clone()),
     );
     let bound = |v: serde_json::Value| BoundParams(v.as_object().unwrap().clone());
 
@@ -353,6 +367,31 @@ async fn the_door_sets_and_lists_as_the_client_does() {
     assert_eq!(back.skips, direct.skips);
     assert_eq!(back.tenant.as_deref(), Some("spc_a"));
     assert!(back.occurrences.iter().all(|o| o.target == "only"));
+
+    // Each change leaves a record on the security stream (G12).
+    for (op, params) in [
+        (
+            window_ops::DELETE_SKIP,
+            serde_json::json!({ "id": skip.rows[0]["id"].clone() }),
+        ),
+        (
+            window_ops::DELETE_WINDOW,
+            serde_json::json!({ "id": "nightly" }),
+        ),
+    ] {
+        window_ops::execute(&ops, op, "home", &bound(params), "owner")
+            .await
+            .expect(op);
+    }
+    assert_eq!(
+        acts(&stream),
+        [
+            "window-set",
+            "window-skipped",
+            "skip-deleted",
+            "window-deleted"
+        ]
+    );
 
     // Bound to a tenant's space, none of them is there.
     for op in window_ops::OPS {

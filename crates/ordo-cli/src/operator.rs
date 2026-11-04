@@ -100,6 +100,7 @@ const SWITCHES: &[&str] = &[
     "--from-genesis",
     "--dry-run",
     "--no-activate",
+    "--bump",
     "--no-wait",
     "--apply",
     "--record",
@@ -1788,8 +1789,57 @@ fn floor_report(f: &ordo_exec::prune::Floor, policy: &ordo_exec::cadence::LogPol
 /// `migration.md` owns the sequence: three deploys, not a side effect of
 /// one. Drops are the other way round (artifact first, then the DDL) and
 /// the gate tolerates them, so a program that only drops is a match.
+/// `ordo apply`, and with `--bump` once more after raising the source's
+/// `@` version, when the first is refused because that version is already
+/// applied with different content (owner, 2026-11-03, asks 12 and 13). The
+/// file is changed only on that refusal, and only with `--bump`.
 async fn apply(flags: Flags) -> Outcome {
+    let first = apply_once(&flags).await;
+    if first.code == 0 || !flags.has("--bump") {
+        return first;
+    }
+    let Some((version, next)) = ordo_host::schema_apply::NameRefusal::read_taken(&first.report)
+    else {
+        return first;
+    };
+    let Some(path) = flags.positional.first() else {
+        return first;
+    };
+    match bump_source(std::path::Path::new(path), &version, &next) {
+        Ok(file) => {
+            let again = apply_once(&flags).await;
+            Outcome {
+                report: format!(
+                    "bumped     {file}: @ {version} -> @ {next}\n{}",
+                    again.report
+                ),
+                code: again.code,
+            }
+        }
+        Err(e) => Outcome::failed(format!("{}REFUSED  --bump: {e}\n", first.report)),
+    }
+}
+
+/// Raise `domain … @ from` to `to` in whichever file under `path` holds the
+/// header, and name that file.
+fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, String> {
+    for file in crate::sources::files(path)? {
+        let text =
+            std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        if let Some(raised) = ordo_plan::artifact::with_declared(&text, from, to) {
+            std::fs::write(&file, raised).map_err(|e| format!("{}: {e}", file.display()))?;
+            return Ok(file.display().to_string());
+        }
+    }
+    Err(format!(
+        "no file under {} declares `@ {from}`",
+        path.display()
+    ))
+}
+
+async fn apply_once(flags: &Flags) -> Outcome {
     if let Err(e) = flags.only(&[
+        "--bump",
         "--db",
         "--as",
         "--no-activate",
@@ -1804,7 +1854,7 @@ async fn apply(flags: Flags) -> Outcome {
     // How long to wait for the nodes to serve what this activates
     // (`deploy_wait`). Read before anything is applied, so a bad value
     // refuses the command rather than a deploy half reported.
-    let wait = match crate::deploy_wait::from_flags(&flags) {
+    let wait = match crate::deploy_wait::from_flags(flags) {
         Ok(w) => w,
         Err(e) => return Outcome::usage(format!("{e}\n")),
     };
@@ -1817,14 +1867,14 @@ async fn apply(flags: Flags) -> Outcome {
     };
     // The database this deployment uses: `--db`, else the one the
     // environment names. The refusal prints it in the command it suggests.
-    let db = pool_config(&flags).db;
+    let db = pool_config(flags).db;
     let activate = !flags.has("--no-activate");
 
     // **17u: the endpoint, when one is named.** The whole difference is
     // which side of the wire compiles and applies — the rendering below is
     // the same function over the same value, so an operator reads one
     // report whichever mode they ran in.
-    if let Some(host) = crate::wire::requested(&flags) {
+    if let Some(host) = crate::wire::requested(flags) {
         if flags.named.contains_key("--as") {
             // `--as` is an ASSERTION, and this door does not take one. The
             // actor recorded over the wire is the principal the token
@@ -1860,7 +1910,7 @@ async fn apply(flags: Flags) -> Outcome {
         };
         return crate::wire::apply_over_the_wire(
             &host,
-            &flags,
+            flags,
             src.text(),
             code,
             activate,
@@ -1910,7 +1960,7 @@ async fn apply(flags: Flags) -> Outcome {
     let program =
         ordo_host::schema_apply::Program::assemble(schema, doc, ddl, src.text().to_string());
 
-    let pool = match connect(&flags).await {
+    let pool = match connect(flags).await {
         Ok(p) => p,
         Err(o) => return o,
     };

@@ -784,7 +784,7 @@ async fn apply_report(
             r.push_str(&format!("           {}\n", recorded_line(&recorded)));
             Outcome::failed(r)
         }
-        Err(ApplyRefusal::Internal(e)) => {
+        Err(ApplyRefusal::Internal(e)) | Err(ApplyRefusal::VersionTaken(e)) => {
             r.push_str(&format!("APPLY\n  FAILED   {e}\n"));
             Outcome::failed(r)
         }

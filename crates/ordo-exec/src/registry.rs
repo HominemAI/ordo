@@ -302,6 +302,18 @@ pub async fn revisions(pool: &Pool, declared: Option<&str>) -> Result<Vec<Revisi
     Ok(out)
 }
 
+/// Every `@` version declared by a program stored here: what a refusal
+/// counts up from when it names the next number to use.
+pub async fn declared_versions(pool: &Pool) -> Result<Vec<String>, PoolError> {
+    let rows = pool
+        .rows("SELECT DISTINCT \"declared\" FROM \"$artifacts\" WHERE \"declared\" <> ''")
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect())
+}
+
 /// Record that this release built `version` to `artifact` and `ddl`. A
 /// build already recorded is left as it is.
 async fn record_build(

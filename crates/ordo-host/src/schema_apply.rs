@@ -113,8 +113,7 @@ pub struct Program {
     /// The name this program is stored and served under. Compiled, it is
     /// the declared version, or for a program that declares none the
     /// 16-hex digest of what it compiles to. An apply settles it with
-    /// [`name_version`], which may answer a stored name or a revision
-    /// (`0.2.0+r2`).
+    /// [`name_version`], which may answer a stored name.
     pub version: String,
     /// The `@` version the source declares, if any.
     pub declared: Option<String>,
@@ -172,7 +171,7 @@ impl Program {
         self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
         self.declared = a::declared_version(&self.source);
         self.version = match &self.declared {
-            Some(d) => a::revision_name(d, 1),
+            Some(d) => d.clone(),
             None => a::program_version(&self.doc, &self.ddl),
         };
     }
@@ -226,13 +225,62 @@ pub struct Naming {
     /// An earlier version under this declared version compiles to this
     /// program, so this is a new build of it at most.
     pub existing: bool,
-    /// The warning for a program that changed under the same declared
-    /// version. Never a refusal (owner, 2026-11-03).
-    pub note: Option<String>,
+}
+
+/// Why [`name_version`] could not name a program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameRefusal {
+    /// The declared `@` version is stored with different content. The
+    /// developer raises the number; `next` is the one to use, when the
+    /// stored numbers read as `x.y.z`.
+    Taken {
+        version: String,
+        next: Option<String>,
+    },
+    /// Reading the registry failed.
+    Registry(String),
+}
+
+impl std::fmt::Display for NameRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NameRefusal::Taken { version, next } => {
+                write!(
+                    f,
+                    "version_taken: version {version} is already applied with different \
+                     content. Comments and spacing never count; this is a real change, so \
+                     it needs a version of its own. "
+                )?;
+                match next {
+                    Some(n) => write!(
+                        f,
+                        "Set `domain … @ {n}` in the source, or run `ordo apply --bump` to \
+                         have the file changed for you."
+                    ),
+                    None => write!(f, "Raise `domain … @ {version}` in the source."),
+                }
+            }
+            NameRefusal::Registry(e) => write!(f, "registry: {e}"),
+        }
+    }
+}
+
+impl NameRefusal {
+    /// The version and the next number from a [`NameRefusal::Taken`] as
+    /// rendered, wherever it travelled: the door sends the text alone, and
+    /// `ordo apply --bump` reads it back here, beside the one place that
+    /// writes it.
+    pub fn read_taken(text: &str) -> Option<(String, String)> {
+        let rest = &text[text.find("version_taken: version ")? + 23..];
+        let version = rest.split(' ').next()?.to_string();
+        let set = &rest[rest.find("Set `domain … @ ")? + "Set `domain … @ ".len()..];
+        let next = set.split('`').next()?.to_string();
+        Some((version, next))
+    }
 }
 
 /// **Name a program before an apply stores it** (`plan-versions.md` §1.1,
-/// owner, 2026-11-03, ask 6).
+/// owner, 2026-11-03, asks 6 and 13).
 ///
 /// The declared `@` version names it. Each version already stored under
 /// that number, newest first, is compared with this program as compiled
@@ -246,18 +294,18 @@ pub struct Naming {
 ///
 /// A match is that version, under its stored name. No match, with the
 /// number unused, is the declared version itself. No match under a used
-/// number is the next revision, `0.2.0+r2`, with a warning to bump the
-/// number.
+/// number is refused, naming the next number to use: the source must
+/// always name what is applied (owner, 2026-11-03, ask 13).
 ///
 /// A program that declares no `@` version is named as before 2026-11-03,
-/// by the 16-hex digest of what it compiles to, and never warned about:
-/// there is no number for it to disagree with.
-pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, String> {
+/// by the 16-hex digest of what it compiles to.
+pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
     use ordo_exec::registry;
+    let registry_err = |e: ordo_exec::PoolError| NameRefusal::Registry(e.to_string());
     let declared = program.declared.as_deref();
     let stored = registry::revisions(pool, declared)
         .await
-        .map_err(|e| format!("registry: {e}"))?;
+        .map_err(registry_err)?;
     for r in &stored {
         let same = if r.release.as_deref() == Some(ordo_plan::artifact::ORDO_RELEASE) {
             program.builds_as(&r.artifact)
@@ -270,7 +318,6 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Stri
             return Ok(Naming {
                 version: r.artifact.version.clone(),
                 existing: true,
-                note: None,
             });
         }
     }
@@ -279,34 +326,33 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Stri
         // already is this program.
         let existing = registry::get(pool, &program.version)
             .await
-            .map_err(|e| format!("registry: {e}"))?
+            .map_err(registry_err)?
             .is_some();
         return Ok(Naming {
             version: program.version.clone(),
             existing,
-            note: None,
         });
     };
-    let mut n = stored.len() as u32 + 1;
-    let mut name = ordo_plan::artifact::revision_name(d, n);
-    while registry::get(pool, &name)
-        .await
-        .map_err(|e| format!("registry: {e}"))?
-        .is_some()
-    {
-        n += 1;
-        name = ordo_plan::artifact::revision_name(d, n);
+    let taken = !stored.is_empty()
+        || registry::get(pool, d)
+            .await
+            .map_err(registry_err)?
+            .is_some();
+    if taken {
+        let numbers = registry::declared_versions(pool)
+            .await
+            .map_err(registry_err)?;
+        let next = ordo_plan::artifact::next_version(
+            numbers.iter().map(String::as_str).chain(std::iter::once(d)),
+        );
+        return Err(NameRefusal::Taken {
+            version: d.to_string(),
+            next,
+        });
     }
-    let note = (!stored.is_empty()).then(|| {
-        format!(
-            "this program changes version {d} without a new `@` version; it is stored as \
-             {name}. Raise `domain … @ {d}` to give it a version of its own"
-        )
-    });
     Ok(Naming {
-        version: name,
+        version: d.to_string(),
         existing: false,
-        note,
     })
 }
 
@@ -2567,6 +2613,9 @@ pub enum ApplyRefusal {
     ExecFailed(Box<ExecFailed>),
     /// Something before execution failed: a count, a DDL rendering.
     Internal(String),
+    /// The declared `@` version is already applied with different content
+    /// ([`NameRefusal::Taken`], rendered).
+    VersionTaken(String),
 }
 
 /// What [`ApplyRefusal::ExecFailed`] carries: the statements that were
@@ -2599,9 +2648,11 @@ pub async fn apply_with(
     choices: &Choices,
 ) -> (Result<Plan, String>, Result<Applied, ApplyRefusal>) {
     // The name `ordo apply` will store it under, so the `$migrations` row
-    // written here names the same version (`name_version`). A database with
-    // no registry, or one no apply has touched since 2026-11-03, keeps the
-    // declared name, and the next apply's own record settles it.
+    // written here names the same version (`name_version`). A real change
+    // under a used `@` number is refused here as it is there (ask 13). A
+    // database with no registry, or one no apply has touched since
+    // 2026-11-03, keeps the declared name, and the next apply's own record
+    // settles it.
     let named;
     let program = match name_version(pool, program).await {
         Ok(n) if n.version != program.version => {
@@ -2609,6 +2660,10 @@ pub async fn apply_with(
             p.version = n.version;
             named = p;
             &named
+        }
+        Err(e @ NameRefusal::Taken { .. }) => {
+            let e = e.to_string();
+            return (Err(e.clone()), Err(ApplyRefusal::VersionTaken(e)));
         }
         _ => program,
     };
@@ -2857,6 +2912,7 @@ impl ApplyRefusal {
             ApplyRefusal::CreateFailed(_) => "create_failed",
             ApplyRefusal::ExecFailed(_) => "execute_failed",
             ApplyRefusal::Internal(_) => "internal",
+            ApplyRefusal::VersionTaken(_) => "version_taken",
         }
     }
 }
@@ -2930,6 +2986,7 @@ fn forward_refusal(r: ApplyRefusal, plan: &Plan) -> ForwardRefused {
         ApplyRefusal::CreateFailed(e) => ("create_failed", e, true),
         ApplyRefusal::ExecFailed(f) => ("execute_failed", f.failure.to_string(), false),
         ApplyRefusal::Internal(e) => ("internal", e, true),
+        ApplyRefusal::VersionTaken(e) => ("version_taken", e, false),
     };
     ForwardRefused {
         class,

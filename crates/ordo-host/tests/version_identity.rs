@@ -1,12 +1,12 @@
 //! Increment 1 of `plan-versions.md`: the developer's declared `@` version
-//! names a version, and nothing about versioning is ever a refusal (owner,
-//! 2026-11-03, board `program-versions-the-core-under-schema` ask 6).
+//! names a version (owner, 2026-11-03, board
+//! `program-versions-the-core-under-schema` asks 6 and 13).
 //!
 //! - The first apply of `@ 0.2.0` is version `0.2.0`.
 //! - An edit to comments or spacing compiles to the same program: the same
 //!   version, nothing stored, nothing re-pointed.
-//! - A real change under the same number is kept apart as `0.2.0+r2`, with
-//!   a warning to raise the number. Never refused.
+//! - A real change under a number already applied is refused, naming the
+//!   next number, so the source always names what is applied.
 //! - Applying `0.2.0`'s content again finds `0.2.0`.
 //! - A stored build from another Ordo release is compared after compiling
 //!   its source under this one, so a release's own changes move nothing.
@@ -20,7 +20,7 @@ use ordo_conformance::Pg;
 use ordo_exec::registry::{self, Applied, Artifact, RegistryRefusal};
 use ordo_exec::route::SinglePool;
 use ordo_exec::{Pool, PoolConfig};
-use ordo_host::apply_op::{self, Activation, Report, Stored};
+use ordo_host::apply_op::{self, Activation, ApplyRefused, Report, Stored};
 use ordo_host::schema_apply::Program;
 
 const V020: &str = "domain tasks @ 0.2.0
@@ -84,6 +84,10 @@ async fn fresh(stem: &str) -> Pool {
 }
 
 async fn apply(pool: &Pool, source: &str) -> Report {
+    try_apply(pool, source).await.expect("applies")
+}
+
+async fn try_apply(pool: &Pool, source: &str) -> Result<Report, ApplyRefused> {
     let program = Program::compile(source).expect("compiles");
     apply_op::run_program(
         pool,
@@ -95,7 +99,6 @@ async fn apply(pool: &Pool, source: &str) -> Report {
         true,
     )
     .await
-    .expect("applies")
 }
 
 fn artifact(p: &Program, version: &str) -> Artifact {
@@ -144,37 +147,66 @@ async fn comments_and_spacing_are_the_same_version() {
     assert!(report.notes.is_empty(), "{:?}", report.notes);
 }
 
-/// **A change under the same number is kept apart, never refused.**
+/// **A real change needs a version of its own** (ask 13). The refusal
+/// names the next number; nothing is stored and nothing switches.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_change_under_the_same_number_is_a_revision_with_a_warning() {
-    let pool = fresh("ordo_vid_revision").await;
+async fn a_change_under_the_same_number_is_refused_naming_the_next() {
+    let pool = fresh("ordo_vid_taken").await;
     apply(&pool, V020).await;
-    let report = apply(&pool, V020_CHANGED).await;
-    assert_eq!(report.version, "0.2.0+r2");
-    assert_eq!(report.stored, Stored::Written);
-    assert!(matches!(report.activation, Activation::Switched { .. }));
-    assert!(
-        report
-            .notes
-            .iter()
-            .any(|n| n.contains("0.2.0+r2") && n.contains("@ 0.2.0")),
-        "the warning names the revision and the number to raise: {:?}",
-        report.notes
+    let refused = try_apply(&pool, V020_CHANGED).await.expect_err("refused");
+    assert_eq!(
+        refused,
+        ApplyRefused::VersionTaken {
+            version: "0.2.0".into(),
+            next: Some("0.2.1".into())
+        }
     );
+    assert_eq!(refused.class(), "version_taken");
+    let text = refused.to_string();
+    assert!(
+        text.contains("@ 0.2.1") && text.contains("--bump"),
+        "{text}"
+    );
+    assert_eq!(
+        ordo_host::schema_apply::NameRefusal::read_taken(&text),
+        Some(("0.2.0".into(), "0.2.1".into())),
+        "`--bump` reads back what the door sends"
+    );
+    let stored = one(&pool, "SELECT count(*) FROM \"$artifacts\"").await;
+    assert_eq!(stored.as_deref(), Some("1"), "nothing stored");
+
+    // The preview says the same before anything is tried.
+    assert!(matches!(
+        apply_op::preview(&pool, V020_CHANGED).await,
+        Err(ApplyRefused::VersionTaken { .. })
+    ));
 
     // The first content again is the first version again.
     let back = apply(&pool, V020).await;
     assert_eq!(back.version, "0.2.0");
     assert_eq!(back.stored, Stored::AlreadyPresent);
 
-    // A raised number is a version of its own, with no warning.
-    let raised = apply(&pool, &V020_CHANGED.replace("@ 0.2.0", "@ 0.3.0")).await;
-    assert_eq!(raised.version, "0.3.0");
-    assert!(raised.notes.is_empty(), "{:?}", raised.notes);
+    // The raised number is a version of its own.
+    let raised = apply(&pool, &V020_CHANGED.replace("@ 0.2.0", "@ 0.2.1")).await;
+    assert_eq!(raised.version, "0.2.1");
+    assert_eq!(raised.stored, Stored::Written);
+    assert!(matches!(raised.activation, Activation::Switched { .. }));
+
+    // The next refusal counts up from the highest number stored.
+    let again = try_apply(
+        &pool,
+        &V020_CHANGED.replace("due:   int?", "due:   int?\n  note:  text?"),
+    )
+    .await
+    .expect_err("refused");
+    assert!(
+        matches!(&again, ApplyRefused::VersionTaken { next: Some(n), .. } if n == "0.2.2"),
+        "{again:?}"
+    );
 }
 
 /// A program with no `@` is named as before, by the digest of what it
-/// compiles to: a lint pass keeps it, a change moves it, and neither warns.
+/// compiles to: a lint pass keeps it, and a change moves it (ask 10 open).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_program_with_no_declared_version_is_named_by_its_compiled_digest() {
     let pool = fresh("ordo_vid_undeclared").await;
@@ -190,7 +222,6 @@ async fn a_program_with_no_declared_version_is_named_by_its_compiled_digest() {
     assert_eq!(linted.stored, Stored::AlreadyPresent);
     let changed = apply(&pool, &V020_CHANGED.replace("domain tasks @ 0.2.0\n", "")).await;
     assert_ne!(changed.version, first.version);
-    assert!(changed.notes.is_empty(), "{:?}", changed.notes);
 }
 
 /// **An Ordo release's own changes move nothing.** The stored build of

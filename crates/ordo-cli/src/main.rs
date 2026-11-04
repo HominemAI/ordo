@@ -114,13 +114,16 @@ fn usage() -> ! {
          database deliberately: verify, checkpoint, prune, revert and keys\n\
          must work when the door does not, and a verification that can only\n\
          be performed by the thing under suspicion is not a verification.\n  \
-         ordo apply     <dir|file.ordo> [--as <actor>] [--no-activate]\n      \
-         compile the program, store its artifact under its version hash,\n      \
+         ordo apply     <dir|file.ordo> [--as <actor>] [--no-activate] [--bump]\n      \
+         compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
          refuse it stores and does not activate, naming `ordo migrate\n      \
          --apply`. An op that does not compile refuses the whole apply.\n      \
          `--no-activate` stores without re-pointing, for a staged deploy.\n      \
+         A real change under an `@` version already applied is refused,\n      \
+         naming the next number; comments and spacing never count.\n      \
+         `--bump` writes that number into the source and applies again.\n      \
          It then waits until every running node serves the new version and\n      \
          has brought the tenants' databases to it, and names any tenant\n      \
          held closed. `--wait-secs <n>` (or ORDO_APPLY_WAIT_SECS, default\n      \

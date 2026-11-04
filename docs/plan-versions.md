@@ -42,7 +42,6 @@ Each side owns its own changes:
 | | Names or records | Decided by |
 |---|---|---|
 | **Version** | `domain notes @ 0.2.0`, as declared | the developer |
-| **Revision** | `0.2.0+r2`, when the program changed under the same number | the apply's comparison |
 | **Build** | the compiled document and DDL, plus the Ordo release, one `$builds` row each | the Ordo release |
 | **Source fingerprint** | full SHA-256 of the files as written; a check, never a name | promotion (§3.1) |
 
@@ -57,9 +56,14 @@ How an apply names a program (`schema_apply::name_version`):
 - A match is that version. Comments, spacing and blank lines never reach
   the compiled program, so a lint pass is not a release.
 - No match under a new number is that number.
-- No match under a used number is the next revision, with a warning to
-  raise the number. **Nothing about versioning is ever refused** (owner,
-  2026-11-03: "I don't want any hard blocks on versioning").
+- No match under a used number is **refused**, naming the next number:
+  one patch above the highest stored (owner, 2026-11-03, ask 13: "We
+  need to block on version in the same file if the file has changed",
+  formatting excepted). The source then always names what is applied.
+  A change to a function's code alone is a real change too.
+- `ordo apply --bump` writes that number into the file and applies again,
+  over the door as well (ask 12). A plain apply never edits files.
+  `ordo dev` uses no registry and is never refused.
 - A program with no `@` is named as before, by the 16-hex digest of what
   it compiles to (ask 8).
 - A version stored before 2026-11-03 keeps its 16-hex name (ask 7). The
@@ -567,12 +571,19 @@ task `program-versions-the-core-under-schema`:
 
 - Ask 5, ruled 2026-11-03: a source with no edition line is edition 1 for
   good.
-- Ask 6, ruled 2026-11-03: the declared `@` version names a version; a
-  change under the same number is a revision with a warning, never a
-  refusal.
+- Ask 6, ruled 2026-11-03: the declared `@` version names a version.
+  Its "revision with a warning" half was replaced the same day by ask 13.
+- Ask 9, open: refuse new content under a number lower than the newest.
+- Ask 10, open: refuse or warn when a program declares no `@`.
+- Ask 11, moot after ask 13: promotion needs no rule for `+r` names.
+- Ask 12, ruled 2026-11-03: `ordo apply --bump` raises the number in the
+  file, opt-in.
+- Ask 13, ruled 2026-11-03: a real change under a used number is refused
+  on every path, naming the next number; comments and spacing never are.
 - Ask 7, ruled 2026-11-03: a version stored under a 16-hex name keeps it.
-- Ask 8, open, built on its recommendation: a program with no `@` is named
-  by the 16-hex digest of what it compiles to, as before.
+- Ask 8, open: show an order number (#1, #2, ...) beside every version.
+  A program with no `@` is still named by the 16-hex digest of what it
+  compiles to, as before.
 
 ---
 

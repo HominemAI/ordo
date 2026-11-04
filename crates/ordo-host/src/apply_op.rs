@@ -454,6 +454,13 @@ pub enum ApplyRefused {
     /// A step before the decision failed: a count, a DDL rendering, the
     /// registry.
     Internal(String),
+    /// The declared `@` version is already applied with different content.
+    /// The developer raises the number; `next` is the one to use (owner,
+    /// 2026-11-03, ask 13). `ordo apply --bump` writes it into the file.
+    VersionTaken {
+        version: String,
+        next: Option<String>,
+    },
 }
 
 impl ApplyRefused {
@@ -468,6 +475,7 @@ impl ApplyRefused {
             ApplyRefused::UnknownVersion(_) => "unknown_version",
             ApplyRefused::Code(_) => "function_code_refused",
             ApplyRefused::Internal(_) => "internal",
+            ApplyRefused::VersionTaken { .. } => "version_taken",
         }
     }
 
@@ -480,7 +488,8 @@ impl ApplyRefused {
             ApplyRefused::Ghost { .. } => ErrorCode::SchemaDrift,
             ApplyRefused::Broken { .. }
             | ApplyRefused::DoesNotCompile(_)
-            | ApplyRefused::Code(_) => ErrorCode::ApplyRefused,
+            | ApplyRefused::Code(_)
+            | ApplyRefused::VersionTaken { .. } => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -537,7 +546,22 @@ impl std::fmt::Display for ApplyRefused {
             ),
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Internal(e) => write!(f, "{e}"),
+            ApplyRefused::VersionTaken { version, next } => write!(
+                f,
+                "{}",
+                sa::NameRefusal::Taken {
+                    version: version.clone(),
+                    next: next.clone(),
+                }
+            ),
         }
+    }
+}
+
+fn refused(e: sa::NameRefusal) -> ApplyRefused {
+    match e {
+        sa::NameRefusal::Taken { version, next } => ApplyRefused::VersionTaken { version, next },
+        sa::NameRefusal::Registry(e) => ApplyRefused::Internal(format!("registry: {e}")),
     }
 }
 
@@ -643,11 +667,7 @@ async fn sequence(
     // below writes the name into `$migrations`, so an unchanged program
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
-    let naming = sa::name_version(pool, program)
-        .await
-        .map_err(ApplyRefused::Internal)?;
-    let mut notes = notes;
-    notes.extend(naming.note.clone());
+    let naming = sa::name_version(pool, program).await.map_err(refused)?;
     let renamed;
     let program = if naming.version != program.version {
         let mut p = program.clone();
@@ -1102,10 +1122,10 @@ pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused>
     // The name the apply would store it under (see `sequence`). A registry
     // no apply has touched since 2026-11-03 has no `declared` column yet,
     // which reads as "not stored", and the apply then fills it in.
-    let mut notes = notes;
-    if let Ok(naming) = sa::name_version(pool, &program).await {
-        program.version = naming.version;
-        notes.extend(naming.note);
+    match sa::name_version(pool, &program).await {
+        Ok(naming) => program.version = naming.version,
+        Err(e @ sa::NameRefusal::Taken { .. }) => return Err(refused(e)),
+        Err(sa::NameRefusal::Registry(_)) => {}
     }
     let serving = registry::active_version(pool).await.ok().flatten();
     let already_stored = registry::get(pool, &program.version)
@@ -1706,6 +1726,10 @@ mod tests {
             },
             ApplyRefused::InProgress,
             ApplyRefused::Internal("x".into()),
+            ApplyRefused::VersionTaken {
+                version: "0.2.0".into(),
+                next: None,
+            },
         ];
         for r in &all {
             assert!(!r.class().is_empty());

@@ -889,14 +889,20 @@ async fn a_server_with_no_routing_or_credentials_settings_gives_a_new_tenant_its
 
 // ── 25i: a program update ────────────────────────────────────────────────
 
-/// The notes program with one more field, for an update that adds.
+/// The notes program with one more field, for an update that adds. A real
+/// change takes a version of its own (owner, 2026-11-03, ask 13).
 fn with_pinned() -> String {
-    let with = SOURCE.replace(
+    let with = raised(&SOURCE.replace(
         "  created: datetime\n",
         "  created: datetime\n  pinned: bool = false\n",
-    );
+    ));
     assert_ne!(with, SOURCE, "the marker line moved");
     with
+}
+
+/// `source` declared one patch above the notes program's own version.
+fn raised(source: &str) -> String {
+    ordo_plan::artifact::with_declared(source, "0.1.0", "0.1.1").expect("notes declares @ 0.1.0")
 }
 
 async fn has_column(pool: &Pool, table: &str, column: &str) -> bool {
@@ -995,7 +1001,7 @@ async fn a_change_one_tenants_data_cannot_take_closes_that_tenant_alone() {
     // Bo has written nothing: a constraint is applied only over a table that
     // holds no rows, so an empty tenant takes it and a used one does not.
 
-    let unique = SOURCE.replace("  title: text\n", "  title: text unique\n");
+    let unique = raised(&SOURCE.replace("  title: text\n", "  title: text unique\n"));
     assert_ne!(unique, SOURCE, "the marker line moved");
     d.apply_program(&unique, true).await;
 

@@ -13018,8 +13018,9 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       Built 2026-11-03 as increment 1 of `plan-versions.md`. The owner
       ruled the same day that the declared `@` version names a version
       (ask 6). An apply compares compiled programs under one Ordo release
-      to decide the name, so comments never count; a change under a used
-      number is a revision (`0.2.0+r2`) with a warning. The source
+      to decide the name, so comments never count; a real change under a
+      used number is refused, naming the next number, and
+      `ordo apply --bump` writes it into the file (asks 12 and 13). The source
       fingerprint, full SHA-256 of the files, is the byte-stable check
       this item asks for; Linux CI matched its pinned value 2026-11-03
       (run 41708525773).

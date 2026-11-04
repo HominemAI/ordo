@@ -200,6 +200,50 @@ async fn the_bound_reaches_a_statement_inside_a_transaction() {
     pool.rows("SELECT 1").await.expect("the pool re-dials");
 }
 
+/// Ordo's own tables are made outside the bound (owner, 2026-11-04). A
+/// boot that waits its turn behind another replica's setup for longer than
+/// the bound still starts: the wait is held here by a second session
+/// taking the setup lock for a second, five times the bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_platform_tables_are_made_outside_the_bound() {
+    const FRESH: &str = "ordo_noisy_neighbour_boot";
+    let cfg = PoolConfig {
+        db: FRESH.into(),
+        ..cfg(2)
+    };
+    ordo_exec::drop_database(&cfg, FRESH).await.expect("drop");
+    ordo_exec::create_database(&cfg, FRESH)
+        .await
+        .expect("database");
+    let other = Pool::connect_own(cfg.clone(), PoolLimits::default())
+        .await
+        .expect("a second session");
+    let held = tokio::spawn(async move {
+        other
+            .rows(&format!(
+                "SELECT pg_advisory_xact_lock({}, 0), pg_sleep(1)",
+                ordo_exec::PLATFORM_DDL_LOCK_NS
+            ))
+            .await
+            .expect("held");
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let pool = Pool::connect_with(
+        cfg,
+        PoolLimits {
+            statement_timeout: Some(Duration::from_millis(200)),
+            ..PoolLimits::default()
+        },
+    )
+    .await
+    .expect("boot waits its turn and starts");
+    held.await.expect("the holder finished");
+    pool.rows("SELECT 1 FROM \"$commandlog\" LIMIT 0")
+        .await
+        .expect("the tables are made");
+}
+
 /// The bound is a policy, not a law: an operator who needs a migration
 /// window turns it off, and the same statement runs.
 #[tokio::test(flavor = "multi_thread")]

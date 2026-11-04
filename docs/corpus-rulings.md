@@ -12063,3 +12063,12 @@ while building increment 2. Both answered "ok" on their recommendations.
   holds no personal data (the space id, version names, the deployment owner
   who moved the pin), and it answers what a tenant was served, and when,
   after the tenant is gone.
+
+## 2026-11-04: Ordo's own boot setup is outside the statement bound
+
+Board task `the-statement-bound-also-covered-the`, ask 1. The owner: "agreed", to the recommendation to exempt it.
+
+- **What was seen.** A test bounded at 200 ms failed at boot on CI. The pool makes Ordo's own tables when it starts, and that ran under the per-statement bound (`ORDO_PG_STATEMENT_TIMEOUT_MS`, default 30 s).
+- **The ruling.** The table setup at boot runs with no statement bound. A slow change to a big table, or a wait behind another replica's setup, must not stop the host starting.
+- **What stays bounded.** A wait on a table lock that traffic holds uses `lock_timeout` at the same value. The catalog reads that decide whether anything needs making keep the statement bound.
+- **Where.** `Pool::ensure_platform_tables` (`crates/ordo-exec/src/lib.rs`). Guarded by `noisy_neighbour.rs::the_platform_tables_are_made_outside_the_bound`, which fails without it.

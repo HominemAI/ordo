@@ -1067,10 +1067,22 @@ impl Pool {
                 continue;
             }
             let tx = self.begin().await?;
+            // Ordo's own tables are made outside the per-statement bound
+            // (owner, 2026-11-04): a slow change to a big table must not
+            // stop the host starting, and a boot waiting its turn behind
+            // another replica's is not stuck. A wait on a table lock that
+            // traffic holds stays bounded, by `lock_timeout` at the same
+            // value. The catalog probes above are plain reads and keep the
+            // bound.
+            tx.rows("SET LOCAL statement_timeout = 0").await?;
             tx.rows(&format!(
                 "SELECT pg_advisory_xact_lock({PLATFORM_DDL_LOCK_NS}, 0)"
             ))
             .await?;
+            if let Some(bound) = self.shared.limits.statement_timeout {
+                tx.rows(&format!("SET LOCAL lock_timeout = {}", bound.as_millis()))
+                    .await?;
+            }
             for stmt in &pending {
                 tx.rows(stmt).await?;
             }

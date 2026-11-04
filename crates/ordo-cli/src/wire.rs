@@ -1254,6 +1254,57 @@ pub async fn diff_over_the_wire(
     }
 }
 
+/// One deploy op's result row through the door: a `POST` with a touch for
+/// a change, a `GET` for a read. A refusal is the door's, rendered as every
+/// `--host` command renders one.
+pub(crate) async fn door_op(
+    host: &Host,
+    flags: &Flags,
+    op: &str,
+    params: Value,
+    write: bool,
+) -> Result<Value, Outcome> {
+    let token = token(flags).await.map_err(Outcome::usage)?;
+    let space = space(flags).map_err(Outcome::usage)?;
+    let (path, result) = if write {
+        let path = format!("/op/{op}");
+        let mut body = params;
+        body["$space"] = Value::String(space.clone());
+        let r = post_touching(host, &path, flags, &token, &space, body.to_string(), None).await;
+        (path, r)
+    } else {
+        let query = params
+            .as_object()
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| {
+                        let v = match v {
+                            Value::String(s) => s.clone(),
+                            Value::Null => return None,
+                            other => other.to_string(),
+                        };
+                        Some(format!("{k}={}", query_escape(&v)))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&")
+            })
+            .unwrap_or_default();
+        let path = if query.is_empty() {
+            format!("/op/{op}")
+        } else {
+            format!("/op/{op}?{query}")
+        };
+        let r = get_json_in(host, &path, &token, Some(&space)).await;
+        (path, r)
+    };
+    let (status, value) =
+        result.map_err(|e| Outcome::failed(format!("REFUSED  {}: {e}\n", host.url(&path))))?;
+    if status >= 400 {
+        return Err(door_refusal(status, &value));
+    }
+    Ok(value["rows"][0].clone())
+}
+
 /// A program version cut to 12 characters for a table.
 fn short_version(v: &str) -> &str {
     &v[..v.char_indices().nth(12).map_or(v.len(), |(i, _)| i)]

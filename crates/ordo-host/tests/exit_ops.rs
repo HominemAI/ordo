@@ -650,6 +650,21 @@ async fn deletion_needs_the_spaces_own_id_and_then_ends_the_space() {
         ))
         .await
         .expect("a pin row");
+    // A maintenance window that lists it, which erasure drops it from.
+    ordo_host::windows::Windows::on(&h.pool)
+        .ensure()
+        .await
+        .expect("$windows");
+    h.pool
+        .rows(&format!(
+            "INSERT INTO \"$windows\" (\"id\", \"target\", \"kind\", \"cron\", \
+               \"length_secs\", \"message\", \"set_by\", \"set_at\") \
+             VALUES ('nightly', 'only', 'cron', '0 1 * * *', 60, 'm', 'dev:ada', 1); \
+             INSERT INTO \"$window_tenants\" (\"window_id\", \"space\") \
+             VALUES ('nightly', '{DEFAULT_SPACE}')"
+        ))
+        .await
+        .expect("a window");
 
     // Right.
     let (status, body) = delete(&h.state, DEFAULT_SPACE, Some(&t)).await;
@@ -680,6 +695,20 @@ async fn deletion_needs_the_spaces_own_id_and_then_ends_the_space() {
         pins[0][0].as_deref(),
         Some("1"),
         "the pin history outlives the space"
+    );
+    let listed =
+        h.pg.query(&format!(
+            "SELECT count(*) FROM \"$window_tenants\" WHERE \"space\" = '{DEFAULT_SPACE}'"
+        ))
+        .expect("count");
+    assert_eq!(listed[0][0].as_deref(), Some("0"), "no window names it");
+    let windows =
+        h.pg.query("SELECT count(*) FROM \"$windows\"")
+            .expect("count");
+    assert_eq!(
+        windows[0][0].as_deref(),
+        Some("1"),
+        "the window is the deployment's"
     );
     // The artifact registry is deployment state, not the space's. A
     // deleted space must not take the deployment's program with it.

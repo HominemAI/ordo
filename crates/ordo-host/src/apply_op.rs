@@ -480,6 +480,10 @@ pub enum ApplyRefused {
     /// one line of at most 80 characters. The caller's to fix; nothing was
     /// applied.
     Provenance(String),
+    /// The version is revoked (D8, `plan-versions.md` §1.11), so it is not
+    /// activated or rolled back to. The text names the revoke and the
+    /// command that lifts it.
+    Revoked(String),
 }
 
 impl ApplyRefused {
@@ -497,6 +501,7 @@ impl ApplyRefused {
             ApplyRefused::VersionTaken { .. } => "version_taken",
             ApplyRefused::VersionBehind { .. } => "version_behind",
             ApplyRefused::Provenance(_) => "provenance_refused",
+            ApplyRefused::Revoked(_) => "version_revoked",
         }
     }
 
@@ -511,7 +516,8 @@ impl ApplyRefused {
             | ApplyRefused::DoesNotCompile(_)
             | ApplyRefused::Code(_)
             | ApplyRefused::VersionTaken { .. }
-            | ApplyRefused::VersionBehind { .. } => ErrorCode::ApplyRefused,
+            | ApplyRefused::VersionBehind { .. }
+            | ApplyRefused::Revoked(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -569,6 +575,8 @@ impl std::fmt::Display for ApplyRefused {
             ),
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
+            // Its text leads with the class already.
+            ApplyRefused::Revoked(e) => write!(f, "{e}"),
             ApplyRefused::Internal(e) => write!(f, "{e}"),
             ApplyRefused::VersionTaken { version, next } => write!(
                 f,
@@ -978,6 +986,9 @@ async fn sequence(
             Ok(versions::Activated::AlreadyActive(version)) => {
                 Activation::AlreadyActive { version }
             }
+            Err(e @ versions::VersionRefusal::Revoked { .. }) => {
+                return Err(ApplyRefused::Revoked(e.to_string()))
+            }
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
         }
     };
@@ -1092,6 +1103,27 @@ async fn activate_locked(
         .ensure()
         .await
         .map_err(|e| ApplyRefused::Internal(format!("registry tables: {e}")))?;
+    gate(pool, version).await?;
+    // The same re-point as an apply's, pins included.
+    match Versions::on(pool)
+        .activate(version, actor, ordo_commandlog::Timestamp(now_secs()))
+        .await
+    {
+        Ok(versions::Activated::Switched { from, to }) => Ok(Activation::Switched { from, to }),
+        Ok(versions::Activated::AlreadyActive(version)) => {
+            Ok(Activation::AlreadyActive { version })
+        }
+        Err(versions::VersionRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
+        Err(e @ versions::VersionRefusal::Revoked { .. }) => {
+            Err(ApplyRefused::Revoked(e.to_string()))
+        }
+        Err(e) => Err(ApplyRefused::Internal(e.to_string())),
+    }
+}
+
+/// The load gate an activation passes: a stored version whose tables this
+/// database holds, so a node could load it.
+async fn gate(pool: &Pool, version: &str) -> Result<(), ApplyRefused> {
     let stored = Versions::on(pool)
         .get(version)
         .await
@@ -1127,18 +1159,82 @@ async fn activate_locked(
             })
         }
     }
-    // The same re-point as an apply's, pins included.
-    match Versions::on(pool)
-        .activate(version, actor, ordo_commandlog::Timestamp(now_secs()))
-        .await
-    {
-        Ok(versions::Activated::Switched { from, to }) => Ok(Activation::Switched { from, to }),
-        Ok(versions::Activated::AlreadyActive(version)) => {
-            Ok(Activation::AlreadyActive { version })
+    Ok(())
+}
+
+/// Why a revoke did not happen: the apply lock or the load gate the move
+/// passes ([`ApplyRefused`]), or the `Versions` client's own refusal.
+#[derive(Debug)]
+pub enum RevokeRefused {
+    Apply(ApplyRefused),
+    Version(versions::VersionRefusal),
+}
+
+impl RevokeRefused {
+    /// The one place it becomes a door answer.
+    pub fn to_exec_error(&self, what: &str) -> ExecError {
+        match self {
+            RevokeRefused::Apply(r) => ExecError::new(r.code(), format!("{what}: {r}")),
+            RevokeRefused::Version(e) => e.to_exec_error(what),
         }
-        Err(versions::VersionRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
-        Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }
+}
+
+impl std::fmt::Display for RevokeRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RevokeRefused::Apply(r) => write!(f, "{r}"),
+            RevokeRefused::Version(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// **Revoke a stored version** (D8, asks 18 and 20): `ordo versions
+/// revoke` and `std.deployment.revoke` both call this.
+///
+/// Under the apply lock, so it queues with applies and activations. When
+/// the version is the active one and `move_to` names where tenants go, the
+/// move passes [`activate`]'s load gate first, and then
+/// [`Versions::revoke`] makes the activation and the revoke one
+/// transaction.
+pub async fn revoke(
+    pool: &Pool,
+    version: &str,
+    reason: &str,
+    move_to: Option<&str>,
+    actor: &str,
+) -> Result<versions::Revoked, RevokeRefused> {
+    let lock = match ApplyLock::take(pool).await {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Err(RevokeRefused::Apply(ApplyRefused::InProgress)),
+        Err(e) => return Err(RevokeRefused::Apply(ApplyRefused::Internal(e))),
+    };
+    let out = async {
+        let v = Versions::on(pool);
+        v.ensure().await.map_err(RevokeRefused::Version)?;
+        // The checks `Versions::revoke` repeats in its transaction, made
+        // here first so the gate runs only for a move that would happen.
+        versions::check_reason(reason).map_err(RevokeRefused::Version)?;
+        let named = v.resolve(version).await.map_err(RevokeRefused::Version)?;
+        let active = v.active_version().await.map_err(RevokeRefused::Version)?;
+        if let (Some(to), true) = (move_to, active.as_deref() == Some(named.as_str())) {
+            let to = v.resolve(to).await.map_err(RevokeRefused::Version)?;
+            if to != named
+                && v.revocation_of(&to)
+                    .await
+                    .map_err(RevokeRefused::Version)?
+                    .is_none()
+            {
+                gate(pool, &to).await.map_err(RevokeRefused::Apply)?;
+            }
+        }
+        v.revoke(version, reason, move_to, actor, now_secs())
+            .await
+            .map_err(RevokeRefused::Version)
+    }
+    .await;
+    lock.release().await;
+    out
 }
 
 /// What is stored, what serves, and every re-point, newest first.
@@ -1155,6 +1251,9 @@ pub struct History {
     /// How many tenants are pinned to each version (`plan-versions.md`
     /// §1.3). A version no tenant is pinned to is absent.
     pub tenants: std::collections::BTreeMap<String, u64>,
+    /// Each revoked version's mark (§1.11). A version not revoked is
+    /// absent.
+    pub revoked: std::collections::BTreeMap<String, versions::Revocation>,
 }
 
 /// The deployment's program history: `std.deployment.versions` and `ordo
@@ -1180,6 +1279,7 @@ pub async fn history(pool: &Pool, limit: usize) -> Result<History, versions::Ver
                     .collect(),
                 activations: v.activations(limit).await?,
                 tenants: v.tenants_per_version().await?,
+                revoked: v.revocations().await?,
             })
         }
         .await,
@@ -1200,6 +1300,11 @@ impl History {
                 "actor": by,
                 "serving": Some(v) == self.active.as_ref(),
                 "tenants": self.tenants.get(v).copied().unwrap_or(0),
+                "revoked": self.revoked.get(v).map(|r| json!({
+                    "reason": r.reason,
+                    "actor": r.actor,
+                    "at": r.at,
+                })),
             })).collect::<Vec<_>>(),
             "activations": self.activations.iter().map(|a| json!({
                 "seq": a.seq,

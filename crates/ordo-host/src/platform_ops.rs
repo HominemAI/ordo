@@ -1042,6 +1042,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::secrets::specs())
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
+    .chain(crate::window_ops::specs())
     .chain(crate::fleet::specs())
     .chain(crate::settings::specs())
     .chain(crate::quotas::specs())
@@ -1840,6 +1841,10 @@ pub fn owner_only(name: &str) -> bool {
         // G1 to G3: the program's history, its rollback and its preview
         // are the deployment's, on `APPLY`'s terms.
         || crate::deploy_ops::OPS.contains(&name)
+        // Maintenance windows (owner, 2026-11-04): the app developer's
+        // contract with each tenant, set by the deployment owner on
+        // `APPLY`'s terms. A tenant has no say in them through Ordo.
+        || crate::window_ops::OPS.contains(&name)
         // 17aa. Owner, and then narrower still for `APPLY`'s exact reason:
         // `TenantOps::create` refuses unless the bound space is the
         // platform's own. Creating the next tenant decides who the
@@ -2709,6 +2714,9 @@ impl PlatformOps {
             crate::apply_op::APPLY => self.apply_ops()?.apply(space, bound, caller).await,
             name if crate::deploy_ops::OPS.contains(&name) => {
                 crate::deploy_ops::execute(self.apply_ops()?, name, space, bound, caller).await
+            }
+            name if crate::window_ops::OPS.contains(&name) => {
+                crate::window_ops::execute(self.apply_ops()?, name, space, bound, caller).await
             }
             crate::tenant_ops::CREATE => self.tenant_ops()?.create(space, bound, caller).await,
             crate::reap_op::REAP => self.reap_ops()?.reap(space, bound, caller).await,

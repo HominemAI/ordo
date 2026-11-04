@@ -550,8 +550,40 @@ fn a_code_change_alone_is_a_new_version_over_the_wire() {
     let first = over_the_wire(&program_with_fn("fn_v1", HELLO_JS), addr, &token(DEP_OWNER));
     assert_eq!(first.code, 0, "{}", first.report);
     let changed = HELLO_JS.replace("said", "heard");
-    let second = over_the_wire(&program_with_fn("fn_v2", &changed), addr, &token(DEP_OWNER));
+    let path = program_with_fn("fn_v2", &changed);
+    // A real change, the code's included, takes a version of its own
+    // (owner, 2026-11-03, ask 13): unraised, the door refuses it by name.
+    let unraised = over_the_wire(&path, addr, &token(DEP_OWNER));
+    assert!(
+        unraised.report.contains("version_taken"),
+        "{}",
+        unraised.report
+    );
+    // `--bump` reads the number from the door's refusal, raises it in the
+    // file, and applies again.
+    let second = operator::run(
+        "apply",
+        &[
+            path.clone(),
+            "--bump".into(),
+            "--host".into(),
+            format!("http://{addr}"),
+            "--token".into(),
+            token(DEP_OWNER),
+            "--space".into(),
+            HOME.into(),
+            "--no-wait".into(),
+        ],
+    );
     assert_eq!(second.code, 0, "{}", second.report);
+    assert!(
+        second.report.contains("@ 0.1.0 -> @ 0.1.1"),
+        "{}",
+        second.report
+    );
+    assert!(std::fs::read_to_string(&path)
+        .expect("read")
+        .contains("domain fx @ 0.1.1"));
     assert_ne!(
         first.report, second.report,
         "a change to the code alone stores a new version"

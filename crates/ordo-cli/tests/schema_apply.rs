@@ -699,3 +699,64 @@ fn the_setting_off_restores_the_refusal() {
         "nothing was applied"
     );
 }
+
+// ── the declared version (owner, 2026-11-03, asks 12 and 13) ────────────
+
+/// A real change under an `@` version already applied is refused, naming
+/// the next number, and the file is left alone. `--bump` writes that
+/// number into the file, and nothing else, and applies again.
+#[test]
+fn a_change_under_a_used_version_is_refused_and_bump_raises_it() {
+    let _g = SETTING.lock().unwrap_or_else(|e| e.into_inner());
+    let db = "ordo_sapply_bump";
+    let pg = empty(db);
+    let v1 = format!("# tasks\ndomain tasks @ 0.2.0\n{V1}");
+    let path = program(db, "v", &v1);
+    let first = apply(&path, db);
+    assert_eq!(first.code, 0, "{}", first.report);
+
+    let v2 = format!("# tasks\ndomain tasks @ 0.2.0\n{V2}");
+    std::fs::write(&path, &v2).expect("write");
+    let refused = apply(&path, db);
+    assert_ne!(refused.code, 0, "{}", refused.report);
+    assert!(
+        refused.report.contains("version_taken") && refused.report.contains("@ 0.2.1"),
+        "{}",
+        refused.report
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        v2,
+        "file untouched"
+    );
+
+    let bumped = operator::run(
+        "apply",
+        &[
+            path.clone(),
+            "--bump".into(),
+            "--db".into(),
+            db.into(),
+            "--as".into(),
+            "test".into(),
+        ],
+    );
+    assert_eq!(bumped.code, 0, "{}", bumped.report);
+    assert!(
+        bumped.report.contains("@ 0.2.0 -> @ 0.2.1"),
+        "{}",
+        bumped.report
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        v2.replace("@ 0.2.0", "@ 0.2.1"),
+        "only the number changed"
+    );
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT \"version\" FROM \"$activations\" ORDER BY \"seq\" DESC LIMIT 1"
+        ),
+        "0.2.1"
+    );
+}

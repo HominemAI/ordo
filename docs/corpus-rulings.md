@@ -11988,3 +11988,38 @@ Board `program-versions-the-core-under-schema`, asks 5 to 7.
     Each side owns its own changes, and comparing under one release keeps
     Ordo's changes out of the developer's version.
 
+
+## 2026-11-03: a changed program needs a new version number
+
+Board task `program-versions-the-core-under-schema`, asks 12 and 13. The
+discussion started from ask 8 (programs with no `@`) and moved to what a
+source line means.
+
+- **The owner's concern:** "people and agents will work from source code -
+  so what is applied should match what is being applied", and "you could
+  have source code with the same version defined but it's a thousand
+  versions." A revision name (`0.2.0+r2`) lives only in the registry, so
+  the file stops naming what is live.
+- **Ask 13, ruled:** "Lets retract. We need to block on version in the
+  same file if the file has changed , the exeption being formatting like
+  white space and comments - similar to our previous work the proper
+  comparisons".
+  - A real change under an `@` number already applied is refused, on every
+    path: `ordo apply`, `ordo migrate --apply`, the door, the preview.
+  - The refusal names the next number, one patch above the highest stored.
+  - The comparison is the one built for ask 6: compiled output, with a
+    stored build from another Ordo release recompiled first. Comments,
+    spacing and blank lines are never refused.
+  - This replaces the "revision with a warning, never refused" half of ask
+    6. The owner's earlier words, "I don't want any hard blocks on
+    versioning", were about lint, and lint is still never refused.
+- **Ask 12, ruled:** "That version needs to be bumped, and optionally the
+  apply offers the ability to bump that version in file."
+  - `ordo apply --bump` writes the named number into the file, changing
+    nothing else, and applies again. It works over `--host` too.
+  - A plain apply never edits files.
+- **Ask 11** is moot: no `+r` names exist to promote.
+- **Reasoning:** one rule on every path is predictable, and the source is
+  then the true record of what runs, for people and agents alike. A
+  change to a function's code alone is a real change and needs a number
+  too. `ordo dev` keeps no registry and is never refused.

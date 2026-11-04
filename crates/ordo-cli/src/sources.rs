@@ -144,6 +144,18 @@ fn label_of(path: &Path) -> String {
 /// sorted at every level so a nested tree is walked in one order on every
 /// machine; the caller sorts the flattened result again, which is what
 /// actually pins the order.
+/// The `.ordo` files a path names: the file itself, or each one under the
+/// directory, in [`Sources::read`]'s order.
+pub fn files(path: &Path) -> Result<Vec<PathBuf>, String> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut found = Vec::new();
+    collect(path, path, &mut found)?;
+    found.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    Ok(found.into_iter().map(|(_, p)| p).collect())
+}
+
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?

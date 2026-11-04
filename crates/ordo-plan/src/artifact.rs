@@ -474,17 +474,47 @@ pub fn declared_version(source: &str) -> Option<String> {
     ordo_syntax::parse_program(source).ok()?.domain?.version
 }
 
-/// The name of the `n`th revision of a declared version, from 1.
-///
-/// The first is the declared version itself. A later one is stored when the
-/// compiled program changed under the same number: `0.2.0+r2`, semver's
-/// build-metadata form, "the same version, built again". A program that
-/// declares no `@` version is named by [`program_version`] instead.
-pub fn revision_name(declared: &str, n: u32) -> String {
-    match n {
-        1 => declared.to_string(),
-        n => format!("{declared}+r{n}"),
+/// The number to suggest when a declared version is taken by different
+/// content: one patch above the highest `x.y.z` among `taken` (owner,
+/// 2026-11-03, ask 13). Pre-release and build parts are ignored for the
+/// comparison. `None` when none of them reads as `x.y.z`.
+pub fn next_version<'a>(taken: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let (major, minor, patch) = taken.into_iter().filter_map(numbers_of).max()?;
+    Some(format!("{major}.{minor}.{}", patch + 1))
+}
+
+fn numbers_of(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+    let v = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(v)
+}
+
+/// `source` with its `domain … @ from` header raised to `to`, and nothing
+/// else touched: `ordo apply --bump` writes this back to the file (owner,
+/// 2026-11-03, ask 12). `None` when the source does not declare `from`.
+pub fn with_declared(source: &str, from: &str, to: &str) -> Option<String> {
+    let domain = ordo_syntax::parse_program(source).ok()?.domain?;
+    if domain.version.as_deref() != Some(from) {
+        return None;
     }
+    let mut out = String::with_capacity(source.len() + to.len());
+    let mut done = false;
+    for (i, line) in source.split_inclusive('\n').enumerate() {
+        if !done && i + 1 == domain.span.line as usize {
+            let at = line.find('@')?;
+            let rest = &line[at + 1..];
+            let gap = rest.len() - rest.trim_start().len();
+            let tail = rest[gap..].strip_prefix(from)?;
+            out.push_str(&line[..at + 1 + gap]);
+            out.push_str(to);
+            out.push_str(tail);
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    (done && declared_version(&out).as_deref() == Some(to)).then_some(out)
 }
 
 /// A version's **build identity**: the full SHA-256 of what this Ordo

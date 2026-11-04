@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use ordo_plan::artifact::{
-    build_identity, build_identity_of, code_hashes, declared_version, revision_name, short,
-    source_identity, to_bytes, FIRST_EDITION,
+    build_identity, build_identity_of, code_hashes, declared_version, next_version, short,
+    source_identity, to_bytes, with_declared, FIRST_EDITION,
 };
 use serde_json::json;
 
@@ -32,9 +32,38 @@ fn the_declared_version_is_read_from_the_domain_header() {
 }
 
 #[test]
-fn revisions_are_named_after_the_declared_version() {
-    assert_eq!(revision_name("0.2.0", 1), "0.2.0");
-    assert_eq!(revision_name("0.2.0", 2), "0.2.0+r2");
+fn the_next_number_is_one_patch_above_the_highest() {
+    assert_eq!(next_version(["0.2.0"]).as_deref(), Some("0.2.1"));
+    assert_eq!(
+        next_version(["0.2.0", "0.10.3", "0.9.9"]).as_deref(),
+        Some("0.10.4"),
+        "numbers compare as numbers, not text"
+    );
+    assert_eq!(
+        next_version(["1.0.0-beta.1", "0.4.0+r2"]).as_deref(),
+        Some("1.0.1")
+    );
+    assert_eq!(next_version(["v2", "1.0"]), None);
+}
+
+/// `--bump` changes the number and not one other byte.
+#[test]
+fn the_declared_version_is_raised_in_place() {
+    let source =
+        "# notes\r\ndomain notes  @  1.0.0   # first\r\n\r\nentity note {\r\n  body: text\r\n}\r\n";
+    let raised = with_declared(source, "1.0.0", "1.0.1").expect("raised");
+    assert_eq!(raised, source.replace("@  1.0.0", "@  1.0.1"));
+    assert_eq!(declared_version(&raised).as_deref(), Some("1.0.1"));
+    assert_eq!(
+        with_declared(source, "2.0.0", "2.0.1"),
+        None,
+        "not the declared one"
+    );
+    assert_eq!(
+        with_declared("entity note {\n  body: text\n}\n", "1.0.0", "1.0.1"),
+        None,
+        "no header"
+    );
 }
 
 /// **The same source gives the same fingerprint on every platform.** Pinned

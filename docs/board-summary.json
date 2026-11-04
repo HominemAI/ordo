@@ -1,6 +1,6 @@
 {
  "date": "2026-11-04",
- "text": "Versions increment 2 is built on bleeding: every tenant pinned to a version, labels, the git commit, and ordo versions diff [[program-versions-the-core-under-schema]]. Asks 16 and 17 ask whether the write check and the pin stream wait for increment 3. Ordo's own boot setup is now outside the statement bound [[the-statement-bound-also-covered-the]].",
+ "text": "Versions increments 2 and 2b are built on bleeding: pins, labels, diff, revoking a version, and maintenance windows set for all, only or all-except tenants [[program-versions-the-core-under-schema]]. Console screens for windows come next.",
  "tiles": [
   [
    "4,056",
@@ -36,7 +36,7 @@
  "look": [
   {
    "id": "program-versions-the-core-under-schema",
-   "why": "increment 2 built"
+   "why": "2b built; console next"
   },
   {
    "id": "notes-page-catch-up-flake",

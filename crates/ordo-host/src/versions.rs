@@ -1459,6 +1459,11 @@ impl<'a> Versions<'a> {
     /// pinned to it in a pinned state, oldest version first.
     pub async fn pinned_to_revoked(&self) -> Result<Vec<RevokedVersion>, VersionRefusal> {
         let marks = self.revocations().await?;
+        // Nothing revoked, nothing to report. A deployment with nothing
+        // applied has no `$artifacts` to read order numbers from either.
+        if marks.is_empty() {
+            return Ok(Vec::new());
+        }
         let ordinals = registry::ordinals(self.pool).await?;
         let mut out = Vec::with_capacity(marks.len());
         for (version, mark) in marks {

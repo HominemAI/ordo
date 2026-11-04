@@ -12100,4 +12100,5 @@ Board task `program-versions-the-core-under-schema`, asks 21 and 22.
   - An API endpoint sets a window and another deletes it.
   - A query lists the scheduled windows from 12 months back to 12 months ahead. A cron window is listed as each time the cron gives.
   - An optional skip endpoint suppresses windows over a time range, as an exception to a cron.
-- **Read as.** The endpoints belong to the deployment owner, since the window is the app developer's contract with the tenant and the tenant has no say through Ordo. A cron window needs a length and a time zone; this build takes both, UTC by default. The hold flag in the recommendation was not ruled; it stays with rollouts (increment 10).
+- **Read as.** The endpoints belong to the deployment owner, since the window is the app developer's contract with the tenant and the tenant has no say through Ordo. A cron window needs a length; it takes one. Its times are UTC, as every Ordo schedule's are (`every day 02:00Z`, DST sidestepped); a time zone is a later extension. The hold flag in the recommendation was not ruled; it stays with rollouts (increment 10).
+- **Console (owner, same day).** *"the console will need an interface to work with these as well."* The console gets screens to set, delete, skip and list a tenant's windows.

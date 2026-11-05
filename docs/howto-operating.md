@@ -229,10 +229,10 @@ ordo versions unrevoke '#3' --reason "fixed in the client"
 ordo versions revoked                       # each revoked version and the tenants on it
 ```
 
-- A revoked version is refused as an `ordo rollback` or activation target, as the version an apply activates, as `versions.new_tenant` (`ORDO_VERSIONS_NEW_TENANT`) and as any pin. The refusal names who revoked it, why, and the `ordo versions unrevoke` command.
+- A revoked version is refused as an `ordo rollback` or activation target, as the version an apply activates, as `versions.new_tenant` and as any pin. The refusal names who revoked it, why, and the `ordo versions unrevoke` command.
 - Revoking the active version is refused without `--move-to`. Ordo never picks where tenants go. With it, the activation to that version and the revoke happen in one change, and every tenant's pin moves as an activation moves it. The version moved to passes the same load gate as `ordo rollback`.
 - A version that is not active is only marked. Its tenants stay on it until they move off it (below). `--move-to` on it names where they go; leave it out and they go to the active version. `--move-to` naming the version itself, or a revoked one, is refused.
-- A revoke of the version `ORDO_VERSIONS_NEW_TENANT` names is refused, naming the variable. Set it to another version or unset it, then revoke. The check reads the variable on the host that runs the revoke, so set it the same on every node.
+- A revoke of the version `versions.new_tenant` names is refused, naming the setting. Set another (`ordo versions set new-tenant <version>`) or clear it (`--clear`), then revoke.
 - A reason is 1 to 500 characters. Every revoke and unrevoke is kept with who, why and when; `ordo versions show` lists them.
 - `ordo versions list` and `std.deployment.versions` show the mark and its reason.
 - Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door (`std.deployment.revoke`, `std.deployment.unrevoke`, `std.deployment.revoked`), deployment owner only.
@@ -307,8 +307,8 @@ A node can serve more than one version at once. The active version is the one an
 ## Versions and pins
 
 - **A pin** is the version one tenant is served. `$spaces.version` holds it, in the control database, with an epoch that grows by 1 on every change. `$pins` keeps every change: from, to, epoch, who, why, when.
-- **The active version** is where new tenants start (unless `ORDO_VERSIONS_NEW_TENANT` names another) and where an activation moves every tenant.
-- **A new tenant gets its own version's tables.** With `ORDO_VERSIONS_NEW_TENANT` set, each node keeps that version loaded, and a new tenant's database is made in its shape. A beta that adds a table works for its tenants at once. A node still loading it refuses the create for a moment, nothing made, and the identical call lands once it has. The catch-up leaves such a database alone; it is on its pin, not behind.
+- **The active version** is where new tenants start (unless `versions.new_tenant` names another) and where an activation moves every tenant.
+- **A new tenant gets its own version's tables.** With `versions.new_tenant` set, each node keeps that version loaded, and a new tenant's database is made in its shape. A beta that adds a table works for its tenants at once. A node still loading it refuses the create for a moment, nothing made, and the identical call lands once it has. The catch-up leaves such a database alone; it is on its pin, not behind.
 - **An activation moves every tenant at once**, a tenant you pinned elsewhere included. Rollouts that move tenants in batches come later.
 - **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no passkey touch, of a person or of a machine key, so you can move many tenants at once and your own system may drive moves (owner, 2026-11-05).
 - **See one tenant's version:** `ordo versions list --tenant <id>` prints its version, its epoch and every pin change. Through the door: `std.deployment.tenantVersion`.
@@ -317,10 +317,17 @@ A node can serve more than one version at once. The active version is the one an
 - **Loading.** A node loads every version a pin names at boot and when a pin first names it, one at a time. A request never starts a load. A tenant whose version is still loading answers "closed for a moment" and the same request lands once it has. A version no pin names any more is dropped.
 - **The pin fence.** Each tenant's own database records the newest epoch any node wrote under (`$pin_fence`). A node whose pin is older has its write refused, reads the pin again and writes once more. The caller sees one answer.
 - **Which moves wait for a maintenance window.** Only a move off a revoked version (above). An activation and a pin move a tenant at once, whatever its window says.
-- **Which versions stay served** is yours to set. `ORDO_VERSIONS_SERVED=in-use`, the default, serves every version a tenant is pinned to. A list, such as `ORDO_VERSIONS_SERVED=#4,#5`, serves only those beside the active version: a pin or move target outside it is refused, naming the value to add. A boot whose list leaves out a version tenants are on is refused the same way.
-- **The oldest version a tenant may stay on:** `ORDO_VERSIONS_MINIMUM=#4`. Tenants below it move in their maintenance window, or on demand (`ordo versions move`), as off a revoked version. Nothing is pinned, activated or started below it.
-- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (its `ORDO_VERSIONS_NEW_TENANT`), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads.
-- **Every node should agree on `ORDO_VERSIONS_NEW_TENANT`.** Each node writes its value to `$nodes`. A node that sees another with a different value logs a warning naming the setting, on every reconcile tick, until they agree.
+- **The version settings live in Ordo**, not the environment (owner, 2026-11-05). They are stored in the control database with who set each, when and why. Every node reads the one stored value.
+  - Read them: `ordo versions settings` (or `std.deployment.versionSettings`, or the console's Deploys screen). It prints the three and the recent changes.
+  - Change one: `ordo versions set <served|minimum|new-tenant> <value> --reason "..."`, or `--clear` for the default. Through the door: `std.deployment.setVersionSetting`. You, or your own system with a machine key that has the `deployment` grant. No passkey touch is asked below `ORDO_SECURITY_LEVEL=high`.
+  - A change is checked before it is kept. A refusal names the setting, the value and the command that fixes it.
+  - A change reaches every node at once, on the same notice as a pin, and at the latest on the next reconcile tick.
+- **Which versions stay served** is yours to set. `in-use`, the default, serves every version a tenant is pinned to. A list, such as `ordo versions set served '#4,#5'`, serves only those beside the active version: a pin or move target outside it is refused, naming the value to add. A list that leaves out a version tenants are on is refused the same way.
+- **The oldest version a tenant may stay on:** `ordo versions set minimum '#4'`. Tenants below it move in their maintenance window, or on demand (`ordo versions move`), as off a revoked version. Nothing is pinned, activated or started below it. A minimum above the active version is refused.
+- **Where new tenants start:** `ordo versions set new-tenant <version>`, such as a beta. A version not stored, revoked, or outside the served list is refused.
+- **Upgrading from the environment variables.** `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM` and `ORDO_VERSIONS_NEW_TENANT` are read once. On the first boot after the upgrade, a value set there is stored, if nothing is stored yet, and the log says the variable is now ignored and can be removed. Each later boot while it stays set logs that it is ignored. A value the checks refuse is not stored; the log says why, and the boot goes on.
+- **A stored problem never stops a boot.** If a stored setting no longer fits what is applied, boot logs it, naming the setting, and serves on (owner, 2026-11-02: an upgrade never stops a running deployment).
+- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (`versions.new_tenant` as that node last read it), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads.
 
 ## Health Endpoints
 

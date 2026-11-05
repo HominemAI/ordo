@@ -163,10 +163,7 @@ pub async fn delete(
     };
     if !super::recover::fresh_presence(&claims, now) {
         auth.record_refusal(OP, "presence-required", now);
-        return edge(
-            EdgeCode::PresenceRequired,
-            "deleting your account needs a fresh passkey assertion: POST /auth/step-up first",
-        );
+        return super::presence_refusal("deleting your account");
     }
     let principal = claims.principal.clone();
     if body.get("confirm").and_then(|c| c.as_str()) != Some(principal.0.as_str()) {

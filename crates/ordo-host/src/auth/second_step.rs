@@ -397,6 +397,117 @@ pub(super) fn redeem_reauth(
     })
 }
 
+/// A fresh sign-in **as the touch** (owner, 2026-11-05,
+/// `how-a-person-without-a-passkey`): `POST /auth/step-up` with the session's
+/// bearer and a reauth handle in [`REAUTH_HEADER`], in place of a passkey
+/// assertion. Answers the same session re-minted with presence now, exactly
+/// as a passkey step-up does, so every gate that asks for a touch (the op
+/// door's step-up, a console session's tenant reach, the account routes)
+/// accepts it with no gate of its own.
+///
+/// Refused:
+/// - a capability or delegated token, and an ended session
+///   ([`step_up_claims`]): presence is not delegable;
+/// - a person who holds a passkey, or a link in a recovery's quarantine
+///   (`ordo_identity::refresh_presence_by_reauth`): they are told to touch
+///   it, and the handle is not spent;
+/// - a handle that is missing, unknown, spent, or another person's
+///   ([`redeem_reauth`]): the one answer;
+/// - a handle with no second step behind it from a person who holds a
+///   second factor.
+pub(super) async fn step_up_by_reauth(
+    auth: &Arc<AuthState>,
+    headers: &axum::http::HeaderMap,
+    now: Timestamp,
+) -> Response {
+    const OP: &str = "auth.step-up";
+    let claims = match step_up_claims(auth, headers, OP, now) {
+        Ok(c) => c,
+        Err(r) => return *r,
+    };
+    let (auth2, headers2, claims2) = (auth.clone(), headers.clone(), claims.clone());
+    let done = tokio::task::spawn_blocking(move || {
+        let session = claims2.session.as_ref().expect("checked by step_up_claims");
+        // A console key session keeps its own short end, as a passkey
+        // step-up leaves it.
+        let ceiling = if super::console::is_console_session(&claims2) {
+            session.ceiling(auth2.console_session_secs())
+        } else {
+            session.ceiling(auth2.session_max_secs)
+        };
+        let expires = Timestamp(now.0.saturating_add(auth2.session_secs).min(ceiling.0));
+        // Who may use a sign-in as the touch is decided before the handle is
+        // spent, so a passkey holder keeps theirs for what it is good for.
+        let spec = {
+            let dir = auth2.lock_directory();
+            ordo_identity::refresh_presence_by_reauth(&dir, &claims2, now, expires)
+                .map_err(ReauthStepUp::Session)?
+        };
+        let who = &claims2.principal.0;
+        let proof = redeem_reauth(&auth2, &headers2, who, now).map_err(ReauthStepUp::Handle)?;
+        let holds = match auth2.second_factors() {
+            Some(sf) => sf
+                .holds_any(who)
+                .map_err(|_| ReauthStepUp::Handle("second-factor-store-unavailable"))?,
+            None => false,
+        };
+        if holds && !proof.second_step_done {
+            return Err(ReauthStepUp::Handle("second-step-required"));
+        }
+        Ok((spec, ceiling))
+    })
+    .await;
+    let (spec, ceiling) = match done {
+        Ok(Ok(x)) => x,
+        Ok(Err(ReauthStepUp::Session(ordo_identity::SessionError::PasskeyHeld { .. }))) => {
+            auth.record_refusal(OP, "passkey-held", now);
+            return ordo_api::EdgeError::new(
+                ordo_api::EdgeCode::PresenceRequired,
+                "you hold a passkey, so a fresh sign-in does not stand in for its touch: \
+                 POST /auth/step-up/begin, then POST /auth/step-up with the assertion. A \
+                 passkey added by a recovery counts once its quarantine ends",
+            )
+            .into_response();
+        }
+        Ok(Err(ReauthStepUp::Session(e))) => {
+            auth.record_refusal(OP, super::session_error_reason(&e), now);
+            return refused();
+        }
+        Ok(Err(ReauthStepUp::Handle(reason))) => {
+            auth.record_refusal(OP, reason, now);
+            return refused();
+        }
+        Err(_) => {
+            auth.record_refusal(OP, "ceremony-task-failed", now);
+            return refused();
+        }
+    };
+    auth.record(
+        Some(&claims.principal),
+        OP,
+        ordo_secevent::EventKind::StepUpSatisfied,
+        now,
+    );
+    let expires_at = spec.expires.0;
+    let token = token::mint(&auth.token_key, &spec);
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "token": token,
+            "expires_at": expires_at,
+            "session_expires_at": ceiling.0,
+        })),
+    )
+        .into_response()
+}
+
+/// Why a step-up by reauth did not re-mint.
+enum ReauthStepUp {
+    Session(ordo_identity::SessionError),
+    Handle(&'static str),
+}
+
 /// The kind a client names. The plan's own spellings for the answers
 /// (`backup_code`, `passkey_assertion`) are accepted beside the words the
 /// token and the record use.

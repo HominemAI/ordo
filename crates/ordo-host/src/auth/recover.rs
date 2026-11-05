@@ -303,11 +303,10 @@ pub async fn contest(State(auth): State<Option<SharedAuth>>, Json(body): Json<Va
 
 // ── recovery codes (R4) ──────────────────────────────────────────────────
 
-/// `Some(the 403)` unless the session holds a fresh passkey assertion: the
-/// gate linking has. A password session, a stale one and a quarantined
-/// passkey's session are each refused, and the refusal says what to do, since
-/// the person is authenticated and owed the reason.
-/// Whether the session holds presence proved inside the step-up window.
+/// Whether the session holds presence proved inside the step-up window: a
+/// passkey's, or a fresh sign-in's for a person with no passkey
+/// (`second_step::step_up_by_reauth`). A quarantined passkey's session holds
+/// none.
 pub(super) fn fresh_presence(claims: &ordo_identity::TokenClaims, now: Timestamp) -> bool {
     claims.user_presence_at.is_some_and(|p| {
         now.0
@@ -327,13 +326,7 @@ fn require_presence(
         return None;
     }
     auth.record_refusal(op, "presence-required", now);
-    Some(
-        EdgeError::new(
-            EdgeCode::PresenceRequired,
-            format!("{what} needs a fresh passkey assertion: POST /auth/step-up first"),
-        )
-        .into_response(),
-    )
+    Some(super::presence_refusal(what))
 }
 
 /// Acknowledge a recovery: `POST /auth/recover/ack {"case"}` with a session's

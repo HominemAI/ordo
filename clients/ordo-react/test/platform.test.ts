@@ -24,6 +24,7 @@ afterEach(() => {
 const withSharing = () =>
   withPlatformOps(iface(), 'std.space.share', 'std.space.shareLink', 'std.space.revokeLink', 'std.space.links');
 const denied = { status: 403, body: refusal('access_denied', 'no') };
+const untouched = { status: 403, body: refusal('presence_required', 'touch a passkey, or sign in again') };
 const SHARE_VALUES = {
   ops: 'myNotes',
   rows: JSON.stringify([{ entity: 'notes', id: 'note_1', level: 'read' }]),
@@ -101,8 +102,8 @@ describe('platform ops through the hooks', () => {
 });
 
 describe('a platform write that wants a fresh touch', () => {
-  it('asks for one on access_denied and tries once more, with a new idempotency key', async () => {
-    const door = new MockDoor().program(denied, { body: { rows: [{ ticket: 'tkt_2' }] } });
+  it('asks for one on presence_required and tries once more, with a new idempotency key', async () => {
+    const door = new MockDoor().program(untouched, { body: { rows: [{ ticket: 'tkt_2' }] } });
     let touches = 0;
     const m = await mount(() => useCommit('std.space.share'), {
       client: client(door, { iface: withSharing() }),
@@ -121,7 +122,7 @@ describe('a platform write that wants a fresh touch', () => {
   });
 
   it('believes the second refusal, and asks only once', async () => {
-    const door = new MockDoor().always(denied);
+    const door = new MockDoor().always(untouched);
     let touches = 0;
     const m = await mount(() => useCommit('std.space.share'), {
       client: client(door, { iface: withSharing() }),
@@ -135,10 +136,10 @@ describe('a platform write that wants a fresh touch', () => {
     });
     expect(touches).toBe(1);
     expect(door.requests).toHaveLength(2);
-    expect(m.result.current.refusal?.class).toBe('access_denied');
+    expect(m.result.current.refusal?.class).toBe('presence_required');
   });
 
-  it('never asks for a program op, which a touch cannot help', async () => {
+  it('never asks on access_denied, which a touch cannot help', async () => {
     const door = new MockDoor().always(denied);
     let touches = 0;
     const m = await mount(() => useCommit('std.tasks.create'), {

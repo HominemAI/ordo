@@ -881,6 +881,23 @@ fn step_up_claims(
     Ok(claims)
 }
 
+/// The two ways to give a touch, for every `presence_required` refusal: a
+/// passkey, or, for a person with no passkey, a fresh sign-in (owner,
+/// 2026-11-05, `how-a-person-without-a-passkey`).
+pub const PRESENCE_WAYS: &str = "Touch a passkey: POST /auth/step-up/begin, then \
+     POST /auth/step-up. With no passkey, sign in again: POST /auth/complete with \
+     \"reauth\": true, then POST /auth/step-up with the handle in the x-reauth header";
+
+/// The `403 presence_required` an `/auth/*` route answers when `what` needs
+/// a touch the session does not hold. Says both ways to give one.
+pub(crate) fn presence_refusal(what: &str) -> Response {
+    EdgeError::new(
+        EdgeCode::PresenceRequired,
+        format!("{what} needs a fresh touch. {PRESENCE_WAYS}"),
+    )
+    .into_response()
+}
+
 /// Start a **step-up** inside a session: `POST /auth/step-up/begin` with the
 /// session's bearer token.
 ///
@@ -889,6 +906,10 @@ fn step_up_claims(
 /// `allow_credentials` is that principal's own passkeys. The server checks
 /// the binding again at completion, so a browser that ignores the list gains
 /// nothing.
+///
+/// A person who holds no passkey is answered `reauthentication_required`:
+/// their touch is a fresh sign-in, sent to `POST /auth/step-up` as a reauth
+/// handle (owner, 2026-11-05).
 pub async fn step_up_begin(
     State(auth): State<Option<SharedAuth>>,
     headers: axum::http::HeaderMap,
@@ -923,15 +944,29 @@ pub async fn step_up_begin(
             .filter_map(|a| a.0.strip_prefix("passkey:"))
             .filter_map(|id| ordo_identity::passkey::credential_id_from_b64url(id).ok())
             .collect();
+        if allow.is_empty() {
+            return Ok(None);
+        }
         // Bound to this one session (G15): a touch relayed for it cannot be
         // spent on another session of the same person.
         passkey
             .begin_step_up_for(now, &claims.principal, Some(&session), &allow)
+            .map(Some)
             .map_err(StoreFailure::from)
     })
     .await;
     match minted {
-        Ok(Ok(options)) => (
+        Ok(Ok(None)) => {
+            auth.record_refusal("auth.step-up.begin", "no-passkey", now);
+            EdgeError::new(
+                EdgeCode::ReauthenticationRequired,
+                "you hold no passkey, so a fresh sign-in is your touch: POST \
+                 /auth/complete with \"reauth\": true, then POST /auth/step-up with the \
+                 handle in the x-reauth header",
+            )
+            .into_response()
+        }
+        Ok(Ok(Some(options))) => (
             StatusCode::OK,
             Json(request_options_json(&options, auth.passkey_timeout_ms())),
         )
@@ -952,6 +987,9 @@ pub async fn step_up_begin(
 /// with fresh presence, and nothing wider: same principal, same client, same
 /// session id, so a logout still refuses what comes back.
 ///
+/// A person with no passkey sends a reauth handle in the `x-reauth` header
+/// instead, and `{}` as the body ([`second_step::step_up_by_reauth`]).
+///
 /// Refused, always as the one answer: no bearer, a token that does not
 /// verify, a capability or delegated token, a logged-out session, a
 /// challenge minted for another principal or another phase, a passkey that
@@ -966,6 +1004,11 @@ pub async fn step_up(
     };
     let now_secs = (auth.now)();
     let now = Timestamp(now_secs);
+    // A fresh sign-in in place of the assertion, for a person with no
+    // passkey (owner, 2026-11-05).
+    if headers.contains_key(second_step::REAUTH_HEADER) {
+        return second_step::step_up_by_reauth(&auth, &headers, now).await;
+    }
     let Some(passkey) = auth.passkey.clone() else {
         auth.record_refusal("auth.step-up", "unknown-method", now);
         return refused();
@@ -1082,6 +1125,7 @@ fn session_error_reason(e: &ordo_identity::SessionError) -> &'static str {
             "method-cannot-prove-presence"
         }
         ordo_identity::SessionError::AccountDeleted { .. } => "identity-deleted",
+        ordo_identity::SessionError::PasskeyHeld { .. } => "passkey-held",
         ordo_identity::SessionError::StoreUnavailable(_) => "directory-unavailable",
         _ => "session-refused",
     }

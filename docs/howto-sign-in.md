@@ -750,38 +750,51 @@ The classes a sign-in page meets:
 
 | Class | Where it comes from | What to do |
 |---|---|---|
-| `presence_required` | `403` from the account routes (recovery codes, account delete) when the token has no fresh passkey touch. | Call `stepUp`, then repeat the call. |
+| `presence_required` | `403` when the call needs a touch the token does not hold: the account routes (recovery codes, account delete, email changes) and any op that asks for one. | Call `stepUp`, then repeat the call. A person with no passkey signs in again instead: `reauthenticateWithPassword`, then `stepUpWithProof`. |
 | `space_paused` | `423`. Someone paused the tenant on purpose. The data is kept and nothing ran. | Show a paused message. Do not retry: waiting does not lift a pause. |
 | `human_check_failed` | `403`. A public write came without a human-check token the provider confirmed, or the provider could not be asked. | Run the widget again and send the new token in `X-Ordo-Human`. A token is good for one write. |
 | `server_busy` | `503` with `Retry-After`. Every database connection is in use and nothing ran. | The client already retried. Show a busy message and let the person try again. |
 | `tenant_not_ready` | `503` with `Retry-After`. The person's own tenant is still being set up (section 4) and nothing ran. | The client already retried. Show the setting-up screen; `TenantGate` does this for you. |
 | `serialization_conflict` | `409`. The write lost a race with other writes to the same rows, through the server's retries (`ORDO_WRITE_RETRIES`). Nothing was applied. | The client already retried. Show a busy message and let the person try again. |
-| `access_denied` | The door refuses the caller. One answer for every reason. | Right after sign-up, wait (section 4). On a platform op, ask for a touch and retry once. |
+| `access_denied` | The door refuses the caller. One answer for every reason. | Right after sign-up, wait (section 4). A touch does not help: the door says `presence_required` when one would. |
 
 Three details you need.
 
-**`presence_required` is folded.** The SDK's passkey helpers turn any refusal
-of an account route into `PasskeyError` with `failure: 'refused'`. Ask for the
-touch before the call. Platform ops (`std.space.share` and the like) ask for a
-touch no older than five minutes, and the door answers `access_denied` when it
-is stale. So retry once after a step-up:
+**A touch is a passkey, or a fresh sign-in.** Some ops (`std.space.share`
+and the like) ask for a touch no older than five minutes. When the token's is
+stale the door answers `presence_required`, never `access_denied`. A person
+with no passkey gives the touch by signing in again (owner, 2026-11-05):
+`stepUp` fails `reauthentication_required` for them, so prove a first factor
+with `reauthenticateWithPassword` and send the proof to `stepUpWithProof`. A
+person who holds a passkey must touch it. So retry once after a touch:
 
 ```ts
-import { OrdoRefusal, stepUp } from '@hominemai/ordo-sdk';
+import { OrdoRefusal, PasskeyError, reauthenticateWithPassword, stepUp, stepUpWithProof } from '@hominemai/ordo-sdk';
 
-const DOOR = 'http://localhost:4000';
+const DOOR = { baseUrl: 'http://localhost:4000' };
 
-/** Run `act`. If the door refuses it, ask for a passkey touch and run it once more. */
+/** Run `act`. If the door asks for a touch, take one and run it once more. */
 export async function withPresence<T>(
   token: string,
   act: (token: string) => Promise<T>,
   onFresh: (token: string) => void,
+  askPassword: () => Promise<{ identifier: string; password: string }>,
 ): Promise<T> {
   try {
     return await act(token);
   } catch (e) {
-    if (!(e instanceof OrdoRefusal) || e.class !== 'access_denied') throw e;
-    const fresh = await stepUp({ baseUrl: DOOR }, token); // one passkey touch
+    if (!(e instanceof OrdoRefusal) || e.code !== 'presence_required') throw e;
+    let fresh;
+    try {
+      fresh = await stepUp(DOOR, token); // one passkey touch
+    } catch (s) {
+      if (!(s instanceof PasskeyError) || s.failure !== 'reauthentication_required') throw s;
+      // No passkey: a fresh sign-in is the touch. A person who holds a
+      // second factor gets a `second-step` answer to finish first.
+      const proof = await reauthenticateWithPassword(DOOR, token, await askPassword());
+      if (proof.kind !== 'proof') throw s;
+      fresh = await stepUpWithProof(DOOR, token, { reauth: proof.reauth });
+    }
     onFresh(fresh.token);
     return act(fresh.token);
   }
@@ -1840,7 +1853,7 @@ refused.
 | `POST /auth/email/remove` | | `{removed}` |
 
 - The address counts only after `complete`.
-- Changing or removing an address needs a fresh passkey touch (`POST /auth/step-up` first). Without one the answer is `403 presence_required`, and the message names the setting. Adding a first address needs no touch. See "Asking for a touch" below.
+- Changing or removing an address needs a fresh touch (`POST /auth/step-up` first; with no passkey, a fresh sign-in sent to it in `x-reauth`). Without one the answer is `403 presence_required`, and the message names the setting. Adding a first address needs no touch. See "Asking for a touch" below.
 - The code is the emailed sign-in code of section 10: the same digits, life, tries and limits, and the same settings.
 - The message says "Confirm your email address". A confirmation code never signs anybody in, and a sign-in code never confirms an address.
 - A wrong, late, used or another person's code is the one refusal, `401 authentication_failed`.

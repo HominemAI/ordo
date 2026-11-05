@@ -12,6 +12,7 @@
  * | `signInWithPasskeyStep` | `POST /auth/begin`, `/auth/complete` | a session, or a `SecondStep` (a passkey owes one only when a person or a tenant turned it on) |
  * | `completeSecondStep` | `POST /auth/second-step` (and `/begin` for a key) | the session, or a proof when the step was for a change |
  * | `reauthenticateWithPassword`, `reauthenticateWithPasskey` | `POST /auth/complete` with `reauth` | a proof, or a `SecondStep` that ends in one |
+ * | `stepUpWithProof` | `POST /auth/step-up` with `x-reauth` | the session with fresh presence, for a person with no passkey |
  * | `listFactors`, `removeFactor`, `setSecondStepLevel` | `GET /auth/factors`, `POST /auth/factors/{id}/remove`, `/policy` | the person's factors, and the changes to them |
  * | `beginTotpEnrolment`, `confirmTotpEnrolment`, `enrolSecurityKey` | `POST /auth/factors/totp/*`, `/key/*` | a factor |
  *
@@ -335,6 +336,24 @@ export interface ChangeProof {
 
 function proofHeaders(proof: ChangeProof | undefined): Record<string, string> | undefined {
   return proof?.reauth ? { 'x-reauth': proof.reauth } : undefined;
+}
+
+/**
+ * A fresh sign-in as the touch, for a person who holds no passkey (owner,
+ * 2026-11-05). `stepUp` fails `reauthentication_required` for such a person:
+ * prove a first factor with `reauthenticateWith*`, then send the proof here.
+ * Answers the same session, re-minted with presence, as `stepUp` does. A
+ * person who holds a passkey is refused `presence_required`: they touch it.
+ */
+export async function stepUpWithProof(
+  endpoint: PasskeyEndpoint,
+  token: string,
+  proof: ChangeProof,
+): Promise<PasskeySession> {
+  if (!proof.reauth) {
+    throw new PasskeyError('malformed', 'a step-up by sign-in needs the proof from reauthenticateWith*');
+  }
+  return session(await call(endpoint, '/auth/step-up', {}, token, 'POST', proofHeaders(proof)));
 }
 
 /**

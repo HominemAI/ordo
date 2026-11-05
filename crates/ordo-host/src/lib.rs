@@ -1919,6 +1919,45 @@ impl IdentityAccess {
     /// session-revocation check: `check` (every op) and `token_known`
     /// (`GET /live`) both ask it. No list, or a token with no session,
     /// is not revoked (see the `revocations` field).
+    /// An app session's half of [`AccessChecker::presence_required`]: would
+    /// `check` allow it with a touch made now, and nothing else changed?
+    fn session_presence_required(&self, token: &str, space: &str, op: &str) -> bool {
+        let at = (self.now)();
+        let now = ordo_identity::principal::Timestamp(at);
+        let Ok(claims) = ordo_identity::verify(&self.key, token, now) else {
+            return false;
+        };
+        if claims.capability.is_some()
+            || claims.delegation.is_some()
+            || claims.session.is_none()
+            || self.session_ended(&claims)
+            || (self.deployment.get().is_some() && crate::console_keys::is_console_session(&claims))
+        {
+            return false;
+        }
+        let touched = ordo_identity::TokenClaims {
+            user_presence_at: Some(now),
+            ..claims
+        };
+        let reach = crate::console_keys::Reach::Space {
+            space,
+            home: self.console_home.get().map(String::as_str),
+            op,
+            now: at,
+        };
+        if crate::console_keys::console_may(&touched, reach).is_err() {
+            return false;
+        }
+        let ispace = ordo_identity::principal::SpaceId(space.to_string());
+        matches!(
+            self.engine.check(&touched, &ispace, op, now),
+            ordo_identity::access::Decision::Allow
+        ) && !self
+            .second_step
+            .get()
+            .is_some_and(|levels| levels.refuses(&touched, space))
+    }
+
     fn session_ended(&self, claims: &ordo_identity::TokenClaims) -> bool {
         match (&self.revocations, claims.session.as_ref()) {
             (Some(list), Some(session)) => {
@@ -2366,11 +2405,17 @@ impl AccessChecker for IdentityAccess {
         false
     }
 
-    /// A deployment person whose touch is too old for `op`: the realm
-    /// table, asked again after `check` denied.
+    /// A person whose touch is too old for `op`, asked again after `check`
+    /// denied. A deployment person: the realm table. An app session: the
+    /// same checks `check` runs, with a touch made now. Either way the
+    /// refusal then tells them how to give one (`ApiError::presence_required`).
+    ///
+    /// Never for a capability or delegated token: presence is not delegable,
+    /// so it is not told to touch anything. Never for a token that does not
+    /// verify or a session that ended: those keep the uniform denial.
     fn presence_required(&self, token: &str, space: &str, op: &str) -> bool {
         if !ordo_identity::deployment_token::is_deployment_shape(token) {
-            return false;
+            return self.session_presence_required(token, space, op);
         }
         let at = (self.now)();
         self.deployment_claims(token, at).is_ok_and(|c| {

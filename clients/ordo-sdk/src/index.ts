@@ -239,6 +239,7 @@ export {
   setSecondStepLevel,
   signInWithPasskeyStep,
   signInWithPassword,
+  stepUpWithProof,
 } from './auth/second-step.js';
 export type {
   ChangeProof,

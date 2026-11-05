@@ -664,12 +664,17 @@ is absent from the interface and `useCommit` on it throws the same "not in this
 catalog" error as any op the token cannot call. If a door ever carries a
 platform op in its own descriptor, that descriptor wins.
 
-Platform writes want a passkey touch no older than a few minutes, and the door
-answers one `access_denied` for "too old" and "not allowed". `stepUp` on
-`<OrdoProvider>` is how the app asks for a fresh touch: `useCommit` on a
-platform op that is refused `access_denied` calls it once and tries the write
-again, with a new idempotency key. A second refusal is believed. Program ops
-never call it.
+Some writes want a touch no older than a few minutes. The door then answers
+`presence_required`. `stepUp` on `<OrdoProvider>` is how the app asks for a
+fresh touch: `useCommit` on a write refused `presence_required` calls it once
+and tries the write again, with a new idempotency key. A second refusal is
+believed. An `access_denied` never calls it.
+
+A touch is a passkey (`session.stepUp()`). A person with no passkey signs in
+again instead (owner, 2026-11-05): `session.stepUp()` fails
+`reauthentication_required`, so the app proves a first factor with
+`reauthenticateWithPassword` and passes the proof to
+`session.stepUpWithProof(proof.reauth)`.
 
 ## Guests
 

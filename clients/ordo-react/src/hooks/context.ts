@@ -60,12 +60,11 @@ export interface OrdoProviderProps {
    */
   readonly device?: DeviceSource | undefined;
   /**
-   * How the app asks the person for a fresh touch (a passkey step-up).
-   * A platform write (`std.space.share` and the rest, see `platform.ts`)
-   * wants a recent one, and the door answers `access_denied` both for "too
-   * old" and for "not allowed". With this set, `useCommit` on a platform op
-   * that is refused `access_denied` calls it once and tries the write again;
-   * a second refusal is believed. Program ops never use it.
+   * How the app asks the person for a fresh touch: a passkey step-up
+   * (`session.stepUp`), or for a person with no passkey a fresh sign-in
+   * (`reauthenticateWith*`, then `session.stepUpWithProof`). With this set,
+   * `useCommit` on a write refused `presence_required` calls it once and
+   * tries the write again; a second refusal is believed.
    */
   readonly stepUp?: () => Promise<void>;
   readonly children?: ReactNode;

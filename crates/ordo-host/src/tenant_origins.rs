@@ -21,7 +21,7 @@
 //! (`tenant-origins.refresh`).
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use ordo_api::{BoundParams, ErrorCode, ExecError, ExecResult};
 use ordo_exec::{sql_lit, Pool, PoolError};
@@ -98,6 +98,10 @@ pub struct TenantOriginMap {
     max: usize,
     pool: Pool,
     lists: RwLock<HashMap<String, Vec<String>>>,
+    /// The security stream each change is recorded on. A change of origins
+    /// lets another page call the door, so it is evidence (security audit
+    /// 2026-11-05, M4).
+    stream: Option<Arc<ordo_secevent::Recorder>>,
 }
 
 impl TenantOriginMap {
@@ -106,7 +110,14 @@ impl TenantOriginMap {
             max,
             pool,
             lists: RwLock::new(HashMap::new()),
+            stream: None,
         }
+    }
+
+    /// Record every change on this stream: the tenant's and the deployment's.
+    pub fn with_stream(mut self, stream: Arc<ordo_secevent::Recorder>) -> TenantOriginMap {
+        self.stream = Some(stream);
+        self
     }
 
     pub fn max(&self) -> usize {
@@ -182,11 +193,31 @@ impl TenantOriginMap {
             .map_err(|e| {
                 ExecError::of_fault(e.class(), ErrorCode::SpaceUnavailable, e.to_string())
             })?;
-        let mut lists = self.lists.write().unwrap_or_else(|p| p.into_inner());
-        if list.is_empty() {
-            lists.remove(space);
-        } else {
-            lists.insert(space.to_string(), list.clone());
+        let was = {
+            let mut lists = self.lists.write().unwrap_or_else(|p| p.into_inner());
+            if list.is_empty() {
+                lists.remove(space)
+            } else {
+                lists.insert(space.to_string(), list.clone())
+            }
+        };
+        if let Some(stream) = &self.stream {
+            crate::enrolment::record(
+                stream,
+                &crate::enrolment::Act {
+                    act: "origins-set",
+                    detail: format!(
+                        "origins={stored} was={} by={by}",
+                        was.unwrap_or_default().join(",")
+                    ),
+                    by: Some(by),
+                    tenant: Some(space),
+                    // The deployment's too: a tenant's origins open the
+                    // door the deployment serves to another page.
+                    deployment: true,
+                    at,
+                },
+            );
         }
         Ok(list)
     }

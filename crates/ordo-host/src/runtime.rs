@@ -4488,7 +4488,7 @@ async fn assemble_program(
         &pool,
         &cfg.token_secret,
         &metrics,
-        recorder,
+        recorder.clone(),
         delegations.clone(),
         revocations.clone(),
         &credentials,
@@ -4789,10 +4789,10 @@ async fn assemble_program(
         let env = |k: &str| std::env::var(k).ok();
         let max = crate::tenant_origins::max_from_vars(&env)
             .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?;
-        let map = Arc::new(crate::tenant_origins::TenantOriginMap::new(
-            max,
-            pool.clone(),
-        ));
+        let map = Arc::new(
+            crate::tenant_origins::TenantOriginMap::new(max, pool.clone())
+                .with_stream(recorder.clone()),
+        );
         map.ensure_table()
             .await
             .map_err(|e| BootRefusal::Database(e.to_string()))?;

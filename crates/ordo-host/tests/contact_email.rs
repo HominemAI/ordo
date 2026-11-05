@@ -89,6 +89,7 @@ fn harness_full(required: Requirement, touch: bool) -> H {
     .with_email(email.clone());
     state.now = Box::new(|| NOW);
     let mut contact = ContactEmails::in_memory(required)
+        .with_home("home")
         .with_change_touch(touch)
         .with_mail(email.clone(), queue.clone())
         .with_stream(recorder);
@@ -449,7 +450,7 @@ async fn the_requirement_refuses_an_op_until_an_address_is_added() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn without_mail_nothing_can_be_required_or_confirmed() {
-    let contact = ContactEmails::in_memory(Requirement::Off);
+    let contact = ContactEmails::in_memory(Requirement::Off).with_home("home");
     let set = BoundParams(json!({"required": "all"}).as_object().unwrap().clone());
     let e = contact
         .execute(SET_POLICY, "home", &set, "p_dev")
@@ -542,7 +543,7 @@ async fn the_notice_reaches_a_passkey_person_at_the_added_address() {
     );
     assert!(recipients().await.is_empty());
 
-    let contact = ContactEmails::on_pool(Requirement::Off, pool.clone());
+    let contact = ContactEmails::on_pool(Requirement::Off, pool.clone()).with_home("home");
     contact
         .confirm(ADA, OLD, "code", NOW)
         .await

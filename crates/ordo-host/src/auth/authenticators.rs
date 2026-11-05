@@ -49,18 +49,28 @@ enum Failure {
 }
 
 impl Failure {
-    fn answer(self, auth: &AuthState, op: &str, now: Timestamp) -> Response {
+    fn answer(
+        self,
+        auth: &AuthState,
+        who: Option<&ordo_identity::PrincipalId>,
+        op: &str,
+        now: Timestamp,
+    ) -> Response {
+        let record = |reason: &str| match who {
+            Some(p) => auth.record_refusal_of(p, op, reason, now),
+            None => auth.record_refusal(op, reason, now),
+        };
         match self {
             Failure::Refused(reason) => {
-                auth.record_refusal(op, reason, now);
+                record(reason);
                 refused()
             }
             Failure::Unavailable(reason, failure) => {
-                auth.record_refusal(op, reason, now);
+                record(reason);
                 failure.into_response()
             }
             Failure::Last => {
-                auth.record_refusal(op, "last-authenticator", now);
+                record("last-authenticator");
                 EdgeError::new(
                     EdgeCode::LastAuthenticator,
                     "that is the only way this person can sign in; add another first",
@@ -170,6 +180,7 @@ pub async fn list(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let auth2 = auth.clone();
     let listed = tokio::task::spawn_blocking(move || {
         let links = auth2
@@ -232,11 +243,11 @@ pub async fn list(
             (StatusCode::OK, Json(answer)).into_response()
         }
         Ok(Err(failure)) => {
-            auth.record_refusal("auth.authenticators", "directory-unavailable", now);
+            auth.record_refusal_of(&who, "auth.authenticators", "directory-unavailable", now);
             failure.into_response()
         }
         Err(_) => {
-            auth.record_refusal("auth.authenticators", "directory-unavailable", now);
+            auth.record_refusal_of(&who, "auth.authenticators", "directory-unavailable", now);
             StoreFailure::task_failed().into_response()
         }
     }
@@ -274,6 +285,7 @@ pub async fn link_begin(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let auth2 = auth.clone();
     let p2 = passkey.clone();
     let minted = tokio::task::spawn_blocking(move || {
@@ -323,9 +335,10 @@ pub async fn link_begin(
             )
                 .into_response()
         }
-        Ok(Err(e)) => e.answer(&auth, "auth.authenticators.link.begin", now),
+        Ok(Err(e)) => e.answer(&auth, Some(&who), "auth.authenticators.link.begin", now),
         Err(_) => {
-            auth.record_refusal(
+            auth.record_refusal_of(
+                &who,
                 "auth.authenticators.link.begin",
                 "ceremony-task-failed",
                 now,
@@ -363,6 +376,7 @@ pub async fn link(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let auth2 = auth.clone();
     let done = tokio::task::spawn_blocking(move || {
         let (voucher, stamped) = verify_vouch(&auth2, &claims, &body, now)?;
@@ -424,9 +438,9 @@ pub async fn link(
             )
                 .into_response()
         }
-        Ok(Err(e)) => e.answer(&auth, OP, now),
+        Ok(Err(e)) => e.answer(&auth, Some(&who), OP, now),
         Err(_) => {
-            auth.record_refusal(OP, "ceremony-task-failed", now);
+            auth.record_refusal_of(&who, OP, "ceremony-task-failed", now);
             refused()
         }
     }
@@ -463,6 +477,7 @@ pub async fn unlink(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let end_sessions = body
         .get("end_sessions")
         .and_then(|v| v.as_bool())
@@ -548,9 +563,9 @@ pub async fn unlink(
             )
                 .into_response()
         }
-        Ok(Err(e)) => e.answer(&auth, OP, now),
+        Ok(Err(e)) => e.answer(&auth, Some(&who), OP, now),
         Err(_) => {
-            auth.record_refusal(OP, "ceremony-task-failed", now);
+            auth.record_refusal_of(&who, OP, "ceremony-task-failed", now);
             store_unavailable()
         }
     }

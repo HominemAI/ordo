@@ -741,10 +741,11 @@ async fn a_tenant_lists_its_own_origins_when_the_deployment_allows_it() {
     );
 
     // Allowed: the owner sets a list, and the layer answers it per space.
-    let map = Arc::new(ordo_host::tenant_origins::TenantOriginMap::new(
-        5,
-        rt.pool.clone(),
-    ));
+    let stream = Arc::new(ordo_secevent::Recorder::default());
+    let map = Arc::new(
+        ordo_host::tenant_origins::TenantOriginMap::new(5, rt.pool.clone())
+            .with_stream(stream.clone()),
+    );
     let set = map
         .execute(
             ordo_host::tenant_origins::SET_ORIGINS,
@@ -761,6 +762,25 @@ async fn a_tenant_lists_its_own_origins_when_the_deployment_allows_it() {
         .await
         .expect("set");
     assert_eq!(set.rows[0]["origins"], "https://shop.example");
+    // The change is on the record, the tenant's and the deployment's
+    // (security audit 2026-11-05, M4).
+    let recorded: Vec<_> = stream
+        .drain_all(ordo_commandlog::Timestamp(u64::MAX))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            ordo_secevent::EventKind::Enrolment { act, detail } if act == "origins-set" => {
+                Some((e.scope, detail))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert!(recorded
+        .iter()
+        .any(|(s, _)| *s == ordo_secevent::Scope::Space(ordo_commandlog::SpaceId(tenant.clone()))));
+    assert!(recorded
+        .iter()
+        .all(|(_, d)| d.contains("origins=https://shop.example") && d.contains("by=mem_1")));
     // Another node learns it from the table.
     let other = ordo_host::tenant_origins::TenantOriginMap::new(5, rt.pool.clone());
     other.load().await.expect("load");

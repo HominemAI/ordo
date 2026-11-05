@@ -676,7 +676,7 @@ impl GuessLimits {
         bound: &BoundParams,
         caller: &str,
     ) -> Result<ExecResult, ExecError> {
-        if self.home.as_deref().is_some_and(|h| h != space) {
+        if self.home.as_deref() != Some(space) {
             return Err(ExecError::new(
                 ErrorCode::NotFound,
                 "the app developer's password slowdown is the deployment's setting, and this op \

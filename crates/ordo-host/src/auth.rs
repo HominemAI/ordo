@@ -585,8 +585,31 @@ impl AuthState {
 
     /// One refusal, with the reason the caller is not told.
     fn record_refusal(&self, op: &str, reason: &str, at: Timestamp) {
+        self.refusal(None, op, reason, at);
+    }
+
+    /// One refusal after the session token verified: it names the person,
+    /// so an alert can fire on one person's session failing its touch
+    /// (security audit 2026-11-05, M5).
+    fn record_refusal_of(
+        &self,
+        principal: &ordo_identity::PrincipalId,
+        op: &str,
+        reason: &str,
+        at: Timestamp,
+    ) {
+        self.refusal(Some(principal), op, reason, at);
+    }
+
+    fn refusal(
+        &self,
+        principal: Option<&ordo_identity::PrincipalId>,
+        op: &str,
+        reason: &str,
+        at: Timestamp,
+    ) {
         self.record(
-            None,
+            principal,
             op,
             ordo_secevent::EventKind::AuthenticationFailed {
                 reason: reason.to_string(),
@@ -862,11 +885,11 @@ fn step_up_claims(
         return Err(Box::new(refused()));
     };
     if claims.capability.is_some() || claims.delegation.is_some() {
-        auth.record_refusal(op, "presence-not-delegable", now);
+        auth.record_refusal_of(&claims.principal, op, "presence-not-delegable", now);
         return Err(Box::new(refused()));
     }
     let Some(session) = claims.session.as_ref() else {
-        auth.record_refusal(op, "not-a-session", now);
+        auth.record_refusal_of(&claims.principal, op, "not-a-session", now);
         return Err(Box::new(refused()));
     };
     let Some(revocations) = auth.revocations.as_ref() else {
@@ -875,7 +898,7 @@ fn step_up_claims(
     if revocations.is_revoked(&session.id)
         || revocations.principal_ended(&claims.principal, session.started_at)
     {
-        auth.record_refusal(op, "session-ended", now);
+        auth.record_refusal_of(&claims.principal, op, "session-ended", now);
         return Err(Box::new(refused()));
     }
     Ok(claims)
@@ -926,6 +949,7 @@ pub async fn step_up_begin(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let auth2 = auth.clone();
     let session = claims
         .session
@@ -957,7 +981,7 @@ pub async fn step_up_begin(
     .await;
     match minted {
         Ok(Ok(None)) => {
-            auth.record_refusal("auth.step-up.begin", "no-passkey", now);
+            auth.record_refusal_of(&who, "auth.step-up.begin", "no-passkey", now);
             EdgeError::new(
                 EdgeCode::ReauthenticationRequired,
                 "you hold no passkey, so a fresh sign-in is your touch: POST \
@@ -972,11 +996,11 @@ pub async fn step_up_begin(
         )
             .into_response(),
         Ok(Err(failure)) => {
-            auth.record_refusal("auth.step-up.begin", "store-unavailable", now);
+            auth.record_refusal_of(&who, "auth.step-up.begin", "store-unavailable", now);
             failure.into_response()
         }
         Err(_) => {
-            auth.record_refusal("auth.step-up.begin", "store-unavailable", now);
+            auth.record_refusal_of(&who, "auth.step-up.begin", "store-unavailable", now);
             StoreFailure::task_failed().into_response()
         }
     }
@@ -1017,6 +1041,7 @@ pub async fn step_up(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let Some(CompleteRequest::PasskeyAssertion {
         challenge,
         credential_id,
@@ -1025,7 +1050,7 @@ pub async fn step_up(
         signature,
     }) = parse_complete(&body)
     else {
-        auth.record_refusal("auth.step-up", "malformed-request", now);
+        auth.record_refusal_of(&who, "auth.step-up", "malformed-request", now);
         return refused();
     };
     let auth2 = auth.clone();
@@ -1074,24 +1099,24 @@ pub async fn step_up(
     let (spec, ceiling, held_until) = match done {
         Ok(Ok(x)) => x,
         Ok(Err(StepUpFailure::Ceremony(e))) => {
-            auth.record_refusal("auth.step-up", auth_error_reason(&e), now);
+            auth.record_refusal_of(&who, "auth.step-up", auth_error_reason(&e), now);
             return ceremony_refusal(&e);
         }
         Ok(Err(StepUpFailure::OtherPrincipal)) => {
-            auth.record_refusal("auth.step-up", "challenge-for-another-principal", now);
+            auth.record_refusal_of(&who, "auth.step-up", "challenge-for-another-principal", now);
             return refused();
         }
         Ok(Err(StepUpFailure::OtherSession)) => {
-            auth.record_refusal("auth.step-up", "challenge-for-another-session", now);
+            auth.record_refusal_of(&who, "auth.step-up", "challenge-for-another-session", now);
             return refused();
         }
         Ok(Err(StepUpFailure::Session(e))) => {
             let reason = session_error_reason(&e);
-            auth.record_refusal("auth.step-up", reason, now);
+            auth.record_refusal_of(&who, "auth.step-up", reason, now);
             return refused();
         }
         Err(_) => {
-            auth.record_refusal("auth.step-up", "ceremony-task-failed", now);
+            auth.record_refusal_of(&who, "auth.step-up", "ceremony-task-failed", now);
             return refused();
         }
     };

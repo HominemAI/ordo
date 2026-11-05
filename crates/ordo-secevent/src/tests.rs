@@ -621,6 +621,77 @@ fn a_failed_append_returns_its_entries_and_a_full_outbox_declares_the_loss() {
     store.verify(&Scope::Space(space())).expect("chains");
 }
 
+/// **An anonymous flood cannot blank other tenants' evidence** (security
+/// audit 2026-11-05, M1). Failed presentations collapse as denials do, so
+/// ten thousand of them are one entry; and when the outbox is full, a scope
+/// holding less than another still gets in, at the bigger scope's expense.
+#[test]
+fn a_flood_of_failed_presentations_collapses_and_one_scope_cannot_starve_another() {
+    let recorder = Recorder::with_outbox(Collapser::new(60, 64), 4);
+    for n in 0..10_000u32 {
+        recorder.observe(
+            Observation {
+                space: None,
+                subject: Subject::Unverified,
+                op: "auth.register".into(),
+                kind: EventKind::AuthenticationFailed {
+                    reason: "bad-method".into(),
+                },
+                at: Timestamp(1_000),
+                correlation: cor(n),
+            },
+            Relationship::None,
+        );
+    }
+    assert_eq!(
+        (recorder.backlog(), recorder.dropped()),
+        (0, 0),
+        "folded into a window, not queued one by one"
+    );
+    let out = recorder.drain_ready(Timestamp(1_060));
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert_eq!(out[0].count, 10_000);
+    assert_eq!(
+        out[0].kind,
+        EventKind::AuthenticationFailed {
+            reason: "bad-method".into()
+        }
+    );
+
+    // The deployment scope fills the outbox; a tenant's sign-in still lands.
+    let obs = |space: Option<SpaceId>, n: u32| Observation {
+        space,
+        subject: Subject::member(&format!("usr_{n}")),
+        op: "openTasks".into(),
+        kind: EventKind::Authenticated,
+        at: Timestamp(2_000),
+        correlation: cor(n),
+    };
+    for n in 0..4 {
+        recorder.observe(obs(None, n), Relationship::None);
+    }
+    assert_eq!(recorder.backlog(), 4);
+    recorder.observe(obs(Some(space()), 9), Relationship::Member);
+    assert_eq!((recorder.backlog(), recorder.dropped()), (4, 1));
+    let out = recorder.drain_ready(Timestamp(2_001));
+    assert_eq!(
+        out[0].kind,
+        EventKind::EventsDropped { lost: 1 },
+        "the loss is the deployment scope's, declared"
+    );
+    assert_eq!(out[0].scope, Scope::Deployment);
+    assert!(out
+        .iter()
+        .any(|e| e.scope == Scope::Space(space()) && e.kind == EventKind::Authenticated));
+    // The deployment kept its oldest three.
+    let kept: Vec<String> = out
+        .iter()
+        .filter(|e| e.scope == Scope::Deployment && e.kind == EventKind::Authenticated)
+        .map(|e| e.subject.render())
+        .collect();
+    assert_eq!(kept, ["user:usr_0", "user:usr_1", "user:usr_2"]);
+}
+
 // ───────────────────────── routing: members only ────────────────────────
 
 fn engine_with_member() -> (AccessEngine, TokenClaims) {
@@ -818,6 +889,7 @@ fn a_window_collapses_by_space_principal_op_and_hashes_once() {
         about: None,
         subject: Subject::member(who),
         op: op.into(),
+        failed: None,
     };
     for n in 0..40u32 {
         c.observe(
@@ -893,6 +965,7 @@ fn the_cap_degrades_the_record_instead_of_growing_it() {
                 about: None,
                 subject: Subject::member(&format!("usr_{n}")),
                 op: "openTasks".into(),
+                failed: None,
             },
             RecordedDecision::NoMembership,
             Timestamp(1_000),
@@ -1451,6 +1524,7 @@ fn the_window_cap_counts_per_scope_and_not_per_target() {
                 about: Some(SpaceId(format!("spc_target_{n:03}"))),
                 subject: Subject::Unverified,
                 op: "openTasks".into(),
+                failed: None,
             },
             RecordedDecision::TokenUnverifiable,
             Timestamp(1_000),

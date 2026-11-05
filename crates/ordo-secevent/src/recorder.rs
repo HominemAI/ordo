@@ -237,19 +237,73 @@ struct Outbox {
     /// on purpose — a marker generated from a counter can never itself be
     /// the thing the cap discards.
     lost: BTreeMap<Scope, u64>,
+    /// Entries in [`Outbox::queue`] per scope, for the fair share below.
+    held: BTreeMap<Scope, usize>,
 }
 
 impl Outbox {
     /// Returns how many observations the bound refused (0 or the entry's
-    /// own count).
+    /// own count, or 1 when a larger scope's newest entry gave way).
+    ///
+    /// **One scope cannot starve the rest** (security audit 2026-11-05,
+    /// M1). When the outbox is full and the arrival's scope holds fewer
+    /// entries than the scope holding the most, that scope's newest entry
+    /// gives way and is counted into its own loss. Within a scope the rule
+    /// is unchanged: the oldest survive and arrivals are refused. A
+    /// deployment with one busy scope therefore loses nothing it did not
+    /// lose before.
     fn push(&mut self, entry: StreamEntry) -> u64 {
+        let mut refused = 0;
         if self.queue.len() >= self.cap {
-            let lost = entry.count.max(1);
-            *self.lost.entry(entry.scope).or_insert(0) += lost;
-            return lost;
+            let mine = self.held.get(&entry.scope).copied().unwrap_or(0);
+            let biggest = self
+                .held
+                .iter()
+                .filter(|(s, _)| **s != entry.scope)
+                .max_by_key(|(_, n)| **n)
+                .map(|(s, n)| (s.clone(), *n));
+            match biggest {
+                Some((big, n)) if n > mine + 1 && self.evict_newest(&big) => refused = 1,
+                _ => {
+                    let lost = entry.count.max(1);
+                    *self.lost.entry(entry.scope).or_insert(0) += lost;
+                    return lost;
+                }
+            }
         }
+        *self.held.entry(entry.scope.clone()).or_insert(0) += 1;
         self.queue.push_back(entry);
-        0
+        refused
+    }
+
+    /// Drop `scope`'s newest non-marker entry, counted into its loss.
+    fn evict_newest(&mut self, scope: &Scope) -> bool {
+        let Some(i) = self
+            .queue
+            .iter()
+            .rposition(|e| e.scope == *scope && !e.kind.is_marker())
+        else {
+            return false;
+        };
+        let gone = self.queue.remove(i).expect("just found");
+        self.forget(&gone.scope);
+        *self.lost.entry(gone.scope).or_insert(0) += gone.count.max(1);
+        true
+    }
+
+    fn forget(&mut self, scope: &Scope) {
+        if let Some(n) = self.held.get_mut(scope) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.held.remove(scope);
+            }
+        }
+    }
+
+    /// Every queued entry, oldest first, and the per-scope tally cleared.
+    fn take_queue(&mut self) -> Vec<StreamEntry> {
+        self.held.clear();
+        self.queue.drain(..).collect()
     }
 
     /// Hand a batch back to the front, in order. What no longer fits is
@@ -269,6 +323,7 @@ impl Outbox {
                 refused += lost;
                 continue;
             }
+            *self.held.entry(entry.scope.clone()).or_insert(0) += 1;
             self.queue.push_front(entry);
         }
         refused
@@ -346,6 +401,7 @@ impl Recorder {
                 queue: VecDeque::new(),
                 cap: cap.max(1),
                 lost: BTreeMap::new(),
+                held: BTreeMap::new(),
             }),
             observed: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -375,11 +431,28 @@ impl Recorder {
                     about,
                     subject: obs.subject,
                     op: sanitize_op(&obs.op),
+                    failed: None,
                 };
                 let mut c = self.collapser.lock().expect("collapser");
                 for d in decisions {
                     c.observe(key.clone(), d, obs.at, obs.correlation.clone());
                 }
+            }
+            // Collapsed like a denial: many failures need no token, so one
+            // entry each let an outsider fill the outbox (audit M1).
+            EventKind::AuthenticationFailed { reason } => {
+                let key = CollapseKey {
+                    scope,
+                    about,
+                    subject: obs.subject,
+                    op: sanitize_op(&obs.op),
+                    failed: Some(reason),
+                };
+                self.collapser.lock().expect("collapser").observe_failure(
+                    key,
+                    obs.at,
+                    obs.correlation,
+                );
             }
             kind => {
                 let mut entry =
@@ -433,7 +506,7 @@ impl Recorder {
     pub fn drain_ready(&self, now: Timestamp) -> Vec<StreamEntry> {
         let mut pending = self.pending.lock().expect("pending");
         let mut out = pending.take_drop_markers(now);
-        out.extend(pending.queue.drain(..));
+        out.extend(pending.take_queue());
         drop(pending);
         out.extend(self.collapser.lock().expect("collapser").close_due(now));
         out
@@ -444,7 +517,7 @@ impl Recorder {
     pub fn drain_all(&self, now: Timestamp) -> Vec<StreamEntry> {
         let mut pending = self.pending.lock().expect("pending");
         let mut out = pending.take_drop_markers(now);
-        out.extend(pending.queue.drain(..));
+        out.extend(pending.take_queue());
         drop(pending);
         out.extend(self.collapser.lock().expect("collapser").close_all());
         out

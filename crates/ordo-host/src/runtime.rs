@@ -4488,7 +4488,7 @@ async fn assemble_program(
         &pool,
         &cfg.token_secret,
         &metrics,
-        recorder,
+        recorder.clone(),
         delegations.clone(),
         revocations.clone(),
         &credentials,
@@ -4789,10 +4789,10 @@ async fn assemble_program(
         let env = |k: &str| std::env::var(k).ok();
         let max = crate::tenant_origins::max_from_vars(&env)
             .map_err(|(var, detail)| BootRefusal::Invalid { var, detail })?;
-        let map = Arc::new(crate::tenant_origins::TenantOriginMap::new(
-            max,
-            pool.clone(),
-        ));
+        let map = Arc::new(
+            crate::tenant_origins::TenantOriginMap::new(max, pool.clone())
+                .with_stream(recorder.clone()),
+        );
         map.ensure_table()
             .await
             .map_err(|e| BootRefusal::Database(e.to_string()))?;
@@ -6310,7 +6310,22 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
         tokio::spawn(async move {
             match crate::direct_uses::drain(&pool, &recorder).await {
                 Ok(0) => {}
-                Ok(n) => println!("  direct      {n} use(s) of `--direct` since the last boot, on the security log"),
+                Ok(n) => {
+                    println!("  direct      {n} use(s) of `--direct` since the last boot, on the security log");
+                    // Each row goes once its event is stored, not before
+                    // (security audit 2026-11-05, L6). A row still here at
+                    // the next boot is confirmed or carried again then.
+                    for _ in 0..20 {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        match crate::direct_uses::pending(&pool).await {
+                            Ok(p) if p.is_empty() => break,
+                            Ok(_) => {
+                                let _ = crate::direct_uses::confirm(&pool).await;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
                 Err(e) => println!("  direct      the `--direct` uses could not be read: {e}"),
             }
         });

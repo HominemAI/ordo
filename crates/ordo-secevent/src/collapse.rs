@@ -70,6 +70,14 @@ pub struct CollapseKey {
     pub about: Option<SpaceId>,
     pub subject: Subject,
     pub op: String,
+    /// `Some(reason)` for a window of failed presentations
+    /// ([`EventKind::AuthenticationFailed`]), `None` for a window of
+    /// denials. The reason is in the key, so two reasons are two entries.
+    /// Failures collapse as denials do because many are reachable with no
+    /// token at all: uncollapsed, an anonymous flood filled the shared
+    /// outbox and pushed out every tenant's evidence (security audit
+    /// 2026-11-05, M1).
+    pub failed: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +87,9 @@ struct Window {
     last_at: Timestamp,
     count: u64,
     correlations: Vec<CorrelationId>,
+    /// When the window opened, among this collapser's windows: entries
+    /// close in the order they opened, not in key order.
+    seq: u64,
 }
 
 /// The default collapse window: sixty seconds.
@@ -117,6 +128,8 @@ pub struct Collapser {
     /// the cap refused since it did.
     window_start: BTreeMap<Scope, Timestamp>,
     suppressed: BTreeMap<Scope, u64>,
+    /// The next window's [`Window::seq`].
+    next_seq: u64,
 }
 
 impl Default for Collapser {
@@ -134,6 +147,7 @@ impl Collapser {
             open_per_scope: BTreeMap::new(),
             window_start: BTreeMap::new(),
             suppressed: BTreeMap::new(),
+            next_seq: 0,
         }
     }
 
@@ -154,9 +168,26 @@ impl Collapser {
         at: Timestamp,
         correlation: CorrelationId,
     ) {
+        self.fold(key, Some(decision), at, correlation);
+    }
+
+    /// Fold one failed presentation into its window. `key.failed` names
+    /// the reason; the cap and the window are the ones denials share.
+    pub fn observe_failure(&mut self, key: CollapseKey, at: Timestamp, correlation: CorrelationId) {
+        debug_assert!(key.failed.is_some(), "a failure window names its reason");
+        self.fold(key, None, at, correlation);
+    }
+
+    fn fold(
+        &mut self,
+        key: CollapseKey,
+        decision: Option<RecordedDecision>,
+        at: Timestamp,
+        correlation: CorrelationId,
+    ) {
         self.window_start.entry(key.scope.clone()).or_insert(at);
         if let Some(w) = self.open.get_mut(&key) {
-            w.decisions.insert(decision);
+            w.decisions.extend(decision);
             w.last_at = at;
             w.count += 1;
             // A bounded sample of distinct correlations: enough to reach the
@@ -172,14 +203,17 @@ impl Collapser {
             return;
         }
         *self.open_per_scope.entry(key.scope.clone()).or_insert(0) += 1;
+        let seq = self.next_seq;
+        self.next_seq += 1;
         self.open.insert(
             key,
             Window {
-                decisions: BTreeSet::from([decision]),
+                decisions: decision.into_iter().collect(),
                 first_at: at,
                 last_at: at,
                 count: 1,
                 correlations: vec![correlation],
+                seq,
             },
         );
     }
@@ -212,14 +246,24 @@ impl Collapser {
                 .filter(|k| k.scope == *scope)
                 .cloned()
                 .collect();
-            for key in keys {
-                let w = self.open.remove(&key).expect("just listed");
+            let mut closed: Vec<(CollapseKey, Window)> = keys
+                .into_iter()
+                .map(|key| {
+                    let w = self.open.remove(&key).expect("just listed");
+                    (key, w)
+                })
+                .collect();
+            closed.sort_by_key(|(_, w)| w.seq);
+            for (key, w) in closed {
                 out.push(StreamEntry {
                     scope: key.scope,
                     about: key.about,
                     subject: key.subject,
                     op: key.op,
-                    kind: EventKind::Denied(w.decisions),
+                    kind: match key.failed {
+                        Some(reason) => EventKind::AuthenticationFailed { reason },
+                        None => EventKind::Denied(w.decisions),
+                    },
                     first_at: w.first_at,
                     last_at: w.last_at,
                     count: w.count,

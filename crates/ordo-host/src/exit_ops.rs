@@ -168,13 +168,10 @@ pub struct ExitOps {
 impl ExitOps {
     /// The database `space`'s rows are in.
     async fn space_pool(&self, space: &SpaceId) -> Result<Pool, ExecError> {
-        self.pools.resolve(space).await.map_err(|e| {
-            ExecError::of_fault(
-                e.class(),
-                ErrorCode::Internal,
-                format!("the space's database: {e}"),
-            )
-        })
+        self.pools
+            .resolve(space)
+            .await
+            .map_err(|e| store_fault("the space's database", e.class(), &e))
     }
 
     /// The deployed artifact, and the program compiled from its own stored
@@ -191,13 +188,7 @@ impl ExitOps {
         let stored = Versions::on(&self.pool)
             .active()
             .await
-            .map_err(|e| {
-                ExecError::of_fault(
-                    e.class(),
-                    ErrorCode::Internal,
-                    format!("the artifact registry: {e}"),
-                )
-            })?
+            .map_err(|e| store_fault("the artifact registry", e.class(), &e))?
             .ok_or_else(|| {
                 ExecError::internal(
                     "this deployment has no active artifact, so there is no schema to \
@@ -237,13 +228,7 @@ impl ExitOps {
         let stored = Versions::on(&self.pool)
             .active()
             .await
-            .map_err(|e| {
-                ExecError::of_fault(
-                    e.class(),
-                    ErrorCode::Internal,
-                    format!("the artifact registry: {e}"),
-                )
-            })?
+            .map_err(|e| store_fault("the artifact registry", e.class(), &e))?
             .ok_or_else(|| {
                 ExecError::internal(
                     "this deployment has no active artifact, so there is no schema to \
@@ -283,17 +268,15 @@ impl ExitOps {
             ));
         }
         let root = self.bundles.join(space);
-        std::fs::create_dir_all(&root)
-            .map_err(|e| ExecError::internal(format!("{}: {e}", root.display())))?;
+        std::fs::create_dir_all(&root).map_err(|e| bundle_dir_fault(&root, e))?;
         let used: usize = std::fs::read_dir(&root)
-            .map_err(|e| ExecError::internal(format!("{}: {e}", root.display())))?
+            .map_err(|e| bundle_dir_fault(&root, e))?
             .filter_map(Result::ok)
             .filter_map(|e| e.file_name().to_string_lossy().parse::<usize>().ok())
             .max()
             .unwrap_or(0);
         let dir = root.join(format!("{:04}", used + 1));
-        std::fs::create_dir(&dir)
-            .map_err(|e| ExecError::internal(format!("{}: {e}", dir.display())))?;
+        std::fs::create_dir(&dir).map_err(|e| bundle_dir_fault(&dir, e))?;
         Ok(dir)
     }
 
@@ -717,6 +700,32 @@ impl ExitOps {
     }
 }
 
+/// A store's fault, told to the caller in fixed words that keep its class;
+/// the driver's text goes to the server log only (security audit
+/// 2026-11-05, L2).
+fn store_fault(
+    what: &str,
+    class: ordo_fault::FaultClass,
+    cause: &dyn std::fmt::Display,
+) -> ExecError {
+    eprintln!("exit ops: {what}: {cause}");
+    ExecError::of_fault(
+        class,
+        ErrorCode::Internal,
+        format!("{what} did not answer. Try again; the server log has the cause"),
+    )
+}
+
+/// The bundle directory could not be made or read: the caller is not told
+/// the server's paths.
+fn bundle_dir_fault(path: &std::path::Path, e: std::io::Error) -> ExecError {
+    eprintln!("exit ops: {}: {e}", path.display());
+    ExecError::internal(
+        "the bundle directory could not be prepared. The deployment owner checks the \
+         server log, which names the path and the cause",
+    )
+}
+
 /// The engine's refusals, given their wire names.
 fn export_refusal(e: ExportError) -> ExecError {
     let message = e.to_string();
@@ -729,7 +738,7 @@ fn export_refusal(e: ExportError) -> ExecError {
         ExportError::SealedUnopened { .. } | ExportError::KeyRelease(_) => {
             ExecError::new(ErrorCode::SealedOpenFailed, message)
         }
-        ExportError::Store(e) => ExecError::of_fault(e.class(), ErrorCode::Internal, message),
+        ExportError::Store(e) => store_fault("the space's database", e.class(), &message),
         ExportError::Bundle(_) => ExecError::internal(message),
         _ => ExecError::internal(message),
     }
@@ -764,7 +773,7 @@ fn import_refusal(e: ordo_exec::import::ImportError) -> ExecError {
         E::BlobRefused { .. } => ExecError::new(ErrorCode::AccessGuard, message),
         // Neither is the caller's to repair, and an operator has to be able
         // to tell a database or a store fault from a bundle defect.
-        E::Store(e) => ExecError::of_fault(e.class(), ErrorCode::Internal, message),
+        E::Store(e) => store_fault("the space's database", e.class(), &message),
         E::Bundle(_) => ExecError::internal(message),
         E::FormatUnknown { .. }
         | E::BundleIncomplete { .. }

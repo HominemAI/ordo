@@ -103,6 +103,12 @@ pub enum IdentityError {
     /// A machine key asked to make a key its minting grant does not cover.
     /// Says what the deployment owner gives.
     MintRefused(String),
+    /// A machine key lacks the grant this act needs. Names the grant and
+    /// what the key holds.
+    GrantNeeded {
+        grant: &'static str,
+        holds: Vec<String>,
+    },
     /// The audit log or one of its checkpoints does not check out.
     AuditBroken(crate::audit::AuditBreak),
     /// The request body or a field in it is malformed.
@@ -195,6 +201,7 @@ impl IdentityError {
             IdentityError::LastPasskey => "last_passkey",
             IdentityError::NameTaken(_) => "name_taken",
             IdentityError::MintRefused(_) => "mint_refused",
+            IdentityError::GrantNeeded { .. } => "grant_needed",
             IdentityError::AuditBroken(_) => "audit_broken",
             IdentityError::BadRequest(_) => "bad_request",
             IdentityError::Internal(_) => "internal",
@@ -222,6 +229,7 @@ impl IdentityError {
             | IdentityError::OriginRefused
             | IdentityError::MustEnrolPasskey
             | IdentityError::MintRefused(_)
+            | IdentityError::GrantNeeded { .. }
             | IdentityError::TouchNeeded { .. } => StatusCode::FORBIDDEN,
             IdentityError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
             IdentityError::LastAdmin | IdentityError::NameTaken(_) | IdentityError::LastPasskey => {
@@ -299,6 +307,17 @@ impl fmt::Display for IdentityError {
                 "that is your only passkey; add another passkey first, then remove this one",
             ),
             IdentityError::MintRefused(why) => f.write_str(why),
+            IdentityError::GrantNeeded { grant, holds } => write!(
+                f,
+                "this machine key holds {} and this act needs the `{grant}` grant; a \
+                 deployment owner makes a key whose `grants` names `{grant}`, or a person \
+                 does this act",
+                if holds.is_empty() {
+                    "no grant".to_string()
+                } else {
+                    format!("`{}`", holds.join("`, `"))
+                }
+            ),
             IdentityError::NameTaken(name) => write!(
                 f,
                 "a live machine key is already named `{name}`; choose another name, or end it \

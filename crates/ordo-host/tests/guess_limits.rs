@@ -410,6 +410,30 @@ async fn the_app_developer_and_a_tenant_change_it_inside_their_bounds() {
     assert!(acts.iter().any(|s| s == "t1"), "{acts:?}");
 }
 
+/// A deployment-only setter built with no home answers nowhere (security
+/// audit 2026-11-05, L0): before, it answered in every space, so a tenant
+/// owner could change the deployment's policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deployment_setter_with_no_home_refuses_every_space() {
+    let limits = GuessLimits::in_memory(Deployment::default());
+    let err = limits
+        .execute(SET_APP, "t1", &params(&[("slowAfter", "3")]), "own_t1")
+        .await
+        .expect_err("no home, no deployment setting");
+    assert_eq!(err.code, ordo_api::ErrorCode::NotFound, "{err:?}");
+    let emails = ordo_host::contact_email::ContactEmails::in_memory(Default::default());
+    let err = emails
+        .execute(
+            ordo_host::contact_email::SET_POLICY,
+            "t1",
+            &params(&[("required", "all")]),
+            "own_t1",
+        )
+        .await
+        .expect_err("no home, no deployment setting");
+    assert_eq!(err.code, ordo_api::ErrorCode::NotFound, "{err:?}");
+}
+
 /// Never off by omission: a door given no slowdown of its own has Ordo's
 /// default, in memory.
 #[tokio::test(flavor = "multi_thread")]

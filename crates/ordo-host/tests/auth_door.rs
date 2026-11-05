@@ -1237,9 +1237,10 @@ async fn sign_in_to(app: &axum::Router, space: &str) -> Answer {
 }
 
 fn policies() -> Arc<SessionPolicies> {
-    Arc::new(SessionPolicies::in_memory(Deployment::with_defaults(
-        3_600, 43_200, ON,
-    )))
+    Arc::new(
+        SessionPolicies::in_memory(Deployment::with_defaults(3_600, 43_200, ON))
+            .with_home("system"),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]

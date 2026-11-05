@@ -245,9 +245,10 @@ pub fn failure_reasons(h: &Harness) -> Vec<String> {
         .expect("recorder")
         .drain_all(ordo_commandlog::Timestamp(NOW + 10_000))
         .iter()
-        .filter_map(|e| match &e.kind {
-            EventKind::AuthenticationFailed { reason } => Some(reason.clone()),
-            _ => None,
+        // Like failures in one window are one entry with its count.
+        .flat_map(|e| match &e.kind {
+            EventKind::AuthenticationFailed { reason } => vec![reason.clone(); e.count as usize],
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -753,11 +754,26 @@ async fn a_passkey_of_another_principal_cannot_step_up_a_session() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Each refusal names the session's person, whose touch failed (security
+    // audit 2026-11-05, M5): an alert can fire on one person's session.
+    let failed: Vec<(String, String)> = h
+        .auth
+        .recorder
+        .as_ref()
+        .expect("recorder")
+        .drain_all(ordo_commandlog::Timestamp(NOW + 10_000))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::AuthenticationFailed { reason } => Some((reason, e.subject.render())),
+            _ => None,
+        })
+        .collect();
+    let me = ordo_secevent::Subject::member(&principal_of(&token, NOW).0).render();
     assert_eq!(
-        failure_reasons(&h),
+        failed,
         vec![
-            "passkey-of-another-principal".to_string(),
-            "challenge-for-another-principal".to_string()
+            ("passkey-of-another-principal".to_string(), me.clone()),
+            ("challenge-for-another-principal".to_string(), me)
         ]
     );
 }

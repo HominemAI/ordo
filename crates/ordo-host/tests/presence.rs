@@ -95,6 +95,10 @@ use ordo_host::platform_ops::person_scoped;
 /// list of tenants, and the consent ops other than the approval (11-4b).
 fn presence_free(name: &str) -> bool {
     person_scoped(name)
+        // Moving a tenant between versions asks no touch, strict or not
+        // (owner, 2026-11-05: "If they are logged in they proved their
+        // access").
+        || ordo_host::deploy_ops::NO_PRESENCE.contains(&name)
         || (ordo_host::consent::any_member(name) && !ordo_host::consent::asks_presence(name))
 }
 
@@ -369,6 +373,63 @@ fn the_owner_named_ops_can_each_be_exempted() {
                 AccessDecision::Allow { .. }
             );
             assert_eq!(asks, other != op, "{op}: engine on {other}");
+        }
+    }
+}
+
+/// **A person moving a tenant's version is not asked for a touch**, strict
+/// or not (owner, 2026-11-05: *"If they are logged in they proved their
+/// access."*). The role gate stays: an editor is still refused.
+#[test]
+fn moving_a_tenant_version_asks_no_touch_and_keeps_the_role_gate() {
+    let pin = ordo_host::deploy_ops::PIN;
+    for policy in [
+        PresencePolicy::standard(),
+        PresencePolicy::standard().with_reads(true),
+    ] {
+        let d = door(&policy);
+        assert!(allowed(&d, "usr_owner", false, pin), "{policy:?}");
+        assert!(!allowed(&d, "usr_editor", true, pin), "{policy:?}");
+    }
+    // Its neighbours still ask.
+    let d = door(&PresencePolicy::standard());
+    assert!(!allowed(
+        &d,
+        "usr_owner",
+        false,
+        ordo_host::deploy_ops::ACTIVATE
+    ));
+}
+
+/// **A system caller is never asked for a touch** (owner, 2026-11-05). A
+/// delegated token is refused every op that asks for presence because the
+/// op is not delegable, which the engine checks first, so it is never told
+/// `presence_required` for an op it could otherwise call. A machine key
+/// needs no touch in the home space (`deployment_access`). If an op ever
+/// asks for presence and is delegable, this fails: decide then whether a
+/// delegated token may call it at all, never ask it for a touch.
+#[test]
+fn no_op_asks_a_delegated_token_for_presence() {
+    let f = Fixture::from_source(PROGRAM, "").expect("the program compiles");
+    let rows = [row("usr_owner", "owner")];
+    let exempt_all = PresencePolicy::parse("std.space.*,std.deployment.*", &names()).expect("ok");
+    for policy in [
+        PresencePolicy::standard(),
+        PresencePolicy::standard().with_reads(true),
+        exempt_all.clone(),
+        exempt_all.with_reads(true),
+    ] {
+        let engine = ordo_host::engine_from_members_under(&f, &rows, &policy)
+            .expect("the engine builds");
+        let mut ops = names();
+        ops.push("listNotes".to_string());
+        for op in ops {
+            if engine.step_up_for(&op, None).demands_presence() {
+                assert!(
+                    !engine.delegable(&op),
+                    "{op} asks for presence and is delegable under {policy:?}"
+                );
+            }
         }
     }
 }

@@ -397,8 +397,12 @@ pub fn op_class(name: &str) -> Option<OpClass> {
 
 /// A platform write that asks for a fresh touch (`presence.rs`: every
 /// platform op that changes something, unless `ORDO_STEP_UP_EXEMPT_OPS`
-/// names it, and it is unset here).
-fn needs_presence(class: OpClass, kind: ordo_api::OpKind) -> bool {
+/// names it, and it is unset here). Moving a tenant's version asks none
+/// (owner, 2026-11-05: *"If they are logged in they proved their access"*).
+fn needs_presence(name: &str, class: OpClass, kind: ordo_api::OpKind) -> bool {
+    if ordo_host::deploy_ops::NO_PRESENCE.contains(&name) {
+        return false;
+    }
     let write = kind != ordo_api::OpKind::Read;
     match class {
         OpClass::AnyMember { presence } => presence,
@@ -465,7 +469,8 @@ fn deployment_op(name: &str, kind: ordo_api::OpKind, who: Kind, home: bool) -> E
     if home {
         // A write the touch gate names asks a stale person for a touch.
         let gated = kind != ordo_api::OpKind::Read
-            && !matches!(class, OpClass::AnyMember { presence: false });
+            && !matches!(class, OpClass::AnyMember { presence: false })
+            && !ordo_host::deploy_ops::NO_PRESENCE.contains(&name);
         return if person && !fresh && gated {
             presence
         } else {
@@ -510,7 +515,7 @@ pub fn expect_op_in(
             if !role_reaches(class, role) {
                 return holds(Expect::Denied);
             }
-            if !fresh && needs_presence(class, kind) {
+            if !fresh && needs_presence(name, class, kind) {
                 return holds(Expect::Denied);
             }
             holds(Expect::Pass)

@@ -61,7 +61,18 @@
 //! the engine is told so directly (`deployment_engine`'s loop). A read the
 //! app developer names in [`ENV`] is delegable, as it always was.
 //!
-//! **Two ops are never exempt**: `std.deployment.addConsoleKey` and
+//! # Version moves, and systems
+//!
+//! Owner, 2026-11-05: *"If they are logged in they proved their access."*
+//! Moving a tenant's version (`std.deployment.pin`,
+//! [`crate::deploy_ops::NO_PRESENCE`]) asks no touch of anyone, strict or
+//! not. The same day: a system caller is never asked for a touch on an op
+//! its credential is granted. A machine key needs none in the home space
+//! (`deployment_access`). A delegated token is refused every op that asks
+//! for presence as not delegable, before presence is read, so it is never
+//! told to touch a passkey (`tests/presence.rs` guards this).
+//!
+//! **Two ops are never exempt**:`std.deployment.addConsoleKey` and
 //! `std.deployment.revokeConsoleKey` ([`crate::console_keys::NEVER_EXEMPT`]).
 //! Who holds a console key decides who can sign in as the deployment owner,
 //! so it takes the owner's own touch whatever the list says. A prefix such
@@ -175,6 +186,12 @@ impl PresencePolicy {
     /// for none unless the deployment is strict.
     pub fn requires(&self, op: &str, kind: ordo_api::OpKind) -> bool {
         if kind == ordo_api::OpKind::Read && !self.reads {
+            return false;
+        }
+        // Moving a tenant between versions asks no touch of anyone signed
+        // in (owner, 2026-11-05: "If they are logged in they proved their
+        // access"). Strict mode does not bring it back.
+        if crate::deploy_ops::NO_PRESENCE.contains(&op) {
             return false;
         }
         !self.exempts(op)

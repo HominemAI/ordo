@@ -169,8 +169,13 @@ The setting is `ORDO_STEP_UP_EXEMPT_OPS`, a list of the platform ops that do
 **not** require presence (exact names, or a prefix ending `.*`). **Its default
 is empty: presence is required on every platform op**, which is what every
 "step-up gated" statement in this document describes. An exempt op keeps its
-role gate, and it is one a capability token may be granted, since nothing about
-it is structurally human-only any longer. An entry that names no platform op
+role gate. An exempt read is one a delegated token may be granted; platform
+writes stay closed to delegated tokens whatever the list says
+(`ORDO_DELEGABLE_OPS`). **A system caller is never asked for a touch**
+(owner, 2026-11-05): a machine key needs none in the deployment's own space,
+and a delegated token is refused a presence-gated op as not delegable before
+presence is read. Moving a tenant's version (`std.deployment.pin`) asks no
+touch of anyone (same day). An entry that names no platform op
 refuses the boot. Code: `crates/ordo-host/src/presence.rs`; deployment
 reference: `docs/deploying.md`.
 

@@ -225,7 +225,7 @@ fn list(text: &str) -> Vec<String> {
 }
 
 /// One stored connection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Row {
     name: String,
     key: String,
@@ -233,6 +233,20 @@ struct Row {
     secret: String,
     state: String,
     rev: i64,
+}
+
+/// The secret is never printed (security audit 2026-11-05, L3).
+impl std::fmt::Debug for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Row")
+            .field("name", &self.name)
+            .field("key", &self.key)
+            .field("settings", &self.settings)
+            .field("secret", &"<redacted>")
+            .field("state", &self.state)
+            .field("rev", &self.rev)
+            .finish()
+    }
 }
 
 /// A connection, built and ready to serve.
@@ -1372,6 +1386,27 @@ pub fn specs() -> Vec<OpSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A connection's client secret never reaches a log by `{:?}` (security
+    /// audit 2026-11-05, L3).
+    #[test]
+    fn a_rows_debug_hides_its_secret() {
+        let settings = Settings::from_json(&json!({
+            "kind": "oidc", "clientId": "c", "scope": "openid"
+        }))
+        .expect("settings");
+        let row = Row {
+            name: "corp".into(),
+            key: "k".into(),
+            settings,
+            secret: "s3cret-value".into(),
+            state: "live".into(),
+            rev: 1,
+        };
+        let shown = format!("{row:?}");
+        assert!(!shown.contains("s3cret-value"), "{shown}");
+        assert!(shown.contains("corp"), "{shown}");
+    }
 
     #[test]
     fn the_setting_is_off_unless_on_and_names_itself_when_wrong() {

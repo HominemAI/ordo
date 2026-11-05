@@ -66,7 +66,10 @@ pub const UNREVOKE: &str = "std.deployment.unrevoke";
 pub const REVOKED: &str = "std.deployment.revoked";
 /// **Move one tenant to a stored version, now** (`plan-versions.md` §1.3,
 /// increment 3): the move on demand (owner, 2026-11-05). A door op, so the
-/// app developer's own system can drive moves as well as a person.
+/// app developer's own system can drive moves as well as a person. A system
+/// caller (a machine key) is never asked for a passkey touch here (owner,
+/// 2026-11-05; `deployment_access`). A person is asked, as on every other
+/// platform write, until the board rules otherwise.
 pub const PIN: &str = "std.deployment.pin";
 /// One tenant's version, epoch and pin history.
 pub const TENANT_VERSION: &str = "std.deployment.tenantVersion";
@@ -83,13 +86,6 @@ pub const OPS: [&str; 10] = [
     PIN,
     TENANT_VERSION,
 ];
-
-/// The ops that move tenants between versions and ask no passkey touch:
-/// the owner, 2026-11-05, *"technically the developer could even have their
-/// own system managing automatic updates"*, and a system caller moving
-/// versions is not asked for one. The role gate is unchanged: deployment
-/// owner only, on the deployment's own space.
-pub const NO_PRESENCE: [&str; 1] = [PIN];
 
 /// The activation log's length when the caller names none.
 pub const DEFAULT_LIMIT: i64 = 20;

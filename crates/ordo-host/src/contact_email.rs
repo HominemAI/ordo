@@ -848,7 +848,7 @@ impl ContactEmails {
                 "`{op}` is not an email policy op"
             )));
         }
-        if self.home.as_deref().is_some_and(|h| h != space) {
+        if self.home.as_deref() != Some(space) {
             return Err(ExecError::new(
                 ErrorCode::NotFound,
                 "the app developer's email policy is the deployment's setting and this op \

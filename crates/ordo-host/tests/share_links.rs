@@ -149,7 +149,8 @@ async fn harness_src(db: &str, settings: LinkSettings, source: Option<&str>) -> 
     // The production cost is `Argon2idHasher::new`, which `new` uses.
     let links = Arc::new(
         ShareLinks::new(share.clone(), settings)
-            .with_hasher(Arc::new(ordo_identity::Argon2idHasher::weak_for_tests())),
+            .with_hasher(Arc::new(ordo_identity::Argon2idHasher::weak_for_tests()))
+            .with_home(DEFAULT_SPACE),
     );
     let platform = Arc::new(
         PlatformOps::new(engine.clone(), grants.clone(), Arc::new(|| NOW))
@@ -2318,7 +2319,8 @@ fn throttled_entries(h: &Harness) -> Vec<(String, u64)> {
 fn another_door(h: &Harness, settings: LinkSettings) -> Arc<ShareLinks> {
     Arc::new(
         ShareLinks::new(h.share.clone(), settings)
-            .with_hasher(Arc::new(ordo_identity::Argon2idHasher::weak_for_tests())),
+            .with_hasher(Arc::new(ordo_identity::Argon2idHasher::weak_for_tests()))
+            .with_home(DEFAULT_SPACE),
     )
 }
 

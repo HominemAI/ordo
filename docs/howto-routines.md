@@ -250,6 +250,8 @@ See `howto-pause.md` for what a pause is.
 
 - Any change to a routine, its body, its trigger or its flags, is a new program version. Apply and activate it like any other change.
 - An edited body takes effect once that version is active.
+- **A run executes under its tenant's version.** A tenant pinned to a version other than the active one runs that version's body, and its command group names that version. A routine the tenant's version does not declare is skipped and recorded as `undeclared`.
+- The schedules and change triggers are the active version's. A routine that only a non-active version declares does not fire yet.
 - A routine added, retimed or removed by a hot deploy takes effect when each node switches to the version, with no restart. The log prints a `routines:` line with the version.
 - `ordo apply` waits for that switch on every node before it returns (`deploying.md` §7, "When a new version is served").
 - A routine kept under its name whose trigger changed gets a new cursor when each tenant is next reached after the switch.

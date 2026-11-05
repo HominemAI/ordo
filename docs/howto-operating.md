@@ -630,6 +630,42 @@ with a uniqueness check rather than assumed unique: a colliding draw is
 retried rather than minted. `ORDO_AUTH_UNSAFE_MEMORY_DIRECTORY` no
 longer exists: there is nothing unsafe left in this path to gate.
 
+### Touches a tenant chooses
+
+`ORDO_SECURITY_LEVEL` sets which situations ask a person for a passkey touch,
+for every tenant. You may let each tenant change some of them for its own
+space (owner, 2026-11-05). You choose which situations, and which way.
+Nothing is exposed by default.
+
+- **See what is exposed:** `ordo touches --host <h>`. It prints each
+  situation, what the level asks, what tenants may change, and the recent
+  changes with who made them and why. Through the door:
+  `std.deployment.tenantTouches`. The console's Deploys screen shows the same.
+- **Expose one:** `ordo touches expose membership raise --reason "..."`.
+  - `raise`: a tenant may turn the touch on where the level leaves it off.
+  - `lower`: a tenant may turn it off where the level asks.
+  - `both`: either way. `none` takes it back.
+  - Through the door: `std.deployment.exposeTouch`. You, or your own system
+    with a machine key that has the `deployment` grant. No passkey touch is
+    asked below `ORDO_SECURITY_LEVEL=high`.
+- **What can be exposed:** `export-import`, `membership`, `tenant-storage`,
+  `approving-delegation` and `account-security` (a tenant's own sign-in
+  providers and origins). Acts on the deployment, recovery, platform reads
+  and a person's contact email never can; the refusal names them.
+- **A tenant's owner sets it** with `std.space.setTouch {situation, touch}`,
+  where `touch` is `on`, `off` or `default`. `std.space.touches` reads what
+  is exposed, what the tenant chose and what is in force. A choice outside
+  what you exposed is refused, naming the exposure and the command that
+  changes it.
+- **The order:** `ORDO_STEP_UP_EXEMPT_OPS` and `ORDO_STEP_UP_REQUIRED_OPS`
+  first, then the tenant's choice, then the level. `std.space.touches` names
+  each op a per-action setting decides.
+- **Taking an exposure back** leaves a tenant's choice stored and unused.
+  Expose it again and the choice is back in force.
+- A system is never asked, whatever a tenant chooses.
+- A change reaches the node that made it at once, and every other node at
+  its next door rebuild.
+
 ## When a Person Loses Their Passkey
 
 Ordo provides the mechanisms. The app developer decides what is enforced,

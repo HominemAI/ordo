@@ -136,7 +136,7 @@ test('add, refuse, edit, skip and delete maintenance windows; revoke a version a
   await expect(second.getByText('revoked', { exact: true })).toHaveCount(0);
 
   // Revoking the version that serves asks where to move.
-  const serving = versions.getByRole('listitem').filter({ hasText: 'serving' });
+  const serving = versions.getByRole('listitem').filter({ hasText: 'active (new tenants)' });
   await serving.getByRole('button', { name: 'Revoke' }).click();
   await expect(serving.getByLabel('It serves now. Move to')).toBeVisible();
   await serving.getByRole('button', { name: 'Cancel' }).click();

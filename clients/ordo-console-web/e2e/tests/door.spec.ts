@@ -115,7 +115,7 @@ test('link the deployment by sign-in, write with a relayed touch, deploy and rol
   await page.getByRole('button', { name: 'Roll back the app', exact: true }).click();
   await touchIfAsked(page);
   await expect(page.getByRole('status')).toContainText('Rolled the app back to');
-  await expect(versions.getByRole('listitem').last().getByText('serving')).toBeVisible();
+  await expect(versions.getByRole('listitem').last().getByText('active (new tenants)')).toBeVisible();
   await page.getByText(/Activation history/).click();
   await expect(page.getByRole('list', { name: 'Activations' }).getByRole('listitem')).toHaveCount(3);
 

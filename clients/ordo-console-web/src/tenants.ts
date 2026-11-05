@@ -40,6 +40,9 @@ export interface Tenant {
   quarantined: string | null;
   /** The role the deployment owner holds in it, if any. */
   yourRole: string | null;
+  /** The version it is pinned to, and that version's order number. Absent from an older host. */
+  version?: string | null;
+  ordinal?: number | null;
 }
 
 export interface TenantList {

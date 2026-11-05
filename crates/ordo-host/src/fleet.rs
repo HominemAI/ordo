@@ -233,6 +233,8 @@ pub fn specs() -> Vec<OpSpec> {
             "usage",
             "quarantined",
             "yourRole",
+            "version",
+            "ordinal",
         ]
         .iter()
         .map(|f| FieldSpec::new(*f))
@@ -287,6 +289,25 @@ impl TenantListOps {
         };
         let fleet = read(&self.control).await.map_err(unreadable)?;
         let usage = latest_usage(&self.control).await.map_err(unreadable)?;
+        // Each tenant's version (`plan-versions.md` §1.3), from the one
+        // client that reads pins.
+        let versions = crate::versions::Versions::on(&self.control);
+        let pins: BTreeMap<String, String> = versions
+            .all_pins()
+            .await
+            .map_err(|e| e.to_exec_error("the tenants' versions could not be read"))?
+            .0
+            .into_iter()
+            .map(|(space, version, _)| (space, version))
+            .collect();
+        let ordinals = if pins.is_empty() {
+            BTreeMap::new()
+        } else {
+            versions
+                .ordinals()
+                .await
+                .map_err(|e| e.to_exec_error("the versions' order numbers could not be read"))?
+        };
         let include_reaped = bound
             .0
             .get("includeReaped")
@@ -343,6 +364,8 @@ impl TenantListOps {
                     "usage": usage.get(&t.id).cloned().unwrap_or(Value::Null),
                     "quarantined": quarantined.get(&t.id),
                     "yourRole": roles.get(&t.id).copied().flatten(),
+                    "version": pins.get(&t.id),
+                    "ordinal": pins.get(&t.id).and_then(|v| ordinals.get(v)),
                 })
             })
             .collect();

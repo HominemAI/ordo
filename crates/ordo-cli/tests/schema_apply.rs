@@ -983,3 +983,62 @@ fn a_version_carries_its_label_and_commit_and_two_compare() {
     assert_ne!(nope.code, 0);
     assert!(nope.report.contains("`0.0.9`"), "{}", nope.report);
 }
+
+/// `ordo rollback --version '#1'` resolves names as `ordo versions` does,
+/// records the deployment owner when `--as` is not given, and the revoked
+/// report prints times in UTC.
+#[test]
+fn rollback_takes_an_order_number_and_revoke_times_print_in_utc() {
+    let _g = SETTING.lock().unwrap_or_else(|e| e.into_inner());
+    let db = "ordo_sapply_rollback_names";
+    let pg = empty(db);
+    let v1 = program(db, "v1", V1);
+    let v2 = program(db, "v2", V2);
+    assert_eq!(apply(&v1, db).code, 0);
+    let first = one(
+        &pg,
+        "SELECT version FROM \"$activations\" ORDER BY seq DESC LIMIT 1",
+    );
+    assert_eq!(apply(&v2, db).code, 0);
+
+    let back = operator::run(
+        "rollback",
+        &["--version".into(), "#1".into(), "--db".into(), db.into()],
+    );
+    assert_eq!(back.code, 0, "{}", back.report);
+    assert!(back.report.contains(&first), "{}", back.report);
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT actor FROM \"$activations\" ORDER BY seq DESC LIMIT 1"
+        ),
+        "deployment-owner:unattributed"
+    );
+
+    let unknown = operator::run(
+        "rollback",
+        &["--version".into(), "#9".into(), "--db".into(), db.into()],
+    );
+    assert_ne!(unknown.code, 0);
+    assert!(unknown.report.contains("REFUSED"), "{}", unknown.report);
+
+    // #2 is no longer the active version, so it can be revoked.
+    let revoke = operator::run(
+        "versions",
+        &[
+            "revoke".into(),
+            "#2".into(),
+            "--reason".into(),
+            "bad".into(),
+            "--db".into(),
+            db.into(),
+        ],
+    );
+    assert_eq!(revoke.code, 0, "{}", revoke.report);
+    let revoked = operator::run("versions", &["revoked".into(), "--db".into(), db.into()]);
+    assert!(
+        revoked.report.contains(" UTC  \"bad\""),
+        "a UTC time, not epoch seconds:\n{}",
+        revoked.report
+    );
+}

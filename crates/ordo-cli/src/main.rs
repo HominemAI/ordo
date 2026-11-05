@@ -202,7 +202,7 @@ fn usage() -> ! {
          they had ends, and the passkeys they had can contest it for three days.\n      \
          Evidence is one of vouched-by-members, verified-out-of-band,\n      \
          contract-holder, host-break-glass (the default).\n  \
-         ordo rollback  --version <hash> [--as <actor>]\n      \
+         ordo rollback  --version <hash or #n> [--as <actor>]\n      \
          re-point the registry at a version it already holds. The same\n      \
          mechanism as apply's activation, backwards; one more row in the\n      \
          activation log, never a rewrite of it.\n  \

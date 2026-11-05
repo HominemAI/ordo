@@ -231,6 +231,7 @@ What is planned, not built:
 | Agents | A VS Code extension | 💭 Open for thoughts |
 | Operating | The console, and one image that runs everything | ✅ Done |
 | Operating | Proxy mode and limits by visitor address | ✅ Done |
+| Operating | Program versions: order numbers, labels, revoke, and maintenance windows | 🚧 In progress |
 | Operating | Security event stream | 🚧 In progress |
 | Operating | Backup and restore drill | 📋 Planned |
 | Operating | Applying from a connected GitHub repository | 💭 Open for thoughts |

@@ -208,8 +208,11 @@ export async function codeFor(address: string, n: number): Promise<string> {
 export function applyProgram(dir: string): string {
   const s = stack();
   // `--direct`: the harness owns this stack's database and holds no
-  // deployment-owner credential at the door. Each use is recorded and the
-  // next boot writes it to the security log.
+  // deployment-owner credential at the door. The stack runs no identity
+  // service (stack.sh), so there is no machine key to mint, and a bearer
+  // token for the deployment's own space would need a passkey sign-in
+  // first. Each use is recorded in `ORDO_PG_DB` (the database this command
+  // acts on) and the next boot writes it to the security log.
   return execFileSync(s.ordo, ['apply', dir, '--direct', '--as', 'notes-e2e', '--wait-secs', '240'], {
     env: {
       ...process.env,

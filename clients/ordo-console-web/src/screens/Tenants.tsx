@@ -23,6 +23,7 @@ import {
   stored,
   type Tenant,
 } from '../tenants';
+import { moveTenantOffRevoked, pinTenant, setTenantTarget } from '../deploys';
 import { withTouch } from '../touch';
 import './tenants.css';
 
@@ -54,6 +55,7 @@ type Open =
   | { kind: 'pause'; t: Tenant }
   | { kind: 'delete'; t: Tenant }
   | { kind: 'bucket'; t: Tenant }
+  | { kind: 'version'; t: Tenant }
   | { kind: 'resolve'; c: OwnerCase }
   | { kind: 'complete'; c: OwnerCase }
   | null;
@@ -76,6 +78,8 @@ export function Tenants(props: { onSignedOut: () => void }) {
   const [open, setOpen] = useState<Open>(null);
   const [note, setNote] = useState<string>('other');
   const [typed, setTyped] = useState('');
+  const [verAct, setVerAct] = useState<'pin' | 'move' | 'target' | 'clear'>('pin');
+  const [verName, setVerName] = useState('');
   const [bucket, setBucket] = useState({ endpoint: '', region: '', bucket: '', credential: '', platformSealed: true });
   const [cases, setCases] = useState<OwnerCase[] | null>(null);
   const [succ, setSucc] = useState({ tenant: '', principal: '', departed: '', evidence: '', reference: '' });
@@ -289,6 +293,20 @@ export function Tenants(props: { onSignedOut: () => void }) {
                           }}
                         >
                           Pause
+                        </button>
+                      )}
+                      {(t.status === 'active' || t.status === 'paused') && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          aria-label={`Version of ${t.name}`}
+                          onClick={() => {
+                            setVerAct('pin');
+                            setVerName('');
+                            setOpen({ kind: 'version', t });
+                          }}
+                        >
+                          Version
                         </button>
                       )}
                       {t.status === 'paused' && (
@@ -674,6 +692,64 @@ export function Tenants(props: { onSignedOut: () => void }) {
             <div className="actions">
               <button type="submit" className="primary" disabled={busy}>
                 Complete succession
+              </button>
+              <button type="button" className="link" onClick={() => setOpen(null)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+        {open?.kind === 'version' && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const t = open.t;
+              const v = verName.trim();
+              if ((verAct === 'pin' || verAct === 'target') && !v) return;
+              if (verAct === 'pin') void change(() => pinTenant(t.id, v), `Pinned ${t.name} to ${v}.`);
+              else if (verAct === 'move') void change(() => moveTenantOffRevoked(t.id), `Moved ${t.name} off its version.`);
+              else if (verAct === 'target')
+                void change(() => setTenantTarget(t.id, v), `${t.name} moves to ${v} in its window.`);
+              else void change(() => setTenantTarget(t.id, null), `Cleared the target of ${t.name}.`);
+            }}
+          >
+            <h2 id="tenant-action-title">Version of {open.t.name}</h2>
+            <p>
+              Now on{' '}
+              <span className="mono">
+                {open.t.ordinal != null ? `#${open.t.ordinal} · ` : ''}
+                {open.t.version ?? 'no version'}
+              </span>
+              . Name a version by its name or its order number, such as <span className="mono">#4</span>. The
+              deployment refuses a revoked version, or one below the minimum, and says which.
+            </p>
+            <label htmlFor="ver-act">Act</label>
+            <select
+              id="ver-act"
+              value={verAct}
+              onChange={(e) => setVerAct(e.target.value as 'pin' | 'move' | 'target' | 'clear')}
+            >
+              <option value="pin">Pin to a version now</option>
+              <option value="move">Move now off a revoked version, to its target</option>
+              <option value="target">Set the version its window moves it to</option>
+              <option value="clear">Clear the version its window moves it to</option>
+            </select>
+            {(verAct === 'pin' || verAct === 'target') && (
+              <>
+                <label htmlFor="ver-name">Version</label>
+                <input
+                  id="ver-name"
+                  value={verName}
+                  onChange={(e) => setVerName(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                />
+              </>
+            )}
+            <div className="actions">
+              <button type="submit" className="primary" disabled={busy}>
+                Apply
               </button>
               <button type="button" className="link" onClick={() => setOpen(null)}>
                 Cancel

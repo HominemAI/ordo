@@ -54,12 +54,15 @@ const APPLY: &str = ordo_host::apply_op::APPLY;
 use ordo_host::deploy_ops::{ACTIVATE, PLAN, VERSIONS};
 /// The revoke ops and the window ops (versions increment 2b), the real
 /// ones over the test's own database.
-const VERSION_OPS: [&str; 5] = [
+const VERSION_OPS: [&str; 8] = [
     ordo_host::deploy_ops::REVOKE,
     ordo_host::deploy_ops::UNREVOKE,
     ordo_host::deploy_ops::REVOKED,
     ordo_host::deploy_ops::VERSION_SETTINGS,
     ordo_host::deploy_ops::SET_VERSION_SETTING,
+    ordo_host::deploy_ops::PIN,
+    ordo_host::deploy_ops::MOVE_OFF_REVOKED,
+    ordo_host::deploy_ops::SET_MOVE_TARGET,
 ];
 use ordo_host::window_ops::OPS as WINDOW_OPS;
 /// The touches tenants may choose (owner, 2026-11-05). A deployment write:
@@ -150,6 +153,10 @@ impl Door {
                 ordo_host::deploy_ops::REVOKED,
                 ordo_host::deploy_ops::VERSION_SETTINGS,
                 ordo_host::deploy_ops::SET_VERSION_SETTING,
+                // A version move asks no touch (owner, 2026-11-05).
+                ordo_host::deploy_ops::PIN,
+                ordo_host::deploy_ops::MOVE_OFF_REVOKED,
+                ordo_host::deploy_ops::SET_MOVE_TARGET,
                 ordo_host::window_ops::WINDOWS,
             ]
             .contains(change)
@@ -1487,6 +1494,22 @@ async fn revoke_needs_a_reason_and_somewhere_to_move_and_unrevoke_lifts_it() {
     );
     let after = h.get("deploys/settings").await.body;
     assert_eq!(after["history"][0]["reason"], "start here", "{after}");
+
+    // Pin, move and target reach the door's ops and its refusals come back
+    // in the door's words (no tenant by that id here).
+    for (route, body) in [
+        ("deploys/pin", json!({"tenant": "spc_none", "version": v1})),
+        ("deploys/move", json!({"tenant": "spc_none"})),
+        (
+            "deploys/target",
+            json!({"tenant": "spc_none", "version": v1}),
+        ),
+    ] {
+        let r = h.post(route, body).await;
+        assert_ne!(r.status, StatusCode::OK, "{route}: {}", r.body);
+        let message = r.body["message"].as_str().unwrap_or_default();
+        assert!(message.contains("spc_none"), "{route}: {}", r.body);
+    }
 
     // The touches tenants may choose (owner, 2026-11-05): nothing exposed,
     // one exposed with a reason, and an act on the deployment refused in

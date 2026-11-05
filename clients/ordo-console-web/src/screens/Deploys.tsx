@@ -344,6 +344,9 @@ export function Deploys(props: { onSignedOut: () => void }) {
           {inUse && inUse.length > 0 && (
             <div className="note revoked-warning" role="region" aria-label="Revoked versions in use">
               <h3>Revoked versions still in use</h3>
+              <p className="small">
+                They move in a maintenance window, or now: use the Version button on the Tenants screen.
+              </p>
               <ul>
                 {inUse.map((r) => (
                   <li key={r.version}>

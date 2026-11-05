@@ -22,21 +22,21 @@ const ROWS: Row[] = [
     key: 'served',
     label: 'Versions served',
     unset: 'in-use: every version a tenant is on',
-    hint: 'in-use, or a comma list of versions (a name or #n) served beside the active one.',
+    hint: 'in-use, or a comma list of versions (a name or #n) served beside the active one. Clear sets in-use.',
   },
   {
     name: 'versions.minimum',
     key: 'minimum',
     label: 'Oldest version a tenant may stay on',
     unset: 'none',
-    hint: 'A version, a name or #n. Tenants below it move in their maintenance window.',
+    hint: 'A version, a name or #n. Tenants below it move in their maintenance window, or when you move them. Clear sets none.',
   },
   {
     name: 'versions.new_tenant',
     key: 'newTenant',
     label: 'New tenants start on',
     unset: 'the active version',
-    hint: 'A stored version that is not revoked, a name or #n.',
+    hint: 'A stored version that is not revoked, a name or #n. Clear sets the active version.',
   },
 ];
 
@@ -143,6 +143,14 @@ export function VersionSettings(props: {
             </Fragment>
           ))}
         </dl>
+      )}
+      {now?.waiting?.line && (
+        <p className="note" role="status">
+          {now.waiting.line.replace('`ordo windows set`', 'Maintenance windows').replace(
+            '`ordo versions move <tenant>`',
+            'the Version button on the Tenants screen',
+          )}
+        </p>
       )}
 
       {editing && (

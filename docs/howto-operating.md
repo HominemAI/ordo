@@ -274,6 +274,8 @@ With one database per tenant, an update has to reach each person's database as w
 - **A program applied to one database** (`ordo apply --db`, which `examples/notes/dev/serve.sh` uses) reaches no tenant's database by itself. Each replica notices the swap and brings every tenant database forward within seconds.
 - **A tenant that was down, or was created from the previous version,** is found by the same catch-up, once at boot and then on a tick (`ORDO_TENANT_CATCHUP_SECS`, default 15).
 
+The catch-up brings a database to the **active** version. A tenant pinned to another version (see "Versions and pins" below) is not brought forward. Its database must already hold that version's shape, and each node checks it the first time it opens the tenant. A database that lacks something the version declares keeps that tenant closed. `/health/ready` names the first thing missing and the fix: pin it to a version its database serves, or activate that version so its database is brought forward.
+
 Until its database has followed, a tenant is closed. The person who calls it is told: "space `...` is closed for a moment while its data is brought to the current version of the app." `/health/ready` lists the tenant under `quarantined` with the versions involved. The log says `tenant catch-up: ...` when one is moved or held.
 
 **A field the program stopped declaring** is left in the tenant's database, as it is in the deployment's own: no column is deleted, and the database records that it is at the new version. **A change a tenant's data cannot take** (a `unique` over duplicate values, or a constraint over a table that holds rows) keeps only that tenant closed. `/health/ready` gives its reason, for example `Bringing it forward was refused: not_class_a: ...`, and it is not asked again until the next version or a restart. The deployment owner decides what to do, for example by changing the program.
@@ -283,6 +285,22 @@ Until its database has followed, a tenant is closed. The person who calls it is 
 When `ordo apply` or `ordo rollback` activates a new version, each node independently loads it, runs the load gate, and either begins serving or stays on the old one. There is no restart and no drain. Requests in flight keep running on the version they started with; new requests see the new version.
 
 A swap must pass shape verification because the gate runs on every swap, not only at boot. If the database schema has drifted since the last deploy, the swap refuses and the node keeps serving the old version. This is not a failure. It is how you learn the database state and the serving program disagree.
+
+A node can serve more than one version at once. The active version is the one an activation installs. Each tenant is served the version it is pinned to, which is the active one unless it was moved (next section). A version served beside the active one passes the same compile and gate. Its live check is made against each tenant's own database, not the deployment's.
+
+## Versions and pins
+
+- **A pin** is the version one tenant is served. `$spaces.version` holds it, in the control database, with an epoch that grows by 1 on every change. `$pins` keeps every change: from, to, epoch, who, why, when.
+- **The active version** is where new tenants start (unless `ORDO_VERSIONS_NEW_TENANT` names another) and where an activation moves every tenant.
+- **An activation moves every tenant at once**, a tenant you pinned elsewhere included. Rollouts that move tenants in batches come later.
+- **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no passkey touch, so the app developer's own system may drive moves.
+- **See one tenant's version:** `ordo versions list --tenant <id>` prints its version, its epoch and every pin change. Through the door: `std.deployment.tenantVersion`.
+- `ordo versions list` says, per version, how many tenants it serves, and marks the active one `active (new tenants)`.
+- **How a node learns of a pin.** Every pin change notifies the nodes in its own transaction. A node then reads `$pins` from the last row it read. It also reads every pin again every `ORDO_PINS_RECONCILE_SECS` seconds (`pins.reconcile_interval`, default 30), so a missed notice costs at most that long.
+- **Loading.** A node loads every version a pin names at boot and when a pin first names it, one at a time. A request never starts a load. A tenant whose version is still loading answers "closed for a moment" and the same request lands once it has. A version no pin names any more is dropped.
+- **The pin fence.** Each tenant's own database records the newest epoch any node wrote under (`$pin_fence`). A node whose pin is older has its write refused, reads the pin again and writes once more. The caller sees one answer.
+- **Which moves wait for a maintenance window: none yet.** An activation and a pin move a tenant at once, whatever its window says. A tenant left on a revoked version stays there. Moving it in its window, or on demand, comes next.
+- **Every node should agree on `ORDO_VERSIONS_NEW_TENANT`.** Each node writes its value to `$nodes`. A node that sees another with a different value logs a warning naming the setting, on every reconcile tick, until they agree.
 
 ## Health Endpoints
 

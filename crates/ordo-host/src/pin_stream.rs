@@ -147,6 +147,13 @@ impl PinStream {
 
     /// Load what the pins name and drop what they no longer do.
     async fn settle(&self, read: &mut Read) {
+        // The registry's active version is the deploy channel's to load,
+        // with its live check and the tenant catch-up; never this stream's.
+        match Versions::on(&self.control).active_version().await {
+            Ok(v) => self.deployment.follow(v),
+            Err(e) if e.is_missing_table() => self.deployment.follow(None),
+            Err(e) => eprintln!("pins: the active version was not read ({e})"),
+        }
         let (loaded, refused) = self.load_wanted().await;
         read.loaded = loaded;
         read.refused = refused;
@@ -162,6 +169,7 @@ impl PinStream {
             .values()
             .map(|(v, _)| v.clone())
             .filter(|v| self.deployment.loaded(v).is_none())
+            .filter(|v| self.deployment.following().as_deref() != Some(v.as_str()))
             .collect();
         out.sort();
         out.dedup();

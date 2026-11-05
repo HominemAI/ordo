@@ -162,9 +162,9 @@ The pin this plan adds:
   (review, 2026-11-04).
 - An apply adds `$spaces`' columns only when the pin's are missing: the
   table's setup locks it exclusively once per column.
-- Not yet built: the pin epoch check in the write transaction and the
-  stream event (increment 3, asks 16 and 17), the principal check on who
-  may pin, and the rollout id on `$pins` (increment 10).
+- Not yet built then: the pin epoch check in the write transaction and
+  the stream event (built in increment 3, below), the principal check on
+  who may pin, and the rollout id on `$pins` (increment 10).
 
 **As built in increment 2, session 2** (2026-11-04, `versions.rs`,
 `versions_diff.rs`):
@@ -195,6 +195,40 @@ The pin this plan adds:
   a 12-character commit. `std.deployment.versions` carries `label` and
   `gitCommit`, camel case like its other keys.
 
+**As built in increment 3, session 1** (2026-11-05, `versions.rs`,
+`pin_stream.rs`, `deploy.rs`, `spaces.rs`, `ordo_exec`):
+
+- **Where the epoch check reads** (ask 16's open point): a `$pin_fence`
+  row per tenant in the tenant's own database, made with Ordo's other
+  tables in every database a write reaches. The control database stays the
+  pin's source. The fence is the newest epoch any node wrote under.
+- Every write transaction on a tenant's handle reads the fence first. An
+  older epoch than the fence is refused as `PoolError::PinMoved`
+  (retryable) and writes nothing. A newer one raises the fence in the same
+  transaction.
+- **What the caller sees** (audit 2026-11-05): nothing. The door reads that
+  tenant's pin from the control database again, resolves again and writes
+  once more. A second refusal answers `server_busy`. A routine run reads the
+  pin again and is retried by the runner.
+- **The pin stream** (ask 17): every pin change notifies `ordo_pins` in its
+  own transaction. Nodes read `$pins` by `seq` from the last row they read.
+  Every pin change holds the pin lock and draws `seq` under it, so rows
+  commit in `seq` order. A node also reads every pin again every
+  `pins.reconcile_interval` (`ORDO_PINS_RECONCILE_SECS`, 30 s).
+- **One tenant moves on demand**: `Versions::pin`, cause `pin`, through
+  `std.deployment.pin` and `ordo versions pin <tenant> <version>`. It is the
+  seam every later single-tenant move calls (§1.11). It asks no passkey
+  touch (owner, 2026-11-05: the developer's own system may drive moves).
+- `std.deployment.tenantVersion` and `ordo versions list --tenant <id>`:
+  one tenant's version, epoch and pin history.
+- `ordo versions list|show` say `active (new tenants)` and `serving N
+  tenants`. The console's Deploys screen still says `serving` (session 2).
+- Each node writes its `versions.new_tenant` to `$nodes`. A node that sees
+  another live node with a different value logs a warning naming the
+  setting and its variable, on every reconcile tick.
+- An activation still moves every tenant at once, a tenant pinned
+  elsewhere included (until rollouts, increment 10).
+
 ### 1.4 How the door picks the version per request
 
 1. The door binds the space, as now.
@@ -214,6 +248,36 @@ The pin this plan adds:
 - A pin switch closes the tenant's streams with a reconnect signal.
 - Refusals give version and setting detail to the deployment owner's token
   only. End users get a plain refusal.
+
+**As built in increment 3, session 1** (2026-11-05):
+
+- `Deployment` holds the active `Loaded` and a map of the others, by name,
+  and every tenant's pin and epoch. `Deployment::for_space` answers the
+  tenant's `Loaded`; `Spaces::resolve` uses it, so reads, writes, blobs and
+  routines run under the tenant's version.
+- The door looks an op up in the named tenant's version
+  (`OpRegistry::get_in`). The access engine grants the ops of every served
+  version, by name; an op both declare is pinned as the active one
+  declares it.
+- Steps 2 and 5: pins load at boot, refresh on the nudge, reconcile on a
+  timer. Versions load at boot and when a pin first names one, one at a
+  time, never from a request. A version no pin names is dropped at once
+  (no minimum residency yet).
+- A version beside the active one is gated in its shadow like any load.
+  Its live comparison is the shape fingerprint (step 6), not the
+  deployment database's drift.
+- Step 6: on first open per node, a tenant pinned to a non-active version
+  whose `$migrations` does not name it has its tables read and diffed
+  against the version, with no prior. Anything missing closes the tenant,
+  and `/health/ready` names it and the fix. Not checked: a column the
+  version does not know that has no default.
+- A tenant pinned to a version this node has not loaded answers
+  `space_unavailable`, retryable, naming no version.
+- Except the registry's active version: the deploy channel loads it, with
+  its live check, and swaps. Until the swap lands, a tenant pinned to it is
+  served the node's active version, as before increment 3. The node reads
+  every pin just before it swaps, so the catch-up the swap starts sees the
+  new pins and no tenant is served the old version from a stale pin.
 
 ### 1.5 What serving many versions costs
 
@@ -300,6 +364,12 @@ Routines, schedules, functions, mail and webhooks:
 - Each run executes under its tenant's pinned `Loaded`.
 - A pin switch hands the cursor over to Y.
 
+As built in increment 3, session 1: each run resolves its tenant first and
+runs the routine as the tenant's version declares it, named
+`<routine>@<that version>`. A routine the tenant's version does not
+declare is skipped and recorded `undeclared`. The schedules and listeners
+are still the active version's alone (session 2).
+
 ### 1.11 Revocation and end of life
 
 **Ruled 2026-11-02 (D8).** The owner first asked who decides a version is
@@ -375,6 +445,24 @@ nothing of versions.
   console's e2e run.
 - Not built: moves at a window (increment 3), a time zone on a cron (a
   later extension).
+
+**Ruled 2026-11-05: when and where a revoked version's tenants move.**
+
+- No deadline. A tenant on a revoked version moves only in its maintenance
+  window, or on demand. On demand is the deployment owner's act, or the
+  tenant's own if the app developer grants it (off by default). No window
+  and no demand: the tenant stays.
+- The target is the app developer's choice: the active version by
+  default, or any named version that is not revoked. Ordo picks nothing
+  beyond that default.
+- The owner: *"technically the developer could even have their own system
+  managing automatic updates."* So the move on demand is a door op a
+  system credential can call, with no passkey touch and no exemption
+  setting.
+- Where it lands: increment 3, session 2. Session 1 built the seam:
+  `Versions::pin` is the one single-tenant move, `std.deployment.pin` its
+  door op, which asks no touch. The window-timed move and the tenant's own
+  trigger call it with their own actor and cause.
 
 ---
 
@@ -658,7 +746,7 @@ round is about 35 minutes for the full suite.
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
-| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal; routines run per pin; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
+| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. | S | 1 | a missing environment is refused with the command that creates it | none |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
@@ -676,6 +764,39 @@ round is about 35 minutes for the full suite.
 | 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
 | 15 | **`prev` in the language.** | M | 8, syntax design | a declared rename renders as a rename | 27x |
 | 16 | **Tenant builds.** After first deployment. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
+
+**Increment 3, what remains for session 2:**
+
+- Revoked-version moves (§1.11): in the tenant's window, on demand by the
+  deployment owner, by the tenant when granted; target active or named.
+  `ordo versions revoked` shows each tenant's next window or "no window".
+- Memory at 1,000+ spaces, measured and recorded here; `versions.max_loaded`
+  and `versions.memory_budget` set from it; views evicted per space.
+- Load guards: `versions.min_residency`, `versions.idle_evict_after`,
+  `versions.max_concurrent_loads` as settings.
+- Digest at load: recompute the source fingerprint, refuse a mismatch
+  (§6 conflict 4).
+- Per-version catalog and generated interface; functions per version
+  (`functions.reload` serves the active version's only).
+- Schedules and listeners as the union over served versions; cursor
+  hand-over at a switch.
+- `versions.served` and `versions.minimum`, and the refusal of a change
+  that strands a tenant.
+- Sharing rule (§1.7), `versions_disagree`.
+- Client contract (§1.9): version on every answer, the distinct refusal for
+  an op the version lacks, the SDK's version-changed event, idempotency
+  across one switch, the tenant admin's label.
+- Stream close on a pin switch.
+- Per-node health on `/health/deploy`: `also_serving` is in `$nodes`,
+  not yet shown.
+- The catch-up and provisioning for a tenant pinned to a non-active
+  version: a new tenant on `versions.new_tenant` is provisioned with the
+  active version's tables, so a beta version that adds a table holds it
+  closed until it is activated.
+- Console: Deploys says `serving` for the active version; the Tenants
+  screen has no version column.
+- Audit leftovers not taken by the CLI-output fixes: times as UTC, window
+  caps as settings or recorded as fixed.
 
 What sets the pace:
 
@@ -768,7 +889,7 @@ refusal a setting can fix names the setting and the value.
 | `versions.max_loaded` | set from increment 3's memory measurement | node |
 | `versions.max_concurrent_loads` | 1 | node |
 | `versions.memory_budget` | set from increment 3's memory measurement | node |
-| `pins.reconcile_interval` | 30 seconds | deployment |
+| `pins.reconcile_interval` | 30 seconds (`ORDO_PINS_RECONCILE_SECS`, built 2026-11-05) | deployment |
 | `forward.retry_interval` | 15 seconds | deployment |
 | `editions.load_window` | 12 months | Ordo release |
 | `soak.length` | 7 days, 0 allowed | plan |

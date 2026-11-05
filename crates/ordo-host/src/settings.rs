@@ -1463,6 +1463,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"the active version"#,
         r#""#,
     ),
+    s(
+        "ORDO_PINS_RECONCILE_SECS",
+        "Databases and pools",
+        r#"30 s"#,
+        r#"1 or more"#,
+    ),
     s("ORDO_BLOB_STORE", "Storage and blobs", r#"none"#, r#""#),
     s(
         "ORDO_BLOB_S3_ENDPOINT",

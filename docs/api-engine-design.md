@@ -673,7 +673,11 @@ clients learn to ignore. Generated code therefore pins the hash of *the op it
 is calling*, the same granularity the server compares at and the same
 granularity grants pin at (`security-logging-design.md` §5). The server:
 
-- always answers with `X-Ordo-Op-Version` (the served hash);
+- always answers with `X-Ordo-Op-Version` (the served hash). Since
+  `plan-versions.md` increment 3 a node serves each tenant the version it is
+  pinned to, so the served hash is the op's hash **in the calling tenant's
+  version**: two tenants on two versions can get two hashes for one op name,
+  and a bundle built from either is stale for the other;
 - adds `X-Ordo-Version-Skew: stale` when the pinned hash mismatches.
   This is a **soft signal** (the call still executes; bindings surface a typed
   warning). Richer drift classification (compatible / narrowed / breaking)
@@ -694,6 +698,11 @@ atomically on LISTEN/NOTIFY. In this crate:
 - A request clones its `OpSpec` at dispatch, so in-flight requests finish on
   the version they looked up; the next request sees the new registry. No
   drain, no restart. Rollback is the same swap, backwards.
+- The op is looked up for the space the request names
+  (`OpRegistry::get_in`). The host's registry answers from the version that
+  tenant is pinned to, which may not be the active one
+  (`plan-versions.md` §1.4). A request with no space header is looked up in
+  the active version.
 - Live sessions are **not** torn down on swap: the subscription survives, and
   the client's next refetch executes under the new version (skew surfaces
   through §10 headers if the client pinned a hash).

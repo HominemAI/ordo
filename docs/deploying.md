@@ -653,6 +653,9 @@ consequences worth knowing before you tune anything:
   Space is in the MAC precisely to stop that.
 - An honestly stale cursor (the op was redeployed) answers `version_skew`:
   restart from page one, distinct from a forgery.
+- Each tenant is served the version it is pinned to, so "redeployed" is
+  per tenant: moving one tenant to another version (`ordo versions pin`)
+  makes its cursors for a changed op `version_skew`, and nobody else's.
 
 Rotating the page key invalidates outstanding cursors. That costs paging
 clients one restart, which is the correct price for a key rotation.
@@ -1354,6 +1357,12 @@ first swap to it, rebuild its access engine, switch its routines and bring
 every tenant's database to it. Until then, a page that calls an op the new
 version added is refused `access_denied`. So `ordo apply` waits.
 
+A node can serve several versions at once, each to the tenants pinned to
+it (`howto-operating.md`, "Versions and pins"). An activation moves every
+tenant to the new version, so the wait above covers them all. A tenant
+pinned to another version is served that version's ops: an op only the
+active version has answers it as an op that does not exist.
+
 - **By default it returns when every running node serves the version** and
   has finished its tenant catch-up. It prints `served <version> on N
   node(s)`, how long it waited and how long the slowest catch-up took.
@@ -1503,7 +1512,8 @@ Two things end cleanly, and the SDK recovers from both:
 - **A page cursor** continues when the op it was minted for is unchanged.
   An Ordo upgrade that changes how ops compile (2026-10-26 did) changes
   every op's version, and the cursor is refused `version_skew` (409). The
-  SDK starts that list again from page one.
+  SDK starts that list again from page one. Moving one tenant to another
+  version does the same for that tenant's cursors of an op that changed.
 
 ### How it is tested
 

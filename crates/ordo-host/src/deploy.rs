@@ -803,6 +803,12 @@ pub struct Deployment {
     /// read up to. Filled from the control database at boot and by the pin
     /// stream ([`crate::pin_stream`]).
     pins: RwLock<PinMap>,
+    /// The registry's active version, as the pin stream last read it, when
+    /// this node has not swapped to it yet. A tenant pinned to it is served
+    /// the node's active version until the swap lands: an activation moves
+    /// every pin first, and the deploy channel's swap (with its live check
+    /// and the tenant catch-up) is what brings the node to it.
+    following: RwLock<Option<String>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -845,6 +851,7 @@ impl Deployment {
             platform: Vec::new(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         })
     }
 
@@ -867,6 +874,7 @@ impl Deployment {
             current: RwLock::new(Arc::new(verified.0)),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         }))
     }
 
@@ -1000,6 +1008,7 @@ impl Deployment {
             platform,
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         }))
     }
 
@@ -1033,6 +1042,7 @@ impl Deployment {
             platform: Vec::new(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         })
     }
 
@@ -1052,6 +1062,7 @@ impl Deployment {
             platform,
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         }))
     }
 
@@ -1164,6 +1175,11 @@ impl Deployment {
         }
         match self.loaded(&version) {
             Some(l) => Ok((l, Some(epoch))),
+            // The activation landed in the registry and this node's swap
+            // has not: served as before the activation until it does.
+            None if self.following.read().expect("pin lock").as_deref() == Some(&version) => {
+                Ok((active, Some(epoch)))
+            }
             None => Err(Unserved {
                 space: space.to_string(),
                 version,
@@ -1226,6 +1242,17 @@ impl Deployment {
             others.remove(v);
         }
         gone
+    }
+
+    /// The registry's active version as the pin stream last read it. See
+    /// the field.
+    pub fn follow(&self, registry_active: Option<String>) {
+        *self.following.write().expect("pin lock") = registry_active;
+    }
+
+    /// The registry's active version this node follows, when it has read it.
+    pub fn following(&self) -> Option<String> {
+        self.following.read().expect("pin lock").clone()
     }
 
     /// One tenant's pin as this node holds it: version and epoch.

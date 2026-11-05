@@ -6712,6 +6712,14 @@ async fn spawn_deploy_listener(
                     continue;
                 }
             }
+            // The activation moved every pin in its own transaction, so the
+            // pins are read before the swap: from the swap on, no tenant is
+            // served the old version from a pin this node had not yet read
+            // as moved, and the catch-up the swap nudges sees the new pins.
+            match pins.reload().await {
+                Ok(read) => rebuild(read).await,
+                Err(e) => eprintln!("pins: not read before the swap ({e})"),
+            }
             match deployment.swap(verified) {
                 Swapped::AlreadyServing(v) => println!("deploy {v}: already serving"),
                 Swapped::Refused(why) => {
@@ -6808,12 +6816,6 @@ async fn spawn_deploy_listener(
                             "deploy {to}: the routines were not switched ({e}); the previous \
                              version's keep running until a restart"
                         ),
-                    }
-                    // The activation re-pinned its tenants; a version no
-                    // pin names any more is dropped here.
-                    match pins.reload().await {
-                        Ok(read) => rebuild(read).await,
-                        Err(e) => eprintln!("pins: not read after the swap ({e})"),
                     }
                     node_status.also_serving(
                         deployment

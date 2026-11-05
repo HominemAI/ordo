@@ -798,12 +798,12 @@ fn versions_list_and_show_name_the_tenants_pinned() {
     let newer = list
         .report
         .find(&format!(
-            "#2 · {second}  declared none  tenants 1  <- serving"
+            "#2 · {second}  declared none  serving 1 tenants  <- active (new tenants)"
         ))
-        .unwrap_or_else(|| panic!("the serving version, with its tenant:\n{}", list.report));
+        .unwrap_or_else(|| panic!("the active version, with its tenant:\n{}", list.report));
     let older = list
         .report
-        .find(&format!("#1 · {first}  declared none  tenants 0\n"))
+        .find(&format!("#1 · {first}  declared none  serving 0 tenants\n"))
         .unwrap_or_else(|| panic!("the older version, with none:\n{}", list.report));
     assert!(newer < older, "newest first:\n{}", list.report);
 
@@ -813,7 +813,7 @@ fn versions_list_and_show_name_the_tenants_pinned() {
     );
     assert_eq!(show.code, 0, "{}", show.report);
     for want in [
-        format!("version    #2 · {second}  <- serving"),
+        format!("version    #2 · {second}  <- active (new tenants)"),
         "declared   none".to_string(),
         "tenants    1 pinned".to_string(),
         "BUILDS (1)".to_string(),

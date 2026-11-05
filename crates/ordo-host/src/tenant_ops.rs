@@ -754,9 +754,11 @@ impl TenantOps {
             Err(e) => Err(e),
         };
         if let Err(e) = targeted {
+            eprintln!("tenant {id}: the registry could not be written: {e}");
             return Err(ExecError::new(
                 ErrorCode::SpaceUnavailable,
-                format!("the tenant registry could not be written ({e}); nothing was created"),
+                "the tenant registry could not be written; nothing was created. Try again; \
+                 the server log has the cause",
             ));
         }
         // Phases 2 and 3, against the plan phase 0 made. `pre` moves in,
@@ -832,11 +834,13 @@ impl TenantOps {
             }
             Err(e) => {
                 record("not-activated");
+                eprintln!("tenant {id}: not activated: {e}");
                 return Err(ExecError::new(
                     ErrorCode::SpaceUnavailable,
                     format!(
-                        "tenant `{id}` was built and not activated ({e}); it is owned by \
-                         `{owner}` and does not serve until the control database is writable"
+                        "tenant `{id}` was built and not activated; it is owned by `{owner}` \
+                         and does not serve until the control database is writable. The \
+                         server log has the cause"
                     ),
                 ));
             }
@@ -1373,11 +1377,12 @@ impl TenantOps {
             }
             Err(e) => {
                 record("failed");
+                eprintln!("tenant {id}: not activated: {e}");
                 return Err(ExecError::new(
                     ErrorCode::SpaceUnavailable,
                     format!(
-                        "tenant `{id}` was built and not activated ({e}); it does not serve \
-                         until the control database is writable"
+                        "tenant `{id}` was built and not activated; it does not serve until \
+                         the control database is writable. The server log has the cause"
                     ),
                 ));
             }
@@ -1416,10 +1421,15 @@ fn check_principal(principal: &str) -> Result<(), ExecError> {
     ))
 }
 
+/// The registry's fault, told to the caller in fixed words: the driver's
+/// text (constraint names, key values) goes to the server log only
+/// (security audit 2026-11-05, L2).
 fn registry_unavailable(e: ordo_exec::PoolError) -> ExecError {
+    eprintln!("tenant registry: {e}");
     ExecError::new(
         ErrorCode::SpaceUnavailable,
-        format!("the tenant registry could not be read or written ({e})"),
+        "the tenant registry could not be read or written. Try again; the server log has \
+         the cause",
     )
 }
 
@@ -1569,7 +1579,13 @@ fn refusal_to_error(refusal: ProvisionRefusal) -> ExecError {
              once the key provider answers",
         ),
         ProvisionRefusal::Store(ref e) => {
-            ExecError::of_fault(e.class(), ErrorCode::Internal, refusal.to_string())
+            eprintln!("tenant setup: {refusal}");
+            ExecError::of_fault(
+                e.class(),
+                ErrorCode::Internal,
+                "the tenant's database could not be set up. Try again; the server log has \
+                 the cause",
+            )
         }
     }
 }
@@ -1584,5 +1600,18 @@ mod tests {
     #[test]
     fn the_op_is_the_one_the_design_already_named() {
         assert_eq!(CREATE, "std.space.create");
+    }
+
+    /// The driver's words stay on the server (security audit 2026-11-05,
+    /// L2): a constraint name or a key value is not the caller's to read.
+    #[test]
+    fn a_registry_fault_tells_the_caller_fixed_words() {
+        let driver = "duplicate key value violates unique constraint \"tenants_pkey\" \
+                      DETAIL: Key (id)=(t_secret) already exists";
+        let e = registry_unavailable(ordo_exec::PoolError::db(driver));
+        assert_eq!(e.code, ErrorCode::SpaceUnavailable);
+        assert!(!e.message.contains("tenants_pkey"), "{}", e.message);
+        assert!(!e.message.contains("t_secret"), "{}", e.message);
+        assert!(e.message.contains("Try again"), "{}", e.message);
     }
 }

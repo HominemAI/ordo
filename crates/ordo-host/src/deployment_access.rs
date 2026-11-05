@@ -127,7 +127,11 @@ fn machine(claims: &DeploymentClaims, home: &str, space: &str, op: &str) -> Real
     let granted = if space == home {
         claims.holds(GRANT_DEPLOYMENT)
     } else {
-        op == crate::exit_ops::IMPORT && claims.holds(GRANT_IMPORT)
+        // A tenant, never the public `system` space everyone reads
+        // (security audit 2026-11-05, L1).
+        space != crate::provision::SYSTEM_SPACE
+            && op == crate::exit_ops::IMPORT
+            && claims.holds(GRANT_IMPORT)
     };
     if granted {
         Realm::Allow
@@ -266,5 +270,13 @@ mod tests {
         assert_eq!(d(&only_import, HOME, APPLY), Realm::Deny);
         assert_eq!(d(&none, HOME, APPLY), Realm::Deny);
         assert_eq!(d(&only_deployment, HOME, APPLY), Realm::Allow);
+        // Where the home is not `system`, the public space is no tenant.
+        let elsewhere =
+            |c: &DeploymentClaims, space: &str| decide(c, Some("home2"), space, import, None, NOW);
+        assert_eq!(elsewhere(&only_import, "t1"), Realm::Allow);
+        assert_eq!(
+            elsewhere(&only_import, crate::provision::SYSTEM_SPACE),
+            Realm::Deny
+        );
     }
 }

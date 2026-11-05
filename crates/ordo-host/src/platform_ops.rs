@@ -1043,6 +1043,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
     .chain(crate::window_ops::specs())
+    .chain(crate::revoked_moves::specs())
     .chain(crate::fleet::specs())
     .chain(crate::settings::specs())
     .chain(crate::quotas::specs())
@@ -2717,6 +2718,11 @@ impl PlatformOps {
             }
             name if crate::window_ops::OPS.contains(&name) => {
                 crate::window_ops::execute(self.apply_ops()?, name, space, bound, caller).await
+            }
+            // The tenant moves itself off a revoked version: bound to the
+            // tenant, granted to the roles the app developer names.
+            crate::revoked_moves::MOVE_SELF => {
+                crate::revoked_moves::execute(self.apply_ops()?, space, bound, caller).await
             }
             crate::tenant_ops::CREATE => self.tenant_ops()?.create(space, bound, caller).await,
             crate::reap_op::REAP => self.reap_ops()?.reap(space, bound, caller).await,

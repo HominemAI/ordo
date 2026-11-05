@@ -388,7 +388,8 @@ pub fn op_class(name: &str) -> Option<OpClass> {
         | "std.space.delete"
         | "std.space.download"
         | "std.space.pause"
-        | "std.space.resume" => Nobody,
+        | "std.space.resume"
+        | "std.space.moveOffRevoked" => Nobody,
         n if n.starts_with("std.deployment.") || n.starts_with("std.identity.") => Deployment,
         _ => return None,
     };

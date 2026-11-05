@@ -447,6 +447,7 @@
     "crates/ordo-host/src/proxy.rs": "all",
     "crates/ordo-host/src/public.rs": "all",
     "crates/ordo-host/src/quotas.rs": "all",
+    "crates/ordo-host/src/revoked_moves.rs": "all",
     "crates/ordo-host/src/reap_op.rs": [
       "deployment_tenants",
       "marketing_site_app",

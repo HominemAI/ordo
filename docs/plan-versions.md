@@ -478,6 +478,32 @@ nothing of versions.
   door op, which asks no touch. The window-timed move and the tenant's own
   trigger call it with their own actor and cause.
 
+**As built in increment 3, session 2** (2026-11-05, `versions.rs`,
+`revoked_moves.rs`, `windows.rs`, `deploy_ops.rs`):
+
+- One move: `Versions::move_off_revoked`, one transaction under the pin
+  lock. It refuses a tenant not on a revoked version (`not_on_revoked`), so
+  two nodes in the same window move a tenant once.
+- The target, in this order: the tenant's own (`$move_targets`, set by
+  `ordo versions target` and `std.deployment.setMoveTarget`), the revoke's
+  `--move-to` (`$revocations.move_to`, now taken on a version that is not
+  active), the active version. A revoked target is refused
+  (`move_target_revoked`), naming `ordo versions target`. Ordo picks no
+  other.
+- In a window: every node sweeps on its pin reconcile tick. A tenant whose
+  window holds now, not skipped, moves, cause `window`, actor
+  `ordo:window:<id>` (`Windows::open_at`). At most 1,000 tenants a tick.
+- On demand: `ordo versions move <tenant>` and
+  `std.deployment.moveOffRevoked`, cause `demand`, deployment owner or a
+  system's machine key, no passkey touch.
+- By the tenant: `std.space.moveOffRevoked`, cause `tenant`, granted to the
+  roles in `ORDO_VERSIONS_TENANT_MOVE_ROLES` (`versions.tenant_move_roles`),
+  none by default. No touch.
+- `ordo versions revoked` and `std.deployment.revoked` show the revoke's
+  `moveTo`, and each tenant's own `target` and `nextWindow`, or "no window".
+- `$move_targets` is an erasure attachment.
+- Tests: `crates/ordo-host/tests/versions_moves.rs`.
+
 ---
 
 ## 2 · Schema evolution on the core
@@ -779,11 +805,10 @@ round is about 35 minutes for the full suite.
 | 15 | **`prev` in the language.** | M | 8, syntax design | a declared rename renders as a rename | 27x |
 | 16 | **Tenant builds.** After first deployment. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
 
-**Increment 3, what remains for session 2:**
+**Increment 3, what remains after session 2:**
 
-- Revoked-version moves (§1.11): in the tenant's window, on demand by the
-  deployment owner, by the tenant when granted; target active or named.
-  `ordo versions revoked` shows each tenant's next window or "no window".
+- Session 2 built the revoked-version moves (§1.11): in the window, on
+  demand, by the tenant when granted, each to the developer's target.
 - Memory at 1,000+ spaces, measured and recorded here; `versions.max_loaded`
   and `versions.memory_budget` set from it; views evicted per space.
 - Load guards: `versions.min_residency`, `versions.idle_evict_after`,

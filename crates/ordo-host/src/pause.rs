@@ -401,7 +401,7 @@ pub struct PausePolicy {
     answers: PauseAnswers,
 }
 
-fn roles(list: &str, var: &str) -> Result<Vec<Role>, String> {
+pub(crate) fn roles(list: &str, var: &str) -> Result<Vec<Role>, String> {
     let mut out = Vec::new();
     for word in list.split(',').map(str::trim).filter(|w| !w.is_empty()) {
         let role = match word {

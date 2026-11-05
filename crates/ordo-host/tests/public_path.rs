@@ -176,6 +176,7 @@ async fn boot(stem: &str) -> (ordo_host::runtime::Runtime, axum::Router) {
         credentials: None,
         presence: Default::default(),
         pausing: Default::default(),
+        version_moves: Default::default(),
         delegable: Default::default(),
         access_template: Default::default(),
         deployment_owners: Vec::new(),

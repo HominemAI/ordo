@@ -116,6 +116,7 @@ pub mod registrations;
 pub mod release_ops;
 pub mod renewal;
 pub mod replay;
+pub mod revoked_moves;
 pub mod routines;
 pub mod runtime;
 pub mod schema_apply;
@@ -3176,7 +3177,12 @@ pub fn engine_from_directory_served(
                 }
                 v
             });
+        // Moving a tenant off a revoked version from inside it is the app
+        // developer's grant too (ruled 2026-11-05), none by default.
+        let moving = crate::revoked_moves::current();
         let roles: &[Role] = if let Some(granted) = pausing.roles_for(&spec.name) {
+            granted
+        } else if let Some(granted) = moving.roles_for(&spec.name) {
             granted
         } else if let Some(granted) = with_owner.as_deref() {
             granted

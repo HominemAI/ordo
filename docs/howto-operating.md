@@ -228,12 +228,25 @@ ordo versions revoked                       # each revoked version and the tenan
 
 - A revoked version is refused as an `ordo rollback` or activation target, as the version an apply activates, as `versions.new_tenant` (`ORDO_VERSIONS_NEW_TENANT`) and as any pin. The refusal names who revoked it, why, and the `ordo versions unrevoke` command.
 - Revoking the active version is refused without `--move-to`. Ordo never picks where tenants go. With it, the activation to that version and the revoke happen in one change, and every tenant's pin moves as an activation moves it. The version moved to passes the same load gate as `ordo rollback`.
-- A version that is not active is only marked. A tenant `versions.new_tenant` started on it stays there until the next activation; `ordo versions revoked` lists it.
+- A version that is not active is only marked. Its tenants stay on it until they move off it (below). `--move-to` on it names where they go; leave it out and they go to the active version. `--move-to` naming the version itself, or a revoked one, is refused.
 - A revoke of the version `ORDO_VERSIONS_NEW_TENANT` names is refused, naming the variable. Set it to another version or unset it, then revoke. The check reads the variable on the host that runs the revoke, so set it the same on every node.
 - A reason is 1 to 500 characters. Every revoke and unrevoke is kept with who, why and when; `ordo versions show` lists them.
 - `ordo versions list` and `std.deployment.versions` show the mark and its reason.
 - Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door (`std.deployment.revoke`, `std.deployment.unrevoke`, `std.deployment.revoked`), deployment owner only.
-- Moving tenants off a revoked version in their maintenance windows comes with increment 3 of `plan-versions.md`, when each tenant is served its own version.
+**Moving tenants off a revoked version** (ruled 2026-11-05):
+
+```
+ordo versions target spc_acme '#5'          # where this tenant goes; --clear to drop it
+ordo versions move spc_acme                 # move it now
+```
+
+- There is no deadline. A tenant on a revoked version moves in its maintenance window, or on demand. With neither it stays.
+- **In its window.** Every node checks on each pin reconcile tick (`ORDO_PINS_RECONCILE_SECS`, 30 s). A tenant whose window holds now, not skipped, moves. The pin change says `window` and names the window.
+- **On demand.** `ordo versions move <tenant>`, or `std.deployment.moveOffRevoked` through the door. You, or your own system with a machine key, call it. No passkey touch is asked.
+- **By the tenant.** Off by default. Name the tenant roles that may in `ORDO_VERSIONS_TENANT_MOVE_ROLES` (for example `owner`). They then call `std.space.moveOffRevoked` bound to their own tenant.
+- **Where it goes**, in this order: the tenant's own target (`ordo versions target`, `std.deployment.setMoveTarget`), then the revoke's `--move-to`, then the active version. Ordo picks nothing else.
+- A target that is revoked is refused and the tenant stays. The refusal names `ordo versions target <tenant> <version>`. A window move refused this way is logged on every tick until you name another.
+- `ordo versions revoked` shows each revoked version's `--move-to`, and each tenant's own target and next window, or `no window`.
 
 ## Maintenance Windows
 
@@ -299,7 +312,7 @@ A node can serve more than one version at once. The active version is the one an
 - **How a node learns of a pin.** Every pin change notifies the nodes in its own transaction. A node then reads `$pins` from the last row it read. It also reads every pin again every `ORDO_PINS_RECONCILE_SECS` seconds (`pins.reconcile_interval`, default 30), so a missed notice costs at most that long.
 - **Loading.** A node loads every version a pin names at boot and when a pin first names it, one at a time. A request never starts a load. A tenant whose version is still loading answers "closed for a moment" and the same request lands once it has. A version no pin names any more is dropped.
 - **The pin fence.** Each tenant's own database records the newest epoch any node wrote under (`$pin_fence`). A node whose pin is older has its write refused, reads the pin again and writes once more. The caller sees one answer.
-- **Which moves wait for a maintenance window: none yet.** An activation and a pin move a tenant at once, whatever its window says. A tenant left on a revoked version stays there. Moving it in its window, or on demand, comes next.
+- **Which moves wait for a maintenance window.** Only a move off a revoked version (above). An activation and a pin move a tenant at once, whatever its window says.
 - **Every node should agree on `ORDO_VERSIONS_NEW_TENANT`.** Each node writes its value to `$nodes`. A node that sees another with a different value logs a warning naming the setting, on every reconcile tick, until they agree.
 
 ## Health Endpoints

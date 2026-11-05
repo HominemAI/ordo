@@ -537,12 +537,16 @@ async fn space_scoped_tables(
 /// `$window_tenants` joined it on 2026-11-04: it names the tenants a
 /// maintenance window lists, not what a tenant holds. Erasure deletes a
 /// tenant's rows there, so a window no longer names it.
+///
+/// `$move_targets` joined it on 2026-11-05: it names the version a tenant
+/// moves to off a revoked one, not what the tenant holds.
 pub const ATTACHMENTS: &[&str] = &[
     "$spacedb",
     "$spacebucket",
     "$spaces",
     "$moves",
     "$window_tenants",
+    "$move_targets",
 ];
 
 /// How many rows `space` holds in `pool`'s database, across every table an

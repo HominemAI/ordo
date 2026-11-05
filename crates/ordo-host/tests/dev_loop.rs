@@ -542,6 +542,7 @@ async fn d3_hot_swap_serves_a_new_op_through_the_same_door() {
         credentials: None,
         presence: Default::default(),
         pausing: Default::default(),
+        version_moves: Default::default(),
         delegable: Default::default(),
         access_template: Default::default(),
         deployment_owners: Vec::new(),

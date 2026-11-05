@@ -804,11 +804,11 @@ async fn a_pin_to_a_revoked_version_or_no_tenant_is_refused() {
     assert!(e.to_string().contains("ordo tenants list"), "{e}");
 }
 
-/// **Which moves wait for a maintenance window** (audit 2026-11-05): none
-/// yet. A window set for every tenant, in the future, holds nothing back:
-/// an activation and a pin move the tenant at once. A tenant left on a
-/// version revoked while it was not active stays there; moving it in its
-/// window or on demand is ruled (2026-11-05) and lands in session 2.
+/// **Which moves wait for a maintenance window** (audit 2026-11-05): only
+/// a move off a revoked version. A window set for every tenant, in the
+/// future, holds nothing back: an activation and a pin move the tenant at
+/// once. A tenant left on a version revoked while it was not active stays
+/// there until its window or a demand (`versions_moves.rs`).
 #[tokio::test(flavor = "multi_thread")]
 async fn no_move_waits_for_a_window_yet_and_a_revoked_versions_tenant_stays() {
     let (pool, _) = registry_db("ordo_vserve_windows").await;

@@ -12157,3 +12157,11 @@ Board task `security-levels-low-standard-and-high`. The owner wrote notes per ro
 - **`a-system-running-imports-on-its`, "ok".** A machine key may import into a tenant when the developer grants it, per key, off by default. No touch is asked.
 - **`a-developer-s-own-system-minting`.** The recommendation was that a machine key may mint scoped keys no wider than itself. The owner changed it: *"maybe a separate minting grant that defines what grants it can give as opposed to it can give what it has - because it itself may not need to use those things."* A minting grant is its own grant. It names what the keys it mints may do, apart from what the minting key may do itself. The developer gives it, off by default.
 - **`how-a-person-without-a-passkey`, "ok".** A reauth handle (a fresh sign-in) counts as the touch wherever a touch is asked, as it already does for second-factor changes.
+
+## 2026-11-05: the CLI goes through the door
+
+Board task `the-cli-s-db-mode-goes` (Reported fixes). No ruling ever allowed the CLI's direct database mode; it contradicts 2026-09-21 and 2026-10-27.
+
+- **Ask 1, "ok".** The 13 commands that already have a door route use the door only.
+- **Ask 2.** The recommendation was door actions for usage, deploy history, triggers, prune, revert and restore, keeping checkpoint direct because its signing key is kept apart. The owner: *"It follows that the door would manage a checkpoint?"* Read as yes, and the recommendation was wrong: a server with checkpointing on already holds `ORDO_CHECKPOINT_KEY` for its attestation worker. Checkpoint gets a door action like the other 6.
+- **Ask 3, "ok".** The 9 commands that must work with no server (keys, verify, restore, identity recover, the first apply) keep a direct path behind an explicit `--direct` flag, refused unless named, and recorded on the security log at the next boot.

@@ -352,7 +352,7 @@ pub static REGISTRY: &[Setting] = &[
     s(
         "ORDO_EMAIL_CHANGE_TOUCH",
         "Sign-in and sessions",
-        r#"on"#,
+        r#"on (off at `ORDO_SECURITY_LEVEL=low`)"#,
         r#"`on` or `off`"#,
     ),
     s(
@@ -999,9 +999,21 @@ pub static REGISTRY: &[Setting] = &[
         r#"`on` or `off`"#,
     ),
     s(
+        "ORDO_SECURITY_LEVEL",
+        "Passkeys and presence",
+        r#"`standard`"#,
+        r#"`low`, `standard` or `high`"#,
+    ),
+    s(
+        "ORDO_STEP_UP_REQUIRED_OPS",
+        "Passkeys and presence",
+        r#"none"#,
+        r#""#,
+    ),
+    s(
         "ORDO_STEP_UP_EXEMPT_OPS",
         "Passkeys and presence",
-        r#"none: every change needs it"#,
+        r#"none: `ORDO_SECURITY_LEVEL` decides"#,
         r#""#,
     ),
     s(

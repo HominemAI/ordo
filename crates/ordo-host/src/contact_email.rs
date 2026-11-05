@@ -105,13 +105,19 @@ pub const FIELDS: [&str; 6] = [
 /// or removing a contact email asks for a fresh passkey touch.
 pub const TOUCH_ENV: &str = "ORDO_EMAIL_CHANGE_TOUCH";
 
-/// `on` or `off`; unset is `on`.
-pub fn touch_from_vars(var: &dyn Fn(&str) -> Option<String>) -> Result<bool, String> {
+/// `on` or `off`; unset is what `ORDO_SECURITY_LEVEL` says: `off` at low,
+/// `on` at standard and high (owner, 2026-11-05).
+pub fn touch_from_vars(
+    var: &dyn Fn(&str) -> Option<String>,
+    level: crate::security_level::SecurityLevel,
+) -> Result<bool, String> {
     match var(TOUCH_ENV).as_deref().map(str::trim) {
-        None | Some("") | Some("on") => Ok(true),
+        None | Some("") => Ok(level.asks(crate::security_level::Situation::ContactEmail)),
+        Some("on") => Ok(true),
         Some("off") => Ok(false),
         Some(other) => Err(format!(
-            "{TOUCH_ENV}: `{other}` is not on or off; the default is on"
+            "{TOUCH_ENV}: `{other}` is not on or off; unset follows ORDO_SECURITY_LEVEL \
+             (on at standard and high)"
         )),
     }
 }

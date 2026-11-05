@@ -124,6 +124,7 @@ pub mod second_factor_store;
 pub mod second_factors;
 pub mod secrets;
 pub mod security_key;
+pub mod security_level;
 pub mod security_record;
 pub mod self_serve;
 pub mod serve;
@@ -3209,6 +3210,14 @@ pub fn engine_from_directory_served(
         // undelegable by saying so directly.
         if spec.kind == OpKind::Read && !policy.exempts(&spec.name) {
             engine.forbid_delegation(&spec.name);
+        }
+        // **A level that frees a change of its touch frees it for a person
+        // only** (`ORDO_SECURITY_LEVEL`, owner 2026-11-05). The touch is what
+        // kept a capability grant off a platform change, so a change the app
+        // developer did not name in `ORDO_STEP_UP_EXEMPT_OPS` stays closed to
+        // grants by saying so directly.
+        if spec.kind != OpKind::Read && !policy.exempts(&spec.name) {
+            engine.forbid_capability(&spec.name);
         }
         // Deployed with a pin like every other op. A platform op's manifest
         // is the hand-written spec, so the hash is over that document; it

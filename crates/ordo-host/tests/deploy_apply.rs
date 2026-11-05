@@ -144,7 +144,16 @@ fn engine(f: &Fixture) -> AccessEngine {
         row(HOME, DEP_EDITOR, "editor"),
         row(TENANT, TENANT_OWNER, "owner"),
     ];
-    ordo_host::engine_from_members(f, &rows).expect("engine")
+    // `ORDO_SECURITY_LEVEL=high`: every change asks for a touch, which is
+    // what the refusals in this file check. At standard, deploying asks none
+    // (owner, 2026-11-05); a capability grant is refused apply either way.
+    ordo_host::engine_from_members_under(
+        f,
+        &rows,
+        &ordo_host::presence::PresencePolicy::standard()
+            .with_level(ordo_host::security_level::SecurityLevel::High),
+    )
+    .expect("engine")
 }
 
 async fn harness(db: &str) -> Harness {

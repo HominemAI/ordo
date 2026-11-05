@@ -395,18 +395,21 @@ pub fn op_class(name: &str) -> Option<OpClass> {
     Some(class)
 }
 
-/// A platform write that asks for a fresh touch (`presence.rs`: every
-/// platform op that changes something, unless `ORDO_STEP_UP_EXEMPT_OPS`
-/// names it, and it is unset here). Moving a tenant's version asks none
-/// (owner, 2026-11-05: *"If they are logged in they proved their access"*).
+/// A platform write that asks for a fresh touch. Which changes ask is the
+/// security level's table (`security_level.rs`, owner 2026-11-05), and the
+/// matrix boots at the default, standard, with neither per-op list set.
+/// Moving a tenant's version asks none (owner, 2026-11-05: *"If they are
+/// logged in they proved their access"*).
 fn needs_presence(name: &str, class: OpClass, kind: ordo_api::OpKind) -> bool {
     if ordo_host::deploy_ops::NO_PRESENCE.contains(&name) {
         return false;
     }
     let write = kind != ordo_api::OpKind::Read;
+    let level = ordo_host::security_level::SecurityLevel::Standard;
+    let asks = write && ordo_host::security_level::asks_for_op(level, name);
     match class {
-        OpClass::AnyMember { presence } => presence,
-        OpClass::Admin | OpClass::OwnerOnly | OpClass::Deployment => write,
+        OpClass::AnyMember { presence } => presence && asks,
+        OpClass::Admin | OpClass::OwnerOnly | OpClass::Deployment => asks,
         _ => false,
     }
 }
@@ -468,9 +471,14 @@ fn deployment_op(name: &str, kind: ordo_api::OpKind, who: Kind, home: bool) -> E
     let presence = Expect::Code(403, "presence_required");
     if home {
         // A write the touch gate names asks a stale person for a touch.
+        // At the default level (`security_level.rs`) only some do.
         let gated = kind != ordo_api::OpKind::Read
             && !matches!(class, OpClass::AnyMember { presence: false })
-            && !ordo_host::deploy_ops::NO_PRESENCE.contains(&name);
+            && !ordo_host::deploy_ops::NO_PRESENCE.contains(&name)
+            && ordo_host::security_level::asks_for_op(
+                ordo_host::security_level::SecurityLevel::Standard,
+                name,
+            );
         return if person && !fresh && gated {
             presence
         } else {

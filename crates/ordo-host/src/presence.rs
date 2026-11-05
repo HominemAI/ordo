@@ -33,7 +33,9 @@
 //!
 //! An entry is an exact op name, or a prefix ending `.*`, which names every
 //! platform op that begins with it. **Unset or empty is the default:
-//! presence required on every platform op that changes something.** Chosen over a per-op table of
+//! `ORDO_SECURITY_LEVEL` decides which changes ask** ([`crate::security_level`],
+//! owner 2026-11-05; standard by default, every change at high).
+//! [`REQUIRED_ENV`] is the other direction: ops that ask whatever the level. Chosen over a per-op table of
 //! values because the default has to be the safe one and a list of
 //! exceptions says exactly what was loosened: reading the variable is
 //! reading the departure from the default. A list of exceptions also cannot
@@ -100,12 +102,20 @@ pub const ENV: &str = "ORDO_STEP_UP_EXEMPT_OPS";
 /// The strict setting: `on` asks for presence on reads too. Default `off`.
 pub const READS_ENV: &str = "ORDO_PRESENCE_ON_READS";
 
+/// The list of ops that **do** require presence whatever the level says
+/// ([`crate::security_level`]). Same shape as [`ENV`].
+pub const REQUIRED_ENV: &str = "ORDO_STEP_UP_REQUIRED_OPS";
+
 /// Where platform ops require presence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PresencePolicy {
     exempt: Vec<String>,
     /// Presence on reads too ([`READS_ENV`]). Off by default.
     reads: bool,
+    /// `ORDO_SECURITY_LEVEL`: which writes ask when no list names them.
+    level: crate::security_level::SecurityLevel,
+    /// [`REQUIRED_ENV`]: writes that ask whatever the level.
+    required: Vec<String>,
 }
 
 fn matches(pattern: &str, op: &str) -> bool {
@@ -124,13 +134,15 @@ impl PresencePolicy {
     /// deployment, `ORDO_PRESENCE_ON_READS=on` with no exemptions.
     pub fn everything_required() -> PresencePolicy {
         PresencePolicy {
-            exempt: Vec::new(),
             reads: true,
+            level: crate::security_level::SecurityLevel::High,
+            ..PresencePolicy::default()
         }
     }
 
-    /// What a deployment that sets nothing gets: every change requires
-    /// presence, no read does.
+    /// What a deployment that sets nothing gets: `ORDO_SECURITY_LEVEL`
+    /// standard, so a change asks where the level's table says, and no read
+    /// does.
     pub fn standard() -> PresencePolicy {
         PresencePolicy::default()
     }
@@ -169,7 +181,7 @@ impl PresencePolicy {
         }
         Ok(PresencePolicy {
             exempt,
-            reads: false,
+            ..PresencePolicy::default()
         })
     }
 
@@ -185,16 +197,67 @@ impl PresencePolicy {
     /// Does this platform op demand a fresh passkey assertion? A read asks
     /// for none unless the deployment is strict.
     pub fn requires(&self, op: &str, kind: ordo_api::OpKind) -> bool {
-        if kind == ordo_api::OpKind::Read && !self.reads {
-            return false;
-        }
         // Moving a tenant between versions asks no touch of anyone signed
         // in (owner, 2026-11-05: "If they are logged in they proved their
         // access"). Strict mode does not bring it back.
         if crate::deploy_ops::NO_PRESENCE.contains(&op) {
             return false;
         }
-        !self.exempts(op)
+        if self.names_required(op) {
+            return true;
+        }
+        if kind == ordo_api::OpKind::Read {
+            return self.reads && !self.exempts(op);
+        }
+        !self.exempts(op) && crate::security_level::asks_for_op(self.level, op)
+    }
+
+    /// The same policy at `level` (`ORDO_SECURITY_LEVEL`).
+    pub fn with_level(mut self, level: crate::security_level::SecurityLevel) -> PresencePolicy {
+        self.level = level;
+        self
+    }
+
+    /// The level this policy was built at.
+    pub fn level(&self) -> crate::security_level::SecurityLevel {
+        self.level
+    }
+
+    /// The same policy with [`REQUIRED_ENV`]'s list, read as [`ENV`]'s is.
+    /// An entry the exemptions also name exactly, or one naming an op that
+    /// never asks, refuses the boot.
+    pub fn with_required(mut self, list: &str, known: &[String]) -> Result<PresencePolicy, String> {
+        let named = PresencePolicy::parse(list, known).map_err(|e| e.replace(ENV, REQUIRED_ENV))?;
+        for entry in &named.exempt {
+            if crate::deploy_ops::NO_PRESENCE.contains(&entry.as_str()) {
+                return Err(format!(
+                    "`{entry}` never asks for a touch: moving a tenant's version is open to \
+                     anyone signed in who may move it (owner, 2026-11-05). Remove it from \
+                     {REQUIRED_ENV}"
+                ));
+            }
+            if self.exempt.iter().any(|e| e == entry) {
+                return Err(format!(
+                    "`{entry}` is in both {ENV} and {REQUIRED_ENV}. Remove it from one"
+                ));
+            }
+        }
+        self.required = named.exempt;
+        Ok(self)
+    }
+
+    /// [`REQUIRED_ENV`] from the environment, over this policy. Unset is
+    /// none.
+    pub fn required_from_env(self, known: &[String]) -> Result<PresencePolicy, String> {
+        match std::env::var(REQUIRED_ENV) {
+            Ok(list) => self.with_required(&list, known),
+            Err(_) => Ok(self),
+        }
+    }
+
+    /// Does [`REQUIRED_ENV`] name this op?
+    fn names_required(&self, op: &str) -> bool {
+        self.required.iter().any(|p| matches(p, op))
     }
 
     /// Does the app developer's list name this op? Never for
@@ -221,15 +284,24 @@ impl PresencePolicy {
         } else {
             "not required on reads (ORDO_PRESENCE_ON_READS=on requires it)"
         };
-        if self.exempt.is_empty() {
-            format!("required on every platform op that changes something; {reads}")
-        } else {
-            format!(
-                "NOT required on: {} (ORDO_STEP_UP_EXEMPT_OPS); required on every other \
-                 platform op that changes something; {reads}",
+        let mut parts = vec![format!(
+            "on changes as ORDO_SECURITY_LEVEL={} says",
+            self.level.as_str()
+        )];
+        if !self.exempt.is_empty() {
+            parts.push(format!(
+                "NOT required on: {} (ORDO_STEP_UP_EXEMPT_OPS)",
                 self.exempt.join(", ")
-            )
+            ));
         }
+        if !self.required.is_empty() {
+            parts.push(format!(
+                "required on: {} (ORDO_STEP_UP_REQUIRED_OPS)",
+                self.required.join(", ")
+            ));
+        }
+        parts.push(reads.to_string());
+        parts.join("; ")
     }
 }
 

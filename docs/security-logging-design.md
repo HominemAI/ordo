@@ -166,9 +166,15 @@ passkey assertion (`UserPresence` has no other producer), and the freshness
 window is the engine's. The setting says only *where presence is required*.
 
 The setting is `ORDO_STEP_UP_EXEMPT_OPS`, a list of the platform ops that do
-**not** require presence (exact names, or a prefix ending `.*`). **Its default
-is empty: presence is required on every platform op**, which is what every
-"step-up gated" statement in this document describes. An exempt op keeps its
+**not** require presence (exact names, or a prefix ending `.*`). Its default
+is empty. **Since 2026-11-05 `ORDO_SECURITY_LEVEL` (`low`, `standard`, `high`;
+default `standard`) sets which platform changes ask** when no list names
+them, by the owner's table (`crates/ordo-host/src/security_level.rs`). At
+`high` every platform change asks, which is what every "step-up gated"
+statement in this document describes. At `standard`, deploying, creating a
+tenant and membership changes ask no touch; deleting, export and import,
+storage, recovery and console keys do. `ORDO_STEP_UP_REQUIRED_OPS` puts the
+touch back on named ops at any level. An exempt op keeps its
 role gate. An exempt read is one a delegated token may be granted; platform
 writes stay closed to delegated tokens whatever the list says
 (`ORDO_DELEGABLE_OPS`). **A system caller is never asked for a touch**

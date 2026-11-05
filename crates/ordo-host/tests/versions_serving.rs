@@ -779,6 +779,60 @@ async fn a_pin_reaches_a_node_by_the_stream_and_loads_its_version() {
     assert_eq!(d.for_space("spc_a").expect("served").0.version, "0.3.0");
 }
 
+/// **`versions.new_tenant` reaches every node by the stream** (stored in
+/// Ordo since 2026-11-05): a change nudges the pin channel, the next read
+/// takes it, loads the version it names and keeps it while it is named.
+/// Nodes read one value, so none can disagree.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_new_tenant_setting_reaches_a_node_by_the_stream() {
+    let (pool, c) = registry_db("ordo_vserve_new_tenant").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    let (d, stream) = node(&pool, &c).await;
+    let (d2, stream2) = node(&pool, &c).await;
+    assert_eq!(stream.reload().await.expect("boot").new_tenant, None);
+    assert_eq!(d.new_tenant(), None);
+
+    Versions::on(&pool)
+        .set_setting(
+            ordo_host::versions::VersionSetting::NewTenant,
+            Some("#1"),
+            "deployment-owner:ada",
+            "beta",
+            60,
+        )
+        .await
+        .expect("set");
+    for (d, stream) in [(&d, &stream), (&d2, &stream2)] {
+        let read = stream.tail().await.expect("tail");
+        assert_eq!(read.new_tenant, Some(Some("0.1.0".to_string())), "{read:?}");
+        assert_eq!(read.loaded, vec!["0.1.0".to_string()], "{read:?}");
+        assert_eq!(d.new_tenant().as_deref(), Some("0.1.0"));
+        assert!(d.loaded("0.1.0").is_some(), "kept loaded for new tenants");
+    }
+    assert_eq!(
+        stream.reload().await.expect("again").new_tenant,
+        None,
+        "read once"
+    );
+
+    Versions::on(&pool)
+        .set_setting(
+            ordo_host::versions::VersionSetting::NewTenant,
+            None,
+            "deployment-owner:ada",
+            "ga",
+            61,
+        )
+        .await
+        .expect("cleared");
+    let read = stream.tail().await.expect("tail");
+    assert_eq!(read.new_tenant, Some(None), "{read:?}");
+    assert_eq!(read.dropped, vec!["0.1.0".to_string()], "{read:?}");
+    assert_eq!(d.new_tenant(), None);
+}
+
 /// The move's refusals: a revoked version, and a tenant there is none of.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pin_to_a_revoked_version_or_no_tenant_is_refused() {

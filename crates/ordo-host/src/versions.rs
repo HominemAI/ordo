@@ -50,7 +50,7 @@
 //! is a revoke.
 //!
 //! - A revoked version is refused as an activation or rollback target, as
-//!   `versions.new_tenant` (at boot and when a tenant is pinned), and as
+//!   `versions.new_tenant` (when it is set and when a tenant is pinned), and as
 //!   any pin target. Each refusal names the revoke and the command that
 //!   lifts it ([`VersionRefusal::Revoked`]).
 //! - Revoking the active version is refused unless the deployment owner
@@ -90,19 +90,181 @@ use ordo_fault::FaultClass;
 
 pub use ordo_exec::registry::{Activated, Activation, Applied, Artifact, Revision, DEPLOY_CHANNEL};
 
-/// The setting naming the version a new tenant starts on (§7).
+/// The setting naming the version a new tenant starts on (§7). Stored in
+/// the control database ([`VersionSetting`], owner 2026-11-05).
 pub const NEW_TENANT_SETTING: &str = "versions.new_tenant";
-/// Its environment variable.
+/// The environment variable that set it before 2026-11-05. Read once, to
+/// adopt its value ([`Versions::adopt_env`]); ignored after.
 pub const NEW_TENANT_ENV: &str = "ORDO_VERSIONS_NEW_TENANT";
 
 /// The setting naming which versions this deployment serves (§1.6, D15).
 pub const SERVED_SETTING: &str = "versions.served";
-/// Its environment variable: `in-use`, the default, or a comma list.
+/// Its former environment variable, read only to adopt it.
 pub const SERVED_ENV: &str = "ORDO_VERSIONS_SERVED";
 /// The setting naming the oldest version a tenant may stay on (§1.6).
 pub const MINIMUM_SETTING: &str = "versions.minimum";
-/// Its environment variable. Unset: none.
+/// Its former environment variable, read only to adopt it.
 pub const MINIMUM_ENV: &str = "ORDO_VERSIONS_MINIMUM";
+
+/// **The three version settings** (owner, 2026-11-05: *"that lives within
+/// ordo and should likely not be an env because it is dependany on what is
+/// applied"*). Each is about program versions, so each is stored in the
+/// control database, `$version_settings`, with who set it, when and why.
+/// They are set through the door (`std.deployment.setVersionSetting`), the
+/// CLI (`ordo versions set`) and the console's Deploys screen. Every node
+/// reads them where it needs them, and the pin stream's nudge tells a node
+/// to read them again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSetting {
+    Served,
+    Minimum,
+    NewTenant,
+}
+
+impl VersionSetting {
+    pub const ALL: [VersionSetting; 3] = [
+        VersionSetting::Served,
+        VersionSetting::Minimum,
+        VersionSetting::NewTenant,
+    ];
+
+    /// `versions.served`, `versions.minimum`, `versions.new_tenant`.
+    pub fn name(self) -> &'static str {
+        match self {
+            VersionSetting::Served => SERVED_SETTING,
+            VersionSetting::Minimum => MINIMUM_SETTING,
+            VersionSetting::NewTenant => NEW_TENANT_SETTING,
+        }
+    }
+
+    /// The environment variable it was read from before 2026-11-05.
+    pub fn env(self) -> &'static str {
+        match self {
+            VersionSetting::Served => SERVED_ENV,
+            VersionSetting::Minimum => MINIMUM_ENV,
+            VersionSetting::NewTenant => NEW_TENANT_ENV,
+        }
+    }
+
+    /// The command that sets it.
+    pub fn command(self) -> &'static str {
+        match self {
+            VersionSetting::Served => "ordo versions set served",
+            VersionSetting::Minimum => "ordo versions set minimum",
+            VersionSetting::NewTenant => "ordo versions set new-tenant",
+        }
+    }
+
+    /// What it means when it is not set.
+    pub fn unset_reads(self) -> &'static str {
+        match self {
+            VersionSetting::Served => "in-use",
+            VersionSetting::Minimum => "none",
+            VersionSetting::NewTenant => "the active version",
+        }
+    }
+
+    /// From its name (`versions.served`), its short name (`served`), or
+    /// `new-tenant` / `new_tenant`.
+    pub fn parse(text: &str) -> Option<VersionSetting> {
+        let t = text.trim();
+        let t = t.strip_prefix("versions.").unwrap_or(t);
+        match t {
+            "served" => Some(VersionSetting::Served),
+            "minimum" => Some(VersionSetting::Minimum),
+            "new_tenant" | "new-tenant" | "newTenant" => Some(VersionSetting::NewTenant),
+            _ => None,
+        }
+    }
+
+    fn from_name(name: &str) -> Option<VersionSetting> {
+        VersionSetting::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// The command a refusal names for `setting`.
+fn command_of(setting: &str) -> &'static str {
+    VersionSetting::from_name(setting)
+        .unwrap_or(VersionSetting::NewTenant)
+        .command()
+}
+
+/// The three settings as stored. `Default` is every one unset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VersionSettings {
+    pub policy: ServedPolicy,
+    pub new_tenant: Option<String>,
+}
+
+impl VersionSettings {
+    /// The value of one, as it is stored: `None` when unset.
+    pub fn value(&self, s: VersionSetting) -> Option<String> {
+        match s {
+            VersionSetting::Served => self.policy.served.as_ref().map(|l| l.join(",")),
+            VersionSetting::Minimum => self.policy.minimum.clone(),
+            VersionSetting::NewTenant => self.new_tenant.clone(),
+        }
+    }
+
+    /// The census line.
+    pub fn describe(&self) -> String {
+        format!(
+            "{}   new tenants: {}",
+            self.policy.describe(),
+            self.new_tenant.as_deref().unwrap_or("the active version")
+        )
+    }
+
+    fn with(&self, s: VersionSetting, value: Option<String>) -> VersionSettings {
+        let mut out = self.clone();
+        match s {
+            VersionSetting::Served => {
+                out.policy.served = value.map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|x| !x.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+            }
+            VersionSetting::Minimum => out.policy.minimum = value,
+            VersionSetting::NewTenant => out.new_tenant = value,
+        }
+        out
+    }
+}
+
+/// One change to a version setting, as `$version_settings` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingChange {
+    pub seq: i64,
+    pub setting: String,
+    /// `None`: cleared, back to the default.
+    pub value: Option<String>,
+    pub actor: String,
+    pub reason: String,
+    pub at: u64,
+}
+
+/// What a setting change did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingSet {
+    /// Recorded; the settings now.
+    Changed(VersionSettings),
+    /// The setting already held that value; nothing was written.
+    Unchanged(VersionSettings),
+}
+
+impl SettingSet {
+    pub fn settings(&self) -> &VersionSettings {
+        match self {
+            SettingSet::Changed(s) | SettingSet::Unchanged(s) => s,
+        }
+    }
+}
+
+/// The most history rows one read answers.
+pub const MAX_SETTING_HISTORY: usize = 200;
 
 /// **Which versions stay served** (`plan-versions.md` §1.6; ruled
 /// 2026-10-01 and 2026-11-02, D15: the app developer decides).
@@ -114,8 +276,8 @@ pub const MINIMUM_ENV: &str = "ORDO_VERSIONS_MINIMUM";
 ///   maintenance window, as off a revoked version, and nothing is pinned
 ///   below it.
 ///
-/// A change that would strand a tenant is refused at boot, naming the
-/// setting and the value to add ([`Versions::check_policy`]).
+/// A change that would strand a tenant is refused when it is made, naming
+/// the setting and the value to add ([`Versions::check_policy`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServedPolicy {
     pub served: Option<Vec<String>>,
@@ -144,14 +306,6 @@ impl ServedPolicy {
         }
     }
 
-    /// From [`SERVED_ENV`] and [`MINIMUM_ENV`].
-    pub fn from_env() -> ServedPolicy {
-        ServedPolicy::parse(
-            std::env::var(SERVED_ENV).ok().as_deref(),
-            std::env::var(MINIMUM_ENV).ok().as_deref(),
-        )
-    }
-
     /// The census line.
     pub fn describe(&self) -> String {
         format!(
@@ -163,24 +317,6 @@ impl ServedPolicy {
             self.minimum.as_deref().unwrap_or("none")
         )
     }
-}
-
-static POLICY: std::sync::OnceLock<ServedPolicy> = std::sync::OnceLock::new();
-static NO_POLICY: ServedPolicy = ServedPolicy {
-    served: None,
-    minimum: None,
-};
-
-/// Install the deployment's policy, once, at boot, after
-/// [`Versions::check_policy`] resolved it. A second call is ignored.
-pub fn install_policy(policy: ServedPolicy) {
-    let _ = POLICY.set(policy);
-}
-
-/// The policy every [`Versions::on`] checks pins against: what boot
-/// installed, or `in-use` and no minimum.
-pub fn policy() -> &'static ServedPolicy {
-    POLICY.get().unwrap_or(&NO_POLICY)
 }
 
 /// The longest label a version may carry, in characters.
@@ -368,7 +504,52 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
     if pool.rows(MOVE_TARGETS_DDL).await.is_err() {
         pool.rows(MOVE_TARGETS_DDL).await?;
     }
+    if pool.rows(SETTINGS_DDL).await.is_err() {
+        pool.rows(SETTINGS_DDL).await?;
+    }
     Ok(())
+}
+
+/// `$version_settings`, beside `$revocations`: every change to the three
+/// version settings ([`VersionSetting`]), append-only, with who, why and
+/// when. A setting's value is its newest row's; `value` NULL is unset.
+const SETTINGS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$version_settings\" ( \
+  \"seq\" bigserial PRIMARY KEY, \
+  \"setting\" text NOT NULL, \
+  \"value\" text NULL, \
+  \"actor\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+); \
+CREATE INDEX IF NOT EXISTS \"$version_settings_setting\" \
+  ON \"$version_settings\" (\"setting\", \"seq\")";
+
+/// The newest row of each setting.
+const SETTINGS_NOW_SQL: &str = "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" \
+     FROM \"$version_settings\" ORDER BY \"setting\", \"seq\" DESC";
+
+fn settings_of(rows: &[Vec<Option<String>>]) -> VersionSettings {
+    let mut out = VersionSettings::default();
+    for r in rows {
+        let Some(s) = r
+            .first()
+            .cloned()
+            .flatten()
+            .and_then(|n| VersionSetting::from_name(&n))
+        else {
+            continue;
+        };
+        let value = r.get(1).cloned().flatten().filter(|v| !v.is_empty());
+        out = out.with(s, value);
+    }
+    out
+}
+
+/// The settings, read inside `tx`. The table exists: every transaction that
+/// reads it ran [`ensure_revocations`] first.
+async fn settings_in(tx: &ordo_exec::TxConn) -> Result<VersionSettings, PoolError> {
+    Ok(settings_of(&tx.rows(SETTINGS_NOW_SQL).await?))
 }
 
 /// Read `$revocations` with `sql`. A table from before `move_to` gains the
@@ -714,7 +895,6 @@ pub enum VersionRefusal {
     /// fixes the setting; the refusal names it and the value.
     Setting {
         setting: &'static str,
-        var: &'static str,
         value: String,
         stored: Vec<String>,
         /// What else the deployment owner may do, after "Set it to one of
@@ -731,11 +911,11 @@ pub enum VersionRefusal {
     GitCommit(String),
     /// The version is revoked (D8), so it is not activated, rolled back
     /// to, pinned or given to new tenants. `setting` is set when
-    /// `versions.new_tenant` named it: `(setting, variable)`.
+    /// `versions.new_tenant` named it.
     Revoked {
         named: String,
         mark: Box<Revocation>,
-        setting: Option<(&'static str, &'static str)>,
+        setting: Option<&'static str>,
     },
     /// The active version, revoked with no `--move-to` (ask 18).
     /// `candidates` names every stored version that is not revoked.
@@ -754,12 +934,10 @@ pub enum VersionRefusal {
     /// An unrevoke of a version that is not revoked.
     NotRevoked { named: String },
     /// A revoke of the version `versions.new_tenant` names. Revoked, it
-    /// would leave new tenants unpinned and refuse the next boot, so the
-    /// setting changes first.
+    /// would leave new tenants unpinned, so the setting changes first.
     NamedBySetting {
         named: String,
         setting: &'static str,
-        var: &'static str,
     },
     /// A reason that is empty or longer than [`MAX_REASON_CHARS`]. Fix the
     /// input.
@@ -792,7 +970,7 @@ pub enum VersionRefusal {
     /// A pin target stored before `versions.minimum`.
     BelowMinimum { named: String, minimum: String },
     /// `versions.served` leaves out a version tenants are pinned to: the
-    /// boot refuses it, naming the value to add.
+    /// change is refused, naming the value to add.
     Stranded {
         version: String,
         tenants: u64,
@@ -800,7 +978,7 @@ pub enum VersionRefusal {
     },
     /// `versions.minimum` names a version stored after the active one, so
     /// every tenant on the active version would count as below it and no
-    /// move could land: the boot refuses it, naming the active version.
+    /// move could land: the change is refused, naming the active version.
     MinimumAboveActive { minimum: String, active: String },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
@@ -864,10 +1042,17 @@ impl VersionRefusal {
             VersionRefusal::UnknownVersion(_) | VersionRefusal::NotStored { .. } => {
                 ExecError::new(ErrorCode::NotFound, message)
             }
+            // A setting's value that is refused is the caller's input,
+            // now that a setting is changed at the door (2026-11-05).
             VersionRefusal::Label(_)
             | VersionRefusal::GitCommit(_)
             | VersionRefusal::MoveTo(_)
-            | VersionRefusal::Reason(_) => ExecError::new(ErrorCode::InvalidParam, message),
+            | VersionRefusal::Reason(_)
+            | VersionRefusal::Setting { .. }
+            | VersionRefusal::Stranded { .. }
+            | VersionRefusal::MinimumAboveActive { .. } => {
+                ExecError::new(ErrorCode::InvalidParam, message)
+            }
             VersionRefusal::Collision { .. } | VersionRefusal::AlreadyRevoked { .. } => {
                 ExecError::new(ErrorCode::Duplicate, message)
             }
@@ -884,11 +1069,6 @@ impl VersionRefusal {
             VersionRefusal::NotRevoked { .. }
             | VersionRefusal::NoTenant { .. }
             | VersionRefusal::NotOnRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
-            VersionRefusal::Setting { .. }
-            | VersionRefusal::Stranded { .. }
-            | VersionRefusal::MinimumAboveActive { .. } => {
-                ExecError::new(ErrorCode::Internal, message)
-            }
             VersionRefusal::Store(e) => {
                 ExecError::of_fault(e.class(), ErrorCode::SpaceUnavailable, message)
             }
@@ -912,19 +1092,19 @@ impl std::fmt::Display for VersionRefusal {
             ),
             VersionRefusal::Setting {
                 setting,
-                var,
                 value,
                 stored,
                 hint,
             } => write!(
                 f,
-                "{setting} ({var}) is `{value}`, and no version is stored under that name. \
-                 Stored: {}. Set it to one of them, {hint}",
+                "{setting} `{value}` names no stored version. Stored: {}. Set it to one of \
+                 them with `{} <version>`, {hint}",
                 if stored.is_empty() {
                     "none".to_string()
                 } else {
                     stored.join(", ")
-                }
+                },
+                command_of(setting)
             ),
             VersionRefusal::NotStored { asked, stored } => write!(
                 f,
@@ -951,11 +1131,12 @@ impl std::fmt::Display for VersionRefusal {
                     mark.reason,
                     mark.version
                 )?;
-                if let Some((setting, var)) = setting {
+                if let Some(setting) = setting {
                     write!(
                         f,
-                        ". {setting} ({var}) names it: set it to a version that is not \
-                         revoked, or unset it to start new tenants on the active version"
+                        ". {setting} names it: `{} <version>` names one that is not \
+                         revoked, or `--clear` starts new tenants on the active version",
+                        command_of(setting)
                     )?;
                 }
                 Ok(())
@@ -986,15 +1167,12 @@ impl std::fmt::Display for VersionRefusal {
                  the versions that do"
             ),
             VersionRefusal::Reason(why) => write!(f, "reason refused: {why}"),
-            VersionRefusal::NamedBySetting {
-                named,
-                setting,
-                var,
-            } => write!(
+            VersionRefusal::NamedBySetting { named, setting } => write!(
                 f,
-                "revoke_named_by_setting: {setting} ({var}) names {named}, so new tenants \
-                 start on it. Set it to another version, or unset it to start them on the \
-                 active version, then revoke"
+                "revoke_named_by_setting: {setting} names {named}, so new tenants start on \
+                 it. Set another with `{cmd} <version>`, or `{cmd} --clear` to start them on \
+                 the active version, then revoke",
+                cmd = command_of(setting)
             ),
             VersionRefusal::NoTenant { space } => write!(
                 f,
@@ -1046,15 +1224,16 @@ impl std::fmt::Display for VersionRefusal {
             } => write!(
                 f,
                 "not_served: {named} is not a version this deployment serves: \
-                 {SERVED_SETTING} ({SERVED_ENV}) is `{}`. Add it: {SERVED_ENV}={},{version}, \
-                 or set it to `in-use`",
+                 {SERVED_SETTING} is `{}`. Add it: `ordo versions set served {},{version}`, \
+                 or `ordo versions set served in-use`",
                 list.join(","),
                 list.join(",")
             ),
             VersionRefusal::BelowMinimum { named, minimum } => write!(
                 f,
-                "below_minimum: {named} is older than {MINIMUM_SETTING} ({MINIMUM_ENV}), \
-                 {minimum}. Name a version at or above it, or lower {MINIMUM_ENV}"
+                "below_minimum: {named} is older than {MINIMUM_SETTING}, {minimum}. Name a \
+                 version at or above it, or lower it: `ordo versions set minimum <version>` \
+                 or `--clear`"
             ),
             VersionRefusal::Stranded {
                 version,
@@ -1062,17 +1241,18 @@ impl std::fmt::Display for VersionRefusal {
                 list,
             } => write!(
                 f,
-                "{SERVED_SETTING} ({SERVED_ENV}) is `{}` and leaves out {version}, which \
-                 {tenants} tenant(s) are pinned to. Add it: {SERVED_ENV}={},{version}, or \
-                 move them first (`ordo versions pin <tenant> <version>`)",
+                "{SERVED_SETTING} `{}` leaves out {version}, which {tenants} tenant(s) are \
+                 pinned to. Add it: `ordo versions set served {},{version}`, or move them \
+                 first (`ordo versions pin <tenant> <version>`)",
                 list.join(","),
                 list.join(",")
             ),
             VersionRefusal::MinimumAboveActive { minimum, active } => write!(
                 f,
-                "{MINIMUM_SETTING} ({MINIMUM_ENV}) is {minimum}, stored after the active \
-                 version {active}, so every tenant on {active} would be below it. Set \
-                 {MINIMUM_ENV}={active} or older, activate {minimum} first, or unset it"
+                "{MINIMUM_SETTING} `{minimum}` is stored after the active version {active}, \
+                 so every tenant on {active} would be below it. Name {active} or older \
+                 (`ordo versions set minimum {active}`), activate {minimum} first, or \
+                 `--clear` it"
             ),
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
@@ -1112,12 +1292,12 @@ impl From<RegistryRefusal> for VersionRefusal {
 #[derive(Clone, Copy)]
 pub struct Versions<'a> {
     pool: &'a Pool,
-    /// `versions.new_tenant`, as this node read it. `None`: the active
-    /// version.
+    /// `versions.new_tenant` named by the caller. `None`: the stored one,
+    /// read where it is needed.
     new_tenant: Option<&'a str>,
-    /// `versions.served` and `versions.minimum`: what boot installed
-    /// ([`policy`]), unless a caller names another.
-    policy: &'a ServedPolicy,
+    /// `versions.served` and `versions.minimum` named by the caller.
+    /// `None`: the stored ones ([`Versions::settings`]), read each time.
+    policy: Option<&'a ServedPolicy>,
 }
 
 impl<'a> Versions<'a> {
@@ -1125,19 +1305,30 @@ impl<'a> Versions<'a> {
         Versions {
             pool,
             new_tenant: None,
-            policy: policy(),
+            policy: None,
         }
     }
 
-    /// The same client, under another served policy.
+    /// The same client, under another served policy than the stored one.
     pub fn with_policy(self, policy: &'a ServedPolicy) -> Versions<'a> {
-        Versions { policy, ..self }
+        Versions {
+            policy: Some(policy),
+            ..self
+        }
+    }
+
+    /// The served policy in force: the caller's, or the stored one.
+    async fn policy_now(&self) -> Result<ServedPolicy, VersionRefusal> {
+        match self.policy {
+            Some(p) => Ok(p.clone()),
+            None => Ok(self.settings().await?.policy),
+        }
     }
 
     /// **May a tenant be pinned to `version`** under `versions.served` and
     /// `versions.minimum`? The active version is always served.
     pub async fn check_served(&self, version: &str) -> Result<(), VersionRefusal> {
-        let p = self.policy;
+        let p = &self.policy_now().await?;
         if p.served.is_none() && p.minimum.is_none() {
             return Ok(());
         }
@@ -1167,7 +1358,8 @@ impl<'a> Versions<'a> {
 
     /// The stored versions below `versions.minimum`. Empty with none.
     pub async fn below_minimum(&self) -> Result<Vec<String>, VersionRefusal> {
-        let Some(min) = &self.policy.minimum else {
+        let p = self.policy_now().await?;
+        let Some(min) = &p.minimum else {
             return Ok(vec![]);
         };
         let ords = registry::ordinals(self.pool).await?;
@@ -1181,8 +1373,9 @@ impl<'a> Versions<'a> {
             .collect())
     }
 
-    /// **Check `versions.served` and `versions.minimum` at boot**, and
-    /// answer them resolved: each `#n` named as its version. Refused: a
+    /// **Check `versions.served` and `versions.minimum`** before a change
+    /// to either is stored, and answer them resolved: each `#n` named as
+    /// its version. Boot runs it on the stored ones and only logs. Refused: a
     /// version not stored (naming the setting and the versions stored), and
     /// a served list that leaves out a version tenants are pinned to
     /// (naming the value to add). A deployment with nothing applied passes.
@@ -1195,7 +1388,7 @@ impl<'a> Versions<'a> {
             Err(e) if e.is_missing_table() => return Ok(p.clone()),
             Err(e) => return Err(e.into()),
         };
-        let resolve = |name: &str, setting: &'static str, var: &'static str| {
+        let resolve = |name: &str, setting: &'static str| {
             let name = name.to_string();
             let stored = stored.clone();
             async move {
@@ -1204,10 +1397,9 @@ impl<'a> Versions<'a> {
                     Err(VersionRefusal::NotStored { .. })
                     | Err(VersionRefusal::UnknownVersion(_)) => Err(VersionRefusal::Setting {
                         setting,
-                        var,
                         value: name,
                         stored,
-                        hint: "or unset it",
+                        hint: "or `--clear` it",
                     }),
                     Err(e) => Err(e),
                 }
@@ -1217,7 +1409,7 @@ impl<'a> Versions<'a> {
         if let Some(list) = &p.served {
             let mut resolved = Vec::new();
             for name in list {
-                resolved.push(resolve(name, SERVED_SETTING, SERVED_ENV).await?);
+                resolved.push(resolve(name, SERVED_SETTING).await?);
             }
             let active = registry::active_version(self.pool).await?;
             for (version, tenants) in self.tenants_per_version().await? {
@@ -1232,7 +1424,7 @@ impl<'a> Versions<'a> {
             out.served = Some(resolved);
         }
         if let Some(min) = &p.minimum {
-            let minimum = resolve(min, MINIMUM_SETTING, MINIMUM_ENV).await?;
+            let minimum = resolve(min, MINIMUM_SETTING).await?;
             // A minimum above the active version puts every tenant on the
             // active version below it, and every move to it is refused.
             if let Some(active) = registry::active_version(self.pool).await? {
@@ -1570,11 +1762,18 @@ impl<'a> Versions<'a> {
             return Ok(Activated::AlreadyActive(version.to_string()));
         }
         // Every tenant would land below `versions.minimum`.
-        if self.below_minimum().await?.iter().any(|v| v == version) {
+        let policy = self.policy_now().await?;
+        if self
+            .with_policy(&policy)
+            .below_minimum()
+            .await?
+            .iter()
+            .any(|v| v == version)
+        {
             return Err(VersionRefusal::BelowMinimum {
                 named: self.named(version).await?,
                 minimum: self
-                    .named(self.policy.minimum.as_deref().unwrap_or_default())
+                    .named(policy.minimum.as_deref().unwrap_or_default())
                     .await?,
             });
         }
@@ -1611,8 +1810,8 @@ impl<'a> Versions<'a> {
     /// (§1.3, D14). Rollouts do not exist yet, so the active version stands
     /// in for it until increment 10.
     pub async fn new_tenant_version(&self) -> Result<Option<String>, VersionRefusal> {
-        if let Some(v) = self.new_tenant {
-            return Ok(Some(v.to_string()));
+        if let Some(v) = self.new_tenant_setting().await? {
+            return Ok(Some(v));
         }
         match registry::active_version(self.pool).await {
             Ok(v) => Ok(v),
@@ -1622,31 +1821,39 @@ impl<'a> Versions<'a> {
         }
     }
 
-    /// Refuse a `versions.new_tenant` that names no stored version. Boot
-    /// calls this, so a deployment never starts tenants on a version it
-    /// cannot load.
+    /// `versions.new_tenant`: the caller's, or the stored one. `None`:
+    /// unset, the active version.
+    async fn new_tenant_setting(&self) -> Result<Option<String>, VersionRefusal> {
+        match self.new_tenant {
+            Some(v) => Ok(Some(v.to_string())),
+            None => Ok(self.settings().await?.new_tenant),
+        }
+    }
+
+    /// Refuse a `versions.new_tenant` that names no stored version, a
+    /// revoked one, or one the served policy leaves out. A change to the
+    /// setting is checked so, and boot logs what it finds, so a deployment
+    /// never starts tenants on a version it cannot load.
     pub async fn check_new_tenant(&self) -> Result<(), VersionRefusal> {
-        let Some(value) = self.new_tenant else {
+        let Some(value) = self.new_tenant_setting().await? else {
             return Ok(());
         };
+        let value = value.as_str();
         if registry::get(self.pool, value).await?.is_some() {
             return match self.revocation_of(value).await? {
-                Some(mark) => Err(self
-                    .revoked(mark, Some((NEW_TENANT_SETTING, NEW_TENANT_ENV)))
-                    .await),
+                Some(mark) => Err(self.revoked(mark, Some(NEW_TENANT_SETTING)).await),
                 None => self.check_served(value).await,
             };
         }
         Err(VersionRefusal::Setting {
             setting: NEW_TENANT_SETTING,
-            var: NEW_TENANT_ENV,
             value: value.to_string(),
             stored: registry::stored(self.pool)
                 .await?
                 .into_iter()
                 .map(|(v, _, _)| v)
                 .collect(),
-            hint: "or unset it to start new tenants on the active version",
+            hint: "or `--clear` it to start new tenants on the active version",
         })
     }
 
@@ -1665,8 +1872,14 @@ impl<'a> Versions<'a> {
         // The turn first, then the version: an activation that started
         // before this has committed by now, and is the one read.
         tx.rows(&pin_lock_sql()).await?;
-        let version = match self.new_tenant {
+        // The stored setting is read under the same turn, so a change to it
+        // that committed first is the one this pin follows.
+        let named = match self.new_tenant {
             Some(v) => Some(v.to_string()),
+            None => settings_in(&tx).await?.new_tenant,
+        };
+        let version = match &named {
+            Some(v) => Some(v.clone()),
             None => match active_in(&tx).await {
                 Ok(v) => v,
                 // No registry: nothing has ever been applied here.
@@ -1679,10 +1892,7 @@ impl<'a> Versions<'a> {
         };
         if let Some(mark) = mark_in(&tx, &version).await? {
             tx.rollback().await?;
-            let setting = self
-                .new_tenant
-                .is_some()
-                .then_some((NEW_TENANT_SETTING, NEW_TENANT_ENV));
+            let setting = named.is_some().then_some(NEW_TENANT_SETTING);
             return Err(self.revoked(mark, setting).await);
         }
         let filter = format!(
@@ -1931,11 +2141,7 @@ impl<'a> Versions<'a> {
     }
 
     /// The refusal for a revoked version, named as a person reads it.
-    async fn revoked(
-        &self,
-        mark: Revocation,
-        setting: Option<(&'static str, &'static str)>,
-    ) -> VersionRefusal {
+    async fn revoked(&self, mark: Revocation, setting: Option<&'static str>) -> VersionRefusal {
         let named = self
             .named(&mark.version)
             .await
@@ -2479,6 +2685,323 @@ impl<'a> Versions<'a> {
     }
 }
 
+// ── the version settings (owner, 2026-11-05) ───────────────────────────
+
+impl<'a> Versions<'a> {
+    /// **The three version settings as stored.** A database with no table
+    /// yet answers each unset.
+    pub async fn settings(&self) -> Result<VersionSettings, VersionRefusal> {
+        match self.pool.rows(SETTINGS_NOW_SQL).await {
+            Ok(rows) => Ok(settings_of(&rows)),
+            Err(e) if e.is_missing_table() => Ok(VersionSettings::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Every change to them, newest first, at most `limit`
+    /// ([`MAX_SETTING_HISTORY`]).
+    pub async fn setting_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SettingChange>, VersionRefusal> {
+        let sql = format!(
+            "SELECT \"seq\", \"setting\", \"value\", \"actor\", \"reason\", \"at\" \
+             FROM \"$version_settings\" ORDER BY \"seq\" DESC LIMIT {}",
+            limit.clamp(1, MAX_SETTING_HISTORY)
+        );
+        match self.pool.rows(&sql).await {
+            Ok(rows) => Ok(rows.iter().filter_map(|r| change_row(r)).collect()),
+            Err(e) if e.is_missing_table() => Ok(vec![]),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// **Check a value for one setting** against the others as stored, and
+    /// answer it resolved: `#n` named as its version, `None` for unset
+    /// (`in-use` for served, `none` for minimum, empty for any). The checks
+    /// that ran at boot before 2026-11-05:
+    ///
+    /// - each version named is stored ([`VersionRefusal::Setting`]);
+    /// - `versions.served` strands no tenant ([`VersionRefusal::Stranded`]);
+    /// - `versions.minimum` is not above the active version
+    ///   ([`VersionRefusal::MinimumAboveActive`]);
+    /// - `versions.new_tenant` is not revoked, and the served policy serves
+    ///   it.
+    ///
+    /// Each refusal names the setting and the value.
+    pub async fn check_setting(
+        &self,
+        setting: VersionSetting,
+        value: Option<&str>,
+    ) -> Result<(Option<String>, VersionSettings), VersionRefusal> {
+        let value = value.map(str::trim).filter(|v| !v.is_empty());
+        let value = match (setting, value) {
+            (VersionSetting::Served, Some("in-use")) | (VersionSetting::Minimum, Some("none")) => {
+                None
+            }
+            (_, v) => v.map(str::to_string),
+        };
+        let now = self.settings().await?;
+        let candidate = now.with(setting, value);
+        let stored_only = Versions {
+            policy: None,
+            new_tenant: None,
+            ..*self
+        };
+        let policy = match setting {
+            // The policy is checked whole, so a change to either half
+            // never leaves the pair stranding a tenant.
+            VersionSetting::Served | VersionSetting::Minimum => {
+                stored_only.check_policy(&candidate.policy).await?
+            }
+            VersionSetting::NewTenant => candidate.policy.clone(),
+        };
+        let mut resolved = VersionSettings {
+            policy,
+            new_tenant: None,
+        };
+        if let Some(named) = &candidate.new_tenant {
+            let version = match self.resolve(named).await {
+                Ok(v) => v,
+                Err(VersionRefusal::NotStored { .. }) | Err(VersionRefusal::UnknownVersion(_)) => {
+                    return Err(VersionRefusal::Setting {
+                        setting: NEW_TENANT_SETTING,
+                        value: named.clone(),
+                        stored: self.unrevoked().await?,
+                        hint: "or `--clear` it to start new tenants on the active version",
+                    })
+                }
+                Err(e) => return Err(e),
+            };
+            stored_only
+                .with_policy(&resolved.policy)
+                .with_new_tenant(Some(&version))
+                .check_new_tenant()
+                .await?;
+            resolved.new_tenant = Some(version);
+        }
+        Ok((resolved.value(setting), resolved))
+    }
+
+    /// **Change one version setting**, or clear it with `None`, with who
+    /// and why. Checked first ([`Versions::check_setting`]), then written
+    /// under the pin lock with the pin stream's nudge, so every node reads
+    /// it again at once ([`crate::pin_stream`]) and at the latest on its
+    /// reconcile tick. A value the setting already holds writes nothing.
+    pub async fn set_setting(
+        &self,
+        setting: VersionSetting,
+        value: Option<&str>,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<SettingSet, VersionRefusal> {
+        let reason = check_reason(reason)?;
+        self.ensure().await?;
+        let (value, _) = self.check_setting(setting, value).await?;
+        self.record_setting(setting, value, actor, &reason, at, false)
+            .await
+            .map(|s| s.expect("an unconditional write answers"))
+    }
+
+    /// Write one setting's row. `only_if_never_set`: write nothing, and
+    /// answer `None`, when the setting has any row at all.
+    async fn record_setting(
+        &self,
+        setting: VersionSetting,
+        value: Option<String>,
+        actor: &str,
+        reason: &str,
+        at: u64,
+        only_if_never_set: bool,
+    ) -> Result<Option<SettingSet>, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if only_if_never_set {
+            let any = tx
+                .rows(&format!(
+                    "SELECT 1 FROM \"$version_settings\" WHERE \"setting\" = {} LIMIT 1",
+                    sql_lit(setting.name())
+                ))
+                .await?;
+            if !any.is_empty() {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+        }
+        let now = settings_in(&tx).await?;
+        if now.value(setting) == value {
+            tx.rollback().await?;
+            return Ok(Some(SettingSet::Unchanged(now)));
+        }
+        tx.rows(&format!(
+            "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+             VALUES ({}, {}, {}, {}, {at})",
+            sql_lit(setting.name()),
+            value.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
+            sql_lit(actor),
+            sql_lit(reason),
+        ))
+        .await?;
+        tx.rows(&format!("SELECT pg_notify({}, '')", sql_lit(PINS_CHANNEL)))
+            .await?;
+        tx.commit().await?;
+        Ok(Some(SettingSet::Changed(now.with(setting, value))))
+    }
+
+    /// **Adopt a version setting still set in the environment**, once
+    /// (owner, 2026-11-05). For each of the three:
+    ///
+    /// - not in the environment: nothing;
+    /// - set, and the setting was never stored: stored as [`SYSTEM_ACTOR`]
+    ///   with the checks a change has, and a line says the variable is now
+    ///   ignored and can be removed;
+    /// - set, and the setting is stored: a line, on every boot, that it is
+    ///   ignored.
+    ///
+    /// A value the checks refuse is not stored, and its line says why. It
+    /// never refuses: an upgrade never stops a running deployment (owner,
+    /// 2026-11-02). The lines, for the node's log.
+    pub async fn adopt_env(&self, at: u64) -> Vec<String> {
+        self.adopt_from(|var| std::env::var(var).ok(), at).await
+    }
+
+    /// [`Versions::adopt_env`], reading the environment through `read`.
+    pub async fn adopt_from(&self, read: impl Fn(&str) -> Option<String>, at: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Err(e) = self.ensure().await {
+            out.push(format!(
+                "versions: the version settings were not read, so no environment value was \
+                 adopted ({e})"
+            ));
+            return out;
+        }
+        for s in VersionSetting::ALL {
+            // Empty was unset before 2026-11-05 too.
+            let Some(raw) = read(s.env())
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
+            let checked = self.check_setting(s, Some(raw.as_str())).await;
+            let written = match checked {
+                Ok((value, _)) => {
+                    self.record_setting(
+                        s,
+                        value,
+                        SYSTEM_ACTOR,
+                        &format!("adopted from {} at boot", s.env()),
+                        at,
+                        true,
+                    )
+                    .await
+                }
+                Err(e) => {
+                    // Refused, unless something is stored already: then
+                    // the variable is only ignored.
+                    match self.record_setting_exists(s).await {
+                        Ok(true) => Ok(None),
+                        Ok(false) => {
+                            out.push(format!(
+                                "versions: {} is `{raw}` and was not stored, so it is ignored: \
+                                 {e}. Set {} with `{} <value>`, then remove {}",
+                                s.env(),
+                                s.name(),
+                                s.command(),
+                                s.env()
+                            ));
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+            match written {
+                Ok(Some(SettingSet::Changed(_))) => out.push(format!(
+                    "versions: {} was set from {} (`{raw}`) and is now stored in Ordo. {} is \
+                     ignored from now on and can be removed; `{}` changes the setting",
+                    s.name(),
+                    s.env(),
+                    s.env(),
+                    s.command()
+                )),
+                Ok(Some(SettingSet::Unchanged(_))) | Ok(None) => {
+                    let stored = self
+                        .settings()
+                        .await
+                        .ok()
+                        .and_then(|now| now.value(s))
+                        .unwrap_or_else(|| s.unset_reads().to_string());
+                    out.push(format!(
+                        "versions: {} is set and ignored: {} is stored in Ordo as `{stored}`. \
+                         Remove the variable; `{}` changes the setting",
+                        s.env(),
+                        s.name(),
+                        s.command()
+                    ));
+                }
+                Err(e) => out.push(format!(
+                    "versions: {} was not adopted ({e}); the next boot tries again",
+                    s.env()
+                )),
+            }
+        }
+        out
+    }
+
+    /// Has `setting` ever been stored, cleared included?
+    async fn record_setting_exists(&self, setting: VersionSetting) -> Result<bool, VersionRefusal> {
+        match self
+            .pool
+            .rows(&format!(
+                "SELECT 1 FROM \"$version_settings\" WHERE \"setting\" = {} LIMIT 1",
+                sql_lit(setting.name())
+            ))
+            .await
+        {
+            Ok(rows) => Ok(!rows.is_empty()),
+            Err(e) if e.is_missing_table() => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// **The stored settings, checked at boot.** One line per problem, for
+    /// the log; nothing is refused, because an upgrade never stops a
+    /// running deployment (owner, 2026-11-02). A problem here also refuses
+    /// the pins it touches, naming the setting.
+    pub async fn settings_problems(&self) -> Vec<String> {
+        let stored = match self.settings().await {
+            Ok(s) => s,
+            Err(e) => {
+                return vec![format!(
+                    "versions: the version settings were not read ({e})"
+                )]
+            }
+        };
+        let mut out = Vec::new();
+        if let Err(e) = self.check_policy(&stored.policy).await {
+            out.push(format!("versions: a stored setting needs a look: {e}"));
+        }
+        if let Err(e) = self.check_new_tenant().await {
+            out.push(format!("versions: a stored setting needs a look: {e}"));
+        }
+        out
+    }
+}
+
+fn change_row(r: &[Option<String>]) -> Option<SettingChange> {
+    Some(SettingChange {
+        seq: r.first()?.clone()?.parse().ok()?,
+        setting: r.get(1)?.clone()?,
+        value: r.get(2).cloned().flatten(),
+        actor: r.get(3)?.clone()?,
+        reason: r.get(4)?.clone()?,
+        at: r.get(5)?.clone()?.parse().ok()?,
+    })
+}
+
 fn revocation_sql(
     version: &str,
     act: RevokeAct,
@@ -2554,17 +3077,37 @@ mod tests {
     fn a_bad_setting_names_the_setting_and_the_value() {
         let e = VersionRefusal::Setting {
             setting: NEW_TENANT_SETTING,
-            var: NEW_TENANT_ENV,
             value: "9.9.9".into(),
             stored: vec!["0.1.0".into()],
-            hint: "or unset it",
+            hint: "or `--clear` it",
         };
         let text = e.to_string();
         assert!(text.contains("versions.new_tenant"), "{text}");
-        assert!(text.contains("ORDO_VERSIONS_NEW_TENANT"), "{text}");
+        assert!(text.contains("ordo versions set new-tenant"), "{text}");
+        assert!(!text.contains(NEW_TENANT_ENV), "{text}");
         assert!(text.contains("9.9.9"), "{text}");
         assert!(text.contains("0.1.0"), "{text}");
         assert_eq!(e.remedy(), Remedy::FixInput);
+        assert_eq!(e.to_exec_error("x").code, ErrorCode::InvalidParam);
+    }
+
+    #[test]
+    fn a_setting_is_named_three_ways() {
+        for (text, want) in [
+            ("served", VersionSetting::Served),
+            ("versions.served", VersionSetting::Served),
+            ("minimum", VersionSetting::Minimum),
+            ("new-tenant", VersionSetting::NewTenant),
+            ("versions.new_tenant", VersionSetting::NewTenant),
+            ("newTenant", VersionSetting::NewTenant),
+        ] {
+            assert_eq!(VersionSetting::parse(text), Some(want), "{text}");
+        }
+        assert_eq!(VersionSetting::parse("versions.max"), None);
+        let s = VersionSettings::default().with(VersionSetting::Served, Some("a, b".into()));
+        assert_eq!(s.policy.served, Some(vec!["a".into(), "b".into()]));
+        assert_eq!(s.value(VersionSetting::Served).as_deref(), Some("a,b"));
+        assert_eq!(s.value(VersionSetting::NewTenant), None);
     }
 
     #[test]

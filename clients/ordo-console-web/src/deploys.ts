@@ -128,6 +128,30 @@ export const revoke = (version: string, reason: string, moveTo: string | null): 
 export const unrevoke = (version: string, reason: string): Promise<Revoked> =>
   post<Revoked>('deploys/unrevoke', { version, reason });
 
+/** The three version settings, stored in Ordo (owner, 2026-11-05). `null` is unset. */
+export interface VersionSettings {
+  served: string | null;
+  minimum: string | null;
+  newTenant: string | null;
+  history?: { setting: string; value: string | null; actor: string; reason: string; at: number }[];
+}
+
+/** What a change answers: the settings now, and whether this one changed. */
+export interface SettingChanged extends VersionSettings {
+  setting: string;
+  value: string | null;
+  changed: boolean;
+}
+
+export type VersionSettingName = 'versions.served' | 'versions.minimum' | 'versions.new_tenant';
+
+export const versionSettings = (): Promise<VersionSettings> => get<VersionSettings>('deploys/settings');
+export const setVersionSetting = (
+  setting: VersionSettingName,
+  value: string | null,
+  reason: string,
+): Promise<SettingChanged> => post<SettingChanged>('deploys/setting', { setting, reason, ...(value ? { value } : {}) });
+
 /** How long the screen waits for every node to serve a version. */
 export const WAIT_SECS = 120;
 

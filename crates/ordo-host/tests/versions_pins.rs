@@ -19,7 +19,7 @@ use ordo_exec::{Pool, PoolConfig};
 use ordo_host::apply_op::{self, Activation};
 use ordo_host::schema_apply::Program;
 use ordo_host::tenants;
-use ordo_host::versions::{VersionRefusal, Versions, NEW_TENANT_ENV, NEW_TENANT_SETTING};
+use ordo_host::versions::{VersionRefusal, Versions, NEW_TENANT_SETTING};
 
 const V010: &str = "domain tasks @ 0.1.0
 
@@ -243,7 +243,12 @@ async fn a_setting_naming_no_stored_version_is_refused_naming_it() {
         "{refused:?}"
     );
     let text = refused.to_string();
-    for want in [NEW_TENANT_SETTING, NEW_TENANT_ENV, "9.9.9", "0.1.0"] {
+    for want in [
+        NEW_TENANT_SETTING,
+        "ordo versions set new-tenant",
+        "9.9.9",
+        "0.1.0",
+    ] {
         assert!(text.contains(want), "`{want}` missing from: {text}");
     }
 }

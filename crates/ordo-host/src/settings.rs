@@ -1470,28 +1470,10 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
-        "ORDO_VERSIONS_NEW_TENANT",
-        "Databases and pools",
-        r#"the active version"#,
-        r#""#,
-    ),
-    s(
         "ORDO_PINS_RECONCILE_SECS",
         "Databases and pools",
         r#"30 s"#,
         r#"1 or more"#,
-    ),
-    s(
-        "ORDO_VERSIONS_SERVED",
-        "Databases and pools",
-        r#"in-use"#,
-        r#""#,
-    ),
-    s(
-        "ORDO_VERSIONS_MINIMUM",
-        "Databases and pools",
-        r#"none"#,
-        r#""#,
     ),
     s(
         "ORDO_VERSIONS_TENANT_MOVE_ROLES",
@@ -2368,12 +2350,17 @@ mod tests {
 
     /// Names a crate reads that are not deployment settings: the console's
     /// own, test names, and a name read only to refuse it.
-    const NOT_DEPLOYMENT: [&str; 4] = [
+    const NOT_DEPLOYMENT: [&str; 7] = [
         "ORDO_",
         "ORDO_A",
         "ORDO_B",
         // Read only to refuse it, naming ORDO_MAIL_CREDENTIALS_FILE.
         "ORDO_MAIL_PASSWORD",
+        // Read only to adopt a value into the stored version settings,
+        // once, and to warn while it stays set (owner, 2026-11-05).
+        "ORDO_VERSIONS_NEW_TENANT",
+        "ORDO_VERSIONS_SERVED",
+        "ORDO_VERSIONS_MINIMUM",
     ];
     /// Crates that read no deployment setting of `ordo-host`'s.
     /// Programs with their own settings, documented with them: the identity

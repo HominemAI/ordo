@@ -1311,6 +1311,12 @@ impl Deployment {
         *self.new_tenant.write().expect("pin lock") = version;
     }
 
+    /// `versions.new_tenant` as this node last read it, the active version
+    /// included.
+    pub fn new_tenant_setting(&self) -> Option<String> {
+        self.new_tenant.read().expect("pin lock").clone()
+    }
+
     /// The version `versions.new_tenant` names, when it is not the active
     /// one.
     pub fn new_tenant(&self) -> Option<String> {

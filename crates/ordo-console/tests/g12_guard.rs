@@ -94,6 +94,16 @@ const CALLS: &[(&str, Rule)] = &[
     ),
     // Maintenance windows (owner, 2026-11-04).
     ("std.deployment.windows", Read),
+    // Version settings (owner, 2026-11-05: they live in Ordo).
+    ("std.deployment.versionSettings", Read),
+    (
+        "std.deployment.setVersionSetting",
+        Write {
+            act: "version-setting",
+            src: "deploy_ops.rs",
+            test: "versions_settings.rs",
+        },
+    ),
     (
         "std.deployment.setWindow",
         Write {

@@ -1521,7 +1521,7 @@ async fn a_new_tenant_is_provisioned_on_the_version_it_starts_on() {
         matches!(e, ProvisionRefusal::VersionLoading { ref version, .. } if version == "beta"),
         "{e}"
     );
-    assert!(e.to_string().contains("ORDO_VERSIONS_NEW_TENANT"), "{e}");
+    assert!(e.to_string().contains("versions.new_tenant"), "{e}");
     assert!(!database_exists(&control, &first).await, "nothing created");
 
     // Loaded: the tenant's database is the beta's shape and says so.

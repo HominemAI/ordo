@@ -2418,9 +2418,12 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "pin" => versions_pin(flags).await,
         "move" => versions_move(flags).await,
         "target" => versions_target(flags).await,
+        "settings" => versions_settings(flags).await,
+        "set" => versions_set(flags).await,
         other => Outcome::usage(format!(
             "unknown `ordo versions` subcommand `{other}`; there are `list`, `show`, \
-             `label`, `diff`, `revoke`, `unrevoke`, `revoked`, `pin`, `move` and `target`\n"
+             `label`, `diff`, `revoke`, `unrevoke`, `revoked`, `pin`, `move`, `target`, \
+             `settings` and `set`\n"
         )),
     }
 }
@@ -2436,6 +2439,9 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>] [--db <name>]\n
      [--db <name> --as <who> | --host <h> ...]\n\
      ordo versions unrevoke <version> --reason \"<text>\"  [--db <name> --as <who> | --host <h> ...]\n\
      ordo versions revoked  [--db <name> | --host <h> ...]\n\
+     ordo versions settings [--limit <n>]  --host <h> ...\n\
+     ordo versions set <served|minimum|new-tenant> <value> | --clear  --reason \"<text>\"  \
+     --host <h> ...\n\
      a version is its name or its order number, `#4`";
 
 /// Who a revoke made on the database is recorded as, when `--as` is not
@@ -2964,6 +2970,137 @@ async fn versions_target(flags: Flags) -> Outcome {
         None => None,
     };
     Outcome::ok(report(set.as_deref(), ordinal))
+}
+
+/// The door, for a command that has no database path (ruled 2026-11-05:
+/// the CLI goes through the door).
+fn door_only(flags: &Flags) -> Result<crate::wire::Host, Outcome> {
+    match crate::wire::requested(flags) {
+        Some(Ok(h)) => Ok(h),
+        Some(Err(e)) => Err(Outcome::usage(e)),
+        None => Err(Outcome::usage(
+            "the version settings are read and changed through the door: name it with \
+             `--host <h>` (or ORDO_HOST), and `--token` or a signed-in session\n"
+                .into(),
+        )),
+    }
+}
+
+/// The three settings as `ordo versions settings` and `set` print them.
+fn settings_lines(row: &serde_json::Value) -> String {
+    let show = |k: &str, unset: &str| row[k].as_str().unwrap_or(unset).to_string();
+    format!(
+        "  served      {}\n  minimum     {}\n  new tenants {}\n",
+        show("served", "in-use"),
+        show("minimum", "none"),
+        show("newTenant", "the active version")
+    )
+}
+
+/// `ordo versions settings`: `versions.served`, `versions.minimum` and
+/// `versions.new_tenant` as stored, and who changed them, when and why
+/// (`std.deployment.versionSettings`).
+async fn versions_settings(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--limit"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    if !flags.positional.is_empty() {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    }
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let limit = match flags.named_value("--limit").map(str::parse::<u64>) {
+        None => None,
+        Some(Ok(n)) if n >= 1 => Some(n),
+        Some(_) => return Outcome::usage("`--limit` is a whole number from 1\n".into()),
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::VERSION_SETTINGS,
+        serde_json::json!({ "limit": limit }),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = format!("VERSION SETTINGS\n{}", settings_lines(&row));
+    let history = row["history"].as_array().cloned().unwrap_or_default();
+    out.push_str(&format!("CHANGES ({})\n", history.len()));
+    if history.is_empty() {
+        out.push_str("  none: every setting is at its default\n");
+    }
+    for c in &history {
+        out.push_str(&format!(
+            "  {}  {} = {}  by {}  \"{}\"\n",
+            ordo_host::versions::utc_minute(c["at"].as_u64().unwrap_or(0)),
+            c["setting"].as_str().unwrap_or("?"),
+            c["value"].as_str().unwrap_or("(cleared)"),
+            c["actor"].as_str().unwrap_or("?"),
+            c["reason"].as_str().unwrap_or("")
+        ));
+    }
+    Outcome::ok(out)
+}
+
+/// `ordo versions set <served|minimum|new-tenant> <value> | --clear
+/// --reason "..."`: change one version setting through the door
+/// (`std.deployment.setVersionSetting`). The deployment owner, or a machine
+/// key with the `deployment` grant.
+async fn versions_set(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--clear", "--reason"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let (name, value) = match (flags.positional.as_slice(), flags.has("--clear")) {
+        ([s, v], false) => (s.clone(), Some(v.clone())),
+        ([s], true) => (s.clone(), None),
+        _ => return Outcome::usage(format!("{VERSIONS_USAGE}\n")),
+    };
+    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
+        return Outcome::usage(format!(
+            "`{name}` is not a version setting; there are `served`, `minimum` and \
+             `new-tenant`\n"
+        ));
+    };
+    let Some(reason) = flags.named_value("--reason") else {
+        return Outcome::usage(
+            "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
+        );
+    };
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({ "setting": setting.name(), "value": value, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let now = row["value"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| setting.unset_reads().to_string());
+    let head = if row["changed"].as_bool() == Some(true) {
+        format!("set        {} = {now}\n", setting.name())
+    } else {
+        format!("unchanged  {} is already {now}\n", setting.name())
+    };
+    Outcome::ok(format!("{head}{}", settings_lines(&row)))
 }
 
 /// What `ordo versions revoked` prints, on both paths.

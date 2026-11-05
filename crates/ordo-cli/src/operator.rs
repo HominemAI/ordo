@@ -2285,10 +2285,21 @@ async fn rollback(flags: Flags) -> Outcome {
         .named
         .get("--as")
         .cloned()
-        .unwrap_or_else(|| "operator:unattributed".to_string());
+        .unwrap_or_else(|| UNATTRIBUTED_OWNER.to_string());
     let pool = match connect(&flags).await {
         Ok(p) => p,
         Err(o) => return o,
+    };
+    // Names work as they do for `ordo versions`: `#3`, or a version name.
+    let version = match ordo_host::versions::Versions::on(&pool)
+        .resolve(&version)
+        .await
+    {
+        Ok(v) => v,
+        Err(e @ ordo_host::versions::VersionRefusal::NotStored { .. }) => {
+            return Outcome::failed(format!("REFUSED  {e}\n"))
+        }
+        Err(e) => return Outcome::failed(format!("database: {e}\n")),
     };
     // The one body, which `std.deployment.activate` calls too: the same
     // lock as an apply, and the same refusal for a version whose tables
@@ -2649,7 +2660,7 @@ pub(crate) fn revoked_list(list: &[ordo_host::versions::RevokedVersion]) -> Stri
             "  {}  by {} at {}  \"{}\"\n    tenants pinned: {}\n",
             numbered(r.ordinal, &r.mark.version),
             r.mark.actor,
-            r.mark.at,
+            ordo_host::versions::utc_minute(r.mark.at),
             r.mark.reason,
             r.tenant_count
         ));
@@ -2921,7 +2932,7 @@ async fn versions_show(flags: Flags) -> Outcome {
             out.push_str(&format!(
                 "  {:<8}  at {} by {}  \"{}\"\n",
                 r.act.as_str(),
-                r.at,
+                ordo_host::versions::utc_minute(r.at),
                 r.actor,
                 r.reason
             ));

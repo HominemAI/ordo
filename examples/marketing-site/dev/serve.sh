@@ -88,7 +88,7 @@ until curl -fsS "http://127.0.0.1:$port/health/live" >/dev/null 2>&1; do
   sleep 0.2
 done
 
-"$ordo" apply "$repo/examples/marketing-site" --as site-dev
+"$ordo" apply "$repo/examples/marketing-site" --as site-dev --direct
 echo
 echo "The door is at http://127.0.0.1:$port and the page belongs at $page."
 echo "Next: sh examples/marketing-site/dev/seed"

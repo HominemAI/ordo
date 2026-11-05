@@ -9,10 +9,10 @@
 //! `90m`, `2h`, `1h30m`.
 
 use ordo_host::window_ops;
-use ordo_host::windows::{self, Schedule, Skip, Target, Window, WindowSpec, Windows};
+use ordo_host::windows::{self, Schedule, Skip, Target, Window, WindowSpec};
 use serde_json::json;
 
-use crate::operator::{connect, Flags, Outcome};
+use crate::operator::{Flags, Outcome};
 
 const USAGE: &str =
     "ordo windows set [--id <id>] (--all | --only <tenant>... | --except <tenant>...)\n\
@@ -22,14 +22,10 @@ const USAGE: &str =
      ordo windows skip <window> --starts <utc> --ends <utc> [--id <id>] [--reason \"<text>\"]\n\
      ordo windows unskip <skip-id>\n\
      ordo windows list [<tenant>]\n\
-     each takes [--db <name> --as <who>] or [--host <h> --token <t> --space <s>];\n\
+     each takes --host <h> [--token <t> --space <s>];\n\
      times are UTC, `2026-11-20T02:00Z`; a length is seconds or `90m`, `2h`, `1h30m`";
 
 const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
-
-/// Who a change made on the database is recorded as, when `--as` is not
-/// given.
-const UNATTRIBUTED_OWNER: &str = "deployment-owner:unattributed";
 
 pub async fn run(flags: Flags) -> Outcome {
     let Some(sub) = flags.positional.first().cloned() else {
@@ -51,11 +47,11 @@ pub async fn run(flags: Flags) -> Outcome {
 }
 
 fn allow(flags: &Flags, own: &[&str]) -> Result<(), Outcome> {
-    let mut allowed = vec!["--db", "--as"];
+    let mut allowed = vec!["--as"];
     allowed.extend(own);
     allowed.extend(DOOR_FLAGS);
     flags.only(&allowed).map_err(Outcome::usage)?;
-    if flags.named_value("--as").is_some() && crate::wire::requested(flags).is_some() {
+    if flags.named_value("--as").is_some() {
         return Err(Outcome::usage(
             "`--as` names who acted on the database; over the door it is the token's \
              principal\n"
@@ -63,13 +59,6 @@ fn allow(flags: &Flags, own: &[&str]) -> Result<(), Outcome> {
         ));
     }
     Ok(())
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 fn refused(e: windows::WindowRefusal) -> Outcome {
@@ -160,47 +149,36 @@ async fn set(flags: Flags) -> Outcome {
         schedule,
         message,
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        let mut params = json!({
-            "id": spec.id,
-            "target": spec.target.kind(),
-            "message": spec.message,
-        });
-        if !spec.target.tenants().is_empty() {
-            params["tenants"] = json!(spec.target.tenants());
-        }
-        match &spec.schedule {
-            Schedule::Range { start, end } => {
-                params["starts"] = windows::format_utc(*start).into();
-                params["ends"] = windows::format_utc(*end).into();
-            }
-            Schedule::Cron { cron, length } => {
-                params["cron"] = cron.clone().into();
-                params["lengthSecs"] = (*length).into();
-            }
-        }
-        let row =
-            match crate::wire::door_op(&host, &flags, window_ops::SET_WINDOW, params, true).await {
-                Ok(r) => r,
-                Err(o) => return o,
-            };
-        return match Window::from_json(&row) {
-            Some(w) => Outcome::ok(window_set(&w)),
-            None => Outcome::failed("REFUSED  the door's answer is not a window\n".into()),
-        };
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match crate::operator::door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match Windows::on(&pool).set(&spec, actor, now()).await {
-        Ok(w) => Outcome::ok(window_set(&w)),
-        Err(e) => refused(e),
+    let mut params = json!({
+        "id": spec.id,
+        "target": spec.target.kind(),
+        "message": spec.message,
+    });
+    if !spec.target.tenants().is_empty() {
+        params["tenants"] = json!(spec.target.tenants());
+    }
+    match &spec.schedule {
+        Schedule::Range { start, end } => {
+            params["starts"] = windows::format_utc(*start).into();
+            params["ends"] = windows::format_utc(*end).into();
+        }
+        Schedule::Cron { cron, length } => {
+            params["cron"] = cron.clone().into();
+            params["lengthSecs"] = (*length).into();
+        }
+    }
+    let row = match crate::wire::door_op(&host, &flags, window_ops::SET_WINDOW, params, true).await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    match Window::from_json(&row) {
+        Some(w) => Outcome::ok(window_set(&w)),
+        None => Outcome::failed("REFUSED  the door's answer is not a window\n".into()),
     }
 }
 
@@ -236,32 +214,22 @@ async fn delete(flags: Flags) -> Outcome {
     let [id] = flags.positional.as_slice() else {
         return Outcome::usage(format!("{USAGE}\n"));
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        return match crate::wire::door_op(
-            &host,
-            &flags,
-            window_ops::DELETE_WINDOW,
-            json!({ "id": id }),
-            true,
-        )
-        .await
-        {
-            Ok(_) => Outcome::ok(format!("deleted    window {id}\n")),
-            Err(o) => o,
-        };
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match crate::operator::door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match Windows::on(&pool).delete(id).await {
-        Ok(()) => Outcome::ok(format!("deleted    window {id}\n")),
-        Err(e) => refused(e),
-    }
+    return match crate::wire::door_op(
+        &host,
+        &flags,
+        window_ops::DELETE_WINDOW,
+        json!({ "id": id }),
+        true,
+    )
+    .await
+    {
+        Ok(_) => Outcome::ok(format!("deleted    window {id}\n")),
+        Err(o) => o,
+    };
 }
 
 async fn skip(flags: Flags) -> Outcome {
@@ -280,45 +248,31 @@ async fn skip(flags: Flags) -> Outcome {
     };
     let id = flags.named_value("--id");
     let reason = flags.named_value("--reason");
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            window_ops::SKIP_WINDOW,
-            json!({
-                "window": window,
-                "id": id,
-                "starts": windows::format_utc(start),
-                "ends": windows::format_utc(end),
-                "reason": reason,
-            }),
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return match Skip::from_json(&row) {
-            Some(s) => Outcome::ok(skip_set(&s)),
-            None => Outcome::failed("REFUSED  the door's answer is not a skip\n".into()),
-        };
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match crate::operator::door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match Windows::on(&pool)
-        .skip(window, id, start, end, reason, actor, now())
-        .await
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        window_ops::SKIP_WINDOW,
+        json!({
+            "window": window,
+            "id": id,
+            "starts": windows::format_utc(start),
+            "ends": windows::format_utc(end),
+            "reason": reason,
+        }),
+        true,
+    )
+    .await
     {
-        Ok(s) => Outcome::ok(skip_set(&s)),
-        Err(e) => refused(e),
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    match Skip::from_json(&row) {
+        Some(s) => Outcome::ok(skip_set(&s)),
+        None => Outcome::failed("REFUSED  the door's answer is not a skip\n".into()),
     }
 }
 
@@ -340,32 +294,22 @@ async fn unskip(flags: Flags) -> Outcome {
     let [id] = flags.positional.as_slice() else {
         return Outcome::usage(format!("{USAGE}\n"));
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        return match crate::wire::door_op(
-            &host,
-            &flags,
-            window_ops::DELETE_SKIP,
-            json!({ "id": id }),
-            true,
-        )
-        .await
-        {
-            Ok(_) => Outcome::ok(format!("deleted    skip {id}\n")),
-            Err(o) => o,
-        };
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match crate::operator::door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match Windows::on(&pool).delete_skip(id).await {
-        Ok(()) => Outcome::ok(format!("deleted    skip {id}\n")),
-        Err(e) => refused(e),
-    }
+    return match crate::wire::door_op(
+        &host,
+        &flags,
+        window_ops::DELETE_SKIP,
+        json!({ "id": id }),
+        true,
+    )
+    .await
+    {
+        Ok(_) => Outcome::ok(format!("deleted    skip {id}\n")),
+        Err(o) => o,
+    };
 }
 
 async fn list(flags: Flags) -> Outcome {
@@ -377,34 +321,24 @@ async fn list(flags: Flags) -> Outcome {
         [t] => Some(t.as_str()),
         _ => return Outcome::usage(format!("{USAGE}\n")),
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            window_ops::WINDOWS,
-            json!({ "tenant": tenant }),
-            false,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return match windows::Listing::from_json(&row) {
-            Ok(l) => Outcome::ok(l.render()),
-            Err(e) => Outcome::failed(format!("REFUSED  {e}\n")),
-        };
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match crate::operator::door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match Windows::on(&pool).list(tenant, now()).await {
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        window_ops::WINDOWS,
+        json!({ "tenant": tenant }),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    match windows::Listing::from_json(&row) {
         Ok(l) => Outcome::ok(l.render()),
-        Err(e) => refused(e),
+        Err(e) => Outcome::failed(format!("REFUSED  {e}\n")),
     }
 }

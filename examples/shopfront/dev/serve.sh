@@ -131,9 +131,9 @@ start_door() {
 # ── The door, then the program ─────────────────────────────────────────────
 # The tenant needs keys before the door can serve it. The door never mints
 # them for a name it was handed; the app developer runs this once.
-"$ordo" keys init --space "$space" --as shopfront-dev
+"$ordo" keys init --space "$space" --as shopfront-dev --direct
 start_door
-"$ordo" apply "$repo/examples/shopfront" --as shopfront-dev
+"$ordo" apply "$repo/examples/shopfront" --as shopfront-dev --direct
 
 # ── The owner, named on the server ─────────────────────────────────────────
 # The deployment's owner is set on the server: an account signs up, its id

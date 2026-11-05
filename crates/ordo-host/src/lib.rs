@@ -69,6 +69,7 @@ pub mod delegation;
 pub mod deploy;
 pub mod deploy_ops;
 pub mod deployment_access;
+pub mod direct_uses;
 pub mod directory;
 pub mod email_code;
 pub mod enrolment;

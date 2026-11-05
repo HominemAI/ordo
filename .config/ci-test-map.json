@@ -295,6 +295,9 @@
       "versions_settings"
     ],
     "crates/ordo-host/src/deployment_access.rs": "all",
+    "crates/ordo-host/src/direct_uses.rs": [
+      "direct_uses"
+    ],
     "crates/ordo-host/src/directory.rs": "all",
     "crates/ordo-host/src/email_code.rs": [
       "attest",

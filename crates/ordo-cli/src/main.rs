@@ -67,12 +67,13 @@ fn usage() -> ! {
          one-time setup code that enrols a new console passkey, and writes\n      \
          the time and unix user to the console's audit log. When the code\n      \
          is used, every console session ends.\n  \
-         ordo plan  <dir|file.ordo> --against <db>\n      \
-         the migration report: every change between the program and a LIVE\n      \
-         database, classified, probed and costed. Read-only — it applies no\n      \
-         DDL and writes nothing. Refuses to print an appliable plan when any\n      \
-         probe comes back non-empty.\n  \
-         ordo migrate <dir|file.ordo> --apply --db <db> [--as <actor>] [--places ...]\n      \
+         ordo plan  <dir|file.ordo> --host <h> [--token <t> --space <s>]\n      \
+         what applying the program would do to the running deployment,\n      \
+         worked out by the deployment and not done (`std.deployment.plan`):\n      \
+         the verdict, then every change with its class and what refuses it.\n      \
+         Read-only. Exits 1 when the apply would refuse. Through the door\n      \
+         only; `--against <db>` is gone.\n  \
+         ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
          the plan, then the additive apply (schema-evolution increment 2):\n      \
          a first apply against an empty database creates the whole schema;\n      \
          over a deployed one it sends class A (new entity, optional or\n      \
@@ -108,12 +109,19 @@ fn usage() -> ! {
          a machine key (ORDO_MACHINE_KEY or ORDO_MACHINE_KEY_FILE, with\n      \
          ORDO_IDENTITY_URL; for CI, no browser), or the session from login.\n\
          \n\
-         operator commands — these talk to a deployment's database\n\
-         (ORDO_PG_HOST/PORT/USER/DB, or --db <name>). `apply` also speaks to\n\
-         a deployment over HTTP; see its --host below. The rest stay on the\n\
-         database deliberately: verify, checkpoint, prune, revert and keys\n\
-         must work when the door does not, and a verification that can only\n\
-         be performed by the thing under suspicion is not a verification.\n  \
+         operator commands — these go through the deployment\'s door\n\
+         (`--host <h>`, or ORDO_HOST, with `--token` or `ordo login`), as the\n\
+         deployment owner (owner, 2026-11-05). The commands that must work\n\
+         when no server can be up open the database from this machine\n\
+         instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
+         `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
+         --proof), `restore`, `identity recover`, `migrate --apply`, and\n\
+         `apply` and `rollback` when no host can boot. Without `--direct`\n\
+         and without `--host` they refuse, naming both. Each `--direct` use\n\
+         is recorded before it runs and written to the deployment\'s\n\
+         security log (a `deploy` event, act `direct-cli`) at the next boot.\n\
+         `deploys`, `usage`, `triggers`, `prune`, `revert` and `checkpoint`\n\
+         still open the database; they move to the door next.\n  \
          ordo apply     <dir|file.ordo> [--as <actor>] [--no-activate] [--bump]\n                \
          [--label \"<text>\"]\n      \
          compile the program, store its artifact under its `@` version,\n      \
@@ -135,8 +143,10 @@ fn usage() -> ! {
          300) bounds the wait; past it the apply exits 1 and says what each\n      \
          node is still doing. `--no-wait` returns once the version is active.\n      \
          `--host <h> --token <t> --space <s>` sends the program to a running\n      \
-         deployment's own door (`std.deployment.apply`) instead of opening its\n      \
-         database. A bare host gets https; spell `http://` for a local `ordo\n      \
+         deployment's own door (`std.deployment.apply`). `--direct` opens its\n      \
+         database instead, for the first apply before any host serves it or\n      \
+         when the host will not boot; with neither flag the command refuses.\n      \
+         A bare host gets https; spell `http://` for a local `ordo\n      \
          dev` (`--host http://127.0.0.1:4000`). An empty `--host`\n      \
          selects that address. ORDO_HOST, ORDO_TOKEN and ORDO_SPACE are the environment forms.\n      \
          Without `--token`, the token comes from a machine key or from\n      \
@@ -202,39 +212,39 @@ fn usage() -> ! {
          they had ends, and the passkeys they had can contest it for three days.\n      \
          Evidence is one of vouched-by-members, verified-out-of-band,\n      \
          contract-holder, host-break-glass (the default).\n  \
-         ordo rollback  --version <hash or #n> [--as <actor>]\n      \
+         ordo rollback  --version <hash or #n> --host <h> | --direct [--as <actor>]\n      \
          re-point the registry at a version it already holds. The same\n      \
          mechanism as apply's activation, backwards; one more row in the\n      \
-         activation log, never a rewrite of it.\n  \
+         activation log, never a rewrite of it. `--direct` is for a host that\n      \
+         will not boot; `--as` goes with it.\n  \
          ordo deploys   [--limit <n>]\n      \
          what is stored, what is serving, and every re-point in order.\n  \
-         ordo versions  list [--tenant <id>] [--db <name>]\n      \
+         ordo versions  list [--tenant <id>] --host <h>\n      \
          each stored version, newest first: its order number, name, declared\n      \
          version, how many tenants it serves, its commit and label, and which\n      \
          one is active (where new tenants start). `--tenant` shows one\n      \
          tenant's version and its pin changes, also through `--host ...`.\n  \
-         ordo versions  pin <tenant> <version> [--db <name> --as <who>]\n      \
+         ordo versions  pin <tenant> <version> --host <h>\n      \
          move one tenant to a stored version now. Refused for a revoked\n      \
          version. The next activation moves it with every other tenant.\n  \
-         ordo versions  show <version> [--db <name>]\n      \
+         ordo versions  show <version> --host <h>\n      \
          one version: order number, declared version, source fingerprint,\n      \
          label, commit, its builds and the Ordo release of each, tenants\n      \
          pinned, activations. A version is its name or its order number, `#4`.\n  \
-         ordo versions  label <version> \"<text>\" | --clear [--db <name>]\n      \
+         ordo versions  label <version> \"<text>\" | --clear --host <h>\n      \
          set or remove a stored version's label (one line, at most 80\n      \
          characters).\n  \
-         ordo versions  diff <a> <b> [--schema | --source] [--db <name>]\n      \
+         ordo versions  diff <a> <b> [--schema | --source] --host <h>\n      \
          what changed from <a> to <b>: the schema change, as `ordo plan`\n      \
-         names it, then a unified diff of the source. `label` and `diff`\n      \
-         take `--host <h> --token <t> --space <s>` to go through the door,\n      \
-         deployment owner only. A version not stored is refused, naming\n      \
-         those that are.\n  \
+         names it, then a unified diff of the source. Every `versions`\n      \
+         command goes through the door (`--host <h> --token <t> --space\n      \
+         <s>`), deployment owner only. A version not stored is refused,\n      \
+         naming those that are.\n  \
          ordo versions  revoke <version> --reason \"<text>\" [--move-to <version>]\n      \
          mark a version revoked: it is never activated, rolled back to,\n      \
          pinned or given to new tenants. The active version needs\n      \
          `--move-to`, a stored version that is not revoked; the activation\n      \
-         and the revoke are one change. `--as <who>` names you on the\n      \
-         database path.\n  \
+         and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
          ordo versions  settings | set <served|minimum|new-tenant> <value> | --clear --reason \"<text>\"\n      \
@@ -243,7 +253,6 @@ fn usage() -> ! {
          through the door only (`--host ...`); a refused value is named.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
-         `revoke`, `unrevoke` and `revoked` also take `--host ...`.\n  \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \
          (--starts <utc> --ends <utc> | --cron \"<m h dom mon dow>\" --length <len>)\n                 \
          --message \"<text>\"\n      \
@@ -259,8 +268,8 @@ fn usage() -> ! {
          ordo windows   list [<tenant>]\n      \
          every time from 12 months back to 12 months ahead, skipped ones\n      \
          marked; with a tenant, the windows that cover it. Times are UTC,\n      \
-         `2026-11-20T02:00Z`. Each takes `--db <name> [--as <who>]` or\n      \
-         `--host ...`, deployment owner only.\n  \
+         `2026-11-20T02:00Z`. Each goes through the door (`--host ...`),\n      \
+         deployment owner only.\n  \
          ordo verify     --identity [--security-key-id <id> --security-public-key <hex>]\n      \
          verify the deployment's security stream, then reconcile every link in\n      \
          `$authenticator` against it: a link no event explains (a sign-up, a\n      \
@@ -362,12 +371,12 @@ fn usage() -> ! {
          resolves --space's database through $spacedb instead of trusting\n      \
          --db to name it, and prints which database it resolved; refused\n      \
          together with --db, which is the manual, break-glass form.\n  \
-         ordo fleet      [--db <name>]\n      \
-         every target's schema version and when it was last confirmed, its\n      \
-         custody, and which tenants are on it, each tenant printed with its\n      \
-         name beside its id. From the control database alone: quarantine,\n      \
-         the connection budget and installed credential labels are a\n      \
-         replica's own state and are not here — see /health/ready.\n  \
+         ordo fleet      --host <h> [--token <t> --space <s>]\n      \
+         every target, its custody, and which tenants are on it, each tenant\n      \
+         printed with its name beside its id and the version it is on\n      \
+         (`std.deployment.tenants`). Quarantine, the connection budget and\n      \
+         installed credential labels are a replica's own state and are not\n      \
+         here — see /health/ready.\n  \
          ordo revert     <dir|file.ordo> --space <spc> --group <id> --as <principal>\n                  \
          [--dry-run]\n      \
          apply the inverse of a command group as NEW history, in one\n      \
@@ -379,11 +388,13 @@ fn usage() -> ! {
          \n\
          limits and metering:\n  \
          ordo quota set  --space <spc> --quantity <requests|rows_returned>\n                  \
-         --limit <n> --grace <n> --period-secs <n>\n      \
+         --limit <n> --grace <n> --period-secs <n> --host <h> --home <s>\n      \
+         (through the door; `--home` or ORDO_SPACE is the deployment's own\n      \
+         space, because `--space` names the tenant)\n      \
          set a per-space quota. Changes without a restart. Over the limit\n      \
          alone warns; over limit plus grace refuses with quota_exceeded.\n  \
-         ordo quota show --space <spc>\n      \
-         the quotas set on a space.\n  \
+         ordo quota show --space <spc> --host <h> --home <s>\n      \
+         the quotas set on a space, and what it has used this period.\n  \
          ordo usage --space <spc> --from <secs> --to <secs> [--db <name>]\n      \
          a space's usage over [from, to) as JSONL, one record per period.\n\
          \n\
@@ -553,7 +564,7 @@ fn main() {
     // operator asking "what will this deploy do to my database" should not
     // have to learn a second verb to ask it. It dispatches before the
     // source-loading path because it needs flags, a database and a runtime.
-    if cmd == "plan" && rest.iter().any(|a| a == "--against") {
+    if cmd == "plan" && rest.iter().any(|a| a == "--against" || a == "--host") {
         let out = ordo_cli::operator::run("plan", rest);
         if out.code == 0 {
             print!("{}", out.report);

@@ -320,7 +320,8 @@ fn lit(s: &str) -> String {
 /// Run `ordo verify` (the crate function the binary calls) and answer its
 /// exit code and report.
 fn ordo_verify(args: &[&str]) -> (i32, String) {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let mut args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    args.push("--direct".into());
     // The command builds a runtime of its own, so it cannot run on this
     // test's runtime; a thread of its own is a process's main thread enough.
     let out = std::thread::spawn(move || ordo_cli::operator::run("verify", &args))

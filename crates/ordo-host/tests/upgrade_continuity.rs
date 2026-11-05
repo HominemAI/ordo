@@ -236,6 +236,8 @@ impl World {
             "upgrade-test".into(),
             "--db".into(),
             self.db.clone(),
+            // No host can sign this in; the direct path, recorded.
+            "--direct".into(),
         ];
         let out = tokio::task::spawn_blocking(move || ordo_cli::operator::run("apply", &args))
             .await
@@ -270,7 +272,8 @@ impl World {
 
     /// `ordo verify` with this build, in this process: `(exit code, report)`.
     async fn verify(&self, args: &[&str]) -> (i32, String) {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        args.push("--direct".into());
         let out = tokio::task::spawn_blocking(move || ordo_cli::operator::run("verify", &args))
             .await
             .expect("verify ran");

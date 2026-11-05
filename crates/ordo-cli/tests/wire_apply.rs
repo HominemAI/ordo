@@ -25,24 +25,10 @@
 //!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
-use std::sync::Arc;
-
-use ordo_api::{router, ApiState, MemoryBus, MemoryReplayCache, PageKey};
 mod support;
-use ordo_conformance::{Fixture, Pg};
-use ordo_host::apply_op;
-use ordo_host::grants::PgGrantRegistry;
-use ordo_host::platform_ops::{self, PlatformExecutor, PlatformOps};
-use ordo_host::FixtureExecutor;
-use ordo_identity::principal::{PrincipalId, Timestamp as IStamp};
-use ordo_identity::{TokenKey, TokenSpec};
+use ordo_conformance::Pg;
+use support::door::{door, runtime, serve, token, DEP_MANAGER, DEP_OWNER, HOME};
 use support::operator;
-
-const NOW: u64 = 1_000_000;
-const SECRET: &[u8] = b"wire-apply-secret";
-const HOME: &str = "ordo_home";
-const DEP_OWNER: &str = "dep_owner";
-const DEP_MANAGER: &str = "dep_manager";
 
 const V1: &str = r#"
 entity b {
@@ -94,137 +80,6 @@ fn empty(db: &str) -> Pg {
     pg
 }
 
-fn token(principal: &str) -> String {
-    ordo_identity::mint(
-        &TokenKey::from_secret(SECRET),
-        &TokenSpec {
-            principal: PrincipalId(principal.into()),
-            expires: IStamp(NOW + 3_600),
-            client: None,
-            // Present, so step-up is satisfied. Every platform op requires
-            // it; see `wire.rs`'s module doc on where an operator's token
-            // comes from.
-            user_presence_at: Some(IStamp(NOW)),
-            capability: None,
-            delegation: None,
-            session: None,
-        },
-    )
-}
-
-/// The deployment, listening on a loopback port.
-///
-/// A real socket rather than `oneshot` on the router: the point of this
-/// file is the **client**, and a client that was handed a `Service` would
-/// prove nothing about the request it builds, the headers it sends or the
-/// body it reads back off the wire.
-async fn serve(target_db: &str) -> std::net::SocketAddr {
-    let f = Arc::new(Fixture::load().expect("fixture"));
-
-    let dir_db = format!("{target_db}_dir");
-    let dir_pg = Pg::named(&dir_db);
-    f.reset(&dir_pg).expect("seeded");
-    let dir_pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
-        db: dir_db,
-        size: 2,
-        ..ordo_exec::PoolConfig::from_env()
-    })
-    .await
-    .expect("directory pool");
-
-    let target = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
-        db: target_db.to_string(),
-        size: 3,
-        ..ordo_exec::PoolConfig::from_env()
-    })
-    .await
-    .expect("target pool");
-
-    let grants = Arc::new(PgGrantRegistry::new(dir_pool.clone()));
-    grants.ensure_table().await.expect("platform table");
-
-    // The same rows, through the same registration loop a deployment uses.
-    let row = |id: &str, role: &str| {
-        vec![
-            Some(HOME.to_string()),
-            Some(id.to_string()),
-            Some(role.to_string()),
-        ]
-    };
-    let engine = Arc::new(
-        ordo_host::engine_from_members(&f, &[row(DEP_OWNER, "owner"), row(DEP_MANAGER, "manager")])
-            .expect("engine"),
-    );
-
-    let deployment = ordo_host::deploy::Deployment::pinned_with_platform_ops(
-        "wire-apply-test",
-        f.clone(),
-        ordo_exec::Executor {
-            pool: dir_pool.clone(),
-            schema: f.schema.clone(),
-            registry: f.registry.clone(),
-            keys: f.keys.clone(),
-            space: ordo_conformance::fixture_space(),
-        },
-        platform_ops::specs(),
-    )
-    .expect("platform specs");
-
-    let ops = Arc::new(
-        PlatformOps::new(engine.clone(), grants, Arc::new(|| NOW)).with_apply(
-            apply_op::ApplyOps::new(
-                target.clone(),
-                std::sync::Arc::new(ordo_exec::route::SinglePool::new(target)),
-                HOME,
-            ),
-        ),
-    );
-    let state = ApiState {
-        registry: deployment.handle(),
-        executor: Arc::new(PlatformExecutor::new(
-            Arc::new(FixtureExecutor {
-                spaces: ordo_host::spaces::Spaces::new(deployment.clone()),
-                pg: dir_pg.clone(),
-                page_size: 50,
-            }),
-            ops,
-        )),
-        access: Arc::new(ordo_host::IdentityAccess::sharing(
-            engine,
-            TokenKey::from_secret(SECRET),
-            Box::new(|| NOW),
-            Arc::new(ordo_host::metrics::Metrics::new()),
-        )),
-        quota: Arc::new(ordo_api::NoQuota),
-        bus: Arc::new(MemoryBus::new()),
-        replay: Arc::new(MemoryReplayCache::new()),
-        attest: Arc::new(ordo_api::attest::NoAttestation),
-        page_key: PageKey::from_secret(b"wire-apply-test"),
-        sync: Default::default(),
-        live_streams: Default::default(),
-        refine_limits: Default::default(),
-        public: Default::default(),
-    };
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router(state)).await;
-    });
-    addr
-}
-
-/// A runtime the server lives on, held for the length of the test. The CLI
-/// runs outside it, on the test's own thread, and builds its own.
-fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-}
-
 fn over_the_wire(path: &str, addr: std::net::SocketAddr, tok: &str) -> operator::Outcome {
     operator::run(
         "apply",
@@ -251,6 +106,9 @@ fn against_the_database(path: &str, db: &str, actor: &str) -> operator::Outcome 
         "apply",
         &[
             path.into(),
+            // The direct path: the first apply of a database no host serves
+            // yet. Named, and recorded for the next boot.
+            "--direct".into(),
             "--db".into(),
             db.into(),
             "--as".into(),
@@ -450,16 +308,35 @@ fn a_missing_token_says_where_one_comes_from() {
     assert!(out.report.contains("ORDO_MACHINE_KEY"), "{}", out.report);
 }
 
-/// The database path is still the default. No `--host`, no environment,
-/// and the command talks to Postgres exactly as it always did.
+/// The database path is `--direct` only (owner, 2026-11-05): the first
+/// apply, when no host serves the database yet. It writes the program, and
+/// leaves a row for the next boot to carry to the security log.
 #[test]
-fn without_a_host_the_command_still_talks_to_the_database() {
+fn with_direct_the_command_talks_to_the_database_and_leaves_a_record() {
     let db = "ordo_wire_default";
     empty(db);
     let path = program("default", V1);
     let out = against_the_database(&path, db, "test");
     assert_eq!(out.code, 0, "{}", out.report);
     assert!(out.report.contains("schema     created"), "{}", out.report);
+
+    let uses = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
+                size: 1,
+                ..ordo_exec::PoolConfig::from_env()
+            })
+            .await
+            .expect("pool");
+            ordo_host::direct_uses::pending(&pool).await.expect("rows")
+        });
+    assert!(
+        uses.iter().any(|u| u.command == "ordo_apply"),
+        "the use is on record for the next boot: {uses:?}"
+    );
 }
 
 // ── backend functions ────────────────────────────────────────────────────
@@ -590,21 +467,9 @@ fn a_code_change_alone_is_a_new_version_over_the_wire() {
     );
 }
 
-/// The door flags every `--host` command here takes.
-fn door(addr: std::net::SocketAddr, tok: &str) -> Vec<String> {
-    vec![
-        "--host".into(),
-        format!("http://{addr}"),
-        "--token".into(),
-        tok.into(),
-        "--space".into(),
-        HOME.into(),
-    ]
-}
-
 /// `--label` and the source's git commit reach the door with the program,
-/// and `ordo versions label|diff --host` print what the database path
-/// prints (`plan-versions.md` §4 row 2).
+/// and `ordo versions label|diff --host` print the deployment's answer
+/// (`plan-versions.md` §4 row 2).
 #[test]
 fn a_label_and_a_commit_travel_and_versions_answer_over_the_wire() {
     let db = "ordo_wire_labels";
@@ -654,17 +519,12 @@ fn a_label_and_a_commit_travel_and_versions_answer_over_the_wire() {
 
     let label = operator::run("versions", &with_door(&["label", "#2", "staged"]));
     assert_eq!(label.code, 0, "{}", label.report);
-    let direct = operator::run(
-        "versions",
-        &[
-            "label".into(),
-            "#2".into(),
-            "staged".into(),
-            "--db".into(),
-            db.into(),
-        ],
+    assert!(
+        label.report.starts_with("labelled   #2 · "),
+        "{}",
+        label.report
     );
-    assert_eq!(label.report, direct.report, "one rendering, two paths");
+    assert!(label.report.contains("\"staged\""), "{}", label.report);
 
     let long = "x".repeat(81);
     let refused = operator::run("versions", &with_door(&["label", "#2", &long]));
@@ -673,17 +533,6 @@ fn a_label_and_a_commit_travel_and_versions_answer_over_the_wire() {
 
     let over = operator::run("versions", &with_door(&["diff", "#1", "#2"]));
     assert_eq!(over.code, 0, "{}", over.report);
-    let direct = operator::run(
-        "versions",
-        &[
-            "diff".into(),
-            "#1".into(),
-            "#2".into(),
-            "--db".into(),
-            db.into(),
-        ],
-    );
-    assert_eq!(over.report, direct.report, "one rendering, two paths");
     assert!(over.report.contains("  B2  "), "{}", over.report);
 
     let source = operator::run("versions", &with_door(&["diff", "#1", "#2", "--source"]));
@@ -719,11 +568,6 @@ fn revokes_and_windows_answer_the_same_over_the_wire() {
         v.extend(door(addr, &owner));
         v
     };
-    let direct = |head: &[&str]| -> Vec<String> {
-        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
-        v.extend(["--db".to_string(), db.to_string()]);
-        v
-    };
     let first = operator::run("apply", &with_door(&[&path, "--no-wait"]));
     assert_eq!(first.code, 0, "{}", first.report);
     std::fs::write(&path, V2).expect("write");
@@ -748,27 +592,28 @@ fn revokes_and_windows_answer_the_same_over_the_wire() {
     );
     assert_eq!(over.code, 0, "{}", over.report);
     let report_over = operator::run("versions", &with_door(&["revoked"]));
-    let report_direct = operator::run("versions", &direct(&["revoked"]));
     assert_eq!(report_over.code, 0, "{}", report_over.report);
-    assert_eq!(report_over.report, report_direct.report, "one rendering");
     assert!(report_over.report.contains("drops a column"));
     let lifted = operator::run(
         "versions",
         &with_door(&["unrevoke", "#2", "--reason", "ok"]),
     );
     assert_eq!(lifted.code, 0, "{}", lifted.report);
-    let lifted_direct = operator::run("versions", &direct(&["unrevoke", "#2", "--reason", "ok"]));
+    let lifted_again = operator::run(
+        "versions",
+        &with_door(&["unrevoke", "#2", "--reason", "ok"]),
+    );
     assert!(
-        lifted_direct.report.contains("not_revoked"),
+        lifted_again.report.contains("not_revoked"),
         "{}",
-        lifted_direct.report
+        lifted_again.report
     );
     let again = operator::run(
         "versions",
-        &direct(&["revoke", "#2", "--reason", "drops a column"]),
+        &with_door(&["revoke", "#2", "--reason", "drops a column"]),
     );
-    assert_eq!(over.report, again.report, "one rendering, two paths");
-    let list = operator::run("versions", &direct(&["list"]));
+    assert_eq!(over.report, again.report, "the same words each time");
+    let list = operator::run("versions", &with_door(&["list"]));
     assert!(
         list.report.contains("REVOKED \"drops a column\""),
         "{}",
@@ -817,8 +662,8 @@ fn revokes_and_windows_answer_the_same_over_the_wire() {
     ];
     let over = operator::run("windows", &with_door(&set));
     assert_eq!(over.code, 0, "{}", over.report);
-    let again = operator::run("windows", &direct(&set));
-    assert_eq!(over.report, again.report, "one rendering, two paths");
+    let again = operator::run("windows", &with_door(&set));
+    assert_eq!(over.report, again.report, "the same words each time");
     let skip = [
         "skip",
         "weekly",
@@ -831,13 +676,8 @@ fn revokes_and_windows_answer_the_same_over_the_wire() {
     ];
     let over = operator::run("windows", &with_door(&skip));
     assert_eq!(over.code, 0, "{}", over.report);
-    assert_eq!(over.report, operator::run("windows", &direct(&skip)).report);
-    // The span's first line carries this second's time; the rest agrees.
-    let body = |o: &operator::Outcome| o.report.lines().skip(1).collect::<Vec<_>>().join("\n");
     let over = operator::run("windows", &with_door(&["list"]));
-    let here = operator::run("windows", &direct(&["list"]));
     assert_eq!(over.code, 0, "{}", over.report);
-    assert_eq!(body(&over), body(&here));
     assert!(over.report.contains("skipped by freeze"), "{}", over.report);
     // spc_w is left out of the window.
     let w = operator::run("windows", &with_door(&["list", "spc_w"]));
@@ -849,10 +689,201 @@ fn revokes_and_windows_answer_the_same_over_the_wire() {
     assert_eq!(gone.code, 0, "{}", gone.report);
     let gone = operator::run("windows", &with_door(&["delete", "weekly"]));
     assert_eq!(gone.code, 0, "{}", gone.report);
-    let missing = operator::run("windows", &direct(&["delete", "weekly"]));
+    let missing = operator::run("windows", &with_door(&["delete", "weekly"]));
     assert!(
         missing.report.contains("ordo windows list"),
         "{}",
         missing.report
     );
+}
+
+/// The commands that had a database path and now have only the door print
+/// from the deployment's own answers: `versions list|show`, `rollback`,
+/// `plan`, `fleet` and `quota` (owner, 2026-11-05).
+#[test]
+fn versions_rollback_plan_fleet_and_quota_answer_over_the_wire() {
+    let db = "ordo_wire_reads";
+    empty(db);
+    let path = program("reads", V1);
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
+    let with_door = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(door(addr, &owner));
+        v
+    };
+    let first = operator::run("apply", &with_door(&[&path, "--no-wait"]));
+    assert_eq!(first.code, 0, "{}", first.report);
+
+    let list = operator::run("versions", &with_door(&["list"]));
+    assert_eq!(list.code, 0, "{}", list.report);
+    assert!(list.report.starts_with("VERSIONS (1,"), "{}", list.report);
+    assert!(list.report.contains("<- active"), "{}", list.report);
+    let show = operator::run("versions", &with_door(&["show", "#1"]));
+    assert_eq!(show.code, 0, "{}", show.report);
+    assert!(
+        show.report.starts_with("version    #1 · "),
+        "{}",
+        show.report
+    );
+    assert!(show.report.contains("ACTIVATIONS (1,"), "{}", show.report);
+    let none = operator::run("versions", &with_door(&["show", "#9"]));
+    assert_ne!(none.code, 0);
+    assert!(
+        none.report.contains("no version is stored"),
+        "{}",
+        none.report
+    );
+
+    // #1 already serves; a rollback to it changes nothing. A number that
+    // names nothing is refused.
+    let same = operator::run("rollback", &with_door(&["--version", "#1"]));
+    assert_eq!(same.code, 0, "{}", same.report);
+    assert!(same.report.contains("already active"), "{}", same.report);
+    let ghost = operator::run("rollback", &with_door(&["--version", "#9"]));
+    assert_ne!(ghost.code, 0);
+    assert!(
+        ghost.report.contains("#1 · "),
+        "names what is stored: {}",
+        ghost.report
+    );
+
+    // The deployment says what applying this program would do.
+    let plan = operator::run("plan", &with_door(&[&path]));
+    assert_eq!(plan.code, 0, "{}", plan.report);
+    assert!(plan.report.contains("matches"), "{}", plan.report);
+
+    // The fleet, from the registry on the deployment's database.
+    rt.block_on(async {
+        let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
+            db: db.to_string(),
+            size: 1,
+            ..ordo_exec::PoolConfig::from_env()
+        })
+        .await
+        .expect("pool");
+        ordo_host::fleet::ensure_tables(&pool)
+            .await
+            .expect("tables");
+        ordo_host::tenants::reserve(&pool, "spc_fleet", "Acme Corp", "dev:ada", 1, None)
+            .await
+            .expect("tenant");
+        ordo_host::quotas::ensure_table(&pool)
+            .await
+            .expect("$quotas");
+    });
+    let fleet = operator::run("fleet", &with_door(&[]));
+    assert_eq!(fleet.code, 0, "{}", fleet.report);
+    let line = fleet
+        .report
+        .lines()
+        .find(|l| l.contains("spc_fleet"))
+        .unwrap_or_else(|| panic!("the tenant's id is not printed: {}", fleet.report));
+    assert!(line.contains("Acme Corp"), "the name beside the id: {line}");
+    assert!(
+        fleet.report.starts_with("target  default"),
+        "{}",
+        fleet.report
+    );
+
+    // Quotas: `--space` is the tenant, `--home` the deployment's own space.
+    let quota = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend([
+            "--host".to_string(),
+            format!("http://{addr}"),
+            "--token".to_string(),
+            owner.clone(),
+            "--home".to_string(),
+            HOME.to_string(),
+        ]);
+        v
+    };
+    let set = operator::run(
+        "quota",
+        &quota(&[
+            "set",
+            "--space",
+            "spc_fleet",
+            "--quantity",
+            "requests",
+            "--limit",
+            "100",
+            "--grace",
+            "10",
+            "--period-secs",
+            "3600",
+        ]),
+    );
+    assert_eq!(set.code, 0, "{}", set.report);
+    assert!(
+        set.report.contains("SET     requests limit 100"),
+        "{}",
+        set.report
+    );
+    let shown = operator::run("quota", &quota(&["show", "--space", "spc_fleet"]));
+    assert_eq!(shown.code, 0, "{}", shown.report);
+    assert!(shown.report.contains("requests"), "{}", shown.report);
+    assert!(shown.report.contains("limit 100"), "{}", shown.report);
+}
+
+/// A command that has a door and no `--host` is refused, and the refusal
+/// names the flag to use. `--db` and `--direct` do not reopen a path that
+/// was closed (owner, 2026-11-05: "the CLI goes through the door").
+#[test]
+fn a_door_command_with_no_host_is_refused_naming_the_flag() {
+    for (cmd, args) in [
+        ("versions", vec!["list"]),
+        ("versions", vec!["revoke", "#1", "--reason", "x"]),
+        ("windows", vec!["list"]),
+        ("fleet", vec![]),
+        ("quota", vec!["show", "--space", "spc_x"]),
+        ("plan", vec!["p.ordo", "--against", "somedb"]),
+    ] {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let out = operator::run(cmd, &args);
+        assert_eq!(out.code, 2, "{cmd}: {}", out.report);
+        assert!(out.report.contains("--host"), "{cmd}: {}", out.report);
+        let mut with_db = args.clone();
+        with_db.extend(["--db".to_string(), "somedb".to_string()]);
+        let out = operator::run(cmd, &with_db);
+        assert_eq!(out.code, 2, "{cmd} --db: {}", out.report);
+        assert!(out.report.contains("--host"), "{cmd} --db: {}", out.report);
+        let mut with_direct = args.clone();
+        with_direct.push("--direct".to_string());
+        let out = operator::run(cmd, &with_direct);
+        assert_eq!(out.code, 2, "{cmd} --direct: {}", out.report);
+        assert!(
+            out.report.contains("no direct path") && out.report.contains("--host"),
+            "{cmd} --direct: {}",
+            out.report
+        );
+    }
+}
+
+/// `apply` and `rollback` take the door, or `--direct` when no host can
+/// boot. With neither, both flags are named. With both, one must go.
+#[test]
+fn apply_and_rollback_name_both_flags_when_given_neither() {
+    for cmd in ["apply", "rollback"] {
+        let args: Vec<String> = if cmd == "apply" {
+            vec!["p.ordo".into()]
+        } else {
+            vec!["--version".into(), "#1".into()]
+        };
+        let out = operator::run(cmd, &args);
+        assert_eq!(out.code, 2, "{cmd}: {}", out.report);
+        assert!(out.report.contains("--host"), "{cmd}: {}", out.report);
+        assert!(out.report.contains("--direct"), "{cmd}: {}", out.report);
+        let mut both = args.clone();
+        both.extend([
+            "--direct".to_string(),
+            "--host".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        ]);
+        let out = operator::run(cmd, &both);
+        assert_eq!(out.code, 2, "{cmd}: {}", out.report);
+        assert!(out.report.contains("name one"), "{cmd}: {}", out.report);
+    }
 }

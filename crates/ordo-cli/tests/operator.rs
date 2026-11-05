@@ -47,9 +47,20 @@ use support::operator;
 /// is set, and clears it before letting go.
 static PROCESS_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+/// The commands that must work with no server (owner, 2026-11-05) open the
+/// database only behind `--direct`. These tests are about what they do once
+/// allowed, so the flag is added here; `direct_flag.rs` is about the flag.
+fn needs_direct(cmd: &str) -> bool {
+    matches!(cmd, "verify" | "restore" | "migrate" | "keys" | "identity")
+}
+
 fn run_op(cmd: &str, args: &[String]) -> operator::Outcome {
     let _shared = PROCESS_ENV.read().unwrap_or_else(|e| e.into_inner());
-    operator::run(cmd, args)
+    let mut args = args.to_vec();
+    if needs_direct(cmd) && !args.iter().any(|a| a == "--direct") {
+        args.push("--direct".into());
+    }
+    operator::run(cmd, &args)
 }
 
 /// Holds the write side and unsets the checkpoint signing pair on drop, so
@@ -1846,6 +1857,7 @@ async fn restore_resolves_the_tenants_database_from_its_id() {
         .args([
             "restore",
             "--record",
+            "--direct",
             "--tenant",
             "--space",
             "conformance",
@@ -1922,78 +1934,6 @@ async fn restore_refuses_a_tenant_id_and_a_host_together() {
     assert_eq!(code, 2, "{out}{err}");
     assert!(err.contains("--tenant"), "{err}");
     assert!(err.contains("--db"), "{err}");
-}
-
-// ── fleet ────────────────────────────────────────────────────────────────
-
-/// 18d R-O6: the operator surface prints a tenant's **name** beside its
-/// **id**, because the id (`spc_...`) is opaque by design (the 2026-09-21
-/// ruling behind `ordo_host::tenants`) — a fleet report that named only
-/// ids would tell an operator which target is unhealthy and nothing about
-/// whose tenant that is.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_operator_surface_prints_the_name_beside_the_id() {
-    const CONTROL_DB: &str = "ordo_op_r9_fleet_control";
-    const TENANT_ID: &str = "spc_r9fleettest0000000000000";
-    const TENANT_NAME: &str = "Acme Corp (fleet test)";
-
-    let control = fresh_for_restore(CONTROL_DB).await;
-    ordo_host::tenants::ensure_table(&control)
-        .await
-        .expect("tenants table");
-    ordo_exec::spacedb::ensure_table(&control)
-        .await
-        .expect("spacedb table");
-    for (table, col) in [("$spaces", "$space"), ("$spacedb", "$space")] {
-        control
-            .rows(&format!(
-                "DELETE FROM \"{table}\" WHERE \"{col}\" = {}",
-                ordo_exec::sql_lit(TENANT_ID)
-            ))
-            .await
-            .unwrap();
-    }
-    ordo_host::tenants::reserve(
-        &control,
-        TENANT_ID,
-        TENANT_NAME,
-        "mem_owner",
-        1_700_000_000,
-        None,
-    )
-    .await
-    .expect("mint");
-    let env = PoolConfig::from_env();
-    ordo_exec::spacedb::attach(
-        &control,
-        &ordo_crypto::SpaceId(TENANT_ID.into()),
-        &ordo_exec::spacedb::DbAttachment {
-            host: env.host.clone(),
-            port: env.port,
-            user: env.user.clone(),
-            db: "ordo_op_r9_fleet_target".into(),
-            credential: "r9-fleet-local".into(),
-            custody: ordo_exec::spacedb::DbCustody::PlatformManaged,
-            attached_at: 1,
-            attached_by: "mem_owner".into(),
-        },
-    )
-    .await
-    .expect("attached");
-    drop(control);
-
-    let (out, err, code) = ordo(&["fleet", "--db", CONTROL_DB]);
-    assert_eq!(code, 0, "{out}{err}");
-    let tenant_line = out
-        .lines()
-        .find(|l| l.contains(TENANT_ID))
-        .unwrap_or_else(|| panic!("the tenant's id was not printed at all: {out}"));
-    assert!(
-        tenant_line.contains(TENANT_NAME),
-        "the id is printed without its name beside it: {tenant_line:?}\nfull output:\n{out}"
-    );
-    let expected_target = format!("{}:{}/ordo_op_r9_fleet_target", env.host, env.port);
-    assert!(out.contains(&expected_target), "{out}");
 }
 
 /// The default `restore-witness` gives: the newest **witnessed** checkpoint
@@ -2872,8 +2812,12 @@ async fn a_dry_run_computes_the_inverse_and_touches_nothing() {
 // ── the binary itself ────────────────────────────────────────────────────
 
 fn ordo(args: &[&str]) -> (String, String, i32) {
+    let mut args: Vec<&str> = args.to_vec();
+    if args.first().is_some_and(|c| needs_direct(c)) && !args.contains(&"--direct") {
+        args.push("--direct");
+    }
     let out = support::ordo()
-        .args(args)
+        .args(&args)
         .env("ORDO_PG_HOST", &Pg::default().host)
         .env("ORDO_PG_PORT", &Pg::default().port)
         .env("ORDO_PG_USER", &Pg::default().user)
@@ -3011,7 +2955,13 @@ fn the_three_commands_compose_the_way_an_operator_uses_them() {
     // alone.
     let v = operator::run(
         "verify",
-        &args(&["--key-id", "chk-operator", "--public-key", &published]),
+        &args(&[
+            "--key-id",
+            "chk-operator",
+            "--public-key",
+            &published,
+            "--direct",
+        ]),
     );
     assert_eq!(v.code, 0, "{}", v.report);
     assert!(
@@ -3048,7 +2998,13 @@ fn the_three_commands_compose_the_way_an_operator_uses_them() {
     // checkpoint that predates it.
     let v = operator::run(
         "verify",
-        &args(&["--key-id", "chk-operator", "--public-key", &published]),
+        &args(&[
+            "--key-id",
+            "chk-operator",
+            "--public-key",
+            &published,
+            "--direct",
+        ]),
     );
     assert_eq!(v.code, 0, "{}", v.report);
     assert!(v.report.contains("VERIFIED 1 group "), "{}", v.report);

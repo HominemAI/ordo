@@ -13,7 +13,7 @@
 //!
 //! | Route | Commands | Without a flag |
 //! |---|---|---|
-//! | [`Route::Door`] | `versions`, `windows`, `fleet`, `quota`, `plan` | refused; names `--host` |
+//! | [`Route::Door`] | `versions`, `windows`, `fleet`, `quota`, `touches`, `plan` | refused; names `--host` |
 //! | [`Route::Either`] | `apply`, `rollback` | refused; names `--host` and `--direct` |
 //! | [`Route::Direct`] | `keys`, `verify`, `restore`, `identity recover`, `migrate --apply` | refused; names `--direct` and `--host` |
 //! | [`Route::Open`] | the rest | unchanged (session 2 moves them) |
@@ -41,7 +41,7 @@ pub fn policy(cmd: &str, sub: Option<&str>, flags: &Flags) -> Route {
     match cmd {
         // No subcommand prints the usage and touches nothing.
         "versions" | "windows" | "quota" | "keys" | "identity" if sub.is_none() => Route::Open,
-        "versions" | "windows" | "fleet" | "quota" => Route::Door,
+        "versions" | "windows" | "fleet" | "quota" | "touches" => Route::Door,
         // `plan <dir>` alone only compiles. With `--against` or `--host` it
         // is the deployment's plan, which is the door's.
         "plan" => Route::Door,

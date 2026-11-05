@@ -407,6 +407,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "fn" => rt.block_on(fn_cmd(flags)),
         "import" => rt.block_on(import_cmd(flags)),
         "fleet" => rt.block_on(fleet_cmd(flags)),
+        "touches" => rt.block_on(touches_cmd(flags)),
         "triggers" => rt.block_on(crate::triggers::run(flags)),
         _ => Outcome::usage(format!("unknown command `{cmd}`")),
     }
@@ -3653,6 +3654,132 @@ async fn usage(flags: Flags) -> Outcome {
 /// tenant's name beside it, the 2026-09-21 ruling this whole increment is
 /// named for), and each target's custody (`$spacedb.custody`, R-O3's
 /// question, answered before a restore is planned rather than during one).
+const TOUCHES_USAGE: &str = "ordo touches [--limit <n>]  --host <h> ...\n\
+     ordo touches expose <situation> <none|raise|lower|both> --reason \"<text>\"  --host <h> ...\n\
+     a situation is one of export-import, membership, tenant-storage, approving-delegation, \
+     account-security";
+
+/// `ordo touches`: which passkey touches the app developer lets tenants
+/// choose, and which way (`std.deployment.tenantTouches`), and `ordo touches
+/// expose`: change one (`std.deployment.exposeTouch`). Through the door only
+/// (owner, 2026-11-05: a tenant chooses its touches within what the
+/// developer exposes; nothing is exposed by default).
+async fn touches_cmd(flags: Flags) -> Outcome {
+    let mut flags = flags;
+    let sub = if flags.positional.first().map(String::as_str) == Some("expose") {
+        flags.positional.remove(0);
+        true
+    } else {
+        false
+    };
+    let mut allowed = if sub {
+        vec!["--reason"]
+    } else {
+        vec!["--limit"]
+    };
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let (op, params, write) = if sub {
+        let [situation, exposed] = flags.positional.as_slice() else {
+            return Outcome::usage(format!("{TOUCHES_USAGE}\n"));
+        };
+        if let Err(e) = ordo_host::tenant_touches::choosable(situation) {
+            return Outcome::usage(format!("{}\n", e.to_exec_error().message));
+        }
+        if let Err(e) = ordo_host::tenant_touches::Direction::parse(exposed) {
+            return Outcome::usage(format!("{e}\n"));
+        }
+        let Some(reason) = flags.named_value("--reason") else {
+            return Outcome::usage(
+                "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
+            );
+        };
+        (
+            ordo_host::tenant_touches::EXPOSE,
+            serde_json::json!({ "situation": situation, "exposed": exposed, "reason": reason }),
+            true,
+        )
+    } else {
+        if !flags.positional.is_empty() {
+            return Outcome::usage(format!("{TOUCHES_USAGE}\n"));
+        }
+        let limit = match flags.named_value("--limit").map(str::parse::<u64>) {
+            None => None,
+            Some(Ok(n)) if n >= 1 => Some(n),
+            Some(_) => return Outcome::usage("`--limit` is a whole number from 1\n".into()),
+        };
+        (
+            ordo_host::tenant_touches::TOUCHES,
+            serde_json::json!({ "limit": limit }),
+            false,
+        )
+    };
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(&host, &flags, op, params, write).await {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = String::new();
+    if sub {
+        let s = row["situation"].as_str().unwrap_or("?");
+        let e = row["exposed"].as_str().unwrap_or("?");
+        out.push_str(&if row["changed"].as_bool() == Some(true) {
+            format!("set        {s} exposed {e}\n")
+        } else {
+            format!("unchanged  {s} is already exposed {e}\n")
+        });
+    }
+    out.push_str(&touches_lines(&row));
+    Outcome::ok(out)
+}
+
+/// What `ordo touches` prints: each situation, what the level asks, and
+/// what tenants may change; then the history.
+fn touches_lines(row: &serde_json::Value) -> String {
+    let mut out = format!(
+        "TENANT TOUCHES (ORDO_SECURITY_LEVEL={})\n",
+        row["level"].as_str().unwrap_or("?")
+    );
+    for s in row["situations"].as_array().cloned().unwrap_or_default() {
+        let asks = if s["levelAsks"].as_bool() == Some(true) {
+            "asks"
+        } else {
+            "no touch"
+        };
+        let exposed = if s["choosable"].as_bool() == Some(true) {
+            format!("tenants: {}", s["exposed"].as_str().unwrap_or("none"))
+        } else {
+            "never a tenant's".to_string()
+        };
+        out.push_str(&format!(
+            "  {:<22} {:<9} {exposed}\n",
+            s["situation"].as_str().unwrap_or("?"),
+            asks
+        ));
+    }
+    let history = row["history"].as_array().cloned().unwrap_or_default();
+    out.push_str(&format!("CHANGES ({})\n", history.len()));
+    if history.is_empty() {
+        out.push_str("  none: nothing is exposed to tenants\n");
+    }
+    for c in &history {
+        out.push_str(&format!(
+            "  {}  {} exposed {}  by {}  \"{}\"\n",
+            ordo_host::versions::utc_minute(c["at"].as_u64().unwrap_or(0)),
+            c["situation"].as_str().unwrap_or("?"),
+            c["exposed"].as_str().unwrap_or("?"),
+            c["actor"].as_str().unwrap_or("?"),
+            c["reason"].as_str().unwrap_or("")
+        ));
+    }
+    out
+}
+
 async fn fleet_cmd(flags: Flags) -> Outcome {
     if let Err(e) = flags.only(&["--host", "--token", "--space"]) {
         return Outcome::usage(e);

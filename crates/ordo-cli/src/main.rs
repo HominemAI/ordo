@@ -371,6 +371,13 @@ fn usage() -> ! {
          resolves --space's database through $spacedb instead of trusting\n      \
          --db to name it, and prints which database it resolved; refused\n      \
          together with --db, which is the manual, break-glass form.\n  \
+         ordo touches    [--limit <n>] --host <h>\n      \
+         which passkey touches tenants may choose for their own space, and\n      \
+         which way, beside what ORDO_SECURITY_LEVEL asks; then the changes.\n  \
+         ordo touches    expose <situation> <none|raise|lower|both> --reason \"<text>\" --host <h>\n      \
+         let tenants turn one touch on (raise), off (lower), or both; none\n      \
+         takes it back. Nothing is exposed by default. Acts on the\n      \
+         deployment can never be exposed, and the refusal names them.\n  \
          ordo fleet      --host <h> [--token <t> --space <s>]\n      \
          every target, its custody, and which tenants are on it, each tenant\n      \
          printed with its name beside its id and the version it is on\n      \
@@ -524,6 +531,7 @@ fn main() {
             | "identity"
             | "import"
             | "fleet"
+            | "touches"
             | "triggers"
     ) {
         let out = ordo_cli::operator::run(cmd, rest);

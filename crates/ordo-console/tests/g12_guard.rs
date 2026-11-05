@@ -104,6 +104,16 @@ const CALLS: &[(&str, Rule)] = &[
             test: "versions_settings.rs",
         },
     ),
+    // The touches tenants may choose (owner, 2026-11-05).
+    ("std.deployment.tenantTouches", Read),
+    (
+        "std.deployment.exposeTouch",
+        Write {
+            act: "tenant-touch-exposed",
+            src: "tenant_touches.rs",
+            test: "tenant_touches.rs",
+        },
+    ),
     (
         "std.deployment.setWindow",
         Write {

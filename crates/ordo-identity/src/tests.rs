@@ -836,6 +836,33 @@ fn stale_presence_does_not_satisfy_step_up() {
     ));
 }
 
+/// A tenant's own touch (owner, 2026-11-05): set in one space, it decides
+/// that space alone; every other space keeps the op's minimum.
+#[test]
+fn a_space_touch_decides_that_space_alone() {
+    let mut e = engine_with_profile();
+    e.require_step_up("space.delete");
+    let other = SpaceId("other".into());
+    e.set_profile(
+        &other,
+        AccessProfile::new().allow(Role::Owner, "space.delete"),
+    );
+    let o = user("o");
+    e.set_membership(&space(), &o, Role::Owner);
+    e.set_membership(&other, &o, Role::Owner);
+    e.set_step_up_in(&space(), "space.delete", false);
+    assert!(e
+        .check(&human_claims(&o), &space(), "space.delete", T0)
+        .is_allow());
+    assert!(!e
+        .check(&human_claims(&o), &other, "space.delete", T0)
+        .is_allow());
+    // Raised in the other space: an op with no minimum asks there.
+    e.set_step_up_in(&other, "txns.list", true);
+    assert!(e.step_up_in(&other, "txns.list", None).demands_presence());
+    assert!(!e.step_up_in(&space(), "txns.list", None).demands_presence());
+}
+
 #[test]
 fn step_up_denial_comes_after_inclusion() {
     // Op both unlisted and step-up-gated → the denial names the real gap

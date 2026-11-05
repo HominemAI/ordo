@@ -186,6 +186,24 @@ touch of anyone (same day). An entry that names no platform op
 refuses the boot. Code: `crates/ordo-host/src/presence.rs`; deployment
 reference: `docs/deploying.md`.
 
+**A tenant may choose its own touches, within what the app developer
+exposes** (owner, 2026-11-05: *"the dev decides whichway ... The dev exposes
+the options"*). The exposure is a stored deployment setting
+(`std.deployment.exposeTouch`), per situation: `raise`, `lower`, `both` or
+`none`, and `none` for every situation by default. A tenant's owner then sets
+its own touch with `std.space.setTouch`; a choice outside the exposure is
+refused, naming the exposure and the command that changes it. Only the
+situations whose ops act inside one tenant can be exposed: export and import,
+membership and admission, tenant storage and attestation, approving a
+delegation, and the tenant's own ways in and origins. The acts on the
+deployment, recovery, platform reads and a person's contact email can never
+be. The door reads, in order: the per-op settings above, the tenant's choice,
+the level. The engine holds a tenant's choice for that tenant's space alone
+(`AccessEngine::set_step_up_in`). `std.space.setTouch` itself always follows
+the level, so a stolen session cannot lower the touch on lowering touches.
+A system is never asked, whatever a tenant chooses. Each change is on the
+security record. Code: `crates/ordo-host/src/tenant_touches.rs`.
+
 ## 3. Account linking & provisioning
 
 **One human principal, many linked authenticators** [settled]. The directory

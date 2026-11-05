@@ -490,6 +490,13 @@ are what killed the "denial is a chain event" reading:
   the second defect in the `(principal, op)` version.
 - **Per-space, per-window entry cap.** Overflow collapses to a single
   "N further denials suppressed" marker. The record degrades before it grows.
+- **Failed sign-ins collapse the same way** (security audit 2026-11-05).
+  `AuthenticationFailed` is keyed on `(space, principal, op, reason)` and
+  shares the window and the cap. Many failures need no token, so one entry
+  each let an outsider fill the outbox.
+- **One scope cannot starve the rest.** When the outbox is full, an arrival
+  from a scope holding fewer entries than the largest one gets in, and the
+  largest scope's newest entry is counted into its own declared loss.
 - **Independent retention, and pruning that verification survives.** The
   stream carries its own periodic signed checkpoints (the same `Signer` trait
   §7 uses). Retention drops a **whole prefix ending at a checkpoint**, never

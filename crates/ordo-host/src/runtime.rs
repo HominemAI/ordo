@@ -6310,7 +6310,22 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
         tokio::spawn(async move {
             match crate::direct_uses::drain(&pool, &recorder).await {
                 Ok(0) => {}
-                Ok(n) => println!("  direct      {n} use(s) of `--direct` since the last boot, on the security log"),
+                Ok(n) => {
+                    println!("  direct      {n} use(s) of `--direct` since the last boot, on the security log");
+                    // Each row goes once its event is stored, not before
+                    // (security audit 2026-11-05, L6). A row still here at
+                    // the next boot is confirmed or carried again then.
+                    for _ in 0..20 {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        match crate::direct_uses::pending(&pool).await {
+                            Ok(p) if p.is_empty() => break,
+                            Ok(_) => {
+                                let _ = crate::direct_uses::confirm(&pool).await;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
                 Err(e) => println!("  direct      the `--direct` uses could not be read: {e}"),
             }
         });

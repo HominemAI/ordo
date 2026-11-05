@@ -831,7 +831,8 @@ host refuses to boot a tenant with no custody. Without `--direct` and without
 `--host` they refuse and name both flags. Each `--direct` use is written to
 `$direct_uses` before it runs. The next boot writes it to the security log as
 a `deploy` event with the act `direct-cli`, naming the command, the unix user
-and the machine, then deletes the row. Once the deployment has an owner who
+and the machine. The row is deleted once that event is stored, so a node that
+stops first carries it again at its next boot. Once the deployment has an owner who
 can sign in, the next `ordo apply` goes through the door (`--host`) like
 every other command, and `--direct` stays for a host that will not boot.
 

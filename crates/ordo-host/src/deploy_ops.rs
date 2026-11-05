@@ -327,7 +327,7 @@ pub fn specs() -> Vec<OpSpec> {
                     max: Some(crate::versions::MAX_SETTING_HISTORY.to_string()),
                 }),
             }],
-            &["served", "minimum", "newTenant", "history"],
+            &["served", "minimum", "newTenant", "history", "waiting"],
         ),
         spec(
             SET_VERSION_SETTING,
@@ -360,6 +360,7 @@ pub fn specs() -> Vec<OpSpec> {
                 "served",
                 "minimum",
                 "newTenant",
+                "waiting",
             ],
         ),
     ]
@@ -373,6 +374,15 @@ fn settings_json(s: &crate::versions::VersionSettings) -> serde_json::Value {
         "minimum": s.value(VersionSetting::Minimum),
         "newTenant": s.value(VersionSetting::NewTenant),
     })
+}
+
+/// The tenants waiting to move off a revoked or too-old version, and how
+/// many of them no window covers. Best effort: unreadable counts as none.
+async fn waiting_json(pool: &ordo_exec::Pool) -> serde_json::Value {
+    let w = crate::revoked_moves::waiting(pool, crate::runtime::now_secs())
+        .await
+        .unwrap_or_default();
+    json!({ "tenants": w.tenants, "noWindow": w.no_window, "line": w.line() })
 }
 
 fn tenant_param() -> ParamSpec {
@@ -716,6 +726,7 @@ pub async fn execute(
                 .await
                 .map_err(read)?;
             let mut row = settings_json(&settings);
+            row["waiting"] = waiting_json(&ops.pool).await;
             row["history"] = json!(history
                 .iter()
                 .map(|c| json!({
@@ -760,6 +771,7 @@ pub async fn execute(
             row["setting"] = json!(setting.name());
             row["value"] = json!(now);
             row["changed"] = json!(changed);
+            row["waiting"] = waiting_json(&ops.pool).await;
             row
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),

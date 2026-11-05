@@ -17,7 +17,7 @@ identity database) can still name owners of its own space at boot with
 
 New to Ordo and want the short path from nothing to a deployed app first?
 [`docs/quickstart.md`](quickstart.md) is that path; this is the full
-operator reference it points back to.
+reference it points back to.
 
 ---
 
@@ -48,10 +48,10 @@ would mean two places to look.
 
 ```
 ordo-host          the server
-ordo               the operator tool (apply, prune, checkpoint, revert)
+ordo               the deployment owner tool (apply, prune, checkpoint, revert)
 ```
 
-Two binaries, not one, and the split is deliberate: an operator tool and a
+Two binaries, not one, and the split is deliberate: the deployment owner's tool and a
 serving process have different blast radii and different bases. The *role*
 half of "single static binary, role by config" is honoured by
 `ORDO_WORKERS` (below); the single-binary half is not, and should not be.
@@ -138,7 +138,7 @@ admit `evil-db.internal`.
 **Unset denies everything.** That is the same position every other
 address-shaped control here takes (a credential label this node does not
 hold is refused before any dial), and it is chosen on purpose: an allowlist
-that defaulted to open would protect only the deployments whose operator
+that defaulted to open would protect only the deployments whose deployment owner
 already knew to configure it, which is the set that needed it least. The
 practical consequence is that **per-tenant databases and per-tenant buckets
 do nothing until you set this**, and the refusal a caller sees says so without
@@ -149,7 +149,7 @@ declined. A refusal that distinguished "not on the list" from "malformed"
 would be an oracle a caller maps one attempt at a time.
 
 **This does not gate the deployment's own database or its own bucket.**
-`ORDO_PG_HOST` and `ORDO_BLOB_S3_*` are the operator's own configuration and
+`ORDO_PG_HOST` and `ORDO_BLOB_S3_*` are the deployment owner's own configuration and
 are never checked against this list; attaching a tenant to that same database,
 or to that same bucket, is refused outright, by identity rather than by name,
 so `localhost` and `127.0.0.1` are not two answers to one question and neither
@@ -179,7 +179,7 @@ they chose."* Leave `ORDO_PG_TENANT_*` unset and every tenant gets its own
 database on the deployment's own server, which is the ordinary small
 deployment.
 
-The fallback is **per field**. An operator pointing tenants at another server
+The fallback is **per field**. A deployment owner pointing tenants at another server
 usually changes the host and keeps the port, and a setting that demanded all
 four would be three more chances to mistype the ones that were not the point.
 
@@ -195,7 +195,7 @@ gone, so remove the line. `ORDO_PG_ROUTING=single`, or any other value, refuses
 the boot.
 
 **These hosts need no allowlist entry.** `ORDO_PG_ATTACH_HOSTS` exists to
-refuse an address *chosen by data*; a cluster the operator set in the
+refuse an address *chosen by data*; a cluster the deployment owner set in the
 deployment's own environment is not that, and is allowed by definition (§2c,
 D-S6: *"if i defined it on my platform it is allowed"*). Without that, an
 unset allowlist would refuse a deployment its own default tenant cluster and
@@ -284,8 +284,8 @@ credential is not on the wire.
 | `ORDO_EXIT_BUNDLE_DIR` | refuse the **feature** | where `std.space.export` writes bundles, one sub-directory per space. Unset leaves `std.space.export` and `std.space.delete` unregistered (they answer as any unknown op) and the startup log says so. Set, it must be an absolute path the process can create, or the boot refuses. The bundle holds the whole space: put it on a volume with the access controls you would give a database dump. |
 | `ORDO_IMPORT_BUNDLE_DIR` | refuse the **feature** | where `std.space.import` READS a staged bundle. Unset leaves `std.space.import` unregistered and the startup log says so. Set, it must be an absolute path that **already exists**: this one is an input, so the boot checks it rather than creating it, because an empty directory nobody meant to point at answers every import with `bundle_unknown` and looks like a bug in the op. A bundle is staged at `<root>/<space>/<name>` and the caller names only `<name>`. **The space component is an authorization boundary**: one root serves every tenant, so a flat layout would let any tenant's owner load another tenant's staged bundle into a space whose keys they hold. A **people map** is staged beside the bundle as `<bundle>.people`, a JSON object of source member id to destination member id: rows that name a person resolve through it, and any name it does not cover stops the import. It may only name people who are already members of the destination, so a staged file can never hand out access. |
 | `ORDO_PRESENCE_ON_READS` | default `off` | `on` or `off`. **On asks for a fresh passkey assertion on platform reads too**, for a strict deployment. Off, a signed-in person reads with no touch: owner, 2026-10-22, "If you are signed in = that passkey was your credentials - you are authenticated." A read is an op whose kind is `Read`, served on `GET`. A read freed this way stays closed to delegated tokens. Any other value refuses the boot. The startup log says which. |
-| `ORDO_SECURITY_LEVEL` | default `standard` | `low`, `standard` or `high`. **Which situations ask a person for a passkey touch** (owner, 2026-11-05). A system (a machine key) is never asked at any level, and sign-up never asks. Low asks only for console keys, a console acting inside a tenant, recovery and contests, and the identity service's account page. Standard adds deleting or reaping a tenant, export and import, tenant storage and attestation, approving a delegation, a person's second factors, and changing a contact email. High asks on every platform change. Platform reads ask at no level; only `ORDO_PRESENCE_ON_READS=on` does. **The per-action settings override the level:** `ORDO_STEP_UP_EXEMPT_OPS` takes the touch off named ops, `ORDO_STEP_UP_REQUIRED_OPS` puts it on, and `ORDO_EMAIL_CHANGE_TOUCH` decides the contact email. The table is in `crates/ordo-host/src/security_level.rs`. The startup log prints the level, what it asks for and what it does not. Any other value refuses the boot, naming the setting and its values. **A tenant may choose its own touches where you let it** (owner, 2026-11-05). That is a stored setting, not a variable: `ordo touches expose <situation> <raise|lower|both|none> --reason "..."` (`std.deployment.exposeTouch`). Nothing is exposed by default. The door reads, in order: the per-action settings, the tenant's choice, the level. See `howto-operating.md`, "Touches a tenant chooses". |
-| `ORDO_STEP_UP_REQUIRED_OPS` | default unset | comma-separated **platform ops that require a fresh passkey assertion whatever `ORDO_SECURITY_LEVEL` says**, the same shape as `ORDO_STEP_UP_EXEMPT_OPS`: `std.space.admit` or `std.space.*`. A read named here asks too. An op named exactly in both lists refuses the boot, and so does `std.deployment.pin`, which never asks (owner, 2026-11-05). An entry that names no platform op refuses the boot and lists the ones that exist. The startup log names what it adds. |
+| `ORDO_SECURITY_LEVEL` | default `standard` | `low`, `standard` or `high`. **Which situations ask a person for a passkey touch** (owner, 2026-11-05). A system (a machine key) is never asked at any level, and sign-up never asks. Low asks only for console keys, a console acting inside a tenant, recovery and contests, and the identity service's account page. Standard adds deleting or reaping a tenant, export and import, tenant storage and attestation, approving a delegation, account security on the app's sign-in, and changing a contact email. High adds deploying, versions and deployment settings, creating a tenant, and membership and admission. Platform reads ask at no level; only `ORDO_PRESENCE_ON_READS=on` does. **The per-action settings override the level:** `ORDO_STEP_UP_EXEMPT_OPS` takes the touch off named ops, `ORDO_STEP_UP_REQUIRED_OPS` puts it on, and `ORDO_EMAIL_CHANGE_TOUCH` decides the contact email. The table is in `crates/ordo-host/src/security_level.rs`. The startup log prints the level, what it asks for and what it does not. Any other value refuses the boot, naming the setting and its values. **A tenant may choose its own touches where you let it** (owner, 2026-11-05). That is a stored setting, not a variable: `ordo touches expose <situation> <raise|lower|both|none> --reason "..."` (`std.deployment.exposeTouch`). Nothing is exposed by default. The door reads, in order: the per-action settings, the tenant's choice, the level. See `howto-operating.md`, "Touches a tenant chooses". |
+| `ORDO_STEP_UP_REQUIRED_OPS` | default unset | comma-separated **platform ops that require a fresh passkey assertion whatever `ORDO_SECURITY_LEVEL` says**, the same shape as `ORDO_STEP_UP_EXEMPT_OPS`: `std.space.admit` or `std.space.*`. A read named here asks too. An op named exactly in both lists refuses the boot, and so does any op that moves a tenant's version (`std.deployment.pin`, `moveOffRevoked`, `setMoveTarget`, `std.space.moveOffRevoked`), which never asks (owner, 2026-11-05). An entry that names no platform op refuses the boot and lists the ones that exist. The startup log names what it adds. |
 | `ORDO_STEP_UP_EXEMPT_OPS` | default unset | comma-separated **platform ops that do not require a fresh passkey assertion**, whatever `ORDO_SECURITY_LEVEL` says, each an exact name or a prefix ending `.*`: `std.space.admit,std.space.setRole`, or `std.space.*`. **Unset leaves every change to the level.** A platform change the level's table does not place keeps asking at every level, including one added by a later release. A platform op that only reads asks for none (owner, 2026-10-22) unless `ORDO_PRESENCE_ON_READS=on`. Which ops ask is your application's decision (owner ruling, 2026-09-29), and this is where you make it, for any of them: `std.deployment.apply`, `std.space.create`, `std.space.import`, `std.space.export`, `std.space.delete`, the membership and admission ops, the tenant provider ops (`std.space.addConnection`, `std.space.updateConnection`, `std.space.retireConnection`, `std.space.connections`), and the rest. The role gate is unchanged: an exempt op is still refused to a caller the engine does not list for it. **A system caller needs no entry here** (owner, 2026-11-05): a machine key is never asked for a touch, in the deployment's own space or importing into a tenant under its `import` grant (`docs/howto-identity.md` §6), and a delegated token is refused platform writes as not delegable whatever this list says (`ORDO_DELEGABLE_OPS`). An exempt read is one a delegated token may be granted. Moving a tenant's version (`std.deployment.pin`) never asks for a touch, so it needs no entry either. An entry that names no platform op refuses the boot and lists the ones that exist. The startup log names what is exempt. |
 | `ORDO_ACCESS_TEMPLATE` | default unset | the app developer's **default for who may call each program op**: `reportByProject=owner,manager; reportByPerson=owner,manager`. Entries split on `;` or a newline, each `op=role,role`. `op=` closes the op to every role until a tenant opens it. **Unset keeps the built-in default**: every role calls authored reads, editors and up authored writes, managers and owners the `std.*` ops. A tenant's owner may change it for their tenant (`howto-roles.md`). Naming a platform op, a pattern, an unknown role, or an op twice refuses the boot. A name the program does not have does nothing. Read once at boot; the boot census prints a `profiles` line. |
 | `ORDO_DELEGABLE_OPS` | default unset | comma-separated **delete ops a delegated token may call**, each an exact op name: `purgeDone,std.tasks.delete`. A delegated token is one that acts for a person, such as a worker credential (`howto-workers.md`). **Unset closes every delete to delegated tokens**; reads and ordinary writes stay open, bounded by the token's allowlist and by what the delegator may do. Platform writes (`std.space.*`, `std.person.*` and the rest) stay closed whatever you set, because their record would name only the delegator; naming one refuses the boot, and so does a pattern. A name the program does not have does nothing. A refusal answers `access_denied` and is recorded as `OpNotDelegable`. The startup log names what is open. |
@@ -377,7 +377,7 @@ a password was supplied), the custody kind and epoch, the system space and
 what this boot did about it, the program and its
 gate summary, the blob store, and a `DISABLED` line for every feature that
 is off **naming the variable that would enable it**. A feature that is off
-and unmentioned is a feature an operator believes is on. No secret, no
+and unmentioned is a feature a deployment owner believes is on. No secret, no
 derived secret, and no length of a secret appears in it.
 
 **Shutdown** is `SIGTERM` or `SIGINT`: stop accepting, drain in-flight HTTP
@@ -414,7 +414,7 @@ involved: GHCR authenticates with the automatic `GITHUB_TOKEN`.
 ```
 ghcr.io/hominemai/ordo/ordo             the one image: the deployment, the console
                                         and the identity service, under ordo-supervisor
-ghcr.io/hominemai/ordo/ordo-cli         the operator tool
+ghcr.io/hominemai/ordo/ordo-cli         the deployment owner tool
 ghcr.io/hominemai/ordo/ordo-playground  the browser surface
 ```
 
@@ -681,7 +681,7 @@ clients one restart, which is the correct price for a key rotation.
 > deployment, and **custody is an input to loading a
 > program**: `deploy::verify_candidate` assigns the fixture's provider and
 > asserts it by identity, so a deployment cannot read through the
-> operator's custody and write under the repository's test constant. That
+> deployment owner's custody and write under the repository's test constant. That
 > was true until 2026-09-07 and is the reason `ORDO_KEY_PROVIDER=test`
 > refuses without `ORDO_DEV_UNSAFE_TEST_KEYS`.
 >
@@ -756,7 +756,7 @@ it. It is a **second** dev flag rather than a reuse of
 `ORDO_DEV_UNSAFE_TEST_KEYS` because the two unsafe different things: a
 laptop running a development master key is not a deployment that
 agreed to put customer files on a filesystem, and one flag unlocking both
-would hand an operator who asked for the first the second in silence.
+would hand a deployment owner who asked for the first the second in silence.
 
 **When a store is required** (ruled 2026-09-07): *exactly when the loaded
 program declares a `blob` field that is not `inline`.* Three cases, and the
@@ -797,7 +797,7 @@ itself. Owner-ruled 2026-09-20 (checklist 17v).
 It is not a tenant, and three properties say how:
 
 - **Nobody names it.** A tenant's id reaches the binary from outside, in
-  `ORDO_SPACE`, in a request header, or after `--space` on an operator
+  `ORDO_SPACE`, in a request header, or after `--space` on a deployment owner
   command. This one never does, which is why creating it cannot turn a typo
   into a tenant.
 - **Nobody erases it.** `std.space.delete` refuses it before it checks the
@@ -984,7 +984,7 @@ where the boundary is.
 The same discipline runs one layer up. Bad token, no membership,
 suspended, op not in role, capability outside its allowlist, stale
 step-up: all one `Deny` on the wire. The *reasons* are rich and they go
-to the operator's audit trail, where they belong.
+to the deployment owner's audit trail, where they belong.
 
 Two properties to rely on:
 
@@ -1364,7 +1364,7 @@ Three things worth knowing before you run it:
   shadow built from *its own* DDL, and then compared against the **live**
   schema. Any of those refusing means the node keeps serving what it had; a
   node that cannot load a new version must not stop serving the old one, and
-  the refusal is an operator alert rather than an outage.
+  the refusal is a deployment owner alert rather than an outage.
 - **`--no-activate` stores without re-pointing.** `migration.md`'s
   additive-then-swap sequence puts a column in the database one deploy before
   the artifact that reads it, so storing an artifact whose migration has not
@@ -1454,8 +1454,11 @@ machine key in `ORDO_MACHINE_KEY` for CI, or with a bearer token in
 default and `--host` with an empty value selects it; `ORDO_HOST` is the
 environment form. A bare hostname gets `https`, and `http://` must be
 spelled, which is what addressing a local `ordo dev` looks like
-(`--host http://127.0.0.1:4000`). With neither flag nor variable the command
-talks to the database exactly as it did before: the door is opt-in.
+(`--host http://127.0.0.1:4000`). The CLI goes through the door (owner,
+2026-11-05). With neither `--host` nor `ORDO_HOST`, `ordo apply` refuses
+and names `--host` and `--direct`. `--direct` opens the database from this
+machine when no host can boot. It is recorded on the security log at the
+next boot.
 
 What the far end runs is `std.deployment.apply`, a platform op that calls the
 same `ordo_host::apply_op::run` the database path calls. The two print the
@@ -1463,7 +1466,7 @@ same report because they render the same structured outcome through the same
 function, and a refusal carries the same class under a wire code
 (`apply_refused`, `not_activated`, `apply_in_progress`, `schema_drift`).
 
-Four things about the door are worth knowing before an operator meets them:
+Four things about the door are worth knowing before the deployment owner meets them:
 
 - **Who may.** A deployment person or machine key from the identity
   service, wherever it runs. Without it, a deployment **owner**, which is
@@ -1479,12 +1482,12 @@ Four things about the door are worth knowing before an operator meets them:
   proved from the token. There is no `--as` over the door and the flag is
   refused with `--host`, because a string that does not reach the audit
   record it looks like it is writing is worse than no string.
-- **The token.** With the identity service: a deployment token from it,
-  with a passkey touch in the last 5 minutes (`ordo login --touch`), or a
-  machine key's token, which the owner allowed to deploy with nobody
+- **The token.** With the identity service: a deployment token from it
+  (add a passkey touch with `ordo login --touch` when the level asks for
+  one; see below), or a machine key's token, which the owner allowed to deploy with nobody
   present (plan Q2), in the deployment's own space only. Without it: an
   ordinary sign-in token (`/auth/begin`, then `/auth/complete`), which must
-  carry presence because applying is step-up gated. Either way a capability
+  carry presence only when the level asks for it. Either way a capability
   token can never satisfy step-up; see `docs/howto-operating.md` for the
   exact calls.
 - **Two applies queue.** They serialize on an advisory lock keyed by the
@@ -1496,9 +1499,21 @@ Four things about the door are worth knowing before an operator meets them:
   holding the lock may be changing the schema the waiter planned against, so
   the retry has to re-plan and only the caller can decide to.
 
-**What stays on the database, and why.** `ordo keys init`, `ordo verify`,
-`ordo checkpoint`, `ordo prune` and `ordo revert` do not move and are not
-going to. Each has to work when the door does not: verification in particular
+**What asks for a touch.** It depends on `ORDO_SECURITY_LEVEL`. At the
+default, `standard`, the commands here ask none: deploys, versions and
+deployment settings ask a touch only at `high`. Deleting a tenant, export
+and import, tenant storage, delegation approval and account security ask
+one at `standard` and `high`. Console keys and recovery ask at every
+level. A machine key is never asked. A touch lasts 5 minutes
+(`ordo login --touch`).
+
+**What stays on the database, and why.** `ordo keys`, `ordo verify` (except
+`--proof`), `ordo restore`, `ordo identity recover` and
+`ordo migrate --apply` open the database and need `--direct`. `ordo apply`
+and `ordo rollback` take `--host`, or `--direct` as the break-glass path
+when no host can boot. `ordo checkpoint`, `ordo prune`, `ordo revert`,
+`ordo deploys`, `ordo usage` and `ordo triggers` still take `--db` and
+move to the door next. The ones that open the database have to work when the door does not: verification in particular
 is very often run *because* the engine is refusing requests, and a
 verification that can only be performed by the thing under suspicion is not a
 verification. `ordo keys init` is sharper still: it exists because a
@@ -1739,7 +1754,7 @@ the owner's ruling (`corpus-rulings.md`, `write-quota`, 2026-09-19).
 reading either surface for the same closed period reads byte-identical
 JSONL. The route is gated like `/metrics`: reserved op name
 `platform.usage`, checked against the deployment's own space regardless of
-which space `space=` names, since this is an operator surface over every
+which space `space=` names, since this is a deployment owner surface over every
 tenant the process serves. No new environment variable: access is the
 deployment's ordinary access model, the same one `/metrics` and
 `/security/alerts` already use.

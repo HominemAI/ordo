@@ -1913,9 +1913,12 @@ async fn restore_resolves_the_tenants_database_from_its_id() {
 /// 18d R-O1: `--tenant` and `--db` are two independent ways to name where a
 /// tenant's rows are, and giving both is refused rather than guessed at —
 /// the exact hazard R-O1 exists to remove. Usage error (exit 2): nothing
-/// was attempted, and no database connection is even needed to see it.
+/// was attempted, and the command's own database is only reached to record
+/// the `--direct` use.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_refuses_a_tenant_id_and_a_host_together() {
+    // `--direct` records in the database it acts on (`--db`), so it exists.
+    let _pg = Pg::named("ordo_op_r9_conflict");
     let (out, err, code) = ordo(&[
         "restore",
         "--record",

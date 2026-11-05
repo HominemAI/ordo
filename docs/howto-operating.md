@@ -20,8 +20,12 @@ Against the deployment's **database**, which is what a first deployment and a
 recovery need. It is refused unless you name `--direct`:
 
 ```
-ordo apply ./myprogram.ordo --direct --db prod --as my-service
+ordo apply ./myprogram.ordo --direct --as my-service
 ```
+
+`--direct` records its use in the database the command acts on. `--db <name>`
+names that database; without it, ORDO_PG_HOST, ORDO_PG_PORT, ORDO_PG_USER and
+ORDO_PG_DB do. Set those first.
 
 With neither `--host` nor `--direct`, `ordo apply` refuses and names both.
 `--direct` is for the first program on a database no host serves yet, and for a
@@ -41,8 +45,8 @@ addressing a local `ordo dev` looks like (`--host http://127.0.0.1:4000`):
 plaintext is never a default for a request carrying a token that can replace
 the program. `--host` with an empty value selects the default deployment,
 `ordo.inf.smg.icu`. The environment forms are `ORDO_HOST`, `ORDO_TOKEN` and
-`ORDO_SPACE`. **With no `--host` and no `ORDO_HOST`, the command talks to the
-database exactly as it always has**: the door is opt-in.
+`ORDO_SPACE`. **With no `--host` and no `ORDO_HOST`, `ordo apply` refuses**
+and names `--host` and `--direct`.
 
 `--space` is the **deployment's own** space, the one the binary was
 configured with (`ORDO_SPACE` on the server). Applying is the deployment's
@@ -51,7 +55,7 @@ space gets `not_found`, and no membership change inside a tenant will change
 that.
 
 **`--as` is refused with `--host`.** On the database path `--as` is an
-assertion an operator holding credentials makes about themselves. Over the
+assertion a deployment owner holding credentials makes about themselves. Over the
 door the actor written into `$migrations` is the principal the token proved,
 so there is nothing to assert. Taking the flag and ignoring it would put a
 string in a command line that does not reach the record it looks like it is
@@ -225,7 +229,7 @@ ordo versions diff '#3' '#4' --source       # the source diff only
 - A label is one line of at most 80 characters. Anything else is refused, saying so.
 - `ordo apply` records the git commit of the source: `git rev-parse HEAD` where the source lives, with `-dirty` when the applied files have changes not in it. Outside a git repository nothing is recorded. The first commit recorded for a version stays.
 - The apply report, `ordo deploys`, `ordo versions list` and `show` print the label and the first 12 characters of the commit.
-- `label` and `diff` take `--db`, or `--host --token --space` to go through the door (`std.deployment.label`, `std.deployment.diff`). Over the door both answer only the deployment owner, in the deployment's own space.
+- `label` and `diff` go through the door only (`std.deployment.label`, `std.deployment.diff`): `--host --token --space`. Both answer only the deployment owner, in the deployment's own space.
 - A name that is not stored is refused, naming every version that is.
 
 **Revoking a version:**
@@ -245,7 +249,7 @@ ordo versions revoked                       # each revoked version and the tenan
 - A revoke of the version `versions.new_tenant` names is refused, naming the setting. Set another (`ordo versions set new-tenant <version>`) or clear it (`--clear`), then revoke.
 - A reason is 1 to 500 characters. Every revoke and unrevoke is kept with who, why and when; `ordo versions show` lists them.
 - `ordo versions list` and `std.deployment.versions` show the mark and its reason.
-- Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door (`std.deployment.revoke`, `std.deployment.unrevoke`, `std.deployment.revoked`), deployment owner only.
+- Each goes through the door only, `--host --token --space` (`std.deployment.revoke`, `std.deployment.unrevoke`, `std.deployment.revoked`), deployment owner only.
 **Moving tenants off a revoked version** (ruled 2026-11-05):
 
 ```
@@ -290,7 +294,7 @@ ordo windows delete upgrade
 - **Skips** suppress a cron window's times that start inside the skip's range. A range window has none; delete or replace it.
 - **The list** covers 12 months back to 12 months ahead. A cron window is listed as each time it gives. A skipped time stays in the list, marked with the skip. The list holds at most 100,000 times and says when it was cut.
 - A tenant named that does not exist, or was reaped, is refused by name. Erasing a tenant removes it from every window that lists it. An `--only` window whose last tenant was erased covers nobody until you delete it.
-- Each takes `--db` (with `--as <who>`), or `--host --token --space` to go through the door, deployment owner only: `std.deployment.windows`, `setWindow`, `deleteWindow`, `skipWindow`, `deleteSkip`.
+- Each goes through the door only (`--host --token --space`), deployment owner only: `std.deployment.windows`, `setWindow`, `deleteWindow`, `skipWindow`, `deleteSkip`.
 
 ## Every tenant's database follows the program
 
@@ -578,7 +582,7 @@ kind, display, `created_at`) and `$authenticator` (authenticator id,
 principal, `linked_at`). All four are safe in the database backup:
 `$credential` holds no reversible secret, `$sessionrevocation` holds no
 principal, no client and no behaviour, and `$principal`/`$authenticator`
-hold the same directory an operator could reconstruct from an invite
+hold the same directory a deployment owner could reconstruct from an invite
 list.
 
 **A store that cannot be opened refuses the boot.** There is no fallback
@@ -1062,7 +1066,7 @@ retired it completed. A restore from a backup older than a completed
 destruction returns payloads under a destroyed epoch, which `std.E.history`
 already renders as an explicit unresolvable marker rather than a wrong
 answer, but the backup itself cannot be made to open them; the ordering
-rule is what keeps that from happening to a backup an operator actually
+rule is what keeps that from happening to a backup a deployment owner actually
 needs.
 
 **The master key is never inside a backup.** `$keycustody`'s module doc
@@ -1252,7 +1256,7 @@ position `upto` names a head; the chain holds a hash at `upto - 1`, or a
 checkpoint is current history and may anchor verification. When the chain
 holds a different hash, the checkpoint was signed over history a restore
 discarded: it is **orphaned**, it never anchors, and it is listed and kept.
-Its row stays in `$checkpoints`; deleting it is what a dishonest operator
+Its row stays in `$checkpoints`; deleting it is what a dishonest deployment owner
 would do. When both entries that could confirm it have been pruned the
 chain has no opinion, and the checkpoint is neither anchored on nor listed.
 

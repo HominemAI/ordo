@@ -325,6 +325,8 @@ fn every_way_a_link_is_made_explains_it_and_an_onboarding_explains_one() {
 /// `--identity` is the deployment's, so a space is a usage error.
 #[test]
 fn identity_reconciliation_takes_no_space() {
+    // `--direct` records in the database it acts on, so that one exists.
+    let _pg = ordo_conformance::Pg::named("ordo_cli_identity");
     let out = operator::run(
         "verify",
         &args(&[

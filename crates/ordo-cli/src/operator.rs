@@ -2477,20 +2477,20 @@ async fn versions_cmd(flags: Flags) -> Outcome {
     }
 }
 
-const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>] [--db <name>]\n\
-     ordo versions pin <tenant> <version>  [--db <name> --as <who> | --host <h> ...]\n\
-     ordo versions move <tenant>  [--db <name> --as <who> | --host <h> ...]\n\
-     ordo versions target <tenant> <version> | --clear  [--db <name> --as <who> | --host <h> ...]\n\
-     ordo versions show <version> [--db <name>]\n\
-     ordo versions label <version> \"<text>\" | --clear  [--db <name> | --host <h> ...]\n\
-     ordo versions diff <a> <b> [--source | --schema]  [--db <name> | --host <h> ...]\n\
-     ordo versions revoke <version> --reason \"<text>\" [--move-to <version>]  \
-     [--db <name> --as <who> | --host <h> ...]\n\
-     ordo versions unrevoke <version> --reason \"<text>\"  [--db <name> --as <who> | --host <h> ...]\n\
-     ordo versions revoked  [--db <name> | --host <h> ...]\n\
+const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...\n\
+     ordo versions pin <tenant> <version>  --host <h> ...\n\
+     ordo versions move <tenant>  --host <h> ...\n\
+     ordo versions target <tenant> <version> | --clear  --host <h> ...\n\
+     ordo versions show <version>  --host <h> ...\n\
+     ordo versions label <version> \"<text>\" | --clear  --host <h> ...\n\
+     ordo versions diff <a> <b> [--source | --schema]  --host <h> ...\n\
+     ordo versions revoke <version> --reason \"<text>\" [--move-to <version>]  --host <h> ...\n\
+     ordo versions unrevoke <version> --reason \"<text>\"  --host <h> ...\n\
+     ordo versions revoked  --host <h> ...\n\
      ordo versions settings [--limit <n>]  --host <h> ...\n\
      ordo versions set <served|minimum|new-tenant> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
+     every `versions` command goes through the door (`--host <h>` or ORDO_HOST)\n\
      a version is its name or its order number, `#4`";
 
 /// Who a revoke made on the database is recorded as, when `--as` is not
@@ -2884,7 +2884,10 @@ fn settings_lines(row: &serde_json::Value) -> String {
         show("served", "in-use"),
         show("minimum", "none"),
         show("newTenant", "the active version")
-    )
+    ) + &row["waiting"]["line"]
+        .as_str()
+        .map(|l| format!("  WAITING     {l}\n"))
+        .unwrap_or_default()
 }
 
 /// `ordo versions settings`: `versions.served`, `versions.minimum` and

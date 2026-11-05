@@ -169,16 +169,6 @@ When any change is refused, nothing is sent. An apply that landed half its chang
 
 **Reading the record:** `SELECT seq, kind, phase, actor, to_version FROM "$migrations" ORDER BY seq` lists every apply, and the deployment's security stream carries a `schema-migration` entry per row.
 
-## Versions and pins
-
-A **pin** is the version one tenant is set to run. Each tenant has one. A new tenant starts on the active version, or on the version `ORDO_VERSIONS_NEW_TENANT` names.
-
-- Each pin change is kept with who, why and when, in `$pins`.
-- Today pins are recorded and not yet served. Every node still serves the one active version.
-- Every activation moves every tenant's pin to the version it activates. That includes a rollback and an apply. Nothing moves one tenant alone yet.
-- `ordo versions list` and `show` count the tenants pinned to each version.
-- A revoked version cannot be a pin target. See "Revoking a version" below.
-
 ## Rolling Back
 
 `ordo rollback --version <name>` re-points the deployment at a version it has already stored and verified. Name it by its order number (`#3`) or by its name. Both appear in `ordo versions list`. `ordo deploys` shows the name.

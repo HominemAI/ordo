@@ -1883,7 +1883,7 @@ The app developer may turn it off. Two layers:
 
 | Layer | Setting |
 |---|---|
-| Deployment | `ORDO_EMAIL_CHANGE_TOUCH`: `on` (default) or `off` |
+| Deployment | `ORDO_EMAIL_CHANGE_TOUCH`: `on` or `off`; unset is `on`, or `off` at `ORDO_SECURITY_LEVEL=low` |
 | App developer | `std.deployment.setEmailPolicy {changeTouch}`: `on`, `off` or `default`. `default` hands it back to the deployment. |
 
 - The refusal is `403 presence_required`. It names the setting in force.

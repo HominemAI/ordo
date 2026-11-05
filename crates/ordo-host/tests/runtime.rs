@@ -2749,6 +2749,23 @@ fn an_exempt_op_that_names_nothing_refuses_the_boot_by_name() {
     assert!(ran.stderr.contains("std.space.callersOf"), "{}", ran.stderr);
 }
 
+/// **A security level that is not one refuses the boot**, naming the
+/// setting and its three values (owner, 2026-11-05).
+#[test]
+fn a_security_level_that_is_not_one_refuses_the_boot_by_name() {
+    let mut c = host("ordo_rt_never_dialled", free_port());
+    c.env("ORDO_PG_HOST", "203.0.113.1")
+        .env("ORDO_PG_PORT", "5432")
+        .env("ORDO_SECURITY_LEVEL", "paranoid");
+    let ran = refused(c);
+    assert!(
+        ran.stderr
+            .contains("ORDO_SECURITY_LEVEL=low, standard (the default) or high"),
+        "{}",
+        ran.stderr
+    );
+}
+
 /// The strict setting takes `on` or `off`; anything else names it.
 #[test]
 fn a_presence_on_reads_value_that_is_not_on_or_off_refuses_the_boot() {
@@ -2823,15 +2840,20 @@ async fn reads_need_no_presence_strict_restores_it_and_a_named_op_stops_asking()
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         if exempt {
             assert!(
-                stdout.contains("presence    NOT required on: std.space.callersOf"),
+                stdout.contains("NOT required on: std.space.callersOf (ORDO_STEP_UP_EXEMPT_OPS)"),
                 "{stdout}"
             );
         } else {
             assert!(
-                stdout.contains("presence    required on every platform op that changes something"),
+                stdout.contains("presence    on changes as ORDO_SECURITY_LEVEL=standard says"),
                 "{stdout}"
             );
         }
+        // The level and what it asks, on its own line (owner, 2026-11-05).
+        assert!(
+            stdout.contains("security    standard (ORDO_SECURITY_LEVEL); a touch asked for:"),
+            "{stdout}"
+        );
         if strict {
             assert!(stdout.contains("required on reads too"), "{stdout}");
         } else {

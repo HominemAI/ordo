@@ -86,7 +86,7 @@ describe('the share panel', () => {
     const d = byRoute({
       '/op/std.space.share': () => {
         tries += 1;
-        return tries === 1 ? refusal(403, 'access_denied') : { json: { rows: [{ ticket: 'tkt_1' }] } };
+        return tries === 1 ? refusal(403, 'presence_required') : { json: { rows: [{ ticket: 'tkt_1' }] } };
       },
     });
     let touches = 0;
@@ -102,10 +102,10 @@ describe('the share panel', () => {
   });
 
   it('shows the door’s refusal in the page’s words when a second try is refused too', async () => {
-    const d = byRoute({ '/op/std.space.shareLink': refusal(403, 'access_denied') });
+    const d = byRoute({ '/op/std.space.shareLink': refusal(403, 'presence_required') });
     const ui = await show(d, { stepUp: async () => undefined });
     await ui.press('Make a link anyone can read');
-    expect(ui.text()).toContain('The deployment did not allow that.');
+    expect(ui.text()).toContain('Confirm it is you with your passkey, or sign in again, then try once more.');
     expect(d.sent.filter((s) => path(s) === '/op/std.space.shareLink')).toHaveLength(2);
   });
 

@@ -1359,3 +1359,5 @@
 {"seq": 1360, "item": "when-a-tenant-on-a-revoked", "ask": 2, "at": "2026-11-05", "status": "decided", "text": "It's not something we just decide, that could be a default but it's up to the developer to decide where it goes, it could be the default, it could be a specific version, multiple versions back. Etc.", "source": "record", "read": true}
 {"seq": 1361, "item": "when-a-tenant-on-a-revoked", "ask": 0, "at": "2026-11-05", "status": "decided", "text": "Like technically the developer could even have their own system managing automatic updates.", "source": "record", "read": true}
 {"seq": 1362, "item": "when-a-tenant-on-a-revoked", "ask": 0, "at": "2026-11-05", "status": "decided", "text": "I've ruled against these needs often, because it doesn't make sense.", "source": "record", "read": true}
+{"seq": 1363, "item": "a-system-calling-platform-ops-is", "ask": 1, "at": "2026-11-05T09:22:34Z", "status": "open", "text": "good.", "source": "page", "read": false}
+{"seq": 1364, "item": "a-system-calling-platform-ops-is", "ask": 0, "at": "2026-11-05T09:22:37Z", "status": "decided", "text": "", "source": "page", "read": false}

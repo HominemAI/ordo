@@ -696,3 +696,90 @@ async fn a_dropped_field_leaves_the_column_and_moves_the_version() {
     assert_eq!(kind[0][0].as_deref(), Some("version"));
     assert!(w.serves("spc_t").await);
 }
+
+// ── a database on its own tenant's pin ──────────────────────────────────
+
+/// `v2` applied straight to the deployment's own database, as `ordo
+/// apply` does, so the catch-up has `v2` to bring tenants to.
+async fn serving_v2(w: &World, v2: &Program) {
+    migrate(&w.control, v2).await;
+    ordo_host::apply_op::run_program(
+        &w.control,
+        &SinglePool::new(w.control.clone()),
+        v2,
+        vec![],
+        "test",
+        "ordo apply",
+        true,
+    )
+    .await
+    .expect("the direct apply");
+}
+
+/// **The sweep skips a database by its own tenant's pin, not by version.**
+///
+/// `spc_a` is pinned to `v1` and stays there. `spc_b`'s database is at
+/// `v1` too, but `spc_b` is pinned to `v2` (just moved off), so it is
+/// behind and brought forward. Until 2026-11-05 any database at any pinned
+/// version was skipped, so `spc_b` waited.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_skips_a_database_only_when_its_own_tenant_is_pinned_there() {
+    let _serial = SERIAL.lock().await;
+    let v1 = Program::compile(V1).expect("v1");
+    let v2 = Program::compile(V2).expect("v2");
+    let w = World::new("pinskip", &v1, &v2, V2).await;
+    let a = tenant_db_at("ordo_tf_pinskip_a", &v1).await;
+    let b = tenant_db_at("ordo_tf_pinskip_b", &v1).await;
+    w.attach("spc_a", "ordo_tf_pinskip_a").await;
+    w.attach("spc_b", "ordo_tf_pinskip_b").await;
+    serving_v2(&w, &v2).await;
+    let d = w.spaces.deployment();
+    d.note_pin("spc_a", &v1.version, 1, 1);
+    d.note_pin("spc_b", &v2.version, 1, 2);
+
+    let swept = w.catchup.sweep().await;
+    assert_eq!((swept.advanced, swept.held.len()), (1, 0), "{swept:?}");
+    assert_eq!(version_of(&a).await, v1.version, "spc_a stays on its pin");
+    assert_eq!(version_of(&b).await, v2.version, "spc_b is brought forward");
+}
+
+/// **One space's catch-up reads the tenant's pin from the control
+/// database**, so a node that has not yet heard a fresh tenant's pin does
+/// not bring its database off it.
+#[tokio::test(flavor = "multi_thread")]
+async fn bringing_one_space_forward_leaves_a_tenant_pinned_elsewhere() {
+    let _serial = SERIAL.lock().await;
+    let v1 = Program::compile(V1).expect("v1");
+    let v2 = Program::compile(V2).expect("v2");
+    let w = World::new("pinone", &v1, &v2, V2).await;
+    let a = tenant_db_at("ordo_tf_pinone_a", &v1).await;
+    w.attach("spc_a", "ordo_tf_pinone_a").await;
+    serving_v2(&w, &v2).await;
+    ordo_host::tenants::ensure_table(&w.control)
+        .await
+        .expect("$spaces");
+    ordo_host::versions::Versions::on(&w.control)
+        .ensure()
+        .await
+        .expect("pins");
+    assert!(
+        ordo_host::tenants::reserve(&w.control, "spc_a", "a", "dev", 10, None)
+            .await
+            .expect("reserved")
+    );
+    ordo_host::tenants::activate(&w.control, "spc_a", 11)
+        .await
+        .expect("active");
+    w.control
+        .rows(&format!(
+            "UPDATE \"$spaces\" SET \"version\" = '{}' WHERE \"$space\" = 'spc_a'",
+            v1.version
+        ))
+        .await
+        .expect("pinned to v1");
+    assert!(w.spaces.deployment().pin_of("spc_a").is_none());
+
+    let caught = w.catchup.forward_space("spc_a").await;
+    assert_eq!(caught, Caught::Pinned(v1.version.clone()));
+    assert_eq!(version_of(&a).await, v1.version);
+}

@@ -1423,8 +1423,16 @@ async fn a_second_factor_key_cannot_sign_in_alone() {
     .await;
     assert_eq!(alone, unknown, "the same answer as a key nobody enrolled");
 
-    // The step-up route refuses it too.
-    let (_, options) = send(&app, "POST", "/auth/step-up/begin", None, Some(&token)).await;
+    // The step-up route refuses it too. The person holds no passkey, so
+    // the begin says their touch is a fresh sign-in, and an assertion from
+    // the key over any other challenge proves nothing.
+    let (status, begun) = send(&app, "POST", "/auth/step-up/begin", None, Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{begun}");
+    assert_eq!(
+        begun["error"]["code"], "reauthentication_required",
+        "{begun}"
+    );
+    let (_, options) = post(&app, "/auth/begin", json!({"method": "passkey"})).await;
     let (status, _) = send(
         &app,
         "POST",
@@ -2364,4 +2372,144 @@ async fn a_recovery_removes_every_second_factor_only_once_it_completes() {
             .any(|k| k.starts_with("second-factor removed") && k.contains("by=recovery")),
         "{kinds:?}"
     );
+}
+
+// ══════════════════ a fresh sign-in as the touch (owner, 2026-11-05) ══════════
+
+/// `POST /auth/step-up` with a reauth handle in `x-reauth` and `{}`.
+async fn step_up_by_reauth(app: &axum::Router, token: &str, handle: &str) -> (StatusCode, Value) {
+    send_with(
+        app,
+        "POST",
+        "/auth/step-up",
+        Some(json!({})),
+        Some(token),
+        &[("x-reauth", handle)],
+    )
+    .await
+}
+
+/// Register a passkey person through the sign-up route; their token.
+async fn passkey_person(app: &axum::Router) -> String {
+    let (_, options) = post(app, "/auth/register", json!({"method": "passkey"})).await;
+    let device = TestAuthenticator::ed25519();
+    let (status, signed) = post(
+        app,
+        "/auth/complete",
+        registration_body(&device.register(options["challenge"].as_str().expect("challenge"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{signed}");
+    signed["token"].as_str().expect("token").to_string()
+}
+
+/// A person with no passkey signed in by password. The door tells them a
+/// touch is owed, `/auth/step-up/begin` tells them their touch is a fresh
+/// sign-in, and the handle that sign-in yields passes the gate, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_sign_in_is_the_touch_for_a_person_with_no_passkey() {
+    let k = key_harness();
+    let app = k.h.app();
+    let token = token_by_password(&app).await;
+    let ana = claims_of(&token, NOW).principal;
+    let door = door_for(&ana, NOW + 1);
+    assert_eq!(door.check(&token, SPACE, GATED), AccessDecision::Deny);
+    assert!(
+        door.presence_required(&token, SPACE, GATED),
+        "a signed-in person is told a touch is owed, not denied"
+    );
+    assert!(
+        !door.presence_required(&token, SPACE, "space.nothing"),
+        "an op no touch would open keeps the uniform denial"
+    );
+
+    let (status, begun) = send(&app, "POST", "/auth/step-up/begin", None, Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{begun}");
+    assert_eq!(
+        begun["error"]["code"], "reauthentication_required",
+        "{begun}"
+    );
+
+    let handle = reauth_handle(&app, &token, None, NOW).await;
+    let (status, stepped) = step_up_by_reauth(&app, &token, &handle).await;
+    assert_eq!(status, StatusCode::OK, "{stepped}");
+    let present = stepped["token"].as_str().expect("a token").to_string();
+    let claims = claims_of(&present, NOW);
+    assert_eq!(claims.principal, ana, "the same person");
+    assert_eq!(
+        claims.session.as_ref().map(|s| s.id.clone()),
+        claims_of(&token, NOW).session.map(|s| s.id),
+        "the same session"
+    );
+    assert!(
+        matches!(
+            door.check(&present, SPACE, GATED),
+            AccessDecision::Allow { .. }
+        ),
+        "the fresh sign-in passes the gate"
+    );
+
+    // Spent once.
+    let (status, again) = step_up_by_reauth(&app, &token, &handle).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{again}");
+    assert!(again.get("token").is_none(), "{again}");
+}
+
+/// The handle is this person's and nobody else's, and it never makes a
+/// delegated token present.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reauth_never_lets_another_session_or_a_delegated_token_pass() {
+    let k = key_harness();
+    let app = k.h.app();
+    let token = token_by_password(&app).await;
+    let ana_claims = claims_of(&token, NOW);
+    let ana = ana_claims.principal.clone();
+    let handle = reauth_handle(&app, &token, None, NOW).await;
+
+    // Another person's session: refused, and Ana's handle is not spent.
+    let bea_token = passkey_person(&app).await;
+    let (status, out) = step_up_by_reauth(&app, &bea_token, &handle).await;
+    assert_ne!(status, StatusCode::OK, "{out}");
+    assert!(out.get("token").is_none(), "{out}");
+
+    // A delegated token acting as Ana, carrying her session: refused, and
+    // the door never tells it to touch anything.
+    let delegated = ordo_identity::mint(
+        &TokenKey::from_secret(SECRET),
+        &ordo_identity::TokenSpec {
+            principal: ana.clone(),
+            expires: ordo_identity::Timestamp(NOW + 600),
+            client: None,
+            user_presence_at: None,
+            capability: None,
+            delegation: Some(ordo_identity::delegation::DelegationClaim {
+                id: ordo_identity::principal::DelegationId("dlg_1".into()),
+                space: SpaceId(SPACE.into()),
+                delegator: ana.clone(),
+                expires: ordo_identity::Timestamp(NOW + 600),
+            }),
+            session: ana_claims.session.clone(),
+        },
+    );
+    let (status, out) = step_up_by_reauth(&app, &delegated, &handle).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{out}");
+    assert!(out.get("token").is_none(), "{out}");
+    let door = door_for(&ana, NOW + 1);
+    assert!(!door.presence_required(&delegated, SPACE, GATED));
+
+    // Ana's own handle still works for Ana: neither refusal spent it.
+    let (status, stepped) = step_up_by_reauth(&app, &token, &handle).await;
+    assert_eq!(status, StatusCode::OK, "{stepped}");
+}
+
+/// A person who holds a passkey has a touch to give: a fresh sign-in does
+/// not stand in for it, and the refusal says to touch it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_passkey_holder_is_told_to_touch_it() {
+    let k = key_harness();
+    let app = k.h.app();
+    let token = passkey_person(&app).await;
+    let (status, out) = step_up_by_reauth(&app, &token, "ra_anything").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{out}");
+    assert_eq!(out["error"]["code"], "presence_required", "{out}");
 }

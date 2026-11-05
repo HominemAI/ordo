@@ -108,9 +108,9 @@ pub use provider::{
 pub use registry::{ProviderRegistry, RegistryError};
 pub use second_step::{DeploymentMode, PersonMode, SecondStepKind, TenantMode};
 pub use session::{
-    logout, refresh, refresh_presence, sign_in, sign_in_as, LifetimeError,
-    MemorySessionRevocations, RevocationStoreError, SessionClaim, SessionError, SessionId,
-    SessionRevocations, SignIn, DEFAULT_SESSION_MAX_SECS, DEFAULT_SESSION_SECS,
+    logout, refresh, refresh_presence, refresh_presence_by_reauth, sign_in, sign_in_as,
+    LifetimeError, MemorySessionRevocations, RevocationStoreError, SessionClaim, SessionError,
+    SessionId, SessionRevocations, SignIn, DEFAULT_SESSION_MAX_SECS, DEFAULT_SESSION_SECS,
 };
 pub use token::{mint, verify, TokenError, TokenKey, TokenKeyError, TokenSpec};
 pub use upstream::{PresenceMode, PresenceRule, UpstreamAcceptance, UpstreamPresence};

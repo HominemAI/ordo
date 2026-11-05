@@ -12,7 +12,9 @@
 //!
 //! **What stays the platform's.** Step-up is still the one mechanism for
 //! "not delegable", presence is still minted only by a verified passkey
-//! assertion (`UserPresence` has no other producer), and the freshness
+//! assertion or, for a person with no passkey, a fresh sign-in spent at
+//! `/auth/step-up` (owner, 2026-11-05; `refresh_presence_by_reauth`), and
+//! never into a delegated token, and the freshness
 //! window is still the engine's. This setting says only *where presence is
 //! required*.
 //!

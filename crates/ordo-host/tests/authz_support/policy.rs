@@ -344,6 +344,7 @@ pub fn op_class(name: &str) -> Option<OpClass> {
         | "std.space.setShareLinkLifetime"
         | "std.space.setLinkPasswordLimits"
         | "std.space.setPasswordSlowdown"
+        | "std.space.setTouch"
         | "std.space.create"
         | "std.space.reap" => OwnerOnly,
         // Manager and owner.
@@ -373,6 +374,7 @@ pub fn op_class(name: &str) -> Option<OpClass> {
         | "std.space.setLinkPassword"
         | "std.space.setLinkMaxOpens"
         | "std.space.sessionPolicy"
+        | "std.space.touches"
         | "std.space.approveMemberRecovery"
         | "std.space.recoverMember"
         | "std.space.objectToCase" => Admin,

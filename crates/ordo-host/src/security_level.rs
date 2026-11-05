@@ -35,6 +35,11 @@
 //! strict setting's alone. Console keys, recovery, a console acting inside a
 //! tenant and the identity service's account page ask at every level, so
 //! the level does not reach them.
+//!
+//! **A tenant may choose its own touches** where the app developer exposes
+//! them (owner, 2026-11-05, [`crate::tenant_touches`]): only the situations
+//! [`Situation::tenant_choosable`] names. The door reads the per-action
+//! settings first, then the tenant's choice, then the level.
 
 use std::sync::OnceLock;
 
@@ -93,7 +98,7 @@ impl SecurityLevel {
 }
 
 /// The situations of the ruling's table, in its order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Situation {
     Deploying,
     CreatingTenant,
@@ -129,6 +134,53 @@ impl Situation {
         Situation::ContactEmail,
         Situation::IdentityAccountPage,
     ];
+
+    /// The situation's one word, as the door, the CLI and the console
+    /// name it (`ordo touches expose membership both`).
+    pub fn word(self) -> &'static str {
+        match self {
+            Situation::Deploying => "deploying",
+            Situation::CreatingTenant => "creating-tenant",
+            Situation::DeletingTenant => "deleting-tenant",
+            Situation::ConsoleKeys => "console-keys",
+            Situation::ExportImport => "export-import",
+            Situation::Membership => "membership",
+            Situation::Recovery => "recovery",
+            Situation::TenantStorage => "tenant-storage",
+            Situation::PlatformReads => "platform-reads",
+            Situation::ConsoleInTenant => "console-in-tenant",
+            Situation::ApprovingDelegation => "approving-delegation",
+            Situation::AccountSecurity => "account-security",
+            Situation::ContactEmail => "contact-email",
+            Situation::IdentityAccountPage => "identity-account-page",
+        }
+    }
+
+    /// A situation from its [`Situation::word`].
+    pub fn parse(word: &str) -> Option<Situation> {
+        Situation::ALL.into_iter().find(|s| s.word() == word.trim())
+    }
+
+    /// May the app developer let a tenant choose this touch for its own
+    /// space (owner, 2026-11-05, `tenant-chooses-its-touches`)? Only the
+    /// situations whose ops act inside one tenant, through the door.
+    ///
+    /// Never: the acts on the deployment (deploying, creating, deleting or
+    /// reaping a tenant, console keys, a console inside a tenant, the
+    /// identity service's page), recovery (a stolen session must not be able
+    /// to lower the touch that guards taking an account over), platform
+    /// reads (the strict setting's alone), and a person's own contact email
+    /// (one person, many tenants: no one tenant decides it).
+    pub fn tenant_choosable(self) -> bool {
+        matches!(
+            self,
+            Situation::ExportImport
+                | Situation::Membership
+                | Situation::TenantStorage
+                | Situation::ApprovingDelegation
+                | Situation::AccountSecurity
+        )
+    }
 
     /// The table's words, for the boot log.
     pub fn label(self) -> &'static str {
@@ -234,6 +286,10 @@ pub fn situation_of(op: &str) -> Option<Situation> {
         ("std.space", "addConnection" | "updateConnection" | "retireConnection" | "setOrigins") => {
             AccountSecurity
         }
+        // A tenant's own touches: lowering one is lasting harm a stolen
+        // session could do, so it reads as account security. The tenant's
+        // own choice never reaches this op (`tenant_touches::NEVER_CHOSEN`).
+        ("std.space", "setTouch") => AccountSecurity,
         // Taking over a tenant's ownership is the succession half of
         // recovery (owner succession, 2026-10-24).
         ("std.space", "succeedOwner") => Recovery,
@@ -339,6 +395,29 @@ mod tests {
             SecurityLevel::Low,
             "std.deployment.addConsoleKey"
         ));
+    }
+
+    #[test]
+    fn only_situations_inside_a_tenant_are_choosable() {
+        use Situation::*;
+        let choosable: Vec<Situation> = Situation::ALL
+            .into_iter()
+            .filter(|s| s.tenant_choosable())
+            .collect();
+        assert_eq!(
+            choosable,
+            [
+                ExportImport,
+                Membership,
+                TenantStorage,
+                ApprovingDelegation,
+                AccountSecurity
+            ]
+        );
+        for s in Situation::ALL {
+            assert_eq!(Situation::parse(s.word()), Some(s));
+        }
+        assert_eq!(Situation::parse("everything"), None);
     }
 
     #[test]

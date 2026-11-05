@@ -145,6 +145,7 @@ pub mod tenant_ops;
 pub mod tenant_origins;
 pub mod tenant_providers;
 pub mod tenant_setup;
+pub mod tenant_touches;
 pub mod tenants;
 pub mod tickets;
 pub mod tightened;
@@ -2674,7 +2675,8 @@ pub fn deployment_engine(f: &Fixture, pg: &Pg) -> Result<ordo_identity::AccessEn
     // by space then id so a rebuild is deterministic across every space it
     // finds rather than only within one.
     let rows = pg.query(MEMBERS_SQL)?;
-    let tenant = profile_ops::TenantAccess::read_pg(pg)?;
+    let mut tenant = profile_ops::TenantAccess::read_pg(pg)?;
+    tenant.touches = tenant_touches::DoorTouches::read_pg(pg)?;
     engine_from_directory(
         f,
         &rows,
@@ -2695,7 +2697,8 @@ pub fn deployment_engine_delegating(
     delegating: &delegable::DelegablePolicy,
 ) -> Result<ordo_identity::AccessEngine, String> {
     let rows = pg.query(MEMBERS_SQL)?;
-    let tenant = profile_ops::TenantAccess::read_pg(pg)?;
+    let mut tenant = profile_ops::TenantAccess::read_pg(pg)?;
+    tenant.touches = tenant_touches::DoorTouches::read_pg(pg)?;
     engine_from_directory(
         f,
         &rows,
@@ -2796,6 +2799,10 @@ pub async fn deployment_engine_pooled(
     } else {
         (Vec::new(), profile_ops::TenantAccess::default())
     };
+    let mut tenant = tenant;
+    tenant.touches = tenant_touches::DoorTouches::read(pool)
+        .await
+        .map_err(|e| format!("tenant touches: {e}"))?;
     engine_from_directory(
         f,
         &rows,
@@ -3253,6 +3260,11 @@ pub fn engine_from_directory_served(
             crate::consent::any_member(&spec.name) && !crate::consent::asks_presence(&spec.name);
         if policy.requires(&spec.name, spec.kind) && !consent_free {
             engine.require_step_up(&spec.name);
+        }
+        // A tenant's own touch, where the app developer exposed it (owner,
+        // 2026-11-05): after the per-op settings, before the level.
+        if !consent_free {
+            tenant_touches::install(&mut engine, &spec.name, spec.kind, policy, &tenant.touches);
         }
         // **Signed in means authenticated** (owner, 2026-10-22): a read asks
         // for no touch unless the deployment is strict

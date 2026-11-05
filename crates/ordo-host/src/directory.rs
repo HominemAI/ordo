@@ -530,6 +530,11 @@ impl Cache {
         // however many databases the rows came from.
         rows.sort();
         unread_spaces.sort();
+        // The touches tenants chose and what the app developer exposed live
+        // in the control database, read on every build.
+        tenant.touches = crate::tenant_touches::DoorTouches::read(control)
+            .await
+            .map_err(|e| format!("tenant touches: {e}"))?;
         let engine = crate::engine_from_directory_served(
             f,
             others,

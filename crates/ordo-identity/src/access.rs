@@ -451,6 +451,11 @@ pub struct AccessEngine {
     /// nothing for an op contributes [`StepUpRequirement::None`], which is the
     /// identity — so omitting an op is not a way to exempt it.
     client_step_up: BTreeMap<ClientId, BTreeMap<String, StepUpRequirement>>,
+    /// One tenant's own touches, in place of `op_step_up` for that tenant
+    /// alone: the touches the app developer let tenants choose (owner,
+    /// 2026-11-05, "the dev exposes the options"). The deployment decides
+    /// what lands here; a client's additions still fold over it.
+    space_step_up: BTreeMap<(SpaceId, String), StepUpRequirement>,
     /// How old a presence assertion may be and still satisfy step-up, unless
     /// an op or client demands something shorter.
     step_up_max_age_secs: u64,
@@ -476,6 +481,7 @@ impl Default for AccessEngine {
             deployed: BTreeMap::new(),
             op_step_up: BTreeMap::new(),
             client_step_up: BTreeMap::new(),
+            space_step_up: BTreeMap::new(),
             step_up_max_age_secs: DEFAULT_STEP_UP_MAX_AGE_SECS,
             not_delegable: BTreeSet::new(),
             no_capability: BTreeSet::new(),
@@ -742,6 +748,41 @@ impl AccessEngine {
             .insert(op.to_string(), StepUpRequirement::PRESENCE);
     }
 
+    /// One tenant's own touch on `op`: presence (`true`) or none (`false`),
+    /// in `space` alone, in place of the op's minimum there. The deployment
+    /// calls it only for a touch the app developer let tenants choose, in
+    /// the direction they allowed; every other space keeps the op's minimum.
+    pub fn set_step_up_in(&mut self, space: &SpaceId, op: &str, required: bool) {
+        let r = if required {
+            StepUpRequirement::PRESENCE
+        } else {
+            StepUpRequirement::None
+        };
+        self.space_step_up
+            .insert((space.clone(), op.to_string()), r);
+    }
+
+    /// [`AccessEngine::step_up_for`] in one space: that space's own choice
+    /// when it made one, else the op's minimum, strengthened by the client.
+    pub fn step_up_in(
+        &self,
+        space: &SpaceId,
+        op: &str,
+        client: Option<&ClientId>,
+    ) -> StepUpRequirement {
+        match self.space_step_up.get(&(space.clone(), op.to_string())) {
+            None => self.step_up_for(op, client),
+            Some(own) => {
+                let from_client = client
+                    .and_then(|c| self.client_step_up.get(c))
+                    .and_then(|ops| ops.get(op))
+                    .copied()
+                    .unwrap_or(StepUpRequirement::None);
+                own.strongest(from_client)
+            }
+        }
+    }
+
     /// The same, with a window shorter than the deployment's. The effective
     /// window is always the min of this and
     /// [`AccessEngine::step_up_max_age_secs`], so this can only tighten.
@@ -927,7 +968,7 @@ impl AccessEngine {
         // Step-up gate: applies to whichever path allowed. The requirement is
         // the op's, strengthened by the caller's client — a client cannot
         // shop its way out of it (Z-003).
-        match self.step_up_for(op, claims.client.as_ref()) {
+        match self.step_up_in(space, op, claims.client.as_ref()) {
             StepUpRequirement::None => Decision::Allow,
             StepUpRequirement::Presence { max_age_secs } => {
                 // The deployment's window is itself a ceiling: a requirement

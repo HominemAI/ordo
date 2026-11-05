@@ -1031,6 +1031,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(guest_specs())
     .chain(session_policy_specs())
     .chain(crate::guess_limits::specs())
+    .chain(crate::tenant_touches::specs())
     .chain(email_policy_specs())
     .chain(crate::share_links::specs())
     .chain(crate::pause::specs())
@@ -1917,6 +1918,10 @@ pub fn owner_only(name: &str) -> bool {
         // deployment's own space; a tenant's own values are its owner's,
         // unless the app developer's access template says otherwise.
         || crate::guess_limits::OPS.contains(&name)
+        // Which touches tenants may choose is the deployment owner's, in its
+        // own space; a tenant's own choice is its owner's (owner,
+        // 2026-11-05). Reading a tenant's touches is the manager's too.
+        || crate::tenant_touches::owner_only(name)
         // 27ar. Pausing a tenant is a deployment operation (owner,
         // 2026-10-05), and the two answer only in its own space.
         || crate::pause::deployment_scoped(name)
@@ -2185,6 +2190,9 @@ pub struct PlatformOps {
     pub session_policy: Option<Arc<crate::session_policy::SessionPolicies>>,
     /// The password slowdown's layers ([`crate::guess_limits`]).
     pub guess_limits: Option<Arc<crate::guess_limits::GuessLimits>>,
+    /// The touches tenants may choose, and their choices
+    /// ([`crate::tenant_touches`]). `None` where nothing wired them.
+    pub touches: Option<Arc<crate::tenant_touches::TouchOps>>,
     /// The email requirement's state ([`crate::contact_email`]).
     pub contact: Option<Arc<crate::contact_email::ContactEmails>>,
     /// What a tenant's deletion does to identities (E7). `None` leaves them
@@ -2301,6 +2309,7 @@ impl PlatformOps {
             guest: None,
             session_policy: None,
             guess_limits: None,
+            touches: None,
             contact: None,
             identities: None,
             credentials: None,
@@ -2532,6 +2541,11 @@ impl PlatformOps {
 
     pub fn with_guess_limits(mut self, ops: Arc<crate::guess_limits::GuessLimits>) -> PlatformOps {
         self.guess_limits = Some(ops);
+        self
+    }
+
+    pub fn with_touches(mut self, ops: Arc<crate::tenant_touches::TouchOps>) -> PlatformOps {
+        self.touches = Some(ops);
         self
     }
 
@@ -2852,6 +2866,15 @@ impl PlatformOps {
                     )
                 })?;
                 ops.execute(name, space, bound, caller).await
+            }
+            name if crate::tenant_touches::OPS.contains(&name) => {
+                let ops = self.touches.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the touch ops and wired no state for them",
+                    )
+                })?;
+                ops.execute(name, space, bound, caller, self.members.as_deref())
+                    .await
             }
             name if crate::session_policy::OPS.contains(&name) => {
                 let ops = self.session_policy.as_deref().ok_or_else(|| {

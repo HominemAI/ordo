@@ -2155,6 +2155,9 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             name if crate::session_policy::OPS.contains(&name) => true,
             // The password slowdown, in three layers.
             name if crate::guess_limits::OPS.contains(&name) => true,
+            // The touches tenants may choose, in the control database every
+            // assembly has.
+            name if crate::tenant_touches::OPS.contains(&name) => true,
             // Whether a person must have a verified email address.
             name if crate::contact_email::OPS.contains(&name) => true,
             // Recovery R5: the deployment owner's recovery and succession
@@ -3102,6 +3105,14 @@ async fn platform_ops_for(
         if let Some(g) = w.guess_limits.clone() {
             ops = ops.with_guess_limits(g);
         }
+        // The touches tenants may choose (owner, 2026-11-05).
+        crate::tenant_touches::ensure_table(w.pool)
+            .await
+            .map_err(|e| BootRefusal::Database(e.to_string()))?;
+        ops = ops.with_touches(Arc::new(
+            crate::tenant_touches::TouchOps::on_pool(w.pool, w.home.0.clone())
+                .with_stream(stream.clone()),
+        ));
         if let Some(c) = w.contact.clone() {
             ops = ops.with_contact(c);
         }

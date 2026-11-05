@@ -174,6 +174,8 @@ const READS: &[&str] = &[
     "std.deployment.windows",
     // The three version settings and their history; deployment owner only.
     "std.deployment.versionSettings",
+    // Which touches tenants may choose, and the changes; deployment owner.
+    "std.deployment.tenantTouches",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",
@@ -200,6 +202,8 @@ const READS: &[&str] = &[
     "std.space.profile",
     "std.space.sessionPolicy",
     "std.space.shares",
+    // What a tenant may choose about its touches, and what it chose.
+    "std.space.touches",
 ];
 
 /// **A read answers a signed-in person with no touch**, at every level;

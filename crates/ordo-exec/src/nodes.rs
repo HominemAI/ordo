@@ -20,6 +20,15 @@
 //!   A row older than [`stale_after`] is a node that stopped without saying
 //!   so, and nothing waits for it.
 //!
+//! - `also_serving`: the versions this node serves beside `serving`, to
+//!   tenants pinned to them, comma-separated (`plan-versions.md` §1.4,
+//!   increment 3). Empty when it serves one.
+//! - `new_tenant`: this node's `versions.new_tenant`
+//!   (`ORDO_VERSIONS_NEW_TENANT`), empty when unset. Nodes that disagree
+//!   start new tenants on different versions, so each node compares its
+//!   own with the others' and warns, naming the setting
+//!   ([`new_tenant_disagreements`]).
+//!
 //! `seen_at` is the database's clock, both when written and when read, so
 //! two machines with different clocks still agree on which rows are live.
 //!
@@ -41,7 +50,9 @@ CREATE TABLE IF NOT EXISTS \"$nodes\" ( \
   \"sweep_ms\" bigint NOT NULL, \
   \"beat_secs\" bigint NOT NULL, \
   \"seen_at\" bigint NOT NULL \
-)";
+); \
+ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"also_serving\" text NOT NULL DEFAULT ''; \
+ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"new_tenant\" text NOT NULL DEFAULT ''";
 
 /// What one node last said about itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,6 +64,10 @@ pub struct Node {
     pub retrying: bool,
     /// How long the last finished catch-up sweep took.
     pub sweep_ms: u64,
+    /// Versions served beside `serving`, by name.
+    pub also_serving: Vec<String>,
+    /// `versions.new_tenant` as this node read it; empty when unset.
+    pub new_tenant: String,
     pub beat_secs: u64,
     /// Seconds since this node last wrote its row, by the database's clock.
     pub age_secs: u64,
@@ -78,14 +93,16 @@ pub async fn beat(pool: &Pool, n: &Node) -> Result<(), PoolError> {
     let held = serde_json::to_string(&n.held).unwrap_or_else(|_| "[]".into());
     pool.rows(&format!(
         "INSERT INTO \"{NODES_TABLE}\" (\"node\", \"serving\", \"caught_up\", \"held\", \
-           \"retrying\", \"sweep_ms\", \"beat_secs\", \"seen_at\") \
-         VALUES ({}, {}, {}, {}, {}, {}, {}, \
+           \"retrying\", \"sweep_ms\", \"beat_secs\", \"also_serving\", \"new_tenant\", \
+           \"seen_at\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, \
            extract(epoch from clock_timestamp())::bigint) \
          ON CONFLICT (\"node\") DO UPDATE SET \
            \"serving\" = EXCLUDED.\"serving\", \"caught_up\" = EXCLUDED.\"caught_up\", \
            \"held\" = EXCLUDED.\"held\", \"retrying\" = EXCLUDED.\"retrying\", \
            \"sweep_ms\" = EXCLUDED.\"sweep_ms\", \"beat_secs\" = EXCLUDED.\"beat_secs\", \
-           \"seen_at\" = EXCLUDED.\"seen_at\"",
+           \"also_serving\" = EXCLUDED.\"also_serving\", \
+           \"new_tenant\" = EXCLUDED.\"new_tenant\", \"seen_at\" = EXCLUDED.\"seen_at\"",
         sql_lit(&n.node),
         sql_lit(&n.serving),
         sql_lit(&n.caught_up),
@@ -93,6 +110,8 @@ pub async fn beat(pool: &Pool, n: &Node) -> Result<(), PoolError> {
         n.retrying,
         n.sweep_ms,
         n.beat_secs.max(1),
+        sql_lit(&n.also_serving.join(",")),
+        sql_lit(&n.new_tenant),
     ))
     .await?;
     Ok(())
@@ -116,7 +135,8 @@ pub async fn live(pool: &Pool) -> Result<Vec<Node>, PoolError> {
         .rows(&format!(
             "SELECT \"node\", \"serving\", \"caught_up\", \"held\", \"retrying\"::text, \
                \"sweep_ms\", \"beat_secs\", \
-               extract(epoch from clock_timestamp())::bigint - \"seen_at\" \
+               extract(epoch from clock_timestamp())::bigint - \"seen_at\", \
+               \"also_serving\", \"new_tenant\" \
              FROM \"{NODES_TABLE}\" ORDER BY \"node\""
         ))
         .await
@@ -139,10 +159,28 @@ pub async fn live(pool: &Pool) -> Result<Vec<Node>, PoolError> {
                 sweep_ms: cell(5).parse().unwrap_or(0),
                 beat_secs: cell(6).parse().unwrap_or(1),
                 age_secs: cell(7).parse::<i64>().unwrap_or(0).max(0) as u64,
+                also_serving: cell(8)
+                    .split(',')
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                new_tenant: cell(9).to_string(),
             }
         })
         .filter(|n| n.age_secs <= stale_after(n.beat_secs))
         .collect())
+}
+
+/// The live nodes, other than `me`, whose `versions.new_tenant` differs
+/// from `mine` (empty is unset): `(node, its value)`. Each node starts new
+/// tenants on its own value, so a difference hands tenants made on two
+/// nodes two versions.
+pub fn new_tenant_disagreements(nodes: &[Node], me: &str, mine: &str) -> Vec<(String, String)> {
+    nodes
+        .iter()
+        .filter(|n| n.node != me && n.new_tenant != mine)
+        .map(|n| (n.node.clone(), n.new_tenant.clone()))
+        .collect()
 }
 
 /// Where a version stands across the live nodes.

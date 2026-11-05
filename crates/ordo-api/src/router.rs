@@ -810,7 +810,11 @@ async fn dispatch(
 
     // The spec is cloned here, at dispatch — everything below is immune to a
     // concurrent registry swap.
-    let Some(op) = state.registry.current().get(&name) else {
+    let Some(op) = state
+        .registry
+        .current()
+        .get_in(named_space(&headers), &name)
+    else {
         // An op nobody registered answers exactly as a forbidden op does.
         let token = bearer(&headers);
         if token.is_none() {
@@ -2691,7 +2695,11 @@ async fn live_add_inner(
     if let Some(refusal) = token_refusal(state, headers, &add.op).await {
         return Err(refusal);
     }
-    let Some(op) = state.registry.current().get(&add.op) else {
+    let Some(op) = state
+        .registry
+        .current()
+        .get_in(named_space(headers), &add.op)
+    else {
         return Err(door_refusal(
             state,
             &add.op,

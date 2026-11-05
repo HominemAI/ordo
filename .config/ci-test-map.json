@@ -438,6 +438,7 @@
     "crates/ordo-host/src/pause.rs": "all",
     "crates/ordo-host/src/people_ops.rs": "all",
     "crates/ordo-host/src/pgsync.rs": "all",
+    "crates/ordo-host/src/pin_stream.rs": "all",
     "crates/ordo-host/src/platform_ops.rs": "all",
     "crates/ordo-host/src/presence.rs": "all",
     "crates/ordo-host/src/principal_directory.rs": "all",

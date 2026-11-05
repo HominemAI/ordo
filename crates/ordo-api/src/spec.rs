@@ -612,6 +612,15 @@ impl OpSpec {
 /// Returns an owned spec so callers hold their version across swaps.
 pub trait OpRegistry: Send + Sync {
     fn get(&self, name: &str) -> Option<OpSpec>;
+
+    /// The op as the program serving `space` declares it. A registry that
+    /// serves one program for every space answers [`OpRegistry::get`]; a
+    /// host that serves each tenant its pinned version
+    /// (`plan-versions.md` §1.4) answers per space.
+    fn get_in(&self, space: Option<&str>, name: &str) -> Option<OpSpec> {
+        let _ = space;
+        self.get(name)
+    }
 }
 
 /// Parameters that passed type + bounds validation, keyed by declared name.

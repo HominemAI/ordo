@@ -97,6 +97,7 @@ pub mod passkeys;
 pub mod pause;
 pub mod people_ops;
 pub mod pgsync;
+pub mod pin_stream;
 pub mod platform_ops;
 pub mod presence;
 pub mod principal_directory;
@@ -211,6 +212,23 @@ fn space_refusal(e: spaces::SpaceRefusal) -> ExecError {
                 "space `{space}` is closed for a moment while its data is brought to the \
                  current version of the app. Nothing was written and the same request will \
                  land when that is done; if it persists, the deployment owner has the reason"
+            ),
+        ),
+        // The tenant's version is loading on this node, or its database is
+        // not that version's shape. The caller learns neither version: the
+        // deployment owner's `/health/ready` has the reason (V-49).
+        spaces::SpaceRefusal::Unserved { space, .. } => ExecError::new(
+            ErrorCode::SpaceUnavailable,
+            format!(
+                "space `{space}` is closed for a moment while this server gets its version of \
+                 the app ready. Nothing was written and the same request will land shortly"
+            ),
+        ),
+        spaces::SpaceRefusal::Unfit { space, .. } => ExecError::new(
+            ErrorCode::SpaceUnavailable,
+            format!(
+                "space `{space}` is closed while its data is brought to its version of the \
+                 app. Nothing was written; the deployment owner has the reason"
             ),
         ),
         other => ExecError::internal(other.to_string()),
@@ -1029,7 +1047,9 @@ pub(crate) fn op_store_unavailable(e: impl Faulty) -> ExecError {
 }
 
 pub fn exec_failure(e: ordo_exec::ExecFail) -> ExecError {
-    if e.is_busy() {
+    // A pin that moved twice in one request: nothing was written, and the
+    // same request lands once this node has the newest pin.
+    if e.is_busy() || matches!(e.pool_error(), Some(ordo_exec::PoolError::PinMoved { .. })) {
         return ExecError::server_busy();
     }
     classify(e.to_string())
@@ -1204,18 +1224,47 @@ impl OpExecutor for FixtureExecutor {
                     // Under a delegation `caller` is the delegator and
                     // `agent` the token's holder: the guards see the first,
                     // and the chain names both.
-                    let summary = view
+                    let lease = lease.map(|l| (l.key, l.fingerprint));
+                    let first = view
                         .exec
                         .write_chained_as(
                             view.fixture.clone(),
                             bound_space.log.clone(),
-                            call,
-                            caller,
-                            agent,
-                            lease.map(|l| (l.key, l.fingerprint)),
+                            call.clone(),
+                            caller.clone(),
+                            agent.clone(),
+                            lease.clone(),
                         )
-                        .await
-                        .map_err(exec_failure)?;
+                        .await;
+                    // **The pin moved under this node** (§1.3): another
+                    // node already wrote this tenant under a newer pin.
+                    // Nothing was written. The pin is read again and the
+                    // write made once more, under the version it names, so
+                    // the caller sees nothing of it.
+                    let summary = match first {
+                        Err(e)
+                            if matches!(
+                                e.pool_error(),
+                                Some(ordo_exec::PoolError::PinMoved { .. })
+                            ) =>
+                        {
+                            self.spaces.reload_pin(space).await;
+                            let again = self.spaces.resolve(space).await.map_err(space_refusal)?;
+                            let view = &again.view;
+                            view.exec
+                                .write_chained_as(
+                                    view.fixture.clone(),
+                                    again.log.clone(),
+                                    call,
+                                    caller,
+                                    agent,
+                                    lease,
+                                )
+                                .await
+                        }
+                        other => other,
+                    }
+                    .map_err(exec_failure)?;
                     Ok(match summary {
                         Some(v) => ExecOutcome::Ran(ExecResult {
                             position: None,
@@ -2760,6 +2809,29 @@ pub fn engine_from_directory(
     delegating: &delegable::DelegablePolicy,
     template: &access_template::AccessTemplate,
 ) -> Result<ordo_identity::AccessEngine, String> {
+    engine_from_directory_served(f, &[], rows, tenant, policy, pausing, delegating, template)
+}
+
+/// [`engine_from_directory`] for a node serving `others` beside `f`, the
+/// active version (`plan-versions.md` §1.4, increment 3).
+///
+/// The profile grants every op and function any served version declares,
+/// by name, so a tenant pinned to another version may call its own ops.
+/// An op both declare is granted and pinned as `f` declares it. The door
+/// looks an op up in the caller's tenant's version
+/// (`OpRegistry::get_in`), so an op only another version declares is
+/// unregistered to the active version's tenants all the same.
+#[allow(clippy::too_many_arguments)]
+pub fn engine_from_directory_served(
+    f: &Fixture,
+    others: &[Arc<Fixture>],
+    rows: &[Vec<Option<String>>],
+    tenant: &profile_ops::TenantAccess,
+    policy: &presence::PresencePolicy,
+    pausing: &pause::PausePolicy,
+    delegating: &delegable::DelegablePolicy,
+    template: &access_template::AccessTemplate,
+) -> Result<ordo_identity::AccessEngine, String> {
     use ordo_identity::principal::{AccessProfile, PrincipalId, Role, SpaceId};
 
     let mut engine = ordo_identity::AccessEngine::new();
@@ -2831,8 +2903,17 @@ pub fn engine_from_directory(
     // Profile: reads for every role, writes for editor and up. Deliberately
     // explicit per role — `Role::level` is a level, not a hierarchy, so
     // there is no inheritance to lean on.
-    let specs = build_specs(f);
-    for s in &specs {
+    // Each op once, from the first served version that declares it: the
+    // active one first.
+    let mut specs: Vec<(OpSpec, &Fixture)> = build_specs(f).into_iter().map(|s| (s, f)).collect();
+    for o in others {
+        for s in build_specs(o) {
+            if !specs.iter().any(|(have, _)| have.name == s.name) {
+                specs.push((s, o.as_ref()));
+            }
+        }
+    }
+    for (s, declared_by) in &specs {
         let writes = !matches!(s.kind, OpKind::Read);
         // std ops are **registry-present, exposure opt-in**
         // (`std-library.md` §5 rules 2 and 3): deriving an op and exposing
@@ -2853,7 +2934,7 @@ pub fn engine_from_directory(
         }
         // Deploy-time: the op's manifest hash, from the same manifest the
         // catalog publishes.
-        if let Some(pin) = op_pin(f, &s.name) {
+        if let Some(pin) = op_pin(declared_by, &s.name) {
             engine.deploy_op(&s.name, pin);
         }
     }
@@ -2865,8 +2946,15 @@ pub fn engine_from_directory(
     // serving binary answered `access_denied` to every call; the door tests
     // ran a checker of their own. `tests/upgrade_continuity.rs` calls them
     // through the binary.
-    for func in &f.schema.functions {
-        let name = &func.name.name;
+    let mut funcs: Vec<&String> = Vec::new();
+    for fx in std::iter::once(f).chain(others.iter().map(|o| o.as_ref())) {
+        for func in &fx.schema.functions {
+            if !funcs.contains(&&func.name.name) {
+                funcs.push(&func.name.name);
+            }
+        }
+    }
+    for name in funcs {
         let roles = match template.roles_for(name) {
             Some(roles) => roles.to_vec(),
             None => vec![Role::Viewer, Role::Editor, Role::Manager, Role::Owner],
@@ -3125,13 +3213,14 @@ pub fn engine_from_directory(
     // tenant's rows and installed in that tenant alone.
     profile_ops::install_groups(&mut engine, tenant);
     let program: std::collections::BTreeSet<String> =
-        specs.iter().map(|s| s.name.clone()).collect();
+        specs.iter().map(|(s, _)| s.name.clone()).collect();
     for space in &spaces {
         let own = profile_ops::tenant_profile(&engine, &profile, space, tenant, &program);
         engine.set_profile(&SpaceId(space.clone()), own);
     }
     // What a delegated token may never call: every delete the app developer
     // did not open, and every platform write (`delegable`'s module doc).
+    let specs: Vec<OpSpec> = specs.into_iter().map(|(s, _)| s).collect();
     delegable::close(&mut engine, &specs, &platform_ops::specs(), delegating);
     Ok(engine)
 }

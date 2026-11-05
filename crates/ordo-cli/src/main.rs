@@ -208,10 +208,14 @@ fn usage() -> ! {
          activation log, never a rewrite of it.\n  \
          ordo deploys   [--limit <n>]\n      \
          what is stored, what is serving, and every re-point in order.\n  \
-         ordo versions  list [--db <name>]\n      \
+         ordo versions  list [--tenant <id>] [--db <name>]\n      \
          each stored version, newest first: its order number, name, declared\n      \
-         version, how many tenants are pinned to it, its commit and label,\n      \
-         and which one serves.\n  \
+         version, how many tenants it serves, its commit and label, and which\n      \
+         one is active (where new tenants start). `--tenant` shows one\n      \
+         tenant's version and its pin changes, also through `--host ...`.\n  \
+         ordo versions  pin <tenant> <version> [--db <name> --as <who>]\n      \
+         move one tenant to a stored version now. Refused for a revoked\n      \
+         version. The next activation moves it with every other tenant.\n  \
          ordo versions  show <version> [--db <name>]\n      \
          one version: order number, declared version, source fingerprint,\n      \
          label, commit, its builds and the Ordo release of each, tenants\n      \

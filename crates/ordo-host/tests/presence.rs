@@ -419,8 +419,8 @@ fn no_op_asks_a_delegated_token_for_presence() {
         exempt_all.clone(),
         exempt_all.with_reads(true),
     ] {
-        let engine = ordo_host::engine_from_members_under(&f, &rows, &policy)
-            .expect("the engine builds");
+        let engine =
+            ordo_host::engine_from_members_under(&f, &rows, &policy).expect("the engine builds");
         let mut ops = names();
         ops.push("listNotes".to_string());
         for op in ops {

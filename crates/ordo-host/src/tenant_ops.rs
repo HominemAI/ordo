@@ -1548,6 +1548,17 @@ fn refusal_to_error(refusal: ProvisionRefusal) -> ExecError {
             "a schema apply is in flight, so a tenant cannot be given a database right now. \
              Nothing was created, and the identical call lands once it finishes",
         ),
+        // The version the tenant starts on is still loading here. Nothing
+        // about the call was wrong. A self-serve caller reaches this too,
+        // so the version and the setting go to the log, not the answer.
+        ProvisionRefusal::VersionLoading { .. } => {
+            eprintln!("tenant provisioning: {refusal}");
+            ExecError::new(
+                ErrorCode::SpaceUnavailable,
+                "the version new tenants start on is still loading on this server. Nothing \
+                 was created, and the identical call lands in a moment",
+            )
+        }
         ProvisionRefusal::Target(_) => ExecError::new(
             ErrorCode::SpaceUnavailable,
             "the tenant's database could not be prepared, and the identical call lands once \

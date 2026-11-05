@@ -305,6 +305,7 @@ A node can serve more than one version at once. The active version is the one an
 
 - **A pin** is the version one tenant is served. `$spaces.version` holds it, in the control database, with an epoch that grows by 1 on every change. `$pins` keeps every change: from, to, epoch, who, why, when.
 - **The active version** is where new tenants start (unless `ORDO_VERSIONS_NEW_TENANT` names another) and where an activation moves every tenant.
+- **A new tenant gets its own version's tables.** With `ORDO_VERSIONS_NEW_TENANT` set, each node keeps that version loaded, and a new tenant's database is made in its shape. A beta that adds a table works for its tenants at once. A node still loading it refuses the create for a moment, nothing made, and the identical call lands once it has. The catch-up leaves such a database alone; it is on its pin, not behind.
 - **An activation moves every tenant at once**, a tenant you pinned elsewhere included. Rollouts that move tenants in batches come later.
 - **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no passkey touch, of a person or of a machine key, so you can move many tenants at once and your own system may drive moves (owner, 2026-11-05).
 - **See one tenant's version:** `ordo versions list --tenant <id>` prints its version, its epoch and every pin change. Through the door: `std.deployment.tenantVersion`.

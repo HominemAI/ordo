@@ -154,6 +154,9 @@ impl PinStream {
             .by_space
             .values()
             .map(|(v, _)| v.clone())
+            // The version `versions.new_tenant` names, so the next tenant
+            // is provisioned with its tables.
+            .chain(self.deployment.new_tenant())
             .filter(|v| self.deployment.loaded(v).is_none())
             .filter(|v| self.deployment.following().as_deref() != Some(v.as_str()))
             .collect();

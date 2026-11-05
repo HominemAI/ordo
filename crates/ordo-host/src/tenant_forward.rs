@@ -292,16 +292,22 @@ impl CatchUp {
 
     /// Ask one database what it records and bring it forward if it is
     /// behind. `Ok(None)` means it is already current.
+    ///
+    /// A database at a version some tenant is pinned to, or the one
+    /// `versions.new_tenant` names (`pinned`), is on its own version and
+    /// not behind (`plan-versions.md` §1.3): it is left as it is.
     async fn check_target(
         &self,
         target: ordo_exec::route::Target,
         program: &Program,
+        pinned: &std::collections::HashSet<String>,
     ) -> Result<Option<ordo_exec::route::Target>, (String, String)> {
         let pool = match &target.pool {
             Ok(p) => p.clone(),
             Err(why) => return Err((target.label.clone(), format!("unreachable: {why}"))),
         };
         match ordo_exec::spacedb::recorded_version(&pool).await {
+            Ok(TargetVersion::At(v)) if pinned.contains(&v) => Ok(None),
             Ok(TargetVersion::At(v)) if v != program.version => Ok(Some(target)),
             Ok(_) => Ok(None),
             Err(e) => Err((target.label.clone(), format!("unreachable: {e}"))),
@@ -333,6 +339,18 @@ impl CatchUp {
             }
         };
         let cap = self.spaces.pools().walk_concurrency().max(1);
+        // The versions tenants are pinned to besides the active one: a
+        // database at one of them is on its pin, not behind.
+        let pinned: std::collections::HashSet<String> = {
+            let d = self.spaces.deployment();
+            d.pins()
+                .by_space
+                .into_values()
+                .map(|(v, _)| v)
+                .chain(d.new_tenant())
+                .filter(|v| *v != program.version)
+                .collect()
+        };
         let targets: Vec<_> = targets
             .into_iter()
             .filter(|t| t.label != ordo_exec::route::DEFAULT_LABEL)
@@ -341,7 +359,9 @@ impl CatchUp {
         while rest.peek().is_some() {
             let batch: Vec<_> = rest.by_ref().take(cap).collect();
             let checks = futures::future::join_all(
-                batch.into_iter().map(|t| self.check_target(t, &program)),
+                batch
+                    .into_iter()
+                    .map(|t| self.check_target(t, &program, &pinned)),
             )
             .await;
             let mut behind = Vec::new();

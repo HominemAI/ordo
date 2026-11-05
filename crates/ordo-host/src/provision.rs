@@ -481,6 +481,11 @@ pub enum ProvisionRefusal {
     /// still going. Nothing was written, and the identical call lands once
     /// the apply completes.
     RoutingBusy { space: String },
+    /// **The tenant's version is not loaded on this node yet** (§1.3): the
+    /// version `versions.new_tenant` names, or the one a resumed tenant is
+    /// pinned to. The pin stream loads it; nothing was written, and the
+    /// identical call lands once it has.
+    VersionLoading { space: String, version: String },
 }
 
 impl std::fmt::Display for ProvisionRefusal {
@@ -512,6 +517,13 @@ impl std::fmt::Display for ProvisionRefusal {
                 "`{space}` could not be attached because a schema apply is in flight and \
                  holds the routing lock. Nothing was created, and the identical call lands \
                  once the apply finishes"
+            ),
+            ProvisionRefusal::VersionLoading { space, version } => write!(
+                f,
+                "`{space}` starts on version {version} ({} or its pin), which this node is \
+                 still loading. Nothing was created, and the identical call lands once it is \
+                 loaded",
+                crate::versions::NEW_TENANT_ENV
             ),
             ProvisionRefusal::HostNotAllowed { host } => write!(
                 f,
@@ -1114,7 +1126,22 @@ pub async fn preflight(
     // written. Every step below (the occupancy check, the DDL, and the
     // version recorded beside it) is then about one version rather than
     // about whatever was serving at each separate moment.
-    let artifact = serving.current();
+    //
+    // **The tenant's own version** (`plan-versions.md` §1.3, increment 3
+    // session 2): the one it is pinned to (a provision resumed), or else
+    // the one `versions.new_tenant` starts it on. A beta version that adds
+    // a table gets that table, and the tenant opens on it.
+    let pinned = match crate::versions::Versions::on(control).pin_of(space).await {
+        Ok(p) => p.and_then(|p| p.version),
+        Err(e) if e.is_missing_table() => None,
+        Err(e) => return Err(ProvisionRefusal::Target(PoolError::db(e.to_string()))),
+    };
+    let artifact = serving
+        .provision_version(pinned.as_deref())
+        .map_err(|version| ProvisionRefusal::VersionLoading {
+            space: space.to_string(),
+            version,
+        })?;
     let schema = &artifact.fixture.schema;
 
     let held = ordo_exec::erase::rows_held(control, &sid, schema)

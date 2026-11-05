@@ -1476,3 +1476,89 @@ async fn a_provisioned_target_is_recorded_in_the_fleet_view() {
     }
     assert_eq!(row.confirmed_at, NOW as i64, "the call's own clock");
 }
+
+/// **A new tenant is provisioned on the version it starts on**
+/// (`plan-versions.md` §1.3, increment 3 session 2). With
+/// `versions.new_tenant` naming a beta that adds a table, the tenant's
+/// database gets that table and records the beta, so it opens on its pin
+/// rather than being held closed until the beta is activated. A beta this
+/// node has not loaded yet is refused and nothing is created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_tenant_is_provisioned_on_the_version_it_starts_on() {
+    let f = Arc::new(Fixture::load().expect("fixture"));
+    let pg = Pg::scoped("ordo_provision_beta");
+    f.reset(&pg).expect("seeded");
+    let cfg = PoolConfig {
+        db: pg.db.clone(),
+        size: 3,
+        acquire_timeout: Duration::from_secs(5),
+        ..PoolConfig::from_env()
+    };
+    let control = Pool::connect(cfg.clone()).await.expect("control");
+    spacedb::ensure_table(&control).await.expect("table");
+    ordo_host::tenants::ensure_table(&control)
+        .await
+        .expect("$spaces");
+    let serving = serving(SERVING, &f, &control);
+    let beta = Fixture::from_source(
+        &format!(
+            "{}\nentity tags {{\n  name: text\n}}\n",
+            ordo_conformance::FIXTURE
+        ),
+        ordo_conformance::SEED,
+    )
+    .expect("beta compiles");
+    let stream = Recorder::default();
+
+    // Named, and not loaded here yet: refused, nothing made.
+    serving.set_new_tenant(Some("beta".into()));
+    let first = ordo_conformance::test_db_name("ordo_provision_beta_a");
+    drop_database(&first);
+    let e = prepare(&control, &f, &serving, "spc_beta_a", &first, &stream)
+        .await
+        .expect_err("refused while the beta loads");
+    assert!(
+        matches!(e, ProvisionRefusal::VersionLoading { ref version, .. } if version == "beta"),
+        "{e}"
+    );
+    assert!(e.to_string().contains("ORDO_VERSIONS_NEW_TENANT"), "{e}");
+    assert!(!database_exists(&control, &first).await, "nothing created");
+
+    // Loaded: the tenant's database is the beta's shape and says so.
+    let loaded = ordo_host::deploy::verify_embedded_pinned(
+        beta,
+        &control,
+        &cfg,
+        f.keys.clone(),
+        ordo_conformance::fixture_space(),
+        "beta",
+    )
+    .await
+    .expect("the beta gates beside the active version");
+    serving.install(loaded);
+    let second = ordo_conformance::test_db_name("ordo_provision_beta_b");
+    drop_database(&second);
+    prepare(&control, &f, &serving, "spc_beta_b", &second, &stream)
+        .await
+        .expect("provisioned on the beta");
+    assert_eq!(
+        recorded_version(&second).await,
+        spacedb::TargetVersion::At("beta".into())
+    );
+    assert!(has_table(&target_pool(&second).await, "tags").await);
+
+    // Unnamed: the active version, as before.
+    serving.set_new_tenant(None);
+    let third = ordo_conformance::test_db_name("ordo_provision_beta_c");
+    drop_database(&third);
+    prepare(&control, &f, &serving, "spc_beta_c", &third, &stream)
+        .await
+        .expect("provisioned on the active version");
+    assert_eq!(
+        recorded_version(&third).await,
+        spacedb::TargetVersion::At(SERVING.into())
+    );
+    assert!(!has_table(&target_pool(&third).await, "tags").await);
+    drop_database(&second);
+    drop_database(&third);
+}

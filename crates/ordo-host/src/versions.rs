@@ -798,6 +798,10 @@ pub enum VersionRefusal {
         tenants: u64,
         list: Vec<String>,
     },
+    /// `versions.minimum` names a version stored after the active one, so
+    /// every tenant on the active version would count as below it and no
+    /// move could land: the boot refuses it, naming the active version.
+    MinimumAboveActive { minimum: String, active: String },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -819,6 +823,7 @@ impl VersionRefusal {
             | VersionRefusal::NotServed { .. }
             | VersionRefusal::BelowMinimum { .. }
             | VersionRefusal::Stranded { .. }
+            | VersionRefusal::MinimumAboveActive { .. }
             | VersionRefusal::Revoked {
                 setting: Some(_), ..
             } => Remedy::FixInput,
@@ -879,7 +884,9 @@ impl VersionRefusal {
             VersionRefusal::NotRevoked { .. }
             | VersionRefusal::NoTenant { .. }
             | VersionRefusal::NotOnRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
-            VersionRefusal::Setting { .. } | VersionRefusal::Stranded { .. } => {
+            VersionRefusal::Setting { .. }
+            | VersionRefusal::Stranded { .. }
+            | VersionRefusal::MinimumAboveActive { .. } => {
                 ExecError::new(ErrorCode::Internal, message)
             }
             VersionRefusal::Store(e) => {
@@ -1061,6 +1068,12 @@ impl std::fmt::Display for VersionRefusal {
                 list.join(","),
                 list.join(",")
             ),
+            VersionRefusal::MinimumAboveActive { minimum, active } => write!(
+                f,
+                "{MINIMUM_SETTING} ({MINIMUM_ENV}) is {minimum}, stored after the active \
+                 version {active}, so every tenant on {active} would be below it. Set \
+                 {MINIMUM_ENV}={active} or older, activate {minimum} first, or unset it"
+            ),
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
     }
@@ -1219,7 +1232,18 @@ impl<'a> Versions<'a> {
             out.served = Some(resolved);
         }
         if let Some(min) = &p.minimum {
-            out.minimum = Some(resolve(min, MINIMUM_SETTING, MINIMUM_ENV).await?);
+            let minimum = resolve(min, MINIMUM_SETTING, MINIMUM_ENV).await?;
+            // A minimum above the active version puts every tenant on the
+            // active version below it, and every move to it is refused.
+            if let Some(active) = registry::active_version(self.pool).await? {
+                let ords = registry::ordinals(self.pool).await?;
+                if let (Some(m), Some(a)) = (ords.get(&minimum), ords.get(&active)) {
+                    if m > a {
+                        return Err(VersionRefusal::MinimumAboveActive { minimum, active });
+                    }
+                }
+            }
+            out.minimum = Some(minimum);
         }
         Ok(out)
     }
@@ -2402,7 +2426,17 @@ impl<'a> Versions<'a> {
     /// Every tenant on a revoked version, or on one below
     /// `versions.minimum`, `(space, version)`, at most `limit`, by tenant
     /// id. A database with no pins answers empty.
-    pub async fn on_revoked(&self, limit: usize) -> Result<Vec<(String, String)>, VersionRefusal> {
+    ///
+    /// `after` reads the next page: only tenants whose id sorts after it.
+    /// `only` narrows the tenants in SQL (`AND ...` on `"$space"`), so a
+    /// page holds only the tenants a caller can act on, and those it
+    /// cannot never crowd out the rest.
+    pub async fn on_revoked(
+        &self,
+        limit: usize,
+        after: Option<&str>,
+        only: Option<&str>,
+    ) -> Result<Vec<(String, String)>, VersionRefusal> {
         let below = self.below_minimum().await?;
         if below.is_empty() && self.revocations().await?.is_empty() {
             return Ok(vec![]);
@@ -2424,9 +2458,13 @@ impl<'a> Versions<'a> {
             .rows(&format!(
                 "SELECT \"$space\", \"version\" FROM \"$spaces\" \
                  WHERE \"state\" IN {PINNED_STATES} AND (\"version\" IN \
-                   (SELECT \"version\" FROM ({}) m) {below}) \
+                   (SELECT \"version\" FROM ({}) m) {below}) {after} {only} \
                  ORDER BY \"$space\" LIMIT {limit}",
-                mark_sql(None)
+                mark_sql(None),
+                after = after
+                    .map(|a| format!("AND \"$space\" > {}", sql_lit(a)))
+                    .unwrap_or_default(),
+                only = only.unwrap_or_default(),
             ))
             .await
         {

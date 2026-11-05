@@ -12115,3 +12115,11 @@ Board task `when-a-tenant-on-a-revoked`, asks 1 and 2. The increment 3 audit fou
 - **Read as.** This extends ask 18 (2026-11-04): Ordo never picks a replacement the developer didn't choose. A tenant-triggered move is a capability the app grants, off by default, in line with secure defaults.
 - **Automation (owner, same day, in conversation).** *"Like technically the developer could even have their own system managing automatic updates."* The on-demand move is a door op, not only a CLI or console act, so the developer's own system can call it on its own schedule.
 - **No passkey hoop for it (owner, same day).** I first wrote that such a system needs the move named in `ORDO_STEP_UP_EXEMPT_OPS`. The owner: *"I've ruled against these needs often, because it doesn't make sense."* A system cannot touch a passkey, so the move asks none of a caller that authenticates as a system. This is read for the move op only; whether it holds for every platform op a system calls is asked on the board, not assumed here.
+
+## 2026-11-05: no passkey touch for systems, or for people moving versions
+
+Board task `a-system-calling-platform-ops-is`, asks 1 and 2.
+
+- **Ask 1, "good."** A system caller is never asked for a passkey touch on any platform op its credential is granted. The grant is the control; a touch only proves a person is present.
+- **Ask 2.** The recommendation was to ask a person by default. The owner ruled against it: *"No. They could be moving many at a time, It would be ridiculous to ask for each one. If they are logged in they proved their access."* A signed-in person moving a tenant's version (`std.deployment.pin`) is not asked for a touch. The role gate is unchanged: only the deployment owner may move a version.
+- **Read as.** This applies the 2026-10-22 principle, "signed in means authenticated", to version moves. Other platform writes keep the step-up rules of 2026-09-29 until the owner says otherwise.

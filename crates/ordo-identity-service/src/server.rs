@@ -209,9 +209,17 @@ impl Service {
         };
         if let Some(key) = self.0.cfg.provisioner_key {
             if !machine::ever_named(&tx, handle, PROVISIONER).await? {
-                let made =
-                    machine::add(&tx, handle, &self.0.keys, PROVISIONER, Some(key), boot, now)
-                        .await?;
+                let made = machine::add(
+                    &tx,
+                    handle,
+                    &self.0.keys,
+                    PROVISIONER,
+                    Some(key),
+                    &machine::KeyGrants::provisioner(),
+                    boot,
+                    now,
+                )
+                .await?;
                 out.provisioner = Some(made.id);
             }
         } else {

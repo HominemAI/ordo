@@ -721,6 +721,7 @@ impl Service {
                 client: &signed.name,
                 sid: &signed.session.id,
                 touched_at: None,
+                grants: &signed.grants,
             },
             self.0.cfg.token_secs,
         )
@@ -748,20 +749,28 @@ impl Service {
     }
 
     /// Make a machine key; with `public`, register one the machine made.
+    /// A person gives any grants. A machine key makes one only within its
+    /// minting grant, and never one that mints (owner, 2026-11-05).
     pub async fn add_machine_key(
         &self,
-        by: Actor<'_>,
+        by: &Caller,
         name: &str,
         public: Option<[u8; 32]>,
+        grants: &machine::KeyGrants,
     ) -> Result<machine::Made, IdentityError> {
         let tx = self.0.store.pool().begin().await?;
+        if by.kind == Kind::Machine {
+            let mints = machine::mints_of(&tx, self.handle(), &by.sub).await?;
+            grants.within(&mints)?;
+        }
         let made = machine::add(
             &tx,
             self.handle(),
             &self.0.keys,
             name,
             public,
-            by,
+            grants,
+            by.actor(),
             self.now(),
         )
         .await?;
@@ -791,6 +800,7 @@ impl Service {
                 client: "host",
                 sid: &sid,
                 touched_at: Some(now),
+                grants: &[],
             },
             minutes * 60,
         )?;

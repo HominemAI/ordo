@@ -314,7 +314,9 @@ session to manage. Its session lives at the identity service.
 3. The provisioning service signs in as that machine (5.6) and calls
    `POST /invites {label, role: admin}`. It gets the link and hands it to
    the customer by its own mail. The customer enrols (5.2).
-4. The same machine key makes CI keys and more invites later. Ending it is
+4. The same machine key makes CI keys and more invites later: it holds a
+   minting grant for `deployment` keys (owner, 2026-11-05: a key mints only
+   within its minting grant, `docs/howto-identity.md` §6). Ending it is
    `POST /machine-keys/m_…/end`, from an admin.
 
 ### 5.2 The first admin, from first boot (self-hosting)

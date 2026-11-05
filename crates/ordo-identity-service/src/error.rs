@@ -100,6 +100,9 @@ pub enum IdentityError {
     LastPasskey,
     /// A live machine key already has that name.
     NameTaken(String),
+    /// A machine key asked to make a key its minting grant does not cover.
+    /// Says what the deployment owner gives.
+    MintRefused(String),
     /// The audit log or one of its checkpoints does not check out.
     AuditBroken(crate::audit::AuditBreak),
     /// The request body or a field in it is malformed.
@@ -191,6 +194,7 @@ impl IdentityError {
             IdentityError::UnknownPasskey => "unknown_passkey",
             IdentityError::LastPasskey => "last_passkey",
             IdentityError::NameTaken(_) => "name_taken",
+            IdentityError::MintRefused(_) => "mint_refused",
             IdentityError::AuditBroken(_) => "audit_broken",
             IdentityError::BadRequest(_) => "bad_request",
             IdentityError::Internal(_) => "internal",
@@ -217,6 +221,7 @@ impl IdentityError {
             IdentityError::WrongAudience { .. }
             | IdentityError::OriginRefused
             | IdentityError::MustEnrolPasskey
+            | IdentityError::MintRefused(_)
             | IdentityError::TouchNeeded { .. } => StatusCode::FORBIDDEN,
             IdentityError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
             IdentityError::LastAdmin | IdentityError::NameTaken(_) | IdentityError::LastPasskey => {
@@ -293,6 +298,7 @@ impl fmt::Display for IdentityError {
             IdentityError::LastPasskey => f.write_str(
                 "that is your only passkey; add another passkey first, then remove this one",
             ),
+            IdentityError::MintRefused(why) => f.write_str(why),
             IdentityError::NameTaken(name) => write!(
                 f,
                 "a live machine key is already named `{name}`; choose another name, or end it \

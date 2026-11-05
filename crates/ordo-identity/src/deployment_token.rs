@@ -10,7 +10,15 @@
 //! Header, exactly: `{"alg":"EdDSA","kid":"<kid>","typ":"ordo-deployment+jwt"}`.
 //!
 //! Claims, in this order: `iss`, `aud`, `sub`, `kind`, `role`, `client`,
-//! `sid`, `touched_at` (absent on a machine token), `iat`, `exp`, `jti`.
+//! `sid`, `touched_at` (absent on a machine token), `grants` (a machine
+//! token's only), `iat`, `exp`, `jti`.
+//!
+//! **A machine key's grants** (owner, 2026-11-05) say what it may do:
+//! [`GRANT_DEPLOYMENT`], the deployment's own platform ops, which every key
+//! held before grants existed, and [`GRANT_IMPORT`], `std.space.import` into
+//! a tenant, which the developer gives per key and is off by default. A
+//! machine token signed before the claim existed carries none, and reads as
+//! `deployment` alone, what such a key could do.
 //!
 //! An app token (`crate::token`) is 2 segments with an HMAC and no `aud`,
 //! so the realms cannot be confused: [`is_deployment_shape`] tells them
@@ -85,6 +93,15 @@ impl Kind {
     }
 }
 
+/// A machine key's grant: the deployment's own platform ops, in its home
+/// space.
+pub const GRANT_DEPLOYMENT: &str = "deployment";
+/// A machine key's grant: `std.space.import` into a tenant. No touch is
+/// asked (owner, 2026-11-05).
+pub const GRANT_IMPORT: &str = "import";
+/// Every grant a machine key may hold.
+pub const GRANTS: [&str; 2] = [GRANT_DEPLOYMENT, GRANT_IMPORT];
+
 /// The claim set, as signed and as verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentClaims {
@@ -103,12 +120,19 @@ pub struct DeploymentClaims {
     /// The last passkey assertion in the session, in seconds. Absent on a
     /// machine token. The door maps it to `user_presence_at`.
     pub touched_at: Option<u64>,
+    /// A machine token's grants ([`GRANTS`]). Empty on any other kind.
+    pub grants: Vec<String>,
     pub iat: u64,
     pub exp: u64,
     pub jti: String,
 }
 
 impl DeploymentClaims {
+    /// Does this token hold `grant`? Only a machine token holds any.
+    pub fn holds(&self, grant: &str) -> bool {
+        self.kind == Kind::Machine && self.grants.iter().any(|g| g == grant)
+    }
+
     /// The payload, members in the order the module header lists.
     pub fn to_json(&self) -> String {
         let mut members: Vec<(&str, Value)> = vec![
@@ -122,6 +146,9 @@ impl DeploymentClaims {
         ];
         if let Some(t) = self.touched_at {
             members.push(("touched_at", Value::from(t)));
+        }
+        if self.kind == Kind::Machine {
+            members.push(("grants", Value::from(self.grants.clone())));
         }
         members.push(("iat", Value::from(self.iat)));
         members.push(("exp", Value::from(self.exp)));
@@ -166,6 +193,26 @@ impl DeploymentClaims {
         if kind == Kind::Machine && touched_at.is_some() {
             return Err(DeploymentTokenError::Malformed("touched_at"));
         }
+        let grants = match (kind, m.get("grants")) {
+            // Signed before grants: what every key could do then.
+            (Kind::Machine, None) => vec![GRANT_DEPLOYMENT.to_string()],
+            (Kind::Machine, Some(v)) => {
+                let list = v
+                    .as_array()
+                    .ok_or(DeploymentTokenError::Malformed("grants"))?;
+                let mut out = Vec::with_capacity(list.len());
+                for g in list {
+                    let g = g
+                        .as_str()
+                        .filter(|g| GRANTS.contains(g))
+                        .ok_or(DeploymentTokenError::Malformed("grants"))?;
+                    out.push(g.to_string());
+                }
+                out
+            }
+            (_, None) => Vec::new(),
+            (_, Some(_)) => return Err(DeploymentTokenError::Malformed("grants")),
+        };
         Ok(DeploymentClaims {
             iss: text("iss")?,
             aud: text("aud")?,
@@ -175,6 +222,7 @@ impl DeploymentClaims {
             client: text("client")?,
             sid: text("sid")?,
             touched_at,
+            grants,
             iat: secs("iat")?,
             exp: secs("exp")?,
             jti: text("jti")?,
@@ -333,6 +381,7 @@ mod tests {
             client: "console".into(),
             sid: "s_1".into(),
             touched_at: Some(now - 5),
+            grants: Vec::new(),
             iat: now,
             exp: now + 600,
             jti: "j1".into(),
@@ -437,6 +486,48 @@ mod tests {
             verify(&sign(&c, &kid, &key), &jwks, &expect(1_000)),
             Err(DeploymentTokenError::Malformed("sub"))
         );
+    }
+
+    #[test]
+    fn a_machine_token_carries_its_grants_and_an_old_one_reads_as_deployment() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let kid = key_id(&key.verifying_key());
+        let jwks = set(&[(&kid, &key)]);
+        let mut c = claims(1_000);
+        c.kind = Kind::Machine;
+        c.sub = "m_ci".into();
+        c.touched_at = None;
+        c.grants = vec![GRANT_IMPORT.into()];
+        let back = verify(&sign(&c, &kid, &key), &jwks, &expect(1_000)).unwrap();
+        assert!(back.holds(GRANT_IMPORT));
+        assert!(!back.holds(GRANT_DEPLOYMENT));
+        // Signed before the claim: written by hand without `grants`.
+        let old = c.to_json().replace(r#""grants":["import"],"#, "");
+        assert!(!old.contains("grants"), "{old}");
+        let header = format!(
+            r#"{{"alg":"EdDSA","kid":{},"typ":"{TYP}"}}"#,
+            Value::from(kid.as_str())
+        );
+        let input = format!(
+            "{}.{}",
+            b64url_encode(header.as_bytes()),
+            b64url_encode(old.as_bytes())
+        );
+        let token = format!(
+            "{input}.{}",
+            b64url_encode(&key.sign(input.as_bytes()).to_bytes())
+        );
+        let back = verify(&token, &jwks, &expect(1_000)).unwrap();
+        assert_eq!(back.grants, vec![GRANT_DEPLOYMENT.to_string()]);
+        // A grant word nobody defined is malformed, and a person holds none.
+        c.grants = vec!["everything".into()];
+        assert_eq!(
+            verify(&sign(&c, &kid, &key), &jwks, &expect(1_000)),
+            Err(DeploymentTokenError::Malformed("grants"))
+        );
+        let person = claims(1_000);
+        assert!(!person.to_json().contains("grants"));
+        assert!(!person.holds(GRANT_DEPLOYMENT));
     }
 
     #[test]

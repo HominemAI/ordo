@@ -1712,7 +1712,7 @@ impl ShareLinks {
         bound: &BoundParams,
         caller: &str,
     ) -> Result<ExecResult, ExecError> {
-        if self.home.as_deref().is_some_and(|h| h != space) {
+        if self.home.as_deref() != Some(space) {
             return Err(ExecError::new(
                 ErrorCode::NotFound,
                 "the app developer's link password limits are the deployment's setting, and \

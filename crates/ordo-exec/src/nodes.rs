@@ -23,11 +23,10 @@
 //! - `also_serving`: the versions this node serves beside `serving`, to
 //!   tenants pinned to them, comma-separated (`plan-versions.md` §1.4,
 //!   increment 3). Empty when it serves one.
-//! - `new_tenant`: this node's `versions.new_tenant`
-//!   (`ORDO_VERSIONS_NEW_TENANT`), empty when unset. Nodes that disagree
-//!   start new tenants on different versions, so each node compares its
-//!   own with the others' and warns, naming the setting
-//!   ([`new_tenant_disagreements`]).
+//! - `new_tenant`: `versions.new_tenant` as this node last read it from
+//!   the control database, empty when unset. Informational: since
+//!   2026-11-05 every node reads the one stored value, so nodes no longer
+//!   compare theirs.
 //!
 //! - `not_loaded`: the versions a pin names that this node could not load,
 //!   with why, as a JSON array of `[version, reason]` pairs. Their tenants
@@ -179,18 +178,6 @@ pub async fn live(pool: &Pool) -> Result<Vec<Node>, PoolError> {
         })
         .filter(|n| n.age_secs <= stale_after(n.beat_secs))
         .collect())
-}
-
-/// The live nodes, other than `me`, whose `versions.new_tenant` differs
-/// from `mine` (empty is unset): `(node, its value)`. Each node starts new
-/// tenants on its own value, so a difference hands tenants made on two
-/// nodes two versions.
-pub fn new_tenant_disagreements(nodes: &[Node], me: &str, mine: &str) -> Vec<(String, String)> {
-    nodes
-        .iter()
-        .filter(|n| n.node != me && n.new_tenant != mine)
-        .map(|n| (n.node.clone(), n.new_tenant.clone()))
-        .collect()
 }
 
 /// Where a version stands across the live nodes.

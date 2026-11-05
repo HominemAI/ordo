@@ -27,6 +27,12 @@
 //! - `std.deployment.setMoveTarget($tenant, $version?)`: set or clear where
 //!   one tenant goes off a revoked version. What `ordo versions target
 //!   --host` does.
+//! - `std.deployment.versionSettings($limit?)`: `versions.served`,
+//!   `versions.minimum`, `versions.new_tenant` and their history. What
+//!   `ordo versions settings` prints.
+//! - `std.deployment.setVersionSetting($setting, $value?, $reason)`:
+//!   change one, or clear it (owner, 2026-11-05: they live in Ordo, not
+//!   the environment). What `ordo versions set` does.
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -82,8 +88,16 @@ pub const TENANT_VERSION: &str = "std.deployment.tenantVersion";
 pub const MOVE_OFF_REVOKED: &str = "std.deployment.moveOffRevoked";
 /// Where one tenant goes off a revoked version, set or cleared.
 pub const SET_MOVE_TARGET: &str = "std.deployment.setMoveTarget";
+/// **The three version settings and their history** (owner, 2026-11-05:
+/// they live in Ordo, not the environment).
+pub const VERSION_SETTINGS: &str = "std.deployment.versionSettings";
+/// **Change one version setting**, or clear it, with a reason. A deployment
+/// write, so it asks a touch only at `ORDO_SECURITY_LEVEL=high`
+/// (`security_level::Situation::Deploying`); a machine key with the
+/// `deployment` grant may call it.
+pub const SET_VERSION_SETTING: &str = "std.deployment.setVersionSetting";
 
-pub const OPS: [&str; 12] = [
+pub const OPS: [&str; 14] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -96,6 +110,8 @@ pub const OPS: [&str; 12] = [
     TENANT_VERSION,
     MOVE_OFF_REVOKED,
     SET_MOVE_TARGET,
+    VERSION_SETTINGS,
+    SET_VERSION_SETTING,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -299,7 +315,64 @@ pub fn specs() -> Vec<OpSpec> {
             ],
             &["tenant", "target", "ordinal"],
         ),
+        spec(
+            VERSION_SETTINGS,
+            OpKind::Read,
+            vec![ParamSpec {
+                name: "limit".to_string(),
+                ty: ParamTy::Int,
+                required: false,
+                bounds: Some(Bounds {
+                    min: Some("1".to_string()),
+                    max: Some(crate::versions::MAX_SETTING_HISTORY.to_string()),
+                }),
+            }],
+            &["served", "minimum", "newTenant", "history"],
+        ),
+        spec(
+            SET_VERSION_SETTING,
+            OpKind::Write,
+            vec![
+                ParamSpec {
+                    // `versions.served`, `versions.minimum` or
+                    // `versions.new_tenant`; the short names pass too.
+                    name: "setting".to_string(),
+                    ty: ParamTy::Text { max_len: Some(64) },
+                    required: true,
+                    bounds: None,
+                },
+                ParamSpec {
+                    // Absent or empty clears it. Served takes `in-use` or
+                    // a comma list of versions.
+                    name: "value".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(4096),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+                reason_param(),
+            ],
+            &[
+                "setting",
+                "value",
+                "changed",
+                "served",
+                "minimum",
+                "newTenant",
+            ],
+        ),
     ]
+}
+
+/// The three settings, as both ops answer them. Unset reads as `null`.
+fn settings_json(s: &crate::versions::VersionSettings) -> serde_json::Value {
+    use crate::versions::VersionSetting;
+    json!({
+        "served": s.value(VersionSetting::Served),
+        "minimum": s.value(VersionSetting::Minimum),
+        "newTenant": s.value(VersionSetting::NewTenant),
+    })
 }
 
 fn tenant_param() -> ParamSpec {
@@ -611,6 +684,69 @@ pub async fn execute(
                 None => None,
             };
             json!({ "tenant": tenant, "target": set, "ordinal": ordinal })
+        }
+        VERSION_SETTINGS => {
+            let limit = bound
+                .0
+                .get("limit")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(DEFAULT_LIMIT)
+                .clamp(1, crate::versions::MAX_SETTING_HISTORY as i64);
+            let v = crate::versions::Versions::on(&ops.pool);
+            let read = |e: crate::versions::VersionRefusal| {
+                e.to_exec_error("the version settings could not be read")
+            };
+            let settings = v.settings().await.map_err(read)?;
+            let history = v
+                .setting_history(usize::try_from(limit).unwrap_or(20))
+                .await
+                .map_err(read)?;
+            let mut row = settings_json(&settings);
+            row["history"] = json!(history
+                .iter()
+                .map(|c| json!({
+                    "setting": c.setting, "value": c.value, "actor": c.actor,
+                    "reason": c.reason, "at": c.at,
+                }))
+                .collect::<Vec<_>>());
+            row
+        }
+        SET_VERSION_SETTING => {
+            let named = text(bound, "setting").unwrap_or_default();
+            let Some(setting) = crate::versions::VersionSetting::parse(named) else {
+                return Err(ExecError::new(
+                    ordo_api::ErrorCode::InvalidParam,
+                    format!(
+                        "the version setting was not changed: `{named}` is not one. There are \
+                         versions.served, versions.minimum and versions.new_tenant"
+                    ),
+                ));
+            };
+            let value = text(bound, "value").filter(|v| !v.is_empty());
+            let reason = text(bound, "reason").unwrap_or_default();
+            let set = crate::versions::Versions::on(&ops.pool)
+                .set_setting(setting, value, caller, reason, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the version setting was not changed"))?;
+            let changed = matches!(set, crate::versions::SettingSet::Changed(_));
+            let now = set.settings().value(setting);
+            if changed {
+                ops.record(
+                    caller,
+                    SET_VERSION_SETTING,
+                    "version-setting",
+                    format!(
+                        "setting={} value={} by={caller}",
+                        setting.name(),
+                        now.as_deref().unwrap_or("unset")
+                    ),
+                );
+            }
+            let mut row = settings_json(set.settings());
+            row["setting"] = json!(setting.name());
+            row["value"] = json!(now);
+            row["changed"] = json!(changed);
+            row
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),
     };

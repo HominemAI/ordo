@@ -15,6 +15,10 @@
 //!   A second region tails `$pins` the same way and needs no shared
 //!   `NOTIFY`.
 //!
+//! Each read also takes the version settings (`crate::versions::
+//! VersionSetting`, stored since 2026-11-05): a change to one nudges the
+//! same channel, so `versions.new_tenant` reaches every node as a pin does.
+//!
 //! After each read the node loads every pinned version it does not serve
 //! yet ([`PinStream::load_wanted`]), one at a time
 //! (`versions.max_concurrent_loads`, 1), and drops the ones no pin names.
@@ -45,6 +49,9 @@ pub struct Read {
     pub dropped: Vec<String>,
     /// Versions a pin names that could not be loaded, with why.
     pub refused: Vec<(String, String)>,
+    /// `versions.new_tenant`, when this read found it changed: the version
+    /// it names now, `None` inside when it was cleared.
+    pub new_tenant: Option<Option<String>>,
 }
 
 impl Read {
@@ -133,6 +140,18 @@ impl PinStream {
 
     /// Load what the pins name and drop what they no longer do.
     async fn settle(&self, read: &mut Read) {
+        // `versions.new_tenant` lives in the control database (owner,
+        // 2026-11-05), and a change to it nudges this stream. Read before
+        // the loads, so the version it names is loaded and kept.
+        match Versions::on(&self.control).settings().await {
+            Ok(s) => {
+                if self.deployment.new_tenant_setting() != s.new_tenant {
+                    self.deployment.set_new_tenant(s.new_tenant.clone());
+                    read.new_tenant = Some(s.new_tenant);
+                }
+            }
+            Err(e) => eprintln!("versions: the version settings were not read ({e})"),
+        }
         // The registry's active version is the deploy channel's to load,
         // with its live check and the tenant catch-up; never this stream's.
         match Versions::on(&self.control).active_version().await {
@@ -202,6 +221,12 @@ impl PinStream {
 /// One line per thing a read did, for the node's log.
 pub fn log_lines(read: &Read) -> Vec<String> {
     let mut out = Vec::new();
+    if let Some(named) = &read.new_tenant {
+        out.push(format!(
+            "versions: new tenants now start on {}",
+            named.as_deref().unwrap_or("the active version")
+        ));
+    }
     if !read.moved.is_empty() {
         out.push(format!("pins: {} tenant(s) moved", read.moved.len()));
     }

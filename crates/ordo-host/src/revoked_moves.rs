@@ -133,9 +133,11 @@ pub struct Swept {
 
 /// **Move every tenant on a revoked version whose maintenance window holds
 /// at `now`.** A tenant no window holds stays. Run on each node's pin
-/// reconcile tick (`pins.reconcile_interval`).
+/// reconcile tick (`pins.reconcile_interval`), under the stored
+/// `versions.served` and `versions.minimum`.
 pub async fn sweep(pool: &Pool, now: u64) -> Result<Swept, VersionRefusal> {
-    sweep_under(pool, crate::versions::policy(), now).await
+    let policy = Versions::on(pool).settings().await?.policy;
+    sweep_under(pool, &policy, now).await
 }
 
 /// [`sweep`] under a named `versions.served` and `versions.minimum`: a

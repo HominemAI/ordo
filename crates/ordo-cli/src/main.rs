@@ -237,6 +237,10 @@ fn usage() -> ! {
          database path.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
+         ordo versions  settings | set <served|minimum|new-tenant> <value> | --clear --reason \"<text>\"\n      \
+         read or change which versions are served, the oldest a tenant may\n      \
+         stay on, and the version new tenants start on. Stored in Ordo,\n      \
+         through the door only (`--host ...`); a refused value is named.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          `revoke`, `unrevoke` and `revoked` also take `--host ...`.\n  \

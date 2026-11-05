@@ -21,7 +21,7 @@ use ordo_host::apply_op::{self, Activation, ApplyRefused};
 use ordo_host::deploy_ops;
 use ordo_host::schema_apply::Program;
 use ordo_host::tenants;
-use ordo_host::versions::{RevokeAct, VersionRefusal, Versions, NEW_TENANT_ENV};
+use ordo_host::versions::{RevokeAct, VersionRefusal, Versions, NEW_TENANT_SETTING};
 
 const V010: &str = "domain tasks @ 0.1.0
 
@@ -148,10 +148,11 @@ async fn a_version_not_active_is_only_marked_and_then_refused_everywhere() {
     assert_eq!(e.class(), "version_revoked");
     assert_eq!(v.active_version().await.unwrap().as_deref(), Some("0.2.0"));
 
-    // As the new-tenant setting: at boot, and when a tenant is pinned.
+    // As the new-tenant setting: when it is checked, and when a tenant is
+    // pinned.
     let beta = v.with_new_tenant(Some("0.1.0"));
     let e = beta.check_new_tenant().await.unwrap_err();
-    assert!(e.to_string().contains(NEW_TENANT_ENV), "{e}");
+    assert!(e.to_string().contains(NEW_TENANT_SETTING), "{e}");
     assert!(matches!(
         e,
         VersionRefusal::Revoked {

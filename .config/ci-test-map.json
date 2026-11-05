@@ -289,7 +289,10 @@
       "runtime",
       "shopfront_app",
       "teamspace_app",
-      "two_instances"
+      "two_instances",
+      "versions_moves",
+      "versions_moves_door",
+      "versions_settings"
     ],
     "crates/ordo-host/src/deployment_access.rs": "all",
     "crates/ordo-host/src/directory.rs": "all",

@@ -3801,6 +3801,10 @@ async fn assemble_program(
             var: crate::versions::SERVED_ENV,
             detail: e.to_string(),
         },
+        crate::versions::VersionRefusal::MinimumAboveActive { .. } => BootRefusal::Invalid {
+            var: crate::versions::MINIMUM_ENV,
+            detail: e.to_string(),
+        },
         other => BootRefusal::Database(other.to_string()),
     })?;
     crate::versions::install_policy(served);

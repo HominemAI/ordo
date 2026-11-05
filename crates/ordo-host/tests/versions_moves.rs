@@ -613,3 +613,142 @@ async fn each_node_says_what_it_serves_and_what_would_not_load() {
     assert_eq!(n["notLoaded"][0]["version"], "0.1.0");
     assert_eq!(n["notLoaded"][0]["why"], "it does not compile");
 }
+
+/// **The per-tick cap starves nobody.** 1,000 tenants on the revoked
+/// version sort before `spc_b`, and no window holds them. `spc_b`'s window
+/// opens and it moves on the first tick. Until 2026-11-05 the sweep read
+/// the first 1,000 by id and filtered by window after, so `spc_b` never
+/// moved.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_past_the_cap_moves_in_its_window() {
+    let pool = deployment("ordo_vmove_cap", None).await;
+    for n in 0..revoked_moves::SWEEP_BATCH {
+        tenant(&pool, &format!("spc_0{n:04}")).await;
+    }
+    pool.rows("UPDATE \"$spaces\" SET \"version\" = '0.1.0' WHERE \"$space\" LIKE 'spc_0%'")
+        .await
+        .expect("pinned to the revoked version");
+    let first = Versions::on(&pool)
+        .on_revoked(revoked_moves::SWEEP_BATCH, None, None)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), revoked_moves::SWEEP_BATCH);
+    assert!(
+        first.iter().all(|(s, _)| s.starts_with("spc_0")),
+        "spc_b is past the first page"
+    );
+    window(
+        &pool,
+        only("spc_b"),
+        Schedule::Range {
+            start: NOW as i64 - 60,
+            end: NOW as i64 + 60,
+        },
+    )
+    .await;
+    let swept = revoked_moves::sweep(&pool, NOW).await.expect("swept");
+    assert_eq!(swept.moved.len(), 1, "{:?}", swept.refused);
+    assert_eq!(swept.moved[0].0.change.space, "spc_b");
+    assert_eq!(on(&pool, "spc_b").await.as_deref(), Some("0.3.0"));
+
+    // A window over all: a tick moves at most a page, the next the rest.
+    window(
+        &pool,
+        Target::All,
+        Schedule::Range {
+            start: NOW as i64 - 60,
+            end: NOW as i64 + 60,
+        },
+    )
+    .await;
+    let policy = ServedPolicy::default();
+    let swept = revoked_moves::sweep_paged(&pool, &policy, NOW, 600)
+        .await
+        .unwrap();
+    assert_eq!(swept.moved.len(), 600, "{:?}", swept.refused);
+    let swept = revoked_moves::sweep_paged(&pool, &policy, NOW, 600)
+        .await
+        .unwrap();
+    assert_eq!(
+        swept.moved.len(),
+        401,
+        "1,000 and spc_a: {:?}",
+        swept.refused
+    );
+}
+
+/// **A minimum above the active version is refused at boot**, naming the
+/// setting and the active version. Otherwise every tenant on the active
+/// version is below it, and every move to the active version is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_minimum_above_the_active_version_is_refused() {
+    let pool = fresh("ordo_vmove_min_active").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    apply(&pool, V030).await;
+    let v = Versions::on(&pool);
+    v.activate("0.2.0", OWNER, ordo_commandlog::Timestamp(300))
+        .await
+        .expect("rolled back");
+    let e = v
+        .check_policy(&ServedPolicy::parse(None, Some("#3")))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(e, VersionRefusal::MinimumAboveActive { .. }),
+        "{e}"
+    );
+    let text = e.to_string();
+    assert!(text.contains("ORDO_VERSIONS_MINIMUM"), "{text}");
+    assert!(text.contains("ORDO_VERSIONS_MINIMUM=0.2.0"), "{text}");
+    // At or below the active version passes.
+    let p = v
+        .check_policy(&ServedPolicy::parse(None, Some("0.2.0")))
+        .await
+        .expect("at the active version");
+    assert_eq!(p.minimum.as_deref(), Some("0.2.0"));
+}
+
+/// **Two nodes sweeping the same window at once move each tenant once**:
+/// one pin change each, one `$pins` row each.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_sweepers_move_a_tenant_once() {
+    let pool = deployment("ordo_vmove_two_nodes", None).await;
+    window(
+        &pool,
+        Target::All,
+        Schedule::Range {
+            start: NOW as i64 - 60,
+            end: NOW as i64 + 60,
+        },
+    )
+    .await;
+    // Two sweeps on two connections at once, as two nodes would.
+    let other = pool.clone();
+    let (a, b) = tokio::join!(
+        revoked_moves::sweep(&pool, NOW),
+        revoked_moves::sweep(&other, NOW)
+    );
+    let (a, b) = (a.expect("node a"), b.expect("node b"));
+    assert!(a.refused.is_empty() && b.refused.is_empty(), "{a:?} {b:?}");
+    let mut moved: Vec<String> = a
+        .moved
+        .iter()
+        .chain(b.moved.iter())
+        .map(|(m, _)| m.change.space.clone())
+        .collect();
+    moved.sort();
+    assert_eq!(moved, ["spc_a", "spc_b"]);
+    for t in ["spc_a", "spc_b"] {
+        assert_eq!(on(&pool, t).await.as_deref(), Some("0.3.0"));
+        let windows = Versions::on(&pool)
+            .pin_history(t)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.cause == "window")
+            .count();
+        assert_eq!(windows, 1, "{t} moved once");
+    }
+}

@@ -53,8 +53,11 @@ pub const ROLES_SETTING: &str = "versions.tenant_move_roles";
 /// Its environment variable. Unset or empty: no tenant role may.
 pub const ROLES_ENV: &str = "ORDO_VERSIONS_TENANT_MOVE_ROLES";
 
-/// How many tenants one sweep moves at most. The rest move on the next
-/// tick while their window holds.
+/// How many tenants one sweep moves at most, and how many it reads at a
+/// time. The rest move on the next tick while their window holds.
+///
+/// Only tenants in an open window are read, a page at a time, so tenants
+/// with no window, or refused, never hold back one past the first page.
 pub const SWEEP_BATCH: usize = 1_000;
 
 /// The actor a window move is recorded under, before the window's id.
@@ -142,12 +145,20 @@ pub async fn sweep_under(
     policy: &crate::versions::ServedPolicy,
     now: u64,
 ) -> Result<Swept, VersionRefusal> {
+    sweep_paged(pool, policy, now, SWEEP_BATCH).await
+}
+
+/// [`sweep_under`] with the page size named, so a test can show a tenant
+/// past the first page still moves.
+#[doc(hidden)]
+pub async fn sweep_paged(
+    pool: &Pool,
+    policy: &crate::versions::ServedPolicy,
+    now: u64,
+    batch: usize,
+) -> Result<Swept, VersionRefusal> {
     let mut out = Swept::default();
     let v = Versions::on(pool).with_policy(policy);
-    let on = v.on_revoked(SWEEP_BATCH).await?;
-    if on.is_empty() {
-        return Ok(out);
-    }
     let open = match Windows::on(pool).open_at(now as i64).await {
         Ok(o) => o,
         Err(e) => {
@@ -159,22 +170,60 @@ pub async fn sweep_under(
     if open.is_empty() {
         return Ok(out);
     }
-    for (space, _) in on {
-        let Some((w, _, _)) = open.iter().find(|(w, _, _)| w.target.covers(&space)) else {
-            continue;
-        };
-        let actor = format!("{WINDOW_ACTOR}:{}", w.id);
-        match v
-            .move_off_revoked(&space, &actor, PinCause::Window, now)
-            .await
-        {
-            Ok(m) => out.moved.push((m, w.id.clone())),
-            // Another node moved it first.
-            Err(VersionRefusal::NotOnRevoked { .. }) | Err(VersionRefusal::NoTenant { .. }) => {}
-            Err(e) => out.refused.push((space, e.to_string())),
+    let only = window_filter(open.iter().map(|(w, _, _)| &w.target));
+    let mut after: Option<String> = None;
+    while out.moved.len() < batch {
+        let page = v.on_revoked(batch, after.as_deref(), Some(&only)).await?;
+        let full = page.len() == batch;
+        for (space, _) in &page {
+            if out.moved.len() >= batch {
+                break;
+            }
+            let Some((w, _, _)) = open.iter().find(|(w, _, _)| w.target.covers(space)) else {
+                continue;
+            };
+            let actor = format!("{WINDOW_ACTOR}:{}", w.id);
+            match v
+                .move_off_revoked(space, &actor, PinCause::Window, now)
+                .await
+            {
+                Ok(m) => out.moved.push((m, w.id.clone())),
+                // Another node moved it first.
+                Err(VersionRefusal::NotOnRevoked { .. }) | Err(VersionRefusal::NoTenant { .. }) => {
+                }
+                Err(e) => out.refused.push((space.clone(), e.to_string())),
+            }
+        }
+        match page.last() {
+            Some((last, _)) if full => after = Some(last.clone()),
+            _ => break,
         }
     }
     Ok(out)
+}
+
+/// `AND (...)` on `"$space"`: the tenants at least one of `targets` covers.
+fn window_filter<'w>(targets: impl Iterator<Item = &'w crate::windows::Target>) -> String {
+    use crate::windows::Target;
+    let list = |t: &std::collections::BTreeSet<String>| {
+        t.iter()
+            .map(|s| ordo_exec::sql_lit(s))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let clauses: Vec<String> = targets
+        .map(|t| match t {
+            Target::All => "TRUE".to_string(),
+            Target::Only(t) if t.is_empty() => "FALSE".to_string(),
+            Target::Only(t) => format!("\"$space\" IN ({})", list(t)),
+            Target::Except(t) if t.is_empty() => "TRUE".to_string(),
+            Target::Except(t) => format!("\"$space\" NOT IN ({})", list(t)),
+        })
+        .collect();
+    if clauses.is_empty() {
+        return "AND FALSE".to_string();
+    }
+    format!("AND ({})", clauses.join(" OR "))
 }
 
 /// Fill each listed tenant's next window start (`RevokedPin::next_window`),

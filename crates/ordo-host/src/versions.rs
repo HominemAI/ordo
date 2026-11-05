@@ -1317,6 +1317,16 @@ impl<'a> Versions<'a> {
         }
     }
 
+    /// The served policy in force, read inside `tx` after its pin lock: the
+    /// caller's, or the stored one. A setting change writes under the same
+    /// lock, so a pin never decides on settings a change just replaced.
+    async fn policy_in(&self, tx: &ordo_exec::TxConn) -> Result<ServedPolicy, VersionRefusal> {
+        match self.policy {
+            Some(p) => Ok(p.clone()),
+            None => Ok(settings_in(tx).await?.policy),
+        }
+    }
+
     /// The served policy in force: the caller's, or the stored one.
     async fn policy_now(&self) -> Result<ServedPolicy, VersionRefusal> {
         match self.policy {
@@ -1352,6 +1362,26 @@ impl<'a> Versions<'a> {
                     });
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Refuse `version` when it is below `versions.minimum`.
+    async fn refuse_below_minimum(&self, version: &str) -> Result<(), VersionRefusal> {
+        let policy = self.policy_now().await?;
+        if self
+            .with_policy(&policy)
+            .below_minimum()
+            .await?
+            .iter()
+            .any(|v| v == version)
+        {
+            return Err(VersionRefusal::BelowMinimum {
+                named: self.named(version).await?,
+                minimum: self
+                    .named(policy.minimum.as_deref().unwrap_or_default())
+                    .await?,
+            });
         }
         Ok(())
     }
@@ -1761,22 +1791,6 @@ impl<'a> Versions<'a> {
         if from.as_deref() == Some(version) {
             return Ok(Activated::AlreadyActive(version.to_string()));
         }
-        // Every tenant would land below `versions.minimum`.
-        let policy = self.policy_now().await?;
-        if self
-            .with_policy(&policy)
-            .below_minimum()
-            .await?
-            .iter()
-            .any(|v| v == version)
-        {
-            return Err(VersionRefusal::BelowMinimum {
-                named: self.named(version).await?,
-                minimum: self
-                    .named(policy.minimum.as_deref().unwrap_or_default())
-                    .await?,
-            });
-        }
         let cause = match &from {
             Some(f) => {
                 let ordinals = registry::ordinals(self.pool).await?;
@@ -1793,6 +1807,17 @@ impl<'a> Versions<'a> {
         if let Some(mark) = mark_in(&tx, version).await? {
             tx.rollback().await?;
             return Err(self.revoked(mark, None).await);
+        }
+        // Every tenant would land below `versions.minimum`. Read under the
+        // lock a setting change takes (audit L4).
+        let policy = self.policy_in(&tx).await?;
+        if let Err(e) = self
+            .with_policy(&policy)
+            .refuse_below_minimum(version)
+            .await
+        {
+            tx.rollback().await?;
+            return Err(e);
         }
         registry::record_activation(&tx, version, actor, at).await?;
         repin(&tx, &repin_sql(version, actor, cause, at.0, None)).await?;
@@ -1960,13 +1985,19 @@ impl<'a> Versions<'a> {
         at: u64,
     ) -> Result<PinChange, VersionRefusal> {
         let version = self.resolve(name).await?;
-        self.check_served(&version).await?;
         ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         if let Some(mark) = mark_in(&tx, &version).await? {
             tx.rollback().await?;
             return Err(self.revoked(mark, None).await);
+        }
+        // Read under the lock a setting change takes, so a change racing
+        // this pin is seen (security audit 2026-11-05, L4).
+        let policy = self.policy_in(&tx).await?;
+        if let Err(e) = self.with_policy(&policy).check_served(&version).await {
+            tx.rollback().await?;
+            return Err(e);
         }
         let held = tx
             .rows(&format!(
@@ -2428,12 +2459,17 @@ impl<'a> Versions<'a> {
             Some(n) => Some(self.resolve(n).await?),
             None => None,
         };
-        if let Some(v) = &version {
-            self.check_served(v).await?;
-        }
         ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
+        // Under the lock, as a pin reads it (audit L4).
+        let policy = self.policy_in(&tx).await?;
+        if let Some(v) = &version {
+            if let Err(e) = self.with_policy(&policy).check_served(v).await {
+                tx.rollback().await?;
+                return Err(e);
+            }
+        }
         let held = tx
             .rows(&format!(
                 "SELECT 1 FROM \"$spaces\" WHERE \"$space\" = {} AND \"state\" IN {PINNED_STATES}",
@@ -2541,10 +2577,18 @@ impl<'a> Versions<'a> {
         cause: PinCause,
         at: u64,
     ) -> Result<MovedOff, VersionRefusal> {
-        let below = self.below_minimum().await?;
         ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
+        // Under the lock, as a pin reads it (audit L4).
+        let policy = self.policy_in(&tx).await?;
+        let below = match self.with_policy(&policy).below_minimum().await {
+            Ok(b) => b,
+            Err(e) => {
+                tx.rollback().await?;
+                return Err(e);
+            }
+        };
         let held = tx
             .rows(&format!(
                 "SELECT \"version\" FROM \"$spaces\" \

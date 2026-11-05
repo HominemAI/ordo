@@ -286,6 +286,62 @@ async fn a_change_that_would_break_the_deployment_is_refused_naming_it() {
 /// **A new tenant starts on the stored version, and that version cannot be
 /// revoked** while the setting names it. A revoked one is refused as the
 /// setting.
+/// **A pin sees a setting change that raced it** (security audit
+/// 2026-11-05, L4). The settings are read under the pin lock a change
+/// takes, so a pin queued behind a change that unserves its version is
+/// refused, not landed on a version just unserved.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pin_queued_behind_a_setting_change_reads_the_change() {
+    let pool = three("ordo_vset_race").await;
+    let v = Versions::on(&pool);
+    v.set_setting(VersionSetting::Served, Some("in-use"), OWNER, "all", 300)
+        .await
+        .expect("the table");
+    tenant(&pool, "spc_b").await;
+
+    // A change holds the lock and has written its row: only 0.1.0, beside
+    // the active 0.3.0, is served now.
+    let change = pool.begin().await.expect("tx");
+    change
+        .rows(&format!(
+            "SELECT pg_advisory_xact_lock({}, 0)",
+            ordo_host::versions::PIN_LOCK_NS
+        ))
+        .await
+        .expect("lock");
+    change
+        .rows(
+            "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \
+             \"at\") VALUES ('versions.served', '0.1.0', 'deployment-owner:ada', 'race', 301)",
+        )
+        .await
+        .expect("row");
+    let p2 = pool.clone();
+    let pin =
+        tokio::spawn(async move { Versions::on(&p2).pin("spc_b", "0.2.0", OWNER, 302).await });
+    // The pin is queued behind the change (its lock, or its table).
+    let mut waiting = false;
+    for _ in 0..200 {
+        let rows = pool
+            .rows(
+                "SELECT count(*)::text FROM pg_locks l JOIN pg_database d ON d.oid = l.database \
+                 WHERE NOT l.granted \
+                 AND d.datname = current_database()",
+            )
+            .await
+            .expect("pg_locks");
+        if rows[0][0].as_deref() != Some("0") {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(waiting, "the pin never queued on the lock");
+    change.commit().await.expect("commit");
+    let r = pin.await.expect("task");
+    assert!(matches!(r, Err(VersionRefusal::NotServed { .. })), "{r:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn new_tenants_start_on_the_stored_version() {
     let pool = three("ordo_vset_new_tenant").await;

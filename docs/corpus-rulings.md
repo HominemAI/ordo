@@ -12123,3 +12123,31 @@ Board task `a-system-calling-platform-ops-is`, asks 1 and 2.
 - **Ask 1, "good."** A system caller is never asked for a passkey touch on any platform op its credential is granted. The grant is the control; a touch only proves a person is present.
 - **Ask 2.** The recommendation was to ask a person by default. The owner ruled against it: *"No. They could be moving many at a time, It would be ridiculous to ask for each one. If they are logged in they proved their access."* A signed-in person moving a tenant's version (`std.deployment.pin`) is not asked for a touch. The role gate is unchanged: only the deployment owner may move a version.
 - **Read as.** This applies the 2026-10-22 principle, "signed in means authenticated", to version moves. Other platform writes keep the step-up rules of 2026-09-29 until the owner says otherwise.
+
+## 2026-11-05: security levels for passkey touches
+
+Board task `security-levels-low-standard-and-high`. The owner wrote notes per row on the Ordo Passkey Touches page and said in chat: *"for anything where i didnt define levels make the best of it based on my overall tone of the security landscape."* His notes are recorded verbatim on the task. The tone, from today and 2026-10-22: *"if a user is authed, they are authed"*, a system is never asked, and the developer decides.
+
+- **One setting, three levels.** `ORDO_SECURITY_LEVEL` = `low` | `standard` | `high`. Standard is the default (the owner calls it "default"). A level only sets which situations ask a person for a touch. The per-action settings still override it (*"again the dev decides"*). Low asks only for console permissions, plus recovery (owner).
+- **A system is never asked at any level** (ruled earlier today). Sign-up never asks.
+
+| Situation | Low | Standard | High | Source |
+|---|---|---|---|---|
+| Deploying, versions, deployment settings | off | off | on | reading |
+| Creating a tenant | off | off | on | reading |
+| Deleting or reaping a tenant | off | on | on | reading |
+| Console keys | on | on | on | owner: "this is acceptable" |
+| Export and import | off | on | on | reading |
+| Membership and admission | off | off | on | owner |
+| Recovery and contests | on | on | on | owner |
+| Tenant storage and attestation | off | on | on | reading; "it is the app dev's choice" |
+| Platform reads | off | off | off | owner; only `ORDO_PRESENCE_ON_READS=on` |
+| Console acting inside a tenant | on | on | on | owner: "agreed" |
+| Approving a delegation | off | on | on | reading |
+| Account security on the app's sign-in | off | on | on | reading; owner: "Let's do it" |
+| Changing a contact email | off | on | on | owner: "ok" (2026-10-08 default) |
+| Identity service account page | on | on | on | reading: it is a console permission |
+
+- **Reading, where the owner gave no level:** a touch stays where a stolen session does lasting harm that is hard to undo (deleting, export, sending data outside, an account lockout). Routine work asks nothing below High.
+- **The developer may pass a choice to the tenant** (membership note). Not built: no tenant-level presence setting exists today, found 2026-11-05. Queued with the levels.
+- **Asked on the board:** an automated import by a system, a token that mints tokens for the developer's own users, and how a person without a passkey gives a touch.

@@ -70,6 +70,14 @@ pub struct CollapseKey {
     pub about: Option<SpaceId>,
     pub subject: Subject,
     pub op: String,
+    /// `Some(reason)` for a window of failed presentations
+    /// ([`EventKind::AuthenticationFailed`]), `None` for a window of
+    /// denials. The reason is in the key, so two reasons are two entries.
+    /// Failures collapse as denials do because many are reachable with no
+    /// token at all: uncollapsed, an anonymous flood filled the shared
+    /// outbox and pushed out every tenant's evidence (security audit
+    /// 2026-11-05, M1).
+    pub failed: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,9 +162,26 @@ impl Collapser {
         at: Timestamp,
         correlation: CorrelationId,
     ) {
+        self.fold(key, Some(decision), at, correlation);
+    }
+
+    /// Fold one failed presentation into its window. `key.failed` names
+    /// the reason; the cap and the window are the ones denials share.
+    pub fn observe_failure(&mut self, key: CollapseKey, at: Timestamp, correlation: CorrelationId) {
+        debug_assert!(key.failed.is_some(), "a failure window names its reason");
+        self.fold(key, None, at, correlation);
+    }
+
+    fn fold(
+        &mut self,
+        key: CollapseKey,
+        decision: Option<RecordedDecision>,
+        at: Timestamp,
+        correlation: CorrelationId,
+    ) {
         self.window_start.entry(key.scope.clone()).or_insert(at);
         if let Some(w) = self.open.get_mut(&key) {
-            w.decisions.insert(decision);
+            w.decisions.extend(decision);
             w.last_at = at;
             w.count += 1;
             // A bounded sample of distinct correlations: enough to reach the
@@ -175,7 +200,7 @@ impl Collapser {
         self.open.insert(
             key,
             Window {
-                decisions: BTreeSet::from([decision]),
+                decisions: decision.into_iter().collect(),
                 first_at: at,
                 last_at: at,
                 count: 1,
@@ -219,7 +244,10 @@ impl Collapser {
                     about: key.about,
                     subject: key.subject,
                     op: key.op,
-                    kind: EventKind::Denied(w.decisions),
+                    kind: match key.failed {
+                        Some(reason) => EventKind::AuthenticationFailed { reason },
+                        None => EventKind::Denied(w.decisions),
+                    },
                     first_at: w.first_at,
                     last_at: w.last_at,
                     count: w.count,

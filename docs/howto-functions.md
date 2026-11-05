@@ -400,7 +400,7 @@ line or error message is replaced the same way.
 `ordo apply` deploys the code with the program:
 
 ```
-ordo apply examples/notes-v2 --db <database>
+ordo apply examples/notes-v2 --direct --db <database>
 ```
 
 1. It reads each `code` file and refuses a missing one or one over 20 MB.
@@ -423,7 +423,7 @@ An apply over `--host` does the same through the door:
 - The door stores each file by hash before the version that names it.
 - Over `--host` all code files together may be at most 1,048,576
   characters, because the door takes a body of at most 2 MB. A larger
-  bundle goes through `ordo apply --db`.
+  bundle goes through `ordo apply --direct`.
 
 A secret with no value does not block an apply, on either path. The
 function answers `secret_not_set` until `ordo secret set` runs.

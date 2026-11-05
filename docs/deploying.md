@@ -87,7 +87,7 @@ connection slot from a healthy one.
 | `ORDO_REGEX_MAX_LEN` | default `256`, `1` to `10000` | the longest `matches` pattern a statement runs, in characters. A longer one, or one holding a backreference (`\1` to `\9`), is refused as `invalid_param` before the regex engine runs it |
 | `ORDO_PG_IDLE_SECS` | default `30` | how long a connection may sit unused before the pool closes it, and how long a tenant's database keeps its live-update listener after its last open feed ends. Pools dial on demand and hold **no minimum**, so a tenant nobody is using holds no connection within this period. `0` keeps every connection once dialled. With a database per tenant this is the setting that decides what an idle tenant costs the server (25g). A busy tenant still holds up to `ORDO_PG_POOL_SIZE` connections |
 | `ORDO_TENANT_ATTACH_HOSTS` | **deny everything** | comma-separated hosts a tenant may be attached to: **both** a database host and a bucket endpoint's host. **Unset means no tenant can be attached anywhere**, so `std.space.create`'s `$db` and `std.space.attachBucket`'s `$endpoint` are both refused until it is set (§2c) |
-| `ORDO_TENANT_CATCHUP_SECS` | default `15` | how often each replica looks for tenants whose database is behind the program this node serves and brings them forward (25i). A tenant's own database is moved by an apply through the door, and by this catch-up when the apply reached only the deployment's own database (`ordo apply --db`, which is what `examples/notes/dev/serve.sh` runs), when the tenant was created from the previous version, or when its database was down at the time. A swap and a boot each ask for a pass at once, so this sets only how soon a tenant that was unreachable is found again. A change the tenant's data cannot take is not retried until the next version; the tenant stays closed and `/health/ready` gives the reason |
+| `ORDO_TENANT_CATCHUP_SECS` | default `15` | how often each replica looks for tenants whose database is behind the program this node serves and brings them forward (25i). A tenant's own database is moved by an apply through the door, and by this catch-up when the apply reached only the deployment's own database (`ordo apply --direct`, which is what `examples/notes/dev/serve.sh` runs), when the tenant was created from the previous version, or when its database was down at the time. A swap and a boot each ask for a pass at once, so this sets only how soon a tenant that was unreachable is found again. A change the tenant's data cannot take is not retried until the next version; the tenant stays closed and `/health/ready` gives the reason |
 | `ORDO_NODE_BEAT_SECS` | default `5` | how often each node writes its row in `$nodes`: the version its door serves and whether its tenant catch-up for that version has finished. `ordo apply` waits on these rows, and `GET /health/deploy` shows them (§7, "When a new version is served"). A row older than three beats counts as a stopped node. `0` refuses the boot |
 | `ORDO_VERSIONS_TENANT_MOVE_ROLES` | default unset | the tenant roles that may move their own tenant off a revoked version now (`std.space.moveOffRevoked`), such as `owner`. **Unset, no tenant role may**: a tenant on a revoked version moves in its maintenance window, or when you or your own system move it (`ordo versions move`, `std.deployment.moveOffRevoked`). A word that is not a role refuses the boot by name |
 | `ORDO_PG_TENANT_HOST` | the deployment's own | where a tenant's database is created when the call names no cluster. Per field, so changing the host keeps the port (§2d) |
@@ -821,9 +821,19 @@ tables, mints custody for the system space, and serves with no program:
 Then, in either order:
 
 ```
-ordo apply <dir> --as <you>                     # the first program
-ordo keys init --space <tenant> --as <you>      # the first tenant's custody
+ordo apply <dir> --as <you> --direct                     # the first program
+ordo keys init --space <tenant> --as <you> --direct      # the first tenant's custody
 ```
+
+These two open the database from your machine, so they name `--direct`. No
+host can sign you in yet: nobody has applied a program or signed in, and the
+host refuses to boot a tenant with no custody. Without `--direct` and without
+`--host` they refuse and name both flags. Each `--direct` use is written to
+`$direct_uses` before it runs. The next boot writes it to the security log as
+a `deploy` event with the act `direct-cli`, naming the command, the unix user
+and the machine, then deletes the row. Once the deployment has an owner who
+can sign in, the next `ordo apply` goes through the door (`--host`) like
+every other command, and `--direct` stays for a host that will not boot.
 
 The system space's founding member row needs `members`, which a program's
 DDL creates, so on a database with no program the boot mints custody and the
@@ -1083,7 +1093,9 @@ tenant created) and `std.space.setRecoveryPolicy` (hold on recovery, off unless
 the tenant turns it on, kept in `$recoverytenant`).
 
 The host command is `ordo identity recover --principal <id> --as <who>
-[--evidence <class>] [--ref <r>]`. It opens a recovery with no delay and
+[--evidence <class>] [--ref <r>] --direct`. It opens the database from your
+machine, so it names `--direct`, and the use is recorded for the security log
+at the next boot. It opens a recovery with no delay and
 prints the ticket once. The tables are `$recovery` (the cases) and the
 recovery columns of `$authenticator`, created at boot beside the other
 authentication tables. The worker `auth.recovery.sweep` (60 seconds) removes

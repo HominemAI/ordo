@@ -17,11 +17,18 @@ ordo apply ./myprogram.ordo --host ordo.inf.smg.icu --space ordo-system
 ```
 
 Against the deployment's **database**, which is what a first deployment and a
-recovery need:
+recovery need. It is refused unless you name `--direct`:
 
 ```
-ordo apply ./myprogram.ordo --db prod --as my-service
+ordo apply ./myprogram.ordo --direct --db prod --as my-service
 ```
+
+With neither `--host` nor `--direct`, `ordo apply` refuses and names both.
+`--direct` is for the first program on a database no host serves yet, and for a
+host that will not boot. Each use is recorded before it runs and written to the
+security log at the next boot (`deploying.md`, "A first deployment, in order").
+Every other command in this chapter, `versions`, `windows`, `fleet`, `quota`
+and `plan`, goes through the door and has no `--direct`.
 
 The door path needs no database credentials. It reaches
 `std.deployment.apply` on the running deployment, which calls the same apply
@@ -112,7 +119,7 @@ would refuse it: run `ordo migrate --apply`), `apply_in_progress`,
 
 **First deployment:**
 ```
-ordo apply ./myprogram.ordo --db prod --as my-service
+ordo apply ./myprogram.ordo --direct --db prod --as my-service
 schema     created  (12 table(s) on an empty target; `$migrations` #1; event recorded on the deployment stream)
 stored     abc123def456…
 activated  abc123def456…  (was nothing)
@@ -138,8 +145,8 @@ REFUSED  2 op(s) in this program do not compile, so no node could load the artif
 
 A program whose entities changed needs the database moved before the artifact can be activated. Two commands, in this order:
 
-1. `ordo plan ./myprogram.ordo --against prod` reads the database and prints every change between it and the program, classified (`A2`, `C1`, `B5`…), probed against the live rows, and costed. Read-only. Exit code 1 means a probe or a ruling refused, and the report says which.
-2. `ordo migrate ./myprogram.ordo --apply --db prod --as my-service` runs the same plan and then applies it: class A (a new entity, an optional field, a constant-defaulted field, an index) in one transaction, then each constraint validated and each index built concurrently after it. A foreign key or a check onto a table that exists is added `NOT VALID` in the transaction (a moment's lock, no scan) and validated as its own step (the rows scanned under a lock that lets writes continue). A unique applies only where it constrains no existing data. Recorded in `$migrations` and on the deployment's security stream. Then `ordo apply` stores and activates.
+1. `ordo plan ./myprogram.ordo --host <h>` asks the deployment what applying the program would do (`std.deployment.plan`) and prints the verdict and every change between the database and the program, classified (`A2`, `C1`, `B5`…), with what refuses it. Read-only. Exit code 1 means the apply would refuse, and the report says which. `--against <db>` is gone: the plan goes through the door.
+2. `ordo migrate ./myprogram.ordo --apply --direct --db prod --as my-service` runs the same plan and then applies it: class A (a new entity, an optional field, a constant-defaulted field, an index) in one transaction, then each constraint validated and each index built concurrently after it. A foreign key or a check onto a table that exists is added `NOT VALID` in the transaction (a moment's lock, no scan) and validated as its own step (the rows scanned under a lock that lets writes continue). A unique applies only where it constrains no existing data. Recorded in `$migrations` and on the deployment's security stream. Then `ordo apply` stores and activates.
 
 **Healthy result:**
 ```
@@ -151,7 +158,7 @@ APPLY  (5 statement(s))
   cc  A4  CREATE INDEX CONCURRENTLY "orders$customer$placed$ix" ON "orders" ("$space", "customer", "placed");
   APPLIED  3 statement(s) in one transaction, 1 constraint(s) validated and 1 index(es) built concurrently after it;
            recorded as `$migrations` #7; event recorded on the deployment stream
-  next     `ordo apply ./myprogram.ordo --db prod` stores and activates abc123def456…
+  next     `ordo apply ./myprogram.ordo --direct --db prod` stores and activates abc123def456…
 ```
 
 The deployment keeps serving throughout: the serving artifact tolerates the extra column, and the new artifact reads it once activated.
@@ -164,7 +171,7 @@ The deployment keeps serving throughout: the serving artifact tolerates the extr
 - `validate_failed` in `$migrations`: a row that breaks a constraint was written between the probe and the add. The transaction committed, the constraint was dropped again, and the message names the constraint and the table. Fix the rows and apply again; the plan proposes the constraint afresh.
 - `blind_index_backfill_required`: a `sealed indexed` field onto a populated table. Increment 4.
 - `probe_not_empty`: the live rows violate the constraint the program declares. The report shows the offending values; which row survives is your decision.
-- `serving_schema_drifted`: the database does not hold what the serving version declares (a column dropped by hand, a table missing). Repair or restore first; `ordo plan --against` lists the gap.
+- `serving_schema_drifted`: the database does not hold what the serving version declares (a column dropped by hand, a table missing). Repair or restore first; `ordo plan --host` lists the gap.
 
 When any change is refused, nothing is sent. An apply that landed half its changes would leave a database that matches no version.
 
@@ -178,8 +185,11 @@ When any change is refused, nothing is sent. An apply that landed half its chang
 
 **Command:**
 ```
-ordo rollback --version '#3' --as rollback-reason:incident-12345
+ordo rollback --version '#3' --host ordo.inf.smg.icu --space ordo-system
+ordo rollback --version '#3' --direct --as rollback-reason:incident-12345   # no host will boot
 ```
+
+Through the door, the actor recorded is the principal your token proved, so `--as` is refused. With `--direct` it names you, and the use is recorded for the next boot's security log.
 
 **Healthy result:**
 ```
@@ -199,7 +209,7 @@ Output shows the artifact registry and the activation log in order, so you can s
 
 **Naming, labelling and comparing versions:**
 
-A version is named by its name or by its order number, `#4`. `ordo versions` reads them:
+A version is named by its name or by its order number, `#4`. `ordo versions` reads them. Every `versions` command goes through the door: name the deployment with `--host <h>` (or `ORDO_HOST`), and `--token`, a machine key or `ordo login`. There is no `--db` form. `list` and `show` print what `std.deployment.versions` carries (order number, label, commit, tenants, revoke mark, activations); a version's builds and source fingerprint are not in that answer yet.
 
 ```
 ordo versions list                          # each version, newest first
@@ -287,7 +297,7 @@ ordo windows delete upgrade
 With one database per tenant, an update has to reach each person's database as well as the deployment's own. It does, in three ways.
 
 - **An apply through the door** (`ordo apply --host`, `std.deployment.apply`) applies the change to the deployment's own database and then to each tenant database, 8 at a time and 20 seconds each, before it activates. Safe additive changes land. Anything else is refused by name with nothing sent to that database. The answer carries a `tenants` line: how many were brought forward, how many were already there, and each database that was held with the reason. One database that is down or slow does not fail the apply and does not hold back the activation. A staged apply (`--no-activate`) touches no tenant.
-- **A program applied to one database** (`ordo apply --db`, which `examples/notes/dev/serve.sh` uses) reaches no tenant's database by itself. Each replica notices the swap and brings every tenant database forward within seconds.
+- **A program applied to one database** (`ordo apply --direct`, which `examples/notes/dev/serve.sh` uses) reaches no tenant's database by itself. Each replica notices the swap and brings every tenant database forward within seconds.
 - **A tenant that was down, or was created from the previous version,** is found by the same catch-up, once at boot and then on a tick (`ORDO_TENANT_CATCHUP_SECS`, default 15).
 
 The catch-up brings a database to the **active** version. A tenant pinned to another version (see "Versions and pins" below) is not brought forward. Its database must already hold that version's shape, and each node checks it the first time it opens the tenant. A database that lacks something the version declares keeps that tenant closed. `/health/ready` names the first thing missing and the fix: pin it to a version its database serves, or activate that version so its database is brought forward.
@@ -463,9 +473,13 @@ cannot do:
 
 ```
 ordo quota set --space <s> --quantity <requests|rows_returned> \
-  --limit <n> --grace <n> --period-secs <n>
-ordo quota show --space <s>
+  --limit <n> --grace <n> --period-secs <n> --host <h> --home <deployment space>
+ordo quota show --space <s> --host <h> --home <deployment space>
 ```
+
+Both go through the door (`std.deployment.setQuota`, `std.deployment.quotas`).
+`--space` names the tenant, so the deployment's own space is `--home` (or
+`ORDO_SPACE`).
 
 v1 gates `requests` and `rows_returned` only. Both are counted at the
 door as the request happens (M1a), so the quota is exact. `writes` is
@@ -807,7 +821,7 @@ password given) writes an event to the deployment's signed security stream, so a
 link with no event behind it is one somebody wrote by hand:
 
 ```
-ordo verify --identity [--security-key-id <id> --security-public-key <hex>]
+ordo verify --direct --identity [--security-key-id <id> --security-public-key <hex>]
 ```
 
 It verifies the deployment's stream, then reconciles every link in
@@ -850,7 +864,7 @@ When the deployment owner's own last passkey is gone, no path needs a person
 who can sign in except this one:
 
 ```
-ordo identity recover --principal usr_… --as adam [--evidence host-break-glass] [--ref TICKET-12]
+ordo identity recover --direct --principal usr_… --as adam [--evidence host-break-glass] [--ref TICKET-12]
 ```
 
 It needs the database credentials `ordo` already holds for its other
@@ -1082,7 +1096,7 @@ a deployment you could not repair.
 3. **Record the restore.**
 
    ```
-   ordo restore --record --space myspace --as ops@example.com \
+   ordo restore --record --direct --space myspace --as ops@example.com \
      --source pitr --at 1757003600 \
      [--control-db <name>] [--pre-restore-head <idx>:<hex> | --unattested]
    ```
@@ -1121,7 +1135,7 @@ a deployment you could not repair.
 4. **Verify.**
 
    ```
-   ordo verify --space myspace --control-db <name> \
+   ordo verify --direct --space myspace --control-db <name> \
      [--attestation <file>]… --key-id <id> --public-key <hex>
    ```
 
@@ -1162,9 +1176,9 @@ deployment produces the number that is.
 
 **Command:**
 ```
-ordo verify --space myspace
-ordo verify --space myspace --from-genesis
-ordo verify --space myspace --key-id my-key-id --public-key <hex> 
+ordo verify --direct --space myspace
+ordo verify --direct --space myspace --from-genesis
+ordo verify --direct --space myspace --key-id my-key-id --public-key <hex> 
 ```
 
 **Healthy result (exit code 0):**

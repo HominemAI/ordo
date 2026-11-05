@@ -129,12 +129,12 @@ The normalization is applied *on write*. When you store an email, Ordo normalize
 
 Every space has a space master key (SMK) and a series of data encryption keys (DEKs), one per epoch. New writes seal under the current DEK; a value written earlier stays sealed under the epoch that wrote it until the re-seal pass moves it. Rotation is three operator acts, in this order: mint the next epoch and enqueue the pass (`rotate`), let the deployment's `keys.reseal` worker move every ciphertext off the old epoch, then destroy the old epoch's key once nothing is under it (`destroy`). A fourth act, `reseal`, is the forced re-encrypt you run after an exposure when the rotation already happened.
 
-All four take the same custody flags as `ordo keys init`: `--space`, `--as`, `--db`, and `--master-key-file` with `--passphrase-file`. Without them the commands read `ORDO_MASTER_KEY`, and refuse to unless `ORDO_DEV_UNSAFE_TEST_KEYS=1` is set, because that key is stretched with one HMAC and is for development only.
+All four take the same custody flags as `ordo keys init`: `--direct`, `--space`, `--as`, `--db`, and `--master-key-file` with `--passphrase-file`. Without them the commands read `ORDO_MASTER_KEY`, and refuse to unless `ORDO_DEV_UNSAFE_TEST_KEYS=1` is set, because that key is stretched with one HMAC and is for development only.
 
 ### Rotate
 
 ```
-ordo keys rotate --space acme --reason "laptop lost 2026-09-19" --as ops:ada \
+ordo keys rotate --direct --space acme --reason "laptop lost 2026-09-19" --as ops:ada \
   --master-key-file /etc/ordo/master.key --passphrase-file /run/secrets/master-pass
 ```
 
@@ -147,7 +147,7 @@ Nothing else changes at that moment: every existing value still opens, because t
 The `keys.reseal` worker runs on every deployment, leader-only, and moves one chunk per tick (`ORDO_RESEAL_CHUNK` rows, default 256; `ORDO_RESEAL_PAUSE_MS` between chunks, default 250). It needs no write barrier: writes always seal under the newest epoch, and every update the pass makes is a compare-and-set on the old envelope bytes, so a row written while the pass runs is skipped rather than overwritten.
 
 ```
-ordo keys status --space acme --as ops:ada ...
+ordo keys status --direct --space acme --as ops:ada ...
 ```
 
 prints the current epoch, every live epoch with its four counts and its standing (`current`, `pass running on columns: advanced 3s ago`, `destroyable: re-sealed 2026-09-19`, or `retired, no pass`), and every pass row with its cursor, counts and attempts. The same answer is on the metrics endpoint: `ordo_reseal_rows_remaining{space,population}` and `ordo_reseal_stuck_seconds{space}`, the seconds since the cursor last advanced while rows remain. A pass whose stuck seconds keep rising while rows remain is failing its chunk; `status` shows the attempts, and `/health/deep` shows the worker's failures.
@@ -159,7 +159,7 @@ A pass is complete when every count for the old epoch is zero. Three populations
 ### Force a re-encrypt after an exposure
 
 ```
-ordo keys reseal --space acme --as ops:ada ...
+ordo keys reseal --direct --space acme --as ops:ada ...
 ```
 
 enqueues a pass for every retired epoch that still holds anything and has no open pass, targeted at the current epoch. Run it after `rotate` if a pass was lost, after `blobgc` has retired old object pairs to give a `blocked` pass another sweep, or on a deployment where an epoch was minted before this worker existed. It is idempotent: a second run enqueues nothing.
@@ -167,7 +167,7 @@ enqueues a pass for every retired epoch that still holds anything and has no ope
 ### Destroy an epoch
 
 ```
-ordo keys destroy --space acme --epoch 3 --as ops:ada ...
+ordo keys destroy --direct --space acme --epoch 3 --as ops:ada ...
 ```
 
 counts all four populations under epoch 3 and refuses by name with the number if any is non-zero (`refused: 12 payloads still under epoch 3`), or refuses if 3 is the epoch new writes seal under. When the gate clears it prints the one consequence nothing can undo:

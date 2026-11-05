@@ -207,7 +207,10 @@ export async function codeFor(address: string, n: number): Promise<string> {
  */
 export function applyProgram(dir: string): string {
   const s = stack();
-  return execFileSync(s.ordo, ['apply', dir, '--as', 'notes-e2e', '--wait-secs', '240'], {
+  // `--direct`: the harness owns this stack's database and holds no
+  // deployment-owner credential at the door. Each use is recorded and the
+  // next boot writes it to the security log.
+  return execFileSync(s.ordo, ['apply', dir, '--direct', '--as', 'notes-e2e', '--wait-secs', '240'], {
     env: {
       ...process.env,
       ORDO_PG_HOST: s.pg.host,

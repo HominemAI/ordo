@@ -172,6 +172,8 @@ const READS: &[&str] = &[
     "std.deployment.tenantVersion",
     // Every maintenance window and its times; deployment owner only.
     "std.deployment.windows",
+    // The three version settings and their history; deployment owner only.
+    "std.deployment.versionSettings",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

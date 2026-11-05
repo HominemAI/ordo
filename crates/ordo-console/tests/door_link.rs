@@ -54,10 +54,12 @@ const APPLY: &str = ordo_host::apply_op::APPLY;
 use ordo_host::deploy_ops::{ACTIVATE, PLAN, VERSIONS};
 /// The revoke ops and the window ops (versions increment 2b), the real
 /// ones over the test's own database.
-const VERSION_OPS: [&str; 3] = [
+const VERSION_OPS: [&str; 5] = [
     ordo_host::deploy_ops::REVOKE,
     ordo_host::deploy_ops::UNREVOKE,
     ordo_host::deploy_ops::REVOKED,
+    ordo_host::deploy_ops::VERSION_SETTINGS,
+    ordo_host::deploy_ops::SET_VERSION_SETTING,
 ];
 use ordo_host::window_ops::OPS as WINDOW_OPS;
 
@@ -135,8 +137,12 @@ impl Door {
             engine.require_step_up(change);
         }
         for change in VERSION_OPS.iter().chain(WINDOW_OPS.iter()) {
+            // The version settings ask a touch only at the high level
+            // (`security_level::Situation::Deploying`).
             if ![
                 ordo_host::deploy_ops::REVOKED,
+                ordo_host::deploy_ops::VERSION_SETTINGS,
+                ordo_host::deploy_ops::SET_VERSION_SETTING,
                 ordo_host::window_ops::WINDOWS,
             ]
             .contains(change)
@@ -1441,7 +1447,41 @@ async fn revoke_needs_a_reason_and_somewhere_to_move_and_unrevoke_lifts_it() {
         Value::Null
     );
 
+    // The version settings (owner, 2026-11-05: stored in Ordo): read,
+    // changed with a reason, and a refusal in the door's words.
+    let settings = h.get("deploys/settings").await;
+    assert_eq!(settings.status, StatusCode::OK, "{}", settings.body);
+    assert_eq!(settings.body["newTenant"], Value::Null, "{}", settings.body);
+    let set = h
+        .post(
+            "deploys/setting",
+            json!({"setting": "versions.new_tenant", "value": v1, "reason": "start here"}),
+        )
+        .await;
+    assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+    assert_eq!(set.body["newTenant"], v1.as_str(), "{}", set.body);
+    assert_eq!(set.body["changed"], true, "{}", set.body);
+    let bad = h
+        .post(
+            "deploys/setting",
+            json!({"setting": "versions.minimum", "value": "9.9.9", "reason": "x"}),
+        )
+        .await;
+    assert_ne!(bad.status, StatusCode::OK, "{}", bad.body);
+    let message = bad.body["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("versions.minimum") && message.contains("9.9.9"),
+        "{}",
+        bad.body
+    );
+    let after = h.get("deploys/settings").await.body;
+    assert_eq!(after["history"][0]["reason"], "start here", "{after}");
+
     let audit = audit_of(&h, "deploys.").await;
+    assert!(
+        audit.contains(&"deploys.setting ok".to_string()),
+        "{audit:?}"
+    );
     assert!(
         audit.contains(&"deploys.revoke ok".to_string()),
         "{audit:?}"

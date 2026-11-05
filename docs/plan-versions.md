@@ -238,6 +238,24 @@ The pin this plan adds:
 - An activation still moves every tenant at once, a tenant pinned
   elsewhere included (until rollouts, increment 10).
 
+**As built in increment 3, session 2** (2026-11-05, `deploy.rs`,
+`provision.rs`, `pin_stream.rs`, `tenant_forward.rs`):
+
+- A new tenant is provisioned with its own version's tables: the version
+  it is pinned to (a resumed provision), or else the one
+  `versions.new_tenant` names. Its database's `$migrations` names that
+  version, so a beta that adds a table opens on its pin.
+- Each node keeps the `versions.new_tenant` version loaded, whether or not
+  a pin names it yet. A node that has not loaded it refuses the create,
+  retryable, nothing written; the caller sees no version or setting, the
+  log names both.
+- The catch-up leaves a database at a version some tenant is pinned to, or
+  at the `versions.new_tenant` version, as it is: it is on its pin, not
+  behind.
+- `ordo_exec::erase::rows_held` counts only tables the database has, so a
+  version that declares a new table can be checked against the control
+  database.
+
 ### 1.4 How the door picks the version per request
 
 1. The door binds the space, as now.
@@ -828,10 +846,7 @@ round is about 35 minutes for the full suite.
 - Stream close on a pin switch.
 - Per-node health on `/health/deploy`: `also_serving` is in `$nodes`,
   not yet shown.
-- The catch-up and provisioning for a tenant pinned to a non-active
-  version: a new tenant on `versions.new_tenant` is provisioned with the
-  active version's tables, so a beta version that adds a table holds it
-  closed until it is activated.
+- Session 2 built provisioning on the tenant's own version (§1.3).
 - Console: Deploys says `serving` for the active version; the Tenants
   screen has no version column.
 - Audit leftovers not taken by the CLI-output fixes: times as UTC, window

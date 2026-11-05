@@ -810,6 +810,11 @@ pub struct Deployment {
     /// every pin first, and the deploy channel's swap (with its live check
     /// and the tenant catch-up) is what brings the node to it.
     following: RwLock<Option<String>>,
+    /// `versions.new_tenant`, when it names a version: kept loaded beside
+    /// the active one, whether or not a pin names it yet, so a new tenant
+    /// is provisioned with that version's tables
+    /// ([`Deployment::new_tenant_loaded`], increment 3 session 2).
+    new_tenant: RwLock<Option<String>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -870,6 +875,7 @@ impl Deployment {
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
+            new_tenant: RwLock::new(None),
         })
     }
 
@@ -893,6 +899,7 @@ impl Deployment {
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
+            new_tenant: RwLock::new(None),
         }))
     }
 
@@ -1027,6 +1034,7 @@ impl Deployment {
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
+            new_tenant: RwLock::new(None),
         }))
     }
 
@@ -1061,6 +1069,7 @@ impl Deployment {
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
+            new_tenant: RwLock::new(None),
         })
     }
 
@@ -1081,6 +1090,7 @@ impl Deployment {
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
+            new_tenant: RwLock::new(None),
         }))
     }
 
@@ -1271,6 +1281,9 @@ impl Deployment {
                     }
                 }
             }
+            if let Some(v) = self.new_tenant.read().expect("pin lock").clone() {
+                pinned.insert(v);
+            }
             pinned
         };
         let mut others = self.others.write().expect("deployment lock");
@@ -1289,6 +1302,36 @@ impl Deployment {
     /// the field.
     pub fn follow(&self, registry_active: Option<String>) {
         *self.following.write().expect("pin lock") = registry_active;
+    }
+
+    /// Name the version `versions.new_tenant` starts tenants on. `None`:
+    /// the active version. The pin stream loads it, and it is never
+    /// dropped while named.
+    pub fn set_new_tenant(&self, version: Option<String>) {
+        *self.new_tenant.write().expect("pin lock") = version;
+    }
+
+    /// The version `versions.new_tenant` names, when it is not the active
+    /// one.
+    pub fn new_tenant(&self) -> Option<String> {
+        let named = self.new_tenant.read().expect("pin lock").clone()?;
+        (named != self.current().version).then_some(named)
+    }
+
+    /// **The `Loaded` a tenant is provisioned with** (§1.3): the version it
+    /// is pinned to, or else the one `versions.new_tenant` names, when
+    /// either is not the active one; the active version otherwise.
+    /// `Err(version)` when that version is not loaded on this node yet.
+    pub fn provision_version(&self, pinned: Option<&str>) -> Result<Arc<Loaded>, String> {
+        let current = self.current();
+        let want = match pinned {
+            Some(v) => Some(v.to_string()),
+            None => self.new_tenant(),
+        };
+        match want {
+            Some(v) if v != current.version => self.loaded(&v).ok_or(v),
+            _ => Ok(current),
+        }
     }
 
     /// The registry's active version this node follows, when it has read it.

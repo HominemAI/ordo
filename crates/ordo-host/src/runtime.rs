@@ -6550,6 +6550,8 @@ async fn spawn_deploy_listener(
         space.clone(),
     );
     node_status.new_tenant(crate::versions::new_tenant_from_env().as_deref());
+    // Kept loaded, so a new tenant is provisioned with its tables.
+    deployment.set_new_tenant(crate::versions::new_tenant_from_env());
     let rebuild = {
         let deployment = deployment.clone();
         let pool = pool.clone();

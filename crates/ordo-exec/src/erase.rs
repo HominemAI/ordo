@@ -559,10 +559,23 @@ pub const ATTACHMENTS: &[&str] = &[
 /// it, for erasure's reason: a denial recorded about a space is a record
 /// about the space, not the space's data.
 pub async fn rows_held(pool: &Pool, space: &SpaceId, schema: &Schema) -> Result<i64, PoolError> {
+    // A table this database does not have holds no rows: a version a new
+    // tenant starts on may declare one the deployment's database lacks
+    // (`plan-versions.md` §1.3, 2026-11-05).
+    let present: std::collections::HashSet<String> = pool
+        .rows(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+        )
+        .await?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
     let tables: Vec<(String, String)> = space_scoped_tables(pool, schema)
         .await?
         .into_iter()
         .filter(|(table, _)| !ATTACHMENTS.contains(&table.as_str()))
+        .filter(|(table, _)| present.contains(table))
         .collect();
     if tables.is_empty() {
         return Ok(0);

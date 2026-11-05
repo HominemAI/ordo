@@ -11,6 +11,14 @@
 //! | `GET deploys/revoked` | `std.deployment.revoked` (D8) | signed in |
 //! | `POST deploys/revoke` | `std.deployment.revoke` | both touches |
 //! | `POST deploys/unrevoke` | `std.deployment.unrevoke` | both touches |
+//! | `GET deploys/settings` | `std.deployment.versionSettings` | signed in |
+//! | `POST deploys/setting` | `std.deployment.setVersionSetting` | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
+//!
+//! The version settings (`versions.served`, `versions.minimum`,
+//! `versions.new_tenant`) live in Ordo, not the environment (owner,
+//! 2026-11-05). The screen shows them with their history and changes one at
+//! a time with a reason; the door checks each change and its refusal, which
+//! names the setting and the value, is shown as given.
 //!
 //! A revoke marks a stored version as not to be served, with a reason
 //! (`plan-versions.md` 4, increment 2b). Revoking the version that serves
@@ -49,6 +57,12 @@ pub const REVOKE: &str = "std.deployment.revoke";
 pub const UNREVOKE: &str = "std.deployment.unrevoke";
 /// `std.deployment.revoked`.
 pub const REVOKED: &str = "std.deployment.revoked";
+/// `std.deployment.versionSettings`.
+pub const VERSION_SETTINGS: &str = "std.deployment.versionSettings";
+/// `std.deployment.setVersionSetting`.
+pub const SET_VERSION_SETTING: &str = "std.deployment.setVersionSetting";
+/// How many setting changes the screen lists.
+pub const SETTING_HISTORY_LIMIT: u32 = 20;
 /// The longest reason the console passes on, the door's own bound.
 pub const MAX_REASON_CHARS: usize = 2048;
 
@@ -67,6 +81,8 @@ pub(super) fn routes() -> Router<Console> {
         .route("/d/{handle}/api/deploys/revoked", get(revoked_route))
         .route("/d/{handle}/api/deploys/revoke", post(revoke_route))
         .route("/d/{handle}/api/deploys/unrevoke", post(unrevoke_route))
+        .route("/d/{handle}/api/deploys/settings", get(settings_route))
+        .route("/d/{handle}/api/deploys/setting", post(setting_route))
 }
 
 read!(deploys_route, deploys_get);
@@ -77,6 +93,17 @@ action!(activate_route, "deploys.activate", deploys_activate);
 read!(revoked_route, deploys_revoked);
 action!(revoke_route, "deploys.revoke", deploys_revoke);
 action!(unrevoke_route, "deploys.unrevoke", deploys_unrevoke);
+read!(settings_route, deploys_settings);
+action!(setting_route, "deploys.setting", deploys_setting);
+
+#[derive(Deserialize)]
+struct SettingBody {
+    setting: String,
+    /// Absent or empty clears it.
+    #[serde(default)]
+    value: Option<String>,
+    reason: String,
+}
 
 #[derive(Deserialize)]
 struct ProgramBody {
@@ -320,6 +347,68 @@ async fn deploys_unrevoke(
     let rows = who
         .door(c)?
         .op_present(UNREVOKE, &json!({ "version": version, "reason": reason }))
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// The three version settings and their recent history.
+async fn deploys_settings(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Signed).await?;
+    let rows = who
+        .door(c)?
+        .op(
+            VERSION_SETTINGS,
+            true,
+            &json!({ "limit": SETTING_HISTORY_LIMIT }),
+        )
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Change one version setting, or clear it, with a reason.
+async fn deploys_setting(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: SettingBody = parse(body)?;
+    let setting = match req.setting.trim() {
+        s @ ("versions.served" | "versions.minimum" | "versions.new_tenant") => s.to_string(),
+        other => {
+            return Err(ConsoleError::BadRequest(format!(
+                "`{other}` is not a version setting; there are versions.served, \
+                 versions.minimum and versions.new_tenant"
+            )))
+        }
+    };
+    let value = req
+        .value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    if value.as_ref().is_some_and(|v| v.len() > 4096) {
+        return Err(ConsoleError::BadRequest(
+            "`value` is at most 4096 characters".into(),
+        ));
+    }
+    let reason = reason_of(&req.reason)?;
+    call.detail = format!(
+        "setting={setting} value={}",
+        value.as_deref().unwrap_or("cleared")
+    );
+    let rows = who
+        .door(c)?
+        .op_present(
+            SET_VERSION_SETTING,
+            &json!({ "setting": setting, "value": value, "reason": reason }),
+        )
         .await?;
     Ok(Reply::json(first(rows)))
 }

@@ -18,6 +18,7 @@ import {
   type Would,
 } from '../deploys';
 import { useDeploymentTouch } from './useDeploymentTouch';
+import { VersionSettings } from './VersionSettings';
 
 function when(secs: number): string {
   return new Date(secs * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -64,8 +65,10 @@ function wouldWords(w: Would, p: Preview): string {
  * preview what it does to the database, apply it, wait until every node
  * serves it, and roll the app back to a stored version. Revoke a version
  * with a reason, or lift the mark (docs/plan-versions.md 4, 2b), and see
- * which revoked versions still have tenants on them. Every change at the
- * deployment asks for the owner's own touch there.
+ * which revoked versions still have tenants on them. Show and change the
+ * version settings (served, minimum, new tenants), stored in Ordo since
+ * 2026-11-05. Every change at the deployment asks for the owner's own touch
+ * there when the deployment asks for one.
  */
 export function Deploys(props: { onSignedOut: () => void }) {
   const [state, setState] = useState<Link | null>(null);
@@ -474,6 +477,14 @@ export function Deploys(props: { onSignedOut: () => void }) {
                 </li>
               ))}
             </ol>
+          )}
+          {past && (
+            <VersionSettings
+              stored={past.stored}
+              atDeployment={atDeployment}
+              onSignedOut={props.onSignedOut}
+              onChanged={() => void act(load)}
+            />
           )}
           {past && past.activations.length > 0 && (
             <details className="logs">

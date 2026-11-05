@@ -231,7 +231,7 @@ The pin this plan adds:
 - `std.deployment.tenantVersion` and `ordo versions list --tenant <id>`:
   one tenant's version, epoch and pin history.
 - `ordo versions list|show` say `active (new tenants)` and `serving N
-  tenants`. The console's Deploys screen still says `serving` (session 2).
+  tenants`. The console says the same since session 2.
 - Each node writes its `versions.new_tenant` to `$nodes`. A node that sees
   another live node with a different value logs a warning naming the
   setting and its variable, on every reconcile tick.
@@ -866,8 +866,11 @@ round is about 35 minutes for the full suite.
 - Session 2 built per-node health on `/health/deploy`. Left: a version
   still loading is not shown apart from one that loaded.
 - Session 2 built provisioning on the tenant's own version (§1.3).
-- Console: Deploys says `serving` for the active version; the Tenants
-  screen has no version column.
+- Session 2 built the console's parts: Deploys says `serving N tenants`
+  and `active (new tenants)`; Tenants has a Version column
+  (`std.deployment.tenants` carries `version` and `ordinal`). Left: the
+  console has no screen to move a tenant, set its target, or name a
+  revoke's `--move-to` for a version that is not active.
 - Audit leftovers not taken by the CLI-output fixes: times as UTC, window
   caps as settings or recorded as fixed.
 

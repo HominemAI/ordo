@@ -101,10 +101,10 @@ your token; without it, it is made at the deployment.
 |---|---|
 | Health | Is the deployment up and ready; database, key provider, nodes, quarantined tenants |
 | Runtime | The deployment's status, logs, settings, secrets as set or unset, restart, revisions and roll back. Read-only in door-only mode |
-| Deploys | Apply a program, see stored versions (`#n`, label, commit), roll back the app, revoke a version or lift the mark; a warning names revoked versions that still have tenants. Revoking the version that serves now asks where the tenants go ("Move to"); Ordo never picks |
+| Deploys | Apply a program, see stored versions (`#n`, label, commit), roll back the app, revoke a version or lift the mark; a warning names revoked versions that still have tenants. Revoking the version that serves now asks where the tenants go ("Move to"); Ordo never picks. Each version says how many tenants it serves, and the active one is tagged `active (new tenants)` |
 | Maintenance | Maintenance windows: blocks of time you set, once or on a cron, for all tenants, some, or all but some, with a message. Skip a range of a repeating one. A range is typed in your local time, with a switch to show UTC. A cron is UTC. A window does nothing by itself |
 | Deployment | Is the door reachable; see your touch |
-| Tenants | Create, pause, resume, delete, export and attach a bucket |
+| Tenants | Create, pause, resume, delete, export and attach a bucket. The Version column shows the version each tenant is pinned to, `#n` and name |
 | People | Members, roles, groups, access, invitations, who may join, recovery (inside a tenant where you hold a role) |
 | Sign-in | The deployment's and a tenant's sign-in settings |
 | Settings | Every setting, with the value the deployment took and where it came from |

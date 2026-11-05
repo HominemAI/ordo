@@ -229,6 +229,7 @@ export function Tenants(props: { onSignedOut: () => void }) {
               <tr>
                 <th scope="col">Tenant</th>
                 <th scope="col">Status</th>
+                <th scope="col">Version</th>
                 <th scope="col">Members</th>
                 <th scope="col">Usage, last period</th>
                 <th scope="col">Made</th>
@@ -253,6 +254,16 @@ export function Tenants(props: { onSignedOut: () => void }) {
                     )}
                     {t.status === 'failed' && t.note && <span className="small muted detail"> {t.note}</span>}
                     {t.quarantined && <span className="small error detail"> Held closed: {t.quarantined}</span>}
+                  </td>
+                  <td data-label="Version">
+                    {t.version ? (
+                      <span className="mono" title={t.version}>
+                        {t.ordinal != null ? `#${t.ordinal} · ` : ''}
+                        {t.version.length > 16 ? `${t.version.slice(0, 16)}…` : t.version}
+                      </span>
+                    ) : (
+                      <span className="muted">-</span>
+                    )}
                   </td>
                   <td data-label="Members">{t.members ?? '-'}</td>
                   <td data-label="Usage">

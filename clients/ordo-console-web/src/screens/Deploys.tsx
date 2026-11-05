@@ -24,6 +24,11 @@ function when(secs: number): string {
 }
 
 /** A version hash, short enough to read; the full one is in the title. */
+/** How many tenants a version serves, as the CLI says it. */
+function servingCount(n: number): string {
+  return `serving ${n} ${n === 1 ? 'tenant' : 'tenants'}`;
+}
+
 function short(v: string): string {
   return v.length > 16 ? `${v.slice(0, 16)}…` : v;
 }
@@ -366,11 +371,12 @@ export function Deploys(props: { onSignedOut: () => void }) {
                       {short(v.version)}
                     </strong>
                     {named(v) && <span>{named(v)}</span>}
-                    {v.serving && <span className="tag">serving</span>}
+                    {v.serving && <span className="tag">active (new tenants)</span>}
                     {v.revoked && <span className="tag tag-revoked">revoked</span>}
                   </div>
                   <div className="muted small">
                     Applied {when(v.appliedAt)} by {v.actor}
+                    {v.tenants !== undefined && <> · {servingCount(v.tenants)}</>}
                   </div>
                   {v.revoked && (
                     <div className="small error">

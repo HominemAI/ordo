@@ -523,7 +523,7 @@ impl std::fmt::Display for ProvisionRefusal {
                 "`{space}` starts on version {version} ({} or its pin), which this node is \
                  still loading. Nothing was created, and the identical call lands once it is \
                  loaded",
-                crate::versions::NEW_TENANT_ENV
+                crate::versions::NEW_TENANT_SETTING
             ),
             ProvisionRefusal::HostNotAllowed { host } => write!(
                 f,

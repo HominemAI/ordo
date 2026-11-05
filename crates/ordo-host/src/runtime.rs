@@ -3032,9 +3032,6 @@ async fn platform_ops_for(
         // Owner, 2026-10-21: the setup settings, and the door's view of the
         // own tenants being set up.
         tenants.set_setup(w.provisioning.setup);
-        // `versions.new_tenant`, which boot has checked names a stored
-        // version.
-        tenants.set_new_tenant_version(crate::versions::new_tenant_from_env());
         w.access.wire_not_ready(tenants.not_ready());
         let members = Arc::new(crate::member_ops::MemberOps {
             control: w.pool.clone(),
@@ -3463,6 +3460,8 @@ pub struct Runtime {
     /// configured", which is legitimate for a program with no stored blob
     /// field and refused at load for one that has any.
     pub blob_label: Option<String>,
+    /// The census line for the version settings as boot read them.
+    pub versions_line: String,
     /// The two blob routes' state, when a store is configured.
     pub blobs: Option<ordo_api::blob::BlobState>,
     /// `GET /download`'s state: a person's own download
@@ -3803,47 +3802,28 @@ async fn assemble_program(
     // into the no-program state rather than die on a missing relation:
     // that is the database the first deploy is made to.
     //
-    // Then the pins (`plan-versions.md` §1.3): `versions.new_tenant` must
-    // name a stored version, or no tenant could be started on it, and a
-    // tenant made before pins existed is pinned to the active version.
-    let new_tenant = crate::versions::new_tenant_from_env();
-    let versions = crate::versions::Versions::on(&pool).with_new_tenant(new_tenant.as_deref());
+    // Then the pins (`plan-versions.md` §1.3): a tenant made before pins
+    // existed is pinned to the active version.
+    let versions = crate::versions::Versions::on(&pool);
     versions
         .ensure()
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
-    // `versions.served` and `versions.minimum` (§1.6): each names a stored
-    // version, and a served list strands no tenant. Installed resolved, so
-    // every pin after this is checked against them.
-    let served = crate::versions::ServedPolicy::from_env();
-    let served = versions.check_policy(&served).await.map_err(|e| match e {
-        crate::versions::VersionRefusal::Setting { var, .. } => BootRefusal::Invalid {
-            var,
-            detail: e.to_string(),
-        },
-        crate::versions::VersionRefusal::Stranded { .. } => BootRefusal::Invalid {
-            var: crate::versions::SERVED_ENV,
-            detail: e.to_string(),
-        },
-        crate::versions::VersionRefusal::MinimumAboveActive { .. } => BootRefusal::Invalid {
-            var: crate::versions::MINIMUM_ENV,
-            detail: e.to_string(),
-        },
-        other => BootRefusal::Database(other.to_string()),
-    })?;
-    crate::versions::install_policy(served);
-    versions.check_new_tenant().await.map_err(|e| match e {
-        crate::versions::VersionRefusal::Setting { .. }
-        | crate::versions::VersionRefusal::NotServed { .. }
-        | crate::versions::VersionRefusal::BelowMinimum { .. }
-        | crate::versions::VersionRefusal::Revoked {
-            setting: Some(_), ..
-        } => BootRefusal::Invalid {
-            var: crate::versions::NEW_TENANT_ENV,
-            detail: e.to_string(),
-        },
-        other => BootRefusal::Database(other.to_string()),
-    })?;
+    // The version settings live in Ordo (owner, 2026-11-05). A value still
+    // in the environment is stored once and then ignored, and the stored
+    // ones are checked: each problem is logged, never refused, because an
+    // upgrade never stops a running deployment (owner, 2026-11-02). A
+    // change is checked when it is made.
+    for line in versions.adopt_env(now_secs()).await {
+        eprintln!("{line}");
+    }
+    for line in versions.settings_problems().await {
+        eprintln!("{line}");
+    }
+    let versions_line = match versions.settings().await {
+        Ok(s) => s.describe(),
+        Err(e) => format!("the version settings were not read ({e})"),
+    };
     versions
         .backfill(crate::versions::SYSTEM_ACTOR, now_secs())
         .await
@@ -5470,6 +5450,7 @@ async fn assemble_program(
         pg_bus,
         disabled,
         blob_label,
+        versions_line,
         blobs,
         download,
         stores,
@@ -5975,7 +5956,7 @@ impl Runtime {
             crate::routines::describe(&live.fixture.schema)
         );
         println!("  pausing     {}", crate::pause::current().describe());
-        println!("  versions    {}", crate::versions::policy().describe());
+        println!("  versions    {}", self.versions_line);
         println!(
             "  moving off  a revoked version, from inside a tenant: {}",
             crate::revoked_moves::current().describe()
@@ -6600,9 +6581,9 @@ async fn spawn_deploy_listener(
         keys.clone(),
         space.clone(),
     );
-    node_status.new_tenant(crate::versions::new_tenant_from_env().as_deref());
-    // Kept loaded, so a new tenant is provisioned with its tables.
-    deployment.set_new_tenant(crate::versions::new_tenant_from_env());
+    // `versions.new_tenant` is read from the control database with the
+    // pins (`PinStream::settle`), and kept loaded so a new tenant is
+    // provisioned with its tables.
     let rebuild = {
         let deployment = deployment.clone();
         let pool = pool.clone();
@@ -6622,6 +6603,9 @@ async fn spawn_deploy_listener(
             async move {
                 for line in crate::pin_stream::log_lines(&read) {
                     println!("{line}");
+                }
+                if let Some(named) = &read.new_tenant {
+                    node_status.new_tenant(named.as_deref());
                 }
                 // Per-node health: a version a pin names that would not
                 // load here, said on `/health/deploy` at once.
@@ -6663,12 +6647,11 @@ async fn spawn_deploy_listener(
              the next read"
         ),
     }
-    // The reconcile tick: a whole read, whatever the stream said, and the
-    // check that every node starts new tenants on one version.
+    // The reconcile tick: a whole read, whatever the stream said, the
+    // version settings with it.
     {
         let pins = pins.clone();
         let rebuild = rebuild.clone();
-        let node_status = node_status.clone();
         let pool = pool.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(pin_every);
@@ -6679,9 +6662,6 @@ async fn spawn_deploy_listener(
                 match pins.reload().await {
                     Ok(read) => rebuild(read).await,
                     Err(e) => eprintln!("pins: not read on the reconcile tick ({e})"),
-                }
-                for line in node_status.new_tenant_warnings().await {
-                    eprintln!("{line}");
                 }
                 // Tenants on a revoked version move in their maintenance
                 // window, and only then (ruled 2026-11-05).

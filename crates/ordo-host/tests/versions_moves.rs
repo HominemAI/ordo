@@ -511,14 +511,14 @@ async fn a_served_list_never_strands_a_tenant() {
     );
     let text = e.to_string();
     assert!(
-        text.contains("ORDO_VERSIONS_SERVED=0.2.0,0.1.0"),
+        text.contains("ordo versions set served 0.2.0,0.1.0"),
         "names the value to add: {text}"
     );
     let e = v
         .check_policy(&ServedPolicy::parse(Some("0.1.0,9.9.9"), None))
         .await
         .unwrap_err();
-    assert!(e.to_string().contains("ORDO_VERSIONS_SERVED"), "{e}");
+    assert!(e.to_string().contains("versions.served"), "{e}");
     assert!(e.to_string().contains("9.9.9"), "{e}");
 
     let p = v
@@ -530,7 +530,8 @@ async fn a_served_list_never_strands_a_tenant() {
     let e = v.pin("spc_c", "0.2.0", OWNER, 500).await.unwrap_err();
     assert!(matches!(e, VersionRefusal::NotServed { .. }), "{e}");
     assert!(
-        e.to_string().contains("ORDO_VERSIONS_SERVED=0.1.0,0.2.0"),
+        e.to_string()
+            .contains("ordo versions set served 0.1.0,0.2.0"),
         "{e}"
     );
     // The active version is always served.
@@ -560,7 +561,7 @@ async fn a_tenant_below_the_minimum_moves_in_its_window() {
 
     let e = v.pin("spc_b", "#1", OWNER, 200).await.unwrap_err();
     assert!(matches!(e, VersionRefusal::BelowMinimum { .. }), "{e}");
-    assert!(e.to_string().contains("ORDO_VERSIONS_MINIMUM"), "{e}");
+    assert!(e.to_string().contains("versions.minimum"), "{e}");
     let e = v
         .activate("0.1.0", OWNER, ordo_commandlog::Timestamp(201))
         .await
@@ -677,7 +678,7 @@ async fn a_tenant_past_the_cap_moves_in_its_window() {
     );
 }
 
-/// **A minimum above the active version is refused at boot**, naming the
+/// **A minimum above the active version is refused**, naming the
 /// setting and the active version. Otherwise every tenant on the active
 /// version is below it, and every move to the active version is refused.
 #[tokio::test(flavor = "multi_thread")]
@@ -700,8 +701,8 @@ async fn a_minimum_above_the_active_version_is_refused() {
         "{e}"
     );
     let text = e.to_string();
-    assert!(text.contains("ORDO_VERSIONS_MINIMUM"), "{text}");
-    assert!(text.contains("ORDO_VERSIONS_MINIMUM=0.2.0"), "{text}");
+    assert!(text.contains("versions.minimum"), "{text}");
+    assert!(text.contains("ordo versions set minimum 0.2.0"), "{text}");
     // At or below the active version passes.
     let p = v
         .check_policy(&ServedPolicy::parse(None, Some("0.2.0")))

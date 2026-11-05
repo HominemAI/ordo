@@ -249,6 +249,53 @@ pub async fn note_next_windows(
     }
 }
 
+/// Tenants that must move and are waiting on a window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Waiting {
+    /// Tenants on a revoked version or below `versions.minimum`.
+    pub tenants: u64,
+    /// Of those, the tenants no window covers in the next 12 months. They
+    /// stay where they are until a window is set or they are moved by hand.
+    pub no_window: u64,
+}
+
+impl Waiting {
+    /// The line the CLI and the console print, `None` when nothing waits.
+    pub fn line(&self) -> Option<String> {
+        if self.tenants == 0 {
+            return None;
+        }
+        Some(format!(
+            "{} tenant(s) are on a revoked version or below the minimum; {} have no window and \
+             will not move: `ordo windows set` or `ordo versions move <tenant>`",
+            self.tenants, self.no_window
+        ))
+    }
+}
+
+/// Count the tenants waiting to move and those no window will move. Read
+/// only. A tenant count past 10 000 stops there.
+pub async fn waiting(pool: &Pool, now: u64) -> Result<Waiting, VersionRefusal> {
+    let v = Versions::on(pool);
+    let mut out = Waiting::default();
+    let mut after: Option<String> = None;
+    for _ in 0..10 {
+        let page = v.on_revoked(SWEEP_BATCH, after.as_deref(), None).await?;
+        let spaces: Vec<&str> = page.iter().map(|(s, _)| s.as_str()).collect();
+        let next = Windows::on(pool)
+            .next_for(&spaces, now as i64)
+            .await
+            .unwrap_or_default();
+        out.tenants += page.len() as u64;
+        out.no_window += spaces.iter().filter(|s| !next.contains_key(**s)).count() as u64;
+        match page.last() {
+            Some((last, _)) if page.len() == SWEEP_BATCH => after = Some(last.clone()),
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
 /// One line per thing a sweep did, for the node's log.
 pub fn log_lines(s: &Swept) -> Vec<String> {
     let mut out = Vec::new();

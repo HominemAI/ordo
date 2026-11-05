@@ -1177,7 +1177,7 @@ impl std::fmt::Display for VersionRefusal {
             VersionRefusal::NoTenant { space } => write!(
                 f,
                 "no_tenant: no tenant `{space}` is provisioning, active or paused here, so \
-                 there is no pin to move. `ordo tenants list` names them"
+                 there is no pin to move. `ordo fleet --host <h>` names them"
             ),
             VersionRefusal::NotOnRevoked { space, version } => write!(
                 f,

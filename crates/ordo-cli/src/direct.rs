@@ -127,7 +127,7 @@ pub fn gate(cmd: &str, flags: &mut Flags) -> Result<Via, Outcome> {
         }
         Route::Either => {
             if direct {
-                record(&what)?;
+                record(&what, flags.named_value("--db"))?;
                 return Ok(Via::Direct);
             }
             if host {
@@ -142,7 +142,7 @@ pub fn gate(cmd: &str, flags: &mut Flags) -> Result<Via, Outcome> {
         }
         Route::Direct => {
             if direct {
-                record(&what)?;
+                record(&what, flags.named_value("--db"))?;
                 return Ok(Via::Direct);
             }
             Err(Outcome::usage(format!(
@@ -155,13 +155,14 @@ pub fn gate(cmd: &str, flags: &mut Flags) -> Result<Via, Outcome> {
     }
 }
 
-/// Write the use to `$direct_uses` in the control database
-/// (`PoolConfig::from_env`, not `--db`: the boot reads that one).
+/// Write the use to `$direct_uses` in the database the command acts on:
+/// the one `--db` names, else the one `ORDO_PG_*` names. The refusal says
+/// which one it tried.
 ///
 /// Sync, with a runtime of its own, because `keys` and `identity` run on
 /// stores that build theirs. A use that cannot be recorded is refused:
 /// an unrecorded direct use is what the flag exists to prevent.
-fn record(what: &str) -> Result<(), Outcome> {
+fn record(what: &str, db: Option<&str>) -> Result<(), Outcome> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -180,11 +181,20 @@ fn record(what: &str) -> Result<(), Outcome> {
         .unwrap_or(0);
     let mut cfg = ordo_exec::PoolConfig::from_env();
     cfg.size = 1;
+    if let Some(db) = db {
+        cfg.db = db.to_string();
+    }
+    let tried = format!(
+        "database `{}` on {}:{} as {}",
+        cfg.db, cfg.host, cfg.port, cfg.user
+    );
     rt.block_on(async {
         let pool = ordo_exec::Pool::connect(cfg).await.map_err(|e| {
             Outcome::failed(format!(
-                "REFUSED  `{FLAG}` could not be recorded: the database did not answer ({e}). \
-                 Check ORDO_PG_HOST, ORDO_PG_PORT, ORDO_PG_USER and ORDO_PG_DB\n"
+                "REFUSED  `{FLAG}` could not be recorded: the {tried} did not answer ({e}). \
+                 The record is written where the command acts: `--db <name>` picks the \
+                 database, and ORDO_PG_HOST, ORDO_PG_PORT, ORDO_PG_USER and ORDO_PG_DB pick \
+                 the rest. Nothing was run\n"
             ))
         })?;
         ordo_host::direct_uses::record(&pool, what, &by, &machine, at)

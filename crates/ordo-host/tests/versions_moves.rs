@@ -163,6 +163,13 @@ async fn no_window_and_no_demand_moves_nothing() {
     let swept = revoked_moves::sweep(&pool, NOW).await.expect("swept");
     assert!(swept.moved.is_empty() && swept.refused.is_empty());
 
+    // With no window at all, both tenants wait and the deployment says so.
+    let w = revoked_moves::waiting(&pool, NOW).await.expect("waiting");
+    assert_eq!((w.tenants, w.no_window), (2, 2));
+    let line = w.line().expect("a line");
+    assert!(line.contains("ordo windows set"), "{line}");
+    assert!(line.contains("ordo versions move"), "{line}");
+
     window(
         &pool,
         Target::All,
@@ -183,6 +190,9 @@ async fn no_window_and_no_demand_moves_nothing() {
     .await;
     let swept = revoked_moves::sweep(&pool, NOW).await.expect("swept");
     assert!(swept.moved.is_empty(), "{swept:?}");
+    // The window ahead covers both: they wait, but not without a window.
+    let w = revoked_moves::waiting(&pool, NOW).await.expect("waiting");
+    assert_eq!((w.tenants, w.no_window), (2, 0));
     for t in ["spc_a", "spc_b"] {
         assert_eq!(on(&pool, t).await.as_deref(), Some("0.1.0"), "{t} stays");
     }

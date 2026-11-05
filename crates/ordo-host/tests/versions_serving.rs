@@ -855,7 +855,7 @@ async fn a_pin_to_a_revoked_version_or_no_tenant_is_refused() {
         .await
         .expect_err("refused");
     assert!(matches!(e, VersionRefusal::NoTenant { .. }), "{e}");
-    assert!(e.to_string().contains("ordo tenants list"), "{e}");
+    assert!(e.to_string().contains("ordo fleet --host"), "{e}");
 }
 
 /// **Which moves wait for a maintenance window** (audit 2026-11-05): only

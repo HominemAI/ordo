@@ -114,7 +114,7 @@ pub(crate) fn run_migrate(path: &str, flags: Flags) -> Outcome {
     }
     if !flags.switches.iter().any(|s| s == "--apply") {
         return Outcome::usage(
-            "migrate needs `--apply`: the read-only form is `ordo plan <program> --against <db>`"
+            "migrate needs `--apply`: the read-only form is `ordo plan <program> --host <h>`"
                 .into(),
         );
     }

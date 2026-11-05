@@ -327,6 +327,8 @@ fn with_direct_the_command_talks_to_the_database_and_leaves_a_record() {
         .block_on(async {
             let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
                 size: 1,
+                // `--direct` records in the database it acts on (`--db`).
+                db: db.to_string(),
                 ..ordo_exec::PoolConfig::from_env()
             })
             .await

@@ -221,6 +221,8 @@ async fn a_node_that_stopped_writing_is_not_waited_for() {
 
 #[test]
 fn no_wait_and_wait_secs_together_are_a_usage_error() {
+    // `--direct` records in the database it acts on, so that one exists.
+    empty("ordo_await_usage");
     let out = apply(
         "/nonexistent",
         "ordo_await_usage",

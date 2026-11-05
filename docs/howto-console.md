@@ -87,12 +87,17 @@ to add.
 ## The touch at the deployment
 
 The console can read, and can do some writes. It can never stand in for
-you. Anything that changes the deployment needs a fresh touch of your own
-passkey. With the identity service the touch is made there and rides in
-your token; without it, it is made at the deployment.
+you. What asks for a touch depends on `ORDO_SECURITY_LEVEL`.
 
-- A box asks: "Touch your passkey for the deployment".
-- One touch covers the next 5 minutes of changes.
+- At `standard`, the default, these ask: deleting a tenant, export and
+  import, console keys, recovery, tenant storage, delegation approval and
+  account security.
+- Deploys, versions, settings and touch exposures ask none below `high`.
+- A machine key is never asked.
+- When one asks, a box says "Touch your passkey for the deployment".
+  The touch is made at the identity service and rides in your token;
+  without it, it is made at the deployment.
+- One touch covers the next 5 minutes.
 - The console never satisfies it for you. This is on purpose.
 
 ## Each screen in a line
@@ -217,7 +222,8 @@ It cannot:
 
 The Runtime screen is read-only. Everything in the app still works:
 deploys, tenants, people, sign-in settings, usage, shares, the security
-log. Each write at the deployment still needs your touch.
+log. Each write at the deployment asks for a touch where the level
+asks one.
 
 ## Upgrading from the image before the identity service
 

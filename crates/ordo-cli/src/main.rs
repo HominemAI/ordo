@@ -97,19 +97,20 @@ fn usage() -> ! {
          ordo login [<identity url>] [--touch] [--deployment <h>] [--no-browser]\n      \
          sign this computer in through your browser. The session is kept in\n      \
          ~/.config/ordo/sessions.json (ORDO_CONFIG_DIR moves it), readable by\n      \
-         you only. `--touch` confirms with your passkey again: writes need a\n      \
-         touch in the last 5 minutes. The url defaults to ORDO_IDENTITY_URL.\n  \
+         you only. `--touch` confirms with your passkey again, for the acts the\n      \
+         security level asks a touch for (ORDO_SECURITY_LEVEL; a touch lasts\n      \
+         5 minutes). Deploys, versions and settings ask none below high. The url defaults to ORDO_IDENTITY_URL.\n  \
          ordo logout [<identity url>]    end the session and delete it here.\n  \
          ordo whoami [<identity url>]    who the next command acts as.\n  \
          ordo people list | invite [--label <t>] | end <p_id>\n  \
-         ordo people machine-key add --name <n> | list | end <m_id>\n      \
+         ordo people machine-key add --name <n> [--grants deployment,import] [--mints import]\n         | list | end <m_id>\n      \
          the deployment's admins and machine keys. A machine key's secret is\n      \
          shown once.\n      \
          Commands that call a deployment send, in order: --token, ORDO_TOKEN,\n      \
          a machine key (ORDO_MACHINE_KEY or ORDO_MACHINE_KEY_FILE, with\n      \
          ORDO_IDENTITY_URL; for CI, no browser), or the session from login.\n\
          \n\
-         operator commands — these go through the deployment\'s door\n\
+         deployment owner commands — these go through the deployment\'s door\n\
          (`--host <h>`, or ORDO_HOST, with `--token` or `ordo login`), as the\n\
          deployment owner (owner, 2026-11-05). The commands that must work\n\
          when no server can be up open the database from this machine\n\
@@ -121,9 +122,9 @@ fn usage() -> ! {
          is recorded before it runs and written to the deployment\'s\n\
          security log (a `deploy` event, act `direct-cli`) at the next boot.\n\
          `deploys`, `usage`, `triggers`, `prune`, `revert` and `checkpoint`\n\
-         still open the database; they move to the door next.\n  \
-         ordo apply     <dir|file.ordo> [--as <actor>] [--no-activate] [--bump]\n                \
-         [--label \"<text>\"]\n      \
+         still open the database (`--db <name>`, no `--direct`);\n         they move to the door next.\n  \
+         ordo apply     <dir|file.ordo> --host <h> | --direct [--as <actor>] [--no-activate]\n                \
+         [--bump] [--label \"<text>\"]\n      \
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
@@ -159,7 +160,7 @@ fn usage() -> ! {
          17aa). Prints the minted space id and whether it is reachable now or\n      \
          at the next restart. No `--db` mode exists: creating a tenant is the\n      \
          deployment's act, gated the same way `apply` is (owner, step-up, the\n      \
-         bound space must be the deployment's own), never a row an operator\n      \
+         bound space must be the deployment's own), never a row a deployment owner\n      \
          writes by hand. `--host`, `--token` and `--space` are `apply`'s own\n      \
          flags and resolve the same way; see `apply` above for the defaults,\n      \
          the environment forms and where the token comes from.\n  \
@@ -191,7 +192,7 @@ fn usage() -> ! {
          A secret's value shows as [secret]. The deployment owner's only;\n      \
          `--host`, `--token` and `--space` resolve as for `apply`.\n  \
          ordo import --bundle <b> [--name <n>] --host <h> --token <t> --space <s>\n      \
-         load a bundle an operator has staged for this space through the\n      \
+         load a bundle the deployment owner has staged for this space through the\n      \
          deployment's own door (`std.space.import`, 11-10a). The bundle is\n      \
          named, not pathed: it is read from ORDO_IMPORT_BUNDLE_DIR under the\n      \
          BOUND space's own directory, so a bundle staged for one tenant is\n      \
@@ -203,7 +204,7 @@ fn usage() -> ! {
          No `--db` mode exists, because every sealed field\n      \
          is re-sealed under the destination space's key and this tool holds\n      \
          no custody.\n  \
-         ordo identity recover --principal <id> --as <who> [--evidence <class>] [--ref <r>]\n      \
+         ordo identity recover --direct --principal <id> --as <who> [--evidence <class>] [--ref <r>]\n      \
          open a recovery for a person who has lost every way in, from the host,\n      \
          and print the recovery ticket once. The deployment owner's way back in,\n      \
          and the only one when their own last passkey is gone. The person spends\n      \
@@ -217,7 +218,7 @@ fn usage() -> ! {
          mechanism as apply's activation, backwards; one more row in the\n      \
          activation log, never a rewrite of it. `--direct` is for a host that\n      \
          will not boot; `--as` goes with it.\n  \
-         ordo deploys   [--limit <n>]\n      \
+         ordo deploys   [--limit <n>] [--db <name>]  (database, no --direct yet)\n      \
          what is stored, what is serving, and every re-point in order.\n  \
          ordo versions  list [--tenant <id>] --host <h>\n      \
          each stored version, newest first: its order number, name, declared\n      \
@@ -240,6 +241,12 @@ fn usage() -> ! {
          command goes through the door (`--host <h> --token <t> --space\n      \
          <s>`), deployment owner only. A version not stored is refused,\n      \
          naming those that are.\n  \
+         ordo versions  move <tenant> --host <h>\n      \
+         move one tenant off the revoked version it is on, now, to its\n      \
+         target (`ordo versions target`).\n  \
+         ordo versions  target <tenant> <version> | --clear --host <h>\n      \
+         set where the window sweep moves a tenant that sits on a revoked\n      \
+         version, or clear it.\n  \
          ordo versions  revoke <version> --reason \"<text>\" [--move-to <version>]\n      \
          mark a version revoked: it is never activated, rolled back to,\n      \
          pinned or given to new tenants. The active version needs\n      \
@@ -270,12 +277,12 @@ fn usage() -> ! {
          marked; with a tenant, the windows that cover it. Times are UTC,\n      \
          `2026-11-20T02:00Z`. Each goes through the door (`--host ...`),\n      \
          deployment owner only.\n  \
-         ordo verify     --identity [--security-key-id <id> --security-public-key <hex>]\n      \
+         ordo verify     --direct --identity [--security-key-id <id> --security-public-key <hex>]\n      \
          verify the deployment's security stream, then reconcile every link in\n      \
          `$authenticator` against it: a link no event explains (a sign-up, a\n      \
          ticket, a link ceremony, a recovery, a password given) was written by\n      \
          hand, and is reported by id and principal, exit 3.\n  \
-         ordo verify     --space <spc> [--key-id <id> --public-key <hex>]\n                  \
+         ordo verify     --direct --space <spc> [--key-id <id> --public-key <hex>]\n                  \
          [--from-genesis] [--control-db <name>]\n                  \
          [--attestation <file>]…\n      \
          recompute the space's chain and name the FIRST bad index and what\n      \
@@ -299,7 +306,7 @@ fn usage() -> ! {
          Without them the entries are still recomputed against each other,\n      \
          but nothing proves none was removed from the END of the stream, and\n      \
          the output says so rather than printing a bare green line.\n  \
-         ordo verify     --deployment [--control-db <name>]\n                  \
+         ordo verify     --direct --deployment [--control-db <name>]\n                  \
          [--security-key-id <id> --security-public-key <hex>]\n      \
          the deployment's own security stream, which belongs to no space and\n      \
          has no command chain beside it: unverified callers, non-members,\n      \
@@ -307,7 +314,7 @@ fn usage() -> ! {
          platform's own custody events. It is the only place a CROSS-SPACE\n      \
          sweep is visible, because a principal probing a hundred spaces\n      \
          appears in none of their per-space streams by design.\n  \
-         ordo verify     <dir|file.ordo> --space <spc> --objects\n                  \
+         ordo verify     --direct <dir|file.ordo> --space <spc> --objects\n                  \
          [--master-key-file <f> --passphrase-file <p>]\n      \
          the third, independent mode (`plan-blob-chain.md` §4.5): walk every\n      \
          image the chain has ever stored and compare its recorded digest\n      \
@@ -330,7 +337,7 @@ fn usage() -> ! {
          the same act for the SECURITY stream, under its own key\n      \
          (ORDO_SECURITY_CHECKPOINT_KEY / _KEY_ID). --security selects the\n      \
          artifact rather than adding one: reading both in one command is\n      \
-         free, signing both under two keys is not, and an operator holding\n      \
+         free, signing both under two keys is not, and a deployment owner holding\n      \
          one of the two keys must be able to sign only its artifact.\n      \
          This is the marker `ordo verify` needs for its fourth check —\n      \
          nothing was removed from the END of the stream — which is the one\n      \
@@ -357,7 +364,7 @@ fn usage() -> ! {
          which listeners it no longer serves; without it, or if the listener\n      \
          is still served, deregister refuses unless --force. The act and the\n      \
          position it released are recorded in the space's security stream.\n  \
-         ordo restore   --record --space <spc> --as <who>\n                  \
+         ordo restore   --direct --record --space <spc> --as <who>\n                  \
          (--source pitr --at <secs> | --source bundle --digest <hex>)\n                  \
          [--pre-restore-head <idx>:<hex> | --unattested] [--again]\n                  \
          [--restored-from <idx>]\n                  \
@@ -366,7 +373,7 @@ fn usage() -> ! {
          marker in the chain saying where history resumed, joined by one\n      \
          correlation to a `custody-action` in the security-event stream and\n      \
          to a row in the control database. Without it the platform refuses\n      \
-         to serve the space. Restores are recorded by the operator who ran\n      \
+         to serve the space. Restores are recorded by the deployment owner who ran\n      \
          them; this tool attributes, it does not authenticate. `--tenant`\n      \
          resolves --space's database through $spacedb instead of trusting\n      \
          --db to name it, and prints which database it resolved; refused\n      \
@@ -389,7 +396,7 @@ fn usage() -> ! {
          apply the inverse of a command group as NEW history, in one\n      \
          transaction, with every touched row checked against `--as`'s WRITE\n      \
          guard before and after. History is never rewritten.\n      \
-         `--as` is asserted, not authenticated: this is an operator tool\n      \
+         `--as` is asserted, not authenticated: this is a deployment owner tool\n      \
          holding database credentials. It checks authorization, not\n      \
          identity. See the `operator` module docs.\n\
          \n\
@@ -413,28 +420,28 @@ fn usage() -> ! {
          key id and a fingerprint; never the key. Refuses to overwrite.\n      \
          The passphrase comes from a FILE: a flag is in the shell history\n      \
          and in `ps`, and a prompt cannot be scripted.\n  \
-         ordo keys init --space <spc> --as <who>\n                 \
+         ordo keys init --direct --space <spc> --as <who>\n                 \
          [--master-key-file <f> --passphrase-file <p>]\n      \
          create `$keycustody` if absent and mint the space's SMK and epoch\n      \
          1's DEK. Idempotent. Records a `custody-action` in the space's\n      \
          security-event stream. Without the file flags the master comes\n      \
          from ORDO_MASTER_KEY. **A deployment will not mint custody for a\n      \
          space it was merely told about** — this command is why.\n  \
-         ordo keys status  --space <spc> --as <who> [--db <name>]\n                   \
+         ordo keys status  --direct --space <spc> --as <who> [--db <name>]\n                   \
          [--master-key-file <f> --passphrase-file <p>]\n      \
          the current epoch, each live epoch with its counts and standing,\n      \
          and every re-seal pass with its cursor and attempts.\n  \
-         ordo keys rotate  --space <spc> --as <who> --reason <text>\n                   \
+         ordo keys rotate  --direct --space <spc> --as <who> --reason <text>\n                   \
          [--db <name>] [--master-key-file <f> --passphrase-file <p>]\n      \
          mint the next DEK and queue a re-seal pass for the epoch it replaces.\n  \
-         ordo keys reseal  --space <spc> --as <who> [--db <name>]\n                   \
+         ordo keys reseal  --direct --space <spc> --as <who> [--db <name>]\n                   \
          [--master-key-file <f> --passphrase-file <p>]\n      \
          queue a pass for every retired epoch that still holds anything.\n  \
-         ordo keys destroy --space <spc> --epoch <n> --as <who> [--confirm]\n                   \
+         ordo keys destroy --direct --space <spc> --epoch <n> --as <who> [--confirm]\n                   \
          [--db <name>] [--master-key-file <f> --passphrase-file <p>]\n      \
          destroy a retired DEK once nothing is sealed under it. Refuses by\n      \
          name while any count is non-zero.\n  \
-         ordo keys rewrap-master --from <f> --from-passphrase-file <p>\n                          \
+         ordo keys rewrap-master --direct --from <f> --from-passphrase-file <p>\n                          \
          --to <f> --to-passphrase-file <p> --as <who> [--dry-run]\n      \
          re-wrap every space's SMK from one master to another, in one\n      \
          transaction. NOT an SMK rotation: no envelope and no blind index\n      \

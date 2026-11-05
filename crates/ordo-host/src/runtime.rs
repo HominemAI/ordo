@@ -786,10 +786,19 @@ fn auth_from_env(methods: &str) -> Result<AuthConfig, BootRefusal> {
             detail,
         }
     })?;
+    let security_level =
+        crate::security_level::SecurityLevel::from_vars(&env).map_err(|detail| {
+            BootRefusal::Invalid {
+                var: crate::security_level::ENV,
+                detail,
+            }
+        })?;
     let email_change_touch =
-        crate::contact_email::touch_from_vars(&env).map_err(|detail| BootRefusal::Invalid {
-            var: crate::contact_email::TOUCH_ENV,
-            detail,
+        crate::contact_email::touch_from_vars(&env, security_level).map_err(|detail| {
+            BootRefusal::Invalid {
+                var: crate::contact_email::TOUCH_ENV,
+                detail,
+            }
         })?;
     if !email_required.is_off() && contact_codes.is_none() {
         return Err(BootRefusal::Invalid {
@@ -1651,12 +1660,24 @@ impl RuntimeConfig {
                     var: crate::presence::READS_ENV,
                     detail,
                 })?;
+            let level = crate::security_level::SecurityLevel::from_env().map_err(|detail| {
+                BootRefusal::Invalid {
+                    var: crate::security_level::ENV,
+                    detail,
+                }
+            })?;
             crate::presence::PresencePolicy::from_env(&known)
                 .map_err(|detail| BootRefusal::Invalid {
                     var: crate::presence::ENV,
                     detail,
                 })?
                 .with_reads(reads)
+                .with_level(level)
+                .required_from_env(&known)
+                .map_err(|detail| BootRefusal::Invalid {
+                    var: crate::presence::REQUIRED_ENV,
+                    detail,
+                })?
         };
         // Who may pause a tenant from inside it (27ar). A word that is not a
         // role refuses the boot by name.
@@ -3572,6 +3593,9 @@ async fn assemble_program(
     // Before any engine is built: every door this process ever builds reads
     // the same presence policy.
     crate::presence::install(cfg.presence.clone());
+    // The level the account routes read for the touches outside the door
+    // (`security_level`): a second factor's change.
+    crate::security_level::install(cfg.presence.level());
     // Whose two-step claims count as presence (`plan-auth-federated.md`
     // §8.2): every OIDC connection at its setting, `off` unless named. The
     // tenants' choices are read into it once their table exists.
@@ -5977,6 +6001,10 @@ impl Runtime {
             crate::account_removal::Removal::from_env()
                 .unwrap_or_default()
                 .describe()
+        );
+        println!(
+            "  security    {}",
+            crate::security_level::describe(crate::presence::current().level())
         );
         println!("  presence    {}", crate::presence::current().describe());
         if let Some(label) = &self.recovery_label {

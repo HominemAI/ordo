@@ -88,7 +88,9 @@ async fn harness(db: &str) -> Harness {
         ordo_host::engine_from_members_with(
             &f,
             &rows,
-            &ordo_host::presence::PresencePolicy::standard(),
+            // High: every change asks, which is what this file checks.
+            &ordo_host::presence::PresencePolicy::standard()
+                .with_level(ordo_host::security_level::SecurityLevel::High),
             &PausePolicy::deployment_only(),
         )
         .expect("engine"),

@@ -25,6 +25,7 @@ use ordo_api::{AccessChecker, AccessDecision, OpKind};
 use ordo_conformance::Fixture;
 use ordo_host::console_keys::NEVER_EXEMPT;
 use ordo_host::presence::PresencePolicy;
+use ordo_host::security_level::SecurityLevel;
 use ordo_host::IdentityAccess;
 use ordo_identity::principal::{PrincipalId, Timestamp};
 use ordo_identity::{TokenKey, TokenSpec};
@@ -40,6 +41,12 @@ op listNotes =
 const SECRET: &[u8] = b"presence-secret";
 const NOW: u64 = 1_000;
 const SPACE: &str = "spc_a";
+
+/// `ORDO_SECURITY_LEVEL=high`: every platform change asks, the default
+/// before the levels (owner, 2026-11-05).
+fn high() -> PresencePolicy {
+    PresencePolicy::standard().with_level(SecurityLevel::High)
+}
 
 fn names() -> Vec<String> {
     ordo_host::platform_ops::specs()
@@ -193,10 +200,11 @@ const READS: &[&str] = &[
     "std.space.shares",
 ];
 
-/// **A read answers a signed-in person with no touch.**
+/// **A read answers a signed-in person with no touch**, at every level;
+/// at high every change asks.
 #[test]
-fn by_default_a_read_needs_no_presence_and_a_change_does() {
-    let d = door(&PresencePolicy::standard());
+fn at_high_a_read_needs_no_presence_and_a_change_does() {
+    let d = door(&high());
     for op in names() {
         let without = allowed(&d, "usr_owner", false, &op);
         let with = allowed(&d, "usr_owner", true, &op);
@@ -246,7 +254,7 @@ fn a_read_freed_by_default_is_not_delegable() {
 /// every platform op asks, as before the ruling.
 #[test]
 fn strict_asks_presence_on_every_platform_op() {
-    let d = door(&PresencePolicy::standard().with_reads(true));
+    let d = door(&high().with_reads(true));
     assert!(names().len() >= 15, "the list this test walks is real");
     // A person-scoped op (`std.person.tenants`) reads the caller's own
     // memberships and never asks for presence; every other op does.
@@ -281,7 +289,8 @@ fn strict_asks_presence_on_every_platform_op() {
 #[test]
 fn a_named_op_stops_asking_and_its_neighbour_does_not() {
     let policy = PresencePolicy::parse("std.space.admit, std.space.callersOf", &names())
-        .expect("both name platform ops");
+        .expect("both name platform ops")
+        .with_level(SecurityLevel::High);
     assert!(policy.exempts("std.space.admit"));
     assert!(policy.exempts("std.space.callersOf"));
     assert!(!policy.exempts("std.space.remove"));
@@ -357,7 +366,8 @@ fn the_owner_named_ops_can_each_be_exempted() {
         // Strict, so reads ask too and every op but the named one does.
         let policy = PresencePolicy::parse(op, &names())
             .expect(op)
-            .with_reads(true);
+            .with_reads(true)
+            .with_level(SecurityLevel::High);
         for other in named {
             assert_eq!(
                 policy.requires(other, kind(other)),
@@ -391,8 +401,8 @@ fn moving_a_tenant_version_asks_no_touch_and_keeps_the_role_gate() {
         assert!(allowed(&d, "usr_owner", false, pin), "{policy:?}");
         assert!(!allowed(&d, "usr_editor", true, pin), "{policy:?}");
     }
-    // Its neighbours still ask.
-    let d = door(&PresencePolicy::standard());
+    // Its neighbours still ask where the level says so.
+    let d = door(&high());
     assert!(!allowed(
         &d,
         "usr_owner",
@@ -459,4 +469,99 @@ fn a_name_that_is_no_platform_op_is_refused_and_the_real_ones_are_listed() {
         .expect("empty is the default")
         .exempt()
         .is_empty());
+}
+
+/// **The levels** (owner, 2026-11-05): `ORDO_SECURITY_LEVEL` sets which
+/// changes ask a person for a touch, by the ruling's table, and the door
+/// built under each asks exactly there.
+#[test]
+fn each_level_asks_where_the_table_says() {
+    // (op, low, standard, high)
+    let rows: &[(&str, bool, bool, bool)] = &[
+        ("std.deployment.apply", false, false, true),
+        ("std.deployment.setSessionPolicy", false, false, true),
+        ("std.space.create", false, false, true),
+        ("std.space.delete", false, true, true),
+        ("std.space.reap", false, true, true),
+        ("std.deployment.addConsoleKey", true, true, true),
+        ("std.deployment.revokeConsoleKey", true, true, true),
+        ("std.space.export", false, true, true),
+        ("std.space.import", false, true, true),
+        ("std.space.admit", false, false, true),
+        ("std.space.setRole", false, false, true),
+        ("std.space.recoverMember", true, true, true),
+        ("std.identity.approveRecovery", true, true, true),
+        ("std.space.attachBucket", false, true, true),
+        ("std.delegation.approve", false, true, true),
+    ];
+    for (i, level) in [
+        SecurityLevel::Low,
+        SecurityLevel::Standard,
+        SecurityLevel::High,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let policy = PresencePolicy::standard().with_level(level);
+        for (op, low, standard, high) in rows {
+            let want = [*low, *standard, *high][i];
+            assert_eq!(policy.requires(op, kind(op)), want, "{level:?}: {op}");
+        }
+        // A read never asks at any level unless the deployment is strict.
+        assert!(!policy.requires("std.space.members", OpKind::Read));
+        // Moving a version never asks.
+        assert!(!policy.requires(ordo_host::deploy_ops::PIN, OpKind::Write));
+    }
+    // The door agrees, for the owner: standard frees a membership change and
+    // keeps the touch on a delete.
+    let d = door(&PresencePolicy::standard());
+    assert!(allowed(&d, "usr_owner", false, "std.space.admit"));
+    assert!(!allowed(&d, "usr_owner", false, "std.space.delete"));
+    assert!(allowed(&d, "usr_owner", true, "std.space.delete"));
+    let d = door(&PresencePolicy::standard().with_level(SecurityLevel::Low));
+    assert!(allowed(&d, "usr_owner", false, "std.space.delete"));
+    for op in NEVER_EXEMPT {
+        assert!(
+            !allowed(&d, "usr_owner", false, op),
+            "low still asks on {op}"
+        );
+    }
+}
+
+/// **The per-action settings override the level** (*"again the dev
+/// decides"*): `ORDO_STEP_UP_REQUIRED_OPS` adds a touch the level leaves
+/// off, and `ORDO_STEP_UP_EXEMPT_OPS` takes one off that it asks.
+#[test]
+fn the_per_action_lists_override_the_level() {
+    let low = PresencePolicy::parse("std.space.recoverMember", &names())
+        .expect("ok")
+        .with_level(SecurityLevel::Low)
+        .with_required("std.space.admit,std.deployment.apply", &names())
+        .expect("ok");
+    assert!(low.requires("std.space.admit", OpKind::Write));
+    assert!(low.requires("std.deployment.apply", OpKind::Write));
+    assert!(!low.requires("std.space.recoverMember", OpKind::Write));
+    assert!(!low.requires("std.space.delete", OpKind::Write));
+    // Required reaches a read too.
+    let reads = PresencePolicy::standard()
+        .with_required("std.space.members", &names())
+        .expect("ok");
+    assert!(reads.requires("std.space.members", OpKind::Read));
+    // Each refusal names the setting.
+    let both = PresencePolicy::parse("std.space.admit", &names())
+        .expect("ok")
+        .with_required("std.space.admit", &names())
+        .expect_err("in both lists");
+    assert!(both.contains("ORDO_STEP_UP_EXEMPT_OPS") && both.contains("ORDO_STEP_UP_REQUIRED_OPS"));
+    let typo = PresencePolicy::standard()
+        .with_required("std.space.nothing", &names())
+        .expect_err("not an op");
+    assert!(typo.contains("std.space.nothing"), "{typo}");
+    let pin = PresencePolicy::standard()
+        .with_required(ordo_host::deploy_ops::PIN, &names())
+        .expect_err("pin never asks");
+    assert!(pin.contains("ORDO_STEP_UP_REQUIRED_OPS"), "{pin}");
+    let line = low.describe();
+    assert!(line.contains("ORDO_SECURITY_LEVEL=low"), "{line}");
+    assert!(line.contains("ORDO_STEP_UP_REQUIRED_OPS"), "{line}");
 }

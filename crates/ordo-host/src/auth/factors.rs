@@ -79,10 +79,17 @@ pub(super) async fn authorise_change(
         };
     }
     let claims = step_up_claims(auth, headers, op, now)?;
-    if needs_proof && !super::recover::fresh_presence(&claims, now) {
+    if needs_proof && proof_asked() && !super::recover::fresh_presence(&claims, now) {
         prove_change(auth, headers, &claims.principal.0, op, now).await?;
     }
     Ok((claims.principal.0.clone(), sf))
+}
+
+/// Does this deployment ask for proof on a change to a person's factors?
+/// `ORDO_SECURITY_LEVEL=low` does not; standard and high do (owner,
+/// 2026-11-05, "account security on the app's sign-in").
+fn proof_asked() -> bool {
+    crate::security_level::current().asks(crate::security_level::Situation::AccountSecurity)
 }
 
 /// What a change to a factor needs: a fresh passkey assertion in the session,
@@ -95,7 +102,7 @@ async fn proof_of_person(
     op: &str,
     now: Timestamp,
 ) -> Result<(), Box<Response>> {
-    if super::recover::fresh_presence(claims, now) {
+    if !proof_asked() || super::recover::fresh_presence(claims, now) {
         return Ok(());
     }
     prove_change(auth, headers, &claims.principal.0, op, now).await

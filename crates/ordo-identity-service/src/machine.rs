@@ -11,12 +11,28 @@
 //! `complete` checks it, the signature, and that it was not spent before,
 //! and opens a machine session. One refusal for every failure
 //! ([`IdentityError::MachineRefused`]).
+//!
+//! # Grants (owner, 2026-11-05)
+//!
+//! A key holds **grants**, what it may do, carried on its token
+//! (`ordo_identity::deployment_token::GRANTS`): `deployment`, the
+//! deployment's own platform ops, and `import`, importing into a tenant.
+//! A key made without naming any holds `deployment`, as every key did
+//! before grants; `import` is off unless the deployment owner gives it.
+//!
+//! A key may also hold a **minting grant** (`mints`): the grants the keys it
+//! makes may carry, apart from what it may do itself (*"because it itself
+//! may not need to use those things"*). Empty, the default, is that it
+//! makes no keys. A person gives one, and the provisioner key holds one for
+//! `deployment` keys ([`KeyGrants::provisioner`]); a key a machine made holds
+//! none. Every key records who made it (`created_by`).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use ordo_exec::{sql_lit, Pool, TxConn};
+use ordo_identity::deployment_token;
 use ordo_identity::webauthn::{b64url_decode, b64url_encode};
 use serde_json::{json, Value};
 
@@ -68,6 +84,122 @@ pub fn sign_challenge(key: &SigningKey, challenge: &str) -> Option<String> {
     Some(b64url_encode(&key.sign(&bytes).to_bytes()))
 }
 
+/// What a new key may do, and what the keys it makes may carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyGrants {
+    pub grants: Vec<String>,
+    pub mints: Vec<String>,
+}
+
+impl Default for KeyGrants {
+    /// `deployment`, and no minting: what every key held before grants.
+    fn default() -> Self {
+        KeyGrants {
+            grants: vec![deployment_token::GRANT_DEPLOYMENT.to_string()],
+            mints: Vec::new(),
+        }
+    }
+}
+
+impl KeyGrants {
+    /// The provisioner's, made at first boot from
+    /// `ORDO_IDENTITY_PROVISIONER_KEY`: `deployment`, and it makes CI keys
+    /// that hold `deployment` (`plan-identity-service.md` 5.1, step 4). The
+    /// one minting grant not given by a person: whoever provisions the
+    /// deployment sets that key.
+    pub fn provisioner() -> KeyGrants {
+        KeyGrants {
+            mints: vec![deployment_token::GRANT_DEPLOYMENT.to_string()],
+            ..KeyGrants::default()
+        }
+    }
+
+    /// Read `grants` and `mints` from a request body. Absent `grants` is
+    /// `deployment`; absent `mints` is none.
+    pub fn from_body(body: &Value) -> Result<KeyGrants, IdentityError> {
+        let list = |field: &str| -> Result<Option<Vec<String>>, IdentityError> {
+            let Some(v) = body.get(field) else {
+                return Ok(None);
+            };
+            let refused = || {
+                IdentityError::BadRequest(format!(
+                    "`{field}` is a list of grants: {}",
+                    deployment_token::GRANTS.join(", ")
+                ))
+            };
+            let mut out: Vec<String> = Vec::new();
+            for g in v.as_array().ok_or_else(refused)? {
+                let g = g
+                    .as_str()
+                    .filter(|g| deployment_token::GRANTS.contains(g))
+                    .ok_or_else(refused)?;
+                if !out.iter().any(|o| o == g) {
+                    out.push(g.to_string());
+                }
+            }
+            Ok(Some(out))
+        };
+        let default = KeyGrants::default();
+        Ok(KeyGrants {
+            grants: list("grants")?.unwrap_or(default.grants),
+            mints: list("mints")?.unwrap_or_default(),
+        })
+    }
+
+    /// Whether a key whose minting grant is `mints` may make a key with
+    /// these grants. A minted key never mints.
+    pub fn within(&self, mints: &[String]) -> Result<(), IdentityError> {
+        if mints.is_empty() {
+            return Err(IdentityError::MintRefused(
+                "this machine key holds no minting grant. A deployment owner gives one when \
+                 making a key: POST /machine-keys with `mints` naming the grants its keys may \
+                 carry"
+                    .into(),
+            ));
+        }
+        if let Some(g) = self.grants.iter().find(|g| !mints.contains(g)) {
+            return Err(IdentityError::MintRefused(format!(
+                "this machine key's minting grant does not name `{g}`; it names {}. A deployment \
+                 owner makes a key whose `mints` names `{g}`",
+                mints.join(", ")
+            )));
+        }
+        if !self.mints.is_empty() {
+            return Err(IdentityError::MintRefused(
+                "a key a machine makes holds no minting grant; only a deployment owner gives one, \
+                 so leave `mints` out"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn words(list: &[String]) -> String {
+    list.join(",")
+}
+
+fn split(cell: Option<&str>) -> Vec<String> {
+    cell.unwrap_or("")
+        .split(',')
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The minting grant of the live key `id`: empty for an unknown or ended
+/// key.
+pub async fn mints_of(tx: &TxConn, handle: &str, id: &str) -> Result<Vec<String>, IdentityError> {
+    let rows = tx
+        .rows(&format!(
+            "SELECT mints FROM machine_keys WHERE {} AND id = {} AND ended_at IS NULL",
+            dep(handle),
+            sql_lit(id)
+        ))
+        .await?;
+    Ok(split(rows.first().and_then(|r| cell(r, 0))))
+}
+
 /// What making a key returns.
 #[derive(Debug, Clone)]
 pub struct Made {
@@ -78,13 +210,16 @@ pub struct Made {
 }
 
 /// Make a machine key inside `tx`. `public` is a key the machine made;
-/// `None` makes a pair here.
+/// `None` makes a pair here. Whether `by` may give `grants` is the
+/// caller's check ([`KeyGrants::within`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn add(
     tx: &TxConn,
     handle: &str,
     keys: &KeyRing,
     name: &str,
     public: Option<[u8; 32]>,
+    grants: &KeyGrants,
     by: Actor<'_>,
     now: u64,
 ) -> Result<Made, IdentityError> {
@@ -117,15 +252,22 @@ pub async fn add(
         }
     };
     tx.rows(&format!(
-        "INSERT INTO machine_keys (id, deployment, name, public_key, created_by, created_at) \
-         VALUES ({}, {}, {}, {}, {}, {now})",
+        "INSERT INTO machine_keys (id, deployment, name, public_key, created_by, created_at, \
+         grants, mints) VALUES ({}, {}, {}, {}, {}, {now}, {}, {})",
         sql_lit(&id),
         sql_lit(handle),
         sql_lit(name),
         sql_lit(&b64url_encode(&public)),
         sql_lit(by.id),
+        sql_lit(&words(&grants.grants)),
+        sql_lit(&words(&grants.mints)),
     ))
     .await?;
+    let detail = format!(
+        "{name} grants={} mints={}",
+        words(&grants.grants),
+        words(&grants.mints)
+    );
     audit::append(
         tx,
         handle,
@@ -136,7 +278,7 @@ pub async fn add(
             subject: &id,
             outcome: "ok",
             client: by.client,
-            detail: name,
+            detail: &detail,
         },
         now,
     )
@@ -195,8 +337,8 @@ pub async fn end(
 pub async fn list(pool: &Pool, handle: &str) -> Result<Vec<Value>, IdentityError> {
     Ok(pool
         .rows(&format!(
-            "SELECT id, name, public_key, created_by, created_at, last_used_at, ended_at \
-             FROM machine_keys WHERE {} ORDER BY created_at, id",
+            "SELECT id, name, public_key, created_by, created_at, last_used_at, ended_at, \
+             grants, mints FROM machine_keys WHERE {} ORDER BY created_at, id",
             dep(handle)
         ))
         .await?
@@ -210,6 +352,8 @@ pub async fn list(pool: &Pool, handle: &str) -> Result<Vec<Value>, IdentityError
                 "createdAt": num(r, 4),
                 "lastUsedAt": num(r, 5),
                 "endedAt": num(r, 6),
+                "grants": split(cell(r, 7)),
+                "mints": split(cell(r, 8)),
             })
         })
         .collect())
@@ -262,6 +406,8 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 pub struct SignedIn {
     pub id: String,
     pub name: String,
+    /// What the key may do, for its token.
+    pub grants: Vec<String>,
     pub session: Opened,
 }
 
@@ -308,8 +454,8 @@ impl MachineSignIn {
         }
         let rows = pool
             .rows(&format!(
-                "SELECT name, public_key, last_used_at FROM machine_keys WHERE {} AND id = {} \
-                 AND ended_at IS NULL",
+                "SELECT name, public_key, last_used_at, grants FROM machine_keys WHERE {} AND \
+                 id = {} AND ended_at IS NULL",
                 dep(handle),
                 sql_lit(machine)
             ))
@@ -336,6 +482,7 @@ impl MachineSignIn {
             }
         }
         let name = text(r, 0);
+        let grants = split(cell(r, 3));
         let first_use = cell(r, 2).is_none();
         let tx = pool.begin().await?;
         tx.rows(&format!(
@@ -380,6 +527,7 @@ impl MachineSignIn {
         Ok(SignedIn {
             id: machine.to_string(),
             name,
+            grants,
             session,
         })
     }

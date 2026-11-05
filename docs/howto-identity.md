@@ -147,10 +147,29 @@ A machine key signs CI in, to deploy with nobody present.
    people machine-key end m_…`. New sign-ins are refused at once; its
    tokens die within the token life.
 
-A machine key may deploy, activate, and set quotas in the deployment's own
-space. It never acts inside a tenant. It belongs to the deployment, so it
-outlives the person who made it. Every act is recorded under its id and
-name.
+A machine key is never asked for a passkey touch. It belongs to the
+deployment, so it outlives the person who made it. Every act is recorded
+under its id and name.
+
+**Grants** (owner, 2026-11-05) say what a key may do. They are set when the
+key is made, with `--grants`, and carried on its token:
+
+| Grant | Lets the key | Default |
+|---|---|---|
+| `deployment` | call the platform ops in the deployment's own space: deploy, activate, quotas and the rest | on |
+| `import` | run `std.space.import` into a tenant, from a bundle staged under that tenant's directory | off |
+
+A key made without `--grants` holds `deployment`, as every key did before
+grants. `--grants import` makes a key that only imports.
+
+**A minting grant** (`--mints`) lets a key make keys itself, for the
+developer's own system that hands keys out. It names the grants those keys
+may carry, apart from what the minting key holds: a key with
+`--grants "" --mints import` holds nothing itself and makes keys that
+import. It is off by default. Only a person gives one, so a key a machine
+made never mints. The one exception is the provisioner key made at first
+boot from `ORDO_IDENTITY_PROVISIONER_KEY`: it mints `deployment` keys for CI. A key asked for more than its minting grant is refused
+with `mint_refused`, naming the grant. The list shows who made each key.
 
 ## 7. The command line
 
@@ -184,7 +203,7 @@ unused (168, 7 days) and `ORDO_IDENTITY_SESSION_MAX_HOURS` at most (720,
 | `ordo people list` | everyone, and whose access has ended |
 | `ordo people invite [--label <text>]` | a sign-up link for a new admin |
 | `ordo people end <p_id>` | ends a person's access now |
-| `ordo people machine-key add --name <name> [--public-key <base64url>]` | a key for CI; its secret is shown once |
+| `ordo people machine-key add --name <name> [--public-key <base64url>] [--grants <list>] [--mints <list>]` | a key for CI; its secret is shown once. `--grants`: `deployment` (default), `import`. `--mints`: what the keys it makes may carry, none by default |
 | `ordo people machine-key list` | every machine key |
 | `ordo people machine-key end <m_id>` | ends a machine key now |
 

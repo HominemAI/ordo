@@ -2797,11 +2797,15 @@ pub fn specs() -> Vec<Spec> {
     v.push(
         r(
             "ID-037",
-            "a member without a fresh touch shares",
+            // At the default level, sharing is membership work and asks no
+            // touch (`ORDO_SECURITY_LEVEL=standard`, owner 2026-11-05): the
+            // door lets the stale manager through, and the op refuses the
+            // body it was sent. At `high` this is a `presence_required`.
+            "a member without a fresh touch shares, at the standard level",
             "POST",
             "/op/std.space.share",
             "manager_stale",
-            Expect::Denied,
+            Expect::Code(400, "missing_param"),
         )
         .body(r#"{"ops":"myNotes","to":"x@x.org"}"#),
     );

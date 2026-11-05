@@ -675,13 +675,17 @@ async fn machine_keys_create(
                         })?,
                 ),
             };
+            let grants = machine::KeyGrants::from_body(&b)?;
             let made = s
-                .add_machine_key(c.actor(), text(&b, "name")?, public)
+                .add_machine_key(&c, text(&b, "name")?, public, &grants)
                 .await?;
             Ok(Reply::json(json!({
                 "id": made.id,
                 "name": made.name,
                 "secret": made.secret,
+                "grants": grants.grants,
+                "mints": grants.mints,
+                "createdBy": c.sub,
             })))
         }
         .await,

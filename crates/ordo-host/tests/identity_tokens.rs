@@ -126,6 +126,11 @@ fn claims(kind: Kind, touched_at: Option<u64>) -> DeploymentClaims {
         client: "console".into(),
         sid: "s_1".into(),
         touched_at,
+        grants: if kind == Kind::Machine {
+            vec![ordo_identity::deployment_token::GRANT_DEPLOYMENT.into()]
+        } else {
+            Vec::new()
+        },
         iat: NOW,
         exp: NOW + 600,
         jti: "j_1".into(),
@@ -333,6 +338,23 @@ async fn a_machine_key_applies_at_home_and_reaches_no_tenant() {
     assert_eq!(allowed(d.door.check(&m, TENANT, MEMBERS)), None);
     assert!(!d.door.presence_required(&m, TENANT, MEMBERS));
     assert_eq!(allowed(d.door.check(&m, HOME, APP_OP)), None);
+    // Without the `import` grant it imports into no tenant.
+    let import = ordo_host::exit_ops::IMPORT;
+    assert_eq!(allowed(d.door.check(&m, TENANT, import)), None);
+
+    // **A system importing into a tenant** (owner, 2026-11-05): with the
+    // grant, the import and nothing else, and no touch is asked.
+    let mut c = claims(Kind::Machine, None);
+    c.grants = vec![deployment_token::GRANT_IMPORT.into()];
+    let importer = sign(&c, &k);
+    assert_eq!(
+        allowed(d.door.check(&importer, TENANT, import)),
+        Some("m_ci".into())
+    );
+    assert!(!d.door.presence_required(&importer, TENANT, import));
+    assert_eq!(allowed(d.door.check(&importer, TENANT, MEMBERS)), None);
+    // It does not hold `deployment`, so the home space is closed to it.
+    assert_eq!(allowed(d.door.check(&importer, HOME, APPLY)), None);
 
     // Break-glass is a person with a fresh touch.
     let b = sign(&claims(Kind::Breakglass, Some(NOW)), &k);

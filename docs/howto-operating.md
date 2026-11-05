@@ -72,10 +72,13 @@ curl -s https://ordo.inf.smg.icu/auth/complete \
 ```
 
 Two properties of that token decide what the door will accept, and both are
-the platform's rather than the CLI's. It must carry **presence**: applying is
-step-up gated like every platform op, and `/auth/refresh` continues a session
-without a new sign-in. And it can never be a **capability token**: a
-capability token can never satisfy step-up, which is what makes applying a
+the platform's rather than the CLI's. It carries **presence** when
+`ORDO_SECURITY_LEVEL=high`, or `ORDO_STEP_UP_REQUIRED_OPS` names
+`std.deployment.apply`: then applying is step-up gated, and `/auth/refresh`
+continues a session without a new sign-in. At the default level, standard,
+deploying asks no touch of a signed-in person (owner, 2026-11-05). And it can
+never be a **capability token**: a platform change is closed to capability
+grants and delegated tokens at every level, which is what makes applying a
 schema structurally human-only: no third-party client and no delegated agent
 can deploy, however its allowlist reads.
 
@@ -870,8 +873,9 @@ ticket, so a recovery cannot end in a password. What completing does:
 No token comes back. The person signs in with the new passkey, gets a session
 that works for everything except step-up, and is told when step-up becomes
 available (`presence_available_at`). Ordinary reads and writes work at once.
-Export, import, delete and deploy ask for presence, and the answer is a
-refusal until the quarantine ends.
+Export, import and delete ask for presence at the default
+`ORDO_SECURITY_LEVEL`, and deploying does at `high`; the answer is a refusal
+until the quarantine ends.
 
 ### Contesting a recovery
 

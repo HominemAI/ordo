@@ -20,7 +20,12 @@ usage:
   ordo people invite [--label <text>]   a sign-up link for a new admin, 7 days
   ordo people end <p_id>                end a person's access now
   ordo people machine-key add --name <name> [--public-key <base64url>]
-                                        a key for CI; its secret is shown once
+                              [--grants deployment,import] [--mints import]
+                                        a key for CI; its secret is shown once.
+                                        --grants: what it may do (default deployment;
+                                        import lets it import into a tenant).
+                                        --mints: what the keys it makes may carry
+                                        (default none: it makes no keys)
   ordo people machine-key list          every machine key
   ordo people machine-key end <m_id>    end a machine key now
   Each takes [--identity <url>]. Default: ORDO_IDENTITY_URL, or the one you are signed in to.
@@ -29,7 +34,15 @@ usage:
 pub async fn run(ctx: &Ctx, args: &[String]) -> Outcome {
     let a = match Args::parse(
         args,
-        &["--identity", "--label", "--name", "--public-key", "--token"],
+        &[
+            "--identity",
+            "--label",
+            "--name",
+            "--public-key",
+            "--token",
+            "--grants",
+            "--mints",
+        ],
         &[],
         USAGE,
     ) {
@@ -132,6 +145,16 @@ async fn act(ctx: &Ctx, a: &Args) -> Result<Outcome, SignInError> {
             if let Some(k) = a.get("--public-key") {
                 body["publicKey"] = json!(k);
             }
+            for (flag, field) in [("--grants", "grants"), ("--mints", "mints")] {
+                if let Some(list) = a.get(flag) {
+                    let words: Vec<&str> = list
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|w| !w.is_empty())
+                        .collect();
+                    body[field] = json!(words);
+                }
+            }
             let v = client.post("/machine-keys", body, t).await?;
             match v["secret"].as_str() {
                 Some(secret) => format!(
@@ -160,11 +183,27 @@ async fn act(ctx: &Ctx, a: &Args) -> Result<Outcome, SignInError> {
                     .as_u64()
                     .map(|u| format!("used {} seconds ago", now.saturating_sub(u)))
                     .unwrap_or_else(|| "never used".into());
+                let list = |field: &str| {
+                    let w: Vec<&str> = k[field]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    if w.is_empty() {
+                        "none".to_string()
+                    } else {
+                        w.join(",")
+                    }
+                };
                 out.push_str(&format!(
-                    "{:<26} {:<6} {:<20} {used}\n",
+                    "{:<26} {:<6} {:<20} {used}; grants {}; mints {}; made by {}\n",
                     s(k, "id"),
                     state,
-                    s(k, "name")
+                    s(k, "name"),
+                    list("grants"),
+                    list("mints"),
+                    s(k, "createdBy"),
                 ));
             }
             if out.is_empty() {

@@ -457,6 +457,10 @@ pub struct AccessEngine {
     /// Ops no delegated token may call (SH-20). Empty is "every op the
     /// allowlist and the delegator's reach admit"; the deployment fills it.
     not_delegable: BTreeSet<String>,
+    /// Ops no capability grant reaches, whatever its allowlist says. A step-up
+    /// requirement used to be the only thing keeping a grant off them; an op
+    /// the deployment frees of its touch is named here instead.
+    no_capability: BTreeSet<String>,
     /// Whose two-step claims count as presence, and where
     /// (`plan-auth-federated.md` §8.2). `None` is the default: no provider's
     /// claim satisfies step-up anywhere.
@@ -474,6 +478,7 @@ impl Default for AccessEngine {
             client_step_up: BTreeMap::new(),
             step_up_max_age_secs: DEFAULT_STEP_UP_MAX_AGE_SECS,
             not_delegable: BTreeSet::new(),
+            no_capability: BTreeSet::new(),
             upstream: None,
         }
     }
@@ -713,6 +718,13 @@ impl AccessEngine {
         self.not_delegable.insert(op.to_string());
     }
 
+    /// Close `op` to every capability grant: a grant that lists it is refused
+    /// it as [`DenyReason::OpNotDelegable`]. For an op that asks no touch,
+    /// since a touch is what refuses a grant otherwise.
+    pub fn forbid_capability(&mut self, op: &str) {
+        self.no_capability.insert(op.to_string());
+    }
+
     /// May a delegated token call `op` at all? The question a consent page
     /// asks to say "this agent may not ...".
     pub fn delegable(&self, op: &str) -> bool {
@@ -878,6 +890,9 @@ impl AccessEngine {
             // audit note from. A consent screen people are made to click
             // through after every deploy is a consent screen they stop
             // reading, and that is a security property, not a convenience.
+            if self.no_capability.contains(op) {
+                return Decision::deny(op, DenyReason::OpNotDelegable);
+            }
             if self.drift(grant).iter().any(|(_, d)| d.is_fatal()) {
                 return Decision::deny(op, DenyReason::ManifestChanged);
             }

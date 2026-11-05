@@ -210,6 +210,13 @@ The pin this plan adds:
   tenant's pin from the control database again, resolves again and writes
   once more. A second refusal answers `server_busy`. A routine run reads the
   pin again and is retried by the runner.
+- The door looked the op up, bound it and checked access under the old
+  version. So the write is made again only when the new version declares
+  the op the same way (its plan may differ). Otherwise it answers
+  `server_busy`, nothing written, and the caller's retry passes the door
+  under the new pin (review, 2026-11-05).
+- A whole read of the pins is merged with the stream under one lock: per
+  tenant the newer epoch wins, and the read position never moves back.
 - **The pin stream** (ask 17): every pin change notifies `ordo_pins` in its
   own transaction. Nodes read `$pins` by `seq` from the last row they read.
   Every pin change holds the pin lock and draws `seq` under it, so rows
@@ -275,7 +282,11 @@ The pin this plan adds:
   `space_unavailable`, retryable, naming no version.
 - Except the registry's active version: the deploy channel loads it, with
   its live check, and swaps. Until the swap lands, a tenant pinned to it is
-  served the node's active version, as before increment 3. The node reads
+  served the version it was pinned to before, under that pin's epoch, and
+  that version stays loaded. A node that has swapped raises the fence, so
+  from its first write this node's writes are refused (`server_busy`) until
+  its own swap lands. A tenant this node held no earlier pin for answers
+  `space_unavailable` until then (review, 2026-11-05). The node reads
   every pin just before it swaps, so the catch-up the swap starts sees the
   new pins and no tenant is served the old version from a stale pin.
 

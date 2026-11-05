@@ -28,7 +28,7 @@ use ordo_conformance::{Fixture, Pg, FIXTURE, SEED};
 use ordo_exec::route::SinglePool;
 use ordo_exec::{Pool, PoolConfig};
 use ordo_host::apply_op;
-use ordo_host::deploy::{self, Deployment, Swapped};
+use ordo_host::deploy::{self, Deployment, PinMap, Swapped};
 use ordo_host::schema_apply::Program;
 use ordo_host::spaces::Spaces;
 use ordo_host::tenants;
@@ -45,7 +45,8 @@ const TWIN: &str = "spc_twin";
 const OWNER: &str = "mem_o";
 const TWIN_OWNER: &str = "mem_twin";
 
-/// Version 1 of a notes entity.
+/// Version 1 of a notes entity. `jot` is declared the same way in v1 and
+/// v2; only v2's writes a body, so a row says which version wrote it.
 const NOTES_V1: &str = "
 entity memos (key: memo) {
   owner -> members
@@ -53,6 +54,9 @@ entity memos (key: memo) {
   access read   owner == $caller
   access write  owner == $caller
 }
+
+op jot($owner: text, $title: text) =
+  set memos { owner: $owner, title: $title }
 ";
 
 /// Version 2: an optional field added. Additive, so one database serves
@@ -65,6 +69,9 @@ entity memos (key: memo) {
   access read   owner == $caller
   access write  owner == $caller
 }
+
+op jot($owner: text, $title: text) =
+  set memos { owner: $owner, title: $title, body: \"from v2\" }
 ";
 
 /// Version 3: an entity the database has no table for.
@@ -301,9 +308,10 @@ async fn two_tenants_on_two_versions_are_each_served_their_own() {
 }
 
 /// **The pin fence** (§1.3, ask 16): another node already wrote this
-/// tenant under a newer pin. This node's write is refused in the tenant's
-/// own database, the door reads the pin again and writes once more, and
-/// the caller sees one success.
+/// tenant under a newer pin, to another version. This node's write is
+/// refused in the tenant's own database, the door reads the pin again and
+/// writes once more **under the new version**, and the caller sees one
+/// success.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_write_under_a_stale_pin_is_fenced_and_retried_on_the_new_pin() {
     let h = harness("ordo_vserve_fence").await;
@@ -312,43 +320,84 @@ async fn a_write_under_a_stale_pin_is_fenced_and_retried_on_the_new_pin() {
         .await
         .expect("reserved"));
     tenants::activate(&h.pool, TWIN, 11).await.expect("active");
+    let control = |version: &str, epoch: i64| {
+        format!(
+            "UPDATE \"$spaces\" SET \"version\" = '{version}', \"pin_epoch\" = {epoch} \
+             WHERE \"$space\" = '{TWIN}'"
+        )
+    };
+    let fence = |epoch: i64| {
+        format!(
+            "INSERT INTO \"$pin_fence\" (\"space\", \"epoch\") VALUES ('{TWIN}', {epoch}) \
+             ON CONFLICT (\"space\") DO UPDATE SET \"epoch\" = EXCLUDED.\"epoch\""
+        )
+    };
     h.pool
-        .rows(&format!(
-            "UPDATE \"$spaces\" SET \"version\" = 'v1', \"pin_epoch\" = 7 WHERE \"$space\" = '{TWIN}'"
-        ))
+        .rows(&control("v2", 7))
         .await
-        .expect("the control database says epoch 7");
+        .expect("the control database says v2 at epoch 7");
     h.pool
-        .rows(&format!(
-            "INSERT INTO \"$pin_fence\" (\"space\", \"epoch\") VALUES ('{TWIN}', 7)"
-        ))
+        .rows(&fence(7))
         .await
         .expect("another node wrote under epoch 7");
-    // This node still holds epoch 3.
+    // This node still holds v1 at epoch 3.
     h.deployment.note_pin(TWIN, "v1", 3, 0);
 
-    let (st, body) = create(
+    let (st, body) = call(
         &h,
+        Method::POST,
+        "jot",
         TWIN,
         TWIN_OWNER,
-        json!({"owner": TWIN_OWNER, "title": "t"}),
+        Some(json!({"owner": TWIN_OWNER, "title": "t"})),
     )
     .await;
     assert_eq!(st, 200, "the caller sees nothing of the stale pin: {body}");
     assert_eq!(
         h.deployment.pin_of(TWIN),
-        Some(("v1".to_string(), 7)),
+        Some(("v2".to_string(), 7)),
         "the door read the pin again"
     );
-    assert_eq!(list(&h, TWIN, TWIN_OWNER).await.len(), 1, "written once");
+    let rows = list(&h, TWIN, TWIN_OWNER).await;
+    assert_eq!(rows.len(), 1, "written once: {rows:?}");
+    assert_eq!(
+        rows[0]["body"], "from v2",
+        "the retry ran v2's op, not v1's: {rows:?}"
+    );
 
-    // A node ahead of the fence raises it, in the write's transaction.
-    h.deployment.note_pin(TWIN, "v1", 9, 0);
+    // **The retry passes the door again** when the new version declares
+    // the op differently: v1's create has no `body`, v2's does. The door
+    // bound and checked v1's, so nothing is written and the caller retries.
+    h.pool.rows(&control("v2", 9)).await.expect("v2 at 9");
+    h.pool.rows(&fence(9)).await.expect("fence at 9");
+    h.deployment.note_pin(TWIN, "v1", 8, 0);
     let (st, body) = create(
         &h,
         TWIN,
         TWIN_OWNER,
         json!({"owner": TWIN_OWNER, "title": "u"}),
+    )
+    .await;
+    assert_eq!(st, 503, "{body}");
+    assert_eq!(body["error"]["code"], "server_busy", "{body}");
+    assert_eq!(list(&h, TWIN, TWIN_OWNER).await.len(), 1, "nothing written");
+    assert_eq!(h.deployment.pin_of(TWIN), Some(("v2".to_string(), 9)));
+    let (st, body) = create(
+        &h,
+        TWIN,
+        TWIN_OWNER,
+        json!({"owner": TWIN_OWNER, "title": "u", "body": "b"}),
+    )
+    .await;
+    assert_eq!(st, 200, "the caller's retry lands under v2: {body}");
+
+    // A node ahead of the fence raises it, in the write's transaction.
+    h.deployment.note_pin(TWIN, "v2", 11, 0);
+    let (st, body) = create(
+        &h,
+        TWIN,
+        TWIN_OWNER,
+        json!({"owner": TWIN_OWNER, "title": "w"}),
     )
     .await;
     assert_eq!(st, 200, "{body}");
@@ -359,7 +408,107 @@ async fn a_write_under_a_stale_pin_is_fenced_and_retried_on_the_new_pin() {
         ))
         .await
         .expect("fence");
-    assert_eq!(fence[0][0].as_deref(), Some("9"));
+    assert_eq!(fence[0][0].as_deref(), Some("11"));
+}
+
+/// **An activation this node has not swapped to yet** (review,
+/// 2026-11-05). The registry's active version moved every pin, and this
+/// node is still compiling it. A tenant is served the version it was
+/// pinned to before, under that pin's epoch, so once a node that has
+/// swapped writes under the new epoch, this node's writes are fenced.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_still_loading_an_activation_serves_the_old_pin_under_its_old_epoch() {
+    let h = harness("ordo_vserve_following").await;
+    // TWIN was on v1 (beside the active v2); the activation names v9,
+    // which this node has not loaded.
+    h.deployment.note_pin(TWIN, "v1", 3, 0);
+    h.deployment.follow(Some("v9".into()));
+    h.deployment.note_pin(TWIN, "v9", 4, 0);
+    let (loaded, epoch) = h.deployment.for_space(TWIN).expect("served");
+    assert_eq!(
+        (loaded.version.as_str(), epoch),
+        ("v1", Some(3)),
+        "the version and epoch it held before, not the active v2 under the new epoch"
+    );
+    assert!(
+        h.deployment.retain_pinned().is_empty(),
+        "v1 stays loaded while its tenant waits for the swap"
+    );
+    // A tenant this node held no earlier pin for waits for the swap.
+    h.deployment.note_pin(HERE, "v9", 4, 0);
+    assert!(h.deployment.for_space(HERE).is_err());
+
+    let (st, body) = create(
+        &h,
+        TWIN,
+        TWIN_OWNER,
+        json!({"owner": TWIN_OWNER, "title": "before"}),
+    )
+    .await;
+    assert_eq!(st, 200, "no node wrote under the new epoch yet: {body}");
+
+    // A node that swapped writes under epoch 4: old code no longer writes.
+    h.pool
+        .rows(&format!(
+            "UPDATE \"$pin_fence\" SET \"epoch\" = 4 WHERE \"space\" = '{TWIN}'"
+        ))
+        .await
+        .expect("fence raised");
+    let (st, body) = create(
+        &h,
+        TWIN,
+        TWIN_OWNER,
+        json!({"owner": TWIN_OWNER, "title": "after"}),
+    )
+    .await;
+    assert_eq!(st, 503, "{body}");
+    assert_eq!(body["error"]["code"], "server_busy", "{body}");
+    assert_eq!(list(&h, TWIN, TWIN_OWNER).await.len(), 1, "nothing written");
+}
+
+/// **A whole read racing the stream** (review, 2026-11-05): the reconcile
+/// tick reads every pin while the nudge's tail takes a newer move and
+/// loads its version. The whole read lands last and must not move that
+/// pin back, move the read position back, or drop the version.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whole_read_racing_the_stream_never_moves_a_pin_back() {
+    let (pool, c) = registry_db("ordo_vserve_race").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    let (d, stream) = node(&pool, &c).await;
+    stream.reload().await.expect("boot read");
+
+    // The tick begins: it takes the pins, then reads the database.
+    let before = d.pins();
+    let (rows, seq) = Versions::on(&pool).all_pins().await.expect("whole read");
+    // The nudge lands meanwhile.
+    let moved = Versions::on(&pool)
+        .pin("spc_a", "#1", "deployment-owner:ada", 50)
+        .await
+        .expect("pinned");
+    let tail = stream.tail().await.expect("tail");
+    assert_eq!(tail.loaded, vec!["0.1.0".to_string()], "{tail:?}");
+    let read_to = d.pins().seq;
+    assert!(read_to > seq);
+
+    // The tick takes its read last.
+    let mut read = PinMap {
+        seq,
+        ..PinMap::default()
+    };
+    for (space, version, epoch) in rows {
+        read.by_space.insert(space, (version, epoch));
+    }
+    d.replace_pins(read, &before);
+    assert_eq!(
+        d.pin_of("spc_a"),
+        Some(("0.1.0".to_string(), moved.epoch)),
+        "the newer pin stands"
+    );
+    assert_eq!(d.pins().seq, read_to, "the read position never moves back");
+    assert!(d.retain_pinned().is_empty(), "0.1.0 stays loaded");
+    assert_eq!(d.for_space("spc_a").expect("served").0.version, "0.1.0");
 }
 
 /// The fence at the executor: a write under an older epoch is refused as
@@ -613,10 +762,21 @@ async fn a_pin_reaches_a_node_by_the_stream_and_loads_its_version() {
         "read once"
     );
 
-    // An activation moves every pin; the node drops the version no pin names.
+    // An activation moves every pin. Until this node swaps to it, spc_a is
+    // served 0.1.0, the version it held before; once it has, the node
+    // drops the version no pin names.
     apply(&pool, V030).await;
     let read = stream.reload().await.expect("whole read");
-    assert!(read.dropped.contains(&"0.1.0".to_string()), "{read:?}");
+    assert!(read.dropped.is_empty(), "{read:?}");
+    assert_eq!(d.for_space("spc_a").expect("served").0.version, "0.1.0");
+    let keys = Fixture::from_source("", "").expect("empty").keys.clone();
+    let v3 = deploy::load_active(&pool, &c, keys, ordo_conformance::fixture_space())
+        .await
+        .expect("loads");
+    assert!(matches!(d.swap(v3), Swapped::Installed { .. }));
+    assert!(d.loaded("0.1.0").is_none(), "dropped once the swap lands");
+    assert!(d.loaded("0.2.0").is_none(), "{:?}", d.served_versions());
+    assert_eq!(d.for_space("spc_a").expect("served").0.version, "0.3.0");
 }
 
 /// The move's refusals: a revoked version, and a tenant there is none of.

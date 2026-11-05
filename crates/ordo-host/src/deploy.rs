@@ -805,7 +805,8 @@ pub struct Deployment {
     pins: RwLock<PinMap>,
     /// The registry's active version, as the pin stream last read it, when
     /// this node has not swapped to it yet. A tenant pinned to it is served
-    /// the node's active version until the swap lands: an activation moves
+    /// its earlier pin, under that pin's epoch, until the swap lands
+    /// ([`Deployment::for_space`]): an activation moves
     /// every pin first, and the deploy channel's swap (with its live check
     /// and the tenant catch-up) is what brings the node to it.
     following: RwLock<Option<String>>,
@@ -827,6 +828,23 @@ pub struct PinMap {
     pub by_space: std::collections::HashMap<String, (String, i64)>,
     /// The newest `$pins` row read.
     pub seq: i64,
+    /// Space to the pin it held before its version last changed. Read only
+    /// while the version it moved to is the registry's active one and this
+    /// node has not swapped to it ([`Deployment::for_space`]).
+    pub prior: std::collections::HashMap<String, (String, i64)>,
+}
+
+impl PinMap {
+    /// Set one tenant's pin, keeping the one it replaces when the version
+    /// changes.
+    fn set(&mut self, space: &str, version: &str, epoch: i64) {
+        let next = (version.to_string(), epoch);
+        if let Some(held) = self.by_space.insert(space.to_string(), next) {
+            if held.0 != version {
+                self.prior.insert(space.to_string(), held);
+            }
+        }
+    }
 }
 
 /// A tenant is pinned to a version this node has not loaded. Retryable:
@@ -1165,26 +1183,41 @@ impl Deployment {
     /// made under. A tenant with no pin this node knows is served the
     /// active version and checks no epoch. A tenant pinned to a version
     /// this node has not loaded is [`Unserved`].
+    ///
+    /// Except the registry's active version while this node has not
+    /// swapped to it: the tenant is served the version it was pinned to
+    /// before, **under that pin's epoch**. The fence then refuses its
+    /// writes as soon as a node that has swapped writes under the new
+    /// epoch, so old code never writes beside new. A tenant whose earlier
+    /// pin this node did not hold, or no longer serves, is [`Unserved`]
+    /// until the swap lands.
     pub fn for_space(&self, space: &str) -> Result<(Arc<Loaded>, Option<i64>), Unserved> {
         let active = self.current();
-        let Some((version, epoch)) = self.pin_of(space) else {
-            return Ok((active, None));
+        let (version, epoch, prior) = {
+            let pins = self.pins.read().expect("pin lock");
+            let Some((version, epoch)) = pins.by_space.get(space).cloned() else {
+                return Ok((active, None));
+            };
+            (version, epoch, pins.prior.get(space).cloned())
         };
         if version == active.version {
             return Ok((active, Some(epoch)));
         }
-        match self.loaded(&version) {
-            Some(l) => Ok((l, Some(epoch))),
-            // The activation landed in the registry and this node's swap
-            // has not: served as before the activation until it does.
-            None if self.following.read().expect("pin lock").as_deref() == Some(&version) => {
-                Ok((active, Some(epoch)))
-            }
-            None => Err(Unserved {
-                space: space.to_string(),
-                version,
-            }),
+        if let Some(l) = self.loaded(&version) {
+            return Ok((l, Some(epoch)));
         }
+        let following = self.following.read().expect("pin lock").as_deref() == Some(&version);
+        if following {
+            if let Some((was, was_epoch)) = prior.filter(|(_, e)| *e < epoch) {
+                if let Some(l) = self.loaded(&was) {
+                    return Ok((l, Some(was_epoch)));
+                }
+            }
+        }
+        Err(Unserved {
+            space: space.to_string(),
+            version,
+        })
     }
 
     /// One served version by name, active or not.
@@ -1224,14 +1257,22 @@ impl Deployment {
     /// Drop every non-active version no pin this node holds names, and
     /// answer them. A request in flight keeps its own `Arc`.
     pub fn retain_pinned(&self) -> Vec<String> {
-        let pinned: std::collections::HashSet<String> = self
-            .pins
-            .read()
-            .expect("pin lock")
-            .by_space
-            .values()
-            .map(|(v, _)| v.clone())
-            .collect();
+        let following = self.following().filter(|v| *v != self.current().version);
+        let pinned: std::collections::HashSet<String> = {
+            let pins = self.pins.read().expect("pin lock");
+            let mut pinned: std::collections::HashSet<String> =
+                pins.by_space.values().map(|(v, _)| v.clone()).collect();
+            // A tenant waiting for this node's swap is served its earlier
+            // version until then (`for_space`), so that stays loaded.
+            for (space, (v, _)) in &pins.by_space {
+                if following.as_deref() == Some(v.as_str()) {
+                    if let Some((was, _)) = pins.prior.get(space) {
+                        pinned.insert(was.clone());
+                    }
+                }
+            }
+            pinned
+        };
         let mut others = self.others.write().expect("deployment lock");
         let gone: Vec<String> = others
             .keys()
@@ -1270,9 +1311,39 @@ impl Deployment {
         self.pins.read().expect("pin lock").clone()
     }
 
-    /// Replace every pin, from a whole read of the control database.
-    pub fn replace_pins(&self, map: PinMap) {
-        *self.pins.write().expect("pin lock") = map;
+    /// Take a whole read of the control database. Merged under the lock,
+    /// so a change the stream took while the read ran is kept: per tenant
+    /// the newer epoch wins, the read position never moves back, and a
+    /// tenant the read did not see stays only if the stream gave it since
+    /// `before`, the pins as they were when the read began. The tenants
+    /// whose pin changed.
+    pub fn replace_pins(&self, read: PinMap, before: &PinMap) -> Vec<String> {
+        let mut pins = self.pins.write().expect("pin lock");
+        let mut next = PinMap {
+            seq: read.seq.max(pins.seq),
+            prior: pins.prior.clone(),
+            by_space: pins.by_space.clone(),
+        };
+        for (space, (version, epoch)) in &read.by_space {
+            match pins.by_space.get(space) {
+                Some((_, held)) if *held >= *epoch => {}
+                _ => next.set(space, version, *epoch),
+            }
+        }
+        next.by_space.retain(|space, pin| {
+            read.by_space.contains_key(space) || before.by_space.get(space) != Some(pin)
+        });
+        let by_space = &next.by_space;
+        next.prior.retain(|space, _| by_space.contains_key(space));
+        let mut moved: Vec<String> = next
+            .by_space
+            .iter()
+            .filter(|(s, p)| pins.by_space.get(*s) != Some(*p))
+            .map(|(s, _)| s.clone())
+            .collect();
+        moved.sort();
+        *pins = next;
+        moved
     }
 
     /// Take one pin change. An epoch no newer than the one held is
@@ -1284,8 +1355,7 @@ impl Deployment {
         match pins.by_space.get(space) {
             Some((_, held)) if *held >= epoch => false,
             _ => {
-                pins.by_space
-                    .insert(space.to_string(), (version.to_string(), epoch));
+                pins.set(space, version, epoch);
                 true
             }
         }

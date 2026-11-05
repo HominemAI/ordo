@@ -1046,6 +1046,17 @@ pub(crate) fn op_store_unavailable(e: impl Faulty) -> ExecError {
     ExecError::of_fault(e.fault_class(), ErrorCode::SpaceUnavailable, e.to_string())
 }
 
+/// Does another version declare this op as the door checked it? The plan
+/// may differ (`version_hash`); the name, kind, params, gates and costs the
+/// door read may not.
+fn declares_alike(other: Option<&OpSpec>, checked: &OpSpec) -> bool {
+    other.is_some_and(|o| {
+        let mut o = o.clone();
+        o.version_hash.clone_from(&checked.version_hash);
+        o == *checked
+    })
+}
+
 pub fn exec_failure(e: ordo_exec::ExecFail) -> ExecError {
     // A pin that moved twice in one request: nothing was written, and the
     // same request lands once this node has the newest pin.
@@ -1250,6 +1261,18 @@ impl OpExecutor for FixtureExecutor {
                         {
                             self.spaces.reload_pin(space).await;
                             let again = self.spaces.resolve(space).await.map_err(space_refusal)?;
+                            // The door looked the op up, bound its params
+                            // and checked access against the version first
+                            // resolved. Retried here only when the version
+                            // now named declares the op the same way;
+                            // otherwise nothing was written, and the
+                            // caller's retry passes the door again under
+                            // the new pin.
+                            if again.live.version != bound_space.live.version
+                                && !declares_alike(again.live.specs.get(&op.name).as_ref(), op)
+                            {
+                                return Err(ExecError::server_busy());
+                            }
                             let view = &again.view;
                             view.exec
                                 .write_chained_as(

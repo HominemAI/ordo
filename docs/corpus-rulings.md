@@ -12151,3 +12151,9 @@ Board task `security-levels-low-standard-and-high`. The owner wrote notes per ro
 - **Reading, where the owner gave no level:** a touch stays where a stolen session does lasting harm that is hard to undo (deleting, export, sending data outside, an account lockout). Routine work asks nothing below High.
 - **The developer may pass a choice to the tenant** (membership note). Not built: no tenant-level presence setting exists today, found 2026-11-05. Queued with the levels.
 - **Asked on the board:** an automated import by a system, a token that mints tokens for the developer's own users, and how a person without a passkey gives a touch.
+
+## 2026-11-05: systems importing and minting keys; a touch without a passkey
+
+- **`a-system-running-imports-on-its`, "ok".** A machine key may import into a tenant when the developer grants it, per key, off by default. No touch is asked.
+- **`a-developer-s-own-system-minting`.** The recommendation was that a machine key may mint scoped keys no wider than itself. The owner changed it: *"maybe a separate minting grant that defines what grants it can give as opposed to it can give what it has - because it itself may not need to use those things."* A minting grant is its own grant. It names what the keys it mints may do, apart from what the minting key may do itself. The developer gives it, off by default.
+- **`how-a-person-without-a-passkey`, "ok".** A reauth handle (a fresh sign-in) counts as the touch wherever a touch is asked, as it already does for second-factor changes.

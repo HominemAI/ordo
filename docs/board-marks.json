@@ -7,6 +7,10 @@
   "mark": "done",
   "at": "2026-10-31T04:45:32+00:00"
  },
+ "a-developer-s-own-system-minting:1": {
+  "mark": "done",
+  "at": "2026-11-05T11:25:28+00:00"
+ },
  "a-door-behind-its-database-may:1": {
   "mark": "done",
   "at": "2026-10-30T08:55:45+00:00"
@@ -30,6 +34,10 @@
  "a-system-calling-platform-ops-is:2": {
   "mark": "done",
   "at": "2026-11-05T11:00:01+00:00"
+ },
+ "a-system-running-imports-on-its:1": {
+  "mark": "done",
+  "at": "2026-11-05T11:24:05+00:00"
  },
  "a-tenant-s-pool-could-fill:1": {
   "mark": "done",
@@ -942,6 +950,10 @@
  "heavy-writes-to-a-tenant-can:1": {
   "mark": "done",
   "at": "2026-10-28T04:54:36+00:00"
+ },
+ "how-a-person-without-a-passkey:1": {
+  "mark": "done",
+  "at": "2026-11-05T11:26:21+00:00"
  },
  "idempotency:1": {
   "mark": "done",

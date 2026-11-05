@@ -13,6 +13,13 @@
 //! | `POST deploys/unrevoke` | `std.deployment.unrevoke` | both touches |
 //! | `GET deploys/settings` | `std.deployment.versionSettings` | signed in |
 //! | `POST deploys/setting` | `std.deployment.setVersionSetting` | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
+//! | `GET deploys/touches` | `std.deployment.tenantTouches` | signed in |
+//! | `POST deploys/touch` | `std.deployment.exposeTouch` | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
+//!
+//! The touches tenants may choose (owner, 2026-11-05) are a deployment
+//! setting stored in Ordo too: which situations a tenant may turn on
+//! (`raise`), off (`lower`), or both, beside what the level asks. Nothing is
+//! exposed by default. The door refuses an act on the deployment by name.
 //!
 //! The version settings (`versions.served`, `versions.minimum`,
 //! `versions.new_tenant`) live in Ordo, not the environment (owner,
@@ -61,6 +68,10 @@ pub const REVOKED: &str = "std.deployment.revoked";
 pub const VERSION_SETTINGS: &str = "std.deployment.versionSettings";
 /// `std.deployment.setVersionSetting`.
 pub const SET_VERSION_SETTING: &str = "std.deployment.setVersionSetting";
+/// `std.deployment.tenantTouches`.
+pub const TENANT_TOUCHES: &str = "std.deployment.tenantTouches";
+/// `std.deployment.exposeTouch`.
+pub const EXPOSE_TOUCH: &str = "std.deployment.exposeTouch";
 /// How many setting changes the screen lists.
 pub const SETTING_HISTORY_LIMIT: u32 = 20;
 /// The longest reason the console passes on, the door's own bound.
@@ -83,6 +94,8 @@ pub(super) fn routes() -> Router<Console> {
         .route("/d/{handle}/api/deploys/unrevoke", post(unrevoke_route))
         .route("/d/{handle}/api/deploys/settings", get(settings_route))
         .route("/d/{handle}/api/deploys/setting", post(setting_route))
+        .route("/d/{handle}/api/deploys/touches", get(touches_route))
+        .route("/d/{handle}/api/deploys/touch", post(touch_route))
 }
 
 read!(deploys_route, deploys_get);
@@ -95,6 +108,15 @@ action!(revoke_route, "deploys.revoke", deploys_revoke);
 action!(unrevoke_route, "deploys.unrevoke", deploys_unrevoke);
 read!(settings_route, deploys_settings);
 action!(setting_route, "deploys.setting", deploys_setting);
+read!(touches_route, deploys_touches);
+action!(touch_route, "deploys.touch", deploys_touch);
+
+#[derive(Deserialize)]
+struct TouchBody {
+    situation: String,
+    exposed: String,
+    reason: String,
+}
 
 #[derive(Deserialize)]
 struct SettingBody {
@@ -408,6 +430,61 @@ async fn deploys_setting(
         .op_present(
             SET_VERSION_SETTING,
             &json!({ "setting": setting, "value": value, "reason": reason }),
+        )
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Which touches tenants may choose, what the level asks, and the changes.
+async fn deploys_touches(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Signed).await?;
+    let rows = who
+        .door(c)?
+        .op(
+            TENANT_TOUCHES,
+            true,
+            &json!({ "limit": SETTING_HISTORY_LIMIT }),
+        )
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Expose one situation to tenants, or take it back, with a reason. The
+/// door checks the situation and the direction; its refusal is shown as
+/// given.
+async fn deploys_touch(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: TouchBody = parse(body)?;
+    let situation = req.situation.trim();
+    if situation.is_empty() || situation.len() > 64 {
+        return Err(ConsoleError::BadRequest(
+            "`situation` names one situation, such as membership".into(),
+        ));
+    }
+    let exposed = match req.exposed.trim() {
+        e @ ("none" | "raise" | "lower" | "both") => e,
+        other => {
+            return Err(ConsoleError::BadRequest(format!(
+                "`{other}` is not a direction; there are none, raise, lower and both"
+            )))
+        }
+    };
+    let reason = reason_of(&req.reason)?;
+    call.detail = format!("situation={situation} exposed={exposed}");
+    let rows = who
+        .door(c)?
+        .op_present(
+            EXPOSE_TOUCH,
+            &json!({ "situation": situation, "exposed": exposed, "reason": reason }),
         )
         .await?;
     Ok(Reply::json(first(rows)))

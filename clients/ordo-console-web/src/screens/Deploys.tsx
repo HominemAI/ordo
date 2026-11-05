@@ -18,6 +18,7 @@ import {
   type Would,
 } from '../deploys';
 import { useDeploymentTouch } from './useDeploymentTouch';
+import { TenantTouches } from './TenantTouches';
 import { VersionSettings } from './VersionSettings';
 
 function when(secs: number): string {
@@ -486,6 +487,7 @@ export function Deploys(props: { onSignedOut: () => void }) {
               onChanged={() => void act(load)}
             />
           )}
+          {past && <TenantTouches atDeployment={atDeployment} onSignedOut={props.onSignedOut} />}
           {past && past.activations.length > 0 && (
             <details className="logs">
               <summary>Activation history ({past.activations.length})</summary>

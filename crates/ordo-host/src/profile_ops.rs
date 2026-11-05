@@ -112,6 +112,9 @@ pub struct TenantAccess {
     pub links: Vec<Vec<Option<String>>>,
     pub lines: Vec<Vec<Option<String>>>,
     pub overrides: Vec<Vec<Option<String>>>,
+    /// The touches tenants chose, and what the app developer exposed
+    /// ([`crate::tenant_touches`]). Read from the control database.
+    pub touches: crate::tenant_touches::DoorTouches,
 }
 
 fn exists_sql(table: &str) -> String {
@@ -165,6 +168,7 @@ impl TenantAccess {
         self.links.retain(ok);
         self.lines.retain(ok);
         self.overrides.retain(ok);
+        self.touches.retain(&keep);
     }
 
     /// Add another database's rows.
@@ -172,6 +176,7 @@ impl TenantAccess {
         self.links.extend(other.links);
         self.lines.extend(other.lines);
         self.overrides.extend(other.overrides);
+        self.touches.extend(other.touches);
     }
 }
 

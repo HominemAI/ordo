@@ -534,6 +534,7 @@
     "crates/ordo-host/src/tenant_origins.rs": "all",
     "crates/ordo-host/src/tenant_providers.rs": "all",
     "crates/ordo-host/src/tenant_setup.rs": "all",
+    "crates/ordo-host/src/tenant_touches.rs": "all",
     "crates/ordo-host/src/tenants.rs": "all",
     "crates/ordo-host/src/tickets.rs": "all",
     "crates/ordo-host/src/tightened.rs": [

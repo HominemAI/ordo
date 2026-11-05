@@ -214,6 +214,27 @@ impl PresencePolicy {
         !self.exempts(op) && crate::security_level::asks_for_op(self.level, op)
     }
 
+    /// The per-op setting that decides this op's touch whatever a tenant
+    /// chooses, or `None` when the level (and a tenant's own choice, where
+    /// the app developer exposed it) decides. The order the door reads is:
+    /// these settings, the tenant's choice, the level
+    /// ([`crate::tenant_touches`], owner 2026-11-05).
+    pub fn decided_by(&self, op: &str) -> Option<&'static str> {
+        if crate::deploy_ops::NO_PRESENCE.contains(&op) {
+            return Some("a version move, which never asks");
+        }
+        if crate::console_keys::NEVER_EXEMPT.contains(&op) {
+            return Some("console keys, which always ask");
+        }
+        if self.names_required(op) {
+            return Some(REQUIRED_ENV);
+        }
+        if self.exempts(op) {
+            return Some(ENV);
+        }
+        None
+    }
+
     /// The same policy at `level` (`ORDO_SECURITY_LEVEL`).
     pub fn with_level(mut self, level: crate::security_level::SecurityLevel) -> PresencePolicy {
         self.level = level;

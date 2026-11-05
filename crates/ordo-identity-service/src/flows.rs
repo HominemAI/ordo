@@ -56,7 +56,14 @@ pub struct Caller {
     pub client: String,
     pub sid: String,
     pub touched_at: Option<u64>,
+    /// A machine token's grants. Empty on any other kind.
+    pub grants: Vec<String>,
 }
+
+/// The grant a machine key needs to invite, end a person, end a machine
+/// key or revoke an invite here. The strictest choice; the owner is asked
+/// whether a narrower grant should also do (security audit 2026-11-05, H1).
+pub const ADMIN_ACT_GRANT: &str = ordo_identity::deployment_token::GRANT_DEPLOYMENT;
 
 impl Caller {
     /// The audit row's actor and client.
@@ -79,6 +86,20 @@ impl Caller {
                 }),
             },
         }
+    }
+
+    /// An admin act on people, invites or keys: [`Caller::may_write`], and
+    /// a machine key must hold [`ADMIN_ACT_GRANT`]. A key's grants say what
+    /// it may do here as at the door.
+    pub fn may_admin(&self, now: u64) -> Result<(), IdentityError> {
+        self.may_write(now)?;
+        if self.kind == Kind::Machine && !self.grants.iter().any(|g| g == ADMIN_ACT_GRANT) {
+            return Err(IdentityError::GrantNeeded {
+                grant: ADMIN_ACT_GRANT,
+                holds: self.grants.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -223,6 +244,7 @@ impl Service {
             client: claims.client,
             sid: claims.sid,
             touched_at: claims.touched_at,
+            grants: claims.grants,
         })
     }
 

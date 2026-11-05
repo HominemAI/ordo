@@ -289,7 +289,14 @@ fn events(h: &H) -> Vec<EventKind> {
         .expect("recorder")
         .drain_all(ordo_commandlog::Timestamp(NOW + 1_000_000))
         .into_iter()
-        .map(|e| e.kind)
+        // Like failures in one window are one entry with its count.
+        .flat_map(|e| {
+            let n = match e.kind {
+                EventKind::AuthenticationFailed { .. } => e.count as usize,
+                _ => 1,
+            };
+            std::iter::repeat_n(e.kind, n)
+        })
         .collect()
 }
 

@@ -425,6 +425,7 @@ pub(super) async fn step_up_by_reauth(
         Ok(c) => c,
         Err(r) => return *r,
     };
+    let who = claims.principal.clone();
     let (auth2, headers2, claims2) = (auth.clone(), headers.clone(), claims.clone());
     let done = tokio::task::spawn_blocking(move || {
         let session = claims2.session.as_ref().expect("checked by step_up_claims");
@@ -460,7 +461,7 @@ pub(super) async fn step_up_by_reauth(
     let (spec, ceiling) = match done {
         Ok(Ok(x)) => x,
         Ok(Err(ReauthStepUp::Session(ordo_identity::SessionError::PasskeyHeld { .. }))) => {
-            auth.record_refusal(OP, "passkey-held", now);
+            auth.record_refusal_of(&who, OP, "passkey-held", now);
             return ordo_api::EdgeError::new(
                 ordo_api::EdgeCode::PresenceRequired,
                 "you hold a passkey, so a fresh sign-in does not stand in for its touch: \
@@ -470,15 +471,15 @@ pub(super) async fn step_up_by_reauth(
             .into_response();
         }
         Ok(Err(ReauthStepUp::Session(e))) => {
-            auth.record_refusal(OP, super::session_error_reason(&e), now);
+            auth.record_refusal_of(&who, OP, super::session_error_reason(&e), now);
             return refused();
         }
         Ok(Err(ReauthStepUp::Handle(reason))) => {
-            auth.record_refusal(OP, reason, now);
+            auth.record_refusal_of(&who, OP, reason, now);
             return refused();
         }
         Err(_) => {
-            auth.record_refusal(OP, "ceremony-task-failed", now);
+            auth.record_refusal_of(&who, OP, "ceremony-task-failed", now);
             return refused();
         }
     };

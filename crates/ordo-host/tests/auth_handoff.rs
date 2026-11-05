@@ -192,12 +192,18 @@ fn events(h: &H) -> Vec<EventKind> {
         .collect()
 }
 
+/// Every failure's reason, once per refusal: like failures in one window
+/// are one entry with its count.
 fn reasons(h: &H) -> Vec<String> {
-    events(h)
+    h.auth
+        .recorder
+        .as_ref()
+        .expect("recorder")
+        .drain_all(ordo_commandlog::Timestamp(NOW + 100_000))
         .into_iter()
-        .filter_map(|k| match k {
-            EventKind::AuthenticationFailed { reason } => Some(reason),
-            _ => None,
+        .flat_map(|e| match e.kind {
+            EventKind::AuthenticationFailed { reason } => vec![reason; e.count as usize],
+            _ => Vec::new(),
         })
         .collect()
 }

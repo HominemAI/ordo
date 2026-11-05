@@ -87,6 +87,9 @@ struct Window {
     last_at: Timestamp,
     count: u64,
     correlations: Vec<CorrelationId>,
+    /// When the window opened, among this collapser's windows: entries
+    /// close in the order they opened, not in key order.
+    seq: u64,
 }
 
 /// The default collapse window: sixty seconds.
@@ -125,6 +128,8 @@ pub struct Collapser {
     /// the cap refused since it did.
     window_start: BTreeMap<Scope, Timestamp>,
     suppressed: BTreeMap<Scope, u64>,
+    /// The next window's [`Window::seq`].
+    next_seq: u64,
 }
 
 impl Default for Collapser {
@@ -142,6 +147,7 @@ impl Collapser {
             open_per_scope: BTreeMap::new(),
             window_start: BTreeMap::new(),
             suppressed: BTreeMap::new(),
+            next_seq: 0,
         }
     }
 
@@ -197,6 +203,8 @@ impl Collapser {
             return;
         }
         *self.open_per_scope.entry(key.scope.clone()).or_insert(0) += 1;
+        let seq = self.next_seq;
+        self.next_seq += 1;
         self.open.insert(
             key,
             Window {
@@ -205,6 +213,7 @@ impl Collapser {
                 last_at: at,
                 count: 1,
                 correlations: vec![correlation],
+                seq,
             },
         );
     }
@@ -237,8 +246,15 @@ impl Collapser {
                 .filter(|k| k.scope == *scope)
                 .cloned()
                 .collect();
-            for key in keys {
-                let w = self.open.remove(&key).expect("just listed");
+            let mut closed: Vec<(CollapseKey, Window)> = keys
+                .into_iter()
+                .map(|key| {
+                    let w = self.open.remove(&key).expect("just listed");
+                    (key, w)
+                })
+                .collect();
+            closed.sort_by_key(|(_, w)| w.seq);
+            for (key, w) in closed {
                 out.push(StreamEntry {
                     scope: key.scope,
                     about: key.about,

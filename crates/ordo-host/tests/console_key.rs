@@ -79,9 +79,12 @@ impl H {
             .expect("recorder")
             .drain_all(ordo_commandlog::Timestamp(NOW + 100_000))
             .iter()
-            .filter_map(|e| match &e.kind {
-                EventKind::AuthenticationFailed { reason } => Some(reason.clone()),
-                _ => None,
+            // Like failures in one window are one entry with its count.
+            .flat_map(|e| match &e.kind {
+                EventKind::AuthenticationFailed { reason } => {
+                    vec![reason.clone(); e.count as usize]
+                }
+                _ => Vec::new(),
             })
             .collect()
     }
@@ -487,10 +490,11 @@ async fn a_challenge_is_single_use_and_bound_to_its_key_and_the_signature_to_the
     );
     assert_eq!(
         h.reasons(),
+        // The two like failures are one window, in the order it opened.
         vec![
             "challenge-for-another-key",
-            "bad-signature",
             "challenge-for-another-key",
+            "bad-signature",
             "challenge-spent",
             "challenge-expired",
             "unknown-console-key",

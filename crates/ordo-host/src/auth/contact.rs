@@ -89,9 +89,9 @@ async fn touch_needed(
         EdgeError::new(
             EdgeCode::PresenceRequired,
             format!(
-                "changing or removing your email address needs a fresh passkey touch: \
-                 POST /auth/step-up first. The app developer can turn this off with \
-                 {setting}"
+                "changing or removing your email address needs a fresh touch. {}. The \
+                 app developer can turn this off with {setting}",
+                super::PRESENCE_WAYS
             ),
         )
         .with("setting", setting)

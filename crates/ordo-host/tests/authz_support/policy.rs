@@ -524,8 +524,15 @@ pub fn expect_op_in(
             if !role_reaches(class, role) {
                 return holds(Expect::Denied);
             }
+            // A stale person is told a touch is owed (a passkey, or a
+            // fresh sign-in for a person with none; owner, 2026-11-05),
+            // where the op is served at all.
             if !fresh && needs_presence(name, class, kind) {
-                return holds(Expect::Denied);
+                return holds(if NOT_SERVED_HERE.contains(&name) {
+                    Expect::Denied
+                } else {
+                    Expect::Code(403, "presence_required")
+                });
             }
             holds(Expect::Pass)
         }

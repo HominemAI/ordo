@@ -955,9 +955,11 @@ pub trait AccessChecker: Send + Sync {
     /// allowed `op` in `space` with a fresher passkey touch, and with
     /// nothing else changed? Then the door answers
     /// [`crate::ErrorCode::PresenceRequired`] in place of its uniform
-    /// denial (`plan-identity-service.md` 4.3). Only a deployment token
-    /// answers yes: its holder is already known to the door, so the answer
-    /// says nothing a stranger could use. The default is `false`.
+    /// denial (`plan-identity-service.md` 4.3). Only a verified person's
+    /// own token answers yes, a deployment token or a live app session:
+    /// its holder is already known to the door, so the answer says nothing
+    /// a stranger could use. A capability or delegated token never does,
+    /// since presence is not delegable. The default is `false`.
     fn presence_required(&self, _token: &str, _space: &str, _op: &str) -> bool {
         false
     }

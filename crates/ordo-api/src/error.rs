@@ -1315,14 +1315,17 @@ impl ApiError {
         ApiError::new(ErrorCode::EmailRequired, message).with_op(op)
     }
 
-    /// The `presence_required` answer at the op door: a deployment person's
-    /// touch is older than `op` allows.
+    /// The `presence_required` answer at the op door: a person's touch is
+    /// older than `op` allows. It names both ways to give one: a passkey, or
+    /// a fresh sign-in for a person with no passkey (owner, 2026-11-05).
     pub fn presence_required(op: &str) -> Self {
         ApiError::new(
             ErrorCode::PresenceRequired,
-            "this op needs a passkey touch newer than the one in your token. Nothing ran. \
-             Touch your passkey at the identity service (POST /touch, or `ordo login \
-             --touch`) and send the same call with the new token",
+            "this op needs a touch newer than the one in your token. Nothing ran. Touch a \
+             passkey (POST /auth/step-up/begin, then POST /auth/step-up; at the identity \
+             service POST /touch, or `ordo login --touch`). With no passkey, sign in again: \
+             POST /auth/complete with \"reauth\": true, then POST /auth/step-up with the \
+             handle in the x-reauth header. Send the same call with the new token",
         )
         .with_op(op)
     }

@@ -635,9 +635,10 @@ pub enum SessionError {
     /// the refusal is structural, before the assertion is even looked at.
     PresenceNotDelegable { principal: PrincipalId },
     /// The ceremony that just completed proves identity but not presence — a
-    /// password re-prompt, an OIDC round trip. Re-authenticating is not the
-    /// same claim as being there, and this is where the two stop being
-    /// interchangeable.
+    /// password re-prompt, an OIDC round trip. A passkey step-up needs a
+    /// passkey. A fresh sign-in stands in for presence only through
+    /// [`refresh_presence_by_reauth`], for a person who holds no passkey
+    /// (owner, 2026-11-05).
     MethodCannotProvePresence { method: AuthMethodKind },
     /// The authenticator that asserted is not linked to the session's
     /// principal — or is not linked at all.
@@ -656,6 +657,10 @@ pub enum SessionError {
     /// The session's account was deleted. Its sessions were ended when it
     /// was; this refuses a step-up that raced the deletion.
     AccountDeleted { principal: PrincipalId },
+    /// A fresh sign-in was offered in place of a touch by a person who has
+    /// a touch to give: they hold a passkey, or a recovery's link is still
+    /// in quarantine ([`refresh_presence_by_reauth`]).
+    PasskeyHeld { principal: PrincipalId },
     /// The directory's store could not answer. Distinct on purpose: it does
     /// not depend on which authenticator or session was offered.
     StoreUnavailable(crate::directory::DirectoryStoreError),
@@ -670,7 +675,7 @@ impl From<crate::directory::DirectoryError> for SessionError {
             crate::directory::DirectoryError::Deleted(principal) => {
                 SessionError::AccountDeleted { principal }
             }
-            // `principal_for`, `link_meta` and `refuse_deleted` are the only
+            // `principal_for`, `link_meta`, `links_of` and `refuse_deleted` are the only
             // directory calls this module makes, and they return no other
             // `DirectoryError` variant.
             other => SessionError::StoreUnavailable(crate::directory::DirectoryStoreError(
@@ -704,12 +709,65 @@ impl std::fmt::Display for SessionError {
             SessionError::AccountDeleted { principal } => {
                 write!(f, "the account `{principal}` was deleted")
             }
+            SessionError::PasskeyHeld { principal } => write!(
+                f,
+                "`{principal}` holds a passkey or a link in a recovery's quarantine, so a \
+                 fresh sign-in does not stand in for a passkey touch"
+            ),
             SessionError::StoreUnavailable(e) => write!(f, "{e}"),
         }
     }
 }
 
 impl std::error::Error for SessionError {}
+
+/// Re-mint an existing session's token with presence **now**, from a fresh
+/// sign-in (a reauth handle the host has already spent) instead of a passkey
+/// assertion.
+///
+/// Owner, 2026-11-05 (`how-a-person-without-a-passkey`): a fresh sign-in
+/// counts as the touch wherever a touch is asked. It stands in only for a
+/// person with no touch to give, so this refuses:
+///
+/// - a capability or delegated token: presence is not delegable;
+/// - a deleted account;
+/// - a person who holds a passkey that is not retired, a quarantined one
+///   included: they have a touch to give, and a recovery's quarantine must
+///   not be one sign-in away (audit F-1, 2026-10-24);
+/// - a person any of whose links is still in a recovery's quarantine.
+///
+/// The same session is carried through, as [`refresh_presence`] does.
+pub fn refresh_presence_by_reauth(
+    directory: &Directory,
+    claims: &TokenClaims,
+    at: Timestamp,
+    expires: Timestamp,
+) -> Result<TokenSpec, SessionError> {
+    if claims.capability.is_some() || claims.delegation.is_some() {
+        return Err(SessionError::PresenceNotDelegable {
+            principal: claims.principal.clone(),
+        });
+    }
+    directory.refuse_deleted(&claims.principal)?;
+    let links = directory.links_of(&claims.principal)?;
+    let held = links.iter().any(|(a, meta)| {
+        meta.retired.is_none() && (a.0.starts_with("passkey:") || meta.presence_not_before > at.0)
+    });
+    if held {
+        return Err(SessionError::PasskeyHeld {
+            principal: claims.principal.clone(),
+        });
+    }
+    Ok(TokenSpec {
+        principal: claims.principal.clone(),
+        expires,
+        client: claims.client.clone(),
+        user_presence_at: Some(at),
+        capability: None,
+        delegation: None,
+        session: claims.session.clone(),
+    })
+}
 
 /// Re-mint an existing session's token with a fresh presence stamp.
 ///

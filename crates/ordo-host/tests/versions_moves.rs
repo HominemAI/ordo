@@ -25,7 +25,7 @@ use ordo_host::deploy_ops;
 use ordo_host::revoked_moves;
 use ordo_host::schema_apply::Program;
 use ordo_host::tenants;
-use ordo_host::versions::{PinCause, TargetSource, VersionRefusal, Versions};
+use ordo_host::versions::{PinCause, ServedPolicy, TargetSource, VersionRefusal, Versions};
 use ordo_host::windows::{Schedule, Target, WindowSpec, Windows};
 
 const V010: &str = "domain tasks @ 0.1.0
@@ -492,4 +492,124 @@ async fn the_tenants_own_move_is_off_by_default_and_moves_itself() {
     let last = Versions::on(&pool).pin_history("spc_a").await.unwrap();
     assert_eq!(last.last().unwrap().cause, "tenant");
     assert_eq!(on(&pool, "spc_b").await.as_deref(), Some("0.1.0"));
+}
+
+/// **`versions.served`** (§1.6): a list that leaves out a version tenants
+/// are pinned to is refused, naming the value to add; a name not stored is
+/// refused, naming the setting; a pin outside the list is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_served_list_never_strands_a_tenant() {
+    let pool = deployment("ordo_vmove_served", None).await;
+    let v = Versions::on(&pool);
+    let e = v
+        .check_policy(&ServedPolicy::parse(Some("#2"), None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(e, VersionRefusal::Stranded { tenants: 2, .. }),
+        "{e}"
+    );
+    let text = e.to_string();
+    assert!(
+        text.contains("ORDO_VERSIONS_SERVED=0.2.0,0.1.0"),
+        "names the value to add: {text}"
+    );
+    let e = v
+        .check_policy(&ServedPolicy::parse(Some("0.1.0,9.9.9"), None))
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("ORDO_VERSIONS_SERVED"), "{e}");
+    assert!(e.to_string().contains("9.9.9"), "{e}");
+
+    let p = v
+        .check_policy(&ServedPolicy::parse(Some("#1"), None))
+        .await
+        .expect("strands nobody");
+    assert_eq!(p.served, Some(vec!["0.1.0".to_string()]));
+    let v = v.with_policy(&p);
+    let e = v.pin("spc_c", "0.2.0", OWNER, 500).await.unwrap_err();
+    assert!(matches!(e, VersionRefusal::NotServed { .. }), "{e}");
+    assert!(
+        e.to_string().contains("ORDO_VERSIONS_SERVED=0.1.0,0.2.0"),
+        "{e}"
+    );
+    // The active version is always served.
+    v.pin("spc_a", "0.3.0", OWNER, 501).await.expect("active");
+}
+
+/// **`versions.minimum`** (§1.6): a tenant below it moves in its window as
+/// off a revoked version; nothing is pinned or activated below it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_below_the_minimum_moves_in_its_window() {
+    let pool = fresh("ordo_vmove_minimum").await;
+    for t in ["spc_a", "spc_b"] {
+        tenant(&pool, t).await;
+    }
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    apply(&pool, V030).await;
+    let v = Versions::on(&pool);
+    v.pin("spc_a", "0.1.0", OWNER, 100).await.expect("pinned");
+    v.pin("spc_b", "0.2.0", OWNER, 100).await.expect("pinned");
+    let p = v
+        .check_policy(&ServedPolicy::parse(None, Some("#2")))
+        .await
+        .expect("stored");
+    assert_eq!(p.minimum.as_deref(), Some("0.2.0"));
+    let v = v.with_policy(&p);
+
+    let e = v.pin("spc_b", "#1", OWNER, 200).await.unwrap_err();
+    assert!(matches!(e, VersionRefusal::BelowMinimum { .. }), "{e}");
+    assert!(e.to_string().contains("ORDO_VERSIONS_MINIMUM"), "{e}");
+    let e = v
+        .activate("0.1.0", OWNER, ordo_commandlog::Timestamp(201))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, VersionRefusal::BelowMinimum { .. }), "{e}");
+
+    // No window: it stays. In its window: it moves, and only it.
+    let swept = revoked_moves::sweep_under(&pool, &p, NOW).await.unwrap();
+    assert!(swept.moved.is_empty());
+    window(
+        &pool,
+        Target::All,
+        Schedule::Range {
+            start: NOW as i64 - 60,
+            end: NOW as i64 + 60,
+        },
+    )
+    .await;
+    let swept = revoked_moves::sweep_under(&pool, &p, NOW).await.unwrap();
+    assert_eq!(swept.moved.len(), 1, "{swept:?}");
+    assert_eq!(on(&pool, "spc_a").await.as_deref(), Some("0.3.0"));
+    assert_eq!(on(&pool, "spc_b").await.as_deref(), Some("0.2.0"));
+}
+
+/// **Per-node health** (§1.4, increment 3 session 2): `/health/deploy`
+/// says, per node, which versions it serves beside the active one, where
+/// it starts new tenants, and each version a pin names that it could not
+/// load, with why.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_node_says_what_it_serves_and_what_would_not_load() {
+    let pool = fresh("ordo_vmove_health").await;
+    ordo_exec::nodes::ensure_table(&pool).await.expect("$nodes");
+    let node = ordo_exec::nodes::Node {
+        node: "n1".into(),
+        serving: "0.3.0".into(),
+        caught_up: "0.3.0".into(),
+        also_serving: vec!["0.2.0".into()],
+        new_tenant: "0.4.0-beta".into(),
+        not_loaded: vec![("0.1.0".into(), "it does not compile".into())],
+        beat_secs: 5,
+        ..Default::default()
+    };
+    ordo_exec::nodes::beat(&pool, &node).await.expect("written");
+    let live = ordo_exec::nodes::live(&pool).await.expect("read");
+    assert_eq!(live[0].not_loaded, node.not_loaded);
+    let body = ordo_host::serve::deploy_status("0.3.0", &live);
+    let n = &body["nodes"][0];
+    assert_eq!(n["alsoServing"], serde_json::json!(["0.2.0"]));
+    assert_eq!(n["newTenant"], "0.4.0-beta");
+    assert_eq!(n["notLoaded"][0]["version"], "0.1.0");
+    assert_eq!(n["notLoaded"][0]["why"], "it does not compile");
 }

@@ -342,6 +342,24 @@ Ruled 2026-11-02 (D15).
   refusal names the setting and the value to add.
 - This replaces D-B2's one-version-back bound (2026-09-21).
 
+**As built in increment 3, session 2** (2026-11-05, `versions.rs`,
+`revoked_moves.rs`, `runtime.rs`):
+
+- `ORDO_VERSIONS_SERVED`: `in-use` (the default) or a comma list of names
+  or `#n`. With a list, a pin, a move target, a `--move-to` and
+  `versions.new_tenant` outside it are refused (`not_served`), naming the
+  value to add. The active version is always served.
+- `ORDO_VERSIONS_MINIMUM`: a name or `#n`. Nothing is pinned, activated
+  or started on a version stored before it (`below_minimum`). Tenants on
+  one move in their maintenance window, by the same sweep and the same
+  targets as off a revoked version, and on demand.
+- Boot refuses a name not stored, and a served list that leaves out a
+  version tenants are pinned to, naming the version and the value to add
+  (`ORDO_VERSIONS_SERVED=<list>,<version>`).
+- The CLI's `--db` path does not read these; the door enforces them.
+- Not built: removing a stored version, so `--move-to` on removal waits
+  for that command.
+
 ### 1.7 Sharing across versions
 
 Ruled 2026-11-02 (D7).
@@ -837,15 +855,16 @@ round is about 35 minutes for the full suite.
   (`functions.reload` serves the active version's only).
 - Schedules and listeners as the union over served versions; cursor
   hand-over at a switch.
-- `versions.served` and `versions.minimum`, and the refusal of a change
-  that strands a tenant.
+- Session 2 built `versions.served` and `versions.minimum` (§1.6). Left:
+  the refusal of a rollout that strands a tenant (with rollouts), and a
+  command that removes a stored version (`--move-to`).
 - Sharing rule (§1.7), `versions_disagree`.
 - Client contract (§1.9): version on every answer, the distinct refusal for
   an op the version lacks, the SDK's version-changed event, idempotency
   across one switch, the tenant admin's label.
 - Stream close on a pin switch.
-- Per-node health on `/health/deploy`: `also_serving` is in `$nodes`,
-  not yet shown.
+- Session 2 built per-node health on `/health/deploy`. Left: a version
+  still loading is not shown apart from one that loaded.
 - Session 2 built provisioning on the tenant's own version (§1.3).
 - Console: Deploys says `serving` for the active version; the Tenants
   screen has no version column.

@@ -132,8 +132,18 @@ pub struct Swept {
 /// at `now`.** A tenant no window holds stays. Run on each node's pin
 /// reconcile tick (`pins.reconcile_interval`).
 pub async fn sweep(pool: &Pool, now: u64) -> Result<Swept, VersionRefusal> {
+    sweep_under(pool, crate::versions::policy(), now).await
+}
+
+/// [`sweep`] under a named `versions.served` and `versions.minimum`: a
+/// tenant below the minimum moves in its window too (§1.6).
+pub async fn sweep_under(
+    pool: &Pool,
+    policy: &crate::versions::ServedPolicy,
+    now: u64,
+) -> Result<Swept, VersionRefusal> {
     let mut out = Swept::default();
-    let v = Versions::on(pool);
+    let v = Versions::on(pool).with_policy(policy);
     let on = v.on_revoked(SWEEP_BATCH).await?;
     if on.is_empty() {
         return Ok(out);

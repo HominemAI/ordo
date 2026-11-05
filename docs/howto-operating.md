@@ -314,6 +314,9 @@ A node can serve more than one version at once. The active version is the one an
 - **Loading.** A node loads every version a pin names at boot and when a pin first names it, one at a time. A request never starts a load. A tenant whose version is still loading answers "closed for a moment" and the same request lands once it has. A version no pin names any more is dropped.
 - **The pin fence.** Each tenant's own database records the newest epoch any node wrote under (`$pin_fence`). A node whose pin is older has its write refused, reads the pin again and writes once more. The caller sees one answer.
 - **Which moves wait for a maintenance window.** Only a move off a revoked version (above). An activation and a pin move a tenant at once, whatever its window says.
+- **Which versions stay served** is yours to set. `ORDO_VERSIONS_SERVED=in-use`, the default, serves every version a tenant is pinned to. A list, such as `ORDO_VERSIONS_SERVED=#4,#5`, serves only those beside the active version: a pin or move target outside it is refused, naming the value to add. A boot whose list leaves out a version tenants are on is refused the same way.
+- **The oldest version a tenant may stay on:** `ORDO_VERSIONS_MINIMUM=#4`. Tenants below it move in their maintenance window, or on demand (`ordo versions move`), as off a revoked version. Nothing is pinned, activated or started below it.
+- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (its `ORDO_VERSIONS_NEW_TENANT`), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads.
 - **Every node should agree on `ORDO_VERSIONS_NEW_TENANT`.** Each node writes its value to `$nodes`. A node that sees another with a different value logs a warning naming the setting, on every reconcile tick, until they agree.
 
 ## Health Endpoints

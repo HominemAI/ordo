@@ -995,3 +995,79 @@ async fn a_deploy_retires_the_previous_versions_cursor_once_caught_up() {
         "{actions:?}"
     );
 }
+
+/// **Routines run per pin** (`plan-versions.md` §1.10, increment 3): a
+/// tenant pinned to a version beside the active one runs that version's
+/// body for a routine both declare. The run's command group names the
+/// tenant's version.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_routine_runs_under_the_tenants_pinned_version() {
+    const DB: &str = "ordo_rt_routine_per_pin";
+    let routine = |status: &str| {
+        format!(
+            "routine reviewNew {{
+  trigger when shop.orders.created
+  run:
+    set orders(reviewed == false) {{ reviewed: true, status: \"{status}\" }}
+}}"
+        )
+    };
+    let pool = deploy(DB, &routine("active")).await;
+    let rt = runtime::assemble(config(DB)).await.expect("assembles");
+    let active = rt.deployment.current().version.clone();
+
+    // A second version that differs in the routine's body alone, stored
+    // and served beside the active one, and the tenant pinned to it.
+    let source = format!("{SHAPES}\n{}", routine("pinned"));
+    let f = Fixture::from_source(&source, "").expect("the program compiles");
+    let doc = ordo_plan::artifact::program_artifact(&f.schema, &f.registry).expect("artifact");
+    let art = ordo_exec::registry::Artifact {
+        version: ordo_plan::artifact::program_version(&doc, &f.ddl),
+        artifact: ordo_plan::artifact::to_bytes(&doc),
+        source,
+        ddl: f.ddl.clone(),
+        applied_at: ordo_commandlog::Timestamp(3),
+        actor: "operator:routines".into(),
+    };
+    ordo_exec::registry::store(&pool, &art)
+        .await
+        .expect("store");
+    let pinned = ordo_host::deploy::load_pinned(
+        &rt.pool,
+        &rt.pg,
+        &art.version,
+        rt.keys.clone(),
+        rt.space.clone(),
+    )
+    .await
+    .expect("loads beside the active version");
+    rt.deployment.install(pinned);
+    rt.deployment.note_pin(SPACE, &art.version, 1, 0);
+    assert_ne!(active, art.version);
+
+    let sup = rt.start_workers().await.expect("starts");
+    call(&rt, "placeOrder($placed: \"2026-01-02T00:00:00Z\")").await;
+    let ran = wait_until(Duration::from_secs(20), || async {
+        column(
+            &pool,
+            "SELECT \"status\" FROM \"orders\" WHERE \"reviewed\"",
+        )
+        .await
+        .len()
+            == 1
+    })
+    .await;
+    assert!(ran, "the routine never ran; census: {}", sup.health());
+    assert_eq!(
+        column(&pool, "SELECT \"status\" FROM \"orders\"").await,
+        ["pinned"],
+        "the pinned version's body ran, not the active one's"
+    );
+    let groups = routine_groups(&pool, "reviewNew").await;
+    assert!(
+        matches!(&groups[0].actor, Actor::Routine(r) if r.ends_with(&art.version)),
+        "the group names the tenant's version: {:?}",
+        groups[0].actor
+    );
+    stop(sup).await;
+}

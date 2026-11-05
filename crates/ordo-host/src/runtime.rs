@@ -6101,10 +6101,17 @@ async fn rebuild_access(
     let reads = crate::directory::prefetch(w.pool, w.credentials.as_ref(), &template, scope).await;
     let mut cache = w.access.directory.lock().await;
     let live = w.deployment.current();
+    let others: Vec<Arc<Fixture>> = w
+        .deployment
+        .others()
+        .iter()
+        .map(|l| l.fixture.clone())
+        .collect();
     let built = cache
-        .build(
+        .build_served(
             reads,
             &live.fixture,
+            &others,
             w.pool,
             w.credentials.as_ref(),
             &template,
@@ -6235,7 +6242,12 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
     // only has to obey it: a node that cannot load the new version must not
     // stop serving the old one, and the refusal is an operator alert, not
     // an outage.
-    let deploys = spawn_deploy_listener(&rt).await;
+    let pin_every =
+        crate::versions::pins_reconcile_from_env().map_err(|detail| BootRefusal::Invalid {
+            var: crate::versions::PINS_RECONCILE_ENV,
+            detail,
+        })?;
+    let deploys = spawn_deploy_listener(&rt, pin_every).await;
 
     // This node's row in `$nodes`, from now until shutdown. The access
     // engine was built for the boot's version in `assemble`, so the door
@@ -6456,7 +6468,10 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
 /// Returns `None` when the channel cannot be opened, which is logged and is
 /// not fatal: a node that cannot hear about deploys still serves the
 /// version it has.
-async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<()>> {
+async fn spawn_deploy_listener(
+    rt: &Runtime,
+    pin_every: std::time::Duration,
+) -> Option<tokio::task::JoinHandle<()>> {
     let (listener, mut rx) = match deploy::listen_for_changes(&rt.pg).await {
         Ok(pair) => pair,
         Err(e) => {
@@ -6503,11 +6518,110 @@ async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<(
     // The boot's sweep: a tenant whose database was left behind while this
     // node was down is brought forward now rather than when it is asked for.
     catchup.nudge();
+
+    // **Every tenant's pin, and every version they name** (`plan-versions.md`
+    // §1.4, increment 3), before the first request: a tenant pinned beside
+    // the active version is served its own from the start.
+    let pins = crate::pin_stream::PinStream::new(
+        deployment.clone(),
+        pool.clone(),
+        pg.clone(),
+        keys.clone(),
+        space.clone(),
+    );
+    node_status.new_tenant(crate::versions::new_tenant_from_env().as_deref());
+    let rebuild = {
+        let deployment = deployment.clone();
+        let pool = pool.clone();
+        let metrics = metrics.clone();
+        let access = access.clone();
+        let delegations = delegations.clone();
+        let credentials = credentials.clone();
+        let node_status = node_status.clone();
+        move |read: crate::pin_stream::Read| {
+            let deployment = deployment.clone();
+            let pool = pool.clone();
+            let metrics = metrics.clone();
+            let access = access.clone();
+            let delegations = delegations.clone();
+            let credentials = credentials.clone();
+            let node_status = node_status.clone();
+            async move {
+                for line in crate::pin_stream::log_lines(&read) {
+                    println!("{line}");
+                }
+                if !read.versions_changed() {
+                    return;
+                }
+                // The door knows every served version's ops.
+                if let Err(e) = refresh_access(
+                    &deployment,
+                    &pool,
+                    &token_secret,
+                    &metrics,
+                    &access,
+                    delegations,
+                    &credentials,
+                )
+                .await
+                {
+                    eprintln!("versions: the access engine did not rebuild ({e})");
+                }
+                node_status.also_serving(
+                    deployment
+                        .others()
+                        .iter()
+                        .map(|l| l.version.clone())
+                        .collect(),
+                );
+                node_status.write().await;
+            }
+        }
+    };
+    match pins.reload().await {
+        Ok(read) => rebuild(read).await,
+        Err(e) => eprintln!(
+            "pins: not read at boot ({e}); every tenant is served the active version until \
+             the next read"
+        ),
+    }
+    // The reconcile tick: a whole read, whatever the stream said, and the
+    // check that every node starts new tenants on one version.
+    {
+        let pins = pins.clone();
+        let rebuild = rebuild.clone();
+        let node_status = node_status.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(pin_every);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                match pins.reload().await {
+                    Ok(read) => rebuild(read).await,
+                    Err(e) => eprintln!("pins: not read on the reconcile tick ({e})"),
+                }
+                for line in node_status.new_tenant_warnings().await {
+                    eprintln!("{line}");
+                }
+            }
+        });
+    }
     Some(tokio::spawn(async move {
         // Held for the task's life: dropping the listener closes the
         // channel.
         let _listener = listener;
         while let Some(note) = rx.recv().await {
+            // A pin moved: read the stream from where this node left it.
+            if note.channel == crate::versions::PINS_CHANNEL {
+                match pins.tail().await {
+                    Ok(read) => rebuild(read).await,
+                    Err(e) => eprintln!(
+                        "pins: the stream was not read ({e}); the reconcile tick reads them"
+                    ),
+                }
+                continue;
+            }
             // A new tenant, not a new version. The door is rebuilt and
             // nothing else is: no artifact is loaded, no version changes,
             // and `Deployment::swap` is not called, because the program
@@ -6695,6 +6809,19 @@ async fn spawn_deploy_listener(rt: &Runtime) -> Option<tokio::task::JoinHandle<(
                              version's keep running until a restart"
                         ),
                     }
+                    // The activation re-pinned its tenants; a version no
+                    // pin names any more is dropped here.
+                    match pins.reload().await {
+                        Ok(read) => rebuild(read).await,
+                        Err(e) => eprintln!("pins: not read after the swap ({e})"),
+                    }
+                    node_status.also_serving(
+                        deployment
+                            .others()
+                            .iter()
+                            .map(|l| l.version.clone())
+                            .collect(),
+                    );
                     // The door serves `to` from here: said in `$nodes`, which
                     // is what `ordo apply` waits on.
                     node_status.serving(&to).await;

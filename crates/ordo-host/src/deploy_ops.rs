@@ -64,10 +64,32 @@ pub const REVOKE: &str = "std.deployment.revoke";
 pub const UNREVOKE: &str = "std.deployment.unrevoke";
 /// The revoked versions and the tenants pinned to them.
 pub const REVOKED: &str = "std.deployment.revoked";
+/// **Move one tenant to a stored version, now** (`plan-versions.md` §1.3,
+/// increment 3): the move on demand (owner, 2026-11-05). A door op, so the
+/// app developer's own system can drive moves as well as a person.
+pub const PIN: &str = "std.deployment.pin";
+/// One tenant's version, epoch and pin history.
+pub const TENANT_VERSION: &str = "std.deployment.tenantVersion";
 
-pub const OPS: [&str; 8] = [
-    VERSIONS, ACTIVATE, PLAN, LABEL, DIFF, REVOKE, UNREVOKE, REVOKED,
+pub const OPS: [&str; 10] = [
+    VERSIONS,
+    ACTIVATE,
+    PLAN,
+    LABEL,
+    DIFF,
+    REVOKE,
+    UNREVOKE,
+    REVOKED,
+    PIN,
+    TENANT_VERSION,
 ];
+
+/// The ops that move tenants between versions and ask no passkey touch:
+/// the owner, 2026-11-05, *"technically the developer could even have their
+/// own system managing automatic updates"*, and a system caller moving
+/// versions is not asked for one. The role gate is unchanged: deployment
+/// owner only, on the deployment's own space.
+pub const NO_PRESENCE: [&str; 1] = [PIN];
 
 /// The activation log's length when the caller names none.
 pub const DEFAULT_LIMIT: i64 = 20;
@@ -206,6 +228,31 @@ pub fn specs() -> Vec<OpSpec> {
             &["version", "ordinal", "revoked"],
         ),
         spec(REVOKED, OpKind::Read, vec![], &["versions"]),
+        spec(
+            PIN,
+            OpKind::Write,
+            vec![
+                ParamSpec {
+                    name: "tenant".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: true,
+                    bounds: None,
+                },
+                version_param("version"),
+            ],
+            &["tenant", "from", "to", "epoch", "ordinal"],
+        ),
+        spec(
+            TENANT_VERSION,
+            OpKind::Read,
+            vec![ParamSpec {
+                name: "tenant".to_string(),
+                ty: ParamTy::Text { max_len: Some(128) },
+                required: true,
+                bounds: None,
+            }],
+            &["tenant", "version", "ordinal", "label", "epoch", "history"],
+        ),
     ]
 }
 
@@ -385,6 +432,68 @@ pub async fn execute(
                 o.remove("moved");
             }
             row
+        }
+        PIN => {
+            let tenant = text(bound, "tenant").unwrap_or_default();
+            let version = text(bound, "version").unwrap_or_default();
+            let v = crate::versions::Versions::on(&ops.pool);
+            let moved = v
+                .pin(tenant, version, caller, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the tenant was not moved"))?;
+            ops.record(
+                caller,
+                PIN,
+                "pinned",
+                format!(
+                    "tenant={tenant} version={} was={} by={caller}",
+                    moved.to,
+                    moved.from.as_deref().unwrap_or("none")
+                ),
+            );
+            let ordinal = v
+                .ordinal_of(&moved.to)
+                .await
+                .map_err(|e| e.to_exec_error("the version's order number could not be read"))?;
+            json!({
+                "tenant": moved.space,
+                "from": moved.from,
+                "to": moved.to,
+                "epoch": moved.epoch,
+                "ordinal": ordinal,
+            })
+        }
+        TENANT_VERSION => {
+            let tenant = text(bound, "tenant").unwrap_or_default();
+            let v = crate::versions::Versions::on(&ops.pool);
+            let read = |e: crate::versions::VersionRefusal| {
+                e.to_exec_error("the tenant's pin could not be read")
+            };
+            let Some(pin) = v.pin_of(tenant).await.map_err(read)? else {
+                return Err(crate::versions::VersionRefusal::NoTenant {
+                    space: tenant.to_string(),
+                }
+                .to_exec_error("the tenant's pin could not be read"));
+            };
+            let (ordinal, label) = match &pin.version {
+                Some(version) => (
+                    v.ordinal_of(version).await.map_err(read)?,
+                    v.provenance(version).await.map_err(read)?.label,
+                ),
+                None => (None, None),
+            };
+            let history = v.pin_history(tenant).await.map_err(read)?;
+            json!({
+                "tenant": tenant,
+                "version": pin.version,
+                "ordinal": ordinal,
+                "label": label,
+                "epoch": pin.epoch,
+                "history": history.iter().map(|c| json!({
+                    "from": c.from, "to": c.to, "epoch": c.epoch,
+                    "actor": c.actor, "cause": c.cause, "at": c.at,
+                })).collect::<Vec<_>>(),
+            })
         }
         REVOKED => {
             let list = crate::versions::Versions::on(&ops.pool)

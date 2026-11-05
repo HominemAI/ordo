@@ -357,6 +357,22 @@ impl Cache {
         credentials: &dyn DbCredentials,
         template: &PoolConfig,
     ) -> Result<Directory, String> {
+        self.build_served(reads, f, &[], control, credentials, template)
+            .await
+    }
+
+    /// [`Cache::build`] for a node serving `others` beside `f`: the engine
+    /// grants every served version's ops
+    /// ([`crate::engine_from_directory_served`]).
+    pub async fn build_served(
+        &mut self,
+        reads: Reads,
+        f: &Fixture,
+        others: &[std::sync::Arc<Fixture>],
+        control: &Pool,
+        credentials: &dyn DbCredentials,
+        template: &PoolConfig,
+    ) -> Result<Directory, String> {
         let mut dialled = reads.0.len();
         for mut read in reads.0 {
             self.force(&mut read);
@@ -514,8 +530,9 @@ impl Cache {
         // however many databases the rows came from.
         rows.sort();
         unread_spaces.sort();
-        let engine = crate::engine_from_directory(
+        let engine = crate::engine_from_directory_served(
             f,
+            others,
             &rows,
             &tenant,
             &crate::presence::current(),

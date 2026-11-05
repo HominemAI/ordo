@@ -2353,7 +2353,7 @@ async fn deploys(flags: Flags) -> Outcome {
             named(v),
             provenance_inline(provenance.get(v)),
             if Some(v.as_str()) == active.as_deref() {
-                "  <- serving"
+                "  <- active"
             } else {
                 ""
             }
@@ -2404,14 +2404,16 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "revoke" => versions_revoke(flags).await,
         "unrevoke" => versions_unrevoke(flags).await,
         "revoked" => versions_revoked(flags).await,
+        "pin" => versions_pin(flags).await,
         other => Outcome::usage(format!(
             "unknown `ordo versions` subcommand `{other}`; there are `list`, `show`, \
-             `label`, `diff`, `revoke`, `unrevoke` and `revoked`\n"
+             `label`, `diff`, `revoke`, `unrevoke`, `revoked` and `pin`\n"
         )),
     }
 }
 
-const VERSIONS_USAGE: &str = "ordo versions list [--db <name>]\n\
+const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>] [--db <name>]\n\
+     ordo versions pin <tenant> <version>  [--db <name> --as <who> | --host <h> ...]\n\
      ordo versions show <version> [--db <name>]\n\
      ordo versions label <version> \"<text>\" | --clear  [--db <name> | --host <h> ...]\n\
      ordo versions diff <a> <b> [--source | --schema]  [--db <name> | --host <h> ...]\n\
@@ -2587,6 +2589,159 @@ async fn versions_unrevoke(flags: Flags) -> Outcome {
     Outcome::ok(format!("unrevoked  {}\n", numbered(ordinal, &version)))
 }
 
+/// `ordo versions pin <tenant> <version>`: move one tenant to a stored
+/// version, now (`plan-versions.md` §1.3, increment 3). Locally through
+/// `Versions::pin`, or over the door through `std.deployment.pin`,
+/// deployment owner only.
+async fn versions_pin(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--db", "--as"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let [tenant, version] = flags.positional.as_slice() else {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    };
+    let report = |from: Option<&str>, to: &str, ordinal: Option<u64>, epoch: i64| {
+        format!(
+            "pinned     {tenant} to {} (was {}, epoch {epoch})\n\
+             nodes      read it from the pin stream; a node that misses the nudge reads it \
+             within {} ({})\n",
+            numbered(ordinal, to),
+            from.unwrap_or("none"),
+            ordo_host::versions::PINS_RECONCILE_SETTING,
+            ordo_host::versions::PINS_RECONCILE_ENV,
+        )
+    };
+    if let Some(host) = crate::wire::requested(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        if flags.named_value("--as").is_some() {
+            return Outcome::usage(
+                "`--as` names who acted on the database; over the door it is the token's \
+                 principal\n"
+                    .into(),
+            );
+        }
+        let row = match crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::PIN,
+            serde_json::json!({ "tenant": tenant, "version": version }),
+            true,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        return Outcome::ok(report(
+            row["from"].as_str(),
+            row["to"].as_str().unwrap_or(version),
+            row["ordinal"].as_u64(),
+            row["epoch"].as_i64().unwrap_or(0),
+        ));
+    }
+    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
+    let pool = match connect(&flags).await {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
+    let v = ordo_host::versions::Versions::on(&pool);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let moved = match v.pin(tenant, version, actor, now).await {
+        Ok(m) => m,
+        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    };
+    let ordinal = v.ordinal_of(&moved.to).await.ok().flatten();
+    Outcome::ok(report(
+        moved.from.as_deref(),
+        &moved.to,
+        ordinal,
+        moved.epoch,
+    ))
+}
+
+/// `ordo versions list --tenant <id>`: one tenant's version, its epoch,
+/// and every pin change, locally or through `std.deployment.tenantVersion`.
+async fn tenant_version(flags: &Flags, tenant: &str) -> Outcome {
+    let row = if let Some(host) = crate::wire::requested(flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        match crate::wire::door_op(
+            &host,
+            flags,
+            ordo_host::deploy_ops::TENANT_VERSION,
+            serde_json::json!({ "tenant": tenant }),
+            false,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(o) => return o,
+        }
+    } else {
+        let pool = match connect(flags).await {
+            Ok(p) => p,
+            Err(o) => return o,
+        };
+        let v = ordo_host::versions::Versions::on(&pool);
+        let pin = match v.pin_of(tenant).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Outcome::failed(format!(
+                    "REFUSED  {}\n",
+                    ordo_host::versions::VersionRefusal::NoTenant {
+                        space: tenant.to_string()
+                    }
+                ))
+            }
+            Err(e) => return Outcome::failed(format!("database: {e}\n")),
+        };
+        let ordinal = match &pin.version {
+            Some(version) => v.ordinal_of(version).await.ok().flatten(),
+            None => None,
+        };
+        let history = v.pin_history(tenant).await.unwrap_or_default();
+        serde_json::json!({
+            "version": pin.version,
+            "ordinal": ordinal,
+            "epoch": pin.epoch,
+            "history": history.iter().map(|c| serde_json::json!({
+                "from": c.from, "to": c.to, "epoch": c.epoch,
+                "actor": c.actor, "cause": c.cause, "at": c.at,
+            })).collect::<Vec<_>>(),
+        })
+    };
+    let mut out = format!(
+        "tenant     {tenant}\nversion    {}\nepoch      {}\n\nPIN CHANGES (oldest first)\n",
+        match row["version"].as_str() {
+            Some(v) => numbered(row["ordinal"].as_u64(), v),
+            None => "none: no version was ever pinned".into(),
+        },
+        row["epoch"].as_i64().unwrap_or(0),
+    );
+    for c in row["history"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "  {}. {} -> {}  {} by {} at {}\n",
+            c["epoch"].as_i64().unwrap_or(0),
+            c["from"].as_str().unwrap_or("none"),
+            c["to"].as_str().unwrap_or("?"),
+            c["cause"].as_str().unwrap_or("?"),
+            c["actor"].as_str().unwrap_or("?"),
+            c["at"].as_u64().unwrap_or(0),
+        ));
+    }
+    Outcome::ok(out)
+}
+
 /// `ordo versions revoked`: each revoked version, its reason, and the
 /// tenants pinned to it (D8's report).
 async fn versions_revoked(flags: Flags) -> Outcome {
@@ -2751,13 +2906,26 @@ async fn versions_diff(flags: Flags) -> Outcome {
 }
 
 /// `ordo versions list`: each stored version, newest first, with its
-/// declared version, the tenants pinned to it, and which one serves.
+/// declared version, how many tenants it serves, and which one is active.
+/// With `--tenant <id>`, that one tenant's version and pin history.
 async fn versions_list(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--db"]) {
+    let mut allowed = vec!["--db", "--tenant"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
     }
     if !flags.positional.is_empty() {
         return Outcome::usage("`ordo versions list` takes no version\n".into());
+    }
+    if let Some(tenant) = flags.named_value("--tenant") {
+        return tenant_version(&flags, tenant).await;
+    }
+    if crate::wire::requested(&flags).is_some() {
+        return Outcome::usage(
+            "`ordo versions list` goes through the door with `--tenant <id>`; without it, \
+             use `--db <name>` or `std.deployment.versions`\n"
+                .into(),
+        );
     }
     let pool = match connect(&flags).await {
         Ok(p) => p,
@@ -2782,12 +2950,12 @@ async fn versions_list(flags: Flags) -> Outcome {
             Err(e) => return Outcome::failed(format!("database: {e}\n")),
         };
         out.push_str(&format!(
-            "  {}  declared {declared}  tenants {}{}{}{}\n",
+            "  {}  declared {declared}  serving {} tenants{}{}{}\n",
             numbered(history.ordinals.get(v).copied(), v),
             history.tenants.get(v).copied().unwrap_or(0),
             provenance_inline(history.provenance.get(v)),
             if Some(v) == history.active.as_ref() {
-                "  <- serving"
+                "  <- active (new tenants)"
             } else {
                 ""
             },
@@ -2863,7 +3031,7 @@ async fn versions_show(flags: Flags) -> Outcome {
         "version    {}{}\n",
         numbered(ordinal, version),
         if active.as_deref() == Some(version.as_str()) {
-            "  <- serving"
+            "  <- active (new tenants)"
         } else {
             ""
         }

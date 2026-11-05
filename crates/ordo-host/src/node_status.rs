@@ -58,6 +58,49 @@ impl NodeStatus {
         self.write().await;
     }
 
+    /// The versions served beside the active one, written with the next
+    /// beat.
+    pub fn also_serving(&self, versions: Vec<String>) {
+        self.row.lock().expect("node row lock").also_serving = versions;
+    }
+
+    /// This node's `versions.new_tenant`, written with every beat.
+    pub fn new_tenant(&self, value: Option<&str>) {
+        self.row.lock().expect("node row lock").new_tenant = value.unwrap_or("").to_string();
+    }
+
+    /// **Warn when another live node starts new tenants elsewhere** (audit
+    /// 2026-11-05). The lines to log; empty when every node agrees. Read
+    /// from `$nodes`, so it holds across regions as the rows do.
+    pub async fn new_tenant_warnings(&self) -> Vec<String> {
+        let me = self.snapshot();
+        let Ok(nodes) = nodes::live(&self.pool).await else {
+            return Vec::new();
+        };
+        nodes::new_tenant_disagreements(&nodes, &me.node, &me.new_tenant)
+            .into_iter()
+            .map(|(node, theirs)| {
+                let show = |v: &str| {
+                    if v.is_empty() {
+                        "unset".to_string()
+                    } else {
+                        format!("`{v}`")
+                    }
+                };
+                format!(
+                    "versions: {} ({}) is {} on node {node} and {} here, so new tenants \
+                     start on a different version depending on the node that creates them. \
+                     Set {} to the same value on every node",
+                    crate::versions::NEW_TENANT_SETTING,
+                    crate::versions::NEW_TENANT_ENV,
+                    show(&theirs),
+                    show(&me.new_tenant),
+                    crate::versions::NEW_TENANT_ENV,
+                )
+            })
+            .collect()
+    }
+
     /// A catch-up sweep for `version` finished.
     pub async fn swept(&self, version: &str, held: Vec<(String, String)>, retrying: bool, ms: u64) {
         {

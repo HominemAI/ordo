@@ -282,6 +282,53 @@ pub async fn ensure_pin_tables(pool: &Pool) -> Result<(), PoolError> {
 /// version and kept it until the next activation (review, 2026-11-04).
 pub const PIN_LOCK_NS: i32 = 0x4F52_5049;
 
+/// **The pin stream's nudge** (`plan-versions.md` §1.8, ask 17): every
+/// transaction that changes a pin notifies this channel before it commits.
+/// The stream itself is `$pins`, read by `seq` ([`Versions::pins_since`]);
+/// the nudge only says "read it now". A node that misses one reads it on
+/// its reconcile tick, so a second region needs no shared `NOTIFY`.
+///
+/// Every pin change holds [`PIN_LOCK_NS`] until it commits, and `seq` is
+/// drawn under it, so rows commit in `seq` order and a reader that has
+/// seen row `n` has seen every row below it.
+pub const PINS_CHANNEL: &str = "ordo_pins";
+
+/// `pins.reconcile_interval` (§7): how often a node reads every pin again,
+/// whatever the stream said. Seconds.
+pub const PINS_RECONCILE_SETTING: &str = "pins.reconcile_interval";
+/// Its environment variable.
+pub const PINS_RECONCILE_ENV: &str = "ORDO_PINS_RECONCILE_SECS";
+/// Its default, in seconds.
+pub const PINS_RECONCILE_DEFAULT: u64 = 30;
+
+/// [`PINS_RECONCILE_ENV`], or the default when unset. A value that is not
+/// a whole number of seconds from 1 is refused at boot, naming it.
+pub fn pins_reconcile_from_env() -> Result<std::time::Duration, String> {
+    match std::env::var(PINS_RECONCILE_ENV) {
+        Err(_) => Ok(std::time::Duration::from_secs(PINS_RECONCILE_DEFAULT)),
+        Ok(v) if v.trim().is_empty() => Ok(std::time::Duration::from_secs(PINS_RECONCILE_DEFAULT)),
+        Ok(v) => match v.trim().parse::<u64>() {
+            Ok(n) if n >= 1 => Ok(std::time::Duration::from_secs(n)),
+            _ => Err(format!(
+                "{PINS_RECONCILE_SETTING} ({PINS_RECONCILE_ENV}) is `{v}`: it is a whole number \
+                 of seconds, 1 or more. Set {PINS_RECONCILE_ENV}={PINS_RECONCILE_DEFAULT}, the \
+                 default, or unset it"
+            )),
+        },
+    }
+}
+
+/// Run one pin-changing statement in `tx`, and nudge the pin stream in the
+/// same transaction. The rows the statement returned.
+async fn repin(tx: &ordo_exec::TxConn, sql: &str) -> Result<Vec<Vec<Option<String>>>, PoolError> {
+    let rows = tx.rows(sql).await?;
+    if !rows.is_empty() {
+        tx.rows(&format!("SELECT pg_notify({}, '')", sql_lit(PINS_CHANNEL)))
+            .await?;
+    }
+    Ok(rows)
+}
+
 fn pin_lock_sql() -> String {
     format!("SELECT pg_advisory_xact_lock({PIN_LOCK_NS}, 0)")
 }
@@ -313,6 +360,9 @@ pub enum PinCause {
     NewTenant,
     /// The tenant predates pins and was given one at boot.
     Backfill,
+    /// One tenant moved on its own, by the deployment owner's act
+    /// ([`Versions::pin`]): a move on demand.
+    Pin,
 }
 
 impl PinCause {
@@ -322,6 +372,7 @@ impl PinCause {
             PinCause::Rollback => "rollback",
             PinCause::NewTenant => "new_tenant",
             PinCause::Backfill => "backfill",
+            PinCause::Pin => "pin",
         }
     }
 }
@@ -476,6 +527,9 @@ pub enum VersionRefusal {
     /// A reason that is empty or longer than [`MAX_REASON_CHARS`]. Fix the
     /// input.
     Reason(String),
+    /// A pin of a tenant there is none of, or one that serves nothing
+    /// (`failed`, `reaped`). Fix the input.
+    NoTenant { space: String },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -492,6 +546,7 @@ impl VersionRefusal {
             | VersionRefusal::MoveTo(_)
             | VersionRefusal::Reason(_)
             | VersionRefusal::NamedBySetting { .. }
+            | VersionRefusal::NoTenant { .. }
             | VersionRefusal::Revoked {
                 setting: Some(_), ..
             } => Remedy::FixInput,
@@ -545,7 +600,9 @@ impl VersionRefusal {
             | VersionRefusal::NamedBySetting { .. } => {
                 ExecError::new(ErrorCode::ApplyRefused, message)
             }
-            VersionRefusal::NotRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
+            VersionRefusal::NotRevoked { .. } | VersionRefusal::NoTenant { .. } => {
+                ExecError::new(ErrorCode::NotFound, message)
+            }
             VersionRefusal::Setting { .. } => ExecError::new(ErrorCode::Internal, message),
             VersionRefusal::Store(e) => {
                 ExecError::of_fault(e.class(), ErrorCode::SpaceUnavailable, message)
@@ -648,6 +705,11 @@ impl std::fmt::Display for VersionRefusal {
                 "revoke_named_by_setting: {setting} ({var}) names {named}, so new tenants \
                  start on it. Set it to another version, or unset it to start them on the \
                  active version, then revoke"
+            ),
+            VersionRefusal::NoTenant { space } => write!(
+                f,
+                "no_tenant: no tenant `{space}` is provisioning, active or paused here, so \
+                 there is no pin to move. `ordo tenants list` names them"
             ),
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
@@ -1039,8 +1101,7 @@ impl<'a> Versions<'a> {
             return Err(self.revoked(mark, None).await);
         }
         registry::record_activation(&tx, version, actor, at).await?;
-        tx.rows(&repin_sql(version, actor, cause, at.0, None))
-            .await?;
+        repin(&tx, &repin_sql(version, actor, cause, at.0, None)).await?;
         tx.commit().await?;
         Ok(Activated::Switched {
             from,
@@ -1132,13 +1193,10 @@ impl<'a> Versions<'a> {
             "AND \"$space\" = {} AND \"version\" IS NULL",
             sql_lit(space)
         );
-        tx.rows(&repin_sql(
-            &version,
-            actor,
-            PinCause::NewTenant,
-            at,
-            Some(&filter),
-        ))
+        repin(
+            &tx,
+            &repin_sql(&version, actor, PinCause::NewTenant, at, Some(&filter)),
+        )
         .await?;
         tx.commit().await?;
         Ok(Some(version))
@@ -1159,18 +1217,153 @@ impl<'a> Versions<'a> {
             tx.rollback().await?;
             return Err(self.revoked(mark, None).await);
         }
-        let moved = tx
-            .rows(&repin_sql(
+        let moved = repin(
+            &tx,
+            &repin_sql(
                 &active,
                 actor,
                 PinCause::Backfill,
                 at,
                 Some("AND \"version\" IS NULL"),
-            ))
-            .await?
-            .len();
+            ),
+        )
+        .await?
+        .len();
         tx.commit().await?;
         Ok(moved)
+    }
+
+    /// **Move one tenant's pin** to the version a person named, now
+    /// (`plan-versions.md` §1.3, increment 3), cause `pin`. The move on
+    /// demand: the deployment owner's act today, through the door
+    /// (`std.deployment.pin`) or the CLI.
+    ///
+    /// It is the one act every later single-tenant move calls: a move off
+    /// a revoked version in the tenant's maintenance window, or on demand
+    /// (ruled 2026-11-05), lands here with its own actor and the target
+    /// the app developer chose, the active version by default.
+    ///
+    /// Refused: a version not stored or revoked, a tenant that is not
+    /// `provisioning`, `active` or `paused`. A tenant already there moves
+    /// nothing and answers its pin. The pin the tenant has after.
+    pub async fn pin(
+        &self,
+        space: &str,
+        name: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        let version = self.resolve(name).await?;
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, &version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let held = tx
+            .rows(&format!(
+                "SELECT \"version\", \"pin_epoch\" FROM \"$spaces\" \
+                 WHERE \"$space\" = {} AND \"state\" IN {PINNED_STATES}",
+                sql_lit(space)
+            ))
+            .await?;
+        let Some(row) = held.first() else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        };
+        let from = row.first().cloned().flatten();
+        let filter = format!("AND \"$space\" = {}", sql_lit(space));
+        repin(
+            &tx,
+            &repin_sql(&version, actor, PinCause::Pin, at, Some(&filter)),
+        )
+        .await?;
+        tx.commit().await?;
+        let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);
+        Ok(PinChange {
+            seq: 0,
+            space: space.to_string(),
+            from,
+            to: version,
+            epoch,
+            actor: actor.to_string(),
+            cause: PinCause::Pin.as_str().to_string(),
+            at,
+        })
+    }
+
+    /// **Every pin now**, for a node's whole read (boot, the reconcile
+    /// tick): `(space, version, epoch)` of every tenant that holds one, and
+    /// the newest `$pins` row. A database with no `$spaces` answers empty.
+    pub async fn all_pins(&self) -> Result<(Vec<(String, String, i64)>, i64), VersionRefusal> {
+        // The head first: a change committed between the two reads is read
+        // again from the stream, and a pin never moves back.
+        let head = match self
+            .pool
+            .rows("SELECT coalesce(max(\"seq\"), 0) FROM \"$pins\"")
+            .await
+        {
+            Ok(r) => r
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            Err(e) if e.is_missing_table() => return Ok((Vec::new(), 0)),
+            Err(e) => return Err(e.into()),
+        };
+        let rows = match self
+            .pool
+            .rows(&format!(
+                "SELECT \"$space\", \"version\", \"pin_epoch\" FROM \"$spaces\" \
+                 WHERE \"version\" IS NOT NULL AND \"state\" IN {PINNED_STATES}"
+            ))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) if e.is_missing_table() || e.is_missing_column() => {
+                return Ok((Vec::new(), head))
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok((
+            rows.into_iter()
+                .filter_map(|r| {
+                    Some((
+                        r.first()?.clone()?,
+                        r.get(1)?.clone()?,
+                        r.get(2)?.clone()?.parse().ok()?,
+                    ))
+                })
+                .collect(),
+            head,
+        ))
+    }
+
+    /// **The pin stream** (§1.8, ask 17): every `$pins` row after `seq`,
+    /// oldest first, at most `limit`. See [`PINS_CHANNEL`] for why a reader
+    /// that keeps the newest `seq` it read misses none.
+    pub async fn pins_since(
+        &self,
+        seq: i64,
+        limit: usize,
+    ) -> Result<Vec<PinChange>, VersionRefusal> {
+        let rows = match self
+            .pool
+            .rows(&format!(
+                "SELECT \"seq\", \"space\", \"from\", \"to\", \"epoch\", \"actor\", \
+                 \"cause\", \"at\" FROM \"$pins\" WHERE \"seq\" > {seq} \
+                 ORDER BY \"seq\" LIMIT {limit}"
+            ))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(rows.iter().filter_map(|r| pin_change_row(r)).collect())
     }
 
     /// One tenant's pin. `None` when there is no such tenant.
@@ -1203,21 +1396,7 @@ impl<'a> Versions<'a> {
                 sql_lit(space)
             ))
             .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|r| {
-                Some(PinChange {
-                    seq: r.first()?.clone()?.parse().ok()?,
-                    space: r.get(1)?.clone()?,
-                    from: r.get(2)?.clone(),
-                    to: r.get(3)?.clone()?,
-                    epoch: r.get(4)?.clone()?.parse().ok()?,
-                    actor: r.get(5)?.clone()?,
-                    cause: r.get(6)?.clone()?,
-                    at: r.get(7)?.clone()?.parse().ok()?,
-                })
-            })
-            .collect())
+        Ok(rows.iter().filter_map(|r| pin_change_row(r)).collect())
     }
 
     /// How many tenants are pinned to each version. A version no tenant is
@@ -1332,7 +1511,7 @@ impl<'a> Versions<'a> {
                     _ => PinCause::Activate,
                 };
                 registry::record_activation(&tx, &to, actor, Timestamp(at)).await?;
-                tx.rows(&repin_sql(&to, actor, cause, at, None)).await?;
+                repin(&tx, &repin_sql(&to, actor, cause, at, None)).await?;
                 Some((version.clone(), to))
             }
             (false, Some(_)) => {
@@ -1525,6 +1704,19 @@ fn revocation_sql(version: &str, act: RevokeAct, actor: &str, reason: &str, at: 
 ///
 /// One statement, so the rows it reads are locked (`FOR UPDATE`) for the
 /// update that follows, and the history it writes is the change it made.
+fn pin_change_row(r: &[Option<String>]) -> Option<PinChange> {
+    Some(PinChange {
+        seq: r.first()?.clone()?.parse().ok()?,
+        space: r.get(1)?.clone()?,
+        from: r.get(2)?.clone(),
+        to: r.get(3)?.clone()?,
+        epoch: r.get(4)?.clone()?.parse().ok()?,
+        actor: r.get(5)?.clone()?,
+        cause: r.get(6)?.clone()?,
+        at: r.get(7)?.clone()?.parse().ok()?,
+    })
+}
+
 fn repin_sql(to: &str, actor: &str, cause: PinCause, at: u64, filter: Option<&str>) -> String {
     let to = sql_lit(to);
     format!(

@@ -95,7 +95,7 @@ done
 # NOTES_DEV_PROGRAM=examples/notes-v2 serves v2. A routine a program adds
 # (v2's reminders) runs from the next start of the door, so start this
 # script again after the first apply of v2.
-"$ordo" apply "${NOTES_DEV_PROGRAM:-$repo/examples/notes}" --as notes-dev
+"$ordo" apply "${NOTES_DEV_PROGRAM:-$repo/examples/notes}" --as notes-dev --direct
 echo
 echo "The door is at http://127.0.0.1:$port and the page belongs at $page."
 echo "Ctrl-C stops both the door and the database."

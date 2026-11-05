@@ -12,6 +12,8 @@
 
 #![allow(dead_code)]
 
+pub mod door;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -62,13 +64,35 @@ pub fn ordo() -> Command {
 pub mod operator {
     pub use ordo_cli::operator::*;
 
+    /// The commands that must work with no server open the database only
+    /// behind `--direct` (owner, 2026-11-05). A test that names a database
+    /// (`--db`) or runs one of the commands that has no door means that path,
+    /// so the flag is added here once. `apply` and `rollback` get it only
+    /// with `--db` and no `--host`, so a test of their refusals sees them as
+    /// typed. The commands that have only the door are never touched.
+    pub fn with_direct(cmd: &str, args: &[String]) -> Vec<String> {
+        let has = |f: &str| args.iter().any(|a| a == f);
+        let wants = match cmd {
+            "verify" => !has("--proof"),
+            "keys" => args.first().map(String::as_str) != Some("seal-master"),
+            "restore" | "migrate" | "identity" => true,
+            "apply" | "rollback" => has("--db") && !has("--host"),
+            _ => false,
+        };
+        let mut args = args.to_vec();
+        if wants && !has("--direct") {
+            args.push("--direct".into());
+        }
+        args
+    }
+
     pub fn run(cmd: &str, args: &[String]) -> Outcome {
         super::isolate();
-        ordo_cli::operator::run(cmd, args)
+        ordo_cli::operator::run(cmd, &with_direct(cmd, args))
     }
 
     pub fn run_with_input(cmd: &str, args: &[String], input: &[u8]) -> Outcome {
         super::isolate();
-        ordo_cli::operator::run_with_input(cmd, args, input)
+        ordo_cli::operator::run_with_input(cmd, &with_direct(cmd, args), input)
     }
 }

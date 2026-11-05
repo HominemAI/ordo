@@ -198,7 +198,7 @@ pids="$pids $last"
 wait_for "ordo-host" "$door/health/live" "$last"
 
 # ── 4. The program ─────────────────────────────────────────────────────────
-"$ordo" apply "$program" --as notes-e2e >"$state/apply.log" 2>&1 ||
+"$ordo" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
   { cat "$state/apply.log" >&2; echo "stack: ordo apply failed" >&2; exit 1; }
 
 # ── 5. The page ────────────────────────────────────────────────────────────

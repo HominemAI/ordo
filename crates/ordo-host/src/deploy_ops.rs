@@ -444,6 +444,20 @@ pub async fn execute(
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .unwrap_or_default();
+            // A version is its name or its order number, `#4`, as for
+            // `ordo versions` and `ordo rollback`. A name goes as it is.
+            let version = if version.starts_with('#') {
+                match crate::versions::Versions::on(&ops.pool)
+                    .resolve(version)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return Err(e.to_exec_error("the version could not be activated")),
+                }
+            } else {
+                version.to_string()
+            };
+            let version = version.as_str();
             match apply_op::activate(&ops.pool, version, caller).await {
                 Ok(Activation::Switched { from, to }) => {
                     ops.record(

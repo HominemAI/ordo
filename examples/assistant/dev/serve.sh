@@ -88,7 +88,7 @@ until curl -fsS "http://127.0.0.1:$port/health/live" >/dev/null 2>&1; do
   sleep 0.2
 done
 
-"$ordo" apply "$repo/examples/assistant" --as assistant-dev
+"$ordo" apply "$repo/examples/assistant" --as assistant-dev --direct
 # The agent builds its calls from this descriptor.
 "$ordo" interface "$repo/examples/assistant" --out "$data"
 echo

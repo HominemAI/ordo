@@ -6290,6 +6290,21 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
         });
     }
 
+    // `ordo ... --direct` uses since the last boot (`crate::direct_uses`):
+    // each goes to the security stream as a `deploy` event, act
+    // `direct-cli`, and the row is deleted.
+    {
+        let recorder = rt.access.recorder.clone();
+        let pool = rt.pool.clone();
+        tokio::spawn(async move {
+            match crate::direct_uses::drain(&pool, &recorder).await {
+                Ok(0) => {}
+                Ok(n) => println!("  direct      {n} use(s) of `--direct` since the last boot, on the security log"),
+                Err(e) => println!("  direct      the `--direct` uses could not be read: {e}"),
+            }
+        });
+    }
+
     // The deploy channel. Its refusal policy is already written and this
     // only has to obey it: a node that cannot load the new version must not
     // stop serving the old one, and the refusal is an operator alert, not

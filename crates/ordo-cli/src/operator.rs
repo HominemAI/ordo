@@ -4,28 +4,30 @@
 //!
 //! `check` and `plan` are deploy-time commands: they read `.ordo` files and
 //! answer from the compiler alone. These three are the other half of the
-//! tool. They talk to a **running deployment's database**, and they exist
+//! tool. They talk to a **running deployment** (through its door, or its
+//! database behind `--direct`), and they exist
 //! because `verify_chain`, `checkpoint` and `revert_group` were all
 //! implemented, all correct, and reachable from nothing but their own unit
 //! tests. Undo is the platform's headline safety net; a safety net with no
 //! handle is a claim, not a net.
 //!
-//! # Why the CLI, and what that costs
+//! # Which way a command reaches the deployment
 //!
-//! An operator surface has to be reachable when the thing it operates on is
-//! in trouble, which argues against putting it behind the same HTTP door
-//! whose behaviour you might be investigating: `verify` in particular is a
-//! cron job that must run when the engine is refusing requests, and it must
-//! be runnable by someone who has the database and the published verifying
-//! key and nothing else. A process with an exit code is what cron consumes,
-//! so that is what these are.
+//! Owner, 2026-11-05: *the CLI goes through the door.* Commands that change
+//! or read a deployment go through its HTTP door (`--host`). The commands
+//! that must work when no server can be up open the database from this
+//! machine, and only behind an explicit `--direct`: `verify` is a cron job
+//! that must run when the engine is refusing requests, and a verification
+//! that can only be performed by the thing under suspicion is not a
+//! verification; the key ceremonies run before a server can boot; `restore`
+//! and `identity recover` run when the server cannot serve; the first
+//! `apply` has no host to ask. [`crate::direct`] holds the table of which is
+//! which, and the record each `--direct` use leaves for the next boot.
 //!
-//! The cost is honest and worth stating: `ordo-cli` now depends on
+//! The cost is honest and worth stating: `ordo-cli` depends on
 //! `ordo-exec`, so building the `ordo` binary builds the driver, the pool
 //! and (transitively, because `ordo-exec` hosts the write protocol) the
-//! conformance harness. The alternative — a second binary — would have put
-//! the operator's three commands somewhere they would not be found next to
-//! `check` and `plan`.
+//! conformance harness.
 //!
 //! # Exit codes, because an operator's cron reads those and not prose
 //!
@@ -94,6 +96,9 @@ pub struct Flags {
     /// is **repeatable** keeps all of its values. `named` holds the last of
     /// each, which is what every single-valued flag wants.
     pub(crate) repeated: Vec<(String, String)>,
+    /// `--direct` was typed and recorded ([`crate::direct::gate`]): the
+    /// command may open the database even when `ORDO_HOST` is set.
+    pub(crate) direct: bool,
 }
 
 const SWITCHES: &[&str] = &[
@@ -121,6 +126,8 @@ const SWITCHES: &[&str] = &[
     // `ordo triggers deregister --force`: retire a listener the running
     // deployment has not confirmed orphaned.
     "--force",
+    // `--direct`: open the database from this machine (`crate::direct`).
+    "--direct",
 ];
 
 /// Switches one command takes that another takes a value for:
@@ -308,10 +315,17 @@ pub fn run_with_input(cmd: &str, args: &[String], input: &[u8]) -> Outcome {
 }
 
 fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
-    let flags = match parse_flags_for(cmd, args) {
+    let mut flags = match parse_flags_for(cmd, args) {
         Ok(f) => f,
         Err(e) => return Outcome::usage(e),
     };
+    // Which way this command may reach the deployment, and the record of a
+    // `--direct` use, before anything else runs (`crate::direct`).
+    match crate::direct::gate(cmd, &mut flags) {
+        Ok(crate::direct::Via::Direct) => flags.direct = true,
+        Ok(_) => {}
+        Err(refusal) => return refusal,
+    }
     // A current-thread runtime: these commands are one sequence of queries
     // each, and a work-stealing pool would buy nothing but threads.
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -1891,7 +1905,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
     // which side of the wire compiles and applies — the rendering below is
     // the same function over the same value, so an operator reads one
     // report whichever mode they ran in.
-    if let Some(host) = crate::wire::requested(flags) {
+    if let Some(host) = door_unless_direct(flags) {
         if flags.named.contains_key("--as") {
             // `--as` is an ASSERTION, and this door does not take one. The
             // actor recorded over the wire is the principal the token
@@ -2274,13 +2288,47 @@ pub(crate) fn render_refusal(
 /// behave differently from the deploy it is undoing. What it appends is one
 /// more activation row, so the history reads forwards.
 async fn rollback(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--db", "--as", "--version"]) {
+    if let Err(e) = flags.only(&["--db", "--as", "--version", "--host", "--token", "--space"]) {
         return Outcome::usage(e);
     }
     let version = match flags.require("--version") {
         Ok(v) => v.to_string(),
         Err(e) => return Outcome::usage(e),
     };
+    if let Some(host) = door_unless_direct(&flags) {
+        let host = match host {
+            Ok(h) => h,
+            Err(e) => return Outcome::usage(e),
+        };
+        if flags.named_value("--as").is_some() {
+            return Outcome::usage(
+                "`--as` names who acted on the database; over the door it is the token's \
+                 principal. Drop `--as`, or use `--direct`\n"
+                    .into(),
+            );
+        }
+        let row = match crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::ACTIVATE,
+            serde_json::json!({ "version": version }),
+            true,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(o) => return o,
+        };
+        let to = row["version"].as_str().unwrap_or(&version);
+        return Outcome::ok(match row["state"].as_str() {
+            Some("alreadyActive") => format!("UNCHANGED  {to} is already active\n"),
+            _ => format!(
+                "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n",
+                row["from"].as_str().unwrap_or("nothing"),
+                ordo_host::versions::DEPLOY_CHANNEL,
+            ),
+        });
+    }
     let actor = flags
         .named
         .get("--as")
@@ -2453,7 +2501,7 @@ const UNATTRIBUTED_OWNER: &str = "deployment-owner:unattributed";
 /// `ordo_host::apply_op::revoke`, or over the door through
 /// `std.deployment.revoke`, deployment owner only.
 async fn versions_revoke(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--as", "--reason", "--move-to"];
+    let mut allowed = vec!["--as", "--reason", "--move-to"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -2466,59 +2514,34 @@ async fn versions_revoke(flags: Flags) -> Outcome {
         Err(e) => return Outcome::usage(format!("{e}: a revoke says why, and stays on record\n")),
     };
     let move_to = flags.named_value("--move-to").map(str::to_string);
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        if flags.named_value("--as").is_some() {
-            return Outcome::usage(
-                "`--as` names who acted on the database; over the door it is the token's \
-                 principal\n"
-                    .into(),
-            );
-        }
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::REVOKE,
-            serde_json::json!({ "version": version, "reason": reason, "moveTo": move_to }),
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return Outcome::ok(revoked_report(
-            row["ordinal"].as_u64(),
-            row["version"].as_str().unwrap_or(version),
-            row["revoked"]["reason"].as_str().unwrap_or(&reason),
-            row["moved"].as_str(),
-        ));
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let r = match ordo_host::apply_op::revoke(&pool, version, &reason, move_to.as_deref(), actor)
-        .await
+    if flags.named_value("--as").is_some() {
+        return Outcome::usage(
+            "`--as` names who acted on the database; over the door it is the token's \
+             principal\n"
+                .into(),
+        );
+    }
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::REVOKE,
+        serde_json::json!({ "version": version, "reason": reason, "moveTo": move_to }),
+        true,
+    )
+    .await
     {
         Ok(r) => r,
-        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
-    };
-    let v = ordo_host::versions::Versions::on(&pool);
-    let ordinal = v.ordinal_of(&r.version).await.ok().flatten();
-    let mark = match v.revocation_of(&r.version).await {
-        Ok(m) => m,
-        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+        Err(o) => return o,
     };
     Outcome::ok(revoked_report(
-        ordinal,
-        &r.version,
-        mark.as_ref().map(|m| m.reason.as_str()).unwrap_or(&reason),
-        r.moved.as_ref().map(|(_, to)| to.as_str()),
+        row["ordinal"].as_u64(),
+        row["version"].as_str().unwrap_or(version),
+        row["revoked"]["reason"].as_str().unwrap_or(&reason),
+        row["moved"].as_str(),
     ))
 }
 
@@ -2546,7 +2569,7 @@ pub(crate) fn revoked_report(
 /// `ordo versions unrevoke <version> --reason "..."`: lift the mark (ask
 /// 20). Both acts stay on record.
 async fn versions_unrevoke(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--as", "--reason"];
+    let mut allowed = vec!["--as", "--reason"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -2560,54 +2583,36 @@ async fn versions_unrevoke(flags: Flags) -> Outcome {
             return Outcome::usage(format!("{e}: an unrevoke says why, and stays on record\n"))
         }
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        if flags.named_value("--as").is_some() {
-            return Outcome::usage(
-                "`--as` names who acted on the database; over the door it is the token's \
-                 principal\n"
-                    .into(),
-            );
-        }
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::UNREVOKE,
-            serde_json::json!({ "version": version, "reason": reason }),
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return Outcome::ok(format!(
-            "unrevoked  {}\n",
-            numbered(
-                row["ordinal"].as_u64(),
-                row["version"].as_str().unwrap_or(version)
-            )
-        ));
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let v = ordo_host::versions::Versions::on(&pool);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let version = match v.unrevoke(version, &reason, actor, now).await {
-        Ok(v) => v,
-        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    if flags.named_value("--as").is_some() {
+        return Outcome::usage(
+            "`--as` names who acted on the database; over the door it is the token's \
+             principal\n"
+                .into(),
+        );
+    }
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::UNREVOKE,
+        serde_json::json!({ "version": version, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
     };
-    let ordinal = v.ordinal_of(&version).await.ok().flatten();
-    Outcome::ok(format!("unrevoked  {}\n", numbered(ordinal, &version)))
+    Outcome::ok(format!(
+        "unrevoked  {}\n",
+        numbered(
+            row["ordinal"].as_u64(),
+            row["version"].as_str().unwrap_or(version)
+        )
+    ))
 }
 
 /// `ordo versions pin <tenant> <version>`: move one tenant to a stored
@@ -2615,7 +2620,7 @@ async fn versions_unrevoke(flags: Flags) -> Outcome {
 /// `Versions::pin`, or over the door through `std.deployment.pin`,
 /// deployment owner only.
 async fn versions_pin(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--as"];
+    let mut allowed = vec!["--as"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -2634,112 +2639,55 @@ async fn versions_pin(flags: Flags) -> Outcome {
             ordo_host::versions::PINS_RECONCILE_ENV,
         )
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        if flags.named_value("--as").is_some() {
-            return Outcome::usage(
-                "`--as` names who acted on the database; over the door it is the token's \
-                 principal\n"
-                    .into(),
-            );
-        }
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::PIN,
-            serde_json::json!({ "tenant": tenant, "version": version }),
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return Outcome::ok(report(
-            row["from"].as_str(),
-            row["to"].as_str().unwrap_or(version),
-            row["ordinal"].as_u64(),
-            row["epoch"].as_i64().unwrap_or(0),
-        ));
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let v = ordo_host::versions::Versions::on(&pool);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let moved = match v.pin(tenant, version, actor, now).await {
-        Ok(m) => m,
-        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+    if flags.named_value("--as").is_some() {
+        return Outcome::usage(
+            "`--as` names who acted on the database; over the door it is the token's \
+             principal\n"
+                .into(),
+        );
+    }
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::PIN,
+        serde_json::json!({ "tenant": tenant, "version": version }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
     };
-    let ordinal = v.ordinal_of(&moved.to).await.ok().flatten();
     Outcome::ok(report(
-        moved.from.as_deref(),
-        &moved.to,
-        ordinal,
-        moved.epoch,
+        row["from"].as_str(),
+        row["to"].as_str().unwrap_or(version),
+        row["ordinal"].as_u64(),
+        row["epoch"].as_i64().unwrap_or(0),
     ))
 }
 
 /// `ordo versions list --tenant <id>`: one tenant's version, its epoch,
-/// and every pin change, locally or through `std.deployment.tenantVersion`.
+/// and every pin change, through `std.deployment.tenantVersion`.
 async fn tenant_version(flags: &Flags, tenant: &str) -> Outcome {
-    let row = if let Some(host) = crate::wire::requested(flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        match crate::wire::door_op(
-            &host,
-            flags,
-            ordo_host::deploy_ops::TENANT_VERSION,
-            serde_json::json!({ "tenant": tenant }),
-            false,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        }
-    } else {
-        let pool = match connect(flags).await {
-            Ok(p) => p,
-            Err(o) => return o,
-        };
-        let v = ordo_host::versions::Versions::on(&pool);
-        let pin = match v.pin_of(tenant).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                return Outcome::failed(format!(
-                    "REFUSED  {}\n",
-                    ordo_host::versions::VersionRefusal::NoTenant {
-                        space: tenant.to_string()
-                    }
-                ))
-            }
-            Err(e) => return Outcome::failed(format!("database: {e}\n")),
-        };
-        let ordinal = match &pin.version {
-            Some(version) => v.ordinal_of(version).await.ok().flatten(),
-            None => None,
-        };
-        let history = v.pin_history(tenant).await.unwrap_or_default();
-        serde_json::json!({
-            "version": pin.version,
-            "ordinal": ordinal,
-            "epoch": pin.epoch,
-            "history": history.iter().map(|c| serde_json::json!({
-                "from": c.from, "to": c.to, "epoch": c.epoch,
-                "actor": c.actor, "cause": c.cause, "at": c.at,
-            })).collect::<Vec<_>>(),
-        })
+    let host = match door_only(flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        flags,
+        ordo_host::deploy_ops::TENANT_VERSION,
+        serde_json::json!({ "tenant": tenant }),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
     };
     let mut out = format!(
         "tenant     {tenant}\nversion    {}\nepoch      {}\n\nPIN CHANGES (oldest first)\n",
@@ -2766,7 +2714,7 @@ async fn tenant_version(flags: &Flags, tenant: &str) -> Outcome {
 /// `ordo versions revoked`: each revoked version, its reason, and the
 /// tenants pinned to it (D8's report).
 async fn versions_revoked(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db"];
+    let mut allowed = vec![];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -2774,54 +2722,31 @@ async fn versions_revoked(flags: Flags) -> Outcome {
     if !flags.positional.is_empty() {
         return Outcome::usage("`ordo versions revoked` takes no version\n".into());
     }
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::REVOKED,
-            serde_json::json!({}),
-            false,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        let list: Option<Vec<_>> = row["versions"].as_array().map(|a| {
-            a.iter()
-                .filter_map(ordo_host::deploy_ops::revoked_from_json)
-                .collect()
-        });
-        return match list {
-            Some(l) => Outcome::ok(revoked_list(&l)),
-            None => Outcome::failed("REFUSED  the door's answer has no `versions`\n".into()),
-        };
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match ordo_host::versions::Versions::on(&pool)
-        .pinned_to_revoked()
-        .await
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::REVOKED,
+        serde_json::json!({}),
+        false,
+    )
+    .await
     {
-        Ok(mut l) => {
-            ordo_host::revoked_moves::note_next_windows(&pool, &mut l, now_secs()).await;
-            Outcome::ok(revoked_list(&l))
-        }
-        Err(e) => Outcome::failed(format!("database: {e}\n")),
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let list: Option<Vec<_>> = row["versions"].as_array().map(|a| {
+        a.iter()
+            .filter_map(ordo_host::deploy_ops::revoked_from_json)
+            .collect()
+    });
+    match list {
+        Some(l) => Outcome::ok(revoked_list(&l)),
+        None => Outcome::failed("REFUSED  the door's answer has no `versions`\n".into()),
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// `ordo versions move <tenant>`: move one tenant off the revoked version
@@ -2829,7 +2754,7 @@ fn now_secs() -> u64 {
 /// 2026-11-05). Locally through `Versions::move_off_revoked`, or over the
 /// door through `std.deployment.moveOffRevoked`, deployment owner only.
 async fn versions_move(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--as"];
+    let mut allowed = vec!["--as"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -2844,61 +2769,34 @@ async fn versions_move(flags: Flags) -> Outcome {
             numbered(ordinal, to),
         )
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        if flags.named_value("--as").is_some() {
-            return Outcome::usage(
-                "`--as` names who acted on the database; over the door it is the token's \
-                 principal\n"
-                    .into(),
-            );
-        }
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::MOVE_OFF_REVOKED,
-            serde_json::json!({ "tenant": tenant }),
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return Outcome::ok(report(
-            row["from"].as_str(),
-            row["to"].as_str().unwrap_or("?"),
-            row["ordinal"].as_u64(),
-            row["chosenBy"].as_str().unwrap_or("?"),
-        ));
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let v = ordo_host::versions::Versions::on(&pool);
-    let moved = match v
-        .move_off_revoked(
-            tenant,
-            actor,
-            ordo_host::versions::PinCause::Demand,
-            now_secs(),
-        )
-        .await
+    if flags.named_value("--as").is_some() {
+        return Outcome::usage(
+            "`--as` names who acted on the database; over the door it is the token's \
+             principal\n"
+                .into(),
+        );
+    }
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::MOVE_OFF_REVOKED,
+        serde_json::json!({ "tenant": tenant }),
+        true,
+    )
+    .await
     {
-        Ok(m) => m,
-        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+        Ok(r) => r,
+        Err(o) => return o,
     };
-    let ordinal = v.ordinal_of(&moved.change.to).await.ok().flatten();
     Outcome::ok(report(
-        moved.change.from.as_deref(),
-        &moved.change.to,
-        ordinal,
-        moved.source.as_str(),
+        row["from"].as_str(),
+        row["to"].as_str().unwrap_or("?"),
+        row["ordinal"].as_u64(),
+        row["chosenBy"].as_str().unwrap_or("?"),
     ))
 }
 
@@ -2906,7 +2804,7 @@ async fn versions_move(flags: Flags) -> Outcome {
 /// tenant goes when it moves off a revoked version. Locally or through
 /// `std.deployment.setMoveTarget`, deployment owner only.
 async fn versions_target(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--as", "--clear"];
+    let mut allowed = vec!["--as", "--clear"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -2926,63 +2824,54 @@ async fn versions_target(flags: Flags) -> Outcome {
              active version\n"
         ),
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        if flags.named_value("--as").is_some() {
-            return Outcome::usage(
-                "`--as` names who acted on the database; over the door it is the token's \
-                 principal\n"
-                    .into(),
-            );
-        }
-        let row = match crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::SET_MOVE_TARGET,
-            serde_json::json!({ "tenant": tenant, "version": version }),
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(o) => return o,
-        };
-        return Outcome::ok(report(row["target"].as_str(), row["ordinal"].as_u64()));
-    }
-    let actor = flags.named_value("--as").unwrap_or(UNATTRIBUTED_OWNER);
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let v = ordo_host::versions::Versions::on(&pool);
-    let set = match v
-        .set_move_target(&tenant, version.as_deref(), actor, now_secs())
-        .await
+    if flags.named_value("--as").is_some() {
+        return Outcome::usage(
+            "`--as` names who acted on the database; over the door it is the token's \
+             principal\n"
+                .into(),
+        );
+    }
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::SET_MOVE_TARGET,
+        serde_json::json!({ "tenant": tenant, "version": version }),
+        true,
+    )
+    .await
     {
-        Ok(s) => s,
-        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
+        Ok(r) => r,
+        Err(o) => return o,
     };
-    let ordinal = match &set {
-        Some(s) => v.ordinal_of(s).await.ok().flatten(),
-        None => None,
-    };
-    Outcome::ok(report(set.as_deref(), ordinal))
+    Outcome::ok(report(row["target"].as_str(), row["ordinal"].as_u64()))
 }
 
 /// The door, for a command that has no database path (ruled 2026-11-05:
-/// the CLI goes through the door).
-fn door_only(flags: &Flags) -> Result<crate::wire::Host, Outcome> {
+/// the CLI goes through the door). `direct::gate` has already refused a
+/// call with no host; this is the same answer for a caller that skipped it.
+pub(crate) fn door_only(flags: &Flags) -> Result<crate::wire::Host, Outcome> {
     match crate::wire::requested(flags) {
         Some(Ok(h)) => Ok(h),
         Some(Err(e)) => Err(Outcome::usage(e)),
         None => Err(Outcome::usage(
-            "the version settings are read and changed through the door: name it with \
-             `--host <h>` (or ORDO_HOST), and `--token` or a signed-in session\n"
+            "this command goes through the door: name it with `--host <h>` (or ORDO_HOST), \
+             and `--token` or a signed-in session\n"
                 .into(),
         )),
+    }
+}
+
+/// The door for a command that also has a `--direct` path: `None` when
+/// `--direct` was typed, whatever `ORDO_HOST` says.
+fn door_unless_direct(flags: &Flags) -> Option<Result<crate::wire::Host, String>> {
+    if flags.direct {
+        None
+    } else {
+        crate::wire::requested(flags)
     }
 }
 
@@ -3151,7 +3040,7 @@ const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
 /// version's label. Locally through the `Versions` client, or over the
 /// door through `std.deployment.label`, deployment owner only.
 async fn versions_label(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--clear"];
+    let mut allowed = vec!["--clear"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -3161,28 +3050,11 @@ async fn versions_label(flags: Flags) -> Outcome {
         ([v], true) => (v.clone(), None),
         _ => return Outcome::usage(format!("{VERSIONS_USAGE}\n")),
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        return crate::wire::label_over_the_wire(&host, &flags, &version, label.as_deref()).await;
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let versions = ordo_host::versions::Versions::on(&pool);
-    let version = match versions.set_label(&version, label.as_deref()).await {
-        Ok(v) => v,
-        Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
-    };
-    let ordinal = versions.ordinal_of(&version).await.ok().flatten();
-    let label = match versions.provenance(&version).await {
-        Ok(p) => p.label,
-        Err(e) => return Outcome::failed(format!("database: {e}\n")),
-    };
-    Outcome::ok(labelled(ordinal, &version, label.as_deref()))
+    crate::wire::label_over_the_wire(&host, &flags, &version, label.as_deref()).await
 }
 
 /// What `ordo versions label` prints, on both paths.
@@ -3197,7 +3069,7 @@ pub(crate) fn labelled(ordinal: Option<u64>, version: &str, label: Option<&str>)
 /// between two stored versions, or one of them with `--schema` or
 /// `--source`. One body (`ordo_host::versions_diff`) for both paths.
 async fn versions_diff(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--source", "--schema"];
+    let mut allowed = vec!["--source", "--schema"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -3211,28 +3083,18 @@ async fn versions_diff(flags: Flags) -> Outcome {
         (false, true) => (false, true),
         _ => (true, true),
     };
-    if let Some(host) = crate::wire::requested(&flags) {
-        let host = match host {
-            Ok(h) => h,
-            Err(e) => return Outcome::usage(e),
-        };
-        return crate::wire::diff_over_the_wire(&host, &flags, a, b, schema, source).await;
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    match ordo_host::versions_diff::diff(&pool, a, b, schema, source).await {
-        Ok(d) => Outcome::ok(d.render()),
-        Err(e) => Outcome::failed(format!("REFUSED  {e}\n")),
-    }
+    crate::wire::diff_over_the_wire(&host, &flags, a, b, schema, source).await
 }
 
 /// `ordo versions list`: each stored version, newest first, with its
 /// declared version, how many tenants it serves, and which one is active.
 /// With `--tenant <id>`, that one tenant's version and pin history.
 async fn versions_list(flags: Flags) -> Outcome {
-    let mut allowed = vec!["--db", "--tenant"];
+    let mut allowed = vec!["--tenant"];
     allowed.extend(DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
@@ -3243,180 +3105,151 @@ async fn versions_list(flags: Flags) -> Outcome {
     if let Some(tenant) = flags.named_value("--tenant") {
         return tenant_version(&flags, tenant).await;
     }
-    if crate::wire::requested(&flags).is_some() {
-        return Outcome::usage(
-            "`ordo versions list` goes through the door with `--tenant <id>`; without it, \
-             use `--db <name>` or `std.deployment.versions`\n"
-                .into(),
-        );
-    }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let history = match ordo_host::apply_op::history(&pool, 1).await {
-        Ok(h) => h,
-        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    let row = match history_row(&host, &flags, 1).await {
+        Ok(r) => r,
+        Err(o) => return o,
     };
-    let versions = ordo_host::versions::Versions::on(&pool);
+    let stored = row["stored"].as_array().cloned().unwrap_or_default();
     let mut out = format!(
         "VERSIONS ({}, newest first, #n is the order each was first stored in)\n",
-        history.stored.len()
+        stored.len()
     );
     // Newest by order number: two applies in one second share a time.
-    let mut stored: Vec<&String> = history.stored.iter().map(|(v, _, _)| v).collect();
-    stored.sort_by_key(|v| std::cmp::Reverse(history.ordinals.get(*v).copied()));
-    for v in stored {
-        let declared = match versions.identity(v).await {
-            Ok(Some((d, _))) if !d.is_empty() => d,
-            Ok(_) => "none".to_string(),
-            Err(e) => return Outcome::failed(format!("database: {e}\n")),
-        };
+    let mut sorted: Vec<&serde_json::Value> = stored.iter().collect();
+    sorted.sort_by_key(|v| std::cmp::Reverse(v["ordinal"].as_u64()));
+    for v in sorted {
         out.push_str(&format!(
-            "  {}  declared {declared}  serving {} tenants{}{}{}\n",
-            numbered(history.ordinals.get(v).copied(), v),
-            history.tenants.get(v).copied().unwrap_or(0),
-            provenance_inline(history.provenance.get(v)),
-            if Some(v) == history.active.as_ref() {
+            "  {}  serving {} tenants{}{}{}\n",
+            numbered(v["ordinal"].as_u64(), v["version"].as_str().unwrap_or("?")),
+            v["tenants"].as_u64().unwrap_or(0),
+            provenance_json(v),
+            if v["serving"].as_bool() == Some(true) {
                 "  <- active (new tenants)"
             } else {
                 ""
             },
-            history
-                .revoked
-                .get(v)
-                .map(|r| format!("  REVOKED \"{}\"", r.reason))
+            v["revoked"]["reason"]
+                .as_str()
+                .map(|r| format!("  REVOKED \"{r}\""))
                 .unwrap_or_default()
         ));
     }
     Outcome::ok(out)
 }
 
-/// `ordo versions show <version>`: one version in full.
+/// `std.deployment.versions`: the program history, with `limit` activations.
+async fn history_row(
+    host: &crate::wire::Host,
+    flags: &Flags,
+    limit: u64,
+) -> Result<serde_json::Value, Outcome> {
+    crate::wire::door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::VERSIONS,
+        serde_json::json!({ "limit": limit }),
+        false,
+    )
+    .await
+}
+
+/// `  commit abc1234  "label"`, from a `versions` row: the same words
+/// [`provenance_inline`] prints.
+fn provenance_json(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+    if let Some(c) = v["gitCommit"].as_str() {
+        out.push_str(&format!(
+            "  commit {}",
+            ordo_host::versions::short_commit(c)
+        ));
+    }
+    if let Some(l) = v["label"].as_str() {
+        out.push_str(&format!("  \"{l}\""));
+    }
+    out
+}
+
+/// `ordo versions show <version>`: one version in full, from
+/// `std.deployment.versions`. A version is its name or its order number.
 async fn versions_show(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--db"]) {
+    let mut allowed = vec![];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
         return Outcome::usage(e);
     }
-    let [version] = flags.positional.as_slice() else {
+    let [wanted] = flags.positional.as_slice() else {
         return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
     };
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    let versions = ordo_host::versions::Versions::on(&pool);
-    let version = &match versions.resolve(version).await {
-        Ok(v) => v,
-        Err(e @ ordo_host::versions::VersionRefusal::NotStored { .. }) => {
-            return Outcome::failed(format!("REFUSED  {e}\n"))
-        }
-        Err(e) => return Outcome::failed(format!("database: {e}\n")),
+    let row = match history_row(&host, &flags, 200).await {
+        Ok(r) => r,
+        Err(o) => return o,
     };
-    let read = async {
-        let Some((declared, source_id)) = versions.identity(version).await? else {
-            return Ok(None);
-        };
-        Ok::<_, ordo_host::versions::VersionRefusal>(Some((
-            declared,
-            source_id,
-            versions.ordinal_of(version).await?,
-            versions.get(version).await?,
-            versions.builds(version).await?,
-            versions.tenants_per_version().await?,
-            versions.active_version().await?,
-            versions.activations_of(version).await?,
-            versions.provenance(version).await?,
-            versions.revocation_history(version).await?,
-        )))
+    let stored = row["stored"].as_array().cloned().unwrap_or_default();
+    let found = stored.iter().find(|v| {
+        v["version"].as_str() == Some(wanted.as_str())
+            || wanted
+                .strip_prefix('#')
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| v["ordinal"].as_u64() == Some(n))
+    });
+    let Some(v) = found else {
+        return Outcome::failed(format!(
+            "REFUSED no version is stored under `{wanted}`; `ordo versions list` names them\n"
+        ));
     };
-    let (
-        declared,
-        source_id,
-        ordinal,
-        stored,
-        builds,
-        tenants,
-        active,
-        activations,
-        provenance,
-        revocations,
-    ) = match read.await {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return Outcome::failed(format!(
-                "REFUSED no version is stored under `{version}`; `ordo versions list` \
-                     names them\n"
-            ))
-        }
-        Err(e) => return Outcome::failed(format!("database: {e}\n")),
-    };
+    let name = v["version"].as_str().unwrap_or("?");
     let mut out = format!(
         "version    {}{}\n",
-        numbered(ordinal, version),
-        if active.as_deref() == Some(version.as_str()) {
+        numbered(v["ordinal"].as_u64(), name),
+        if v["serving"].as_bool() == Some(true) {
             "  <- active (new tenants)"
         } else {
             ""
         }
     );
     out.push_str(&format!(
-        "declared   {}\n",
-        if declared.is_empty() {
-            "none"
-        } else {
-            &declared
-        }
+        "applied    {} by {}\n",
+        v["appliedAt"].as_u64().unwrap_or(0),
+        v["actor"].as_str().unwrap_or("?")
     ));
-    out.push_str(&format!(
-        "source     {}\n",
-        ordo_plan::artifact::short(&source_id)
-    ));
-    if let Some(a) = &stored {
-        out.push_str(&format!("applied    {} by {}\n", a.applied_at.0, a.actor));
+    if let Some(l) = v["label"].as_str() {
+        out.push_str(&format!("label      {l}\n"));
     }
-    out.push_str(&provenance_lines(&provenance));
+    if let Some(c) = v["gitCommit"].as_str() {
+        out.push_str(&format!("commit     {c}\n"));
+    }
     out.push_str(&format!(
         "tenants    {} pinned\n",
-        tenants.get(version.as_str()).copied().unwrap_or(0)
+        v["tenants"].as_u64().unwrap_or(0)
     ));
-    if let Some(last) = revocations.last() {
-        out.push_str(&format!(
-            "revoked    {}\n",
-            if last.act == ordo_host::versions::RevokeAct::Revoke {
-                format!("yes, \"{}\"", last.reason)
-            } else {
-                "no".to_string()
-            }
-        ));
+    if let Some(r) = v["revoked"]["reason"].as_str() {
+        out.push_str(&format!("revoked    yes, \"{r}\"\n"));
     }
-    out.push_str(&format!("\nBUILDS ({})\n", builds.len()));
-    for (id, release, at) in &builds {
-        out.push_str(&format!(
-            "  {}  Ordo {release}  at {at}\n",
-            ordo_plan::artifact::short(id)
-        ));
-    }
+    let activations: Vec<&serde_json::Value> = row["activations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["version"].as_str() == Some(name))
+        .collect();
     out.push_str(&format!(
         "\nACTIVATIONS ({}, newest first)\n",
         activations.len()
     ));
-    for a in &activations {
-        out.push_str(&format!("  {}.  at {} by {}\n", a.seq, a.at.0, a.actor));
-    }
-    if !revocations.is_empty() {
+    for a in activations {
         out.push_str(&format!(
-            "\nREVOCATIONS ({}, oldest first)\n",
-            revocations.len()
+            "  {}.  at {} by {}\n",
+            a["seq"].as_u64().unwrap_or(0),
+            a["at"].as_u64().unwrap_or(0),
+            a["actor"].as_str().unwrap_or("?")
         ));
-        for r in &revocations {
-            out.push_str(&format!(
-                "  {:<8}  at {} by {}  \"{}\"\n",
-                r.act.as_str(),
-                ordo_host::versions::utc_minute(r.at),
-                r.actor,
-                r.reason
-            ));
-        }
     }
     Outcome::ok(out)
 }
@@ -3627,7 +3460,9 @@ async fn quota_set(flags: Flags) -> Outcome {
         "--limit",
         "--grace",
         "--period-secs",
-        "--db",
+        "--host",
+        "--token",
+        "--home",
     ]) {
         return Outcome::usage(e);
     }
@@ -3651,58 +3486,97 @@ async fn quota_set(flags: Flags) -> Outcome {
         Ok(n) => n,
         Err(e) => return Outcome::usage(e),
     };
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let (host, home) = match quota_door(&flags) {
+        Ok(v) => v,
         Err(o) => return o,
     };
-    if let Err(e) = ordo_host::quotas::ensure_table(&pool).await {
-        return Outcome::failed(format!("database: {e}\n"));
-    }
-    match ordo_host::quotas::set_limit(&pool, &space, &quantity, limit, grace, period_secs).await {
-        Ok(()) => Outcome::ok(format!(
+    // The same engine and words as `ordo_host::quotas`; a refusal is the
+    // door's, rendered as every `--host` command renders one.
+    match crate::wire::door_op_in(
+        &host,
+        &flags,
+        &home,
+        ordo_host::quotas::SET_QUOTA,
+        serde_json::json!({
+            "space": space, "quantity": quantity, "limit": limit,
+            "grace": grace, "periodSecs": period_secs,
+        }),
+        true,
+    )
+    .await
+    {
+        Ok(_) => Outcome::ok(format!(
             "space   {space}\nSET     {quantity} limit {limit} grace {grace} period {period_secs}s\n"
         )),
-        // The same engine and words as `std.deployment.setQuota` (G9).
-        Err(e @ ordo_host::quotas::QuotaRefusal::Database(_)) => {
-            Outcome::failed(format!("{e}\n"))
-        }
-        Err(e) => Outcome::usage(format!("{e}\n")),
+        Err(o) => o,
     }
 }
 
-/// `ordo quota show --space <s>` — what is configured, not what has been
-/// used; `ordo usage` (M3) answers that.
+/// The door and the deployment's own space for `ordo quota`, whose
+/// `--space` names the tenant the quota is about. The deployment's space is
+/// `--home`, or ORDO_SPACE.
+fn quota_door(flags: &Flags) -> Result<(crate::wire::Host, String), Outcome> {
+    let host = door_only(flags)?;
+    let home = flags
+        .named_value("--home")
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var(crate::wire::SPACE_ENV)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            Outcome::usage(
+                "`--space` names the tenant. Name the deployment's own space with \
+                 `--home <s>` (or ORDO_SPACE)\n"
+                    .into(),
+            )
+        })?;
+    Ok((host, home))
+}
+
+/// `ordo quota show --space <s>` — what is configured, and what the space
+/// has used of it this period, through `std.deployment.quotas`.
 async fn quota_show(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--space", "--db"]) {
+    if let Err(e) = flags.only(&["--space", "--host", "--token", "--home"]) {
         return Outcome::usage(e);
     }
     let space = match flags.require("--space") {
         Ok(s) => s.to_string(),
         Err(e) => return Outcome::usage(e),
     };
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let (host, home) = match quota_door(&flags) {
+        Ok(v) => v,
         Err(o) => return o,
     };
-    if let Err(e) = ordo_host::quotas::ensure_table(&pool).await {
-        return Outcome::failed(format!("database: {e}\n"));
+    let rows = match crate::wire::door_rows_in(
+        &host,
+        &flags,
+        &home,
+        ordo_host::quotas::QUOTAS,
+        serde_json::json!({ "space": space }),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    if rows.is_empty() {
+        return Outcome::ok(format!("space   {space}\n(no quotas configured)\n"));
     }
-    match ordo_host::quotas::limits_for(&pool, &space).await {
-        Ok(rows) if rows.is_empty() => {
-            Outcome::ok(format!("space   {space}\n(no quotas configured)\n"))
-        }
-        Ok(rows) => {
-            let mut out = format!("space   {space}\n");
-            for (quantity, limit) in rows {
-                out.push_str(&format!(
-                    "  {quantity:<14} limit {:<8} grace {:<8} period {}s\n",
-                    limit.limit, limit.grace, limit.period_secs
-                ));
-            }
-            Outcome::ok(out)
-        }
-        Err(e) => Outcome::failed(format!("database: {e}\n")),
+    let mut out = format!("space   {space}\n");
+    for r in rows {
+        out.push_str(&format!(
+            "  {:<14} limit {:<8} grace {:<8} period {}s  used {}\n",
+            r["quantity"].as_str().unwrap_or("?"),
+            r["limit"].as_u64().unwrap_or(0),
+            r["grace"].as_u64().unwrap_or(0),
+            r["periodSecs"].as_u64().unwrap_or(0),
+            r["used"].as_u64().unwrap_or(0),
+        ));
     }
+    Outcome::ok(out)
 }
 
 fn parse_u64(flags: &Flags, name: &str) -> Result<u64, String> {
@@ -3780,48 +3654,75 @@ async fn usage(flags: Flags) -> Outcome {
 /// named for), and each target's custody (`$spacedb.custody`, R-O3's
 /// question, answered before a restore is planned rather than during one).
 async fn fleet_cmd(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--db"]) {
+    if let Err(e) = flags.only(&["--host", "--token", "--space"]) {
         return Outcome::usage(e);
     }
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
+    let host = match door_only(&flags) {
+        Ok(h) => h,
         Err(o) => return o,
     };
-    if let Err(e) = ordo_host::fleet::ensure_tables(&pool).await {
-        return Outcome::failed(format!("database: {e}\n"));
-    }
-    match ordo_host::fleet::read(&pool).await {
-        Ok(fleet) => Outcome::ok(render_fleet(&fleet.targets)),
-        Err(e) => Outcome::failed(format!("database: {e}\n")),
-    }
+    let home = match flags
+        .named_value("--space")
+        .map(str::to_string)
+        .or_else(|| std::env::var(crate::wire::SPACE_ENV).ok())
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(s) => s,
+        None => {
+            return Outcome::usage(
+                "name the deployment's own space with `--space <s>` (or ORDO_SPACE)\n".into(),
+            )
+        }
+    };
+    let rows = match crate::wire::door_rows_in(
+        &host,
+        &flags,
+        &home,
+        ordo_host::fleet::TENANTS,
+        serde_json::json!({}),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    Outcome::ok(render_fleet_rows(&rows))
 }
 
-/// One target row per distinct database, `default` first, then every
-/// attached target, each with its version, its custody and its tenants,
-/// every tenant printed as its id **and** its name (R-O6). The grouping is
-/// `ordo_host::fleet::group`, which `std.deployment.tenants` shares.
-fn render_fleet(targets: &[ordo_host::fleet::Target]) -> String {
+/// `std.deployment.tenants` rows grouped by target, `default` first, each
+/// with its custody and its tenants, every tenant printed as its id **and**
+/// its name (R-O6).
+fn render_fleet_rows(rows: &[serde_json::Value]) -> String {
+    let mut targets: Vec<(String, String, Vec<&serde_json::Value>)> = Vec::new();
+    for r in rows {
+        let label = r["target"].as_str().unwrap_or("default").to_string();
+        let custody = r["custody"].as_str().unwrap_or("platform").to_string();
+        match targets.iter_mut().find(|t| t.0 == label) {
+            Some(t) => t.2.push(r),
+            None => targets.push((label, custody, vec![r])),
+        }
+    }
+    targets.sort_by_key(|t| t.0 != "default");
+    if targets.is_empty() {
+        targets.push(("default".into(), "platform".into(), Vec::new()));
+    }
     let mut out = String::new();
-    for t in targets {
-        let version = t
-            .confirmed
-            .as_ref()
-            .map(|c| format!("{} (confirmed {})", c.version, c.confirmed_at))
-            .unwrap_or_else(|| "not yet confirmed".to_string());
-        let custody = t
-            .custody
-            .map(|c| c.as_str())
-            .unwrap_or("platform (the deployment's own database)");
-        out.push_str(&format!(
-            "target  {}\n  version   {version}\n  custody   {custody}\n",
-            t.label
-        ));
-        if t.tenants.is_empty() {
+    for (label, custody, tenants) in targets {
+        out.push_str(&format!("target  {label}\n  custody   {custody}\n"));
+        if tenants.is_empty() {
             out.push_str("  tenants   (none)\n");
-        } else {
-            for (id, name) in &t.tenants {
-                out.push_str(&format!("  tenant    {id}  {name}\n"));
-            }
+        }
+        for t in tenants {
+            out.push_str(&format!(
+                "  tenant    {}  {}{}\n",
+                t["id"].as_str().unwrap_or("?"),
+                t["name"].as_str().unwrap_or("?"),
+                t["version"]
+                    .as_str()
+                    .map(|v| format!("  on {}", numbered(t["ordinal"].as_u64(), v)))
+                    .unwrap_or_default(),
+            ));
         }
     }
     out

@@ -1264,8 +1264,35 @@ pub(crate) async fn door_op(
     params: Value,
     write: bool,
 ) -> Result<Value, Outcome> {
-    let token = token(flags).await.map_err(Outcome::usage)?;
     let space = space(flags).map_err(Outcome::usage)?;
+    door_op_in(host, flags, &space, op, params, write).await
+}
+
+/// [`door_op`] for a command whose own `--space` names something else (a
+/// quota's tenant): the deployment's space is given by the caller.
+pub(crate) async fn door_op_in(
+    host: &Host,
+    flags: &Flags,
+    space: &str,
+    op: &str,
+    params: Value,
+    write: bool,
+) -> Result<Value, Outcome> {
+    let rows = door_rows_in(host, flags, space, op, params, write).await?;
+    Ok(rows.first().cloned().unwrap_or(Value::Null))
+}
+
+/// Every result row of a deploy op, for the ops that answer a list.
+pub(crate) async fn door_rows_in(
+    host: &Host,
+    flags: &Flags,
+    space: &str,
+    op: &str,
+    params: Value,
+    write: bool,
+) -> Result<Vec<Value>, Outcome> {
+    let token = token(flags).await.map_err(Outcome::usage)?;
+    let space = space.to_string();
     let (path, result) = if write {
         let path = format!("/op/{op}");
         let mut body = params;
@@ -1302,7 +1329,87 @@ pub(crate) async fn door_op(
     if status >= 400 {
         return Err(door_refusal(status, &value));
     }
-    Ok(value["rows"][0].clone())
+    Ok(value["rows"].as_array().cloned().unwrap_or_default())
+}
+
+/// `ordo plan --host`: what applying the program would do, worked out by
+/// the deployment (`std.deployment.plan`) and rendered. Exit 1 when the
+/// apply would refuse or any change is refused, so a script cannot gate a
+/// deploy on a report it did not read.
+pub async fn plan_over_the_wire(host: &Host, flags: &Flags, source: &str, path: &str) -> Outcome {
+    let row = match door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::PLAN,
+        json!({ "program": source }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = format!(
+        "program    {path}\nversion    {}\nserving    {}\n",
+        row["version"].as_str().unwrap_or("?"),
+        row["serving"].as_str().unwrap_or("nothing"),
+    );
+    if row["alreadyStored"].as_bool() == Some(true) {
+        out.push_str("stored     this exact version is already stored\n");
+    }
+    for n in row["notes"].as_array().into_iter().flatten() {
+        out.push_str(&format!("note       {}\n", n.as_str().unwrap_or("")));
+    }
+    let would = &row["would"];
+    let mut refused = false;
+    let verdict = match would["state"].as_str() {
+        Some("create") => format!(
+            "create     an empty database: {} entities would be created",
+            would["entities"].as_u64().unwrap_or(0)
+        ),
+        Some("matches") => format!(
+            "matches    the database already holds the schema ({} pending)",
+            would["pending"].as_u64().unwrap_or(0)
+        ),
+        Some("migrate") => "migrate    the apply would make the safe changes itself".to_string(),
+        Some("held") => {
+            format!(
+            "held       the apply would store the program and not activate it: the changes need \
+             `ordo migrate --apply --direct` or the console, or set {}",
+            row["safeChangesSetting"].as_str().unwrap_or("the safe-change setting")
+        )
+        }
+        Some("refused") => {
+            refused = true;
+            format!(
+                "REFUSED    {}",
+                would["message"]
+                    .as_str()
+                    .unwrap_or("the apply would refuse")
+            )
+        }
+        _ => "?".to_string(),
+    };
+    out.push_str(&format!("\nWOULD\n  {verdict}\n"));
+    let changes = row["changes"].as_array().cloned().unwrap_or_default();
+    out.push_str(&format!("\nCHANGES ({})\n", changes.len()));
+    for c in &changes {
+        out.push_str(&format!(
+            "  {}  {}  {}\n",
+            c["class"].as_str().unwrap_or("?"),
+            c["code"].as_str().unwrap_or("?"),
+            c["change"].as_str().unwrap_or("?"),
+        ));
+        for r in c["refused"].as_array().into_iter().flatten() {
+            refused = true;
+            out.push_str(&format!("      REFUSED  {}\n", r.as_str().unwrap_or("?")));
+        }
+    }
+    if refused {
+        Outcome::failed(out)
+    } else {
+        Outcome::ok(out)
+    }
 }
 
 /// A program version cut to 12 characters for a table.

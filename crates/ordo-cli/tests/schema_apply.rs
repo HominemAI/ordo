@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 mod support;
 use ordo_conformance::Pg;
+use support::door::{door, runtime, serve, token, DEP_OWNER};
 use support::operator;
 
 const V1: &str = r#"
@@ -793,39 +794,40 @@ fn versions_list_and_show_name_the_tenants_pinned() {
         "the activation pinned the tenant"
     );
 
-    let list = operator::run("versions", &["list".into(), "--db".into(), db.into()]);
+    // Read through the door: a host over the same database.
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
+    let with_door = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(door(addr, &owner));
+        v
+    };
+    let list = operator::run("versions", &with_door(&["list"]));
     assert_eq!(list.code, 0, "{}", list.report);
     let newer = list
         .report
         .find(&format!(
-            "#2 · {second}  declared none  serving 1 tenants  <- active (new tenants)"
+            "#2 · {second}  serving 1 tenants  <- active (new tenants)"
         ))
         .unwrap_or_else(|| panic!("the active version, with its tenant:\n{}", list.report));
     let older = list
         .report
-        .find(&format!("#1 · {first}  declared none  serving 0 tenants\n"))
+        .find(&format!("#1 · {first}  serving 0 tenants\n"))
         .unwrap_or_else(|| panic!("the older version, with none:\n{}", list.report));
     assert!(newer < older, "newest first:\n{}", list.report);
 
-    let show = operator::run(
-        "versions",
-        &["show".into(), second.clone(), "--db".into(), db.into()],
-    );
+    let show = operator::run("versions", &with_door(&["show", &second]));
     assert_eq!(show.code, 0, "{}", show.report);
     for want in [
         format!("version    #2 · {second}  <- active (new tenants)"),
-        "declared   none".to_string(),
         "tenants    1 pinned".to_string(),
-        "BUILDS (1)".to_string(),
         "ACTIVATIONS (1, newest first)".to_string(),
     ] {
         assert!(show.report.contains(&want), "`{want}` in:\n{}", show.report);
     }
 
-    let unknown = operator::run(
-        "versions",
-        &["show".into(), "nope".into(), "--db".into(), db.into()],
-    );
+    let unknown = operator::run("versions", &with_door(&["show", "nope"]));
     assert_ne!(unknown.code, 0);
     assert!(unknown.report.contains("REFUSED"), "{}", unknown.report);
 }
@@ -877,9 +879,18 @@ fn a_version_carries_its_label_and_commit_and_two_compare() {
     .trim()
     .to_string();
 
+    // `apply` and `deploys` open the database named; `versions` goes
+    // through a host over the same one.
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
     let run = |args: &[&str]| {
         let mut argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        argv.extend(["--db".to_string(), db.to_string()]);
+        if args[0] == "versions" {
+            argv.extend(door(addr, &owner));
+        } else {
+            argv.extend(["--db".to_string(), db.to_string()]);
+        }
         operator::run(argv.remove(0).as_str(), &argv)
     };
     let first = run(&["apply", &path, "--label", "first cut", "--as", "test"]);
@@ -1001,6 +1012,8 @@ fn rollback_takes_an_order_number_and_revoke_times_print_in_utc() {
     );
     assert_eq!(apply(&v2, db).code, 0);
 
+    // The database path, as when no host can boot: `--direct` records the
+    // deployment owner when `--as` is not given.
     let back = operator::run(
         "rollback",
         &["--version".into(), "#1".into(), "--db".into(), db.into()],
@@ -1022,20 +1035,19 @@ fn rollback_takes_an_order_number_and_revoke_times_print_in_utc() {
     assert_ne!(unknown.code, 0);
     assert!(unknown.report.contains("REFUSED"), "{}", unknown.report);
 
-    // #2 is no longer the active version, so it can be revoked.
-    let revoke = operator::run(
-        "versions",
-        &[
-            "revoke".into(),
-            "#2".into(),
-            "--reason".into(),
-            "bad".into(),
-            "--db".into(),
-            db.into(),
-        ],
-    );
+    // #2 is no longer the active version, so it can be revoked, through
+    // the door of a host over the same database.
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
+    let with_door = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(door(addr, &owner));
+        v
+    };
+    let revoke = operator::run("versions", &with_door(&["revoke", "#2", "--reason", "bad"]));
     assert_eq!(revoke.code, 0, "{}", revoke.report);
-    let revoked = operator::run("versions", &["revoked".into(), "--db".into(), db.into()]);
+    let revoked = operator::run("versions", &with_door(&["revoked"]));
     assert!(
         revoked.report.contains(" UTC  \"bad\""),
         "a UTC time, not epoch seconds:\n{}",

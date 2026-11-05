@@ -59,11 +59,22 @@ use ordo_schema::Schema;
 
 use crate::operator::{connect, Flags, Outcome};
 
-/// `ordo plan <program> --against <db>`.
+/// `ordo plan <program> --host <h>`: what an apply of the program would do
+/// to the deployment, worked out by the deployment and not done
+/// (`std.deployment.plan`). The plan goes through the door (owner, 2026-11-05).
 pub(crate) fn run(path: &str, flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--against", "--db", "--places"]) {
+    if let Err(e) = flags.only(&["--host", "--token", "--space"]) {
         return Outcome::usage(e);
     }
+    let host = match crate::wire::requested(&flags) {
+        Some(Ok(h)) => h,
+        Some(Err(e)) => return Outcome::usage(e),
+        None => {
+            return Outcome::usage(
+                "plan goes through the door: name it with `--host <url>`\n".into(),
+            )
+        }
+    };
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -71,30 +82,13 @@ pub(crate) fn run(path: &str, flags: Flags) -> Outcome {
         Ok(rt) => rt,
         Err(e) => return Outcome::failed(format!("runtime: {e}")),
     };
-    rt.block_on(plan_against(path.to_string(), flags))
-}
-
-async fn plan_against(path: String, mut flags: Flags) -> Outcome {
-    // `--against <db>` names the database; `connect` reads `--db`. One
-    // spelling reaching two readers is how they come to disagree, so the
-    // value is moved rather than read twice.
-    if let Some(db) = flags.named.remove("--against") {
-        flags.named.insert("--db".into(), db);
-    }
-    let src = match crate::Sources::read(std::path::Path::new(&path)) {
-        Ok(s) => s,
-        Err(e) => return Outcome::failed(format!("{e}\n")),
-    };
-    let db = flags.named.get("--db").cloned().unwrap_or_default();
-    let choices = match stated(&flags) {
-        Ok(c) => c,
-        Err(o) => return o,
-    };
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
-        Err(o) => return o,
-    };
-    report(&pool, &src, &path, &db, &choices).await
+    rt.block_on(async {
+        let src = match crate::Sources::read(std::path::Path::new(path)) {
+            Ok(s) => s,
+            Err(e) => return Outcome::failed(format!("{e}\n")),
+        };
+        crate::wire::plan_over_the_wire(&host, &flags, src.text(), path).await
+    })
 }
 
 /// `--places <entity>.<field>=rescale|keep[,…]`: what happens to a stored

@@ -227,6 +227,10 @@ pub struct RuntimeConfig {
     /// `ORDO_TENANT_RESUME_ROLES`. The default is none, which leaves pausing
     /// to the deployment owner. See [`crate::pause::PausePolicy`].
     pub pausing: crate::pause::PausePolicy,
+    /// Which tenant roles may move their own tenant off a revoked version
+    /// (ruled 2026-11-05): `ORDO_VERSIONS_TENANT_MOVE_ROLES`, none by
+    /// default. See [`crate::revoked_moves::MovePolicy`].
+    pub version_moves: crate::revoked_moves::MovePolicy,
     /// Which delete ops a delegated token may call: the app developer's
     /// setting, `ORDO_DELEGABLE_OPS`. The default is none, and platform
     /// writes cannot be opened at all. See [`crate::delegable`].
@@ -1670,6 +1674,14 @@ impl RuntimeConfig {
                     detail,
                 }
             })?);
+        // Who may move their own tenant off a revoked version. A word that
+        // is not a role refuses the boot by name.
+        let version_moves = crate::revoked_moves::MovePolicy::from_env().map_err(|detail| {
+            BootRefusal::Invalid {
+                var: crate::revoked_moves::ROLES_ENV,
+                detail,
+            }
+        })?;
         // Which deletes a delegated token may call (SH-20, 11-4d). Naming a
         // platform op, or writing a pattern, refuses the boot by name.
         let delegable = {
@@ -1776,6 +1788,7 @@ impl RuntimeConfig {
             credentials,
             presence,
             pausing,
+            version_moves,
             delegable,
             access_template,
             deployment_owners,
@@ -2062,6 +2075,8 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             name if crate::deploy_ops::OPS.contains(&name) => true,
             // Maintenance windows, wired with the same state.
             name if crate::window_ops::OPS.contains(&name) => true,
+            // The tenant's own move off a revoked version, the same state.
+            crate::revoked_moves::MOVE_SELF => true,
             // 17aa piece 3 and 11-15: wired unconditionally in `assemble`
             // (`with_tenants`, `with_reap`), and until 2026-09-29 missing
             // here, so the binary answered 404 for both.
@@ -3565,6 +3580,7 @@ async fn assemble_program(
         &cfg.space.0,
     )));
     crate::pause::install(cfg.pausing.clone());
+    crate::revoked_moves::install(cfg.version_moves.clone());
     crate::delegable::install(cfg.delegable.clone());
     crate::access_template::install(cfg.access_template.clone());
     let metrics = Arc::new(Metrics::new());
@@ -5913,6 +5929,10 @@ impl Runtime {
             crate::routines::describe(&live.fixture.schema)
         );
         println!("  pausing     {}", crate::pause::current().describe());
+        println!(
+            "  moving off  a revoked version, from inside a tenant: {}",
+            crate::revoked_moves::current().describe()
+        );
         println!("  delegable   {}", crate::delegable::current().describe());
         println!(
             "  profiles    {}",
@@ -6591,6 +6611,7 @@ async fn spawn_deploy_listener(
         let pins = pins.clone();
         let rebuild = rebuild.clone();
         let node_status = node_status.clone();
+        let pool = pool.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(pin_every);
             every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -6603,6 +6624,16 @@ async fn spawn_deploy_listener(
                 }
                 for line in node_status.new_tenant_warnings().await {
                     eprintln!("{line}");
+                }
+                // Tenants on a revoked version move in their maintenance
+                // window, and only then (ruled 2026-11-05).
+                match crate::revoked_moves::sweep(&pool, now_secs()).await {
+                    Ok(swept) => {
+                        for line in crate::revoked_moves::log_lines(&swept) {
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => eprintln!("versions: the window moves were not read ({e})"),
                 }
             }
         });

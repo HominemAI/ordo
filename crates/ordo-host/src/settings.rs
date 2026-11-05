@@ -1469,6 +1469,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"30 s"#,
         r#"1 or more"#,
     ),
+    s(
+        "ORDO_VERSIONS_TENANT_MOVE_ROLES",
+        "Databases and pools",
+        r#"none"#,
+        r#""#,
+    ),
     s("ORDO_BLOB_STORE", "Storage and blobs", r#"none"#, r#""#),
     s(
         "ORDO_BLOB_S3_ENDPOINT",

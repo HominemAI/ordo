@@ -744,6 +744,93 @@ impl<'a> Windows<'a> {
         })
     }
 
+    /// **The windows in force at `now`**: each whose range, or one of
+    /// whose cron times, holds `now`, and that no skip suppresses. Each with
+    /// the time it is in force, `(start, end)`. Read by the moves off a
+    /// revoked version (`crate::revoked_moves`); a window itself still does
+    /// nothing (ask 24).
+    pub async fn open_at(&self, now: i64) -> Result<Vec<(Window, i64, i64)>, WindowRefusal> {
+        let windows = self.read(None).await?;
+        if windows.is_empty() {
+            return Ok(vec![]);
+        }
+        let skips = self.skips().await?;
+        let mut out = Vec::new();
+        for w in windows {
+            let held = match &w.schedule {
+                Schedule::Range { start, end } => {
+                    (*start <= now && now < *end).then_some((*start, *end))
+                }
+                Schedule::Cron { cron, length } => match Cron::parse(cron) {
+                    Ok(c) => c
+                        .expand(now - length + 1, now + 1, MAX_OCCURRENCES_PER_WINDOW)
+                        .into_iter()
+                        .map(|s| (s, s + length))
+                        .find(|(s, e)| *s <= now && now < *e),
+                    Err(_) => None,
+                },
+            };
+            let Some((start, end)) = held else { continue };
+            let skipped = skips
+                .iter()
+                .any(|s| s.window == w.id && start >= s.start && start < s.end);
+            if !skipped {
+                out.push((w, start, end));
+            }
+        }
+        Ok(out)
+    }
+
+    /// For each of `spaces`, the start of the next unskipped time a window
+    /// covering it gives, after `now` and within the list's 12 months
+    /// ahead. A tenant no window covers is absent.
+    pub async fn next_for(
+        &self,
+        spaces: &[&str],
+        now: i64,
+    ) -> Result<BTreeMap<String, i64>, WindowRefusal> {
+        let windows = self.read(None).await?;
+        if windows.is_empty() || spaces.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let skips = self.skips().await?;
+        let (_, to) = span(now);
+        // Each window's first time after `now`, once.
+        let firsts: Vec<(&Window, i64)> = windows
+            .iter()
+            .filter_map(|w| {
+                let starts: Vec<i64> = match &w.schedule {
+                    Schedule::Range { start, .. } => vec![*start],
+                    Schedule::Cron { cron, .. } => match Cron::parse(cron) {
+                        Ok(c) => c.expand(now + 1, to, MAX_OCCURRENCES_PER_WINDOW),
+                        Err(_) => vec![],
+                    },
+                };
+                starts
+                    .into_iter()
+                    .find(|t| {
+                        *t > now
+                            && !skips
+                                .iter()
+                                .any(|s| s.window == w.id && *t >= s.start && *t < s.end)
+                    })
+                    .map(|t| (w, t))
+            })
+            .collect();
+        let mut out = BTreeMap::new();
+        for space in spaces {
+            if let Some(t) = firsts
+                .iter()
+                .filter(|(w, _)| w.target.covers(space))
+                .map(|(_, t)| *t)
+                .min()
+            {
+                out.insert(space.to_string(), t);
+            }
+        }
+        Ok(out)
+    }
+
     /// Refuse tenants that do not exist or were reaped, naming each.
     async fn refuse_unknown(&self, ids: &[&str]) -> Result<(), WindowRefusal> {
         if ids.is_empty() {

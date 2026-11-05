@@ -21,6 +21,12 @@
 //!   `ordo versions unrevoke --host` does.
 //! - `std.deployment.revoked`: each revoked version and the tenants pinned
 //!   to it. What `ordo versions revoked --host` prints.
+//! - `std.deployment.moveOffRevoked($tenant)`: move one tenant off the
+//!   revoked version it is on, to the target the app developer chose, now
+//!   (`crate::revoked_moves`). What `ordo versions move --host` does.
+//! - `std.deployment.setMoveTarget($tenant, $version?)`: set or clear where
+//!   one tenant goes off a revoked version. What `ordo versions target
+//!   --host` does.
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -70,8 +76,14 @@ pub const REVOKED: &str = "std.deployment.revoked";
 pub const PIN: &str = "std.deployment.pin";
 /// One tenant's version, epoch and pin history.
 pub const TENANT_VERSION: &str = "std.deployment.tenantVersion";
+/// **Move one tenant off a revoked version, now** (ruled 2026-11-05): the
+/// move on demand, by the deployment owner or the app developer's own
+/// system, to the target the developer chose.
+pub const MOVE_OFF_REVOKED: &str = "std.deployment.moveOffRevoked";
+/// Where one tenant goes off a revoked version, set or cleared.
+pub const SET_MOVE_TARGET: &str = "std.deployment.setMoveTarget";
 
-pub const OPS: [&str; 10] = [
+pub const OPS: [&str; 12] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -82,6 +94,8 @@ pub const OPS: [&str; 10] = [
     REVOKED,
     PIN,
     TENANT_VERSION,
+    MOVE_OFF_REVOKED,
+    SET_MOVE_TARGET,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -91,7 +105,16 @@ pub const OPS: [&str; 10] = [
 /// caller is never asked either (same day). The role gate is unchanged:
 /// deployment owner only, on the deployment's own space, and a delegated
 /// token stays refused (`delegable.rs`: platform writes are not delegable).
-pub const NO_PRESENCE: [&str; 1] = [PIN];
+///
+/// The moves off a revoked version and their target are moves too
+/// (2026-11-05), and so is the tenant's own move when the app developer
+/// grants it: the grant is the control.
+pub const NO_PRESENCE: [&str; 4] = [
+    PIN,
+    MOVE_OFF_REVOKED,
+    SET_MOVE_TARGET,
+    crate::revoked_moves::MOVE_SELF,
+];
 
 /// The activation log's length when the caller names none.
 pub const DEFAULT_LIMIT: i64 = 20;
@@ -255,7 +278,37 @@ pub fn specs() -> Vec<OpSpec> {
             }],
             &["tenant", "version", "ordinal", "label", "epoch", "history"],
         ),
+        spec(
+            MOVE_OFF_REVOKED,
+            OpKind::Write,
+            vec![tenant_param()],
+            &["tenant", "from", "to", "epoch", "ordinal", "chosenBy"],
+        ),
+        spec(
+            SET_MOVE_TARGET,
+            OpKind::Write,
+            vec![
+                tenant_param(),
+                ParamSpec {
+                    // Absent clears the tenant's own target.
+                    name: "version".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: false,
+                    bounds: None,
+                },
+            ],
+            &["tenant", "target", "ordinal"],
+        ),
     ]
+}
+
+fn tenant_param() -> ParamSpec {
+    ParamSpec {
+        name: "tenant".to_string(),
+        ty: ParamTy::Text { max_len: Some(128) },
+        required: true,
+        bounds: None,
+    }
 }
 
 fn reason_param() -> ParamSpec {
@@ -498,11 +551,66 @@ pub async fn execute(
             })
         }
         REVOKED => {
-            let list = crate::versions::Versions::on(&ops.pool)
+            let mut list = crate::versions::Versions::on(&ops.pool)
                 .pinned_to_revoked()
                 .await
                 .map_err(|e| e.to_exec_error("the revoked versions could not be read"))?;
+            crate::revoked_moves::note_next_windows(
+                &ops.pool,
+                &mut list,
+                crate::runtime::now_secs(),
+            )
+            .await;
             json!({ "versions": list.iter().map(revoked_json).collect::<Vec<_>>() })
+        }
+        MOVE_OFF_REVOKED => {
+            let tenant = text(bound, "tenant").unwrap_or_default();
+            let moved = crate::versions::Versions::on(&ops.pool)
+                .move_off_revoked(
+                    tenant,
+                    caller,
+                    crate::versions::PinCause::Demand,
+                    crate::runtime::now_secs(),
+                )
+                .await
+                .map_err(|e| e.to_exec_error("the tenant was not moved"))?;
+            ops.record(
+                caller,
+                MOVE_OFF_REVOKED,
+                "moved-off-revoked",
+                format!(
+                    "tenant={tenant} version={} was={} by={caller}",
+                    moved.change.to,
+                    moved.change.from.as_deref().unwrap_or("none")
+                ),
+            );
+            crate::revoked_moves::moved_json(&ops.pool, &moved).await?
+        }
+        SET_MOVE_TARGET => {
+            let tenant = text(bound, "tenant").unwrap_or_default();
+            let version = text(bound, "version").filter(|v| !v.is_empty());
+            let v = crate::versions::Versions::on(&ops.pool);
+            let set = v
+                .set_move_target(tenant, version, caller, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the tenant's move target was not set"))?;
+            ops.record(
+                caller,
+                SET_MOVE_TARGET,
+                "move-target",
+                format!(
+                    "tenant={tenant} target={} by={caller}",
+                    set.as_deref().unwrap_or("cleared")
+                ),
+            );
+            let ordinal = match &set {
+                Some(t) => v
+                    .ordinal_of(t)
+                    .await
+                    .map_err(|e| e.to_exec_error("the version's order number could not be read"))?,
+                None => None,
+            };
+            json!({ "tenant": tenant, "target": set, "ordinal": ordinal })
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),
     };
@@ -541,11 +649,14 @@ pub fn revoked_json(r: &crate::versions::RevokedVersion) -> serde_json::Value {
         "reason": r.mark.reason,
         "actor": r.mark.actor,
         "at": r.mark.at,
+        "moveTo": r.mark.move_to,
         "tenantCount": r.tenant_count,
         "tenants": r.tenants.iter().map(|t| json!({
             "space": t.space,
             "name": t.name,
             "state": t.state,
+            "target": t.target,
+            "nextWindow": t.next_window,
         })).collect::<Vec<_>>(),
     })
 }
@@ -562,6 +673,7 @@ pub fn revoked_from_json(v: &serde_json::Value) -> Option<crate::versions::Revok
             actor: v["actor"].as_str()?.to_string(),
             reason: v["reason"].as_str()?.to_string(),
             at: v["at"].as_u64()?,
+            move_to: v["moveTo"].as_str().map(str::to_string),
         },
         ordinal: v["ordinal"].as_u64(),
         tenants: v["tenants"]
@@ -572,6 +684,8 @@ pub fn revoked_from_json(v: &serde_json::Value) -> Option<crate::versions::Revok
                     space: t["space"].as_str()?.to_string(),
                     name: t["name"].as_str()?.to_string(),
                     state: t["state"].as_str()?.to_string(),
+                    target: t["target"].as_str().map(str::to_string),
+                    next_window: t["nextWindow"].as_i64(),
                 })
             })
             .collect(),

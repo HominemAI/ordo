@@ -57,9 +57,28 @@
 //!   names where its tenants go (ask 18). With it, the activation and the
 //!   revoke are one transaction, and the pins move as any activation moves
 //!   them. Ordo never picks the version.
-//! - Tenants on a revoked version stay there. Moving them in their
-//!   maintenance windows needs each tenant served its own pin, which is
-//!   increment 3 (ask 21).
+//! - Tenants on a revoked version stay there until they move off it
+//!   (below).
+//!
+//! # Moving off a revoked version (increment 3, session 2)
+//!
+//! Ruled 2026-11-05: no deadline. A tenant on a revoked version moves in
+//! its maintenance window, or on demand; with neither it stays.
+//! [`Versions::move_off_revoked`] is the one move, called by the window
+//! sweep (`crate::revoked_moves`), by the deployment owner or a system
+//! (`std.deployment.moveOffRevoked`), and by the tenant when the app
+//! developer grants it (`std.space.moveOffRevoked`, off by default).
+//!
+//! The target is the app developer's choice, read in this order:
+//!
+//! 1. the tenant's own, set by [`Versions::set_move_target`]
+//!    (`$move_targets`);
+//! 2. the revoke's, `--move-to` on a version that is not active
+//!    (`$revocations.move_to`);
+//! 3. the active version.
+//!
+//! A target that is revoked is refused, never passed over for the next:
+//! Ordo picks nothing the developer did not choose beyond the default.
 
 use std::collections::BTreeMap;
 
@@ -218,9 +237,22 @@ CREATE TABLE IF NOT EXISTS \"$revocations\" ( \
   \"act\" text NOT NULL, \
   \"actor\" text NOT NULL, \
   \"reason\" text NOT NULL, \
-  \"at\" bigint NOT NULL \
+  \"at\" bigint NOT NULL, \
+  \"move_to\" text NULL \
 ); \
 CREATE INDEX IF NOT EXISTS \"$revocations_version\" ON \"$revocations\" (\"version\", \"seq\")";
+
+/// `$move_targets`, beside `$spaces`: where one tenant goes when it moves
+/// off a revoked version, set by the deployment owner (ruled 2026-11-05).
+/// It names a tenant and holds none of its data, so erasure deletes its row
+/// (`ordo_exec::erase::ATTACHMENTS`).
+const MOVE_TARGETS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$move_targets\" ( \
+  \"space\" text PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"set_by\" text NOT NULL, \
+  \"set_at\" bigint NOT NULL \
+)";
 
 /// Create `$revocations`. Every transaction that pins reads it, and a
 /// statement that fails inside a transaction aborts it, so each makes sure
@@ -229,7 +261,40 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
     if pool.rows(REVOCATIONS_DDL).await.is_err() {
         pool.rows(REVOCATIONS_DDL).await?;
     }
+    // `move_to` came with increment 3 (2026-11-05). Added only when it is
+    // missing: `ADD COLUMN` locks the table exclusively even when the
+    // column is there, and every pin change runs this.
+    match pool
+        .rows("SELECT \"move_to\" FROM \"$revocations\" LIMIT 0")
+        .await
+    {
+        Err(e) if e.is_missing_column() => {
+            pool.rows(
+                "ALTER TABLE \"$revocations\" ADD COLUMN IF NOT EXISTS \"move_to\" text NULL",
+            )
+            .await?;
+        }
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
+    if pool.rows(MOVE_TARGETS_DDL).await.is_err() {
+        pool.rows(MOVE_TARGETS_DDL).await?;
+    }
     Ok(())
+}
+
+/// Read `$revocations` with `sql`. A table from before `move_to` gains the
+/// column first; a database with none answers empty.
+async fn revocation_rows(pool: &Pool, sql: &str) -> Result<Vec<Vec<Option<String>>>, PoolError> {
+    match pool.rows(sql).await {
+        Ok(rows) => Ok(rows),
+        Err(e) if e.is_missing_table() => Ok(vec![]),
+        Err(e) if e.is_missing_column() => {
+            ensure_revocations(pool).await?;
+            pool.rows(sql).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// The current mark on `version`, read inside `tx`, after its pin lock.
@@ -241,7 +306,8 @@ async fn mark_in(tx: &ordo_exec::TxConn, version: &str) -> Result<Option<Revocat
 /// The newest `$revocations` row of each version whose newest is a revoke.
 fn mark_sql(version: Option<&str>) -> String {
     format!(
-        "SELECT \"seq\", \"version\", \"act\", \"actor\", \"reason\", \"at\" FROM ( \
+        "SELECT \"seq\", \"version\", \"act\", \"actor\", \"reason\", \"at\", \"move_to\" \
+         FROM ( \
            SELECT DISTINCT ON (\"version\") * FROM \"$revocations\" {} \
            ORDER BY \"version\", \"seq\" DESC) m WHERE \"act\" = 'revoke'",
         version
@@ -261,6 +327,7 @@ fn revocation_row(r: &[Option<String>]) -> Option<Revocation> {
         actor: r.get(3)?.clone()?,
         reason: r.get(4)?.clone()?,
         at: r.get(5)?.clone()?.parse().ok()?,
+        move_to: r.get(6).cloned().flatten(),
     })
 }
 
@@ -363,6 +430,15 @@ pub enum PinCause {
     /// One tenant moved on its own, by the deployment owner's act
     /// ([`Versions::pin`]): a move on demand.
     Pin,
+    /// Off a revoked version, in the tenant's maintenance window
+    /// ([`Versions::move_off_revoked`], ruled 2026-11-05).
+    Window,
+    /// Off a revoked version, on demand: the deployment owner or the app
+    /// developer's own system.
+    Demand,
+    /// Off a revoked version, on demand by the tenant, which the app
+    /// developer granted.
+    Tenant,
 }
 
 impl PinCause {
@@ -373,6 +449,9 @@ impl PinCause {
             PinCause::NewTenant => "new_tenant",
             PinCause::Backfill => "backfill",
             PinCause::Pin => "pin",
+            PinCause::Window => "window",
+            PinCause::Demand => "demand",
+            PinCause::Tenant => "tenant",
         }
     }
 }
@@ -443,6 +522,9 @@ pub struct Revocation {
     pub actor: String,
     pub reason: String,
     pub at: u64,
+    /// Where this revoke's tenants move, when the deployment owner named
+    /// it. `None`: the active version.
+    pub move_to: Option<String>,
 }
 
 /// What [`Versions::revoke`] did.
@@ -453,6 +535,43 @@ pub struct Revoked {
     /// The activation made first, when the version was the active one:
     /// `(from, to)`.
     pub moved: Option<(String, String)>,
+    /// Where its tenants move off it, when named.
+    pub move_to: Option<String>,
+}
+
+/// Whose choice a move's target was ([`Versions::move_target`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetSource {
+    /// The tenant's own, `$move_targets`.
+    Tenant,
+    /// The revoke's `--move-to`.
+    Revoke,
+    /// None was named: the active version, the default.
+    Active,
+}
+
+impl TargetSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetSource::Tenant => "tenant",
+            TargetSource::Revoke => "revoke",
+            TargetSource::Active => "active",
+        }
+    }
+}
+
+/// Where a tenant goes off a revoked version, and whose choice it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveTarget {
+    pub version: String,
+    pub source: TargetSource,
+}
+
+/// What [`Versions::move_off_revoked`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedOff {
+    pub change: PinChange,
+    pub source: TargetSource,
 }
 
 /// A tenant pinned to a revoked version.
@@ -461,6 +580,12 @@ pub struct RevokedPin {
     pub space: String,
     pub name: String,
     pub state: String,
+    /// The tenant's own move target, when one is set.
+    pub target: Option<String>,
+    /// When its next maintenance window starts, in seconds since 1970 UTC.
+    /// `None`: no window covers it, or it was not read
+    /// (`crate::revoked_moves::note_next_windows` fills it).
+    pub next_window: Option<i64>,
 }
 
 /// One revoked version and the tenants pinned to it
@@ -551,6 +676,21 @@ pub enum VersionRefusal {
     /// A pin of a tenant there is none of, or one that serves nothing
     /// (`failed`, `reaped`). Fix the input.
     NoTenant { space: String },
+    /// A move off a revoked version for a tenant whose version is not
+    /// revoked. Nothing to move.
+    NotOnRevoked {
+        space: String,
+        version: Option<String>,
+    },
+    /// The target a move off a revoked version would take is revoked
+    /// itself. Ordo never picks another (ruled 2026-11-05); the deployment
+    /// owner names one, or lifts the mark.
+    TargetRevoked {
+        space: String,
+        named: String,
+        source: TargetSource,
+        mark: Box<Revocation>,
+    },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -568,12 +708,14 @@ impl VersionRefusal {
             | VersionRefusal::Reason(_)
             | VersionRefusal::NamedBySetting { .. }
             | VersionRefusal::NoTenant { .. }
+            | VersionRefusal::TargetRevoked { .. }
             | VersionRefusal::Revoked {
                 setting: Some(_), ..
             } => Remedy::FixInput,
             VersionRefusal::Collision { .. }
             | VersionRefusal::Revoked { .. }
             | VersionRefusal::AlreadyRevoked { .. }
+            | VersionRefusal::NotOnRevoked { .. }
             | VersionRefusal::NotRevoked { .. } => Remedy::Refuse,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
@@ -618,12 +760,13 @@ impl VersionRefusal {
             // same call lands once the mark is lifted or the move named.
             VersionRefusal::Revoked { .. }
             | VersionRefusal::RevokeActive { .. }
+            | VersionRefusal::TargetRevoked { .. }
             | VersionRefusal::NamedBySetting { .. } => {
                 ExecError::new(ErrorCode::ApplyRefused, message)
             }
-            VersionRefusal::NotRevoked { .. } | VersionRefusal::NoTenant { .. } => {
-                ExecError::new(ErrorCode::NotFound, message)
-            }
+            VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::NoTenant { .. }
+            | VersionRefusal::NotOnRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
             VersionRefusal::Setting { .. } => ExecError::new(ErrorCode::Internal, message),
             VersionRefusal::Store(e) => {
                 ExecError::of_fault(e.class(), ErrorCode::SpaceUnavailable, message)
@@ -737,6 +880,43 @@ impl std::fmt::Display for VersionRefusal {
                 "no_tenant: no tenant `{space}` is provisioning, active or paused here, so \
                  there is no pin to move. `ordo tenants list` names them"
             ),
+            VersionRefusal::NotOnRevoked { space, version } => write!(
+                f,
+                "not_on_revoked: tenant `{space}` is on {}, which is not revoked, so there is \
+                 nothing to move it off. `ordo versions pin {space} <version>` moves it anyway",
+                version.as_deref().unwrap_or("no version")
+            ),
+            VersionRefusal::TargetRevoked {
+                space,
+                named,
+                source,
+                mark,
+            } => {
+                write!(
+                    f,
+                    "move_target_revoked: tenant `{space}` would move to {named}, which was \
+                     revoked by {} at {}: \"{}\". Ordo picks no other. ",
+                    mark.actor,
+                    utc_minute(mark.at),
+                    mark.reason
+                )?;
+                match source {
+                    TargetSource::Tenant => write!(
+                        f,
+                        "It is the tenant's own target: `ordo versions target {space} \
+                         <version>` names another, or `--clear` falls back to the revoke's"
+                    ),
+                    TargetSource::Revoke => write!(
+                        f,
+                        "It is the revoke's `--move-to`: `ordo versions target {space} \
+                         <version>` names one for this tenant"
+                    ),
+                    TargetSource::Active => write!(
+                        f,
+                        "`ordo versions target {space} <version>` names one for this tenant"
+                    ),
+                }
+            }
             VersionRefusal::Store(e) => write!(f, "{e}"),
         }
     }
@@ -1481,8 +1661,9 @@ impl<'a> Versions<'a> {
     /// When it is the active version, `move_to` must name a stored version
     /// that is not revoked (ask 18). The activation to it, the pins it
     /// moves and the revoke are then one transaction. A version that is not
-    /// active is only marked, and `move_to` is refused for it: nothing
-    /// would move.
+    /// active is only marked, and `move_to`, when given, is where its
+    /// tenants go when they move off it (ruled 2026-11-05): in their
+    /// window or on demand, never at once.
     ///
     /// The checks an activation makes of the database (the load gate) are
     /// the caller's, before this: `crate::apply_op::revoke`.
@@ -1511,7 +1692,7 @@ impl<'a> Versions<'a> {
             });
         }
         let active = active_in(&tx).await?;
-        let moved = match (active.as_deref() == Some(version.as_str()), move_to) {
+        let moved = match (active.as_deref() == Some(version.as_str()), move_to.clone()) {
             (true, None) => {
                 tx.rollback().await?;
                 return Err(VersionRefusal::RevokeActive {
@@ -1540,13 +1721,20 @@ impl<'a> Versions<'a> {
                 repin(&tx, &repin_sql(&to, actor, cause, at, None)).await?;
                 Some((version.clone(), to))
             }
-            (false, Some(_)) => {
+            (false, Some(to)) if to == version => {
                 tx.rollback().await?;
                 return Err(VersionRefusal::MoveTo(format!(
-                    "{} is not the active version, so revoking it moves nothing. Leave \
-                     `--move-to` out; `ordo rollback --version <v>` moves the deployment",
+                    "it names {}, the version being revoked; name another, or leave it out \
+                     to move its tenants to the active version",
                     self.named(&version).await?
                 )));
+            }
+            (false, Some(to)) => {
+                if let Some(mark) = mark_in(&tx, &to).await? {
+                    tx.rollback().await?;
+                    return Err(self.revoked(mark, None).await);
+                }
+                None
             }
             (false, None) => None,
         };
@@ -1556,10 +1744,15 @@ impl<'a> Versions<'a> {
             actor,
             &reason,
             at,
+            move_to.as_deref(),
         ))
         .await?;
         tx.commit().await?;
-        Ok(Revoked { version, moved })
+        Ok(Revoked {
+            version,
+            moved,
+            move_to,
+        })
     }
 
     /// **Lift the revoke mark** from the version a person named (ask 20),
@@ -1589,6 +1782,7 @@ impl<'a> Versions<'a> {
             actor,
             &reason,
             at,
+            None,
         ))
         .await?;
         tx.commit().await?;
@@ -1598,24 +1792,20 @@ impl<'a> Versions<'a> {
     /// Every revoked version's mark. A database with no `$revocations`
     /// answers empty.
     pub async fn revocations(&self) -> Result<BTreeMap<String, Revocation>, VersionRefusal> {
-        match self.pool.rows(&mark_sql(None)).await {
-            Ok(rows) => Ok(rows
-                .iter()
-                .filter_map(|r| revocation_row(r))
-                .map(|r| (r.version.clone(), r))
-                .collect()),
-            Err(e) if e.is_missing_table() => Ok(BTreeMap::new()),
-            Err(e) => Err(e.into()),
-        }
+        Ok(revocation_rows(self.pool, &mark_sql(None))
+            .await?
+            .iter()
+            .filter_map(|r| revocation_row(r))
+            .map(|r| (r.version.clone(), r))
+            .collect())
     }
 
     /// One version's mark, `None` when it is not revoked.
     pub async fn revocation_of(&self, version: &str) -> Result<Option<Revocation>, VersionRefusal> {
-        match self.pool.rows(&mark_sql(Some(version))).await {
-            Ok(rows) => Ok(rows.first().and_then(|r| revocation_row(r))),
-            Err(e) if e.is_missing_table() => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        Ok(revocation_rows(self.pool, &mark_sql(Some(version)))
+            .await?
+            .first()
+            .and_then(|r| revocation_row(r)))
     }
 
     /// Every revoke and unrevoke of one version, oldest first.
@@ -1623,19 +1813,16 @@ impl<'a> Versions<'a> {
         &self,
         version: &str,
     ) -> Result<Vec<Revocation>, VersionRefusal> {
-        let rows = match self
-            .pool
-            .rows(&format!(
-                "SELECT \"seq\", \"version\", \"act\", \"actor\", \"reason\", \"at\" \
+        let rows = revocation_rows(
+            self.pool,
+            &format!(
+                "SELECT \"seq\", \"version\", \"act\", \"actor\", \"reason\", \"at\", \
+                   \"move_to\" \
                  FROM \"$revocations\" WHERE \"version\" = {} ORDER BY \"seq\"",
                 sql_lit(version)
-            ))
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) if e.is_missing_table() => return Ok(vec![]),
-            Err(e) => return Err(e.into()),
-        };
+            ),
+        )
+        .await?;
         Ok(rows.iter().filter_map(|r| revocation_row(r)).collect())
     }
 
@@ -1670,15 +1857,19 @@ impl<'a> Versions<'a> {
             return Ok(Vec::new());
         }
         let ordinals = registry::ordinals(self.pool).await?;
+        // The tenants' own targets live beside `$spaces`, made by the first
+        // pin change since increment 3.
+        ensure_revocations(self.pool).await?;
         let mut out = Vec::with_capacity(marks.len());
         for (version, mark) in marks {
             let rows = match self
                 .pool
                 .rows(&format!(
-                    "SELECT \"$space\", coalesce(\"name\", ''), \"state\", \
-                       count(*) OVER () FROM \"$spaces\" \
-                     WHERE \"version\" = {} AND \"state\" IN {PINNED_STATES} \
-                     ORDER BY \"$space\" LIMIT {MAX_REVOKED_TENANTS}",
+                    "SELECT s.\"$space\", coalesce(s.\"name\", ''), s.\"state\", \
+                       count(*) OVER (), t.\"version\" FROM \"$spaces\" s \
+                     LEFT JOIN \"$move_targets\" t ON t.\"space\" = s.\"$space\" \
+                     WHERE s.\"version\" = {} AND s.\"state\" IN {PINNED_STATES} \
+                     ORDER BY s.\"$space\" LIMIT {MAX_REVOKED_TENANTS}",
                     sql_lit(&version)
                 ))
                 .await
@@ -1701,6 +1892,8 @@ impl<'a> Versions<'a> {
                             space: r.first()?.clone()?,
                             name: r.get(1)?.clone()?,
                             state: r.get(2)?.clone()?,
+                            target: r.get(4).cloned().flatten(),
+                            next_window: None,
                         })
                     })
                     .collect(),
@@ -1711,16 +1904,261 @@ impl<'a> Versions<'a> {
         out.sort_by_key(|r| r.ordinal);
         Ok(out)
     }
+
+    // ── moving off a revoked version (ruled 2026-11-05) ───────────────────
+
+    /// **Set where one tenant goes off a revoked version**, or clear it
+    /// (`None`), so the revoke's target or the active version applies. The
+    /// deployment owner's act. A version not stored, or revoked, is
+    /// refused, and so is a tenant that is not `provisioning`, `active` or
+    /// `paused`. Answers the version set.
+    pub async fn set_move_target(
+        &self,
+        space: &str,
+        name: Option<&str>,
+        actor: &str,
+        at: u64,
+    ) -> Result<Option<String>, VersionRefusal> {
+        let version = match name {
+            Some(n) => Some(self.resolve(n).await?),
+            None => None,
+        };
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let held = tx
+            .rows(&format!(
+                "SELECT 1 FROM \"$spaces\" WHERE \"$space\" = {} AND \"state\" IN {PINNED_STATES}",
+                sql_lit(space)
+            ))
+            .await?;
+        if held.is_empty() {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        }
+        match &version {
+            Some(v) => {
+                if let Some(mark) = mark_in(&tx, v).await? {
+                    tx.rollback().await?;
+                    return Err(self.revoked(mark, None).await);
+                }
+                tx.rows(&format!(
+                    "INSERT INTO \"$move_targets\" (\"space\", \"version\", \"set_by\", \"set_at\") \
+                     VALUES ({s}, {v}, {a}, {at}) ON CONFLICT (\"space\") DO UPDATE SET \
+                     \"version\" = EXCLUDED.\"version\", \"set_by\" = EXCLUDED.\"set_by\", \
+                     \"set_at\" = EXCLUDED.\"set_at\"",
+                    s = sql_lit(space),
+                    v = sql_lit(v),
+                    a = sql_lit(actor),
+                ))
+                .await?;
+            }
+            None => {
+                tx.rows(&format!(
+                    "DELETE FROM \"$move_targets\" WHERE \"space\" = {}",
+                    sql_lit(space)
+                ))
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(version)
+    }
+
+    /// The tenant's own move target, when one is set.
+    pub async fn move_target_of(&self, space: &str) -> Result<Option<String>, VersionRefusal> {
+        match self
+            .pool
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$move_targets\" WHERE \"space\" = {}",
+                sql_lit(space)
+            ))
+            .await
+        {
+            Ok(rows) => Ok(rows.first().and_then(|r| r.first().cloned().flatten())),
+            Err(e) if e.is_missing_table() => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// **Where a tenant on a revoked version goes**, and whose choice that
+    /// was: its own target, the revoke's, or the active version. `mark` is
+    /// the revoke of the version it is on.
+    async fn move_target_in(
+        tx: &ordo_exec::TxConn,
+        space: &str,
+        mark: &Revocation,
+    ) -> Result<Option<MoveTarget>, PoolError> {
+        let own = tx
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$move_targets\" WHERE \"space\" = {}",
+                sql_lit(space)
+            ))
+            .await?;
+        if let Some(v) = own.first().and_then(|r| r.first().cloned().flatten()) {
+            return Ok(Some(MoveTarget {
+                version: v,
+                source: TargetSource::Tenant,
+            }));
+        }
+        if let Some(v) = &mark.move_to {
+            return Ok(Some(MoveTarget {
+                version: v.clone(),
+                source: TargetSource::Revoke,
+            }));
+        }
+        Ok(active_in(tx).await?.map(|v| MoveTarget {
+            version: v,
+            source: TargetSource::Active,
+        }))
+    }
+
+    /// **Move one tenant off the revoked version it is on**, to the target
+    /// the app developer chose (the module doc's order), now. The one move
+    /// every path calls: the window sweep (`window`), the deployment owner
+    /// or a system on demand (`demand`), the tenant when granted
+    /// (`tenant`).
+    ///
+    /// Refused: a tenant that is not `provisioning`, `active` or `paused`,
+    /// one whose version is not revoked, and a target that is revoked or
+    /// no longer stored. One transaction under the pin lock, so two nodes
+    /// sweeping the same window move the tenant once and the second is
+    /// told it is not on a revoked version.
+    pub async fn move_off_revoked(
+        &self,
+        space: &str,
+        actor: &str,
+        cause: PinCause,
+        at: u64,
+    ) -> Result<MovedOff, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let held = tx
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$spaces\" \
+                 WHERE \"$space\" = {} AND \"state\" IN {PINNED_STATES}",
+                sql_lit(space)
+            ))
+            .await?;
+        let Some(row) = held.first() else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        };
+        let from = row.first().cloned().flatten();
+        let mark = match &from {
+            Some(v) => mark_in(&tx, v).await?,
+            None => None,
+        };
+        let (Some(from), Some(mark)) = (from.clone(), mark) else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NotOnRevoked {
+                space: space.to_string(),
+                version: match &from {
+                    Some(v) => Some(self.named(v).await?),
+                    None => None,
+                },
+            });
+        };
+        let Some(target) = Self::move_target_in(&tx, space, &mark).await? else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NotStored {
+                asked: "the active version".into(),
+                stored: vec![],
+            });
+        };
+        if let Some(bad) = mark_in(&tx, &target.version).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::TargetRevoked {
+                space: space.to_string(),
+                named: self.named(&target.version).await?,
+                source: target.source,
+                mark: Box::new(bad),
+            });
+        }
+        if registry::get(self.pool, &target.version).await?.is_none() {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NotStored {
+                asked: target.version,
+                stored: self.unrevoked().await?,
+            });
+        }
+        let filter = format!(
+            "AND \"$space\" = {} AND \"version\" = {}",
+            sql_lit(space),
+            sql_lit(&from)
+        );
+        repin(
+            &tx,
+            &repin_sql(&target.version, actor, cause, at, Some(&filter)),
+        )
+        .await?;
+        tx.commit().await?;
+        let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);
+        Ok(MovedOff {
+            change: PinChange {
+                seq: 0,
+                space: space.to_string(),
+                from: Some(from),
+                to: target.version,
+                epoch,
+                actor: actor.to_string(),
+                cause: cause.as_str().to_string(),
+                at,
+            },
+            source: target.source,
+        })
+    }
+
+    /// Every tenant on a revoked version, `(space, version)`, at most
+    /// `limit`, by tenant id. A database with no pins answers empty.
+    pub async fn on_revoked(&self, limit: usize) -> Result<Vec<(String, String)>, VersionRefusal> {
+        if self.revocations().await?.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = match self
+            .pool
+            .rows(&format!(
+                "SELECT \"$space\", \"version\" FROM \"$spaces\" \
+                 WHERE \"state\" IN {PINNED_STATES} AND \"version\" IN \
+                   (SELECT \"version\" FROM ({}) m) \
+                 ORDER BY \"$space\" LIMIT {limit}",
+                mark_sql(None)
+            ))
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) if e.is_missing_table() || e.is_missing_column() => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?)))
+            .collect())
+    }
 }
 
-fn revocation_sql(version: &str, act: RevokeAct, actor: &str, reason: &str, at: u64) -> String {
+fn revocation_sql(
+    version: &str,
+    act: RevokeAct,
+    actor: &str,
+    reason: &str,
+    at: u64,
+    move_to: Option<&str>,
+) -> String {
     format!(
-        "INSERT INTO \"$revocations\" (\"version\", \"act\", \"actor\", \"reason\", \"at\") \
-         VALUES ({}, {}, {}, {}, {at})",
+        "INSERT INTO \"$revocations\" (\"version\", \"act\", \"actor\", \"reason\", \"at\", \
+           \"move_to\") \
+         VALUES ({}, {}, {}, {}, {at}, {})",
         sql_lit(version),
         sql_lit(act.as_str()),
         sql_lit(actor),
         sql_lit(reason),
+        move_to.map(sql_lit).unwrap_or_else(|| "NULL".to_string()),
     )
 }
 

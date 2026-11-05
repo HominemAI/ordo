@@ -426,6 +426,9 @@ for tests). `howto-sign-in.md` and `howto-sharing.md` show them in use.
 
 - **Passkeys.** `registerPasskey` signs a new person up, `signInWithPasskey`
   signs them in, and `stepUp` asks for a fresh touch before a sensitive call.
+  A person with no passkey gives the touch by signing in again:
+  `reauthenticateWithPassword` (or another first factor), then
+  `stepUpWithProof` with the proof.
   `toBase64Url` and `fromBase64Url` are the encoding helpers.
 - **Emailed code.** `beginEmailSignIn` sends the code and
   `completeEmailSignIn` redeems it.

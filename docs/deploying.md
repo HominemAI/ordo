@@ -89,15 +89,20 @@ connection slot from a healthy one.
 | `ORDO_TENANT_ATTACH_HOSTS` | **deny everything** | comma-separated hosts a tenant may be attached to: **both** a database host and a bucket endpoint's host. **Unset means no tenant can be attached anywhere**, so `std.space.create`'s `$db` and `std.space.attachBucket`'s `$endpoint` are both refused until it is set (§2c) |
 | `ORDO_TENANT_CATCHUP_SECS` | default `15` | how often each replica looks for tenants whose database is behind the program this node serves and brings them forward (25i). A tenant's own database is moved by an apply through the door, and by this catch-up when the apply reached only the deployment's own database (`ordo apply --db`, which is what `examples/notes/dev/serve.sh` runs), when the tenant was created from the previous version, or when its database was down at the time. A swap and a boot each ask for a pass at once, so this sets only how soon a tenant that was unreachable is found again. A change the tenant's data cannot take is not retried until the next version; the tenant stays closed and `/health/ready` gives the reason |
 | `ORDO_NODE_BEAT_SECS` | default `5` | how often each node writes its row in `$nodes`: the version its door serves and whether its tenant catch-up for that version has finished. `ordo apply` waits on these rows, and `GET /health/deploy` shows them (§7, "When a new version is served"). A row older than three beats counts as a stopped node. `0` refuses the boot |
-| `ORDO_VERSIONS_NEW_TENANT` | default unset | the stored version a new tenant is pinned to, named by its name (such as a beta build). **Unset, a new tenant starts on the active version.** A value that names no stored version, or a revoked one, refuses the boot and names the setting and the versions stored. Set it the same on every node. Each tenant is served the version it is pinned to (`howto-operating.md`, "Versions and pins") |
-| `ORDO_VERSIONS_SERVED` | default `in-use` | which versions a tenant may be pinned to: `in-use`, every version a tenant is on, or a comma list of names or `#n`, served beside the active version. A list that leaves out a version tenants are on refuses the boot, naming the value to add. Set it the same on every node |
-| `ORDO_VERSIONS_MINIMUM` | default unset | the oldest version a tenant may stay on, a name or `#n`. Tenants below it move in their maintenance window or on demand; nothing is pinned or activated below it. A name not stored refuses the boot |
 | `ORDO_VERSIONS_TENANT_MOVE_ROLES` | default unset | the tenant roles that may move their own tenant off a revoked version now (`std.space.moveOffRevoked`), such as `owner`. **Unset, no tenant role may**: a tenant on a revoked version moves in its maintenance window, or when you or your own system move it (`ordo versions move`, `std.deployment.moveOffRevoked`). A word that is not a role refuses the boot by name |
 | `ORDO_PG_TENANT_HOST` | the deployment's own | where a tenant's database is created when the call names no cluster. Per field, so changing the host keeps the port (§2d) |
 | `ORDO_PG_TENANT_PORT` | the deployment's own | |
 | `ORDO_PG_TENANT_USER` | the deployment's own | |
 | `ORDO_PG_TENANT_CREDENTIAL` | `$deployment` | a credential **label**; the reserved `$deployment` means this deployment's own password. A label of its own needs `ORDO_TENANT_CREDENTIALS` (§2d) |
 | `ORDO_PG_ATTACH_HOSTS` | **deny everything** | the same list under the name 18d shipped. Read **in addition** to the variable above, not instead of it |
+
+**Version settings are not environment variables** (owner, 2026-11-05). They depend on what is applied, so Ordo stores them:
+
+- Which versions are served, the oldest version a tenant may stay on, and the version new tenants start on.
+- Read them: `ordo versions settings`.
+- Change one: `ordo versions set served|minimum|new-tenant <value> --reason "..."`, or `--clear`. Also `std.deployment.setVersionSetting`, or the console's Deploys screen.
+- A value that strands a tenant, names no stored version, or names a revoked one is refused when you set it. The refusal names the setting and the value.
+- `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM` and `ORDO_VERSIONS_NEW_TENANT` are read once. On the first boot after the upgrade, a value set there is stored. The variable is then ignored and can be removed; each boot logs that while it stays set (`howto-operating.md`, "Versions and pins").
 
 <a id="2c"></a>
 ### §2c · The attach allowlist, and why it denies by default

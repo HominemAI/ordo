@@ -232,9 +232,10 @@ The pin this plan adds:
   one tenant's version, epoch and pin history.
 - `ordo versions list|show` say `active (new tenants)` and `serving N
   tenants`. The console says the same since session 2.
-- Each node writes its `versions.new_tenant` to `$nodes`. A node that sees
-  another live node with a different value logs a warning naming the
-  setting and its variable, on every reconcile tick.
+- Since 2026-11-05 `versions.new_tenant` is stored in Ordo (§7), so every
+  node reads one value and the warning about nodes disagreeing on it is
+  gone. Each node still writes the value it last read to `$nodes`, for
+  `/health/deploy`.
 - An activation still moves every tenant at once, a tenant pinned
   elsewhere included (until rollouts, increment 10).
 
@@ -345,18 +346,21 @@ Ruled 2026-11-02 (D15).
 **As built in increment 3, session 2** (2026-11-05, `versions.rs`,
 `revoked_moves.rs`, `runtime.rs`):
 
-- `ORDO_VERSIONS_SERVED`: `in-use` (the default) or a comma list of names
+- `versions.served`: `in-use` (the default) or a comma list of names
   or `#n`. With a list, a pin, a move target, a `--move-to` and
   `versions.new_tenant` outside it are refused (`not_served`), naming the
   value to add. The active version is always served.
-- `ORDO_VERSIONS_MINIMUM`: a name or `#n`. Nothing is pinned, activated
+- `versions.minimum`: a name or `#n`. Nothing is pinned, activated
   or started on a version stored before it (`below_minimum`). Tenants on
   one move in their maintenance window, by the same sweep and the same
   targets as off a revoked version, and on demand.
-- Boot refuses a name not stored, and a served list that leaves out a
-  version tenants are pinned to, naming the version and the value to add
-  (`ORDO_VERSIONS_SERVED=<list>,<version>`).
-- The CLI's `--db` path does not read these; the door enforces them.
+- A change to either is refused when it is made: a name not stored, a
+  served list that leaves out a version tenants are pinned to (naming the
+  value to add, `ordo versions set served <list>,<version>`), and a
+  minimum above the active version. Built as environment variables first,
+  then moved into Ordo the same day (§7).
+- Each `Versions` call reads the stored values, so the CLI's `--db` path
+  and the door enforce the same ones.
 - Not built: removing a stored version, so `--move-to` on removal waits
   for that command.
 
@@ -465,7 +469,7 @@ nothing of versions.
 - `--move-to` with a version not active is refused: nothing would move.
 - A revoked version is refused, naming the revoke and `ordo versions
   unrevoke`, as an activation, a rollback, an apply's activation, a
-  `--move-to`, `versions.new_tenant` at boot and at pin time, and any pin
+  `--move-to`, `versions.new_tenant` when it is set and at pin time, and any pin
   target (the backfill included). Class `version_revoked`, wire code
   `apply_refused`.
 - A tenant on a version revoked while it was not active stays there:
@@ -957,9 +961,9 @@ refusal a setting can fix names the setting and the value.
 
 | Setting | Default | Layer |
 |---|---|---|
-| `versions.served` | `in-use` | deployment |
-| `versions.minimum` | none | environment |
-| `versions.new_tenant` | last version that finished a rollout | environment |
+| `versions.served` | `in-use` | deployment, stored in Ordo |
+| `versions.minimum` | none | deployment, stored in Ordo |
+| `versions.new_tenant` | last version that finished a rollout (the active version until rollouts) | deployment, stored in Ordo |
 | `versions.idle_evict_after` | 30 minutes | deployment |
 | `versions.min_residency` | 10 minutes | deployment |
 | `versions.max_loaded` | set from increment 3's memory measurement | node |
@@ -968,6 +972,32 @@ refusal a setting can fix names the setting and the value.
 | `pins.reconcile_interval` | 30 seconds (`ORDO_PINS_RECONCILE_SECS`, built 2026-11-05) | deployment |
 | `forward.retry_interval` | 15 seconds | deployment |
 | `editions.load_window` | 12 months | Ordo release |
+
+**The three version settings live in Ordo** (owner, 2026-11-05: *"that
+lives within ordo and should likely not be an env because it is dependany
+on what is applied since that is where versioning happens"*). Built the same
+day:
+
+- Stored in `$version_settings` in the control database, append-only, with
+  who, when and why. A setting's value is its newest row's.
+- Set through the door (`std.deployment.setVersionSetting`, read with
+  `std.deployment.versionSettings`), the CLI (`ordo versions settings`,
+  `ordo versions set <served|minimum|new-tenant> <value> | --clear
+  --reason`) and the console's Deploys screen. The deployment owner, or a
+  machine key with the `deployment` grant. A touch only at
+  `ORDO_SECURITY_LEVEL=high`.
+- The checks boot made run on the change, and refuse it naming the
+  setting, the value and the command. Boot still checks the stored values,
+  and only logs (owner, 2026-11-02: an upgrade never stops a running
+  deployment).
+- A change nudges the pin channel; each node takes it with the pins
+  (`pin_stream.rs`) and on its reconcile tick.
+- `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM` and
+  `ORDO_VERSIONS_NEW_TENANT`: on a boot where one is set and nothing is
+  stored for it, its value is stored once, as `ordo:versions`, with the
+  checks a change has. After that each boot logs that it is ignored and can
+  be removed.
+- Environment variables stay for settings about the binary itself.
 | `soak.length` | 7 days, 0 allowed | plan |
 | `backfill.concurrency` | 8 | environment |
 | `backfill.chunk_rows` | 1,000 | plan |

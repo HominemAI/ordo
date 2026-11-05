@@ -91,33 +91,19 @@ impl PinStream {
         let before = self.deployment.pins();
         let (pins, seq) = Versions::on(&self.control).all_pins().await?;
         let mut map = PinMap {
-            seq: seq.max(before.seq),
+            seq,
             ..PinMap::default()
         };
         for (space, version, epoch) in pins {
-            // A pin read whole never moves back past one the stream gave.
-            let epoch_held = before.by_space.get(&space).map(|(_, e)| *e);
-            match epoch_held {
-                Some(e) if e > epoch => {
-                    let held = before.by_space[&space].clone();
-                    map.by_space.insert(space, held);
-                }
-                _ => {
-                    map.by_space.insert(space, (version, epoch));
-                }
-            }
+            map.by_space.insert(space, (version, epoch));
         }
+        // Merged under the pin lock: a change the stream took while this
+        // read ran is never moved back, nor its read position.
+        let read_moved = self.deployment.replace_pins(map, &before);
         let mut read = Read {
-            moved: map
-                .by_space
-                .iter()
-                .filter(|(s, p)| before.by_space.get(*s) != Some(*p))
-                .map(|(s, _)| s.clone())
-                .collect(),
+            moved: read_moved,
             ..Read::default()
         };
-        read.moved.sort();
-        self.deployment.replace_pins(map);
         self.settle(&mut read).await;
         Ok(read)
     }

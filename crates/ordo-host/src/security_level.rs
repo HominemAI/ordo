@@ -176,6 +176,9 @@ pub fn situation_of(op: &str) -> Option<Situation> {
         // version (`pin`) asks no touch at any level
         // (`deploy_ops::NO_PRESENCE`).
         ("std.deployment", _) => Deploying,
+        // A tenant's own move off a revoked version, when the developer
+        // grants it. Like every move it asks no touch (`NO_PRESENCE`).
+        ("std.space", "moveOffRevoked") => Deploying,
         ("std.space", "create") => CreatingTenant,
         ("std.space", "delete" | "reap") => DeletingTenant,
         ("std.space", "export" | "import" | "download") => ExportImport,

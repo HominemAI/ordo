@@ -64,6 +64,18 @@ impl NodeStatus {
         self.row.lock().expect("node row lock").also_serving = versions;
     }
 
+    /// The versions a pin names that this node could not load, with why
+    /// (per-node health, increment 3 session 2). True when that changed,
+    /// so the caller writes the row now rather than at the next beat.
+    pub fn not_loaded(&self, refused: Vec<(String, String)>) -> bool {
+        let mut row = self.row.lock().expect("node row lock");
+        if row.not_loaded == refused {
+            return false;
+        }
+        row.not_loaded = refused;
+        true
+    }
+
     /// This node's `versions.new_tenant`, written with every beat.
     pub fn new_tenant(&self, value: Option<&str>) {
         self.row.lock().expect("node row lock").new_tenant = value.unwrap_or("").to_string();

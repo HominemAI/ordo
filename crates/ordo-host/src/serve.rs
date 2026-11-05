@@ -454,6 +454,15 @@ pub fn deploy_status(version: &str, nodes: &[ordo_exec::nodes::Node]) -> Value {
             "retrying": n.retrying,
             "sweepMs": n.sweep_ms,
             "seenSecsAgo": n.age_secs,
+            // Per-node health (increment 3, session 2): what it serves
+            // beside the active version, where it starts new tenants, and
+            // each version a pin names that it could not load.
+            "alsoServing": n.also_serving,
+            "newTenant": if n.new_tenant.is_empty() { None } else { Some(&n.new_tenant) },
+            "notLoaded": n.not_loaded.iter().map(|(v, why)| json!({
+                "version": v,
+                "why": why,
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
 }

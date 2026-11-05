@@ -3788,8 +3788,26 @@ async fn assemble_program(
         .ensure()
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
+    // `versions.served` and `versions.minimum` (§1.6): each names a stored
+    // version, and a served list strands no tenant. Installed resolved, so
+    // every pin after this is checked against them.
+    let served = crate::versions::ServedPolicy::from_env();
+    let served = versions.check_policy(&served).await.map_err(|e| match e {
+        crate::versions::VersionRefusal::Setting { var, .. } => BootRefusal::Invalid {
+            var,
+            detail: e.to_string(),
+        },
+        crate::versions::VersionRefusal::Stranded { .. } => BootRefusal::Invalid {
+            var: crate::versions::SERVED_ENV,
+            detail: e.to_string(),
+        },
+        other => BootRefusal::Database(other.to_string()),
+    })?;
+    crate::versions::install_policy(served);
     versions.check_new_tenant().await.map_err(|e| match e {
         crate::versions::VersionRefusal::Setting { .. }
+        | crate::versions::VersionRefusal::NotServed { .. }
+        | crate::versions::VersionRefusal::BelowMinimum { .. }
         | crate::versions::VersionRefusal::Revoked {
             setting: Some(_), ..
         } => BootRefusal::Invalid {
@@ -5929,6 +5947,7 @@ impl Runtime {
             crate::routines::describe(&live.fixture.schema)
         );
         println!("  pausing     {}", crate::pause::current().describe());
+        println!("  versions    {}", crate::versions::policy().describe());
         println!(
             "  moving off  a revoked version, from inside a tenant: {}",
             crate::revoked_moves::current().describe()
@@ -6571,6 +6590,11 @@ async fn spawn_deploy_listener(
             async move {
                 for line in crate::pin_stream::log_lines(&read) {
                     println!("{line}");
+                }
+                // Per-node health: a version a pin names that would not
+                // load here, said on `/health/deploy` at once.
+                if node_status.not_loaded(read.refused.clone()) && !read.versions_changed() {
+                    node_status.write().await;
                 }
                 if !read.versions_changed() {
                     return;

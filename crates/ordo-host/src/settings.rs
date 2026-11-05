@@ -1470,6 +1470,18 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_VERSIONS_SERVED",
+        "Databases and pools",
+        r#"in-use"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_VERSIONS_MINIMUM",
+        "Databases and pools",
+        r#"none"#,
+        r#""#,
+    ),
+    s(
         "ORDO_VERSIONS_TENANT_MOVE_ROLES",
         "Databases and pools",
         r#"none"#,

@@ -26,6 +26,7 @@ import {
   setSecondStepLevel,
   signInWithPasskeyStep,
   signInWithPassword,
+  stepUpWithProof,
   type SecondStep,
 } from '../src/auth/second-step.js';
 
@@ -325,6 +326,34 @@ describe('proving a first factor again', () => {
     expect(d.sent[0]?.headers['Authorization']).toBe('Bearer tok');
     expect(out.removed).toBe('sf_1');
     expect(out.session.token).toBe('replacement');
+  });
+});
+
+describe('a fresh sign-in as the touch (owner, 2026-11-05)', () => {
+  it('sends the proof to /auth/step-up in x-reauth and answers the re-minted session', async () => {
+    const d = door({ json: { ...TOKEN_ANSWER, token: 'present' } });
+    const s = await stepUpWithProof(endpointOver(d), 'tok', { reauth: 'ra_7' });
+    expect(d.sent[0]?.url).toBe('https://door.example.com/auth/step-up');
+    expect(d.sent[0]?.headers['x-reauth']).toBe('ra_7');
+    expect(d.sent[0]?.headers['Authorization']).toBe('Bearer tok');
+    expect(d.sent[0]?.body).toEqual({});
+    expect(s.token).toBe('present');
+  });
+
+  it('a person who holds a passkey is told to touch it', async () => {
+    const d = door({
+      status: 403,
+      json: { error: { code: 'presence_required', message: 'you hold a passkey' } },
+    });
+    await expect(stepUpWithProof(endpointOver(d), 'tok', { reauth: 'ra_8' })).rejects.toMatchObject({
+      code: 'presence_required',
+    });
+  });
+
+  it('sends nothing without a proof', async () => {
+    const d = door();
+    await expect(stepUpWithProof(endpointOver(d), 'tok', {})).rejects.toBeInstanceOf(PasskeyError);
+    expect(d.sent).toHaveLength(0);
   });
 });
 

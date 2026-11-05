@@ -127,20 +127,21 @@ export function useCommit<R = Row>(opName: string, options: UseCommitOptions = {
   );
 
   /**
-   * A platform write wants a fresh touch, and the door's `access_denied`
-   * cannot say "too old" from "not allowed". Ask once, try once more, and
-   * believe the second answer.
+   * The door answers `presence_required` when a fresh touch would let the
+   * write through. Ask once, try once more, and believe the second answer.
+   * `stepUp` is the app's: a passkey touch, or a fresh sign-in for a person
+   * with no passkey (`session.stepUpWithProof`).
    */
   const withPresence = useCallback(
     async (attempt: () => Promise<CommitOutcome<R>>): Promise<CommitOutcome<R>> => {
       const first = await attempt();
-      if (!stepUp || !op.platform || first.status !== 'refused' || first.refusal.class !== 'access_denied') {
+      if (!stepUp || first.status !== 'refused' || first.refusal.code !== 'presence_required') {
         return first;
       }
       await stepUp();
       return attempt();
     },
-    [stepUp, op],
+    [stepUp],
   );
 
   const run = useCallback(

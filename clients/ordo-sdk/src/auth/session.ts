@@ -32,7 +32,7 @@ import {
 } from './passkey.js';
 import { waitForTenant, type WaitForTenantOptions } from './provisioning.js';
 import { resumeSession, type ResumeOptions } from './resume.js';
-import type { SignInResult } from './second-step.js';
+import { stepUpWithProof, type SignInResult } from './second-step.js';
 import { listSpaces, type ListedSpace } from './share.js';
 
 /**
@@ -100,8 +100,16 @@ export interface OrdoAuth {
   readonly signInWithPasskey: (options?: SignInOptions) => Promise<PasskeySession>;
   /** Sign up with a new passkey. `display` names the person. */
   readonly registerPasskey: (options?: RegisterOptions) => Promise<PasskeySession>;
-  /** Prove presence again; the re-minted session is kept. */
+  /**
+   * Prove presence again; the re-minted session is kept. A person with no
+   * passkey is refused `reauthentication_required`: use `stepUpWithProof`.
+   */
   readonly stepUp: () => Promise<PasskeySession>;
+  /**
+   * A fresh sign-in as the touch, for a person with no passkey: the proof
+   * from `reauthenticateWith*`. The re-minted session is kept.
+   */
+  readonly stepUpWithProof: (reauth: string) => Promise<PasskeySession>;
   /** Keep a session another ceremony made (a second step, a handoff, a guest). */
   readonly use: (session: PasskeySession | null) => void;
   /** Sign out at the door and here. Throws `unavailable` when the door could not record it. */
@@ -202,6 +210,7 @@ export function createOrdoAuth(options: OrdoAuthOptions): OrdoAuth {
     signInWithPasskey: async (o) => keep(await signInWithPasskey(door, o)),
     registerPasskey: async (o) => keep(await registerPasskey(door, o)),
     stepUp: async () => keep(await stepUp(door, await token())),
+    stepUpWithProof: async (reauth) => keep(await stepUpWithProof(door, await token(), { reauth })),
     use,
     async signOut() {
       const held = current;

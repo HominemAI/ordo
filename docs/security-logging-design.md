@@ -162,8 +162,9 @@ every platform op, including `std.deployment.apply`, `std.space.create`,
 
 What the platform still owns is unchanged and is what §2.2 pins: step-up is
 the one mechanism for "not delegable", presence is minted only by a verified
-passkey assertion (`UserPresence` has no other producer), and the freshness
-window is the engine's. The setting says only *where presence is required*.
+passkey assertion or, for a person who holds no passkey, a spent reauth handle
+(a fresh sign-in; owner, 2026-11-05, `refresh_presence_by_reauth`), never into
+a delegated or capability token, and the freshness window is the engine's. The setting says only *where presence is required*.
 
 The setting is `ORDO_STEP_UP_EXEMPT_OPS`, a list of the platform ops that do
 **not** require presence (exact names, or a prefix ending `.*`). Its default

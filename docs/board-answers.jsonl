@@ -1379,3 +1379,10 @@
 {"seq": 1380, "item": "a-system-running-imports-on-its", "ask": 1, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1381, "item": "a-developer-s-own-system-minting", "ask": 1, "at": "2026-11-05", "status": "decided", "text": "good - but maybe a separate minting grant that defines what grants it can give as opposed to it can give what it has - because it itself may not need to use those things.", "source": "record", "read": true}
 {"seq": 1382, "item": "how-a-person-without-a-passkey", "ask": 1, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1383, "item": "the-cli-s-db-mode-goes", "ask": 2, "at": "2026-11-05T11:40:56Z", "status": "open", "text": "It follows that the door would manage a checkpoint?", "source": "page", "read": true}
+{"seq": 1384, "item": "the-cli-s-db-mode-goes", "ask": 3, "at": "2026-11-05T11:41:08Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1385, "item": "the-cli-s-db-mode-goes", "ask": 0, "at": "2026-11-05T11:41:19Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1386, "item": "the-cli-s-db-mode-goes", "ask": 1, "at": "2026-11-05T11:41:38Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1387, "item": "the-cli-s-db-mode-goes", "ask": 1, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1388, "item": "the-cli-s-db-mode-goes", "ask": 2, "at": "2026-11-05", "status": "decided", "text": "It follows that the door would manage a checkpoint?", "source": "record", "read": true}
+{"seq": 1389, "item": "the-cli-s-db-mode-goes", "ask": 3, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}

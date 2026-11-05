@@ -562,8 +562,8 @@ these three (2026-09-29); the other kinds wait for 18z.
 | `ORDO_DEV_ADDR` | Address `ordo dev` serves on | `127.0.0.1:4000` | built | | sets | | | cli/dev.rs:866 |
 | `ORDO_PGBIN` | Directory of Postgres tools for the local cluster | probes known paths | built | | sets | | | cli/dev_db.rs:211 |
 | `ORDO_PG_*` under `ordo dev` | Points the loop at an existing database | own cluster | built | | sets | | | cli/dev.rs:977; cli/dev_db.rs:81-85 |
-| `ORDO_HOST`, `ORDO_TOKEN`, `ORDO_SPACE` (CLI) | Where `ordo apply`, `space create` and `import` send the call | `ordo.inf.smg.icu`, none, none | built | | sets | | | cli/wire.rs:33,72,125 |
-| `--as`, `--db`, `--control-db`, `--key-id`, and similar CLI flags | Choose the actor, database or key for one command. None stores a setting | none | built | sets | | | | cli/operator.rs:99-135 |
+| `ORDO_HOST`, `ORDO_TOKEN`, `ORDO_SPACE` (CLI) | Where `ordo apply`, `versions`, `windows`, `fleet`, `quota`, `plan`, `space create` and `import` send the call | `ordo.inf.smg.icu`, none, none | built | | sets | | | cli/wire.rs:33,72,125 |
+| `--as`, `--db`, `--control-db`, `--key-id`, and similar CLI flags | Choose the actor, database or key for one command. None stores a setting. `--db` and the commands that open a database need `--direct` (owner, 2026-11-05); the rest go through `--host` | none | built | sets | | | | cli/operator.rs:99-135 |
 | `ordo quota set` | Writes a quota row (see section 9) | none | built | sets | | | | cli/operator.rs:2191 |
 | `ORDO_KEY_ABBREVIATIONS` | File of extra key abbreviations for generated names | none | built | | sets | | | schema/lib.rs:425 |
 | `ORDO_PLAYGROUND_ADDR` | Address the playground serves on | `127.0.0.1:7878` | built | | sets | | | playground/main.rs:37 |

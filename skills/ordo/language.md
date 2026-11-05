@@ -274,8 +274,8 @@ secret llmKey for api.anthropic.com
 | `ordo dev <dir>` | local door on `127.0.0.1:4000` with its own Postgres, recompiles on save, prints a dev token |
 | `ordo ops <dir> [query]` | the op index, one op's card, or a name search |
 | `ordo gen ts <dir> --app <src>` | the typed client, `interface.json` and `OPS.md` into the app |
-| `ordo plan <dir> --against <db>` | what a deploy would change. Read-only |
-| `ordo apply <dir>` | store and activate the program on a deployment |
+| `ordo plan <dir> --host <h>` | what a deploy would change, asked of the deployment. Read-only |
+| `ordo apply <dir> --host <h>` | store and activate the program on a deployment, through its door (`--direct` only for the first apply or a host that will not boot) |
 
 A change that adds things (an entity, an optional or defaulted field, an
 index) applies live. A new required field over existing rows, a type change

@@ -4,15 +4,15 @@
 # artifact is the version. Every artifact is kept. This file and
 # 05-version-2.ordo are two versions of one program.
 #
-#   ordo plan  examples/concepts/05-version-2.ordo --against prod
+#   ordo plan  examples/concepts/05-version-2.ordo --host <h>
 #       what changes between the live database and version 2, classified
-#   ordo migrate examples/concepts/05-version-2.ordo --apply --db prod
+#   ordo migrate examples/concepts/05-version-2.ordo --apply --direct --db prod
 #       sends the additive part
-#   ordo apply examples/concepts/05-version-2.ordo --db prod
+#   ordo apply examples/concepts/05-version-2.ordo --host <h>
 #       stores and activates version 2; nodes swap with no restart
 #   ordo deploys
 #       what is stored, what is serving, every re-point in order
-#   ordo rollback --version <hash>
+#   ordo rollback --version <hash> --host <h>
 #       re-point at a stored version
 #
 # Read next: docs/howto-operating.md, docs/plan-evolution-plans.md,

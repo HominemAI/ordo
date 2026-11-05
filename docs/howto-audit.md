@@ -137,7 +137,7 @@ record of the compromise.
 So `ordo verify` walks both and reports them apart:
 
 ```
-ordo verify --space spc_7kq --db ordo \
+ordo verify --direct --space spc_7kq --db ordo \
   --key-id chain-2026 --public-key <hex> \
   --security-key-id sec-2026 --security-public-key <hex>
 ```
@@ -165,7 +165,7 @@ principal probing a hundred spaces appears in none of those spaces' streams, by
 design.
 
 ```
-ordo verify --deployment --db ordo --security-key-id sec-2026 --security-public-key <hex>
+ordo verify --direct --deployment --db ordo --security-key-id sec-2026 --security-public-key <hex>
 ```
 
 ### What a run without the security key does *not* tell you
@@ -201,7 +201,7 @@ too; checkpoints signed by it still verify with its public half.
 **Pass both keys during the overlap.** The flags repeat and pair up in order:
 
 ```
-ordo verify --space spc_7kq   --security-key-id sec-2026 --security-public-key <old hex>   --security-key-id sec-2027 --security-public-key <new hex>
+ordo verify --direct --space spc_7kq   --security-key-id sec-2026 --security-public-key <old hex>   --security-key-id sec-2027 --security-public-key <new hex>
 ```
 
 A marker is checked against **the key it names**, not against whichever key

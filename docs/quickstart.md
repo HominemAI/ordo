@@ -340,8 +340,10 @@ skin maps these hooks onto real components; none ships in this package.
 
 A running deployment takes a program through its own door (`ordo apply
 --host`, `docs/deploying.md` §7). The first program has no door to go
-through yet, so the first apply goes straight to the deployment's database.
-Both run the same code and print the same report.
+through yet, so the first apply goes straight to the deployment's database,
+and says so with `--direct`. Both run the same code and print the same
+report. The direct use is recorded and reaches the security log at the next
+boot.
 
 **Custody, once per deployment.** Mint a master key and seal it under a
 passphrase file (never a flag: flags land in shell history and `ps`):
@@ -365,7 +367,7 @@ yet; `/health/live` answers and the log prints
 so no `--db` is needed:
 
 ```
-ordo apply ./notes --as you
+ordo apply ./notes --as you --direct
 ```
 
 First apply against an empty database creates the whole schema in one
@@ -390,7 +392,7 @@ catch-up worker brings each tenant's database forward to the program the
 node serves. To mint custody for a tenant from the host instead:
 
 ```
-ordo keys init --space mytenant --as you
+ordo keys init --direct --space mytenant --as you
 ```
 
 Point `ORDO_SPACE` at `mytenant` and restart if you want that tenant to be
@@ -442,13 +444,15 @@ schema changed — applied through the production class-A path (plan-dev-loop.md
 A2 — new optional field `notes.priority`
 ```
 
-Against a deployed database, the same change is three commands. `--db`
-names the deployment's database (the one `ORDO_PG_DB` points at):
+Against a deployed database, the same change is three commands. `plan` asks
+the running deployment through its door. `migrate` and the first `apply` open
+the deployment's database (the one `ORDO_PG_DB` points at) and name `--direct`;
+once you can sign in, `ordo apply --host` does the last step through the door:
 
 ```
-ordo plan ./notes --against mydb           # read-only: what would move, classified and probed
-ordo migrate ./notes --apply --db mydb --as you
-ordo apply ./notes --db mydb --as you      # store and activate the new artifact
+ordo plan ./notes --host http://127.0.0.1:4000   # read-only: what would move, classified
+ordo migrate ./notes --apply --direct --as you
+ordo apply ./notes --direct --as you             # store and activate the new artifact
 ```
 
 `plan` lists `A2  new optional field notes.priority` as class A, `migrate`

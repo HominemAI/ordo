@@ -58,7 +58,7 @@ ORDO_KEY_PROVIDER=sealed-master
 ORDO_MASTER_KEY_FILE=/run/secrets/master  ORDO_MASTER_KEY_PASSPHRASE_FILE=/run/secrets/pass
 ORDO_SPACE=system                           # plus the token key and the page key
 ordo-host                                   # creates the platform tables and the system space
-ordo apply ./myprogram --as you             # the first program
+ordo apply ./myprogram --as you --direct    # the first program, before any host can sign you in
 ```
 
 **Guarantees.** Every environment refusal happens before the first database
@@ -286,7 +286,7 @@ command.
 ```
 POST /auth/recovery-codes      # needs fresh presence; the old set is void
 POST /auth/recover/code        { "code": "..." }   # opens a recovery, returns a ticket
-ordo identity recover --principal usr_01J8... --as ada     # from the host, prints a ticket once
+ordo identity recover --direct --principal usr_01J8... --as ada     # from the host, prints a ticket once
 ```
 
 **Guarantees.** Recovering an account is separate from recovering data. In every
@@ -402,7 +402,7 @@ Each group is one link in the tenant's chain: `hash = SHA-256(prev || body)`.
 
 ```
 ordo checkpoint --space spc_7kq                 # sign the head
-ordo verify --space spc_7kq --db ordo --key-id chain-2026 --public-key <hex>
+ordo verify --direct --space spc_7kq --db ordo --key-id chain-2026 --public-key <hex>
 # VERIFIED 112 groups · head index 511 = 357b69…
 ```
 
@@ -428,7 +428,7 @@ and the platform records that fact before it serves the tenant again.
 ```
 ordo revert examples/concepts/06-undo-and-history.ordo \
     --space spc_acme --group <correlation id> --as ops:ada --dry-run
-ordo restore --record --space spc_acme --as ada --source pitr --at 1757000000
+ordo restore --record --direct --space spc_acme --as ada --source pitr --at 1757000000
 ```
 
 **Guarantees.** A revert is checked: every touched row is tested against the
@@ -448,10 +448,10 @@ master-wrapped key and a data key in numbered epochs. A blind index lets an
 equality lookup run at SQL speed with no key in the database.
 
 ```
-ordo keys init   --space acme --as ops:ada          # mint custody
-ordo keys rotate --space acme --reason "laptop lost" --as ops:ada
-ordo keys status --space acme --as ops:ada          # the pass, per epoch
-ordo keys destroy --space acme --epoch 3 --as ops:ada --confirm acme:3
+ordo keys init --direct   --space acme --as ops:ada          # mint custody
+ordo keys rotate --direct --space acme --reason "laptop lost" --as ops:ada
+ordo keys status --direct --space acme --as ops:ada          # the pass, per epoch
+ordo keys destroy --direct --space acme --epoch 3 --as ops:ada --confirm acme:3
 ```
 
 See [03-sealed-fields-and-custody](03-sealed-fields-and-custody.ordo).
@@ -562,11 +562,11 @@ every replica swaps with no restart after the load gate passes. The schema chang
 is planned at apply time, labelled by class, and only additive changes are sent.
 
 ```
-ordo plan    examples/concepts/05-version-2.ordo --against prod    # read-only report
-ordo migrate examples/concepts/05-version-2.ordo --apply --db prod # the additive part
-ordo apply   examples/concepts/05-version-2.ordo --db prod         # store and activate
+ordo plan    examples/concepts/05-version-2.ordo --host https://ordo.example.com    # read-only report, through the door
+ordo migrate examples/concepts/05-version-2.ordo --apply --direct --db prod # the additive part
+ordo apply   examples/concepts/05-version-2.ordo --host https://ordo.example.com   # store and activate
 ordo deploys                                                       # stored, serving, every re-point
-ordo rollback --version abc123def456…
+ordo rollback --version abc123def456… --host https://ordo.example.com
 ```
 
 See [05-version-1](05-version-1.ordo) and [05-version-2](05-version-2.ordo). Version 2
@@ -637,7 +637,7 @@ and unlink, first-login provisioning, and the deployment's own custody acts. Eac
 tenant has one, and the deployment has one that belongs to no tenant.
 
 ```
-ordo verify --deployment --db ordo --security-key-id sec-2026 --security-public-key <hex>
+ordo verify --direct --deployment --db ordo --security-key-id sec-2026 --security-public-key <hex>
 ordo checkpoint --security --deployment
 ```
 

@@ -771,6 +771,41 @@ async fn a_machine_key_holds_its_grants_and_mints_only_within_its_minting_grant(
     assert_eq!(row["createdBy"], minter_id.as_str());
     assert_eq!(row["grants"], json!([GRANT_IMPORT]));
     assert_eq!(row["mints"], json!([]));
+
+    // The admin acts need `deployment` here as at the door (audit
+    // 2026-11-05, H1): an import-only key, or one holding none, invites no
+    // one and ends no person and no key.
+    let dana = list_people(&h, &admin).await;
+    let ci_id = plain["id"].as_str().unwrap();
+    for narrow in [&child_token, &minter] {
+        for (path, body) in [
+            ("/invites".to_string(), json!({ "role": "admin" })),
+            (format!("/people/{dana}/end"), Value::Null),
+            (format!("/machine-keys/{ci_id}/end"), Value::Null),
+        ] {
+            let (s, v) = h.bearer("POST", &path, narrow, body).await;
+            assert_eq!(
+                (s, v["error"].as_str()),
+                (StatusCode::FORBIDDEN, Some("grant_needed")),
+                "{path}: {v}"
+            );
+            assert!(
+                v["message"].as_str().unwrap().contains("`deployment`"),
+                "{v}"
+            );
+        }
+    }
+    // A `deployment` key still invites, as the provisioner does.
+    let (s, v) = h
+        .bearer("POST", "/invites", &ci, json!({ "role": "admin" }))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+/// The first person's id.
+async fn list_people(h: &H, bearer: &str) -> String {
+    let (_, v) = h.bearer("GET", "/people", bearer, Value::Null).await;
+    v["people"][0]["id"].as_str().unwrap().to_string()
 }
 
 #[tokio::test(flavor = "multi_thread")]

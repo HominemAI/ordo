@@ -171,6 +171,10 @@ made never mints. The one exception is the provisioner key made at first
 boot from `ORDO_IDENTITY_PROVISIONER_KEY`: it mints `deployment` keys for CI. A key asked for more than its minting grant is refused
 with `mint_refused`, naming the grant. The list shows who made each key.
 
+The grants hold at the identity service too. A machine key needs
+`deployment` to make an invite, revoke one, end a person or end a key.
+A key without it is refused with `grant_needed`, naming the grant.
+
 ## 7. The command line
 
 The `ordo` tool signs in through your browser.

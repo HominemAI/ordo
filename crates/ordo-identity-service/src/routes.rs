@@ -560,7 +560,7 @@ async fn invites_create(State(s): State<Service>, headers: HeaderMap, body: Byte
     respond(
         async {
             let c = caller(&s, &headers).await?;
-            c.may_write(s.now())?;
+            c.may_admin(s.now())?;
             let b = parse(&body)?;
             if let Some(role) = b.get("role") {
                 if role.as_str() != Some(ordo_identity::deployment_token::ROLE_ADMIN) {
@@ -589,7 +589,7 @@ async fn invite_revoke(
     respond(
         async {
             let c = caller(&s, &headers).await?;
-            c.may_write(s.now())?;
+            c.may_admin(s.now())?;
             s.revoke_invite(c.actor(), &id).await?;
             Ok(Reply::json(json!({ "revoked": id })))
         }
@@ -628,7 +628,7 @@ async fn person_end(
     respond(
         async {
             let c = caller(&s, &headers).await?;
-            c.may_write(s.now())?;
+            c.may_admin(s.now())?;
             let e = s.end_person(c.actor(), &id).await?;
             Ok(Reply::json(json!({
                 "ended": id,
@@ -700,7 +700,7 @@ async fn machine_key_end(
     respond(
         async {
             let c = caller(&s, &headers).await?;
-            c.may_write(s.now())?;
+            c.may_admin(s.now())?;
             let sessions = s.end_machine_key(c.actor(), &id).await?;
             Ok(Reply::json(json!({ "ended": id, "sessions": sessions })))
         }

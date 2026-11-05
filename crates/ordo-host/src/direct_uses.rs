@@ -11,7 +11,10 @@
 //! CLI would fork it, and when the CLI runs there may be no host. So the
 //! CLI writes a row to `$direct_uses` in the control database, and the next
 //! boot ([`drain`], called from `runtime`) turns each row into a `deploy`
-//! event with the act `direct-cli` on the security stream, then deletes it.
+//! event with the act `direct-cli` on the security stream. A row is deleted
+//! only once its event is in the stored stream ([`confirm`]): the recorder
+//! is an outbox flushed later, so a node that died before the flush would
+//! otherwise have lost the record (security audit 2026-11-05, L6).
 //! A row is written before the command acts, so a command that fails midway
 //! is still on record. A row that cannot be written refuses the command.
 
@@ -88,13 +91,85 @@ pub struct Use {
 }
 
 impl Use {
-    /// The one line the security stream carries.
+    /// The one line the security stream carries. `use=` is the row's id,
+    /// which [`confirm`] reads back.
     pub fn detail(&self) -> String {
         format!(
-            "command={} by={} machine={} at={}",
-            self.command, self.by, self.machine, self.at
+            "command={} by={} machine={} at={} use={}",
+            self.command, self.by, self.machine, self.at, self.id
         )
     }
+}
+
+/// The row id a stored `direct-cli` detail names.
+fn use_of(detail: &str) -> Option<i64> {
+    detail
+        .split(' ')
+        .find_map(|w| w.strip_prefix("use="))
+        .and_then(|n| n.parse().ok())
+}
+
+/// The op the stream files a use under.
+const OP: &str = "cli.direct";
+
+/// Delete every pending use whose event is already in the stored
+/// deployment stream. Returns how many. Run before [`drain`], so a use a
+/// previous boot carried is not carried twice, and again after the drainer
+/// has had time to write, so the table empties without waiting for a boot.
+pub async fn confirm(pool: &Pool) -> Result<usize, PoolError> {
+    let uses = pending(pool).await?;
+    let Some(since) = uses.iter().map(|u| u.at).min() else {
+        return Ok(0);
+    };
+    let store =
+        ordo_exec::secevent::PgSecurityStore::new(pool.clone(), tokio::runtime::Handle::current());
+    let filter = ordo_exec::secevent::EntryFilter {
+        kind: Some("deploy".to_string()),
+        since: Some(since),
+        ..Default::default()
+    };
+    let mut stored: Vec<i64> = Vec::new();
+    let mut from = 0usize;
+    loop {
+        let page = match store
+            .try_entries_where(
+                &ordo_secevent::Scope::Deployment,
+                &filter,
+                ordo_exec::secevent::Page::Forward { from },
+                500,
+            )
+            .await
+        {
+            Ok(p) => p,
+            // No stream yet: nothing is stored, so nothing is confirmed.
+            Err(e) if e.is_missing_table() => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let Some((last, _)) = page.last() else {
+            break;
+        };
+        from = last + 1;
+        stored.extend(page.iter().filter_map(|(_, c)| match &c.entry.kind {
+            ordo_secevent::EventKind::Deploy { act, detail } if act == ACT && c.entry.op == OP => {
+                use_of(detail)
+            }
+            _ => None,
+        }));
+    }
+    let carried: Vec<String> = uses
+        .iter()
+        .filter(|u| stored.contains(&u.id))
+        .map(|u| u.id.to_string())
+        .collect();
+    if carried.is_empty() {
+        return Ok(0);
+    }
+    pool.rows(&format!(
+        "DELETE FROM \"$direct_uses\" WHERE \"id\" IN ({})",
+        carried.join(", ")
+    ))
+    .await?;
+    Ok(carried.len())
 }
 
 /// Every use not yet carried to the security stream, oldest first.
@@ -120,16 +195,18 @@ pub async fn pending(pool: &Pool) -> Result<Vec<Use>, PoolError> {
         .collect())
 }
 
-/// Carry every pending use to the security stream, then delete what was
-/// carried. Returns how many. Called once at boot, after the boot record.
+/// Carry every pending use not yet in the stored stream to the security
+/// stream. Returns how many. The rows stay until [`confirm`] finds their
+/// events stored. Called once at boot, after the boot record.
 pub async fn drain(pool: &Pool, stream: &ordo_secevent::Recorder) -> Result<usize, PoolError> {
+    confirm(pool).await?;
     let uses = pending(pool).await?;
     for u in &uses {
         stream.observe(
             ordo_secevent::Observation {
                 space: None,
                 subject: ordo_secevent::Subject::platform("cli"),
-                op: "cli.direct".to_string(),
+                op: OP.to_string(),
                 kind: ordo_secevent::EventKind::Deploy {
                     act: ACT.to_string(),
                     detail: u.detail(),
@@ -139,13 +216,6 @@ pub async fn drain(pool: &Pool, stream: &ordo_secevent::Recorder) -> Result<usiz
             },
             ordo_secevent::Relationship::None,
         );
-    }
-    if let Some(last) = uses.last() {
-        pool.rows(&format!(
-            "DELETE FROM \"$direct_uses\" WHERE \"id\" <= {}",
-            last.id
-        ))
-        .await?;
     }
     Ok(uses.len())
 }

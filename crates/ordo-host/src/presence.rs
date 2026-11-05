@@ -177,6 +177,11 @@ impl PresencePolicy {
         if kind == ordo_api::OpKind::Read && !self.reads {
             return false;
         }
+        // Moving a tenant between versions asks no touch (owner,
+        // 2026-11-05): the app developer's own system may drive it.
+        if crate::deploy_ops::NO_PRESENCE.contains(&op) {
+            return false;
+        }
         !self.exempts(op)
     }
 

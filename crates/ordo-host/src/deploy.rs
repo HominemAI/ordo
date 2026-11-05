@@ -516,8 +516,85 @@ pub async fn verify_candidate(
         space,
         &stored.version,
         &stored.ddl,
+        LiveCheck::Deployment,
     )
     .await
+}
+
+/// **Load a version a tenant is pinned to, beside the active one**
+/// (`plan-versions.md` §1.4, increment 3).
+///
+/// The same compile, registration and shadow gate as [`verify_candidate`],
+/// with one difference: the live comparison is not made against the
+/// deployment's own database. That database is the active version's
+/// shape, and a version pinned beside it may differ by design. Each
+/// tenant's own database is asked instead, on its first open per node
+/// (the shape fingerprint, `crate::spaces::Spaces::resolve`). So is the
+/// places check: places live in each tenant's database.
+pub async fn load_pinned(
+    pool: &Pool,
+    cfg: &PoolConfig,
+    version: &str,
+    keys: Arc<dyn ordo_crypto::KeyProvider>,
+    space: ordo_crypto::SpaceId,
+) -> Result<Verified, LoadRefusal> {
+    let Some(stored) = Versions::on(pool).get(version).await? else {
+        return Err(LoadRefusal::Registry(RegistryRefusal::UnknownVersion(
+            version.to_string(),
+        )));
+    };
+    let compiled = Fixture::from_source(&stored.source, "").map_err(|e| LoadRefusal::Compile {
+        version: stored.version.clone(),
+        error: e,
+    })?;
+    gate_fixture(
+        compiled,
+        pool,
+        cfg,
+        keys,
+        space,
+        &stored.version,
+        &stored.ddl,
+        LiveCheck::PerTenant,
+    )
+    .await
+}
+
+/// [`verify_embedded`] for a version served beside the active one: no
+/// live comparison against `pool`'s database. See [`load_pinned`].
+pub async fn verify_embedded_pinned(
+    compiled: Fixture,
+    pool: &Pool,
+    cfg: &PoolConfig,
+    keys: Arc<dyn ordo_crypto::KeyProvider>,
+    space: ordo_crypto::SpaceId,
+    version: &str,
+) -> Result<Verified, LoadRefusal> {
+    let ddl = ordo_schema::ddl_for(&compiled.schema).map_err(|e| LoadRefusal::Compile {
+        version: version.to_string(),
+        error: e.to_string(),
+    })?;
+    gate_fixture(
+        compiled,
+        pool,
+        cfg,
+        keys,
+        space,
+        version,
+        &ddl,
+        LiveCheck::PerTenant,
+    )
+    .await
+}
+
+/// Where a load's live-schema comparison is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveCheck {
+    /// Against the database the version is gated on: the active version.
+    Deployment,
+    /// Against each tenant's database when it is first opened: a version
+    /// served beside the active one.
+    PerTenant,
 }
 
 /// Every money or decimal field whose declared places differ from the
@@ -580,7 +657,17 @@ pub async fn verify_embedded(
         version: version.to_string(),
         error: e.to_string(),
     })?;
-    gate_fixture(compiled, pool, cfg, keys, space, version, &ddl).await
+    gate_fixture(
+        compiled,
+        pool,
+        cfg,
+        keys,
+        space,
+        version,
+        &ddl,
+        LiveCheck::Deployment,
+    )
+    .await
 }
 
 /// The shared gating logic behind [`verify_candidate`] (the registry path)
@@ -588,6 +675,7 @@ pub async fn verify_embedded(
 /// validate specs, run the shape gate, and mint a [`Verified`]. Neither
 /// caller can reach a `Verified` any other way — see [`Verified::from_gate`]'s
 /// own doc on why that separation is the point.
+#[allow(clippy::too_many_arguments)]
 async fn gate_fixture(
     compiled: Fixture,
     pool: &Pool,
@@ -596,6 +684,7 @@ async fn gate_fixture(
     space: ordo_crypto::SpaceId,
     version: &str,
     ddl: &str,
+    live: LiveCheck,
 ) -> Result<Verified, LoadRefusal> {
     // Tenancy first (`in_space` carries custody across), then custody, so
     // the ordering of the two assignments cannot silently matter.
@@ -612,12 +701,17 @@ async fn gate_fixture(
         }
     })?;
 
-    let report = crate::shape::verify_registry(&fixture, cfg, ddl)
+    let mut report = crate::shape::verify_registry(&fixture, cfg, ddl)
         .await
         .map_err(|refusal| LoadRefusal::Shape {
             version: version.to_string(),
             refusal,
         })?;
+    if live == LiveCheck::PerTenant {
+        // The deployment's database is another version's shape; its drift
+        // says nothing about this one. Each tenant's database is asked.
+        report.drift.clear();
+    }
 
     let exec = ordo_exec::Executor {
         pool: pool.clone(),
@@ -699,6 +793,22 @@ pub enum Swapped {
 /// dispatches through.
 pub struct Deployment {
     current: RwLock<Arc<Loaded>>,
+    /// **The versions this node serves besides the active one**
+    /// (`plan-versions.md` §1.4, increment 3), by name. A tenant pinned to
+    /// one of them is served it ([`Deployment::for_space`]). Loaded at boot
+    /// and when a pin names one ([`Deployment::install`]); a version no
+    /// pin names is dropped ([`Deployment::retain_pinned`]).
+    others: RwLock<std::collections::HashMap<String, Arc<Loaded>>>,
+    /// Every tenant's pin as this node last read it, and the `$pins` row
+    /// read up to. Filled from the control database at boot and by the pin
+    /// stream ([`crate::pin_stream`]).
+    pins: RwLock<PinMap>,
+    /// The registry's active version, as the pin stream last read it, when
+    /// this node has not swapped to it yet. A tenant pinned to it is served
+    /// the node's active version until the swap lands: an activation moves
+    /// every pin first, and the deploy channel's swap (with its live check
+    /// and the tenant catch-up) is what brings the node to it.
+    following: RwLock<Option<String>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -710,12 +820,38 @@ pub struct Deployment {
     platform: Vec<OpSpec>,
 }
 
+/// The pins a node holds. See [`Deployment`]'s `pins`.
+#[derive(Debug, Default, Clone)]
+pub struct PinMap {
+    /// Space to `(version, epoch)`.
+    pub by_space: std::collections::HashMap<String, (String, i64)>,
+    /// The newest `$pins` row read.
+    pub seq: i64,
+}
+
+/// A tenant is pinned to a version this node has not loaded. Retryable:
+/// the node loads every pinned version at boot and when a pin names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unserved {
+    pub space: String,
+    pub version: String,
+}
+
+type Others = RwLock<std::collections::HashMap<String, Arc<Loaded>>>;
+
+fn others_empty() -> Others {
+    RwLock::new(std::collections::HashMap::new())
+}
+
 impl Deployment {
     /// Boot on a gated version.
     pub fn boot(verified: Verified) -> Arc<Deployment> {
         Arc::new(Deployment {
             current: RwLock::new(Arc::new(verified.0)),
             platform: Vec::new(),
+            others: others_empty(),
+            pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         })
     }
 
@@ -736,6 +872,9 @@ impl Deployment {
         Ok(Arc::new(Deployment {
             platform: Self::vet_platform(&verified.0, platform)?,
             current: RwLock::new(Arc::new(verified.0)),
+            others: others_empty(),
+            pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         }))
     }
 
@@ -867,6 +1006,9 @@ impl Deployment {
         Ok(Arc::new(Deployment {
             current: RwLock::new(Arc::new(loaded)),
             platform,
+            others: others_empty(),
+            pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         }))
     }
 
@@ -898,6 +1040,9 @@ impl Deployment {
                 views: RwLock::new(std::collections::HashMap::new()),
             })),
             platform: Vec::new(),
+            others: others_empty(),
+            pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         })
     }
 
@@ -915,6 +1060,9 @@ impl Deployment {
         Ok(Arc::new(Deployment {
             current: RwLock::new(d.current()),
             platform,
+            others: others_empty(),
+            pins: RwLock::new(PinMap::default()),
+            following: RwLock::new(None),
         }))
     }
 
@@ -970,8 +1118,186 @@ impl Deployment {
         }
         let from = slot.version.clone();
         let to = next.0.version.clone();
-        *slot = Arc::new(next.0);
+        let mut others = self.others.write().expect("deployment lock");
+        // A version a tenant was already served stays the same `Loaded`,
+        // gated when it was installed.
+        let incoming = others.remove(&to).unwrap_or_else(|| Arc::new(next.0));
+        let old = std::mem::replace(&mut *slot, incoming);
+        // The version replaced stays loaded while a pin this node holds
+        // still names it; `retain_pinned` drops it once none does.
+        if !old.version.is_empty() && old.version != "(none)" {
+            others.insert(old.version.clone(), old);
+        }
+        drop(others);
+        drop(slot);
+        self.retain_pinned();
         Swapped::Installed { from, to }
+    }
+
+    // ── many versions (increment 3) ─────────────────────────────────────
+
+    /// **Serve a version besides the active one**, gated as a swap is. The
+    /// active version is not touched. A version already served answers
+    /// [`Swapped::AlreadyServing`].
+    pub fn install(&self, next: Verified) -> Swapped {
+        if !self.platform.is_empty() {
+            if let Err(refusal) = Self::vet_names(&next.0, &self.platform) {
+                return Swapped::Refused(refusal.to_string());
+            }
+        }
+        let active = self.current();
+        if active.version == next.0.version {
+            return Swapped::AlreadyServing(active.version.clone());
+        }
+        let mut others = self.others.write().expect("deployment lock");
+        if others.contains_key(&next.0.version) {
+            return Swapped::AlreadyServing(next.0.version.clone());
+        }
+        let to = next.0.version.clone();
+        others.insert(to.clone(), Arc::new(next.0));
+        Swapped::Installed {
+            from: active.version.clone(),
+            to,
+        }
+    }
+
+    /// The version a tenant is served, and the pin epoch its writes are
+    /// made under. A tenant with no pin this node knows is served the
+    /// active version and checks no epoch. A tenant pinned to a version
+    /// this node has not loaded is [`Unserved`].
+    pub fn for_space(&self, space: &str) -> Result<(Arc<Loaded>, Option<i64>), Unserved> {
+        let active = self.current();
+        let Some((version, epoch)) = self.pin_of(space) else {
+            return Ok((active, None));
+        };
+        if version == active.version {
+            return Ok((active, Some(epoch)));
+        }
+        match self.loaded(&version) {
+            Some(l) => Ok((l, Some(epoch))),
+            // The activation landed in the registry and this node's swap
+            // has not: served as before the activation until it does.
+            None if self.following.read().expect("pin lock").as_deref() == Some(&version) => {
+                Ok((active, Some(epoch)))
+            }
+            None => Err(Unserved {
+                space: space.to_string(),
+                version,
+            }),
+        }
+    }
+
+    /// One served version by name, active or not.
+    pub fn loaded(&self, version: &str) -> Option<Arc<Loaded>> {
+        let active = self.current();
+        if active.version == version {
+            return Some(active);
+        }
+        self.others
+            .read()
+            .expect("deployment lock")
+            .get(version)
+            .cloned()
+    }
+
+    /// Every version this node serves: the active one first, then the
+    /// others by name.
+    pub fn served_versions(&self) -> Vec<String> {
+        let mut out = vec![self.current().version.clone()];
+        out.extend(self.others().iter().map(|l| l.version.clone()));
+        out
+    }
+
+    /// The served versions other than the active one, by name.
+    pub fn others(&self) -> Vec<Arc<Loaded>> {
+        let mut out: Vec<Arc<Loaded>> = self
+            .others
+            .read()
+            .expect("deployment lock")
+            .values()
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.version.cmp(&b.version));
+        out
+    }
+
+    /// Drop every non-active version no pin this node holds names, and
+    /// answer them. A request in flight keeps its own `Arc`.
+    pub fn retain_pinned(&self) -> Vec<String> {
+        let pinned: std::collections::HashSet<String> = self
+            .pins
+            .read()
+            .expect("pin lock")
+            .by_space
+            .values()
+            .map(|(v, _)| v.clone())
+            .collect();
+        let mut others = self.others.write().expect("deployment lock");
+        let gone: Vec<String> = others
+            .keys()
+            .filter(|v| !pinned.contains(*v))
+            .cloned()
+            .collect();
+        for v in &gone {
+            others.remove(v);
+        }
+        gone
+    }
+
+    /// The registry's active version as the pin stream last read it. See
+    /// the field.
+    pub fn follow(&self, registry_active: Option<String>) {
+        *self.following.write().expect("pin lock") = registry_active;
+    }
+
+    /// The registry's active version this node follows, when it has read it.
+    pub fn following(&self) -> Option<String> {
+        self.following.read().expect("pin lock").clone()
+    }
+
+    /// One tenant's pin as this node holds it: version and epoch.
+    pub fn pin_of(&self, space: &str) -> Option<(String, i64)> {
+        self.pins
+            .read()
+            .expect("pin lock")
+            .by_space
+            .get(space)
+            .cloned()
+    }
+
+    /// Every pin this node holds, and the `$pins` row read up to.
+    pub fn pins(&self) -> PinMap {
+        self.pins.read().expect("pin lock").clone()
+    }
+
+    /// Replace every pin, from a whole read of the control database.
+    pub fn replace_pins(&self, map: PinMap) {
+        *self.pins.write().expect("pin lock") = map;
+    }
+
+    /// Take one pin change. An epoch no newer than the one held is
+    /// ignored, so a change read twice, or out of order, never moves a pin
+    /// back. Whether the pin changed.
+    pub fn note_pin(&self, space: &str, version: &str, epoch: i64, seq: i64) -> bool {
+        let mut pins = self.pins.write().expect("pin lock");
+        pins.seq = pins.seq.max(seq);
+        match pins.by_space.get(space) {
+            Some((_, held)) if *held >= epoch => false,
+            _ => {
+                pins.by_space
+                    .insert(space.to_string(), (version.to_string(), epoch));
+                true
+            }
+        }
+    }
+
+    /// How many tenants this node serves each version to, by its pins.
+    pub fn tenants_served(&self) -> std::collections::BTreeMap<String, u64> {
+        let mut out = std::collections::BTreeMap::new();
+        for (v, _) in self.pins.read().expect("pin lock").by_space.values() {
+            *out.entry(v.clone()).or_insert(0) += 1;
+        }
+        out
     }
 }
 
@@ -986,6 +1312,19 @@ impl OpRegistry for Deployment {
             return Some(spec.clone());
         }
         self.current().specs.get(name)
+    }
+
+    /// The op as the named tenant's version declares it (§1.4). A tenant
+    /// with no pin, or pinned to a version not loaded here, is looked up in
+    /// the active version; the space's resolve then answers the second.
+    fn get_in(&self, space: Option<&str>, name: &str) -> Option<OpSpec> {
+        if let Some(spec) = self.platform.iter().find(|s| s.name == name) {
+            return Some(spec.clone());
+        }
+        match space.map(|s| self.for_space(s)) {
+            Some(Ok((loaded, _))) => loaded.specs.get(name),
+            _ => self.current().specs.get(name),
+        }
     }
 }
 
@@ -1013,7 +1352,11 @@ pub async fn listen_for_changes(
 > {
     ordo_exec::jobs::listen(
         cfg,
-        &[artifacts::DEPLOY_CHANNEL, ordo_exec::jobs::MEMBERS_CHANNEL],
+        &[
+            artifacts::DEPLOY_CHANNEL,
+            ordo_exec::jobs::MEMBERS_CHANNEL,
+            artifacts::PINS_CHANNEL,
+        ],
     )
     .await
 }

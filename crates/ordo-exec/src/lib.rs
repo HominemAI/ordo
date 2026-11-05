@@ -733,7 +733,30 @@ pub struct Pool {
     /// Who this handle's checkouts are recorded as on a pool that tracks
     /// its holders ([`Pool::labelled`]).
     label: Option<Arc<str>>,
+    /// The pin epoch this handle's writes are made under
+    /// (`plan-versions.md` §1.3, V-19), set by [`Pool::with_pin_epoch`] on
+    /// a handle already charged to a space. Every write transaction on the
+    /// handle checks it against the tenant's database first
+    /// ([`PIN_FENCE_DDL`]). `None` checks nothing: a boot pass, an operator
+    /// command, a test with no pins.
+    pin_epoch: Option<i64>,
 }
+
+/// **The pin fence**, in each tenant's own database (`plan-versions.md`
+/// §1.3, ask 16 ruled 2026-11-04). The newest pin epoch any node wrote a
+/// tenant under. A write under an older epoch is refused
+/// ([`PoolError::PinMoved`]); a write under a newer one raises it, in the
+/// write's own transaction.
+///
+/// Here and not in the control database's `$spaces`, because a tenant's
+/// rows are in its own database and a check must read where the write is.
+/// The control database stays the pin's source; this is the high-water
+/// mark of what writers have seen of it.
+pub const PIN_FENCE_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$pin_fence\" ( \
+  \"space\" text PRIMARY KEY, \
+  \"epoch\" bigint NOT NULL \
+)";
 
 async fn dial(cfg: &PoolConfig, statement_timeout: Option<Duration>) -> Result<Client, PoolError> {
     dial_named(cfg, statement_timeout, None).await
@@ -1061,6 +1084,9 @@ impl Pool {
             // `$space` column, so `erase_space`'s information_schema sweep
             // finds it without being told.
             crate::import::IMPORTMAP_DDL,
+            // The pin fence, in every database a write reaches
+            // (`plan-versions.md` §1.3).
+            PIN_FENCE_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -1189,6 +1215,7 @@ impl Pool {
             sweep: None,
             sweep_wait: route::TENANT_DIAL_WAIT_DEFAULT,
             label: None,
+            pin_epoch: None,
         })
     }
 
@@ -1207,6 +1234,7 @@ impl Pool {
             sweep: self.sweep.clone(),
             sweep_wait: self.sweep_wait,
             label: self.label.clone(),
+            pin_epoch: self.pin_epoch,
         }
     }
 
@@ -1231,7 +1259,25 @@ impl Pool {
             sweep: self.sweep.clone(),
             sweep_wait: self.sweep_wait,
             label: self.label.clone(),
+            // An epoch belongs to one tenant's pin; a handle for another
+            // space carries none until it is given one.
+            pin_epoch: None,
         }
+    }
+
+    /// The same handle, with its writes made under `epoch`, the pin epoch
+    /// this node serves the handle's space under. See [`PIN_FENCE_DDL`].
+    /// A handle charged to no space checks nothing.
+    pub fn with_pin_epoch(&self, epoch: i64) -> Pool {
+        Pool {
+            pin_epoch: Some(epoch),
+            ..self.clone()
+        }
+    }
+
+    /// The pin epoch this handle writes under, if it was given one.
+    pub fn pin_epoch(&self) -> Option<i64> {
+        self.pin_epoch
     }
 
     /// A handle onto the same pool for a walker that touches each tenant
@@ -1260,6 +1306,7 @@ impl Pool {
             sweep: Some(gate),
             sweep_wait: wait,
             label: self.label.clone(),
+            pin_epoch: self.pin_epoch,
         }
     }
 
@@ -1344,6 +1391,7 @@ impl Pool {
     pub fn same_handle(&self, other: &Pool) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
             && self.space == other.space
+            && self.pin_epoch == other.pin_epoch
             && self.sweep.is_some() == other.sweep.is_some()
             && match (&self.observer, &other.observer) {
                 (None, None) => true,
@@ -2415,6 +2463,49 @@ impl Executor {
         .await
     }
 
+    /// **The pin fence** ([`PIN_FENCE_DDL`]), inside the write's own
+    /// transaction. A handle with no epoch, or charged to no space, checks
+    /// nothing.
+    ///
+    /// Read without a lock. Under SERIALIZABLE a write that read the old
+    /// epoch while a newer writer raised it is ordered before that writer,
+    /// which is a write made before the pin moved; a write that starts
+    /// after a newer writer committed reads its epoch and is refused.
+    async fn check_pin_fence(&self, tx: &TxConn) -> Result<(), PoolError> {
+        let (Some(held), Some(space)) = (self.pool.pin_epoch(), self.pool.charged_space()) else {
+            return Ok(());
+        };
+        let rows = tx
+            .rows(&format!(
+                "SELECT \"epoch\" FROM \"$pin_fence\" WHERE \"space\" = {}",
+                sql_lit(space)
+            ))
+            .await?;
+        let fence: Option<i64> = rows
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .and_then(|e| e.parse().ok());
+        match fence {
+            Some(f) if f > held => Err(PoolError::PinMoved {
+                space: space.to_string(),
+                held,
+                fence: f,
+            }),
+            Some(f) if f == held => Ok(()),
+            // None, or older: this node is the first to write under its
+            // epoch, and raises the fence for every node after it.
+            _ => tx
+                .rows(&format!(
+                    "INSERT INTO \"$pin_fence\" (\"space\", \"epoch\") VALUES ({}, {held}) \
+                     ON CONFLICT (\"space\") DO UPDATE \
+                     SET \"epoch\" = GREATEST(\"$pin_fence\".\"epoch\", EXCLUDED.\"epoch\")",
+                    sql_lit(space)
+                ))
+                .await
+                .map(|_| ()),
+        }
+    }
+
     /// One attempt at whatever the write protocol was asked to do.
     ///
     /// The body used to be inlined in [`Executor::write_attempt`] and is
@@ -2456,6 +2547,12 @@ impl Executor {
             .begin_for(OpClass::MultiStatementGroup)
             .await
             .map_err(ExecFail::Pool)?;
+        // The pin fence first: a node whose pin of this tenant is older
+        // than one another node already wrote under writes nothing.
+        if let Err(e) = self.check_pin_fence(&tx).await {
+            let _ = tx.rollback().await;
+            return Err(ExecFail::Pool(e));
+        }
         // Read the journal INSIDE the transaction that will write the
         // effect: checking outside it would reintroduce the very window
         // the lease exists to close.

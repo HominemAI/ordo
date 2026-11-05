@@ -169,6 +169,20 @@ pub enum SpaceRefusal {
     /// tenant. The reason (both versions, and any change that was refused)
     /// stays in the register and the log and is not carried to the caller.
     SchemaBehind { space: String, reason: String },
+    /// **The tenant is pinned to a version this node has not loaded yet**
+    /// (`plan-versions.md` §1.4). Retryable: a node loads every pinned
+    /// version at boot and when the pin stream names one.
+    Unserved { space: String, version: String },
+    /// **The tenant's database is not the shape of the version it is
+    /// pinned to** (§1.4 step 6, the shape fingerprint). Only asked of a
+    /// tenant pinned to a version other than the active one: the active
+    /// version's tenants are brought forward by the catch-up. `reason`
+    /// names the first difference and what fixes it.
+    Unfit {
+        space: String,
+        version: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for SpaceRefusal {
@@ -188,6 +202,15 @@ impl std::fmt::Display for SpaceRefusal {
             SpaceRefusal::SchemaBehind { space, reason } => {
                 write!(f, "space `{space}` is not served: {reason}")
             }
+            SpaceRefusal::Unserved { space, version } => write!(
+                f,
+                "space `{space}` is pinned to version `{version}`, which this node has not \
+                 loaded yet. It loads every pinned version at boot and when the pin \
+                 changes; the same request lands once it has"
+            ),
+            SpaceRefusal::Unfit { space, reason, .. } => {
+                write!(f, "space `{space}` is not served: {reason}")
+            }
         }
     }
 }
@@ -201,6 +224,7 @@ impl SpaceRefusal {
     pub fn class(&self) -> ordo_exec::FaultClass {
         match self {
             SpaceRefusal::Unroutable { class, .. } => *class,
+            SpaceRefusal::Unserved { .. } => ordo_exec::FaultClass::Retryable,
             _ => ordo_exec::FaultClass::Broken,
         }
     }
@@ -378,6 +402,10 @@ pub struct Spaces {
     paused: Mutex<BTreeMap<String, crate::pause::PauseRecord>>,
     /// What a paused tenant answers, per reason: the app developer's setting.
     pause_answers: Mutex<crate::pause::PauseAnswers>,
+    /// `(space, version)` pairs whose database passed the shape
+    /// fingerprint on this node (§1.4 step 6). Asked once per pair per
+    /// process, like continuity.
+    fits: Mutex<HashSet<(String, String)>>,
 }
 
 impl Spaces {
@@ -408,6 +436,7 @@ impl Spaces {
             checks: AtomicUsize::new(0),
             paused: Mutex::new(BTreeMap::new()),
             pause_answers: Mutex::new(crate::pause::PauseAnswers::default()),
+            fits: Mutex::new(HashSet::new()),
         })
     }
 
@@ -528,7 +557,17 @@ impl Spaces {
     /// from a string a request supplied. Routing is second, and refuses
     /// before anything is planned.
     pub async fn resolve(&self, space: &str) -> Result<Bound, SpaceRefusal> {
-        let live = self.deployment.current();
+        // **The tenant's own version** (`plan-versions.md` §1.4): its pin,
+        // read from memory, and the epoch its writes are fenced under.
+        let (live, epoch) = match self.deployment.for_space(space) {
+            Ok(found) => found,
+            Err(u) => {
+                return Err(SpaceRefusal::Unserved {
+                    space: u.space,
+                    version: u.version,
+                })
+            }
+        };
         // Custody is what provisioning writes first, so it is what
         // existence is asked about here. `current_epoch` reads; it never
         // creates, which is what makes a typo unable to mint a tenant.
@@ -553,6 +592,24 @@ impl Spaces {
             Ok(p) => p,
             Err(e) => return Err(self.note(e)),
         };
+        // Every write on this handle checks the pin fence (§1.3).
+        let pool = match epoch {
+            Some(e) => pool.with_pin_epoch(e),
+            None => pool,
+        };
+
+        // A tenant pinned to a version other than the active one: its
+        // database must be that version's shape. Asked once per node.
+        if live.version != self.deployment.current().version {
+            if let Err(reason) = self.fits(space, &pool, &live).await {
+                let refusal = SpaceRefusal::Unfit {
+                    space: space.to_string(),
+                    version: live.version.clone(),
+                    reason,
+                };
+                return Err(self.note(refusal));
+            }
+        }
 
         // **The version, before the continuity read** (R-S4). A database
         // whose tables are some other artifact's cannot usefully be asked
@@ -668,6 +725,14 @@ impl Spaces {
     /// program, or a target that predates the version row.
     async fn schema_behind(&self, space: &str, pool: &Pool) -> Option<Reconciled> {
         let serving = self.deployment.current().version.clone();
+        // A tenant pinned to another version is asked the shape question
+        // instead ([`Spaces::fits`]); the catch-up brings databases to the
+        // active version only.
+        if let Some((pinned, _)) = self.deployment.pin_of(space) {
+            if pinned != serving && self.deployment.loaded(&pinned).is_some() {
+                return None;
+            }
+        }
         // **A deployment that cannot name its own version has no basis to
         // call anything behind**, and there are two ways to be in that
         // state rather than the one this first checked for.
@@ -728,6 +793,9 @@ impl Spaces {
             SpaceRefusal::NoCustody(s) => s.clone(),
             SpaceRefusal::Unroutable { space, .. } => space.clone(),
             SpaceRefusal::Rewound { space, .. } => space.clone(),
+            SpaceRefusal::Unfit { space, .. } => space.clone(),
+            // Passing: the node is loading the version.
+            SpaceRefusal::Unserved { .. } => return refusal,
             // Written by the site that made it, which knows the reason and
             // that it belongs in the catch-up's list as well.
             SpaceRefusal::SchemaBehind { .. } => return refusal,
@@ -943,6 +1011,72 @@ impl Spaces {
             .lock()
             .expect("continuity registry is not poisoned")
             .insert(space.to_string());
+    }
+
+    /// **The shape fingerprint** (§1.4 step 6): does this tenant's
+    /// database hold everything `live` declares? Read once per `(space,
+    /// version)` per node. The database's own `$migrations` naming the
+    /// version is enough; otherwise its tables are read and diffed against
+    /// the version's schema, with no prior, so a column the database holds
+    /// and the version does not is never a difference.
+    ///
+    /// Not checked here: a column the database holds that the version does
+    /// not know and that has no default. A version's inserts would fail on
+    /// it. An additive change never adds one (`plan-schema-evolution.md`
+    /// §5, class A); a transforming one is a move (increments 7 and 11).
+    async fn fits(&self, space: &str, pool: &Pool, live: &Loaded) -> Result<(), String> {
+        let key = (space.to_string(), live.version.clone());
+        if self.fits.lock().expect("fit cache").contains(&key) {
+            return Ok(());
+        }
+        if let Ok(ordo_exec::spacedb::TargetVersion::At(at)) =
+            ordo_exec::spacedb::recorded_version(pool).await
+        {
+            if at == live.version {
+                self.fits.lock().expect("fit cache").insert(key);
+                return Ok(());
+            }
+        }
+        let shape = ordo_exec::migrate::live_shape(pool, crate::schema_apply::LIVE)
+            .await
+            .map_err(|e| format!("its database's shape could not be read: {e}"))?;
+        let changes = ordo_schema::diff(&shape, None, &live.fixture.schema);
+        if let Some(first) = changes.first() {
+            return Err(format!(
+                "its database is not the shape of version `{}`, which it is pinned to: {first}{}. \
+                 Pin it to a version its database serves (`ordo versions pin {space} <version>`), \
+                 or activate `{}` so its database is brought forward",
+                live.version,
+                match changes.len() {
+                    1 => String::new(),
+                    n => format!(" (and {} more)", n - 1),
+                },
+                live.version,
+            ));
+        }
+        self.fits.lock().expect("fit cache").insert(key);
+        Ok(())
+    }
+
+    /// Read one tenant's pin from the control database again and take it.
+    /// The door calls this when a write was refused because the pin moved
+    /// ([`ordo_exec::PoolError::PinMoved`]). Whether the pin this node
+    /// holds changed.
+    pub async fn reload_pin(&self, space: &str) -> bool {
+        match crate::versions::Versions::on(self.witness.pool())
+            .pin_of(space)
+            .await
+        {
+            Ok(Some(crate::versions::Pin {
+                version: Some(v),
+                epoch,
+            })) => self.deployment.note_pin(space, &v, epoch, 0),
+            Ok(_) => false,
+            Err(e) => {
+                eprintln!("space {space}: its pin could not be read again ({e})");
+                false
+            }
+        }
     }
 
     /// This space's write log, minted on first use.

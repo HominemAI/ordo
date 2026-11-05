@@ -960,20 +960,34 @@ impl RoutineRunner {
 impl RunHandler for RoutineRunner {
     fn handle<'a>(&'a self, run: &'a Run, ctx: &'a WorkerCtx) -> BoxFut<'a, Result<(), String>> {
         Box::pin(async move {
-            let live = ctx.deployment.current();
+            // **The tenant's own version** (`plan-versions.md` §1.10): the
+            // run executes under the version its tenant is pinned to, and
+            // runs a routine only that version declares the same way. The
+            // listener key was made with the active version's name, so the
+            // pinned version's routines are keyed with it too.
+            let bound = self
+                .spaces
+                .resolve(&run.space.0)
+                .await
+                .map_err(|e| format!("tenant {}: {e}", run.space.0))?;
+            let live = bound.live.clone();
+            let active = ctx.deployment.current().version.clone();
             let schema = &live.fixture.schema;
             let domain = schema.domain.clone().unwrap_or_default();
             let found = schema
                 .routines
                 .iter()
-                .find(|r| run_keys(r, &domain, &live.version) == run.listener)
+                .find(|r| {
+                    run_keys(r, &domain, &active) == run.listener
+                        || run_keys(r, &domain, &live.version) == run.listener
+                })
                 .cloned();
             let now = ctx.now();
             let Some(routine) = found else {
                 eprintln!(
-                    "routine run {} in {}: the live version declares no routine for `{}`; \
-                     recorded and not run",
-                    run.run_key, run.space.0, run.listener
+                    "routine run {} in {}: the tenant's version {} declares no routine for \
+                     `{}`; recorded and not run",
+                    run.run_key, run.space.0, live.version, run.listener
                 );
                 record_skip(&ctx.pool, run, &run.listener, SKIP_UNDECLARED, now)
                     .await
@@ -991,11 +1005,6 @@ impl RunHandler for RoutineRunner {
                     .map_err(|e| e.to_string())?;
                 return Ok(());
             }
-            let bound = self
-                .spaces
-                .resolve(&run.space.0)
-                .await
-                .map_err(|e| format!("tenant {}: {e}", run.space.0))?;
             let fixture = bound.view.fixture.clone();
             let actor = format!("{name}@{}", live.version);
             let woken = match &routine.trigger {
@@ -1082,7 +1091,14 @@ impl RunHandler for RoutineRunner {
                     }
                 }
                 Err(ordo_exec::ExecFail::Compile(m)) if m == NOTHING_CHANGED => {}
-                Err(e) => return Err(format!("routine {name} in {}: {e}", run.space.0)),
+                Err(e) => {
+                    // The tenant's pin moved under this node: read it again,
+                    // so the retry runs under the version it names now.
+                    if matches!(e.pool_error(), Some(ordo_exec::PoolError::PinMoved { .. })) {
+                        self.spaces.reload_pin(&run.space.0).await;
+                    }
+                    return Err(format!("routine {name} in {}: {e}", run.space.0));
+                }
             }
             if let Some(n) = *more.lock().expect("more is not poisoned") {
                 eprintln!(

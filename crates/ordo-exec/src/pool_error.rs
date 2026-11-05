@@ -237,6 +237,19 @@ pub enum PoolError {
     /// the tenant and the next pass tries it again. The value is the wait
     /// that ran out, in milliseconds.
     DialWaitExceeded(u64),
+    /// **The tenant's pin moved past this node** (`plan-versions.md` §1.3,
+    /// V-19). The write carried the pin epoch this node serves the tenant
+    /// under, and the tenant's database records a newer one: another node
+    /// already wrote under a later pin. Nothing was written. Retryable once
+    /// the node has read the tenant's pin again, which the door does
+    /// before it answers.
+    PinMoved {
+        space: String,
+        /// The epoch this node wrote under.
+        held: i64,
+        /// The epoch the tenant's database records.
+        fence: i64,
+    },
     /// Dial or protocol failure, or a row this platform cannot read. The
     /// driver error, when there was one, is the detail's cause.
     Db(DbDetail),
@@ -329,7 +342,8 @@ impl PoolError {
             PoolError::Serialization(_)
             | PoolError::LockTimeout(_)
             | PoolError::RetryExhausted { .. }
-            | PoolError::DialWaitExceeded(_) => FaultClass::Retryable,
+            | PoolError::DialWaitExceeded(_)
+            | PoolError::PinMoved { .. } => FaultClass::Retryable,
             PoolError::Arithmetic(_)
             | PoolError::CheckViolation(_)
             | PoolError::InvalidInput(_)
@@ -433,7 +447,9 @@ impl PoolError {
             | PoolError::InvalidInput(d)
             | PoolError::Db(d) => Some(d),
             PoolError::RetryExhausted { last, .. } => last.detail(),
-            PoolError::Saturated | PoolError::DialWaitExceeded(_) => None,
+            PoolError::Saturated | PoolError::DialWaitExceeded(_) | PoolError::PinMoved { .. } => {
+                None
+            }
         }
     }
 }
@@ -474,6 +490,12 @@ impl fmt::Display for PoolError {
                  again. The wait is {}={ms}; the slots are {}",
                 route::TENANT_DIAL_WAIT_MS_ENV,
                 route::TENANT_DIAL_CONCURRENCY_ENV
+            ),
+            PoolError::PinMoved { space, held, fence } => write!(
+                f,
+                "pin_moved: tenant `{space}` is pinned under epoch {fence} and this node \
+                 wrote under {held}, so nothing was written. The node reads the pin again \
+                 and the request can be sent again"
             ),
             PoolError::Db(m) => write!(f, "db: {m}"),
         }

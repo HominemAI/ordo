@@ -362,6 +362,27 @@ impl RevokeAct {
     }
 }
 
+/// Seconds since the epoch as `2026-11-05 14:02 UTC`, to the minute.
+pub fn utc_minute(at: u64) -> String {
+    let days = (at / 86_400) as i64;
+    let secs = at % 86_400;
+    // Howard Hinnant's days-to-civil.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
 /// One `$revocations` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revocation {
@@ -604,7 +625,10 @@ impl std::fmt::Display for VersionRefusal {
                     f,
                     "version_revoked: {named} was revoked by {} at {}: \"{}\". \
                      `ordo versions unrevoke {} --reason \"...\"` lifts the mark",
-                    mark.actor, mark.at, mark.reason, mark.version
+                    mark.actor,
+                    utc_minute(mark.at),
+                    mark.reason,
+                    mark.version
                 )?;
                 if let Some((setting, var)) = setting {
                     write!(
@@ -631,7 +655,9 @@ impl std::fmt::Display for VersionRefusal {
                 f,
                 "already_revoked: {named} was revoked by {} at {}: \"{}\". The mark stays \
                  as it is",
-                mark.actor, mark.at, mark.reason
+                mark.actor,
+                utc_minute(mark.at),
+                mark.reason
             ),
             VersionRefusal::NotRevoked { named } => write!(
                 f,
@@ -1548,6 +1574,14 @@ fn repin_sql(to: &str, actor: &str, cause: PinCause, at: u64, filter: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn times_print_as_utc_to_the_minute() {
+        assert_eq!(utc_minute(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc_minute(1_762_351_320), "2025-11-05 14:02 UTC");
+        assert_eq!(utc_minute(1_709_164_799), "2024-02-28 23:59 UTC");
+        assert_eq!(utc_minute(1_709_164_800), "2024-02-29 00:00 UTC");
+    }
 
     #[test]
     fn a_bad_setting_names_the_setting_and_the_value() {

@@ -224,10 +224,10 @@ The pin this plan adds:
   `pins.reconcile_interval` (`ORDO_PINS_RECONCILE_SECS`, 30 s).
 - **One tenant moves on demand**: `Versions::pin`, cause `pin`, through
   `std.deployment.pin` and `ordo versions pin <tenant> <version>`. It is the
-  seam every later single-tenant move calls (§1.11). A system caller (a
-  machine key) is asked no passkey touch (owner, 2026-11-05: the
-  developer's own system may drive moves). A person is asked for one, as
-  on every other platform write; whether that changes is open on the board.
+  seam every later single-tenant move calls (§1.11). It asks no passkey
+  touch, of a system or a person, strict deployment or not (owner,
+  2026-11-05: *"If they are logged in they proved their access"*). The
+  role gate is unchanged: deployment owner only.
 - `std.deployment.tenantVersion` and `ordo versions list --tenant <id>`:
   one tenant's version, epoch and pin history.
 - `ordo versions list|show` say `active (new tenants)` and `serving N
@@ -471,11 +471,11 @@ nothing of versions.
 - The owner: *"technically the developer could even have their own system
   managing automatic updates."* So the move on demand is a door op a
   system credential can call, with no passkey touch and no exemption
-  setting. A machine key already needs no touch in the home space; a
-  person's session is still asked, until the board rules on people.
+  setting. A person moving a version is not asked either (owner,
+  2026-11-05: *"They could be moving many at a time"*).
 - Where it lands: increment 3, session 2. Session 1 built the seam:
   `Versions::pin` is the one single-tenant move, `std.deployment.pin` its
-  door op, which asks a system caller no touch. The window-timed move and the tenant's own
+  door op, which asks no touch. The window-timed move and the tenant's own
   trigger call it with their own actor and cause.
 
 ---

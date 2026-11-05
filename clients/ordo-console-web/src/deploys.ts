@@ -152,6 +152,35 @@ export const setVersionSetting = (
   reason: string,
 ): Promise<SettingChanged> => post<SettingChanged>('deploys/setting', { setting, reason, ...(value ? { value } : {}) });
 
+/** Which way tenants may change one touch (owner, 2026-11-05). */
+export type Exposed = 'none' | 'raise' | 'lower' | 'both';
+
+/** One situation of `ORDO_SECURITY_LEVEL`'s table, and what tenants may change. */
+export interface TouchSituation {
+  situation: string;
+  label: string;
+  /** Whether a tenant may ever be let choose it. Acts on the deployment never. */
+  choosable: boolean;
+  exposed: Exposed;
+  levelAsks: boolean;
+}
+
+export interface TenantTouches {
+  level: string;
+  situations: TouchSituation[];
+  history: { situation: string; exposed: Exposed; actor: string; reason: string; at: number }[];
+}
+
+export interface TouchExposed extends TenantTouches {
+  situation: string;
+  exposed: Exposed;
+  changed: boolean;
+}
+
+export const tenantTouches = (): Promise<TenantTouches> => get<TenantTouches>('deploys/touches');
+export const exposeTouch = (situation: string, exposed: Exposed, reason: string): Promise<TouchExposed> =>
+  post<TouchExposed>('deploys/touch', { situation, exposed, reason });
+
 /** How long the screen waits for every node to serve a version. */
 export const WAIT_SECS = 120;
 

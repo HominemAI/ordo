@@ -62,6 +62,12 @@ const VERSION_OPS: [&str; 5] = [
     ordo_host::deploy_ops::SET_VERSION_SETTING,
 ];
 use ordo_host::window_ops::OPS as WINDOW_OPS;
+/// The touches tenants may choose (owner, 2026-11-05). A deployment write:
+/// no touch below `ORDO_SECURITY_LEVEL=high`.
+const TOUCH_OPS: [&str; 2] = [
+    ordo_host::tenant_touches::TOUCHES,
+    ordo_host::tenant_touches::EXPOSE,
+];
 
 /// Where the console and the deployment sit. The default is one site, the
 /// passkey library's test origin; the cross-site rehearsal puts them on two.
@@ -125,6 +131,7 @@ impl Door {
         let profile = VERSION_OPS
             .iter()
             .chain(WINDOW_OPS.iter())
+            .chain(TOUCH_OPS.iter())
             .fold(profile, |p, op| p.allow(Role::Owner, op));
         engine.set_profile(&space, profile);
         if let Some(o) = self.owner.lock().unwrap().clone() {
@@ -209,6 +216,10 @@ async fn op(
         ordo_host::deploy_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
     } else if WINDOW_OPS.contains(&name.as_str()) {
         ordo_host::window_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
+    } else if TOUCH_OPS.contains(&name.as_str()) {
+        ordo_host::tenant_touches::TouchOps::on_pool(&d.deploys.pool, HOME)
+            .execute(&name, &space, &bound, &principal, None)
+            .await
     } else {
         d.ops.execute(&name, &space, &bound, &principal).await
     };
@@ -1477,11 +1488,38 @@ async fn revoke_needs_a_reason_and_somewhere_to_move_and_unrevoke_lifts_it() {
     let after = h.get("deploys/settings").await.body;
     assert_eq!(after["history"][0]["reason"], "start here", "{after}");
 
+    // The touches tenants may choose (owner, 2026-11-05): nothing exposed,
+    // one exposed with a reason, and an act on the deployment refused in
+    // the door's words.
+    let touches = h.get("deploys/touches").await;
+    assert_eq!(touches.status, StatusCode::OK, "{}", touches.body);
+    assert_eq!(touches.body["history"], json!([]), "{}", touches.body);
+    let exposed = h
+        .post(
+            "deploys/touch",
+            json!({"situation": "membership", "exposed": "both", "reason": "teams"}),
+        )
+        .await;
+    assert_eq!(exposed.status, StatusCode::OK, "{}", exposed.body);
+    assert_eq!(exposed.body["changed"], true, "{}", exposed.body);
+    let never = h
+        .post(
+            "deploys/touch",
+            json!({"situation": "deploying", "exposed": "lower", "reason": "x"}),
+        )
+        .await;
+    assert_ne!(never.status, StatusCode::OK, "{}", never.body);
+    let message = never.body["message"].as_str().unwrap_or_default();
+    assert!(message.contains("deploying"), "{}", never.body);
+    let after = h.get("deploys/touches").await.body;
+    assert_eq!(after["history"][0]["reason"], "teams", "{after}");
+
     let audit = audit_of(&h, "deploys.").await;
     assert!(
         audit.contains(&"deploys.setting ok".to_string()),
         "{audit:?}"
     );
+    assert!(audit.contains(&"deploys.touch ok".to_string()), "{audit:?}");
     assert!(
         audit.contains(&"deploys.revoke ok".to_string()),
         "{audit:?}"

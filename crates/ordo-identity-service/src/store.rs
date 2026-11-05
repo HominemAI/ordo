@@ -17,7 +17,7 @@ use ordo_exec::{sql_lit, Pool, PoolLimits, TextRow};
 use crate::config::{IdentityConfig, DATABASE_URL_ENV};
 use crate::error::IdentityError;
 
-const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_1), (2, MIGRATION_2)];
+const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3)];
 
 /// The advisory lock migrations run under, so two services booting at once
 /// do not race.
@@ -29,6 +29,18 @@ const MIGRATION_2: &str = r#"
 ALTER TABLE guess_counts ADD COLUMN source text NOT NULL DEFAULT '';
 ALTER TABLE guess_counts DROP CONSTRAINT guess_counts_pkey;
 ALTER TABLE guess_counts ADD PRIMARY KEY (deployment, kind, source);
+"#;
+
+/// A machine key's grants and its minting grant (owner, 2026-11-05).
+/// `grants` is what the key may do, comma-separated: every key made before
+/// this held `deployment`, and keeps it. `mints` is what the keys it makes
+/// may carry; empty, the default, is that it makes none. The provisioner
+/// key made at first boot makes CI keys (`plan-identity-service.md` 5.1),
+/// so it keeps minting `deployment` keys.
+const MIGRATION_3: &str = r#"
+ALTER TABLE machine_keys ADD COLUMN grants text NOT NULL DEFAULT 'deployment';
+ALTER TABLE machine_keys ADD COLUMN mints text NOT NULL DEFAULT '';
+UPDATE machine_keys SET mints = 'deployment' WHERE name = 'provisioner' AND created_by = 'boot';
 "#;
 
 const MIGRATION_1: &str = r#"

@@ -211,6 +211,27 @@ async fn the_provisioner_key_becomes_a_machine_that_signs_in_and_invites() {
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(v["link"].as_str().unwrap().contains("/join#"));
+
+    // It makes CI keys that deploy (plan 5.1, step 4), and nothing wider:
+    // its minting grant is `deployment` (owner, 2026-11-05).
+    let (s, v) = h
+        .bearer("POST", "/machine-keys", t, json!({ "name": "ci-main" }))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["createdBy"], id.as_str());
+    let (s, v) = h
+        .bearer(
+            "POST",
+            "/machine-keys",
+            t,
+            json!({ "name": "importer", "grants": ["import"] }),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("mint_refused")),
+        "{v}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -635,6 +656,121 @@ async fn a_machine_key_made_by_an_admin_signs_in_until_it_is_ended() {
         (s, v["error"].as_str()),
         (StatusCode::UNAUTHORIZED, Some("machine_refused"))
     );
+}
+
+/// Sign a machine key in and return its token.
+async fn machine_token(h: &H, secret: &str) -> String {
+    let (id, key) = parse_secret(secret).unwrap();
+    let (_, b, _) = h
+        .call("POST", "/machine/begin", &[], json!({ "key": id }))
+        .await;
+    let ch = b["challenge"].as_str().unwrap().to_string();
+    let sig = sign_challenge(&key, &ch).unwrap();
+    let (s, v, _) = h
+        .call(
+            "POST",
+            "/machine/complete",
+            &[],
+            json!({ "key": id, "challenge": ch, "signature": sig }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["token"].as_str().unwrap().to_string()
+}
+
+/// **A machine key's grants and its minting grant** (owner, 2026-11-05).
+/// A key made without naming grants holds `deployment`; `import` is given
+/// per key. A minting grant names what the keys it makes may carry, apart
+/// from what it holds itself. It is off by default, only a person gives
+/// one, and every key records who made it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_key_holds_its_grants_and_mints_only_within_its_minting_grant() {
+    use ordo_identity::deployment_token::{GRANT_DEPLOYMENT, GRANT_IMPORT};
+    let h = boot_with("machine-grants", &[]).await;
+    let (cookie, _) = join(&h, &invite_link(&h).await, "Dana", &authenticator(7, b"d")).await;
+    let admin = token(&h, &cookie).await;
+    let make = |by: String, body: Value| {
+        let h = &h;
+        async move { h.bearer("POST", "/machine-keys", &by, body).await }
+    };
+
+    // Default: `deployment`, and no minting.
+    let (s, plain) = make(admin.clone(), json!({ "name": "ci" })).await;
+    assert_eq!(s, StatusCode::OK, "{plain}");
+    assert_eq!(plain["grants"], json!([GRANT_DEPLOYMENT]));
+    assert_eq!(plain["mints"], json!([]));
+    let ci = machine_token(&h, plain["secret"].as_str().unwrap()).await;
+    let c = deployment_token::verify(&ci, &h.jwks().await, &h.expect()).unwrap();
+    assert_eq!(c.grants, vec![GRANT_DEPLOYMENT.to_string()]);
+
+    // A key with no minting grant makes no key, and the refusal says how.
+    let (s, v) = make(ci.clone(), json!({ "name": "child" })).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("mint_refused")),
+        "{v}"
+    );
+    assert!(v["message"].as_str().unwrap().contains("`mints`"), "{v}");
+
+    // A minter that may not import itself, and whose keys may.
+    let (s, m) = make(
+        admin.clone(),
+        json!({ "name": "handout", "grants": [], "mints": [GRANT_IMPORT] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{m}");
+    let minter_id = m["id"].as_str().unwrap().to_string();
+    let minter = machine_token(&h, m["secret"].as_str().unwrap()).await;
+    let c = deployment_token::verify(&minter, &h.jwks().await, &h.expect()).unwrap();
+    assert!(c.grants.is_empty(), "it holds none itself: {:?}", c.grants);
+
+    let (s, child) = make(
+        minter.clone(),
+        json!({ "name": "sync-1", "grants": [GRANT_IMPORT] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{child}");
+    assert_eq!(child["createdBy"], minter_id.as_str());
+    let child_token = machine_token(&h, child["secret"].as_str().unwrap()).await;
+    let c = deployment_token::verify(&child_token, &h.jwks().await, &h.expect()).unwrap();
+    assert!(c.holds(GRANT_IMPORT) && !c.holds(GRANT_DEPLOYMENT));
+
+    // Beyond the minting grant, or minting in turn: refused, by name.
+    let (s, v) = make(minter.clone(), json!({ "name": "sync-2" })).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("`deployment`"),
+        "{v}"
+    );
+    let (s, v) = make(
+        minter.clone(),
+        json!({ "name": "sync-3", "grants": [GRANT_IMPORT], "mints": [GRANT_IMPORT] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let (s, v) = make(
+        admin.clone(),
+        json!({ "name": "bad", "grants": ["everything"] }),
+    )
+    .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("bad_request")),
+        "{v}"
+    );
+
+    // The list says who made each key and what it holds.
+    let (_, list) = h.bearer("GET", "/machine-keys", &admin, Value::Null).await;
+    let row = list["machineKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["name"] == "sync-1")
+        .unwrap()
+        .clone();
+    assert_eq!(row["createdBy"], minter_id.as_str());
+    assert_eq!(row["grants"], json!([GRANT_IMPORT]));
+    assert_eq!(row["mints"], json!([]));
 }
 
 #[tokio::test(flavor = "multi_thread")]

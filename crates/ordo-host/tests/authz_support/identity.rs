@@ -85,6 +85,11 @@ impl Issuer {
             client: client.into(),
             sid: "s_matrix".into(),
             touched_at,
+            grants: if kind == Kind::Machine {
+                vec![ordo_identity::deployment_token::GRANT_DEPLOYMENT.into()]
+            } else {
+                Vec::new()
+            },
             iat: now,
             exp: now + 4 * 3600,
             jti: "j_matrix".into(),

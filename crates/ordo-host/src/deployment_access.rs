@@ -5,9 +5,16 @@
 //! |---|---|---|---|---|
 //! | Person, touch fresh | allowed | allowed | denied | denied |
 //! | Person, touch stale | reads allowed, a write the touch gate names: `presence_required` | `presence_required` | denied | denied |
-//! | Machine key | allowed, writes included | denied | denied | denied |
+//! | Machine key | allowed with grant `deployment`, writes included | denied | denied | `std.space.import` with grant `import`; denied otherwise |
 //!
 //! A break-glass token is a person here: it carries a fresh touch.
+//!
+//! **A machine key's grants** (owner, 2026-11-05) are on its token
+//! ([`ordo_identity::deployment_token::GRANTS`]). `deployment` is what every
+//! key held before grants existed. `import` lets a system import into a
+//! tenant: the developer gives it per key, off by default, and no touch is
+//! asked. The bundle must still be staged under that tenant's own directory
+//! (`exit_ops`), so the grant reaches only what the deployment owner staged.
 //!
 //! "A write the touch gate names" is the deployment's own presence policy
 //! for platform ops (`presence.rs`, `ORDO_STEP_UP_EXEMPT_OPS`,
@@ -93,20 +100,39 @@ pub fn decide(
         return Realm::Deny;
     }
     let person = matches!(claims.kind, Kind::Person | Kind::Breakglass);
+    if !person {
+        return machine(claims, home, space, op);
+    }
     if space == home {
-        return match (person, touch_window) {
-            (false, _) | (true, None) => Realm::Allow,
-            (true, Some(window)) if fresh(claims.touched_at, window, now) => Realm::Allow,
-            (true, Some(_)) => Realm::PresenceRequired,
+        return match touch_window {
+            None => Realm::Allow,
+            Some(window) if fresh(claims.touched_at, window, now) => Realm::Allow,
+            Some(_) => Realm::PresenceRequired,
         };
     }
-    if !person || !TENANT_OPS_OPEN.contains(&op) {
+    if !TENANT_OPS_OPEN.contains(&op) {
         return Realm::Deny;
     }
     if fresh(claims.touched_at, TENANT_REACH_SECS, now) {
         Realm::Allow
     } else {
         Realm::PresenceRequired
+    }
+}
+
+/// A machine key's row of the table: never asked for a touch, and only
+/// what its grants name.
+fn machine(claims: &DeploymentClaims, home: &str, space: &str, op: &str) -> Realm {
+    use ordo_identity::deployment_token::{GRANT_DEPLOYMENT, GRANT_IMPORT};
+    let granted = if space == home {
+        claims.holds(GRANT_DEPLOYMENT)
+    } else {
+        op == crate::exit_ops::IMPORT && claims.holds(GRANT_IMPORT)
+    };
+    if granted {
+        Realm::Allow
+    } else {
+        Realm::Deny
     }
 }
 
@@ -163,6 +189,7 @@ mod tests {
             client: "console".into(),
             sid: "s_1".into(),
             touched_at,
+            grants: Vec::new(),
             iat: NOW,
             exp: NOW + 600,
             jti: "j".into(),
@@ -185,6 +212,7 @@ mod tests {
         let mut machine = person(None);
         machine.kind = Kind::Machine;
         machine.sub = "m_ci".into();
+        machine.grants = vec![ordo_identity::deployment_token::GRANT_DEPLOYMENT.into()];
         let tenant_op = TENANT_OPS_OPEN[0];
         let d = |c: &DeploymentClaims, space: &str, op: &str, w: Option<u64>| {
             decide(c, Some(HOME), space, op, w, NOW)
@@ -205,5 +233,38 @@ mod tests {
         // A touch from the future past the leeway is not a touch.
         let ahead = person(Some(NOW + 600));
         assert_eq!(d(&ahead, HOME, APPLY, Some(300)), Realm::PresenceRequired);
+    }
+
+    /// **A system importing into a tenant** (owner, 2026-11-05): only with
+    /// the `import` grant, only `std.space.import`, never asked for a touch.
+    /// A key without `deployment` reaches nothing in the home space.
+    #[test]
+    fn a_machine_key_reaches_what_its_grants_name() {
+        use ordo_identity::deployment_token::{GRANT_DEPLOYMENT, GRANT_IMPORT};
+        let import = crate::exit_ops::IMPORT;
+        let key = |grants: &[&str]| {
+            let mut m = person(None);
+            m.kind = Kind::Machine;
+            m.sub = "m_sync".into();
+            m.grants = grants.iter().map(|g| g.to_string()).collect();
+            m
+        };
+        let d = |c: &DeploymentClaims, space: &str, op: &str| {
+            decide(c, Some(HOME), space, op, Some(300), NOW)
+        };
+        let both = key(&[GRANT_DEPLOYMENT, GRANT_IMPORT]);
+        let only_import = key(&[GRANT_IMPORT]);
+        let only_deployment = key(&[GRANT_DEPLOYMENT]);
+        let none = key(&[]);
+        assert_eq!(d(&both, "t1", import), Realm::Allow);
+        assert_eq!(d(&only_import, "t1", import), Realm::Allow);
+        assert_eq!(d(&only_deployment, "t1", import), Realm::Deny);
+        assert_eq!(d(&none, "t1", import), Realm::Deny);
+        // The grant is import, not the tenant.
+        assert_eq!(d(&both, "t1", crate::exit_ops::EXPORT), Realm::Deny);
+        assert_eq!(d(&both, "t1", TENANT_OPS_OPEN[0]), Realm::Deny);
+        assert_eq!(d(&only_import, HOME, APPLY), Realm::Deny);
+        assert_eq!(d(&none, HOME, APPLY), Realm::Deny);
+        assert_eq!(d(&only_deployment, HOME, APPLY), Realm::Allow);
     }
 }

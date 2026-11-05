@@ -204,6 +204,11 @@ fn claims(kind: Kind, touched_at: Option<u64>) -> DeploymentClaims {
         client: "console".into(),
         sid: "s_1".into(),
         touched_at,
+        grants: if kind == Kind::Machine {
+            vec![ordo_identity::deployment_token::GRANT_DEPLOYMENT.into()]
+        } else {
+            Vec::new()
+        },
         iat: START,
         exp: START + 600,
         jti: "j_1".into(),

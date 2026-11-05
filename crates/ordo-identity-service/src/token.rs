@@ -44,6 +44,8 @@ pub struct Subject<'a> {
     pub client: &'a str,
     pub sid: &'a str,
     pub touched_at: Option<u64>,
+    /// A machine key's grants. Ignored for any other kind.
+    pub grants: &'a [String],
 }
 
 /// Sign a token for `who`, living `life_secs`. The one place a claim set is
@@ -67,6 +69,10 @@ pub fn issue(
         touched_at: match who.kind {
             Kind::Machine => None,
             _ => who.touched_at,
+        },
+        grants: match who.kind {
+            Kind::Machine => who.grants.to_vec(),
+            _ => Vec::new(),
         },
         iat: now,
         exp: now + life_secs,
@@ -100,6 +106,9 @@ pub fn for_session(
             client: &session.client,
             sid: &session.id,
             touched_at: session.touched_at,
+            // A machine's token is signed at its sign-in, with its grants;
+            // one made from a session here holds none.
+            grants: &[],
         },
         now,
         issuer.token_secs,

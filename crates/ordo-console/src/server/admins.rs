@@ -9,7 +9,7 @@
 //! | `POST admins/invite {label}` | `POST /invites {role: admin, label}` |
 //! | `POST admins/invite/revoke {id}` | `POST /invites/{id}/revoke` |
 //! | `POST admins/end {id}` | `POST /people/{id}/end` |
-//! | `POST admins/machine-keys/add {name, publicKey?}` | `POST /machine-keys` |
+//! | `POST admins/machine-keys/add {name, publicKey?, grants?, mints?}` | `POST /machine-keys` |
 //! | `POST admins/machine-keys/end {id}` | `POST /machine-keys/{id}/end` |
 //!
 //! The console holds none of this. Every call goes through the one client
@@ -113,6 +113,10 @@ struct KeyBody {
     name: String,
     #[serde(rename = "publicKey")]
     public_key: Option<String>,
+    /// What the key may do; the service's default when absent.
+    grants: Option<Vec<String>>,
+    /// What the keys it makes may carry; none when absent.
+    mints: Option<Vec<String>>,
 }
 
 /// An id that goes into a path at the service: the service's own shapes
@@ -253,6 +257,12 @@ async fn key_add(
     let mut ask = json!({ "name": req.name.trim() });
     if let Some(p) = req.public_key.as_deref().filter(|p| !p.trim().is_empty()) {
         ask["publicKey"] = json!(p.trim());
+    }
+    if let Some(g) = &req.grants {
+        ask["grants"] = json!(g);
+    }
+    if let Some(m) = &req.mints {
+        ask["mints"] = json!(m);
     }
     let made = relay(c, "POST", "/machine-keys", &t, Some(&ask)).await?;
     // The private half, when the service made the pair, is shown once.

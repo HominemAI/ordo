@@ -178,7 +178,7 @@ touch back on named ops at any level. An exempt op keeps its
 role gate. An exempt read is one a delegated token may be granted; platform
 writes stay closed to delegated tokens whatever the list says
 (`ORDO_DELEGABLE_OPS`). **A system caller is never asked for a touch**
-(owner, 2026-11-05): a machine key needs none in the deployment's own space,
+(owner, 2026-11-05): a machine key needs none in the deployment's own space, or importing into a tenant under its `import` grant,
 and a delegated token is refused a presence-gated op as not delegable before
 presence is read. Moving a tenant's version (`std.deployment.pin`) asks no
 touch of anyone (same day). An entry that names no platform op

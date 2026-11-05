@@ -128,12 +128,32 @@ export const revoke = (version: string, reason: string, moveTo: string | null): 
 export const unrevoke = (version: string, reason: string): Promise<Revoked> =>
   post<Revoked>('deploys/unrevoke', { version, reason });
 
+/** What a pin, a move or a target answers: the tenant and the version it is now on, or aimed at. */
+export interface TenantVersionMoved {
+  tenant: string;
+  to?: string;
+  target?: string | null;
+  ordinal?: number | null;
+}
+
+/** Pin one tenant to a stored version now (`std.deployment.pin`). */
+export const pinTenant = (tenant: string, version: string): Promise<TenantVersionMoved> =>
+  post<TenantVersionMoved>('deploys/pin', { tenant, version });
+/** Move one tenant off a revoked version, now, to its target (`std.deployment.moveOffRevoked`). */
+export const moveTenantOffRevoked = (tenant: string): Promise<TenantVersionMoved> =>
+  post<TenantVersionMoved>('deploys/move', { tenant });
+/** Set where the window sweep moves one tenant, or clear it with `null` (`std.deployment.setMoveTarget`). */
+export const setTenantTarget = (tenant: string, version: string | null): Promise<TenantVersionMoved> =>
+  post<TenantVersionMoved>('deploys/target', { tenant, ...(version ? { version } : {}) });
+
 /** The three version settings, stored in Ordo (owner, 2026-11-05). `null` is unset. */
 export interface VersionSettings {
   served: string | null;
   minimum: string | null;
   newTenant: string | null;
   history?: { setting: string; value: string | null; actor: string; reason: string; at: number }[];
+  /** Tenants that must move off a revoked or too-old version, and those no window covers. */
+  waiting?: { tenants: number; noWindow: number; line: string | null };
 }
 
 /** What a change answers: the settings now, and whether this one changed. */

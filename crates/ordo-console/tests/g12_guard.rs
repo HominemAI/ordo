@@ -104,6 +104,31 @@ const CALLS: &[(&str, Rule)] = &[
             test: "versions_settings.rs",
         },
     ),
+    // A tenant's version, moved from the Tenants screen.
+    (
+        "std.deployment.pin",
+        Write {
+            act: "pinned",
+            src: "deploy_ops.rs",
+            test: "versions_pins.rs",
+        },
+    ),
+    (
+        "std.deployment.moveOffRevoked",
+        Write {
+            act: "moved-off-revoked",
+            src: "deploy_ops.rs",
+            test: "versions_moves.rs",
+        },
+    ),
+    (
+        "std.deployment.setMoveTarget",
+        Write {
+            act: "move-target",
+            src: "deploy_ops.rs",
+            test: "versions_moves.rs",
+        },
+    ),
     // The touches tenants may choose (owner, 2026-11-05).
     ("std.deployment.tenantTouches", Read),
     (

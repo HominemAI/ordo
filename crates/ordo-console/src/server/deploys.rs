@@ -13,6 +13,9 @@
 //! | `POST deploys/unrevoke` | `std.deployment.unrevoke` | both touches |
 //! | `GET deploys/settings` | `std.deployment.versionSettings` | signed in |
 //! | `POST deploys/setting` | `std.deployment.setVersionSetting` | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
+//! | `POST deploys/pin` | `std.deployment.pin` | the console's touch; no touch at the deployment |
+//! | `POST deploys/move` | `std.deployment.moveOffRevoked` | the console's touch; no touch at the deployment |
+//! | `POST deploys/target` | `std.deployment.setMoveTarget` | the console's touch; no touch at the deployment |
 //! | `GET deploys/touches` | `std.deployment.tenantTouches` | signed in |
 //! | `POST deploys/touch` | `std.deployment.exposeTouch` | the console's touch; the deployment's only at `ORDO_SECURITY_LEVEL=high` |
 //!
@@ -68,6 +71,12 @@ pub const REVOKED: &str = "std.deployment.revoked";
 pub const VERSION_SETTINGS: &str = "std.deployment.versionSettings";
 /// `std.deployment.setVersionSetting`.
 pub const SET_VERSION_SETTING: &str = "std.deployment.setVersionSetting";
+/// `std.deployment.pin`.
+pub const PIN: &str = "std.deployment.pin";
+/// `std.deployment.moveOffRevoked`.
+pub const MOVE_OFF_REVOKED: &str = "std.deployment.moveOffRevoked";
+/// `std.deployment.setMoveTarget`.
+pub const SET_MOVE_TARGET: &str = "std.deployment.setMoveTarget";
 /// `std.deployment.tenantTouches`.
 pub const TENANT_TOUCHES: &str = "std.deployment.tenantTouches";
 /// `std.deployment.exposeTouch`.
@@ -94,6 +103,9 @@ pub(super) fn routes() -> Router<Console> {
         .route("/d/{handle}/api/deploys/unrevoke", post(unrevoke_route))
         .route("/d/{handle}/api/deploys/settings", get(settings_route))
         .route("/d/{handle}/api/deploys/setting", post(setting_route))
+        .route("/d/{handle}/api/deploys/pin", post(pin_route))
+        .route("/d/{handle}/api/deploys/move", post(move_route))
+        .route("/d/{handle}/api/deploys/target", post(target_route))
         .route("/d/{handle}/api/deploys/touches", get(touches_route))
         .route("/d/{handle}/api/deploys/touch", post(touch_route))
 }
@@ -108,8 +120,100 @@ action!(revoke_route, "deploys.revoke", deploys_revoke);
 action!(unrevoke_route, "deploys.unrevoke", deploys_unrevoke);
 read!(settings_route, deploys_settings);
 action!(setting_route, "deploys.setting", deploys_setting);
+action!(pin_route, "deploys.pin", deploys_pin);
+action!(move_route, "deploys.move", deploys_move);
+action!(target_route, "deploys.target", deploys_target);
 read!(touches_route, deploys_touches);
 action!(touch_route, "deploys.touch", deploys_touch);
+
+#[derive(Deserialize)]
+struct PinBody {
+    tenant: String,
+    /// Absent or empty clears a tenant's move target; a pin needs it.
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// A tenant id as the door takes one.
+fn tenant_of(t: &str) -> Result<String, ConsoleError> {
+    let t = t.trim();
+    if t.is_empty() || t.len() > 128 {
+        return Err(ConsoleError::BadRequest(
+            "`tenant` must name a tenant, as the Tenants screen lists it".into(),
+        ));
+    }
+    Ok(t.to_string())
+}
+
+/// Pin one tenant to a stored version now. The door refuses a revoked,
+/// unserved or too-old version in its own words.
+async fn deploys_pin(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: PinBody = parse(body)?;
+    let tenant = tenant_of(&req.tenant)?;
+    let version = version_of("version", req.version.as_deref().unwrap_or_default())?;
+    call.detail = format!("tenant={tenant} version={version}");
+    let rows = who
+        .door(c)?
+        .op_present(PIN, &json!({ "tenant": tenant, "version": version }))
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Move one tenant off a revoked version (or one below the minimum) now,
+/// to its target.
+async fn deploys_move(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: PinBody = parse(body)?;
+    let tenant = tenant_of(&req.tenant)?;
+    call.detail = format!("tenant={tenant}");
+    let rows = who
+        .door(c)?
+        .op_present(MOVE_OFF_REVOKED, &json!({ "tenant": tenant }))
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
+
+/// Set the version the window sweep moves one tenant to, or clear it.
+async fn deploys_target(
+    c: &Console,
+    call: &mut Call,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Reply, ConsoleError> {
+    let who = c.who(call, headers, Need::Touch).await?;
+    let req: PinBody = parse(body)?;
+    let tenant = tenant_of(&req.tenant)?;
+    let version = req
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| version_of("version", v))
+        .transpose()?;
+    call.detail = format!(
+        "tenant={tenant} target={}",
+        version.as_deref().unwrap_or("cleared")
+    );
+    let rows = who
+        .door(c)?
+        .op_present(
+            SET_MOVE_TARGET,
+            &json!({ "tenant": tenant, "version": version }),
+        )
+        .await?;
+    Ok(Reply::json(first(rows)))
+}
 
 #[derive(Deserialize)]
 struct TouchBody {

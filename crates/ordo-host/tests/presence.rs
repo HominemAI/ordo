@@ -95,9 +95,6 @@ use ordo_host::platform_ops::person_scoped;
 /// list of tenants, and the consent ops other than the approval (11-4b).
 fn presence_free(name: &str) -> bool {
     person_scoped(name)
-        // Moving a tenant between versions asks no touch, strict or not
-        // (owner, 2026-11-05: the developer's own system may drive it).
-        || ordo_host::deploy_ops::NO_PRESENCE.contains(&name)
         || (ordo_host::consent::any_member(name) && !ordo_host::consent::asks_presence(name))
 }
 

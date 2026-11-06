@@ -1,6 +1,6 @@
 {
- "date": "2026-11-04",
- "text": "Versions increments 2 and 2b are on main (PR #6, 3a28847b), with console screens: pins, labels, diff, revoking a version, and a Maintenance screen for windows [[program-versions-the-core-under-schema]]. On the PR, 3 notes e2e tests failed once and passed on re-run [[notes-page-catch-up-flake]]. Increment 3 is next.",
+ "date": "2026-11-06",
+ "text": "2026-11-06 audit of the 45 tasks marked building: 13 were built, 11 not started, 2 blocked; 18 remain in progress and now name what is left. Checklist boxes 7d, 17m, 17ag, 22c, 22i ticked; 27ar reopened (P5, P6 unbuilt). Found: the nightly and the v0.5.0 release both fail on a runner without gh [[sploosh-froze-under-ci-load-and]]; the live deployment is down [[live-instance]]. Tenant pause P5 is being built [[tenant-pause]].",
  "tiles": [
   [
    "4,056",
@@ -35,12 +35,20 @@
  ],
  "look": [
   {
-   "id": "program-versions-the-core-under-schema",
-   "why": "2b and console built"
+   "id": "tenant-pause",
+   "why": "P5 being built; P6 blocked"
   },
   {
-   "id": "notes-page-catch-up-flake",
-   "why": "flaky e2e, not started"
+   "id": "sploosh-froze-under-ci-load-and",
+   "why": "nightly fails, gh missing on the runner"
+  },
+  {
+   "id": "the-live-deployment-stopped-starting-after",
+   "why": "seal-master --from-env owed"
+  },
+  {
+   "id": "program-versions-the-core-under-schema",
+   "why": "3 of 17 increments built"
   }
  ]
 }

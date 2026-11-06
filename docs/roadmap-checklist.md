@@ -1260,8 +1260,12 @@ list, which had drifted from it.
         *metric* cardinality, bounded by the registry's existing 10,000
         series cap and `ordo_metrics_series_dropped_total`. The stream is
         the cheap artifact under load; the counters are the expensive one.
-- [ ] **7d · Nothing verifies the security stream, and no owner can read
-      it.** Found by the 2026-09-07 coverage audit;
+- [x] **7d · Nothing verifies the security stream, and no owner can read
+      it.** **All three built:** (a) 2026-09-26 below; (b) `GET
+      /security/events` and `std.deployment.securityEvents`; (c) the
+      console's Security log screen (`crates/ordo-console/src/server/shares.rs`,
+      test `the_security_log_reads_the_deployment_a_tenant_and_the_console`).
+      The richer explorer in `dashboard-plan.md` is not asked for. Found by the 2026-09-07 coverage audit;
       `audit-board-coverage.md` finding #21 named two of these as
       remainders and §7 closed without them.
       **(a) `ordo verify` does not cover the security-event stream.**
@@ -6572,7 +6576,10 @@ built **on** it.
       **host-side filtering**, closed as deliberately unbuilt because it
       would examine rows the caller never asked for and needs its own
       disclosure rule — which nobody has written. Both `11-8` and `5c` are
-      `[x]`, so all four are invisible.
+      `[x]`, so all four are invisible. **Audit 2026-11-06:** (1) and (3)
+      are closed by 27am (refinement on by default, the executor takes the
+      door's refinement, `crates/ordo-exec/src/lib.rs`). (2) waits on a
+      tracing substrate. (4) stays deliberately unbuilt.
 
 - [x] **16e · `ordo dev` does not exist, and its bar is settled — CLOSED 2026-09-19 by 17o (D1–D4 built; the budget test passes at about 500 ms).**
       `adoption-dx-plan.md` §3.1 is marked **`[settled as bar]`**:
@@ -7482,8 +7489,8 @@ inside-out — each ring assumes the ones before it.
       `provision::prepare_target` runs for a space's own database; 17l
       keeps the per-space half it already had. Neither 17l nor 11-27
       grows a second create path.
-- [ ] **17m · Security stream verification & read surfaces.** Already
-      homed: **7d** (nothing verifies the secevent chain; `ordo verify`
+- [x] **17m · Security stream verification & read surfaces.** Already
+      homed: **7d**, built (verify, owner read route, console screen) (nothing verifies the secevent chain; `ordo verify`
       walks the command chain only) plus the owner-read surface.
 
 ### Ring 3 — the product ring
@@ -9177,8 +9184,10 @@ inside-out — each ring assumes the ones before it.
       did nothing; `a_reserved_but_unbuilt_declaration_says_so` caught it, and
       was itself falsified by removing the call from the keyword arm.
 
-- [ ] **17ag · Ten security findings with no trace.**
-      `audit-security-trace.md`, 2026-09-27.
+- [x] **17ag · Ten security findings with no trace.**
+      `audit-security-trace.md`, 2026-09-27. **Trace complete 2026-09-29**
+      (board `security-trace`); the work it left is on its own rows: 22l,
+      22m, 18x, 18y.
 
       The 31 `SH-n` findings from the four hardening reviews were traced to
       the tree: **13 closed with a named file, 8 homed on a checklist item and
@@ -9474,8 +9483,11 @@ inside-out — each ring assumes the ones before it.
          becomes break-glass, named as such, for the acts that must work
          when the door is down (custody init, chain verification, revert).
          `import` first, then `rollback`, `deploys`, `migrate --apply`,
-         `quota`, `usage`, `restore --record`. **Not started** (board
-         row `cli-door-table`). A per-command table begun in `wire.rs`
+         `quota`, `usage`, `restore --record`. **Built 2026-11-05**
+         (c67dbb44): the door is the default and `--direct` names the
+         database path for the acts that must work with no server.
+         `deploys`, `usage`, `triggers`, `prune`, `revert`, `checkpoint`
+         still open the database (board row `the-cli-s-db-mode-goes`). A per-command table begun in `wire.rs`
          on 2026-09-20 was never compiled and is kept at the tag
          `salvage/cli-door-table`; its branch was deleted 2026-09-29.
       3. **`migration.md` reads as a runbook for two commands that do not
@@ -12746,7 +12758,7 @@ None has a go; each is filed so it cannot be lost.
       (49eb7b43): `erase_space` decides per file by its recorded store,
       leaves a tenant-owned bucket's files, and writes `objects_left`
       beside `space_erased`. Board: `st-delete-objects`.
-- [ ] **22c · Attaching a bucket that already holds this tenant's
+- [x] **22c · Attaching a bucket that already holds this tenant's
       objects.** The refusal is built (U6). **Ruled 2026-09-29: allowed when
       every object matches a record.** Not built. **Ruled 2026-10-06:**
       lift the refusal to change or detach a bucket that holds files, since
@@ -12774,9 +12786,11 @@ None has a go; each is filed so it cannot be lost.
       is built (21b). No command changes a membership. Planned in
       `plan-enrolment.md`, and waits on the owner's answers there. Board:
       `membership-commands`.
-- [ ] **22i · A refinement can reach the door.** The cost gate of 11-8 is
-      built and idle: no op can be marked refinable and the executor ignores
-      `$refine`. Board: `effective-cost`.
+- [x] **22i · A refinement can reach the door.** The cost gate of 11-8 was
+      built and idle. **Built by 27am (2026-10-05):** every non-public
+      compiled read registers `RefineTier::Basic`
+      (`crates/ordo-host/src/lib.rs`), so refinement reaches the door by
+      default; tests `refine_cost.rs`, `cost_class.rs`. Board: `effective-cost`.
 - [ ] **22j · Small things recorded only in prose.** The deployment-id
       column on four tables (18o), a caller for `AccessEngine::grant_for`
       (11-16 follow-up), the break-glass connection string (17z), and a
@@ -13392,7 +13406,7 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       `ORDO_ACCOUNT_REMOVAL` (`never`, `now`, `<n>d`), `members.status`
       readable in programs.
       Board: `person-can-leave`.
-- [x] **27ar · Pausing a tenant, and the layer outside it** (ruled
+- [ ] **27ar · Pausing a tenant, and the layer outside it** (ruled
       2026-10-05): pause and resume a whole tenant, and an in-between layer
       where its people can still sign in and do some things, likely at the
       deployment level. Plan `docs/plan-tenant-pause.md`. **Built
@@ -13406,6 +13420,9 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       resume by a deployment routine (P6). Per reason, the status and
       message a paused tenant answers are the app developer's (ruled
       2026-10-06, ask 8; built eaab5633, `ORDO_TENANT_PAUSE_ANSWERS`).
+      **Reopened 2026-11-06:** the box was ticked with P5 and P6 unbuilt
+      (`onPaused` existed nowhere). P5 is being built; P6 waits on
+      `plan-syntax-additions.md` §3; P7 audit owed. Tests now 29.
       Board: `tenant-pause`.
 - [ ] **27as · Maintenance mode: pause every tenant at once** (asked
       2026-10-05). A deployment-wide pause; what still answers is decided as

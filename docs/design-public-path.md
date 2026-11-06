@@ -1,7 +1,7 @@
 # The public path at runtime: anonymous reads, the cache, API keys
 
 Status: **ruled 2026-10-03; phase 1 (steps 1, 3, 4) built 2026-10-10**
-(`public-path-design`, all 12 asks). Steps 2 and 5 to 11 are not built. The
+(`public-path-design`, all 12 asks). Steps 1, 3, 4, 7 and 9 are built; 2, 5, 6, 8 and 10 are not, and 11 is optional (audit 2026-11-06). The
 departures are listed under §11. The human check: Turnstile, reCAPTCHA and hCaptcha, verified by the
 server, off until a key is set. It follows `plan-public-data.md` and designs what
 happens when a request arrives. The spelling of

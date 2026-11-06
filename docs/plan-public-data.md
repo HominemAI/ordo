@@ -1,7 +1,8 @@
 # Public data: what a visitor who is not signed in can see
 
-Status: **ruled** (`public-data` asks 1 to 23, 2026-10-03). Nothing here is
-built, and there is no go to build it yet (checklist 27ad).
+Status: **ruled** (`public-data` asks 1 to 23, 2026-10-03). Phases 1 and 2
+are built (2026-10-10 to 12; `design-public-path.md` §11). The read layer,
+API keys and the derived index are not (checklist 27ad).
 
 ---
 

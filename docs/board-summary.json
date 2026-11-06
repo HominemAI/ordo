@@ -1,9 +1,9 @@
 {
  "date": "2026-11-06",
- "text": "2026-11-06 audit of the 45 tasks marked building: 13 were built, 11 not started, 2 blocked; 18 remain in progress and now name what is left. Checklist boxes 7d, 17m, 17ag, 22c, 22i ticked; 27ar reopened (P5, P6 unbuilt). Found: the nightly and the v0.5.0 release both fail on a runner without gh [[sploosh-froze-under-ci-load-and]]; the live deployment is down [[live-instance]]. Tenant pause P5 is being built [[tenant-pause]].",
+ "text": "2026-11-06 audit of the 45 tasks marked building: 13 were built, 11 not started, 2 blocked; 18 remain in progress and now name what is left. Checklist boxes 7d, 17m, 17ag, 22c, 22i ticked; 27ar reopened and P5 built the same day [[tenant-pause]]; P6 waits on deployment entities. The nightly and the v0.5.0 release both fail on a runner without gh [[sploosh-froze-under-ci-load-and]]; the live deployment is down [[live-instance]].",
  "tiles": [
   [
-   "4,056",
+   "4,060",
    "Tests green",
    "ok"
   ],
@@ -36,7 +36,7 @@
  "look": [
   {
    "id": "tenant-pause",
-   "why": "P5 being built; P6 blocked"
+   "why": "P5 built; P6 blocked on deployment entities"
   },
   {
    "id": "sploosh-froze-under-ci-load-and",
@@ -44,7 +44,7 @@
   },
   {
    "id": "the-live-deployment-stopped-starting-after",
-   "why": "seal-master --from-env owed"
+   "why": "seal-master --from-env being built"
   },
   {
    "id": "program-versions-the-core-under-schema",

@@ -12190,3 +12190,12 @@ Board task `the-cli-s-db-mode-goes` (Reported fixes). No ruling ever allowed the
 - **Wording, raised on ask 3 of the same task.** The owner: *"I think we need to rephrase passkey touch to reauth or something similar because not everyone might have pass key."* The exact words are asked on the task (ask 5).
 - **`tenant-chooses-its-touches`, ask 3, "ok document".** A tenant can never turn off the reauth on recovery: resetting a member's sign-in, a temporary password, approving or contesting a recovery. The deleting and recovery guide says so.
 - **Ask 5, "ok that should reduce misunderstandings."** "Passkey touch" becomes "reauth" in docs and on the board: a passkey touch or a fresh sign-in. Text an app's users see says "Confirm it's you". Code names (`presence_required`, `--touch`, `exposeTouch`) are unchanged.
+
+## 2026-11-03 to 06: an upgrade must not stop a running deployment
+
+Board task `the-live-deployment-stopped-starting-after` (Reported fixes). The live deployment crash-looped from 2026-11-02 after an upgrade refused the `env` master key it had run with for 6 weeks (21e's refusal, S6-009).
+
+- **Ask 1.** The owner: *"There is nothing permanantly built there - if we need to do it to confirm behavior we can though - Nothing needs to be recovered though."* Nothing to recover; the dev flag only to confirm behaviour. On 2026-11-06: *"I was less interested in fixing it on this live deployment since it doesnt serve anything. - But we should implement the fix."*
+- **Ask 2, "ok".** A setting that an upgrade tightens keeps a running deployment serving with a loud warning that names the fix; only a new deployment is refused. This is the standard-behaviour rule (*"Upgrade should affect nothing"*, Q7 of the identity plan) applied to key custody. Built: `crates/ordo-host/src/tightened.rs` (cabc090a); `ordo keys seal-master --from-env` moves the running key into a sealed file with no re-wrap (1e467636).
+- **Ask 3.** The owner: *"no. We should not be doing digests - we should be doing tags"*. The live image is pinned by a semver tag, never by digest.
+- **Ask 4, "yep".** Release tag v0.5.0 was cut so the deployment can pin `ordo-host:0.5.0`. As of 2026-11-06 `smg_infrastructure/ordo/ordo.yaml` still pulls `:main`; the change is the owner's.

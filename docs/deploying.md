@@ -701,6 +701,14 @@ clients one restart, which is the correct price for a key rotation.
 > uses `sealed-master`: run `ordo keys seal-master`, then set
 > `ORDO_KEY_PROVIDER=sealed-master`, `ORDO_MASTER_KEY_FILE` and
 > `ORDO_MASTER_KEY_PASSPHRASE_FILE`. `ordo dev` needs no setting.
+>
+> **A deployment that already runs on `local` keeps its key.** Run
+> `ordo keys seal-master --from-env --out <file> --passphrase-file <p>`
+> where `ORDO_MASTER_KEY` is set to the running value. The same key moves
+> into the sealed file, so every wrapped key still opens and nothing is
+> re-wrapped. Then set the three `sealed-master` variables, unset
+> `ORDO_MASTER_KEY`, and restart. A plain `seal-master` mints a new key,
+> and a deployment booted on it opens nothing it wrote.
 
 Two levels, and the split matters:
 

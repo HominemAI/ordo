@@ -644,3 +644,169 @@ fn rotate_status_and_destroy_walk_the_epoch_lifecycle() {
 
     std::fs::remove_dir_all(&d).ok();
 }
+
+// ── seal-master --from-env ───────────────────────────────────────────────
+//
+// A deployment that ran on `ORDO_KEY_PROVIDER=local` moves to `sealed-master`
+// with the key it already has (owner, `the-live-deployment-stopped-starting-
+// after`, ask 1). These run the `ordo` binary, so each case owns its
+// ORDO_MASTER_KEY and none can see another's.
+
+/// The value a deployment ran on, and the words it must never print.
+const LIVE_SECRET: &str = "a-live-deployment-master-key-value";
+
+/// `ordo keys seal-master --from-env ...` with ORDO_MASTER_KEY as given
+/// (`None` unsets it). Returns the exit code and both streams.
+fn seal_from_env(out: &std::path::Path, pass: &str, secret: Option<&str>) -> (i32, String) {
+    let mut c = support::ordo();
+    c.args([
+        "keys",
+        "seal-master",
+        "--from-env",
+        "--out",
+        &out.display().to_string(),
+        "--passphrase-file",
+        pass,
+        "--key-id",
+        "live-1",
+    ]);
+    c.env_remove("ORDO_MASTER_KEY_FILE");
+    match secret {
+        Some(s) => c.env("ORDO_MASTER_KEY", s),
+        None => c.env_remove("ORDO_MASTER_KEY"),
+    };
+    let o = c.output().expect("runs ordo");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    (o.status.code().unwrap_or(-1), text)
+}
+
+/// The sealed file holds the bytes the env provider derives from the same
+/// variable: byte equality, and the report says where the key came from
+/// without printing it.
+#[test]
+fn seal_master_from_env_seals_the_running_key() {
+    let d = dir("from-env");
+    let master = d.join("master.key");
+    let _ = std::fs::remove_file(&master);
+    let pass = passfile(&d, "pass", PASS);
+
+    let (code, report) = seal_from_env(&master, &pass, Some(LIVE_SECRET));
+    assert_eq!(code, 0, "{report}");
+    assert!(report.contains("key-id  live-1"), "{report}");
+    assert!(report.contains("source  ORDO_MASTER_KEY"), "{report}");
+    assert!(!report.contains(LIVE_SECRET), "{report}");
+    assert!(report.contains("no escrow"), "{report}");
+
+    let sealed = ordo_crypto::master::open_sealed_master(&master, PASS.as_bytes()).expect("opens");
+    assert_eq!(
+        sealed,
+        ordo_crypto::master::derive_from_secret(LIVE_SECRET.as_bytes()),
+        "the sealed file must hold the key the env provider derives, not a fresh one"
+    );
+    assert_ne!(sealed.as_slice(), LIVE_SECRET.as_bytes());
+}
+
+/// A `sealed-master` provider over the file opens what the env provider
+/// sealed: the migration re-wraps nothing.
+#[test]
+fn a_sealed_master_from_env_opens_what_the_env_provider_sealed() {
+    use ordo_crypto::{Anchor, KeyProvider, LocalKeyProvider, Purpose, SpaceId};
+
+    let d = dir("from-env-roundtrip");
+    let master = d.join("master.key");
+    let _ = std::fs::remove_file(&master);
+    let pass = passfile(&d, "pass", PASS);
+    let (code, report) = seal_from_env(&master, &pass, Some(LIVE_SECRET));
+    assert_eq!(code, 0, "{report}");
+
+    // The deployment as it ran: the `local` provider over the variable.
+    let space = SpaceId("acme".into());
+    let store = SharedStore::default();
+    let before = LocalKeyProvider::new(LIVE_SECRET.as_bytes(), Box::new(store.clone()));
+    before.create_space(&space).expect("custody");
+    let lease = before
+        .release(&space, Purpose::Write, "from-env")
+        .expect("lease");
+    let sealed = before
+        .seal_at(
+            &lease,
+            "orders",
+            "memo",
+            Anchor::Row("r1"),
+            b"kept across the move",
+        )
+        .expect("sealed");
+
+    // The deployment after the move: `sealed-master` over the file, same
+    // `$keycustody` rows, nothing re-wrapped.
+    let after = LocalKeyProvider::from_master(
+        ordo_crypto::master::open_sealed_master(&master, PASS.as_bytes()).expect("opens"),
+        Box::new(store.clone()),
+    );
+    let read = after
+        .release(&space, Purpose::Read, "from-env")
+        .expect("lease");
+    assert_eq!(
+        after
+            .open_at(&read, "orders", "memo", Anchor::Row("r1"), &sealed)
+            .expect("the same master opens it"),
+        b"kept across the move"
+    );
+}
+
+/// No variable, or one too short to be a key: refused by name, and no file
+/// is written.
+#[test]
+fn seal_master_from_env_refuses_an_unset_or_short_variable() {
+    let d = dir("from-env-unset");
+    let pass = passfile(&d, "pass", PASS);
+
+    let unset = d.join("unset.key");
+    let (code, report) = seal_from_env(&unset, &pass, None);
+    assert_ne!(code, 0, "{report}");
+    assert!(report.contains("ORDO_MASTER_KEY"), "{report}");
+    assert!(report.contains("--from-env"), "{report}");
+    assert!(!unset.exists(), "a refused ceremony wrote a file");
+
+    let short = d.join("short.key");
+    let (code, report) = seal_from_env(&short, &pass, Some("short"));
+    assert_ne!(code, 0, "{report}");
+    assert!(report.contains("ORDO_MASTER_KEY"), "{report}");
+    assert!(!short.exists(), "a refused ceremony wrote a file");
+}
+
+/// A shareable in-memory store, so two providers can be pointed at the same
+/// wrapped rows: the only way to ask "are these two masters the same"
+/// without a provider handing its master out.
+#[derive(Default, Clone)]
+struct SharedStore(std::sync::Arc<ordo_crypto::MemoryKeyStore>);
+
+impl ordo_crypto::WrappedKeyStore for SharedStore {
+    fn smk(&self, s: &ordo_crypto::SpaceId) -> Result<Option<Vec<u8>>, ordo_crypto::KeyError> {
+        self.0.smk(s)
+    }
+    fn put_smk(&self, s: &ordo_crypto::SpaceId, w: &[u8]) -> Result<(), ordo_crypto::KeyError> {
+        self.0.put_smk(s, w)
+    }
+    fn deks(&self, s: &ordo_crypto::SpaceId) -> Result<Vec<(u8, Vec<u8>)>, ordo_crypto::KeyError> {
+        self.0.deks(s)
+    }
+    fn put_dek(
+        &self,
+        s: &ordo_crypto::SpaceId,
+        e: u8,
+        w: &[u8],
+    ) -> Result<(), ordo_crypto::KeyError> {
+        self.0.put_dek(s, e, w)
+    }
+    fn drop_dek(&self, s: &ordo_crypto::SpaceId, e: u8) -> Result<(), ordo_crypto::KeyError> {
+        self.0.drop_dek(s, e)
+    }
+    fn drop_space(&self, s: &ordo_crypto::SpaceId) -> Result<(), ordo_crypto::KeyError> {
+        self.0.drop_space(s)
+    }
+}

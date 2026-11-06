@@ -414,12 +414,16 @@ fn usage() -> ! {
          \n\
          key ceremony — custody that only a running server can create is\n\
          custody nobody performed:\n  \
-         ordo keys seal-master --out <path> --passphrase-file <p> [--key-id <id>]\n      \
+         ordo keys seal-master --out <path> --passphrase-file <p> [--key-id <id>]\n                   \
+         [--from-env]\n      \
          mint a deployment master key and write it sealed under a\n      \
          passphrase-derived key (argon2id, the OWASP profile). Prints the\n      \
          key id and a fingerprint; never the key. Refuses to overwrite.\n      \
          The passphrase comes from a FILE: a flag is in the shell history\n      \
-         and in `ps`, and a prompt cannot be scripted.\n  \
+         and in `ps`, and a prompt cannot be scripted. `--from-env` seals\n      \
+         the key ORDO_MASTER_KEY already holds instead of a new one: the\n      \
+         way a deployment on ORDO_KEY_PROVIDER=local moves to sealed-master\n      \
+         and keeps its running key, with nothing re-wrapped.\n  \
          ordo keys init --direct --space <spc> --as <who>\n                 \
          [--master-key-file <f> --passphrase-file <p>]\n      \
          create `$keycustody` if absent and mint the space's SMK and epoch\n      \

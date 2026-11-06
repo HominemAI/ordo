@@ -126,8 +126,9 @@ pub fn env_master_refusal() -> String {
     format!(
         "the env master key (ORDO_MASTER_KEY) is stretched with one HMAC, so a short secret \
          can be guessed offline from a database backup, and it is refused outside \
-         development. Use `sealed-master`: run `ordo keys seal-master` to write the file, \
-         then set ORDO_KEY_PROVIDER=sealed-master, ORDO_MASTER_KEY_FILE and \
+         development. Use `sealed-master`: run `ordo keys seal-master --from-env` with \
+         ORDO_MASTER_KEY set to write the file (the running key moves into it, so nothing \
+         is re-wrapped), then set ORDO_KEY_PROVIDER=sealed-master, ORDO_MASTER_KEY_FILE and \
          ORDO_MASTER_KEY_PASSPHRASE_FILE (the passphrase file in the secret store). For \
          development only, {DEV_FLAG}=1 allows it"
     )
@@ -255,10 +256,23 @@ fn kek(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32], KeyError> {
 /// ceremony that erases every space's custody, and `create_new` makes that
 /// one syscall rather than a check-then-write window.
 pub fn seal_master(path: &Path, key_id: &str, passphrase: &[u8]) -> Result<String, KeyError> {
-    let master = random32();
-    let bytes = encode_sealed_master(key_id, &master, passphrase)?;
+    seal_master_bytes(path, key_id, &random32(), passphrase)
+}
+
+/// Seal a master key the caller already holds, for `ordo keys seal-master
+/// --from-env`: the 32 bytes [`MasterKeySource::Env`] derives move into a
+/// sealed file, so a deployment leaving `ORDO_KEY_PROVIDER=local` keeps its
+/// key and re-wraps nothing. Same file, same refusal to overwrite, same
+/// fingerprint as [`seal_master`]; only where the bytes come from differs.
+pub fn seal_master_bytes(
+    path: &Path,
+    key_id: &str,
+    master: &[u8; 32],
+    passphrase: &[u8],
+) -> Result<String, KeyError> {
+    let bytes = encode_sealed_master(key_id, master, passphrase)?;
     write_new(path, &bytes)?;
-    Ok(fingerprint(&master))
+    Ok(fingerprint(master))
 }
 
 /// The file's bytes, for a caller that writes them itself — a re-wrap, which

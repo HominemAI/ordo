@@ -128,6 +128,10 @@ const SWITCHES: &[&str] = &[
     "--force",
     // `--direct`: open the database from this machine (`crate::direct`).
     "--direct",
+    // `ordo keys seal-master --from-env`: seal the key ORDO_MASTER_KEY
+    // already holds instead of minting one, so a deployment leaving the env
+    // provider re-wraps nothing.
+    "--from-env",
 ];
 
 /// Switches one command takes that another takes a value for:

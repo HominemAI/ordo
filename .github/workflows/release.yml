@@ -193,9 +193,8 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: Publish
+      - name: Write the release notes
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
@@ -237,8 +236,38 @@ jobs:
             echo "files are published without a signed statement of where they came from."
           } > notes.md
 
-          gh release create "$TAG" \
-            --title "ordo $TAG" \
-            --notes-file notes.md \
-            --verify-tag \
-            dist/*
+      - name: Publish
+        # The run's own token and the API, not the `gh` CLI, which the
+        # runner image does not have: the v0.5.0 run of 2026-11-03 failed
+        # here with exit 127 and no release page was made.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const tag = process.env.TAG;
+            // The tag must already exist (what `gh release create --verify-tag` checked).
+            await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
+            const release = await github.rest.repos.createRelease({
+              ...context.repo,
+              tag_name: tag,
+              name: `ordo ${tag}`,
+              body: fs.readFileSync('notes.md', 'utf8'),
+            });
+            for (const name of fs.readdirSync('dist').sort()) {
+              const file = path.join('dist', name);
+              const stat = fs.statSync(file);
+              if (!stat.isFile()) continue;
+              await github.rest.repos.uploadReleaseAsset({
+                ...context.repo,
+                release_id: release.data.id,
+                name,
+                data: fs.readFileSync(file),
+                headers: { 'content-type': 'application/octet-stream', 'content-length': stat.size },
+              });
+              core.info(`uploaded ${name} (${stat.size} bytes)`);
+            }
+            core.info(release.data.html_url);
+            await core.summary.addRaw(`Release: ${release.data.html_url}`).write();

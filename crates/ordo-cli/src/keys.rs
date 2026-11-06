@@ -93,7 +93,8 @@ pub fn run(sub: &str, flags: Flags, cfg: PoolConfig) -> Outcome {
 
 // ── seal-master ──────────────────────────────────────────────────────────
 
-/// `ordo keys seal-master --out <path> [--key-id <id>] --passphrase-file <p>`
+/// `ordo keys seal-master --out <path> [--key-id <id>] --passphrase-file <p>
+///  [--from-env]`
 ///
 /// Mints 32 CSPRNG bytes, derives the KEK with argon2id at the pinned
 /// profile, writes the `ordo-master-v1` file, and prints the key id and a
@@ -101,13 +102,24 @@ pub fn run(sub: &str, flags: Flags, cfg: PoolConfig) -> Outcome {
 /// useless for recovering either. It never prints the key and never writes
 /// it anywhere but the sealed file.
 ///
+/// `--from-env` seals the key the deployment already runs on instead of a
+/// fresh one: the bytes `MasterKeySource::Env` derives from
+/// `ORDO_MASTER_KEY` (the same parsing the `local` provider uses, so
+/// `ORDO_MASTER_KEY_FILE` naming a plaintext file works too). A deployment
+/// that ran on the env provider moves to `sealed-master` with every SMK
+/// still unwrapping, and nothing is re-wrapped (owner, task
+/// `the-live-deployment-stopped-starting-after`, ask 1). An unset or short
+/// variable is refused by name before anything is written. This path does
+/// not need `ORDO_DEV_UNSAFE_TEST_KEYS`: it is how a deployment leaves the
+/// env master, not a way to keep using it.
+///
 /// The passphrase comes from a **file**, not from a prompt and not from a
 /// flag. A flag is in the shell history and in `ps`; a prompt cannot be
 /// scripted, and a ceremony that cannot be scripted is a ceremony somebody
 /// performs by hand differently each time. A file is what the orchestrator's
 /// secret store already mounts.
 fn seal_master(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--out", "--key-id", "--passphrase-file"]) {
+    if let Err(e) = flags.only(&["--out", "--key-id", "--passphrase-file", "--from-env"]) {
         return Outcome::usage(e);
     }
     let out = match flags.require("--out") {
@@ -138,9 +150,29 @@ fn seal_master(flags: Flags) -> Outcome {
         );
     }
 
-    match master::seal_master(&out, &key_id, pass.as_bytes()) {
+    let (sealed, source) = if flags.has("--from-env") {
+        // The env provider's own parsing, not a second one: a key that
+        // reads differently here would seal a file that opens nothing the
+        // deployment wrote. Its refusals already name ORDO_MASTER_KEY.
+        let running = match master::MasterKeySource::Env.open() {
+            Ok(m) => m,
+            Err(e) => {
+                return Outcome::failed(format!(
+                    "--from-env: {e}\n  the key is read from this command's own environment, so run it \
+                     where ORDO_MASTER_KEY is set to the running deployment's value\n"
+                ))
+            }
+        };
+        (
+            master::seal_master_bytes(&out, &key_id, &running, pass.as_bytes()),
+            "ORDO_MASTER_KEY (the running key; nothing to re-wrap)",
+        )
+    } else {
+        (master::seal_master(&out, &key_id, pass.as_bytes()), "new")
+    };
+    match sealed {
         Ok(fingerprint) => Outcome::ok(format!(
-            "sealed  {}\nkey-id  {key_id}\nfp      {fingerprint}\n{LOSS}",
+            "sealed  {}\nkey-id  {key_id}\nfp      {fingerprint}\nsource  {source}\n{LOSS}",
             out.display()
         )),
         Err(e) => Outcome::failed(format!("{e}\n")),

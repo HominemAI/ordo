@@ -11986,6 +11986,13 @@ or a ruling.
       `the_env_master_is_refused_by_ordo_keys_outside_development`. Offline-crackable against wrapped keys that live in
       backups. `sealed-master` uses argon2id and is unaffected. **Owner
       decision:** warn, refuse outside dev, or harden.
+      **2026-11-03 to 06:** the live deployment crash-looped when an upgrade
+      refused its env master (board `the-live-deployment-stopped-starting-after`).
+      Ruled: a running deployment gets a warning with the fix, new ones the
+      refusal (cabc090a, `tightened.rs`). `ordo keys seal-master --from-env`
+      seals the running key with no re-wrap (1e467636; tests
+      `ordo-cli/tests/keys.rs` `seal_master_from_env_*`,
+      `a_sealed_master_from_env_opens_what_the_env_provider_sealed`).
 
 - [ ] **21f · Two notes, recorded (S6-012, S6-013).** The executor splices
       caller values into `.ordo` source text and re-parses, which was

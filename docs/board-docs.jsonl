@@ -1,7 +1,6 @@
 {"file": "corpus-rulings.md", "kind": "record", "what": "The durable record of decisions taken where documents disagreed or were silent, with the reasoning."}
 {"file": "glossary.md", "kind": "record", "what": "The concept map: one entry per term, linked to the section that defines it."}
 {"file": "licensing.md", "kind": "record", "what": "Why Ordo is licensed the way it is, and what that means for a user."}
-{"file": "migrations/README.md", "kind": "record", "what": "How to log each try at moving a real app into Ordo; the import method and its skill are written from these logs"}
 {"file": "roadmap-checklist.md", "kind": "record", "what": "Every work item with its status and reasoning. The long-form record under the board."}
 {"file": "salvage-2026-09-05.md", "kind": "record", "what": "What eight agents left behind when the spend limit stopped them, and each branch's merge base."}
 {"file": "settings.md", "kind": "record", "what": "Every setting: default, whether built, and which layer can change it (deployment, app developer, tenant, person)."}
@@ -75,12 +74,14 @@
 {"file": "plan-tenant-providers.md", "kind": "plan", "what": "Tenant-owned sign-in providers (L1): the setting, ops, routes, key, presence and originating-admin rules"}
 {"file": "plan-tenant-storage.md", "kind": "plan", "what": "Per-tenant object storage: requirements and increments."}
 {"file": "plan-tiers.md", "kind": "plan", "what": "Plan tiers: queries that get faster over time with a human approving. Proposed."}
+{"file": "plan-token-benchmark.md", "kind": "plan", "what": "Plan (2026-10-29): measure how many AI tokens a working app costs an agent on Ordo against the alternatives; nothing run yet, owner questions in section 9"}
 {"file": "plan-topology-audit.md", "kind": "plan", "what": "How to audit the settled topology against what buyers expect."}
 {"file": "plan-usability-testing.md", "kind": "plan", "what": "Testing whether a developer can walk the quickstart, automated and with people."}
 {"file": "plan-versions.md", "kind": "plan", "what": "One build plan joining program versions, schema evolution and environments: the shared core, build order, open decisions, conflicts"}
 {"file": "review-plan-versions.md", "kind": "plan", "what": "Two rounds of adversarial review of plan-versions.md: 54 findings, owner decisions, round comparison, plan changes"}
 {"file": "tooling-and-embedding-plan.md", "kind": "plan", "what": "Tooling and embedding, in three tracks."}
 {"file": "usability-script-console.md", "kind": "plan", "what": "Script for a console usability session with a less technical tester: tasks, what to watch, what fails"}
+{"file": "ai-guide.md", "kind": "guide", "what": "The one-page Ordo guide an AI agent reads, generated from skills/ordo/*.md by the ai_guide_check test; edit the skill files, never this"}
 {"file": "deploying.md", "kind": "guide", "what": "What an operator has to decide, and what the platform decides for them."}
 {"file": "first-deployment.md", "kind": "guide", "what": "From nothing to a signed-in console and a deployed program"}
 {"file": "go-live-notes.md", "kind": "guide", "what": "One-page checklist for putting the notes app live"}
@@ -93,6 +94,7 @@
 {"file": "howto-delegation.md", "kind": "guide", "what": "How a person lets an agent act for them: the consent ceremony's routes, the disclosure, approval with presence, redeem, list, revoke, settings (11-4b)"}
 {"file": "howto-e2e.md", "kind": "guide", "what": "How to run the notes end-to-end tests, locally and from GitHub"}
 {"file": "howto-files.md", "kind": "guide", "what": "How an app developer uploads, shows and downloads files with the SDK and ordo-react, and the blob door's meta route"}
+{"file": "howto-functions.md", "kind": "guide", "what": "How an app developer writes, deploys and calls a backend function: own code run by the deployment in a fresh WebAssembly instance per call"}
 {"file": "howto-identity.md", "kind": "guide", "what": "Running the identity service: deployment people, invites, machine keys, ordo login, break-glass, backups, and rehearsing an upgrade on a copy"}
 {"file": "howto-leave.md", "kind": "guide", "what": "How a member leaves a tenant and how a person deletes their account: the release line, remove and reassign, the refusals"}
 {"file": "howto-loading.md", "kind": "guide", "what": "How an app developer loads a page in stages, and what Ordo promises never blocks"}

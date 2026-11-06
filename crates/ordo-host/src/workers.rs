@@ -76,6 +76,9 @@ impl Worker for TriggersDrain {
                         now,
                     )
                     .await?;
+                // `pass.held` names the paused tenants left alone; a pause is
+                // a decision somebody made and is logged where it is taken,
+                // not once a second here.
                 for m in &pass.misses {
                     eprintln!("worker triggers.drain: not drained: {m}");
                 }
@@ -89,6 +92,11 @@ impl Worker for TriggersDrain {
                     units: pass.units,
                     more: pass.more,
                 });
+            }
+            // The one space this process booted with, paused: its cursors
+            // hold, as a registry tenant's do above.
+            if self.live.paused(&ctx.space.0) {
+                return Ok(Progress::idle());
             }
             for l in wiring.listeners.iter() {
                 let read = triggers::drain_listener(
@@ -136,8 +144,17 @@ impl Worker for TriggersBatch {
             if wiring.listeners.is_empty() {
                 return Ok(Progress::idle());
             }
+            // A paused tenant's batches hold: due or not, they fire on the
+            // first pass after the resume (`plan-tenant-pause.md` §5).
+            let held: Vec<LogSpace> = self
+                .live
+                .paused_spaces()
+                .into_iter()
+                .map(LogSpace)
+                .collect();
             let tx = ctx.pool.begin().await?;
-            let fired = triggers::fire_due(&tx, &wiring.listeners, ctx.now()).await?;
+            let fired =
+                triggers::fire_due_holding(&tx, &wiring.listeners, ctx.now(), &held).await?;
             tx.commit().await?;
             Ok(Progress::did(fired.len() as u64))
         })
@@ -265,6 +282,12 @@ impl Worker for TriggersClock {
             if !triggers::clock_due(&ctx.pool, &wiring.clock, ctx.now()).await? {
                 return Ok(Progress::idle());
             }
+            // A paused tenant is listed too. Its run is enqueued and the
+            // runner's handler skips it and writes the skip down
+            // (`routines.rs`, `$routineskips`, reason `paused`), so a clock
+            // tick during a pause is recorded and not caught up on resume,
+            // and a routine marked `nopause` still runs. One mechanism for
+            // the clock and the runner (`plan-tenant-pause.md` §5).
             let spaces: Vec<LogSpace> = match &wiring.tenants {
                 Some(t) => t.list(&ctx.pool).await.into_iter().map(LogSpace).collect(),
                 None => vec![LogSpace(ctx.space.0.clone())],
@@ -1202,6 +1225,12 @@ impl Worker for BlobGc {
                 };
                 swept += 1;
                 for space in &spaces {
+                    // A paused tenant is not swept: nobody can write it, so
+                    // a sweep is safe and pointless, and it waits for the
+                    // resume (`plan-tenant-pause.md` §5).
+                    if self.spaces.paused_record(&space.0).is_some() {
+                        continue;
+                    }
                     match ordo_exec::blobgc::sweep(
                         pool,
                         self.stores.as_ref(),

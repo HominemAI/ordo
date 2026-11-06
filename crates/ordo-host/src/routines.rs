@@ -196,6 +196,9 @@ pub struct DrainPass {
     pub retired: Vec<(String, String)>,
     /// Tenants whose database could not be reached, with why.
     pub misses: Vec<String>,
+    /// Paused tenants, not visited: their cursors hold where they are
+    /// (`plan-tenant-pause.md` §5).
+    pub held: Vec<String>,
 }
 
 /// One tenant a routine runs in, with when it was created. `None` is the
@@ -266,6 +269,14 @@ impl Tenants {
         let mut pass = DrainPass::default();
         for tenant in self.list_created(control).await {
             let space = tenant.id.clone();
+            // A paused tenant is not drained: its listeners hold their
+            // position, and nothing is accumulated that the runner would
+            // then have to skip. The first pass after the resume reads on
+            // from where each cursor stopped (`plan-tenant-pause.md` §5).
+            if self.spaces.paused_record(&space).is_some() {
+                pass.held.push(space);
+                continue;
+            }
             if !self.due(&space, now) {
                 continue;
             }
@@ -674,6 +685,17 @@ impl LiveRoutines {
 
     pub fn follows_program(&self) -> bool {
         self.follows_program
+    }
+
+    /// Whether `space` is held paused on this replica: the one pause
+    /// register the workers read (`plan-tenant-pause.md` §5).
+    pub fn paused(&self, space: &str) -> bool {
+        self.spaces.paused_record(space).is_some()
+    }
+
+    /// Every tenant held paused on this replica, by id.
+    pub fn paused_spaces(&self) -> Vec<String> {
+        self.spaces.paused_spaces()
     }
 
     /// The wiring in force now.

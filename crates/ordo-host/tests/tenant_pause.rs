@@ -13,6 +13,9 @@
 //! - the record is one row, written once, with a reason from a closed list;
 //! - every replica learns of a pause from the registry.
 //!
+//! - the workers hold a paused tenant still and keep securing its history,
+//!   and a live subscription on it ends with one `space_paused` frame (§5).
+//!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
 use std::sync::Arc;
@@ -177,7 +180,12 @@ async fn harness(db: &str, pausing: PausePolicy) -> Harness {
         attest: Arc::new(ordo_api::attest::NoAttestation),
         page_key: PageKey::from_secret(b"tenant-pause-test"),
         sync: Default::default(),
-        live_streams: Default::default(),
+        // A quiet feed asks the door again every second here, so a pause
+        // under a live subscription closes it within the test's patience.
+        live_streams: ordo_api::LiveStreams::new(ordo_api::LiveSettings {
+            recheck: std::time::Duration::from_secs(1),
+            ..ordo_api::LiveSettings::default()
+        }),
         refine_limits: Default::default(),
         public: Default::default(),
     };
@@ -787,4 +795,234 @@ async fn another_replica_learns_a_pause_and_a_resume_from_the_registry() {
     resume_by_deployment(&h).await;
     assert_eq!(pause::reload(&other, &h.pool).await.unwrap(), 0);
     assert!(pause::gate(&other, "activeProducts", &h.space).is_ok());
+}
+
+// ── what keeps running and what stops (§5) ───────────────────────────────
+
+/// A `GET /op/{name}?live=1` request, the feed a client follows.
+fn live_request(h: &Harness, who: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/op/activeProducts?live=1")
+        .header("x-ordo-space", &h.space)
+        .header("accept", "text/event-stream")
+        .header("authorization", format!("Bearer {}", token(who)))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Read a feed to its end, or for `limit`: the text of every frame, and
+/// whether the door closed it.
+async fn drain_feed(
+    frames: &mut (impl futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+    limit: std::time::Duration,
+) -> (String, bool) {
+    use futures::StreamExt;
+    let mut text = String::new();
+    let deadline = std::time::Instant::now() + limit;
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match tokio::time::timeout(left, frames.next()).await {
+            Ok(Some(Ok(chunk))) => text.push_str(&String::from_utf8_lossy(&chunk)),
+            Ok(None) => return (text, true),
+            Ok(Some(Err(_))) | Err(_) => break,
+        }
+    }
+    (text, false)
+}
+
+/// The `data:` body of the one frame named `event`.
+fn frame_body(text: &str, event: &str) -> Value {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line == format!("event: {event}") {
+            let data = lines.next().unwrap_or_default();
+            let data = data.strip_prefix("data: ").unwrap_or(data);
+            return serde_json::from_str(data).unwrap_or(Value::Null);
+        }
+    }
+    Value::Null
+}
+
+/// §5: a live subscription on a tenant paused under it is closed with one
+/// terminal `space_paused` frame carrying the §4.1 body. While paused, a
+/// new subscription is refused at the door like any read; after the
+/// resume it is admitted again, which is the client's reconnect.
+#[tokio::test(flavor = "multi_thread")]
+async fn live_closes_with_space_paused_and_reconnects_on_resume() {
+    let h = harness("ordo_pause_live", PausePolicy::deployment_only()).await;
+
+    let resp = router(h.state.clone())
+        .oneshot(live_request(&h, EDITOR))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    let mut frames = resp.into_body().into_data_stream();
+    let (first, ended) = drain_feed(&mut frames, std::time::Duration::from_secs(3)).await;
+    assert!(
+        first.contains("\"rows\""),
+        "the first frame is the read: {first}"
+    );
+    assert!(!ended, "the feed closed before anything happened: {first}");
+
+    pause_by_deployment(&h, "billing").await;
+
+    // The door re-checks every feed on its recheck tick (1 s here), finds
+    // the hold, sends the terminal frame and ends the stream.
+    let (text, ended) = drain_feed(&mut frames, std::time::Duration::from_secs(10)).await;
+    assert!(ended, "the feed did not end after the pause: {text}");
+    assert_eq!(
+        text.matches("event: space_paused").count(),
+        1,
+        "one terminal frame, named for the pause: {text}"
+    );
+    assert!(!text.contains("event: error"), "{text}");
+    let body = frame_body(&text, "space_paused");
+    assert_eq!(body["error"]["code"], "space_paused", "{body}");
+    assert_eq!(body["error"]["op"], "activeProducts", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("by the deployment"),
+        "the body names the layer and the reason: {body}"
+    );
+
+    // Reconnecting while paused meets the same refusal at the door.
+    let (status, body) = send(&h.state, live_request(&h, EDITOR)).await;
+    assert_eq!(status, StatusCode::LOCKED, "{body}");
+    assert_eq!(code(&body), "space_paused");
+
+    // After the resume the feed opens again and serves its first frame.
+    resume_by_deployment(&h).await;
+    let resp = router(h.state.clone())
+        .oneshot(live_request(&h, EDITOR))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    let mut frames = resp.into_body().into_data_stream();
+    let (again, ended) = drain_feed(&mut frames, std::time::Duration::from_secs(3)).await;
+    assert!(again.contains("\"rows\""), "{again}");
+    assert!(!ended, "the resumed feed closed at once: {again}");
+}
+
+/// §5: the workers that secure history written before the pause keep
+/// running on a paused tenant. The checkpoint signs the head, attestation
+/// and prune take their turns, and the re-seal pass idles as it would on
+/// any quiet space; none of them reads the pause register.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkpoint_attest_prune_and_reseal_still_run() {
+    use ordo_host::supervisor::{Plan, Supervisor};
+    use ordo_host::workers::{CommandlogAttest, CommandlogCheckpoint, CommandlogPrune, KeysReseal};
+    use std::time::Duration;
+    let h = harness("ordo_pause_workers", PausePolicy::deployment_only()).await;
+
+    // History to secure: one write, then the pause.
+    let (status, body) = command(
+        &h,
+        &h.space.clone(),
+        "std.categories.create",
+        OWNER,
+        json!({ "name": "before the pause" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = pause_by_deployment(&h, "billing").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The tables the workers write, and both schedules due now.
+    ordo_exec::cadence::ensure_tables(&h.pool).await.unwrap();
+    ordo_exec::prune::ensure_tables(&h.pool).await.unwrap();
+    ordo_exec::reseal::ensure_tables(&h.pool).await.unwrap();
+    let witness = ordo_exec::witness::Witness::new(h.pool.clone());
+    witness.ensure_table().await.unwrap();
+    let tx = h.pool.begin().await.unwrap();
+    tx.schedule(ordo_exec::cadence::CHECKPOINT_SCHEDULE, 0)
+        .await
+        .unwrap();
+    tx.schedule(ordo_exec::cadence::ATTEST_SCHEDULE, 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let signer = ordo_commandlog::Ed25519Signer::from_seed("pause-test-key", &[5u8; 32]);
+    let verifier = signer.verifier();
+    let signer = Arc::new(signer);
+    let policy = ordo_exec::cadence::LogPolicy::DEFAULT;
+    const WORKERS: [&str; 4] = [
+        "commandlog.checkpoint",
+        "commandlog.attest",
+        "commandlog.prune",
+        "keys.reseal",
+    ];
+    let sup = Supervisor::start(
+        h.pool.clone(),
+        h.f.keys.clone(),
+        h.deployment.clone(),
+        Arc::new(ordo_host::metrics::Metrics::new()),
+        ordo_crypto::SpaceId(h.space.clone()),
+        ordo_exec::PoolConfig {
+            db: "ordo_pause_workers".into(),
+            ..ordo_exec::PoolConfig::from_env()
+        },
+        Plan {
+            workers: vec![
+                Arc::new(CommandlogCheckpoint {
+                    signer: signer.clone(),
+                    policy,
+                    witness: witness.clone(),
+                }),
+                Arc::new(CommandlogAttest { signer, policy }),
+                Arc::new(CommandlogPrune {
+                    verifier,
+                    policy,
+                    period: Duration::from_secs(1),
+                }),
+                Arc::new(KeysReseal {
+                    chunk: 16,
+                    pause: Duration::from_millis(50),
+                    stream: None,
+                    stores: None,
+                }),
+            ],
+            ..Plan::default()
+        },
+    )
+    .await
+    .expect("the supervisor starts");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let mut health = sup.health();
+    while std::time::Instant::now() < deadline {
+        health = sup.health();
+        if WORKERS
+            .iter()
+            .all(|w| health[w]["runs"].as_u64().unwrap_or(0) >= 1)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    for w in WORKERS {
+        assert!(
+            health[w]["runs"].as_u64().unwrap_or(0) >= 1,
+            "{w} did not run on the paused tenant: {health}"
+        );
+        assert_eq!(health[w]["failures"], json!(0), "{w} failed: {health}");
+        assert_eq!(health[w]["quarantined"], json!(false), "{w}: {health}");
+    }
+    // The checkpoint landed on the paused tenant's chain and was witnessed.
+    let witnessed = witness
+        .latest_checkpoint(&ordo_commandlog::SpaceId(h.space.clone()))
+        .await
+        .expect("the witness reads");
+    assert!(
+        witnessed.is_some(),
+        "no checkpoint was signed for the paused tenant: {health}"
+    );
+    // And the tenant is still paused: none of them lifted anything.
+    assert!(h.spaces.paused_record(&h.space).is_some());
+
+    sup.shutdown(Duration::from_secs(5)).await;
 }

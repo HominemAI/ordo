@@ -165,11 +165,50 @@ pages in the deployment's own space, where they keep answering.
 
 ## What runs during a pause
 
-Records keep being secured: checkpoints, attestation, the security stream.
+Records keep being secured: checkpoints, attestation, pruning, key re-sealing,
+usage counting and the security stream. None of them reads the pause.
 
-A paused tenant's routine runs are skipped. Each skip is finished, not retried, and recorded in the control database's `$routineskips` table with the reason `paused`, and in the log.
+Nothing new happens inside:
 
-A routine whose `run` header says `nopause` runs in a paused tenant anyway. The default is not to run. See `howto-routines.md`.
+- A change routine's listener holds its position. Batches hold. A write that
+  landed just before the pause wakes its routine after the resume, once.
+- A clock routine's tick is skipped. Each skip is finished, not retried, and
+  recorded in the control database's `$routineskips` table with the reason
+  `paused`, and in the log. Skipped ticks are not caught up on resume.
+- A routine whose `run` header says `nopause` runs on its clock anyway. The
+  default is not to run. See `howto-routines.md`.
+- The storage sweep (`blob.gc`) leaves the tenant alone until the resume.
+
+## Live subscriptions and devices
+
+A live subscription on the tenant (`?live=1`, a sync, a read on `/live`) is
+closed with one last frame, `event: space_paused`, carrying the same body as
+the refusal. The door sends it at the next write or within
+`ORDO_LIVE_RECHECK_SECS` (default 30). Opening a new one is refused with
+`space_paused` like any read.
+
+The SDK's sync manager answers that frame:
+
+- `onPaused(refusal)` is called once, with the `space_paused` refusal.
+- Every synced op holds where it stands. `view.paused` carries the refusal,
+  no op is `stopped`, and the device keeps its rows.
+- Nothing reconnects, and `nudge()` does nothing, until your app calls
+  `manager.resumed()`. Learn of the resume from the person's tenant list
+  (`GET /auth/spaces`, `state: active`).
+- `resumed()` reopens every feed with a fresh load, so the device pulls
+  before anything else happens.
+
+```ts
+const manager = SyncManager.start(client, replica, declared, {
+  onPaused: (refusal) => showPausedScreen(refusal.detail.message),
+});
+// later, when the tenant list says `active` again
+manager.resumed();
+```
+
+Writes are not queued on the device (`plan-client-cache.md` §6): a write made
+during a pause is refused with `space_paused` and the values stay the
+caller's. There is nothing to hold and nothing to send on resume.
 
 ## Many replicas
 

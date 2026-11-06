@@ -1036,8 +1036,15 @@ impl Door {
     }
 
     /// The access check alone, for one read, after [`Door::token`] passed.
+    /// Then the executor's holds ([`crate::spec::OpExecutor::held`]): a tenant paused
+    /// after the read was admitted closes it with `space_paused`, and only a
+    /// caller the access check admitted learns of the pause.
     pub(crate) fn access(&self, op: &OpSpec, space: &str) -> Result<(), ApiError> {
-        check_access(&self.state, op, space, &self.headers).map(|_| ())
+        check_access(&self.state, op, space, &self.headers)?;
+        match self.state.executor.held(op, space) {
+            Some(e) => Err(ApiError::from_exec(op, e)),
+            None => Ok(()),
+        }
     }
 
     /// The whole door for one read: the token gate, then the access check.
@@ -1052,13 +1059,23 @@ impl Door {
     }
 }
 
-/// The frame a feed ends with when the door refuses it.
+/// The frame a feed ends with when the door refuses it: `event: error`
+/// carrying the error envelope, or `event: space_paused` when the tenant
+/// was paused under it (`plan-tenant-pause.md` §5). The pause has its own
+/// name on the wire because a client answers it differently: it does not
+/// reconnect until the tenant is resumed, where a refusal stops the read
+/// for good.
 pub(crate) fn refusal_frame(e: &ApiError, key: Option<&str>) -> Event {
     let mut body = e.envelope();
     if let (Some(key), Some(obj)) = (key, body.as_object_mut()) {
         obj.insert("key".into(), Value::String(key.to_string()));
     }
-    Event::default().event("error").data(body.to_string())
+    let name = if e.code == ErrorCode::SpacePaused {
+        "space_paused"
+    } else {
+        "error"
+    };
+    Event::default().event(name).data(body.to_string())
 }
 
 /// A ticker for [`Door::recheck`] whose first tick is one period away, not

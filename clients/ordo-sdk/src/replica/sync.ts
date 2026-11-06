@@ -170,6 +170,12 @@ export async function syncOp(
     if (event === 'error') {
       throw new OrdoRefusal(decodeRefusal(data, 500, spec.op, spec.refusals));
     }
+    // The tenant was paused under the feed (`plan-tenant-pause.md` §5): the
+    // door's one terminal frame, carrying the `space_paused` body. Thrown as
+    // the refusal it is; the sync manager holds the op until the resume.
+    if (event === 'space_paused') {
+      throw new OrdoRefusal(decodeRefusal(data, 423, spec.op, spec.refusals));
+    }
     let delta: FrameDelta;
     let reset = false;
     let members: { entity: string; id: string }[] | undefined;

@@ -76,11 +76,27 @@ export interface SyncView {
   /** True when every live op has finished a load, so no answer is partial. */
   readonly complete: boolean;
   readonly ops: readonly ManagedOp[];
+  /**
+   * The `space_paused` refusal that closed the feeds, while the tenant is
+   * paused (`plan-tenant-pause.md` §5). Every op holds where it stands: no
+   * feed is reopened until {@link SyncManager.resumed} is called. `null`
+   * while the tenant answers.
+   */
+  readonly paused: OrdoRefusal | null;
 }
 
 export interface SyncManagerOptions {
   /** Called after every change to the view. */
   readonly onView?: (view: SyncView) => void;
+  /**
+   * Called once when the door closes the feeds because the tenant was
+   * paused (`plan-tenant-pause.md` §5), with the `space_paused` refusal.
+   * The manager then holds every op and reopens nothing until
+   * {@link SyncManager.resumed}: the tenant's state is in the person's
+   * tenant list (`/auth/spaces`), which is where the app learns of the
+   * resume. The device keeps what it holds.
+   */
+  readonly onPaused?: (refusal: OrdoRefusal) => void;
   /** How long to wait before a reconnect, given the consecutive failures. */
   readonly backoff?: (attempts: number) => number;
   /** How the manager waits. Replaced in tests; defaults to a timer. */
@@ -283,6 +299,12 @@ export class SyncManager {
   #link: ManagerLink | null = null;
   /** The reconnect under way, shared by every call made while it runs. */
   #reconnecting: Promise<void> | null = null;
+  /** The refusal that paused the tenant, while it is paused. */
+  #paused: OrdoRefusal | null = null;
+  /** Resolved by `resumed()`, so every held feed reopens together. */
+  #resume: (() => void) | null = null;
+  #whenResumed: Promise<void> = Promise.resolve();
+  readonly #onPaused: ((refusal: OrdoRefusal) => void) | null;
   /** Resolved on stop, so a waiting reconnect gives up straight away. */
   #stopped!: () => void;
   readonly #whenStopped = new Promise<void>((resolve) => {
@@ -295,6 +317,7 @@ export class SyncManager {
     this.#backoff = options.backoff ?? defaultBackoff;
     this.#wait = options.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#publishMs = options.publishMs ?? 100;
+    this.#onPaused = options.onPaused ?? null;
     if (options.onView) this.#watchers.add(options.onView);
     const target =
       options.online === undefined
@@ -610,6 +633,11 @@ export class SyncManager {
   /** One op's feed, reopened for as long as the manager runs. */
   async #run(entry: Entry): Promise<void> {
     while (this.#running && this.#entries.get(entry.key) === entry) {
+      // Declared while the tenant is paused: wait with the others.
+      if (this.#paused) {
+        await Promise.race([this.#whenResumed, this.#whenStopped]);
+        if (!this.#running) return;
+      }
       let applied = false;
       let nudged = false;
       // One connection's own signal, so a nudge ends it and nothing else.
@@ -663,6 +691,13 @@ export class SyncManager {
           nudged = true;
           entry.attempts = 0;
           if (renewal === 'renewed') entry.renewed = true;
+        } else if (error instanceof OrdoRefusal && error.detail.class === 'space_paused') {
+          // The tenant is paused (`plan-tenant-pause.md` §5). Not a standing
+          // refusal of this op and not a fault to retry: the op holds where
+          // it stands, with its rows, until `resumed()`. The first op to hear
+          // it raises `onPaused`; the rest find the hold set.
+          this.#hold(error);
+          entry.attempts = 0;
         } else if (renewal instanceof OrdoNetworkError) {
           // The door could not be asked for a new token: try again later,
           // as for any feed that could not reach it.
@@ -704,11 +739,44 @@ export class SyncManager {
       // again. Its rows stay readable at the positions they were read at.
       entry.state = { ...entry.state, loaded: 0, complete: false };
       this.#publish();
+      // A paused tenant: no reconnect, and no backoff to count, until the
+      // app says the tenant resumed. The connection after it is a fresh
+      // load, so the device pulls before anything else happens.
+      if (this.#paused) {
+        await Promise.race([this.#whenResumed, this.#whenStopped]);
+        continue;
+      }
       // A busy door's own `Retry-After` is a floor under the backoff.
       const asked = entry.retryAfterMs ?? 0;
       entry.retryAfterMs = null;
       if (!nudged) await this.#pause(entry, Math.max(this.#backoff(entry.attempts), asked));
     }
+  }
+
+  /** Hold every feed: the tenant is paused. The first to hear it tells the app. */
+  #hold(refusal: OrdoRefusal): void {
+    if (this.#paused) return;
+    this.#paused = refusal;
+    this.#whenResumed = new Promise<void>((resolve) => {
+      this.#resume = resolve;
+    });
+    this.#onPaused?.(refusal);
+  }
+
+  /**
+   * The tenant was resumed: open every held feed again, each with a fresh
+   * load (`plan-tenant-pause.md` §5: the device pulls first). The app calls
+   * this when the person's tenant list says the tenant is `active` again,
+   * or when a call to the tenant answers. Nothing happens if no feed was
+   * held, so it is safe to call on every such sign.
+   */
+  resumed(): void {
+    if (!this.#paused) return;
+    this.#paused = null;
+    const resume = this.#resume;
+    this.#resume = null;
+    resume?.();
+    this.#publish();
   }
 
   /**
@@ -1053,6 +1121,7 @@ export class SyncManager {
       position: this.#position,
       complete: live.length > 0 && live.every((o) => o.complete),
       ops,
+      paused: this.#paused,
     };
   }
 

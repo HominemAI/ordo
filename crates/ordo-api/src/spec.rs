@@ -807,6 +807,18 @@ pub trait OpExecutor: Send + Sync {
         let _ = page_rows;
         self.execute(op, space, bound, refine, page, lease)
     }
+
+    /// **A hold that refuses `op` in `space` without running it**, asked by a
+    /// long-lived read (`?live=1`, a sync, a read on `/live`) each time the
+    /// door re-checks it, so a hold taken after the read was admitted ends
+    /// the feed with that refusal as its last frame. A paused tenant
+    /// (`space_paused`, `plan-tenant-pause.md` §5) is the hold this exists
+    /// for. `None` when the op may run. An executor with no holds keeps the
+    /// default.
+    fn held(&self, op: &OpSpec, space: &str) -> Option<ExecError> {
+        let _ = (op, space);
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

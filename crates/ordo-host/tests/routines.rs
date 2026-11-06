@@ -1072,3 +1072,192 @@ async fn a_routine_runs_under_the_tenants_pinned_version() {
     );
     stop(sup).await;
 }
+
+// ── a paused tenant (`plan-tenant-pause.md` §5) ──────────────────────────
+
+/// The registry row and the hold on this replica, as a pause through the
+/// door leaves them.
+async fn pause_tenant(pool: &Pool, rt: &runtime::Runtime, at: u64) {
+    use ordo_host::tenants;
+    tenants::ensure_table(pool).await.expect("registry");
+    tenants::reserve(pool, SPACE, "acme", "operator:routines", 1, None)
+        .await
+        .expect("reserve");
+    tenants::activate(pool, SPACE, 2).await.expect("activate");
+    tenants::pause(
+        pool,
+        SPACE,
+        tenants::PAUSED_BY_DEPLOYMENT,
+        "maintenance",
+        at,
+    )
+    .await
+    .expect("pause");
+    rt.spaces.hold_paused(ordo_host::pause::PauseRecord {
+        space: SPACE.into(),
+        at,
+        by: tenants::PAUSED_BY_DEPLOYMENT.into(),
+        note: "maintenance".into(),
+    });
+}
+
+async fn resume_tenant(pool: &Pool, rt: &runtime::Runtime, at: u64) {
+    ordo_host::tenants::resume(pool, SPACE, true, at)
+        .await
+        .expect("resume");
+    rt.spaces.lift_paused(SPACE);
+}
+
+/// §5: a change routine's listener holds its position through a pause. A
+/// write that lands in the paused tenant wakes nothing while it is paused,
+/// nothing is skipped or dead-lettered, and the first pass after the resume
+/// runs the routine for it exactly once: nothing new happened inside, and
+/// nothing was lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn triggers_hold_position_through_a_pause() {
+    const DB: &str = "ordo_rt_routine_pause_hold";
+    let pool = deploy(
+        DB,
+        "routine reviewNew {
+  trigger when shop.orders.created
+  run:
+    set orders(reviewed == false) { reviewed: true }
+}",
+    )
+    .await;
+    let rt = runtime::assemble(config(DB)).await.expect("assembles");
+    let sup = rt.start_workers().await.expect("starts");
+
+    // The control: a change before the pause runs the routine once.
+    call(&rt, "placeOrder($placed: \"2026-01-01T00:00:00Z\")").await;
+    let ran = wait_until(Duration::from_secs(20), || async {
+        routine_groups(&pool, "reviewNew").await.len() == 1
+    })
+    .await;
+    assert!(ran, "the routine never ran; census: {}", sup.health());
+
+    pause_tenant(&pool, &rt, 3).await;
+    // A write lands in the paused tenant through the write protocol, as a
+    // `nopause` op's would. The door refuses every other write.
+    call(&rt, "placeOrder($placed: \"2026-01-02T00:00:00Z\")").await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        routine_groups(&pool, "reviewNew").await.len(),
+        1,
+        "the routine ran in the paused tenant"
+    );
+    let skips = ordo_host::routines::skips(&pool, SPACE)
+        .await
+        .expect("skips");
+    assert!(
+        skips.is_empty(),
+        "the drain or the batch handed the runner a run to skip; the listener did not hold: \
+         {skips:?}"
+    );
+    assert!(
+        ordo_exec::triggers::dead_letters(&pool, &ordo_commandlog::SpaceId(SPACE.into()))
+            .await
+            .expect("dead letters")
+            .is_empty()
+    );
+
+    resume_tenant(&pool, &rt, 4).await;
+    let caught_up = wait_until(Duration::from_secs(30), || async {
+        routine_groups(&pool, "reviewNew").await.len() == 2
+    })
+    .await;
+    assert!(
+        caught_up,
+        "the write made during the pause woke nothing after the resume; census: {}",
+        sup.health()
+    );
+    let reviewed = column(
+        &pool,
+        "SELECT \"placed\" FROM \"orders\" WHERE \"reviewed\" ORDER BY \"placed\"",
+    )
+    .await;
+    assert_eq!(reviewed.len(), 2, "{reviewed:?}");
+    assert!(reviewed[1].starts_with("2026-01-02"), "{reviewed:?}");
+    // Settle: once, not again.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(routine_groups(&pool, "reviewNew").await.len(), 2);
+    assert!(ordo_host::routines::skips(&pool, SPACE)
+        .await
+        .expect("skips")
+        .is_empty());
+    stop(sup).await;
+}
+
+/// §5: a clock routine's tick during a pause is skipped and written down,
+/// one `$routineskips` row per tick with the reason `paused`, and is not
+/// caught up on the resume. The first tick after the resume runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn clock_ticks_during_a_pause_are_skipped_and_recorded() {
+    const DB: &str = "ordo_rt_routine_pause_clock";
+    let pool = deploy(
+        DB,
+        "routine sweep {
+  trigger every 1s
+  run:
+    set orders(status == \"new\") { status: \"seen\" }
+}",
+    )
+    .await;
+    let rt = runtime::assemble(config(DB)).await.expect("assembles");
+    call(&rt, "placeOrder($placed: \"2026-01-01T00:00:00Z\")").await;
+    pause_tenant(&pool, &rt, 3).await;
+    let sup = rt.start_workers().await.expect("starts");
+
+    let skipped = wait_until(Duration::from_secs(20), || async {
+        ordo_host::routines::skips(&pool, SPACE)
+            .await
+            .map(|s| {
+                s.iter()
+                    .any(|k| k.routine == "sweep" && k.reason == "paused")
+            })
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(skipped, "no skip was recorded; census: {}", sup.health());
+    let skips = ordo_host::routines::skips(&pool, SPACE)
+        .await
+        .expect("skips");
+    assert!(
+        skips.iter().all(|k| k.run_key.starts_with("clock-")),
+        "each recorded skip is a clock tick: {skips:?}"
+    );
+    assert_eq!(
+        column(&pool, "SELECT \"status\" FROM \"orders\"").await,
+        ["new"],
+        "the paused tenant's routine wrote"
+    );
+    assert!(routine_groups(&pool, "sweep").await.is_empty());
+
+    resume_tenant(&pool, &rt, 4).await;
+    let ran = wait_until(Duration::from_secs(20), || async {
+        column(&pool, "SELECT \"status\" FROM \"orders\"").await == ["seen"]
+    })
+    .await;
+    assert!(
+        ran,
+        "the routine did not run after the resume; census: {}",
+        sup.health()
+    );
+    // The ticks skipped stay skipped: no run after the resume answers for
+    // them, and no skip is recorded once the tenant answers again.
+    let recorded = ordo_host::routines::skips(&pool, SPACE)
+        .await
+        .expect("skips")
+        .len();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        ordo_host::routines::skips(&pool, SPACE)
+            .await
+            .expect("skips")
+            .len(),
+        recorded,
+        "a skip was recorded after the resume"
+    );
+    assert!(skips.len() <= recorded);
+    stop(sup).await;
+}

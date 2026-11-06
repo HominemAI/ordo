@@ -227,6 +227,12 @@ Opus builds each increment. Fable audits the whole at the end (P7).
 
 Order: P1, P2, P3 are one sprint. P4 and P5 follow. P6 when §3 is built.
 
+**Built:** P1 to P5. P5 landed 2026-11-06 (`tenant_pause.rs`, `routines.rs`, `clients/ordo-sdk/test/manager.test.ts`), with three readings of §5 worth knowing:
+
+- The clock worker lists a paused tenant and the runner skips and records its run: one skip mechanism for the clock and the runner, not two. `nopause` clock routines still run.
+- A live subscription learns of the pause when the door re-checks it (`ORDO_LIVE_RECHECK_SECS`, 30 by default, or the next write), not by a push from the pause itself.
+- "Queued offline writes marked `held: paused`" is not built: the SDK has no offline write queue (`plan-client-cache.md` §6, writes go to the server; the queue waits on F7 Phase 4). `offline_writes_are_held_and_sent_after_resume` has nothing to test until then. The SDK's `onPaused`, the hold on every synced op, and pull-first on `resumed()` are built.
+
 ---
 
 ## 10 · Draft board asks [open]

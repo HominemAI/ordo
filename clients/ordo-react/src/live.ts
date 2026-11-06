@@ -358,9 +358,12 @@ export class LiveHub {
             }
             continue;
           }
-          if (frame.event === 'error') {
+          if (frame.event === 'error' || frame.event === 'space_paused') {
             // The door re-checked the feed, refused, and closes it. The
             // frame is the last; `key` names the read that was refused.
+            // `space_paused` is the tenant paused under the stream
+            // (`plan-tenant-pause.md` §5): a standing refusal here, until
+            // the app reopens the hub once the tenant is resumed.
             last = new OrdoRefusal(decodeRefusal(frame.data, 500, '', []));
             const key = (frame.data as { key?: unknown } | null)?.key;
             lastKey = typeof key === 'string' ? key : undefined;

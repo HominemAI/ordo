@@ -412,6 +412,20 @@ pub async fn fire_due(
     listeners: &[Listener],
     now: u64,
 ) -> Result<Vec<String>, PoolError> {
+    fire_due_holding(tx, listeners, now, &[]).await
+}
+
+/// [`fire_due`], with the batches of `held` spaces left where they are: a
+/// due batch in a held space neither fires nor is dropped, and fires on the
+/// first pass after the hold lifts. A paused tenant is held
+/// (`plan-tenant-pause.md` §5): nothing new happens inside, and nothing
+/// accumulated is lost.
+pub async fn fire_due_holding(
+    tx: &TxConn,
+    listeners: &[Listener],
+    now: u64,
+    held: &[SpaceId],
+) -> Result<Vec<String>, PoolError> {
     let mut fired = Vec::new();
     for l in listeners {
         let key = l.key();
@@ -427,6 +441,9 @@ pub async fn fire_due(
             let Some(b) = batch_of(&key, &r) else {
                 continue;
             };
+            if held.contains(&b.space) {
+                continue;
+            }
             if !batch_due(&l.modifiers, &b, now) {
                 continue;
             }

@@ -3227,6 +3227,18 @@ impl PlatformExecutor {
 }
 
 impl OpExecutor for PlatformExecutor {
+    /// The pause gate, for a long-lived read the door re-checks: the hold
+    /// `execute_sized` would refuse with, so a feed on a tenant paused under
+    /// it ends with `space_paused` (`plan-tenant-pause.md` §5).
+    fn held(&self, op: &OpSpec, space: &str) -> Option<ExecError> {
+        if let Some(pause) = &self.ops.pause {
+            if let Err(e) = crate::pause::gate(&pause.spaces, &op.name, space) {
+                return Some(e);
+            }
+        }
+        self.inner.held(op, space)
+    }
+
     fn execute<'a>(
         &'a self,
         op: &'a OpSpec,

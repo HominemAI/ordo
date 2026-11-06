@@ -1151,6 +1151,11 @@ impl MeteredExecutor {
 }
 
 impl ordo_api::OpExecutor for MeteredExecutor {
+    /// A hold is the inner executor's; metering adds none and hides none.
+    fn held(&self, op: &ordo_api::OpSpec, space: &str) -> Option<ordo_api::ExecError> {
+        self.inner.held(op, space)
+    }
+
     fn execute<'a>(
         &'a self,
         op: &'a ordo_api::OpSpec,

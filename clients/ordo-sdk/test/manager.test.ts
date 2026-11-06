@@ -1365,3 +1365,82 @@ describe('idle(): a sync nobody uses (plan-sdk-device.md 6)', () => {
     await manager.stop();
   });
 });
+
+describe('a paused tenant (plan-tenant-pause.md §5)', () => {
+  const paused = () =>
+    frame('space_paused', {
+      error: { code: 'space_paused', message: 'space_paused: this tenant is paused (by the deployment, reason `billing`)', op: 'std.tasks.list' },
+    });
+
+  it('closes the feed, raises onPaused once, holds every op, and pulls first on resumed()', async () => {
+    const door = new LiveDoor();
+    const r = await replica();
+    const heard: string[] = [];
+    const manager = SyncManager.start(door.client(), r, [{ spec: tasks }, { spec: mine }], {
+      wait: async (ms) => {
+        door.waits.push(ms);
+      },
+      onPaused: (refusal) => heard.push(refusal.detail.class),
+    });
+    (await door.nth(0)).push(load([task(1), task(2)], 5));
+    (await door.nth(1)).push(load([task(3)], 5));
+    await when(manager, (v) => v.complete);
+
+    // The door's one terminal frame on each feed, then the stream ends.
+    for (const n of [0, 1]) {
+      const feed = await door.nth(n);
+      feed.push(paused());
+      feed.close();
+    }
+    const view = await when(manager, (v) => v.paused !== null);
+    expect(view.paused?.detail.class).toBe('space_paused');
+    expect(heard).toEqual(['space_paused']);
+    // Held, not stopped: the ops stay declared and their rows stay held.
+    expect(view.ops.every((o) => o.stopped === null)).toBe(true);
+    expect(await rows(r)).toEqual([
+      ['task_1', 5],
+      ['task_2', 5],
+      ['task_3', 5],
+    ]);
+    // No reconnect, and no backoff counted, while the tenant is paused.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(door.urls).toHaveLength(2);
+    expect(door.waits).toEqual([]);
+    manager.nudge();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(door.urls).toHaveLength(2);
+
+    // Resumed: every held feed reopens with a fresh load, before anything else.
+    manager.resumed();
+    (await door.nth(2)).push(load([task(1), task(2, 'edited while paused')], 7));
+    (await door.nth(3)).push(load([task(3)], 7));
+    const after = await when(manager, (v) => v.complete && v.paused === null);
+    expect(door.urls).toHaveLength(4);
+    expect(after.position).toBe(7);
+    expect((await r.scan('tasks')).map((x) => (x.row as { title: string }).title)).toContain('edited while paused');
+    // A second resumed() with nothing held is a no-op.
+    manager.resumed();
+    expect(door.urls).toHaveLength(4);
+    await manager.stop();
+  });
+
+  it('a feed refused at the door with space_paused is held the same way', async () => {
+    const door = new LiveDoor().refuse(423, 'space_paused');
+    const heard: string[] = [];
+    const manager = SyncManager.start(door.client(), await replica(), [{ spec: tasks }], {
+      wait: async (ms) => {
+        door.waits.push(ms);
+      },
+      onPaused: (refusal) => heard.push(refusal.detail.class),
+    });
+    const view = await when(manager, (v) => v.paused !== null);
+    expect(view.ops[0]?.stopped).toBeNull();
+    expect(heard).toEqual(['space_paused']);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(door.urls).toHaveLength(1);
+    manager.resumed();
+    await door.nth(0);
+    expect(door.urls).toHaveLength(2);
+    await manager.stop();
+  });
+});

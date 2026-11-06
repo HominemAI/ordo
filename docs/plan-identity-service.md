@@ -190,7 +190,7 @@ the console is up, so it cannot read the console's database. It keeps the
 live deployment spec and the last good one on its own volume
 (`/var/lib/ordo-supervisor`, 0700), sealed with `ORDO_SUPERVISOR_KEY_FILE`
 (the shared sealing module of 2.1). The console keeps the revision history,
-diff, `check-config` run and the person's touch, and hands the supervisor
+diff, `check-config` run and the person's reauth, and hands the supervisor
 the resolved spec with secret values; the supervisor writes the files and
 restarts the child. Revision 1 is still built from the container's `ORDO_*`
 variables, by the supervisor, on a volume that holds no spec yet.
@@ -247,9 +247,9 @@ Header: `{"alg":"EdDSA","kid":"<kid>","typ":"ordo-deployment+jwt"}`.
 The door maps `touched_at` to `user_presence_at` in `TokenClaims`, so the
 existing step-up gate (300 seconds, `DEFAULT_STEP_UP_MAX_AGE_SECS`) works
 unchanged. A write older than that answers `presence_required`, and the
-client asks the service for a fresh touch (5.4, 5.5).
+client asks the service for a reauth (5.4, 5.5).
 
-Machine tokens carry no touch. A machine key satisfies step-up on platform
+Machine tokens carry no reauth. A machine key satisfies step-up on platform
 ops in the home space by policy, because CI applying a program is the point
 of the key (open question Q2). It never satisfies anything in a tenant
 space.
@@ -381,7 +381,7 @@ in here with that same passkey (6.2); nothing is re-enrolled.
    the browser signs the console's origin into the assertion; the service
    accepts each client origin under its RP ID for that (built in step 6).
    The console answers the door's `presence_required` and its own stale
-   touch with the one word `step_up_required`.
+   reauth with the one word `step_up_required`.
 7. Sign-out ends the service session (`POST /sessions/end`); the console
    forgets its token.
 
@@ -446,7 +446,7 @@ default when none is given.
 ### 5.7 Ending access
 
 1. An admin ends a person: People, "End access", a typed confirmation and
-   a touch, or `ordo people end p_…`. The service sets `ended_at`, ends
+   a reauth, or `ordo people end p_…`. The service sets `ended_at`, ends
    every session, voids recovery codes and unspent invites they issued.
 2. New sign-ins and renewals refuse. Live tokens die within 10 minutes
    (`ORDO_IDENTITY_TOKEN_SECS`, at most 3600: ending access takes effect
@@ -483,7 +483,7 @@ console's Health screen shows "break-glass used at …" for 7 days.
 |---|---|
 | Console owners, passkeys, sessions, recovery codes, setup codes (`store.rs` migration 1, `codes.rs`, `passkeys.rs`, `recover.rs`, `server.rs` sign-in routes, the first-run setup code) | Gone from the console. The code moves to the identity service (2.1). The rows move too: owners, passkeys and live recovery codes are copied into the service at its first start (6.1). The console tables are left as they are and dropped in a console migration one release after the cut-over, so a rollback keeps its data. `ordo console recover` is replaced by 5.8 |
 | Console key G14 (`link.rs`, `credentials` table, door's `console_keys.rs`, `auth/console.rs`, `std.deployment.addConsoleKey`, `revokeConsoleKey`, `consoleKeys`, `ORDO_AUTH_CONSOLE_SESSION_SECS`, `$consolekey`) | Gone. The console calls the door as the signed-in person (5.4). An existing link needs nothing from the owner: the new console never reads its sealed key, the door never sees it again, and both rows are dropped one release later. The Deployment screen's link step becomes "Is the door reachable?" only. Step 6 closes it wherever `ORDO_IDENTITY_URL` is set: the console refuses to boot while it holds a key (`ordo-console forget-door-key` forgets it, audited), and the door refuses console key sign-in and every console key session. The code stays for a console without the service until the one image (step 7) carries the service everywhere; step 8 removes it |
-| Relayed touch G15 (`/auth/step-up` for a console session) | Gone. The touch is at the identity service and rides in the token |
+| Relayed reauth G15 (`/auth/step-up` for a console session) | Gone. The reauth is at the identity service and rides in the token |
 | `ORDO_DEPLOYMENT_OWNERS` (`provision.rs`, `runtime.rs`, `deploying.md` section 1) | Ignored wherever `ORDO_IDENTITY_URL` is set, with a boot-log line naming it, never a refusal (owner, 2026-10-30, replacing the boot refusal first planned). A door without the identity service reads it as before. Existing owner rows in the home space stay as app memberships and give no platform rights |
 | Claim code (`ORDO_AUTH_CLAIM_CODE`, `std.deployment.setClaimCode`, `admission::ClaimStore`, `self_serve.rs` "whether a claim code is set", `boot_record.rs` line 213) | Gone. First-comer admission for app tenants stays as the app developer's setting, off by default, and is refused for the home space. Built in step 8 on every deployment (owner, 2026-10-30: "No Remove it now."): a door that still sets `ORDO_AUTH_CLAIM_CODE` boots and logs it as ignored, naming the first-comer setting; the stored row waits for the drop migration |
 | The `system` space's founding row `system:platform` | Stays. It is a row to resolve, never a sign-in |
@@ -537,7 +537,7 @@ and `imports` has no row for `console:<handle>`.
   lookup and hash as they are. `codes.rs` moves with them (2.1), so the
   hashing is the same and the printed codes still work.
 - Not moved: `sessions` (a console cookie on the console's origin; the
-  service's cookie is on its own origin, so one passkey touch at the
+  service's cookie is on its own origin, so one reauth at the
   first visit is the whole cost), and `setup_codes` (unspent console
   invite and recover links point at console pages that no longer exist).
   Each unspent setup code gets an audit row naming it as voided, so an
@@ -616,7 +616,7 @@ newest first, and a red line when verify last failed.
 | Upgrade | `crates/ordo-identity-service/tests/upgrade.rs`, with the SDK's software authenticator | a passkey registered against the console's relying party on a copy of the live schema asserts at the service after the import, under RP ID `localhost` from port 8082 and under `console.example.com` from `console.example.com:8082`; the same passkey fails under `id.example.com`, which is the refusal, not a silent sign-in failure; an old recovery code signs in once |
 | Host integration | `crates/ordo-host/tests/identity_tokens.rs`, with an in-process fake issuer (a signer and a JWKS route) | admin token reaches platform ops; machine token applies; stale touch answers `presence_required`; tenant op denied; app op denied; app owner of the home space denied platform ops; ended `sid`; unknown `kid` refetches once; service down, cached and `$identitykeys` still verify; 2 segment token never hits the JWS path |
 | Authorization matrix | `tests/authz_support/actors.rs`, `policy.rs` | new actors: `deployment_admin` (fresh), `deployment_admin_stale`, `machine_key`, `cli_session`, `deployment_ended` (Dead), `deployment_wrong_aud` (Dead), `deployment_foreign_issuer` (Dead). Realm proofs as rows: every app actor × every platform op is `Denied`; every deployment actor × every app op in every space is `Denied`; `machine_key` × every tenant op is `Denied`. The route guard keeps every new route in the policy |
-| Console | `crates/ordo-console/tests/console.rs`, `door_link.rs` becomes `door_as_person.rs` | sign-in by redirect with a fake issuer; API refuses a token for another `aud`; door calls carry the person's token; `presence_required` surfaces as a touch ask; no runtime routes without the socket setting |
+| Console | `crates/ordo-console/tests/console.rs`, `door_link.rs` becomes `door_as_person.rs` | sign-in by redirect with a fake issuer; API refuses a token for another `aud`; door calls carry the person's token; `presence_required` surfaces as a reauth ask; no runtime routes without the socket setting |
 | Supervisor | `crates/ordo-supervisor/tests/` with the fake host | 3 children start; kill each one, the other 2 keep answering; crash loop in one; the socket refuses `apply` for any child but `deployment`; the socket is unreachable as 65533; revision 1 from the environment; a sealed spec survives a restart |
 | Images smoke | `images.yml`, the `ordo` job | 3 processes as 65531, 65532, 65533; the supervisor's caps and the console's lack of them; `/.well-known/jwks.json` answers; the first invite is printed; `docker kill` of `ordo-console` leaves the door answering; `break-glass-token` plus `ordo apply` of the notes program succeeds |
 | Console e2e | `clients/ordo-console-web/e2e` | sign-up by invite link; console sign-in; invite a second admin; end their access and see the refusal; make a machine key; the upgrade case: enrol at the old console, upgrade the image, open the console and sign in with that same passkey, no invite, no setup code |
@@ -662,9 +662,9 @@ the change.
 | # | Question | Recommendation | Answer |
 |---|---|---|---|
 | Q1 | Where does the service's database live? Its own cluster, or a second database on the console's cluster? | A second database on the console's cluster, which is what the compose file does. No new cluster. A self-hoster may point it anywhere | Yes. As recommended (2.2) |
-| Q2 | May a machine key satisfy the touch on platform writes (apply, activate, quotas) with nobody present? | Yes, in the home space only. CI applying a program is what the key is for. Never in a tenant space, and every act is recorded under the key's name | Yes. As recommended (4.1, 4.3) |
+| Q2 | May a machine key satisfy the reauth on platform writes (apply, activate, quotas) with nobody present? | Yes, in the home space only. CI applying a program is what the key is for. Never in a tenant space, and every act is recorded under the key's name | Yes. As recommended (4.1, 4.3) |
 | Q3 | Ending access: is "tokens die within 10 minutes" enough for v1, or should the door poll the service every 60 seconds for ended sessions? | Expiry only for v1. Add the 60 second poll later if a case needs it | Yes. Expiry only (5.7) |
-| Q4 | May a deployment person still read tenant admin ops (members, grants, `callersOf`) with a fresh touch, as the console key can today? The console's People screens depend on it | Keep it, read-only, touch-gated, the exact list `TENANT_OPS_OPEN` holds today. Writes inside a tenant stay the tenant's own | Ok. As recommended (4.3) |
+| Q4 | May a deployment person still read tenant admin ops (members, grants, `callersOf`) with a reauth, as the console key can today? The console's People screens depend on it | Keep it, read-only, touch-gated, the exact list `TENANT_OPS_OPEN` holds today. Writes inside a tenant stay the tenant's own | Ok. As recommended (4.3) |
 | Q5 | `ordo login`: loopback callback only, or also a device code for SSH-only hosts? | Loopback only in v1. A headless host uses a machine key. Device code is a later S | Ok. As recommended (5.5) |
 | Q6 | The claim code goes everywhere. Does first-comer admission for app tenants stay, as the app developer's setting, off by default? | Stays. It is an app-realm choice, and the home space refuses it | Yes. As recommended (6) |
 | Q7 | The live deployment's upgrade: console owners enrol a new passkey by invite link; the old console passkeys are left behind. Accept? | Accept. Passkeys are bound to the console's origin; moving them is a bigger build than the service | **No.** "They shouldn't need to re-enrol. Upgrade should affect nothing." Owners, passkeys and recovery codes move in by a one-time import at the service's first start, and the service keeps the console's RP ID so the passkeys still assert (6.1, 6.2). Step 1 grew by 1 session (9) |

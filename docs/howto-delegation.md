@@ -8,7 +8,7 @@ For app developers. Built in checklist 11-4b, increments 3 and 4 of
 
 1. **The agent asks.** It names the tenant, itself, the person and the ops.
 2. **The person reads** what the grant allows, in plain words.
-3. **The person approves**, with a fresh passkey touch by default.
+3. **The person approves**, with a reauth by default.
 4. Or **declines**.
 5. **The agent redeems** its request and gets its token.
 
@@ -105,7 +105,7 @@ An op is not granted when it is:
 - not in your program,
 - a platform op,
 - a delete you have not opened with `ORDO_DELEGABLE_OPS`,
-- or one that needs a fresh passkey touch.
+- or one that needs a reauth.
 
 In the SDK: `reviewDelegation`, `approveDelegation`, `declineDelegation`,
 `myDelegations` and `revokeDelegation`. In React, the five ops are in
@@ -117,9 +117,9 @@ In the SDK: `reviewDelegation`, `approveDelegation`, `declineDelegation`,
 POST /op/std.delegation.approve   {"request": "dr_…"}
 ```
 
-By default this asks for a **fresh passkey touch**, like every platform op.
+By default this asks for a **reauth**, like every platform op.
 Call `/auth/step-up` first. A two-step claim your deployment accepts counts
-too. To drop the touch, name the op in `ORDO_STEP_UP_EXEMPT_OPS`.
+too. To drop the reauth, name the op in `ORDO_STEP_UP_EXEMPT_OPS`.
 
 An agent can never approve. A delegated token is refused on every
 `std.delegation.*` op, and no agent token carries presence.
@@ -181,7 +181,7 @@ too. It asks the door again before every pass, so the next write sends an
 `error` frame naming `delegation_required` and no rows. With no write, it
 ends within `ORDO_LIVE_RECHECK_SECS` (30 s by default).
 
-Neither asks for a passkey touch.
+Neither asks for a reauth.
 
 ## Settings
 
@@ -193,7 +193,7 @@ Neither asks for a passkey touch.
 | `ORDO_DELEGATION_MAX_OPS` | `10` | The most ops one request may name. 1 to 100. |
 | `ORDO_DELEGATION_OPEN_PER_AGENT` | `1000` | Requests one agent may have waiting at once. 1 to 1000000. |
 | `ORDO_DELEGATION_OPEN_PER_PERSON` | `10` | Requests one person may have waiting at once. 1 to 1000. |
-| `ORDO_STEP_UP_EXEMPT_OPS` | unset | Name `std.delegation.approve` here to approve without a passkey touch. |
+| `ORDO_STEP_UP_EXEMPT_OPS` | unset | Name `std.delegation.approve` here to approve without a reauth. |
 | `ORDO_DELEGABLE_OPS` | unset | Deletes a delegation may include. |
 
 A request a setting refuses answers `403 delegation_refused`. The message

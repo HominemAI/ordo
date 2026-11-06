@@ -425,8 +425,8 @@ These functions are exported from the package root. Each takes a
 for tests). `howto-sign-in.md` and `howto-sharing.md` show them in use.
 
 - **Passkeys.** `registerPasskey` signs a new person up, `signInWithPasskey`
-  signs them in, and `stepUp` asks for a fresh touch before a sensitive call.
-  A person with no passkey gives the touch by signing in again:
+  signs them in, and `stepUp` asks for a reauth before a sensitive call.
+  A person with no passkey gives the reauth by signing in again:
   `reauthenticateWithPassword` (or another first factor), then
   `stepUpWithProof` with the proof.
   `toBase64Url` and `fromBase64Url` are the encoding helpers.
@@ -501,7 +501,7 @@ the app developer set, such as `ORDO_DELEGATION_MAX_HOURS`.
 The person's side takes an `OrdoClient` signed in as that person:
 `reviewDelegation`, `approveDelegation`, `declineDelegation`, `myDelegations`
 and `revokeDelegation`. Show every part of the disclosure `reviewDelegation`
-returns. Approving needs a fresh passkey touch unless the app developer
+returns. Approving needs a reauth unless the app developer
 exempted it, so call `stepUp` first and build the client from the session it
 returns. Without it the door answers `access_denied`.
 

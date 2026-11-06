@@ -68,7 +68,7 @@ export function returnedErrorText(error: string): string {
 export function refusalText(r: Refusal): string {
   switch (r.class) {
     case 'presence_required':
-      return 'Confirm it is you with your passkey, or sign in again, then try once more.';
+      return "Confirm it's you with your passkey or by signing in again, then try once more.";
     case 'access_denied':
       return 'The deployment did not allow that.';
     case 'email_required':

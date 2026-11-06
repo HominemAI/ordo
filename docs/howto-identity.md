@@ -105,7 +105,7 @@ On Ordo Cloud the first admin comes from the provisioning service, through
 Each invite is a single-use link for one new admin.
 
 - In the console: **Deployment people**, "Invite an admin". It asks for
-  your passkey touch, then shows the link once.
+  your reauth, then shows the link once.
 - From a terminal: `ordo people invite --label "Sam"`.
 - On the host, with no sign-in at all: section 8.
 
@@ -147,7 +147,7 @@ A machine key signs CI in, to deploy with nobody present.
    people machine-key end m_…`. New sign-ins are refused at once; its
    tokens die within the token life.
 
-A machine key is never asked for a passkey touch. It belongs to the
+A machine key is never asked for a reauth. It belongs to the
 deployment, so it outlives the person who made it. Every act is recorded
 under its id and name.
 
@@ -201,7 +201,7 @@ unused (168, 7 days) and `ORDO_IDENTITY_SESSION_MAX_HOURS` at most (720,
 | Command | What it does |
 |---|---|
 | `ordo login [<url>]` | signs this computer in |
-| `ordo login --touch` | a fresh passkey touch for writes, on the session you hold |
+| `ordo login --touch` | a reauth for writes, on the session you hold |
 | `ordo whoami [<url>]` | who the next command acts as, from which credential, and until when |
 | `ordo logout [<url>]` | ends the session at the service and deletes it here |
 | `ordo people list` | everyone, and whose access has ended |
@@ -213,8 +213,8 @@ unused (168, 7 days) and `ORDO_IDENTITY_SESSION_MAX_HOURS` at most (720,
 
 Every `ordo people` command takes `--identity <url>`.
 
-Changes need a passkey touch in the last 5 minutes. At a terminal, `ordo`
-runs the touch by itself and sends the call again. In a script, the
+Changes need a reauth in the last 5 minutes. At a terminal, `ordo`
+runs the reauth by itself and sends the call again. In a script, the
 refusal says to run `ordo login --touch`.
 
 Which credential a command uses, first match wins:

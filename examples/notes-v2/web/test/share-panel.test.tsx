@@ -105,7 +105,7 @@ describe('the share panel', () => {
     const d = byRoute({ '/op/std.space.shareLink': refusal(403, 'presence_required') });
     const ui = await show(d, { stepUp: async () => undefined });
     await ui.press('Make a link anyone can read');
-    expect(ui.text()).toContain('Confirm it is you with your passkey, or sign in again, then try once more.');
+    expect(ui.text()).toContain("Confirm it's you with your passkey or by signing in again, then try once more.");
     expect(d.sent.filter((s) => path(s) === '/op/std.space.shareLink')).toHaveLength(2);
   });
 

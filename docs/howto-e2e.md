@@ -40,7 +40,7 @@ key screens. They run in a separate, report-only step (see "Screenshots").
 The virtual passkey device is Chromium only. Firefox and WebKit people sign in
 with an emailed code (`join` in `tests/people.ts`, which reads the code from
 the mail catcher). Passkey specs sit in `tests/browser`, which only the
-`browser` project runs. Sharing a note asks for a fresh passkey touch, so in
+`browser` project runs. Sharing a note asks for a reauth, so in
 `tests/ui` the person who shares (`owner`) is always a Chromium person, and
 the reader is the project's browser.
 
@@ -373,8 +373,8 @@ passkey and the virtual passkey device is Chromium only:
 | `browser` | In order: first run with the setup code and the 10 recovery codes; sign out and in; invite a second owner, who joins, then remove them; a lost passkey, a recovery code, a forced new passkey and new codes, the old codes refused |
 | `runtime` | In order: Health and Runtime on revision 1; a good change; one the settings check refuses, with nothing running touched; one that crashes and rolls back; a roll back from the list; a managed secret whose value no page or API answer shows; a killed process started again while `/health/ready` keeps answering 200 |
 | `phone` | A Pixel 7: sign-in, a code from `ordo console recover`, the codes, Health, Runtime and Owners, none scrolling sideways |
-| `door` | The link to the deployment by sign-in, a write that asks for the owner's touch at the deployment (in a dialog), deploy and roll back the app, unlink |
-| `identity` | The console on the identity service, against its own stack (`stack-identity.sh`: the real `ordo-identity-service`, the console with `ORDO_IDENTITY_URL` set in door-only mode, and the e2e door verifying the service's tokens with an 8 second touch window, `E2E_DOOR_TOUCH_SECS`). Sign up by the first invite, sign in to the console at the service and come back; pause a tenant, which asks for a fresh touch the page takes at the service; invite a second admin, who joins; end their access, after which their console sends them back to sign in |
+| `door` | The link to the deployment by sign-in, a write that asks for the owner's reauth at the deployment (in a dialog), deploy and roll back the app, unlink |
+| `identity` | The console on the identity service, against its own stack (`stack-identity.sh`: the real `ordo-identity-service`, the console with `ORDO_IDENTITY_URL` set in door-only mode, and the e2e door verifying the service's tokens with an 8 second touch window, `E2E_DOOR_TOUCH_SECS`). Sign up by the first invite, sign in to the console at the service and come back; pause a tenant, which asks for a reauth the page takes at the service; invite a second admin, who joins; end their access, after which their console sends them back to sign in |
 
 Every step also fails on a CSP refusal or a page error. The console holds
 one deployment and at most two owners, so the tests run in order in one

@@ -272,7 +272,7 @@ A reload keeps the person signed in, by default (owner ruling 2026-10-21).
   turns it off. A page may send `"remember": false` with a sign-in, for a
   shared computer.
 
-**Cross-site pairs fall back to a touch per reload.** The cookie is sent only
+**Cross-site pairs fall back to a reauth per reload.** The cookie is sent only
 when the page and the door are on the same site. `notes.example.com` and
 `ordo.example.com` are one site. `notes.example.app` and `ordo.example.com`
 are not, and neither are `localhost` and `127.0.0.1`. `SameSite=Strict` is
@@ -379,20 +379,20 @@ It is layered like the session values. A sign-in that names a tenant
 
 The lock is a separate thing and stays off by default (owner, 2026-10-22).
 
-### Reads need no touch
+### Reads need no reauth
 
 Owner, 2026-10-22: "If you are signed in = that passkey was your
 credentials - you are authenticated."
 
-- A platform op that only reads answers a signed-in person with no passkey
-  touch. Examples: `std.space.sessionPolicy`, `std.space.shares`,
+- A platform op that only reads answers a signed-in person with no
+  reauth. Examples: `std.space.sessionPolicy`, `std.space.shares`,
   `std.space.groups`, `std.space.callersOf`.
 - Read or change is the op's own kind. A read is a `GET`.
-- A change still asks for a fresh touch, unless `ORDO_STEP_UP_EXEMPT_OPS`
+- A change still asks for a reauth, unless `ORDO_STEP_UP_EXEMPT_OPS`
   names it.
 - A read freed this way is still closed to delegated tokens. A read named in
   `ORDO_STEP_UP_EXEMPT_OPS` is open to them, as before.
-- `ORDO_PRESENCE_ON_READS=on` asks for a touch on reads too, for a strict
+- `ORDO_PRESENCE_ON_READS=on` asks for a reauth on reads too, for a strict
   deployment.
 
 The app developer decides whether tenants may set their own. Closing it is one
@@ -750,30 +750,30 @@ The classes a sign-in page meets:
 
 | Class | Where it comes from | What to do |
 |---|---|---|
-| `presence_required` | `403` when the call needs a touch the token does not hold: the account routes (recovery codes, account delete, email changes) and any op that asks for one. | Call `stepUp`, then repeat the call. A person with no passkey signs in again instead: `reauthenticateWithPassword`, then `stepUpWithProof`. |
+| `presence_required` | `403` when the call needs a reauth the token does not hold: the account routes (recovery codes, account delete, email changes) and any op that asks for one. | Call `stepUp`, then repeat the call. A person with no passkey signs in again instead: `reauthenticateWithPassword`, then `stepUpWithProof`. |
 | `space_paused` | `423`. Someone paused the tenant on purpose. The data is kept and nothing ran. | Show a paused message. Do not retry: waiting does not lift a pause. |
 | `human_check_failed` | `403`. A public write came without a human-check token the provider confirmed, or the provider could not be asked. | Run the widget again and send the new token in `X-Ordo-Human`. A token is good for one write. |
 | `server_busy` | `503` with `Retry-After`. Every database connection is in use and nothing ran. | The client already retried. Show a busy message and let the person try again. |
 | `tenant_not_ready` | `503` with `Retry-After`. The person's own tenant is still being set up (section 4) and nothing ran. | The client already retried. Show the setting-up screen; `TenantGate` does this for you. |
 | `serialization_conflict` | `409`. The write lost a race with other writes to the same rows, through the server's retries (`ORDO_WRITE_RETRIES`). Nothing was applied. | The client already retried. Show a busy message and let the person try again. |
-| `access_denied` | The door refuses the caller. One answer for every reason. | Right after sign-up, wait (section 4). A touch does not help: the door says `presence_required` when one would. |
+| `access_denied` | The door refuses the caller. One answer for every reason. | Right after sign-up, wait (section 4). A reauth does not help: the door says `presence_required` when one would. |
 
 Three details you need.
 
-**A touch is a passkey, or a fresh sign-in.** Some ops (`std.space.share`
-and the like) ask for a touch no older than five minutes. When the token's is
+**A reauth is a passkey touch, or a fresh sign-in.** Some ops (`std.space.share`
+and the like) ask for a reauth no older than five minutes. When the token's is
 stale the door answers `presence_required`, never `access_denied`. A person
-with no passkey gives the touch by signing in again (owner, 2026-11-05):
+with no passkey gives the reauth by signing in again (owner, 2026-11-05):
 `stepUp` fails `reauthentication_required` for them, so prove a first factor
 with `reauthenticateWithPassword` and send the proof to `stepUpWithProof`. A
-person who holds a passkey must touch it. So retry once after a touch:
+person who holds a passkey must touch it. So retry once after a reauth:
 
 ```ts
 import { OrdoRefusal, PasskeyError, reauthenticateWithPassword, stepUp, stepUpWithProof } from '@hominemai/ordo-sdk';
 
 const DOOR = { baseUrl: 'http://localhost:4000' };
 
-/** Run `act`. If the door asks for a touch, take one and run it once more. */
+/** Run `act`. If the door asks for a reauth, take one and run it once more. */
 export async function withPresence<T>(
   token: string,
   act: (token: string) => Promise<T>,
@@ -789,7 +789,7 @@ export async function withPresence<T>(
       fresh = await stepUp(DOOR, token); // one passkey touch
     } catch (s) {
       if (!(s instanceof PasskeyError) || s.failure !== 'reauthentication_required') throw s;
-      // No passkey: a fresh sign-in is the touch. A person who holds a
+      // No passkey: a fresh sign-in is the reauth. A person who holds a
       // second factor gets a `second-step` answer to finish first.
       const proof = await reauthenticateWithPassword(DOOR, token, await askPassword());
       if (proof.kind !== 'proof') throw s;
@@ -1229,7 +1229,7 @@ All windows are fixed clock hours and days. No limit reads a client's network ad
 - Delivery is at least once. A duplicate mints a new code that replaces the old one and keeps the attempt count.
 - The code is minted by the `mail.send` worker and stored only as an HMAC.
 - The address in the ceremony row is sealed under a key derived from the challenge.
-- Email sign-in carries no presence. An action that needs a fresh passkey touch still asks for one.
+- Email sign-in carries no presence. An action that needs a reauth still asks for one.
 - The Turnstile check (section 8) runs first in `begin`, when it is on.
 
 The state lives in `$authceremony`, `$authrate` and `$mailoutbox`. `$authrate` holds the counters and device markers. The `auth.ceremony.sweep` worker clears it.
@@ -1853,7 +1853,7 @@ refused.
 | `POST /auth/email/remove` | | `{removed}` |
 
 - The address counts only after `complete`.
-- Changing or removing an address needs a fresh touch (`POST /auth/step-up` first; with no passkey, a fresh sign-in sent to it in `x-reauth`). Without one the answer is `403 presence_required`, and the message names the setting. Adding a first address needs no touch. See "Asking for a touch" below.
+- Changing or removing an address needs a reauth (`POST /auth/step-up` first; with no passkey, a fresh sign-in sent to it in `x-reauth`). Without one the answer is `403 presence_required`, and the message names the setting. Adding a first address needs no reauth. See "Asking for a reauth" below.
 - The code is the emailed sign-in code of section 10: the same digits, life, tries and limits, and the same settings.
 - The message says "Confirm your email address". A confirmation code never signs anybody in, and a sign-in code never confirms an address.
 - A wrong, late, used or another person's code is the one refusal, `401 authentication_failed`.
@@ -1888,10 +1888,10 @@ Optional by default. Two layers:
 - If the address table cannot be read, the call is refused with `503 space_unavailable` and a `Retry-After`. The message names the setting. The same call lands once the table is back. Letting it through would drop a requirement the app developer set (owner, 2026-10-22).
 - Not `off` without a mail channel refuses the boot. The op refuses it too.
 
-### Asking for a touch
+### Asking for a reauth
 
 Owner, 2026-10-22: "Yes by default... But this is the app devs choice."
-Changing or removing an address asks for a fresh passkey touch by default.
+Changing or removing an address asks for a reauth by default.
 The app developer may turn it off. Two layers:
 
 | Layer | Setting |
@@ -1900,7 +1900,7 @@ The app developer may turn it off. Two layers:
 | App developer | `std.deployment.setEmailPolicy {changeTouch}`: `on`, `off` or `default`. `default` hands it back to the deployment. |
 
 - The refusal is `403 presence_required`. It names the setting in force.
-- Adding a first address never asks for a touch.
+- Adding a first address never asks for a reauth.
 - The op answers `changeTouch` and `changeTouchSource` beside `required`.
 
 ### Recorded

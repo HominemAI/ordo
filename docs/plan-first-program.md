@@ -513,7 +513,7 @@ React, Vite, `@ordo/sdk`: sign up, notes list, new note, edit with compare-and-s
 
 ### N3 · Sign-up and sign-in
 
-A registration answers a token and `space`, the person's own tenant. Proved: two people get different tenants and each is that tenant's one owner in its own database; a later sign-in lands in the same one; `GET /auth/spaces` lists it; refresh answers a new token and logout ends the session (the token is refused, a refresh of it is `401`, a sign-in after starts a clean one). The token is held in memory only, so **a reload signs the person out**, and one passkey touch signs them in again. The plan's "refreshing keeps the session" is read as the token renewal, not the page reload.
+A registration answers a token and `space`, the person's own tenant. Proved: two people get different tenants and each is that tenant's one owner in its own database; a later sign-in lands in the same one; `GET /auth/spaces` lists it; refresh answers a new token and logout ends the session (the token is refused, a refresh of it is `401`, a sign-in after starts a clean one). The token is held in memory only, so **a reload signs the person out**, and one reauth signs them in again. The plan's "refreshing keeps the session" is read as the token renewal, not the page reload.
 
 **Sign-up answers before the door serves the tenant.** The door learns of a new tenant by a notification and rebuilds. The first call can be `access_denied` for 65 to 120 ms as measured, and the page waits up to six seconds (`untilServed`). The same applies to a new seat after an accept, for `/auth/spaces`.
 
@@ -537,7 +537,7 @@ What it does not do: no writes offline; the page must stay open, because a reloa
 
 Proved in `a_note_shared_with_another_person_is_read_only_and_can_be_taken_back` and, for the reader's device, in `web/test/live.test.ts`: `std.space.share` for one note and `myNotes`; peek; accept; the ticket spent; the reader listed as a guest; the window reads the shared note and no other; every write is refused through it in every shape, and the reader's own session is no way in; a window token is refused in any other tenant and cannot open a window; a second share to the same person reuses the seat; the sharer lists readers with `std.notesAccess.list`; unshare takes one note off the reader's next load; `std.space.revokeShare` refuses the next call, refuses a new window, and drops the guest listing. On the reader's device the shared note appears, leaves on unshare, and the whole window is erased when the sharer closes it. Acceptance is recorded in the sharer's log and the deployment's security log, as ruled. The plan's "both chains carry the consent" was not asserted in the test.
 
-The share and revoke buttons call platform ops, which ask for a passkey touch no older than five minutes; the page asks once when the door refuses and tries again (`withPresence`). That path is tested against a stubbed door and not against the binary, which would need a five minute wait.
+The share and revoke buttons call platform ops, which ask for a reauth no older than five minutes; the page asks once when the door refuses and tries again (`withPresence`). That path is tested against a stubbed door and not against the binary, which would need a five minute wait.
 
 ### N8b · Share links on the page
 

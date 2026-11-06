@@ -87,7 +87,7 @@ the platform's rather than the CLI's. It carries **presence** when
 `ORDO_SECURITY_LEVEL=high`, or `ORDO_STEP_UP_REQUIRED_OPS` names
 `std.deployment.apply`: then applying is step-up gated, and `/auth/refresh`
 continues a session without a new sign-in. At the default level, standard,
-deploying asks no touch of a signed-in person (owner, 2026-11-05). And it can
+deploying asks no reauth of a signed-in person (owner, 2026-11-05). And it can
 never be a **capability token**: a platform change is closed to capability
 grants and delegated tokens at every level, which is what makes applying a
 schema structurally human-only: no third-party client and no delegated agent
@@ -259,7 +259,7 @@ ordo versions move spc_acme                 # move it now
 
 - There is no deadline. A tenant on a revoked version moves in its maintenance window, or on demand. With neither it stays.
 - **In its window.** Every node checks on each pin reconcile tick (`ORDO_PINS_RECONCILE_SECS`, 30 s). A tenant whose window holds now, not skipped, moves. The pin change says `window` and names the window.
-- **On demand.** `ordo versions move <tenant>`, or `std.deployment.moveOffRevoked` through the door. You, or your own system with a machine key, call it. No passkey touch is asked.
+- **On demand.** `ordo versions move <tenant>`, or `std.deployment.moveOffRevoked` through the door. You, or your own system with a machine key, call it. No reauth is asked.
 - **By the tenant.** Off by default. Name the tenant roles that may in `ORDO_VERSIONS_TENANT_MOVE_ROLES` (for example `owner`). They then call `std.space.moveOffRevoked` bound to their own tenant.
 - **Where it goes**, in this order: the tenant's own target (`ordo versions target`, `std.deployment.setMoveTarget`), then the revoke's `--move-to`, then the active version. Ordo picks nothing else.
 - A target that is revoked is refused and the tenant stays. The refusal names `ordo versions target <tenant> <version>`. A window move refused this way is logged on every tick until you name another.
@@ -324,7 +324,7 @@ A node can serve more than one version at once. The active version is the one an
 - **The active version** is where new tenants start (unless `versions.new_tenant` names another) and where an activation moves every tenant.
 - **A new tenant gets its own version's tables.** With `versions.new_tenant` set, each node keeps that version loaded, and a new tenant's database is made in its shape. A beta that adds a table works for its tenants at once. A node still loading it refuses the create for a moment, nothing made, and the identical call lands once it has. The catch-up leaves such a database alone; it is on its pin, not behind.
 - **An activation moves every tenant at once**, a tenant you pinned elsewhere included. Rollouts that move tenants in batches come later.
-- **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no passkey touch, of a person or of a machine key, so you can move many tenants at once and your own system may drive moves (owner, 2026-11-05).
+- **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no reauth, of a person or of a machine key, so you can move many tenants at once and your own system may drive moves (owner, 2026-11-05).
 - **See one tenant's version:** `ordo versions list --tenant <id>` prints its version, its epoch and every pin change. Through the door: `std.deployment.tenantVersion`.
 - `ordo versions list` says, per version, how many tenants it serves, and marks the active one `active (new tenants)`.
 - **How a node learns of a pin.** Every pin change notifies the nodes in its own transaction. A node then reads `$pins` from the last row it read. It also reads every pin again every `ORDO_PINS_RECONCILE_SECS` seconds (`pins.reconcile_interval`, default 30), so a missed notice costs at most that long.
@@ -333,7 +333,7 @@ A node can serve more than one version at once. The active version is the one an
 - **Which moves wait for a maintenance window.** Only a move off a revoked version (above). An activation and a pin move a tenant at once, whatever its window says.
 - **The version settings live in Ordo**, not the environment (owner, 2026-11-05). They are stored in the control database with who set each, when and why. Every node reads the one stored value.
   - Read them: `ordo versions settings` (or `std.deployment.versionSettings`, or the console's Deploys screen). It prints the three and the recent changes.
-  - Change one: `ordo versions set <served|minimum|new-tenant> <value> --reason "..."`, or `--clear` for the default. Through the door: `std.deployment.setVersionSetting`. You, or your own system with a machine key that has the `deployment` grant. No passkey touch is asked below `ORDO_SECURITY_LEVEL=high`.
+  - Change one: `ordo versions set <served|minimum|new-tenant> <value> --reason "..."`, or `--clear` for the default. Through the door: `std.deployment.setVersionSetting`. You, or your own system with a machine key that has the `deployment` grant. No reauth is asked below `ORDO_SECURITY_LEVEL=high`.
   - A change is checked before it is kept. A refusal names the setting, the value and the command that fixes it.
   - A change reaches every node at once, on the same notice as a pin, and at the latest on the next reconcile tick.
 - **Which versions stay served** is yours to set. `in-use`, the default, serves every version a tenant is pinned to. A list, such as `ordo versions set served '#4,#5'`, serves only those beside the active version: a pin or move target outside it is refused, naming the value to add. A list that leaves out a version tenants are on is refused the same way.
@@ -634,9 +634,9 @@ with a uniqueness check rather than assumed unique: a colliding draw is
 retried rather than minted. `ORDO_AUTH_UNSAFE_MEMORY_DIRECTORY` no
 longer exists: there is nothing unsafe left in this path to gate.
 
-### Touches a tenant chooses
+### Reauths a tenant chooses
 
-`ORDO_SECURITY_LEVEL` sets which situations ask a person for a passkey touch,
+`ORDO_SECURITY_LEVEL` sets which situations ask a person for a reauth,
 for every tenant. You may let each tenant change some of them for its own
 space (owner, 2026-11-05). You choose which situations, and which way.
 Nothing is exposed by default.
@@ -644,13 +644,13 @@ Nothing is exposed by default.
 - **See what is exposed:** `ordo touches --host <h>`. It prints each
   situation, what the level asks, what tenants may change, and the recent
   changes with who made them and why. Through the door:
-  `std.deployment.tenantTouches`. The console's Deploys screen shows the same.
+  `std.deployment.tenantReauths`. The console's Deploys screen shows the same.
 - **Expose one:** `ordo touches expose membership raise --reason "..."`.
-  - `raise`: a tenant may turn the touch on where the level leaves it off.
+  - `raise`: a tenant may turn the reauth on where the level leaves it off.
   - `lower`: a tenant may turn it off where the level asks.
   - `both`: either way. `none` takes it back.
   - Through the door: `std.deployment.exposeTouch`. You, or your own system
-    with a machine key that has the `deployment` grant. No passkey touch is
+    with a machine key that has the `deployment` grant. No reauth is
     asked below `ORDO_SECURITY_LEVEL=high`.
 - **What can be exposed:** `export-import`, `membership`, `tenant-storage`,
   `approving-delegation` and `account-security` (a tenant's own sign-in

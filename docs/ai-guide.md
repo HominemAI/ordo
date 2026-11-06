@@ -633,8 +633,8 @@ Called like any op: `useCommit(name)` or `useOpQuery(name)` after
 The last active owner cannot be removed, suspended or demoted.
 
 **Presence.** A platform op that changes something asks for a fresh
-passkey touch, and is refused `access_denied` without one. An emailed code,
-a password and an OIDC sign-in prove no touch. The deployment owner lists
+reauth, and is refused `access_denied` without one. An emailed code,
+a password and an OIDC sign-in prove no reauth. The deployment owner lists
 the ops people may call without one in `ORDO_STEP_UP_EXEMPT_OPS`
 (`std.space.invite,std.space.remove`). Ops not listed stay refused to
 anyone without a passkey, which is also a way to forbid them. With
@@ -679,7 +679,7 @@ import { auth } from './auth'; // createOrdoAuth, signin.md
 // Name every platform op the app calls (see "Platform ops" below).
 const iface = withPlatformOps(parseInterface(doc), 'std.space.invite', 'std.space.invitations', 'std.space.setRole');
 
-// Asked once when a platform write is refused for want of a fresh touch.
+// Asked once when a platform write is refused for want of a reauth.
 const touch = async () => {
   await auth.stepUp();
 };
@@ -1206,7 +1206,7 @@ front). Hooks give the same detail as `refusal` (`.class`, `.message`,
 
 | Class | Means | Page does |
 |---|---|---|
-| `access_denied` | the door refused the caller: not a member, removed, op not allowed for the role, or no fresh touch | show the message; drop the tenant if it is gone |
+| `access_denied` | the door refused the caller: not a member, removed, op not allowed for the role, or no reauth | show the message; drop the tenant if it is gone |
 | `not_found` | absent, or guarded from you | reload |
 | `cas_miss` | someone changed the row first | reload, show the new state |
 | `access_guard` | you may read the row but not write it | show the message |
@@ -1513,5 +1513,5 @@ peekInvitation(door, ticket: string): Promise<{ space: string; role: string | nu
 declineInvitation(door, ticket: string, token?: string): Promise<void>
 
 // @hominemai/ordo-sdk/auth/recovery.js
-endEverySession(door, token: string): Promise<void>        // sign out everywhere; needs a fresh touch
+endEverySession(door, token: string): Promise<void>        // sign out everywhere; needs a reauth
 ```

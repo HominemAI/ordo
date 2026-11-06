@@ -224,8 +224,8 @@ The pin this plan adds:
   `pins.reconcile_interval` (`ORDO_PINS_RECONCILE_SECS`, 30 s).
 - **One tenant moves on demand**: `Versions::pin`, cause `pin`, through
   `std.deployment.pin` and `ordo versions pin <tenant> <version>`. It is the
-  seam every later single-tenant move calls (§1.11). It asks no passkey
-  touch, of a system or a person, strict deployment or not (owner,
+  seam every later single-tenant move calls (§1.11). It asks no
+  reauth, of a system or a person, strict deployment or not (owner,
   2026-11-05: *"If they are logged in they proved their access"*). The
   role gate is unchanged: deployment owner only.
 - `std.deployment.tenantVersion` and `ordo versions list --tenant <id>`:
@@ -510,12 +510,12 @@ nothing of versions.
   beyond that default.
 - The owner: *"technically the developer could even have their own system
   managing automatic updates."* So the move on demand is a door op a
-  system credential can call, with no passkey touch and no exemption
+  system credential can call, with no reauth and no exemption
   setting. A person moving a version is not asked either (owner,
   2026-11-05: *"They could be moving many at a time"*).
 - Where it lands: increment 3, session 2. Session 1 built the seam:
   `Versions::pin` is the one single-tenant move, `std.deployment.pin` its
-  door op, which asks no touch. The window-timed move and the tenant's own
+  door op, which asks no reauth. The window-timed move and the tenant's own
   trigger call it with their own actor and cause.
 
 **As built in increment 3, session 2** (2026-11-05, `versions.rs`,
@@ -535,10 +535,10 @@ nothing of versions.
   `ordo:window:<id>` (`Windows::open_at`). At most 1,000 tenants a tick.
 - On demand: `ordo versions move <tenant>` and
   `std.deployment.moveOffRevoked`, cause `demand`, deployment owner or a
-  system's machine key, no passkey touch.
+  system's machine key, no reauth.
 - By the tenant: `std.space.moveOffRevoked`, cause `tenant`, granted to the
   roles in `ORDO_VERSIONS_TENANT_MOVE_ROLES` (`versions.tenant_move_roles`),
-  none by default. No touch.
+  none by default. No reauth.
 - `ordo versions revoked` and `std.deployment.revoked` show the revoke's
   `moveTo`, and each tenant's own `target` and `nextWindow`, or "no window".
 - `$move_targets` is an erasure attachment.
@@ -984,7 +984,7 @@ day:
   `std.deployment.versionSettings`), the CLI (`ordo versions settings`,
   `ordo versions set <served|minimum|new-tenant> <value> | --clear
   --reason`) and the console's Deploys screen. The deployment owner, or a
-  machine key with the `deployment` grant. A touch only at
+  machine key with the `deployment` grant. A reauth only at
   `ORDO_SECURITY_LEVEL=high`.
 - The checks boot made run on the change, and refuse it naming the
   setting, the value and the command. Boot still checks the stored values,

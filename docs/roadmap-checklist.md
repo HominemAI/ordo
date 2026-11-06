@@ -13421,8 +13421,14 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       message a paused tenant answers are the app developer's (ruled
       2026-10-06, ask 8; built eaab5633, `ORDO_TENANT_PAUSE_ANSWERS`).
       **Reopened 2026-11-06:** the box was ticked with P5 and P6 unbuilt
-      (`onPaused` existed nowhere). P5 is being built; P6 waits on
-      `plan-syntax-additions.md` §3; P7 audit owed. Tests now 29.
+      (`onPaused` existed nowhere). **P5 built 2026-11-06** (ee6d1c64):
+      workers hold a paused tenant, live closes with the `space_paused`
+      frame, the SDK raises `onPaused` and reconnects on `resumed()`; tests
+      `tenant_pause.rs` (22), `routines.rs`
+      `triggers_hold_position_through_a_pause`,
+      `clock_ticks_during_a_pause_are_skipped_and_recorded`. Held offline
+      writes wait on the SDK write queue (F7 phase 4). **Blocked:** P6 waits
+      on `plan-syntax-additions.md` §3. **Owed:** P7 audit.
       Board: `tenant-pause`.
 - [ ] **27as · Maintenance mode: pause every tenant at once** (asked
       2026-10-05). A deployment-wide pause; what still answers is decided as

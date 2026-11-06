@@ -48,7 +48,7 @@ The template lists the program's own ops only: app ops and `std.<entity>.*`.
 
 ## 3 · A tenant's own profile
 
-A tenant's manager or owner reads and changes it with platform ops. They ask for a fresh passkey touch, like other `std.space` ops. A delegated token cannot call the writes.
+A tenant's manager or owner reads and changes it with platform ops. They ask for a reauth, like other `std.space` ops. A delegated token cannot call the writes.
 
 | Op | Does |
 |---|---|

@@ -794,7 +794,7 @@ Three consequences follow, and they are the terms of the trade:
 3. **No cryptography closes this.** The hostile
    party here is *legitimately authenticated*: a member the space admitted.
    Proof systems prove statements about data; they cannot prove which human is
-   at a keyboard, and possession-plus-presence (a passkey touch) is the ceiling
+   at a keyboard, and possession-plus-presence (a reauth) is the ceiling
    of what any scheme delivers. This is authorization of a party you already
    trusted, which is a governance problem.
 

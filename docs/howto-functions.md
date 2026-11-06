@@ -271,7 +271,7 @@ ordo secret set openaiKey --host <h> --space <s> < openai-key.txt
 - The value is sealed under the deployment's keys in `$secrets`, in the
   control database.
 - Each set is a new version.
-- Setting needs a passkey touch by default, like every platform change.
+- Setting needs a reauth by default, like every platform change.
 - The deployment's security record gets one `secret` entry per set: the
   name, the version and who set it. Never the value.
 - A value may be set before the program declares the secret. It is sent
@@ -659,7 +659,7 @@ ordo fn log 412 --host <h> --space <s>
 ### Who may read them
 
 Only the deployment owner, in the deployment's own space. Both are reads,
-so they need no passkey touch. The ops are
+so they need no reauth. The ops are
 `std.deployment.functionRuns($function?, $tenant?, $limit?)` and
 `std.deployment.functionRun($seq)`. A tenant cannot read its own runs yet.
 

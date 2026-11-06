@@ -14,7 +14,7 @@ const unreachable = (origin: string, door: string) =>
 export function refusalText(e: OrdoRefusal): string {
   switch (e.class) {
     case 'presence_required':
-      return 'Confirm it is you with your passkey, or sign in again, then try once more.';
+      return "Confirm it's you with your passkey or by signing in again, then try once more.";
     case 'access_denied':
       return 'The shop did not allow that.';
     case 'access_guard':

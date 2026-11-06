@@ -69,7 +69,7 @@ export function refusalText(r: Refusal): string {
     case 'cas_miss':
       return 'Changed by someone else, reloaded.';
     case 'presence_required':
-      return 'Confirm it is you with your passkey, or sign in again, then try once more.';
+      return "Confirm it's you with your passkey or by signing in again, then try once more.";
     case 'access_denied':
       return 'You are not allowed to do that.';
     case 'tenant_refused':

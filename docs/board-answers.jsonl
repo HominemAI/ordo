@@ -1425,3 +1425,14 @@
 {"seq": 1426, "item": "security-audit-2026-11-05-14-findings", "ask": 2, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1427, "item": "security-audit-2026-11-05-14-findings", "ask": 4, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1428, "item": "usability-audit-2026-11-05-the-deployment-owner", "ask": 1, "at": "2026-11-05", "status": "decided", "text": "split", "source": "record", "read": true}
+{"seq": 1429, "item": "tenant-schema-updates", "ask": 0, "at": "2026-11-06T02:39:52Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1430, "item": "versions-increment-3-session-2-three", "ask": 4, "at": "2026-11-06T02:40:41Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1431, "item": "versions-increment-3-session-2-three", "ask": 0, "at": "2026-11-06T02:40:43Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1432, "item": "tenant-chooses-its-touches", "ask": 3, "at": "2026-11-06T02:41:46Z", "status": "open", "text": "I think we need to rephrase passkey touch to reauth or something similar because not everyone might have pass key. Separatley did we setup systems for 2FA?", "source": "page", "read": true}
+{"seq": 1433, "item": "tenant-chooses-its-touches", "ask": 4, "at": "2026-11-06T02:41:58Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1434, "item": "tenant-chooses-its-touches", "ask": 0, "at": "2026-11-06T02:41:59Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1435, "item": "an-engineer-who-hates-new-stacks", "ask": 3, "at": "2026-11-06T02:43:33Z", "status": "open", "text": "okay - yeah we'll need a clear command to run from the repo, we should provie binaries (which I think we already build) and we should look at getting it running on brew - but a quickstart.sh to get everything built might help", "source": "page", "read": true}
+{"seq": 1436, "item": "an-engineer-who-hates-new-stacks", "ask": 0, "at": "2026-11-06T02:43:37Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1437, "item": "versions-increment-3-session-2-three", "ask": 4, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1438, "item": "tenant-chooses-its-touches", "ask": 4, "at": "2026-11-05", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1439, "item": "an-engineer-who-hates-new-stacks", "ask": 3, "at": "2026-11-05", "status": "decided", "text": "okay - yeah we'll need a clear command to run from the repo, we should provide binaries (which I think we already build) and we should look at getting it running on brew - but a quickstart.sh to get everything built might help", "source": "record", "read": true}

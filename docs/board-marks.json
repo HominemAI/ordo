@@ -1768,8 +1768,8 @@
   "at": "2026-11-06T02:26:00+00:00"
  },
  "security-audit-2026-11-05-14-findings:4": {
-  "mark": "questions",
-  "at": "2026-11-06T02:26:45+00:00"
+  "mark": "done",
+  "at": "2026-11-06T02:35:43+00:00"
  },
  "security-audit-2026-11-05-14-findings:5": {
   "mark": "done",
@@ -2128,8 +2128,12 @@
   "at": "2026-11-05T12:38:28+00:00"
  },
  "tenant-chooses-its-touches:2": {
+  "mark": "done",
+  "at": "2026-11-06T02:34:05+00:00"
+ },
+ "tenant-chooses-its-touches:3": {
   "mark": "questions",
-  "at": "2026-11-06T02:25:08+00:00"
+  "at": "2026-11-06T02:35:06+00:00"
  },
  "tenant-db-requirements:1": {
   "mark": "done",

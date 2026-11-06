@@ -1436,3 +1436,7 @@
 {"seq": 1437, "item": "versions-increment-3-session-2-three", "ask": 4, "at": "2026-11-05", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1438, "item": "tenant-chooses-its-touches", "ask": 4, "at": "2026-11-05", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1439, "item": "an-engineer-who-hates-new-stacks", "ask": 3, "at": "2026-11-05", "status": "decided", "text": "okay - yeah we'll need a clear command to run from the repo, we should provide binaries (which I think we already build) and we should look at getting it running on brew - but a quickstart.sh to get everything built might help", "source": "record", "read": true}
+{"seq": 1440, "item": "tenant-chooses-its-touches", "ask": 5, "at": "2026-11-06T04:22:01Z", "status": "open", "text": "ok that should reduce misunderstandings.", "source": "page", "read": true}
+{"seq": 1441, "item": "tenant-chooses-its-touches", "ask": 3, "at": "2026-11-06T04:23:06Z", "status": "open", "text": "ok document", "source": "page", "read": true}
+{"seq": 1442, "item": "tenant-chooses-its-touches", "ask": 3, "at": "2026-11-05", "status": "decided", "text": "ok document", "source": "record", "read": true}
+{"seq": 1443, "item": "tenant-chooses-its-touches", "ask": 5, "at": "2026-11-05", "status": "decided", "text": "ok that should reduce misunderstandings.", "source": "record", "read": true}

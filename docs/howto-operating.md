@@ -644,7 +644,7 @@ Nothing is exposed by default.
 - **See what is exposed:** `ordo touches --host <h>`. It prints each
   situation, what the level asks, what tenants may change, and the recent
   changes with who made them and why. Through the door:
-  `std.deployment.tenantReauths`. The console's Deploys screen shows the same.
+  `std.deployment.tenantTouches`. The console's Deploys screen shows the same.
 - **Expose one:** `ordo touches expose membership raise --reason "..."`.
   - `raise`: a tenant may turn the reauth on where the level leaves it off.
   - `lower`: a tenant may turn it off where the level asks.

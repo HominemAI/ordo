@@ -119,7 +119,7 @@ front). Hooks give the same detail as `refusal` (`.class`, `.message`,
 
 | Class | Means | Page does |
 |---|---|---|
-| `access_denied` | the door refused the caller: not a member, removed, op not allowed for the role, or no fresh touch | show the message; drop the tenant if it is gone |
+| `access_denied` | the door refused the caller: not a member, removed, op not allowed for the role, or no reauth | show the message; drop the tenant if it is gone |
 | `not_found` | absent, or guarded from you | reload |
 | `cas_miss` | someone changed the row first | reload, show the new state |
 | `access_guard` | you may read the row but not write it | show the message |

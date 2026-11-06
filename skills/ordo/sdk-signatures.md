@@ -294,5 +294,5 @@ peekInvitation(door, ticket: string): Promise<{ space: string; role: string | nu
 declineInvitation(door, ticket: string, token?: string): Promise<void>
 
 // @hominemai/ordo-sdk/auth/recovery.js
-endEverySession(door, token: string): Promise<void>        // sign out everywhere; needs a fresh touch
+endEverySession(door, token: string): Promise<void>        // sign out everywhere; needs a reauth
 ```

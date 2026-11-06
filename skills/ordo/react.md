@@ -20,7 +20,7 @@ import { auth } from './auth'; // createOrdoAuth, signin.md
 // Name every platform op the app calls (see "Platform ops" below).
 const iface = withPlatformOps(parseInterface(doc), 'std.space.invite', 'std.space.invitations', 'std.space.setRole');
 
-// Asked once when a platform write is refused for want of a fresh touch.
+// Asked once when a platform write is refused for want of a reauth.
 const touch = async () => {
   await auth.stepUp();
 };

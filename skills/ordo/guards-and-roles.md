@@ -106,8 +106,8 @@ Called like any op: `useCommit(name)` or `useOpQuery(name)` after
 The last active owner cannot be removed, suspended or demoted.
 
 **Presence.** A platform op that changes something asks for a fresh
-passkey touch, and is refused `access_denied` without one. An emailed code,
-a password and an OIDC sign-in prove no touch. The deployment owner lists
+reauth, and is refused `access_denied` without one. An emailed code,
+a password and an OIDC sign-in prove no reauth. The deployment owner lists
 the ops people may call without one in `ORDO_STEP_UP_EXEMPT_OPS`
 (`std.space.invite,std.space.remove`). Ops not listed stay refused to
 anyone without a passkey, which is also a way to forbid them. With

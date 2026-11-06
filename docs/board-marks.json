@@ -87,6 +87,18 @@
   "mark": "done",
   "at": "2026-10-22T22:31:25+00:00"
  },
+ "an-engineer-who-hates-new-stacks:1": {
+  "mark": "done",
+  "at": "2026-11-06T02:29:50+00:00"
+ },
+ "an-engineer-who-hates-new-stacks:2": {
+  "mark": "done",
+  "at": "2026-11-06T02:29:54+00:00"
+ },
+ "an-engineer-who-hates-new-stacks:3": {
+  "mark": "questions",
+  "at": "2026-11-06T02:30:41+00:00"
+ },
  "artifact-placement:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -1743,6 +1755,26 @@
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
  },
+ "security-audit-2026-11-05-14-findings:1": {
+  "mark": "done",
+  "at": "2026-11-06T02:25:26+00:00"
+ },
+ "security-audit-2026-11-05-14-findings:2": {
+  "mark": "done",
+  "at": "2026-11-06T02:25:32+00:00"
+ },
+ "security-audit-2026-11-05-14-findings:3": {
+  "mark": "done",
+  "at": "2026-11-06T02:26:00+00:00"
+ },
+ "security-audit-2026-11-05-14-findings:4": {
+  "mark": "questions",
+  "at": "2026-11-06T02:26:45+00:00"
+ },
+ "security-audit-2026-11-05-14-findings:5": {
+  "mark": "done",
+  "at": "2026-11-06T02:27:10+00:00"
+ },
  "security-trace:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -2095,6 +2127,10 @@
   "mark": "done",
   "at": "2026-11-05T12:38:28+00:00"
  },
+ "tenant-chooses-its-touches:2": {
+  "mark": "questions",
+  "at": "2026-11-06T02:25:08+00:00"
+ },
  "tenant-db-requirements:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -2295,6 +2331,14 @@
   "mark": "done",
   "at": "2026-10-27T07:00:03+00:00"
  },
+ "usability-audit-2026-11-05-the-deployment-owner:1": {
+  "mark": "done",
+  "at": "2026-11-06T02:27:22+00:00"
+ },
+ "usability-audit-2026-11-05-the-deployment-owner:2": {
+  "mark": "done",
+  "at": "2026-11-06T02:27:32+00:00"
+ },
  "usability-testing:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
@@ -2318,6 +2362,10 @@
  "versions-increment-3-session-2-three:3": {
   "mark": "done",
   "at": "2026-11-05T12:37:17+00:00"
+ },
+ "versions-increment-3-session-2-three:4": {
+  "mark": "questions",
+  "at": "2026-11-06T02:23:34+00:00"
  },
  "versions-plan-review-identity-and-promotion:1": {
   "mark": "done",

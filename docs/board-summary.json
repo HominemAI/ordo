@@ -1,6 +1,6 @@
 {
  "date": "2026-11-08",
- "text": "2026-11-08 revision for the first release: 23 rows read Yours though every ask was answered; each now says Ruled, Built or Fixed and where. 82 tasks before Future are unfinished: 18 building, 35 queued, 5 blocked, 22 filed, 3 need you [[what-the-first-release-still-holds]]. The nightly still fails: its fix is on bleeding, main is 9 commits behind [[sploosh-froze-under-ci-load-and]]. The live instance waits on your restart [[live-instance]].",
+ "text": "2026-11-08: the live deployment is back on 0.5.0 [[live-instance]]: the manifest named an image the release never built, and the master-key secret did not exist [[image-name-the-release-does-not-build]]. PR #9 carries the nightly fix to main [[sploosh-froze-under-ci-load-and]]. SDK review: 3 fixes asked before release [[sdk-usability-review-before-release-3]]. 82 tasks before Future unfinished; 5 need you [[what-the-first-release-still-holds]].",
  "tiles": [
   [
    "4,060",
@@ -36,12 +36,25 @@
    "82",
    "Unfinished before Future",
    "warn"
+  ],
+  [
+   "up 0.5.0",
+   "Live deployment",
+   "ok"
   ]
  ],
  "look": [
   {
    "id": "what-the-first-release-still-holds",
    "why": "3 asks: what V1 still holds"
+  },
+  {
+   "id": "sdk-usability-review-before-release-3",
+   "why": "3 fixes before release"
+  },
+  {
+   "id": "image-name-the-release-does-not-build",
+   "why": "run the whole one image?"
   },
   {
    "id": "rebuild-ellanor-on-ordo-now-to",
@@ -53,15 +66,7 @@
   },
   {
    "id": "sploosh-froze-under-ci-load-and",
-   "why": "needs a bleeding to main PR"
-  },
-  {
-   "id": "program-versions-the-core-under-schema",
-   "why": "3 of 17 increments built"
-  },
-  {
-   "id": "backend-functions",
-   "why": "3 of 10 increments built"
+   "why": "PR #9 open"
   }
  ]
 }

@@ -1,6 +1,6 @@
 {
- "date": "2026-11-06",
- "text": "2026-11-06 audit of the 45 tasks marked building: 13 were built, 11 not started, 2 blocked; 18 remain in progress and now name what is left. Checklist boxes 7d, 17m, 17ag, 22c, 22i ticked; 27ar reopened and P5 built the same day [[tenant-pause]]; P6 waits on deployment entities. The nightly and the v0.5.0 release both fail on a runner without gh [[sploosh-froze-under-ci-load-and]]; the live deployment is down [[live-instance]].",
+ "date": "2026-11-08",
+ "text": "2026-11-08 revision for the first release: 23 rows read Yours though every ask was answered; each now says Ruled, Built or Fixed and where. 82 tasks before Future are unfinished: 18 building, 35 queued, 5 blocked, 22 filed, 3 need you [[what-the-first-release-still-holds]]. The nightly still fails: its fix is on bleeding, main is 9 commits behind [[sploosh-froze-under-ci-load-and]]. The live instance waits on your restart [[live-instance]].",
  "tiles": [
   [
    "4,060",
@@ -31,24 +31,37 @@
    "7",
    "Designed, unbuilt",
    "warn"
+  ],
+  [
+   "82",
+   "Unfinished before Future",
+   "warn"
   ]
  ],
  "look": [
   {
-   "id": "tenant-pause",
-   "why": "P5 built; P6 blocked on deployment entities"
+   "id": "what-the-first-release-still-holds",
+   "why": "3 asks: what V1 still holds"
+  },
+  {
+   "id": "rebuild-ellanor-on-ordo-now-to",
+   "why": "4 asks, unanswered"
+  },
+  {
+   "id": "an-engineer-who-hates-new-stacks",
+   "why": "the npm org, 10 minutes"
   },
   {
    "id": "sploosh-froze-under-ci-load-and",
-   "why": "nightly fails, gh missing on the runner"
-  },
-  {
-   "id": "the-live-deployment-stopped-starting-after",
-   "why": "seal-master --from-env being built"
+   "why": "needs a bleeding to main PR"
   },
   {
    "id": "program-versions-the-core-under-schema",
    "why": "3 of 17 increments built"
+  },
+  {
+   "id": "backend-functions",
+   "why": "3 of 10 increments built"
   }
  ]
 }

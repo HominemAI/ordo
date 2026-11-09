@@ -50,6 +50,10 @@ timing-alone = { max-threads = 1 }
 # - ordo-cli apply_wait: it boots a real ordo-host binary.
 # - store_pool_slow_commit: it checks another store is served while one
 #   statement is slow, by wall time (2.47 s on a loaded runner, PR 3).
+# - auth_tenant_providers lock deadline, versions_settings pin race: both
+#   wait on a Postgres advisory lock by wall time. Under the full run's
+#   load one round trip took 10.5 s (PR 9) and a spawned pin took over
+#   5 s to reach its lock (nightly 2026-11-09).
 # This override comes first: a test takes the first group that matches.
 [[profile.default.overrides]]
 filter = '''
@@ -62,6 +66,8 @@ filter = '''
   | (binary_id(ordo-host::routines) & test(a_scheduled_routine_runs_on_time_and_records_its_act))
   | (binary_id(ordo-cli::apply_wait) & test(apply_returns_only_after_the_node_serves_and_caught_up))
   | (binary_id(ordo-host::store_pool_slow_commit) & test(another_store_is_served_while_one_statement_is_slow))
+  | (binary_id(ordo-host::auth_tenant_providers) & test(the_tenant_lock_refusal_comes_at_the_deadline_warm_and_cold))
+  | (binary_id(ordo-host::versions_settings) & test(a_pin_queued_behind_a_setting_change_reads_the_change))
 '''
 test-group = 'timing-alone'
 

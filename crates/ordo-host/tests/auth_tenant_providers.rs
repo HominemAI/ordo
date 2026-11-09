@@ -1314,8 +1314,12 @@ fn warm(h: &H, wait_ms: u64) -> TenantConnections {
     .with_lock_wait_ms(wait_ms)
 }
 
-/// The refusal for a 300 ms wait comes after 300 ms and well before 1.5 s,
-/// on a warm pool and on a cold one, and names the setting and its value.
+/// The refusal for a 300 ms wait comes after 300 ms and well before the
+/// 10 s default, on a warm pool and on a cold one, and names the setting
+/// and its value. The upper bound is 5 s, not 1.5 s: the first ask and the
+/// pool's own round trip run uncut by design, and on a loaded CI runner
+/// that round trip took 10.5 s once (2026-11-08, PR 9). A regression that
+/// ignores the setting waits the 10 s default, which 5 s still catches.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tenant_lock_refusal_comes_at_the_deadline_warm_and_cold() {
     let h = harness("ordo_tp_lock_deadline", true).await;
@@ -1329,7 +1333,7 @@ async fn the_tenant_lock_refusal_comes_at_the_deadline_warm_and_cold() {
         let e = waiter.lock(&h.space).await.err().expect("it waits it out");
         let took = started.elapsed();
         assert!(took >= ms(300), "{name}: {took:?}");
-        assert!(took < ms(1500), "{name}: {took:?}");
+        assert!(took < ms(5000), "{name}: {took:?}");
         assert!(
             e.to_string().contains("ORDO_AUTH_TENANT_LOCK_WAIT_MS=300"),
             "{name}: {e}"

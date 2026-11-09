@@ -319,9 +319,12 @@ async fn a_pin_queued_behind_a_setting_change_reads_the_change() {
     let p2 = pool.clone();
     let pin =
         tokio::spawn(async move { Versions::on(&p2).pin("spc_b", "0.2.0", OWNER, 302).await });
-    // The pin is queued behind the change (its lock, or its table).
+    // The pin is queued behind the change (its lock, or its table). Up to
+    // 30 s: on a loaded CI runner the spawned pin took over 5 s to open its
+    // connection and reach the lock (nightly 2026-11-09, "the pin never
+    // queued on the lock"); the bound guards a hang, not the pace.
     let mut waiting = false;
-    for _ in 0..200 {
+    for _ in 0..1200 {
         let rows = pool
             .rows(
                 "SELECT count(*)::text FROM pg_locks l JOIN pg_database d ON d.oid = l.database \

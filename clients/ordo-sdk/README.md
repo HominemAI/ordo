@@ -4,7 +4,9 @@ The generated TypeScript client for one Ordo deployment. One typed function
 per op; the terminal verb decides what you can do with it.
 
 ```ts
-import { OrdoClient, cheapActive, addAnonCustomer, OrdoRefusal } from '@hominemai/ordo-sdk';
+import { OrdoClient, OrdoRefusal } from '@hominemai/ordo-sdk';
+// Your app's ops, written by `ordo gen ts .` from your `.ordo` sources.
+import { cheapActive, addAnonCustomer } from './generated/ops.js';
 
 const client = new OrdoClient({
   baseUrl: 'https://api.example.com',

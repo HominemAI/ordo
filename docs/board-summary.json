@@ -1,6 +1,6 @@
 {
- "date": "2026-11-08",
- "text": "2026-11-08: the live deployment is back on 0.5.0 [[live-instance]]: the manifest named an image the release never built, and the master-key secret did not exist [[image-name-the-release-does-not-build]]. PR #9 carries the nightly fix to main [[sploosh-froze-under-ci-load-and]]. SDK review: 3 fixes asked before release [[sdk-usability-review-before-release-3]]. 82 tasks before Future unfinished; 5 need you [[what-the-first-release-still-holds]].",
+ "date": "2026-11-09",
+ "text": "2026-11-09: 5 tasks answered. The release is done when notes v2 runs on the sealed key with one green nightly; one runs on main now ([[sploosh-froze-under-ci-load-and]]). 10 filed tasks moved to Future; [[syntax-additions]] and [[dl-spec-gaps]] build in the release. SDK: README fixed, 2 fixes queued ([[sdk-usability-review-before-release-3]]); public npm follows them. The one image under the supervisor: 2 asks on [[image-name-the-release-does-not-build]]. The Human Agent Link plan is being written ([[rebuild-ellanor-on-ordo-now-to]]).",
  "tiles": [
   [
    "4,060",
@@ -33,7 +33,7 @@
    "warn"
   ],
   [
-   "82",
+   "74",
    "Unfinished before Future",
    "warn"
   ],
@@ -45,28 +45,8 @@
  ],
  "look": [
   {
-   "id": "what-the-first-release-still-holds",
-   "why": "3 asks: what V1 still holds"
-  },
-  {
-   "id": "sdk-usability-review-before-release-3",
-   "why": "3 fixes before release"
-  },
-  {
    "id": "image-name-the-release-does-not-build",
-   "why": "run the whole one image?"
-  },
-  {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "4 asks, unanswered"
-  },
-  {
-   "id": "an-engineer-who-hates-new-stacks",
-   "why": "the npm org, 10 minutes"
-  },
-  {
-   "id": "sploosh-froze-under-ci-load-and",
-   "why": "PR #9 open"
+   "why": "console origin and the 2 databases"
   }
  ]
 }

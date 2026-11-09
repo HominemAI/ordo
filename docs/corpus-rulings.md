@@ -12199,3 +12199,9 @@ Board task `the-live-deployment-stopped-starting-after` (Reported fixes). The li
 - **Ask 2, "ok".** A setting that an upgrade tightens keeps a running deployment serving with a loud warning that names the fix; only a new deployment is refused. This is the standard-behaviour rule (*"Upgrade should affect nothing"*, Q7 of the identity plan) applied to key custody. Built: `crates/ordo-host/src/tightened.rs` (cabc090a); `ordo keys seal-master --from-env` moves the running key into a sealed file with no re-wrap (1e467636).
 - **Ask 3.** The owner: *"no. We should not be doing digests - we should be doing tags"*. The live image is pinned by a semver tag, never by digest.
 - **Ask 4, "yep".** Release tag v0.5.0 was cut so the deployment can pin `ordo-host:0.5.0`. As of 2026-11-06 `smg_infrastructure/ordo/ordo.yaml` still pulls `:main`; the change is the owner's.
+
+## 2026-11-08: the SDK's front door
+
+Board task `sdk-usability-review-before-release-3`. The read-only SDK review found the notes app building its own session handling (`examples/notes/web/src/session.ts`, 565 lines, 5 lower calls stitched by hand) beside `createOrdoAuth`, the one sign-in front door the SDK has had since 0.5.0.
+
+- **Ask 1.** The owner: *"Front Door should not be bypassed."* The reference app signs in through `createOrdoAuth` alone, so a developer copying it inherits the front door and not a hand-built session. Size M; queued. This is rule 9 (one interface per service) applied to the door seen from the SDK.

@@ -1441,3 +1441,4 @@
 {"seq": 1442, "item": "tenant-chooses-its-touches", "ask": 3, "at": "2026-11-05", "status": "decided", "text": "ok document", "source": "record", "read": true}
 {"seq": 1443, "item": "tenant-chooses-its-touches", "ask": 5, "at": "2026-11-05", "status": "decided", "text": "ok that should reduce misunderstandings.", "source": "record", "read": true}
 {"seq": 1444, "item": "the-live-deployment-stopped-starting-after", "ask": 0, "at": "2026-11-06", "status": "decided", "text": "Ask 2 ok: a running deployment keeps serving with a warning, new ones are refused. Ask 3: tags, not digests. Ask 4: yep, v0.5.0. 2026-11-06: not fixing this live deployment in place, it serves nothing, but build the fix.", "source": "record", "read": true}
+{"seq": 1445, "item": "sdk-usability-review-before-release-3", "ask": 1, "at": "2026-11-08", "status": "decided", "text": "Front Door should not be bypassed", "source": "record", "read": true}

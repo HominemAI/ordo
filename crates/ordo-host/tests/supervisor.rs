@@ -1060,7 +1060,9 @@ async fn secevent_retain_claims_its_own_schedule_once_per_period() {
         sup.health()
     );
 
-    let ran = wait_for(Duration::from_secs(5), || {
+    // 20 s for 5 one-second ticks: the worker ticks on real time, and on
+    // the loaded nightly runner of 2026-11-09 only 3 ticks landed in 5 s.
+    let ran = wait_for(Duration::from_secs(20), || {
         sup.health()["secevent.retain"]["runs"]
             .as_u64()
             .unwrap_or(0)

@@ -1,6 +1,6 @@
 {
  "date": "2026-11-10",
- "text": "2026-11-09, later: 3 more tasks answered. The clock seam is ruled, size L, after the 2 SDK fixes ([[time-sensitive-tests-fail-when-other-tests]]). The console and identity databases got the go; their SQL waits for you, and the console's address is asked again in plain words ([[image-name-the-release-does-not-build]]). Human Agent Link: 6 of 7 asks ruled, its own deployment in a hal namespace, Cloudflare Pages, import by SQL dump; the forwarder ask is put again ([[rebuild-ellanor-on-ordo-now-to]]). Sploosh still owes 1 green nightly ([[sploosh-froze-under-ci-load-and]]).",
+ "text": "2026-11-09, late: slice 0 of Human Agent Link is built and waits for your push: the app shell and CI in human-agent-link, the hal deployment manifests in smg_infrastructure, and the token metrics, 4 agent sessions so far ([[rebuild-ellanor-on-ordo-now-to]], asks 12 to 15). The ordo test instance moves to the supervisor once the 2 URL secrets are in GCP ([[image-name-the-release-does-not-build]]). The clock seam is queued at L after the 2 SDK fixes ([[time-sensitive-tests-fail-when-other-tests]]). Sploosh still owes 1 green nightly ([[sploosh-froze-under-ci-load-and]]).",
  "tiles": [
   [
    "4,060",
@@ -45,12 +45,12 @@
  ],
  "look": [
   {
-   "id": "image-name-the-release-does-not-build",
-   "why": "run the SQL, name the console's address"
+   "id": "rebuild-ellanor-on-ordo-now-to",
+   "why": "asks 12 to 15, then push both repos"
   },
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "ask 5, what a forwarder does"
+   "id": "image-name-the-release-does-not-build",
+   "why": "the 2 URL properties, the DNS route, the push"
   }
  ]
 }

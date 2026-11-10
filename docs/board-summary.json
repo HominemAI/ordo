@@ -1,6 +1,6 @@
 {
  "date": "2026-11-10",
- "text": "2026-11-09, late: slice 0 of Human Agent Link is built and waits for your push: the app shell and CI in human-agent-link, the hal deployment manifests in smg_infrastructure, and the token metrics, 4 agent sessions so far ([[rebuild-ellanor-on-ordo-now-to]], asks 12 to 15). The ordo test instance moves to the supervisor once the 2 URL secrets are in GCP ([[image-name-the-release-does-not-build]]). The clock seam is queued at L after the 2 SDK fixes ([[time-sensitive-tests-fail-when-other-tests]]). Sploosh still owes 1 green nightly ([[sploosh-froze-under-ci-load-and]]).",
+ "text": "2026-11-09, later: asks 12 to 15 ruled ([[rebuild-ellanor-on-ordo-now-to]]): the SDK from a sibling checkout, Cloudflare Pages builds the page itself, the 2 hal names, and the hal master key, now made in the hal namespace. Slice 0 is complete; human-agent-link is ready to push. smg_infrastructure waits on the GCP secrets hal_secrets and the 2 URL properties ([[image-name-the-release-does-not-build]]): gcloud here needs your reauth. Slice 1 waits on your go.",
  "tiles": [
   [
    "4,060",
@@ -46,11 +46,11 @@
  "look": [
   {
    "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "asks 12 to 15, then push both repos"
+   "why": "slice 0 done; go for slice 1?"
   },
   {
    "id": "image-name-the-release-does-not-build",
-   "why": "the 2 URL properties, the DNS route, the push"
+   "why": "the 2 URL properties, then the push"
   }
  ]
 }

@@ -1458,3 +1458,15 @@
 {"seq": 1460, "item": "sdk-usability-review-before-release-3", "ask": 0, "at": "2026-11-09T11:12:07Z", "status": "decided", "text": "Please confirm if ordo can be written in TS without having to make a .ordo file.", "source": "page", "read": true}
 {"seq": 1461, "item": "what-the-first-release-still-holds", "ask": 2, "at": "2026-11-09T11:13:37Z", "status": "open", "text": "Confirm that they have no already been implemented. If not then yes they need to be built and tested.", "source": "page", "read": true}
 {"seq": 1462, "item": "what-the-first-release-still-holds", "ask": 0, "at": "2026-11-09T11:13:41Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1463, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 5, "at": "2026-11-10T00:15:47Z", "status": "open", "text": "What do the forwards provide that the server cannot already? Is our function backend unable to do the same?", "source": "page", "read": true}
+{"seq": 1464, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 6, "at": "2026-11-10T00:16:36Z", "status": "open", "text": "We can clone the data for testing This will prevent having to build an adapter", "source": "page", "read": true}
+{"seq": 1465, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 7, "at": "2026-11-10T00:16:57Z", "status": "open", "text": "This goes with above - yes lets just import everything - but the sql might be faster? Maybe?", "source": "page", "read": true}
+{"seq": 1466, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 8, "at": "2026-11-10T00:17:25Z", "status": "open", "text": "Yep.", "source": "page", "read": true}
+{"seq": 1467, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 9, "at": "2026-11-10T00:18:32Z", "status": "open", "text": "1 ordo 1 deployment currently, so no. Lets setup a new deployment in the HAL namespace", "source": "page", "read": true}
+{"seq": 1468, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 10, "at": "2026-11-10T00:19:12Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1469, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 11, "at": "2026-11-10T00:19:25Z", "status": "open", "text": "It will be on CF as well.", "source": "page", "read": true}
+{"seq": 1470, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 0, "at": "2026-11-10T00:19:28Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1471, "item": "image-name-the-release-does-not-build", "ask": 2, "at": "2026-11-10T00:20:42Z", "status": "open", "text": "I do not understand what you are asking. What is the purpose?", "source": "page", "read": true}
+{"seq": 1472, "item": "image-name-the-release-does-not-build", "ask": 3, "at": "2026-11-10T00:21:08Z", "status": "open", "text": "Go ahead.", "source": "page", "read": true}
+{"seq": 1473, "item": "image-name-the-release-does-not-build", "ask": 0, "at": "2026-11-10T00:21:11Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1474, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 4, "at": "2026-11-10T00:21:28Z", "status": "open", "text": "ok", "source": "page", "read": true}

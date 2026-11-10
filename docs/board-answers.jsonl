@@ -1470,3 +1470,7 @@
 {"seq": 1472, "item": "image-name-the-release-does-not-build", "ask": 3, "at": "2026-11-10T00:21:08Z", "status": "open", "text": "Go ahead.", "source": "page", "read": true}
 {"seq": 1473, "item": "image-name-the-release-does-not-build", "ask": 0, "at": "2026-11-10T00:21:11Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1474, "item": "time-sensitive-tests-fail-when-other-tests", "ask": 4, "at": "2026-11-10T00:21:28Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1475, "item": "image-name-the-release-does-not-build", "ask": 2, "at": "2026-11-10T00:30:45Z", "status": "open", "text": "That's fine. This is our testing instance anyway for now.", "source": "page", "read": true}
+{"seq": 1476, "item": "image-name-the-release-does-not-build", "ask": 0, "at": "2026-11-10T00:30:51Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1477, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 5, "at": "2026-11-10T00:31:59Z", "status": "open", "text": "Yes. If we're making HAL we're not designing around Jazz anymore.", "source": "page", "read": true}
+{"seq": 1478, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 0, "at": "2026-11-10T00:32:04Z", "status": "decided", "text": "", "source": "page", "read": true}

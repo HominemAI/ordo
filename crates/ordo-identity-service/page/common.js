@@ -23,6 +23,31 @@ export class Refusal extends Error {
  */
 export const BASE = document.querySelector('meta[name="ordo-base"]')?.getAttribute('content') || '';
 
+/**
+ * The console this service signs people in for: the first client origin
+ * (ORDO_IDENTITY_CLIENT_ORIGINS), which the page's return-origins list
+ * names after the service's own. Null when no client is configured.
+ */
+export function consoleHome() {
+  const meta = document.querySelector('meta[name="ordo-return-origins"]');
+  const list = (meta?.getAttribute('content') || '').split(' ').filter(Boolean);
+  return list.length > 1 ? `${list[1]}/` : null;
+}
+
+/**
+ * Show the header's "Open the console" link when there is a console to
+ * open. Without it the account page led nowhere after sign-up (owner,
+ * 2026-11-12).
+ */
+function linkConsole() {
+  const a = document.getElementById('console-link');
+  const home = consoleHome();
+  if (!a || !home) return;
+  a.href = home;
+  a.hidden = false;
+}
+linkConsole();
+
 /** POST a JSON body to the service, on this origin, with the session cookie. */
 export async function post(path, body = {}) {
   let res;

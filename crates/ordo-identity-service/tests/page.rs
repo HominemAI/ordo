@@ -220,6 +220,16 @@ async fn sign_in_names_the_origins_it_may_return_to_and_the_api_keeps_its_own_po
         )),
         "{body}"
     );
+    // Every page offers the way to the console, which the script shows
+    // from that list. The account page led nowhere after sign-up before
+    // (owner, 2026-11-12).
+    for path in ["/account", "/join", "/cli"] {
+        let (_, _, html) = get(&h, path).await;
+        assert!(
+            html.contains(r#"<a id="console-link" class="console-link" hidden>Open the console</a>"#),
+            "{path}: {html}"
+        );
+    }
     let (_, headers, _) = get(&h, "/health/live").await;
     assert_eq!(
         headers["content-security-policy"],

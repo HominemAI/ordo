@@ -56,7 +56,9 @@ test('sign in at the identity service, touch for a tenant op, invite and end an 
 
   await test.step('sign up by the first invite, then open the console', async () => {
     await join(page, readFileSync(`${s.identityData}/first-invite`, 'utf8').trim(), 'Dana');
-    await page.goto(`${s.console}/d/main/`);
+    // The account page's header leads to the console (owner, 2026-11-12).
+    await page.getByRole('link', { name: 'Open the console' }).click();
+    await expect(page).toHaveURL(new RegExp(`^${s.console}/`));
     await signedIn(page);
   });
 

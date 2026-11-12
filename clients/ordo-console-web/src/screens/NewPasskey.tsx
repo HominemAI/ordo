@@ -7,7 +7,7 @@ export function NewPasskey(props: { onDone: (codes: string[]) => void; onSignedO
   const { busy, error, run } = useBusy();
   const can = passkeysAvailable();
   return (
-    <section className="card">
+    <section className="card form">
       <h1>Add a new passkey</h1>
       <p>You signed in with a recovery code. Add a new passkey now. Your old recovery codes stop working and you get new ones.</p>
       {error && <p role="alert" className="error">{error}</p>}

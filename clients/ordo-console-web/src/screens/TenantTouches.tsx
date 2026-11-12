@@ -88,7 +88,7 @@ export function TenantTouches(props: {
       {loadError && <p className="muted small">The touches did not load: {loadError}</p>}
       {now && (
         <table className="kv">
-          <caption className="muted small">ORDO_SECURITY_LEVEL={now.level}</caption>
+          <caption className="muted small"><code className="code">ORDO_SECURITY_LEVEL={now.level}</code></caption>
           <thead>
             <tr>
               <th scope="col">Situation</th>

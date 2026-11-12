@@ -10,7 +10,7 @@ export function SignIn(props: {
   const { busy, error, run } = useBusy();
   const can = passkeysAvailable();
   return (
-    <section className="card">
+    <section className="card form">
       <h1>Sign in</h1>
       {props.note && <p className="note" role="status">{props.note}</p>}
       <p>Use the passkey you set up for this console.</p>

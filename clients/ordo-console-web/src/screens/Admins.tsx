@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
 import {
   addMachineKey,
   auditPage,
@@ -20,7 +20,7 @@ function when(secs: number | null | undefined): string {
 }
 
 /** A secret shown once: an invite link or a machine key's private half. */
-function Once(props: { label: string; value: string; note: string; onDone: () => void }) {
+function Once(props: { label: string; value: string; note: ReactNode; onDone: () => void }) {
   const [copied, setCopied] = useState<string | null>(null);
   return (
     <div className="once">
@@ -267,14 +267,19 @@ export function Admins(props: { session: Session; onSignedOut: () => void }) {
 
           <h2>Machine keys</h2>
           <p className="muted">
-            A machine key signs CI in to deploy (ORDO_MACHINE_KEY). It belongs to the deployment, so it outlives the
+            A machine key signs CI in to deploy (<code className="code">ORDO_MACHINE_KEY</code>). It belongs to the deployment, so it outlives the
             person who made it.
           </p>
           {secret ? (
             <Once
               label="Machine key"
               value={secret}
-              note="Put this in your CI's secrets as ORDO_MACHINE_KEY. It is not shown again."
+              note={
+                <>
+                  Put this in your CI's secrets as <code className="code">ORDO_MACHINE_KEY</code>. It is not shown
+                  again.
+                </>
+              }
               onDone={() => setSecret(null)}
             />
           ) : (

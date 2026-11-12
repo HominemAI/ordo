@@ -8,7 +8,7 @@ export function RecoveryCode(props: { onRedeemed: () => void; onBack: () => void
   const { busy, error, run } = useBusy();
   const id = useId();
   return (
-    <section className="card">
+    <section className="card form">
       <h1>Use a recovery code</h1>
       <p>Each code works once. After it, you add a new passkey and get a new set of codes.</p>
       <form

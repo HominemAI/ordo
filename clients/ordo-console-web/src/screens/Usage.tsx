@@ -317,7 +317,7 @@ export function Usage(props: { onSignedOut: () => void }) {
       {notEnforced && (
         <p className="note" role="note">
           These quotas are stored and limit nothing yet. They count from the usage ledger, which is off: set
-          ORDO_USAGE_LEDGER=true on the deployment.
+          <code className="code">ORDO_USAGE_LEDGER=true</code> on the deployment.
         </p>
       )}
       {quotas && quotas.length === 0 && <p>No quotas are set. Every tenant may use as much as it asks for.</p>}

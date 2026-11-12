@@ -87,6 +87,8 @@ body {
   font-size: 0.9rem;
 }
 .brand .mark { color: var(--text); font-weight: 700; }
+.brand { display: flex; align-items: baseline; gap: 0.35rem; }
+.brand .console-link { margin-left: auto; color: var(--text); }
 
 main {
   max-width: 36rem;

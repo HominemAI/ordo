@@ -14,7 +14,7 @@
 
   "ordoInventory": {
     "comment": "The manifest. See information_for_contributors. `languageVersion` is the ordo-syntax version this grammar tracks; the parity test pins it, so a language release cannot ship without the highlighter admitting which language it highlights.",
-    "languageVersion": "0.5.0",
+    "languageVersion": "0.5.1",
     "reserved": {
       "keyword.declaration.ordo": [
         "domain", "entity", "op", "routine", "app", "page", "principal",

@@ -229,6 +229,15 @@ async fn sign_in_names_the_origins_it_may_return_to_and_the_api_keeps_its_own_po
             html.contains(r#"<a id="console-link" class="console-link" hidden>Open the console</a>"#),
             "{path}: {html}"
         );
+        // The script fills the link from this list, so each page carries it.
+        // The account page had only the anchor and the link stayed hidden
+        // (console e2e, 2026-11-12).
+        assert!(
+            html.contains(&format!(
+                r#"<meta name="ordo-return-origins" content="{ORIGIN} {CONSOLE}">"#
+            )),
+            "{path}: {html}"
+        );
     }
     let (_, headers, _) = get(&h, "/health/live").await;
     assert_eq!(

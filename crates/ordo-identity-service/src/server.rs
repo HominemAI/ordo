@@ -236,7 +236,10 @@ impl Service {
                     &tx,
                     handle,
                     &self.0.keys,
-                    &self.0.cfg.origin,
+                    // Under the base path when there is one, as `invite` does:
+                    // the bare origin sent the first admin to the console's
+                    // 404 (hal and ordo first boots, 2026-11-12).
+                    &self.0.cfg.public_url(),
                     "first admin",
                     boot,
                     self.0.cfg.invite_days,

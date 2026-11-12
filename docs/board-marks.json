@@ -1023,6 +1023,10 @@
   "mark": "done",
   "at": "2026-11-10T00:21:08+00:00"
  },
+ "image-name-the-release-does-not-build:4": {
+  "mark": "asking",
+  "at": "2026-11-12T10:46:29+00:00"
+ },
  "isolation-suite:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"

@@ -151,7 +151,7 @@ What runs today:
   tokens that the door and the console verify with its public key. The CLI
   signs in through it with `ordo login`. See
   [`docs/howto-identity.md`](docs/howto-identity.md).
-- **Clients.** `@hominemai/ordo-sdk` (0.5.0) is a typed client generated from
+- **Clients.** `@hominemai/ordo-sdk` (0.5.1) is a typed client generated from
   your program. `createOrdoAuth` is its one sign-in object, and
   `@hominemai/ordo-react` has hooks for live data, including `useOrdoAuth`.
 - **Agent tooling.** `ordo skill install` writes the Ordo agent skill into a

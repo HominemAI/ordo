@@ -1,6 +1,6 @@
 {
  "date": "2026-11-12",
- "text": "2026-11-12: both deployments run the one image under the supervisor ([[image-name-the-release-does-not-build]]). Identity and console serve on ordo.inf.smg.icu and hal.inf.smg.icu; the deployment child crash-loops on a secret-file permission, fixed in smg_infrastructure 6b28385 and waiting for your push. Ask 4 there proposes the supervisor fix. human-agent-link's first CI run is green; Pages and the 2 hal DNS names are yours ([[rebuild-ellanor-on-ordo-now-to]]). Slice 1 waits on your go.",
+ "text": "2026-11-12: both deployments run the one image, tunnel and DNS are in, the hal door answers. The first-admin link printed at boot missed /identity and opened a 404 ([[first-invite-link-missed-the-base-path]], fixed, test added). hal.inf.smg.icu now serves the Pages app instead of the console: ask 16 on [[rebuild-ellanor-on-ordo-now-to]]. Ask 4 on [[image-name-the-release-does-not-build]] proposes the supervisor master-file fix. Slice 1 waits on your go.",
  "tiles": [
   [
    "4,060",
@@ -45,12 +45,12 @@
  ],
  "look": [
   {
-   "id": "image-name-the-release-does-not-build",
-   "why": "push 6b28385; ask 4"
+   "id": "rebuild-ellanor-on-ordo-now-to",
+   "why": "ask 16: which name is the console's"
   },
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "Pages, DNS, go for slice 1"
+   "id": "image-name-the-release-does-not-build",
+   "why": "ask 4"
   }
  ]
 }

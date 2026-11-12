@@ -85,6 +85,15 @@ async fn touch(h: &H, cookie: &str, auth: &TestAuthenticator) {
 async fn under_a_base_path_the_page_its_files_and_calls_stay_under_it() {
     use ordo_identity_service::config::BASE_PATH_ENV;
     let h = boot_with("base_path", &[(BASE_PATH_ENV, "/identity")]).await;
+    // The first admin's link goes under the base path too. It was built
+    // from the bare origin and opened a 404 on the first cluster boots
+    // (2026-11-12); the admin's `invite` below was right all along.
+    let first = h.svc.first_start().await.unwrap();
+    let link = first.first_invite.expect("a first invite").link;
+    assert!(
+        link.starts_with(&format!("{ORIGIN}/identity/join#")),
+        "{link}"
+    );
     let (s, _, html) = get(&h, "/identity/sign-in").await;
     assert_eq!(s, StatusCode::OK);
     assert!(

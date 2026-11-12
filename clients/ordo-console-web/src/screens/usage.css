@@ -56,7 +56,11 @@
   vertical-align: top;
   padding: 8px;
   border-block-end: 1px solid var(--line);
-  overflow-wrap: anywhere;
+}
+
+.usage-table .mono {
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .usage-table thead th {

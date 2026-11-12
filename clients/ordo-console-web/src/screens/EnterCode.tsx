@@ -23,7 +23,7 @@ export function EnterCode(props: {
   const can = passkeysAvailable();
 
   return (
-    <section className="card">
+    <section className="card form">
       <h1>{props.heading}</h1>
       <p>{props.intro}</p>
       {!can && <p role="alert" className="error">This browser cannot use passkeys. Open the console in a current browser.</p>}

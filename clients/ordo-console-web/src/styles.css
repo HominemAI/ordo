@@ -97,23 +97,38 @@ nav a[aria-current='page'] {
 }
 
 main {
-  margin: 24px auto;
-  padding: 0 var(--gutter);
+  margin: 24px 0;
+  padding-inline: clamp(1.5rem, 3vw, 3rem);
 }
 
-main.narrow {
-  max-width: 34rem;
-}
-
+/* Screens fill the width. Only small forms keep a bounded column. */
+main.narrow,
 main.wide {
-  max-width: 56rem;
+  max-inline-size: none;
 }
 
+/* A plain section. The class stays because screens reference it. */
 .card {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 20px;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
+
+.card.form {
+  max-inline-size: 32rem;
+}
+
+/* Setting names and environment variables: code, never broken mid-word. */
+.code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875em;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 h1 {

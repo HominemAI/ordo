@@ -62,9 +62,22 @@
   font-size: 0.875rem;
 }
 
-.setting-name,
 .setting-value {
   overflow-wrap: anywhere;
+}
+
+.settings-table th[scope='row'] {
+  min-inline-size: 22rem;
+  white-space: nowrap;
+}
+
+.settings-table td[data-label='Actions'] {
+  white-space: nowrap;
+  inline-size: 1%;
+}
+
+.settings-table td {
+  min-inline-size: 8rem;
 }
 
 .setting-name {

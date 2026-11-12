@@ -71,18 +71,25 @@
 }
 
 .share-table .detail {
-  overflow-wrap: anywhere;
+  min-inline-size: 16rem;
+}
+
+.share-table td[data-label='Actions'] {
+  white-space: nowrap;
+  inline-size: 1%;
 }
 
 .share-name {
   display: block;
   font-weight: 650;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  min-inline-size: 12rem;
 }
 
 .share-id {
   display: block;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .share-table .tag {

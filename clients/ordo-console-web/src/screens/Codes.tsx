@@ -19,7 +19,7 @@ export function Codes(props: { heading: string; codes: string[]; onContinue: () 
   }, [text]);
 
   return (
-    <section className="card">
+    <section className="card form">
       <h1>{props.heading}</h1>
       <h2>Save your recovery codes</h2>
       <p>

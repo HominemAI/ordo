@@ -161,8 +161,8 @@ export function Deployment(props: { onSignedOut: () => void }) {
           </p>
           <p className="muted small">
             Your browser runs the deployment's passkey here, so the deployment must list this address,{' '}
-            <span className="mono">{window.location.origin}</span>, in ORDO_AUTH_ORIGINS when it shares the
-            deployment's domain, or in ORDO_AUTH_RELATED_ORIGINS when it does not.
+            <span className="mono">{window.location.origin}</span>, in <code className="code">ORDO_AUTH_ORIGINS</code> when it shares the
+            deployment's domain, or in <code className="code">ORDO_AUTH_RELATED_ORIGINS</code> when it does not.
           </p>
           <form
             onSubmit={(e) => {
@@ -172,7 +172,10 @@ export function Deployment(props: { onSignedOut: () => void }) {
           >
             <p id="how-to-link" className="note">
               {state.howToLink ??
-                'Use the passkey you hold at the deployment. The deployment must name you its owner in ORDO_DEPLOYMENT_OWNERS.'}
+                <>
+                  Use the passkey you hold at the deployment. The deployment must name you its owner in{' '}
+                  <code className="code">ORDO_DEPLOYMENT_OWNERS</code>.
+                </>}
             </p>
             <label htmlFor="key-name">Name for this console's key (optional)</label>
             <input id="key-name" maxLength={64} value={name} onChange={(e) => setName(e.target.value)} />
@@ -209,7 +212,7 @@ export function Deployment(props: { onSignedOut: () => void }) {
                   ) : (
                     <>Due {when(state.rotateDueAt)}</>
                   )}{' '}
-                  <span className="muted small">every {state.rotateDays} days (ORDO_CONSOLE_KEY_ROTATE_DAYS)</span>
+                  <span className="muted small">every {state.rotateDays} days (<code className="code">ORDO_CONSOLE_KEY_ROTATE_DAYS</code>)</span>
                 </dd>
               </>
             )}

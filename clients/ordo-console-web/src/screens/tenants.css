@@ -37,12 +37,19 @@
 .tenant-name {
   display: block;
   font-weight: 650;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  min-inline-size: 12rem;
 }
 
 .tenant-id {
   display: block;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.tenant-table td[data-label='Actions'] {
+  white-space: nowrap;
+  inline-size: 1%;
 }
 
 .tenant-table .tag {

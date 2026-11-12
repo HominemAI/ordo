@@ -139,10 +139,9 @@ export function Settings(props: { scope: Scope; onSignedOut: () => void }) {
       <h1>{heading}</h1>
       <p>
         {props.scope === 'signin'
-          ? 'How people sign in to the deployment: sessions, admission, passkeys and the app developer’s stored layers.'
-          : 'Every setting the deployment reads.'}{' '}
-        Each shows the value the running deployment took and where it came from. Secrets show only whether they are
-        set.
+          ? 'How people sign in to the deployment: sessions, admission, passkeys and the app developer’s stored layers. The sign-in part of Settings, the same table narrowed.'
+          : 'What the running deployment read: every setting with its effective value and where it came from, a revision filed here, the environment, or the default.'}{' '}
+        Secrets show only whether they are set. Runtime shows the revisions these changes file, and rolls back to one.
       </p>
       {data.editable ? (
         <p className="muted small">
@@ -298,7 +297,7 @@ function SettingLine(props: {
     <>
       <tr data-setting={r.name} data-drift={r.drift ? r.drift.kind : undefined}>
         <th scope="row">
-          <span className="setting-name mono">{r.name}</span>
+          <span className="setting-name code">{r.name}</span>
           {r.secret && <span className="tag">secret</span>}
           {r.family && <span className="muted small setting-family">{plain(r.family)}</span>}
           {r.what && <span className="muted small setting-family">{r.what}</span>}
@@ -315,7 +314,7 @@ function SettingLine(props: {
         </td>
         <td data-label="Source">
           {r.source ? SOURCE_WORDS[r.source] : <span className="muted">Not known</span>}
-          {r.var && r.source === 'file' && <span className="muted small setting-family mono">{r.var}</span>}
+          {r.var && r.source === 'file' && <span className="muted small setting-family code">{r.var}</span>}
         </td>
         <td data-label="Default">
           {r.default ? plain(r.default) : <span className="muted">None</span>}

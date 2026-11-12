@@ -49,7 +49,6 @@
   vertical-align: top;
   padding: 8px;
   border-block-end: 1px solid var(--line);
-  overflow-wrap: anywhere;
 }
 
 .people-table thead th {
@@ -61,16 +60,23 @@
 .person-name {
   display: block;
   font-weight: 650;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  min-inline-size: 12rem;
 }
 
 .person-id {
   display: block;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .group-list .person-name {
   display: inline;
+}
+
+.people-table td[data-label='Actions'] {
+  white-space: nowrap;
+  inline-size: 1%;
 }
 
 .group-list li {

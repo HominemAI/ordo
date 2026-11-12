@@ -37,6 +37,7 @@ export function DoorOnlyRuntime(props: { data: DoorOnly }) {
   return (
     <section className="card" data-testid="runtime-door-only">
       <h1>Runtime</h1>
+      <p>The process that runs the deployment, as the door reports it.</p>
       <p>
         This console does not manage this deployment's process. It cannot start, stop, restart or change the
         deployment. Change its settings on the platform that runs it.

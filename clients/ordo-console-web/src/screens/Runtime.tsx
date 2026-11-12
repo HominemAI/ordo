@@ -261,6 +261,11 @@ export function Runtime(props: { onSignedOut: () => void }) {
   return (
     <section className="card runtime">
       <h1>Runtime</h1>
+      <p>
+        The process that runs the deployment: the settings revision it was started with, who filed it and when,
+        and a restart or a roll back. For what the running deployment read from those settings, each value with its
+        source, see Settings.
+      </p>
 
       <StatusFacts status={s} />
       <p>

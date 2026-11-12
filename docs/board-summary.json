@@ -1,6 +1,6 @@
 {
  "date": "2026-11-12",
- "text": "2026-11-12: both deployments run the one image, tunnel and DNS are in, the hal door answers. The first-admin link printed at boot missed /identity and opened a 404 ([[first-invite-link-missed-the-base-path]], fixed, test added). hal.inf.smg.icu now serves the Pages app instead of the console: ask 16 on [[rebuild-ellanor-on-ordo-now-to]]. Ask 4 on [[image-name-the-release-does-not-build]] proposes the supervisor master-file fix. Slice 1 waits on your go.",
+ "text": "2026-11-12, later: v0.5.1 is tagged from PR 10 with every check green ([[live-instance]]): the first-boot link fix, the console link, the console layout, Runtime and Settings told apart. smg_infrastructure pins both deployments to it. Your Argo sync of cloudflared brings ordo-api.inf.smg.icu and the restart hook. CI's double run on one commit is filed ([[ci-runs-twice-on-one-commit-with-a-pr-open]]). Ask 4 on [[image-name-the-release-does-not-build]] awaits your go. Slice 1 waits on your go.",
  "tiles": [
   [
    "4,060",
@@ -45,12 +45,12 @@
  ],
  "look": [
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "ask 16: which name is the console's"
-  },
-  {
    "id": "image-name-the-release-does-not-build",
    "why": "ask 4"
+  },
+  {
+   "id": "rebuild-ellanor-on-ordo-now-to",
+   "why": "go for slice 1"
   }
  ]
 }

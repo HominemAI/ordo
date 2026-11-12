@@ -1,6 +1,6 @@
 {
- "date": "2026-11-10",
- "text": "2026-11-09, later: asks 12 to 15 ruled ([[rebuild-ellanor-on-ordo-now-to]]): the SDK from a sibling checkout, Cloudflare Pages builds the page itself, the 2 hal names, and the hal master key, now made in the hal namespace. Slice 0 is complete; human-agent-link is ready to push. smg_infrastructure waits on the GCP secrets hal_secrets and the 2 URL properties ([[image-name-the-release-does-not-build]]): gcloud here needs your reauth. Slice 1 waits on your go.",
+ "date": "2026-11-12",
+ "text": "2026-11-12: both deployments run the one image under the supervisor ([[image-name-the-release-does-not-build]]). Identity and console serve on ordo.inf.smg.icu and hal.inf.smg.icu; the deployment child crash-loops on a secret-file permission, fixed in smg_infrastructure 6b28385 and waiting for your push. Ask 4 there proposes the supervisor fix. human-agent-link's first CI run is green; Pages and the 2 hal DNS names are yours ([[rebuild-ellanor-on-ordo-now-to]]). Slice 1 waits on your go.",
  "tiles": [
   [
    "4,060",
@@ -45,12 +45,12 @@
  ],
  "look": [
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "slice 0 done; go for slice 1?"
+   "id": "image-name-the-release-does-not-build",
+   "why": "push 6b28385; ask 4"
   },
   {
-   "id": "image-name-the-release-does-not-build",
-   "why": "the 2 URL properties, then the push"
+   "id": "rebuild-ellanor-on-ordo-now-to",
+   "why": "Pages, DNS, go for slice 1"
   }
  ]
 }

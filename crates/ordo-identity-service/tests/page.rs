@@ -226,7 +226,9 @@ async fn sign_in_names_the_origins_it_may_return_to_and_the_api_keeps_its_own_po
     for path in ["/account", "/join", "/cli"] {
         let (_, _, html) = get(&h, path).await;
         assert!(
-            html.contains(r#"<a id="console-link" class="console-link" hidden>Open the console</a>"#),
+            html.contains(
+                r#"<a id="console-link" class="console-link" hidden>Open the console</a>"#
+            ),
             "{path}: {html}"
         );
         // The script fills the link from this list, so each page carries it.

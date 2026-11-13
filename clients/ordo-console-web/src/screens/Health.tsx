@@ -121,7 +121,7 @@ export function Health(props: { onSignedOut: () => void; onRuntime: () => void; 
         <p>
           {doorNote}{' '}
           <button type="button" className="link" onClick={props.onDeployment}>
-            Open Deployment
+            Open Connection
           </button>
         </p>
       )}

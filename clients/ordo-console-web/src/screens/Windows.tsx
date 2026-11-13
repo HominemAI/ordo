@@ -255,7 +255,7 @@ export function Windows(props: { onSignedOut: () => void }) {
       {state === null && !error && <p className="muted">Loading…</p>}
 
       {state && !state.linked && (
-        <p className="note">The console is not linked to the deployment yet. Link it on the Deployment screen first.</p>
+        <p className="note">The console is not linked to the deployment yet. Link it on the Connection page first.</p>
       )}
 
       <div role="status">{done && <p className="ok">{done}</p>}</div>

@@ -9,7 +9,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { fits, linkAsNamedOwner, person, recoverCode, savedAndContinue, shownCodes } from './support';
+import { fits, linkAsNamedOwner, person, recoverCode, savedAndContinue, shownCodes, open } from './support';
 
 /** Take the touch at the deployment when it asks for one. */
 async function touchIfAsked(page: Page): Promise<void> {
@@ -41,10 +41,10 @@ test('add, refuse, edit, skip and delete maintenance windows; revoke a version a
   await expect(page.getByRole('heading', { name: 'Your new passkey is ready' })).toBeVisible();
   await shownCodes(page);
   await savedAndContinue(page);
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await linkAsNamedOwner(page, device);
 
-  await page.getByRole('link', { name: 'Maintenance' }).click();
+  await open(page, 'Maintenance');
   await expect(page.getByRole('heading', { name: 'Maintenance windows', level: 1 })).toBeVisible();
   await expect(page.getByText('No window is set.')).toBeVisible();
 
@@ -117,7 +117,7 @@ test('add, refuse, edit, skip and delete maintenance windows; revoke a version a
   await page.setViewportSize({ width: 1280, height: 800 });
 
   // Deploys: revoke the version that does not serve, with a reason, and lift it.
-  await page.getByRole('link', { name: 'Deploys' }).click();
+  await open(page, 'Deploys');
   const versions = page.getByRole('list', { name: 'Stored versions' });
   const second = versions.getByRole('listitem').filter({ hasText: '#2' });
   await expect(second).toBeVisible();
@@ -145,7 +145,7 @@ test('add, refuse, edit, skip and delete maintenance windows; revoke a version a
 
   // Unlink, so a later spec links the door with its own passkey.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   await touchIfAsked(page);

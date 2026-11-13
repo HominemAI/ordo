@@ -49,13 +49,17 @@ body {
 }
 
 .bar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Row 1: the brand, who is signed in, the groups, sign out. */
+.bar-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 16px;
   padding: 12px var(--gutter);
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
 }
 
 .brand {
@@ -69,7 +73,6 @@ body {
 
 nav ul {
   display: flex;
-  flex-wrap: wrap;
   gap: 4px;
   margin: 0;
   padding: 0;
@@ -82,12 +85,47 @@ nav a {
   border-radius: 6px;
   color: var(--text);
   text-decoration: none;
+  white-space: nowrap;
 }
 
-nav a[aria-current='page'] {
+/* The open group, and the open page. Weight and a tint, never color alone. */
+nav a[aria-current] {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
   font-weight: 600;
+}
+
+.groups {
+  flex-wrap: wrap;
+}
+
+/* Row 2: the open group's pages. One line that scrolls sideways when it does
+   not fit; the open page is scrolled into view. A cluster starts with a rule. */
+.pages {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scroll-snap-type: inline proximity;
+  padding: 0 var(--gutter) 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.pages li {
+  flex: none;
+  scroll-snap-align: start;
+}
+
+.pages li.cluster {
+  margin-inline-start: 8px;
+  padding-inline-start: 12px;
+  border-inline-start: 1px solid var(--line);
+}
+
+.pages a[aria-current='page'] {
+  background: none;
+  border-radius: 0;
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .signout {

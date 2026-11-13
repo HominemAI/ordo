@@ -11,7 +11,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner } from './support';
+import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner, open } from './support';
 
 test('see and change the people of a tenant', async ({ browser }) => {
   const { context, page, device, problems } = await person(browser);
@@ -24,12 +24,12 @@ test('see and change the people of a tenant', async ({ browser }) => {
   await savedAndContinue(page);
 
   // Link this console to the deployment with a passkey there.
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await linkAsNamedOwner(page, device);
 
   // Only the tenants where the owner holds a role are offered: Globex,
   // where the owner holds none, is not.
-  await page.getByRole('link', { name: 'People' }).click();
+  await open(page, 'People');
   await expect(page.getByRole('heading', { name: 'People', level: 1 })).toBeVisible();
   const tenant = page.getByLabel('Tenant');
   await expect(tenant.getByRole('option', { name: 'Acme (you: owner)' })).toHaveCount(1);
@@ -155,7 +155,7 @@ test('see and change the people of a tenant', async ({ browser }) => {
 
   // Unlink, so a later spec links the door with its own passkey.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   await expect(page.getByRole('status')).toContainText('Unlinked.');

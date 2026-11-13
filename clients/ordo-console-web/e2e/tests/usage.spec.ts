@@ -7,7 +7,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner } from './support';
+import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner, open } from './support';
 
 test('view usage, edit a quota, sort the slow ops', async ({ browser }) => {
   const { context, page, device, problems } = await person(browser);
@@ -20,11 +20,11 @@ test('view usage, edit a quota, sort the slow ops', async ({ browser }) => {
   await savedAndContinue(page);
 
   // Link this console to the deployment with a passkey there.
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await linkAsNamedOwner(page, device);
 
   // The whole deployment: 6 periods of 10, 5 and 1 requests.
-  await page.getByRole('link', { name: 'Usage' }).click();
+  await open(page, 'Usage');
   await expect(page.getByRole('heading', { name: 'Usage', level: 1 })).toBeVisible();
   await expect(page.getByRole('img', { name: /Requests per period, 6 periods/ })).toBeVisible();
   const by = page.getByRole('region', { name: 'Usage by tenant' });
@@ -85,7 +85,7 @@ test('view usage, edit a quota, sort the slow ops', async ({ browser }) => {
 
   // Unlink, so a later spec links the door with its own passkey.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   await expect(page.getByRole('status')).toContainText('Unlinked.');

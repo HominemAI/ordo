@@ -7,7 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { expect, test, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
-import { person, recoverCode, savedAndContinue, shownCodes, stack } from './support';
+import { person, recoverCode, savedAndContinue, shownCodes, stack, open } from './support';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -68,7 +68,7 @@ test('Health leads with the deployment: ready, on revision 1', async () => {
 });
 
 test('Runtime shows the state, revision 1 and its settings', async () => {
-  await page.getByRole('link', { name: 'Runtime' }).click();
+  await open(page, 'Runtime');
   expect(new URL(page.url()).pathname).toBe('/d/main/runtime');
   await expect(page.getByRole('heading', { name: 'Runtime', level: 1 })).toBeVisible();
   await expect(state()).toHaveAttribute('data-state', 'ready');

@@ -52,7 +52,7 @@ safe from losing access."
 Card: "Connect the console to the deployment it manages."
 
 - Entry state: signed in, on the Health screen.
-- Done when: the Deployment screen says linked.
+- Done when: the Connection page says linked.
 - Have the claim code ready on a second paper. Hand it over only on request.
 
 ### Task 3: Deploy

@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
-import { fits, person } from './support';
+import { fits, person, open } from './support';
 
 interface IdentityStack {
   console: string;
@@ -75,7 +75,7 @@ test('sign in at the identity service, touch for a tenant op, invite and end an 
   await test.step('a tenant op asks for a fresh touch, takes it, and goes through', async () => {
     // The sign-in was a touch; let it age past the door's 8 second window.
     await page.waitForTimeout(9_000);
-    await page.getByRole('link', { name: 'Tenants' }).click();
+    await open(page, 'Tenants');
     const table = page.getByRole('region', { name: 'Tenants, newest first' });
     const acme = table.getByRole('row', { name: /Acme/ });
     await expect(acme).toContainText('Active');
@@ -91,7 +91,7 @@ test('sign in at the identity service, touch for a tenant op, invite and end an 
 
   let link = '';
   await test.step('invite a second admin', async () => {
-    await page.getByRole('link', { name: 'Deployment people' }).click();
+    await open(page, 'Deployment people');
     await expect(page.getByRole('heading', { name: 'Deployment people', level: 1 })).toBeVisible();
     await expect(page.getByRole('list', { name: 'People' })).toContainText('Dana');
     await page.getByLabel('Who it is for (optional)').fill('Eli');
@@ -111,8 +111,8 @@ test('sign in at the identity service, touch for a tenant op, invite and end an 
 
   await test.step("end Eli's access; Eli is sent back to sign in", async () => {
     await page.getByRole('button', { name: 'Done' }).click();
-    await page.getByRole('link', { name: 'Health' }).click();
-    await page.getByRole('link', { name: 'Deployment people' }).click();
+    await open(page, 'Health');
+    await open(page, 'Deployment people');
     const row = page.getByRole('list', { name: 'People' }).getByRole('listitem').filter({ hasText: 'Eli' });
     await row.getByRole('button', { name: 'End access' }).click();
     const confirm = page.getByRole('form', { name: 'End access for Eli' });

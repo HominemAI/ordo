@@ -5,7 +5,7 @@
 
 import { existsSync } from 'node:fs';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
-import { person, savedAndContinue, setupCode, shownCodes, signedIn, signOut, stack } from './support';
+import { person, savedAndContinue, setupCode, shownCodes, signedIn, signOut, stack, open } from './support';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -66,7 +66,7 @@ test('signs out, then back in with the passkey', async () => {
 });
 
 test('invites a second owner, who joins with the code, then removes them', async ({ browser }) => {
-  await page.getByRole('link', { name: 'Owners' }).click();
+  await open(page, 'Owners');
   expect(new URL(page.url()).pathname).toBe('/d/main/owners');
   await expect(page.getByRole('heading', { name: 'Owners' })).toBeVisible();
   await page.getByRole('button', { name: 'Make an invite code' }).click();

@@ -7,7 +7,7 @@
  */
 
 import { expect, test, type Page } from '@playwright/test';
-import { person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner } from './support';
+import { person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner, open } from './support';
 
 const V1 = `entity note {
   title: text
@@ -56,8 +56,8 @@ test('link the deployment by sign-in, write with a relayed touch, deploy and rol
 
   // The owner's new passkey at the deployment, made in this page and named
   // the owner there; then the console links by sign-in.
-  await page.getByRole('link', { name: 'Deployment' }).click();
-  await expect(page.getByRole('heading', { name: 'Deployment', level: 1 })).toBeVisible();
+  await open(page, 'Connection');
+  await expect(page.getByRole('heading', { name: 'Connection', level: 1 })).toBeVisible();
   await page.getByLabel(/Name for this console's key/).fill('e2e console');
   await linkAsNamedOwner(page, device);
   const keys = page.getByRole('list', { name: 'Console keys' });
@@ -75,12 +75,12 @@ test('link the deployment by sign-in, write with a relayed touch, deploy and rol
   await expect(keys.getByText('revoked')).toBeVisible();
 
   // Health from the door.
-  await page.getByRole('link', { name: 'Health' }).click();
+  await open(page, 'Health');
   const door = page.getByRole('definition').filter({ hasText: 'ready' });
   await expect(door.first()).toBeVisible();
 
   // Deploys (step 4): preview, apply, apply a second version, roll the app back.
-  await page.getByRole('link', { name: 'Deploys' }).click();
+  await open(page, 'Deploys');
   await expect(page.getByRole('heading', { name: 'Deploys', level: 1 })).toBeVisible();
   await expect(page.getByText('No program is stored yet.')).toBeVisible();
   const program = (name: string, text: string) =>
@@ -120,7 +120,7 @@ test('link the deployment by sign-in, write with a relayed touch, deploy and rol
   await expect(page.getByRole('list', { name: 'Activations' }).getByRole('listitem')).toHaveCount(3);
 
   // Unlink. The touch given for the deploys may still count; if not, it asks.
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   await touchIfAsked(page);

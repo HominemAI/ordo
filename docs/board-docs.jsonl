@@ -121,6 +121,7 @@
 {"file": "audit-board-2026-09-29.md", "kind": "audit", "what": "Every board task checked against the code: where its work stands, where it was done, and what nothing was tracking."}
 {"file": "audit-board-coverage.md", "kind": "audit", "what": "Capabilities in the specs with no work item at all."}
 {"file": "audit-client-blocking-2026-10-10.md", "kind": "audit", "what": "Where Ordo's browser clients can freeze a page or hold a screen, measured, with the fix for each"}
+{"file": "audit-configuration-syntax.md", "kind": "audit", "what": "Audit of the configuration a deployment owner sets outside the .ordo file, with a per-setting recommendation on what the syntax should express, 2026-11-13"}
 {"file": "audit-coverage-2026-09-07.md", "kind": "audit", "what": "The coverage audit re-run on 2026-09-07."}
 {"file": "audit-doc-contradictions.md", "kind": "audit", "what": "Where design documents contradict each other, and what the code decided."}
 {"file": "audit-one-way-gaps.md", "kind": "audit", "what": "Capabilities that work one way only (write without read-back, create without delete, record without a reader): 12 findings, with evidence and what tracks each"}

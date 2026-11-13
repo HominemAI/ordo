@@ -8,7 +8,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner } from './support';
+import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner, open } from './support';
 
 test('see a tenant links, revoke one, read the security log', async ({ browser }) => {
   const { context, page, device, problems } = await person(browser);
@@ -21,11 +21,11 @@ test('see a tenant links, revoke one, read the security log', async ({ browser }
   await savedAndContinue(page);
 
   // Link this console to the deployment with a passkey there.
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await linkAsNamedOwner(page, device);
 
   // The deployment's own record shows on open, newest first.
-  await page.getByRole('link', { name: 'Shares' }).click();
+  await open(page, 'Shares');
   await expect(page.getByRole('heading', { name: 'Shares and security', level: 1 })).toBeVisible();
   await page.getByRole('button', { name: 'Security log' }).click();
   const record = page.getByRole('region', { name: "The deployment's security record" });
@@ -80,7 +80,7 @@ test('see a tenant links, revoke one, read the security log', async ({ browser }
 
   // Unlink, so a later spec links the door with its own passkey.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   await expect(page.getByRole('status')).toContainText('Unlinked.');

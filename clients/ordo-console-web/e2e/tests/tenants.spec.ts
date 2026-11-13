@@ -9,7 +9,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner } from './support';
+import { fits, person, recoverCode, savedAndContinue, shownCodes, linkAsNamedOwner, open } from './support';
 
 test('list tenants, create one, pause and resume', async ({ browser }) => {
   const { context, page, device, problems } = await person(browser);
@@ -22,11 +22,11 @@ test('list tenants, create one, pause and resume', async ({ browser }) => {
   await savedAndContinue(page);
 
   // Link this console to the deployment with a passkey there.
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await linkAsNamedOwner(page, device);
 
   // The list.
-  await page.getByRole('link', { name: 'Tenants' }).click();
+  await open(page, 'Tenants');
   await expect(page.getByRole('heading', { name: 'Tenants', level: 1 })).toBeVisible();
   const table = page.getByRole('region', { name: 'Tenants, newest first' });
   const acme = table.getByRole('row', { name: /Acme/ });
@@ -107,7 +107,7 @@ test('list tenants, create one, pause and resume', async ({ browser }) => {
   // Unlink, so the next spec links the door with its own passkey. The
   // touch given above still counts.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   await expect(page.getByRole('status')).toContainText('Unlinked.');

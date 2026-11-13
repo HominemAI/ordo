@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ConsoleCallError, explain, SIGNED_OUT } from '../api';
-import { link, type Link } from '../deployment';
+import { link, usable, type Link } from '../deployment';
 import {
   activate,
   apply,
@@ -92,7 +92,7 @@ export function Deploys(props: { onSignedOut: () => void }) {
   const load = useCallback(async () => {
     const s = await link();
     setState(s);
-    if (!s.linked) return;
+    if (!usable(s)) return;
     setPast(await history());
     // The warning is best effort: the versions still show without it.
     try {
@@ -223,11 +223,11 @@ export function Deploys(props: { onSignedOut: () => void }) {
       </p>
       {state === null && !error && <p className="muted">Loading…</p>}
 
-      {state && !state.linked && (
-        <p className="note">The console is not linked to the deployment yet. Link it on the Deployment screen first.</p>
+      {state && !usable(state) && (
+        <p className="note">The console is not linked to the deployment yet. Link it on the Connection page first.</p>
       )}
 
-      {state?.linked && (
+      {state && usable(state) && (
         <>
           <h2>Apply a program</h2>
           <form

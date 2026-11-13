@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { base, handle, type Session } from '../api';
 import { identityMode } from '../identity';
 import { Deployment } from './Deployment';
@@ -15,24 +15,34 @@ import { Usage } from './Usage';
 import { Windows } from './Windows';
 
 /**
- * The signed-in console: a bar with the nav, and one screen. The nav lists
- * the screens built so far; later steps add Deploys, Tenants and the rest (docs/plan-console.md section 4) as one entry each here.
+ * The signed-in console: a bar with the groups, a row of the open group's
+ * pages, and one screen. Two groups (owner, 2026-11-13): System is the
+ * process, Deployment is everything that manages the deployment. Inside
+ * Deployment the pages sit in clusters: what is deployed and how it is
+ * set, what the program holds, and who administers it.
  */
-const SCREENS = [
-  { path: '', name: 'Health' },
-  { path: 'runtime', name: 'Runtime' },
-  { path: 'deploys', name: 'Deploys' },
-  { path: 'windows', name: 'Maintenance' },
-  { path: 'deployment', name: 'Deployment' },
-  { path: 'tenants', name: 'Tenants' },
-  { path: 'people', name: 'People' },
-  { path: 'sign-in', name: 'Sign-in' },
-  { path: 'settings', name: 'Settings' },
-  { path: 'usage', name: 'Usage' },
-  { path: 'shares', name: 'Shares' },
-  { path: 'owners', name: 'Owners' },
-  { path: 'admins', name: 'Deployment people' },
+const GROUPS = [
+  { id: 'system', name: 'System' },
+  { id: 'deployment', name: 'Deployment' },
 ] as const;
+
+type GroupId = (typeof GROUPS)[number]['id'];
+
+const SCREENS = [
+  { path: '', name: 'Health', group: 'system' },
+  { path: 'runtime', name: 'Runtime', group: 'system' },
+  { path: 'deployment', name: 'Connection', group: 'deployment' },
+  { path: 'deploys', name: 'Deploys', group: 'deployment' },
+  { path: 'settings', name: 'Settings', group: 'deployment' },
+  { path: 'sign-in', name: 'Sign-in', group: 'deployment' },
+  { path: 'windows', name: 'Maintenance', group: 'deployment' },
+  { path: 'tenants', name: 'Tenants', group: 'deployment', cluster: true },
+  { path: 'people', name: 'People', group: 'deployment' },
+  { path: 'shares', name: 'Shares', group: 'deployment' },
+  { path: 'usage', name: 'Usage', group: 'deployment' },
+  { path: 'owners', name: 'Owners', group: 'deployment', cluster: true },
+  { path: 'admins', name: 'Deployment people', group: 'deployment', cluster: true },
+] as const satisfies readonly { path: string; name: string; group: GroupId; cluster?: true }[];
 
 type ScreenPath = (typeof SCREENS)[number]['path'];
 
@@ -41,8 +51,18 @@ function current(): ScreenPath {
   return SCREENS.find((s) => s.path === rest)?.path ?? '';
 }
 
+function groupOf(path: ScreenPath): GroupId {
+  return SCREENS.find((s) => s.path === path)?.group ?? 'system';
+}
+
+/** The first page of a group: where its link in the bar leads. */
+function firstOf(group: GroupId): ScreenPath {
+  return SCREENS.find((s) => s.group === group)?.path ?? '';
+}
+
 export function Home(props: { session: Session; onSignedOut: () => void; onSignOut: () => Promise<void> }) {
   const [screen, setScreen] = useState<ScreenPath>(current);
+  const pages = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     const back = () => setScreen(current());
@@ -50,40 +70,66 @@ export function Home(props: { session: Session; onSignedOut: () => void; onSignO
     return () => window.removeEventListener('popstate', back);
   }, []);
 
+  // The row of pages scrolls sideways when it does not fit; keep the open
+  // page in view.
+  useEffect(() => {
+    pages.current
+      ?.querySelector('a[aria-current="page"]')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [screen]);
+
   const go = (path: ScreenPath) => {
     window.history.pushState(null, '', `${base}${path}`);
     setScreen(path);
   };
 
+  const follow = (path: ScreenPath) => (e: MouseEvent<HTMLAnchorElement>) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    go(path);
+  };
+
+  const group = groupOf(screen);
+  // With the identity service the console keeps no owners of its own; the
+  // deployment's people live there. Without it, there are none.
+  const shown = SCREENS.filter((s) => s.group === group && (identityMode() ? s.path !== 'owners' : s.path !== 'admins'));
+
   return (
     <>
       <header className="bar">
-        <span className="brand">Ordo console</span>
-        <span className="muted handle">{handle}</span>
-        <nav aria-label="Console">
-          <ul>
-            {/* With the identity service the console keeps no owners of its own;
-                the deployment's people live there. Without it, there are none. */}
-            {SCREENS.filter((s) => (identityMode() ? s.path !== 'owners' : s.path !== 'admins')).map((s) => (
-              <li key={s.path}>
-                <a
-                  href={`${base}${s.path}`}
-                  aria-current={screen === s.path ? 'page' : undefined}
-                  onClick={(e) => {
-                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                    e.preventDefault();
-                    go(s.path);
-                  }}
-                >
+        <div className="bar-row">
+          <span className="brand">Ordo console</span>
+          <span className="muted handle">{handle}</span>
+          <nav aria-label="Console">
+            <ul className="groups">
+              {GROUPS.map((g) => (
+                <li key={g.id}>
+                  <a
+                    href={`${base}${firstOf(g.id)}`}
+                    aria-current={group === g.id ? 'true' : undefined}
+                    onClick={follow(firstOf(g.id))}
+                  >
+                    {g.name}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+          <button type="button" className="signout" onClick={() => void props.onSignOut()}>
+            Sign out
+          </button>
+        </div>
+        <nav aria-label={`${GROUPS.find((g) => g.id === group)?.name} pages`}>
+          <ul className="pages" ref={pages}>
+            {shown.map((s) => (
+              <li key={s.path} className={'cluster' in s && s.cluster ? 'cluster' : undefined}>
+                <a href={`${base}${s.path}`} aria-current={screen === s.path ? 'page' : undefined} onClick={follow(s.path)}>
                   {s.name}
                 </a>
               </li>
             ))}
           </ul>
         </nav>
-        <button type="button" className="signout" onClick={() => void props.onSignOut()}>
-          Sign out
-        </button>
       </header>
       <main className="wide">
         {screen === '' && (

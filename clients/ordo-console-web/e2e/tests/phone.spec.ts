@@ -5,7 +5,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { fits, passkeyDevice, recoverCode, savedAndContinue, shownCodes, signOut, watch } from './support';
+import { fits, passkeyDevice, recoverCode, savedAndContinue, shownCodes, signOut, watch, open } from './support';
 
 test('the console fits a phone: sign-in, a recover code, codes, Health, Runtime and Owners', async ({ page }) => {
   await passkeyDevice(page);
@@ -33,7 +33,7 @@ test('the console fits a phone: sign-in, a recover code, codes, Health, Runtime 
   await fits(page);
 
   // Runtime, with the revisions, settings and secret the runtime flows made.
-  await page.getByRole('link', { name: 'Runtime' }).click();
+  await open(page, 'Runtime');
   await expect(page.getByRole('heading', { name: 'Runtime', level: 1 })).toBeVisible();
   await expect(page.getByRole('list', { name: 'Revisions' }).getByRole('listitem').first()).toBeVisible();
   await page.getByText(/^Last log lines/).click();
@@ -47,7 +47,7 @@ test('the console fits a phone: sign-in, a recover code, codes, Health, Runtime 
   await page.getByRole('button', { name: 'Apply' }).scrollIntoViewIfNeeded();
   await expect(page.getByRole('button', { name: 'Apply' })).toBeInViewport({ ratio: 1 });
 
-  await page.getByRole('link', { name: 'Owners' }).click();
+  await open(page, 'Owners');
   await expect(page.getByRole('heading', { name: 'Owners' })).toBeVisible();
   await fits(page);
   await expect(page.getByRole('button', { name: 'Make an invite code' })).toBeInViewport({ ratio: 1 });

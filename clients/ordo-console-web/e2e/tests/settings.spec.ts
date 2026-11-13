@@ -11,7 +11,7 @@
  */
 
 import { expect, test } from '@playwright/test';
-import { fits, person, recoverCode, savedAndContinue, shownCodes, stack, linkAsNamedOwner } from './support';
+import { fits, person, recoverCode, savedAndContinue, shownCodes, stack, linkAsNamedOwner, open } from './support';
 
 test('view the settings, change one through a revision, see the drift', async ({ browser }) => {
   const { context, page, device, problems } = await person(browser);
@@ -25,11 +25,11 @@ test('view the settings, change one through a revision, see the drift', async ({
 
   // Link this console to the deployment with a passkey there; `tenants`
   // unlinked when it finished.
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await linkAsNamedOwner(page, device);
 
   // Sign-in settings: the stored guest setting, with who stored it.
-  await page.getByRole('link', { name: 'Sign-in', exact: true }).click();
+  await open(page, 'Sign-in');
   await expect(page.getByRole('heading', { name: 'Sign-in settings', level: 1 })).toBeVisible();
   const guest = page.locator('tr[data-setting="ORDO_AUTH_GUEST"]');
   await expect(guest).toContainText('off');
@@ -40,7 +40,7 @@ test('view the settings, change one through a revision, see the drift', async ({
   await expect(digits).toContainText('Takes 6 to 10');
 
   // Every setting: where the deployment listens, from its environment.
-  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await open(page, 'Settings');
   await expect(page.getByRole('heading', { name: 'Every setting', level: 1 })).toBeVisible();
   await page.getByLabel('Find a setting').fill('ORDO_HOST_ADDR');
   const addr = page.locator('tr[data-setting="ORDO_HOST_ADDR"]');
@@ -73,7 +73,7 @@ test('view the settings, change one through a revision, see the drift', async ({
 
   // Unlink, so `usage` links the door with its own passkey.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.getByRole('link', { name: 'Deployment' }).click();
+  await open(page, 'Connection');
   await page.getByRole('button', { name: 'Unlink' }).click();
   await page.getByRole('button', { name: 'Yes, unlink' }).click();
   // Nothing here wrote at the deployment yet, so unlinking asks for the

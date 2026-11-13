@@ -1,6 +1,6 @@
 {
- "date": "2026-11-12",
- "text": "2026-11-12: both deployments run the one image, tunnel and DNS are in, the hal door answers. The first-admin link printed at boot missed /identity and opened a 404 ([[first-invite-link-missed-the-base-path]], fixed, test added). hal.inf.smg.icu now serves the Pages app instead of the console: ask 16 on [[rebuild-ellanor-on-ordo-now-to]]. Ask 4 on [[image-name-the-release-does-not-build]] proposes the supervisor master-file fix. Slice 1 waits on your go.",
+ "date": "2026-11-13",
+ "text": "2026-11-13: the console nav is 2 groups, System and Deployment, with the open group's pages under the bar, built on bleeding with every check green ([[the-console-groups-its-pages-with]]); it reaches the test instances with the next image. The no-program 503 fix is queued for all 4 program pages ([[console-says-busy-when-no-program]]). v0.5.1 runs on both deployments ([[live-instance]]). Your Argo sync of cloudflared brings ordo-api.inf.smg.icu and the restart hook. Ask 4 on [[image-name-the-release-does-not-build]] and slice 1 wait on your go.",
  "tiles": [
   [
    "4,060",
@@ -38,19 +38,23 @@
    "warn"
   ],
   [
-   "up 0.5.0",
+   "up 0.5.1",
    "Live deployment",
    "ok"
   ]
  ],
  "look": [
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "ask 16: which name is the console's"
-  },
-  {
    "id": "image-name-the-release-does-not-build",
    "why": "ask 4"
+  },
+  {
+   "id": "rebuild-ellanor-on-ordo-now-to",
+   "why": "go for slice 1"
+  },
+  {
+   "id": "console-says-busy-when-no-program",
+   "why": "queued fix"
   }
  ]
 }

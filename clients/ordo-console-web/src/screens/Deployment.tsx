@@ -129,7 +129,7 @@ export function Deployment(props: { onSignedOut: () => void }) {
 
   return (
     <section className="card">
-      <h1>Deployment</h1>
+      <h1>Connection</h1>
       {state === null && !error && <p className="muted">Loading…</p>}
 
       {state?.via === 'identity-service' && (

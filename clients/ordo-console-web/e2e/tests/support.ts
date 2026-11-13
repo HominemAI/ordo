@@ -155,6 +155,40 @@ export async function signedIn(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 }
 
+/**
+ * Open a console page by its name. The bar lists the groups and a second
+ * row lists the open group's pages, so a page in the other group is reached
+ * through its group first.
+ */
+export async function open(page: Page, name: string): Promise<void> {
+  const groups = page.getByRole('navigation', { name: 'Console' });
+  const group = GROUP_OF[name];
+  if (!group) throw new Error(`no console page named ${name}`);
+  if ((await groups.getByRole('link', { name: group, exact: true }).getAttribute('aria-current')) !== 'true') {
+    await groups.getByRole('link', { name: group, exact: true }).click();
+  }
+  await page
+    .getByRole('navigation', { name: `${group} pages` })
+    .getByRole('link', { name, exact: true })
+    .click();
+}
+
+const GROUP_OF: Record<string, string> = {
+  Health: 'System',
+  Runtime: 'System',
+  Connection: 'Deployment',
+  Deploys: 'Deployment',
+  Settings: 'Deployment',
+  'Sign-in': 'Deployment',
+  Maintenance: 'Deployment',
+  Tenants: 'Deployment',
+  People: 'Deployment',
+  Shares: 'Deployment',
+  Usage: 'Deployment',
+  Owners: 'Deployment',
+  'Deployment people': 'Deployment',
+};
+
 export async function signOut(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
@@ -163,7 +197,7 @@ export async function signOut(page: Page): Promise<void> {
 /**
  * Register a new passkey at the deployment and have it named the owner,
  * as `ORDO_DEPLOYMENT_OWNERS` does at a real deployment, then link the
- * console by sign-in with it from the Deployment screen: the claim step
+ * console by sign-in with it from the Connection page: the claim step
  * was removed with the claim code (2026-10-30). The ceremony runs in
  * `page`, whose origin the door lists; the two calls go to the door
  * directly. The console's own passkey shares the relying party, so the

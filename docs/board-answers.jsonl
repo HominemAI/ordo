@@ -1490,3 +1490,4 @@
 {"seq": 1492, "item": "image-name-the-release-does-not-build", "ask": 0, "at": "2026-11-12T10:43:30Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1493, "item": "image-name-the-release-does-not-build", "ask": 4, "at": "2026-11-12", "status": "decided", "text": "What are the security implications?", "source": "record", "read": true}
 {"seq": 1494, "item": "image-name-the-release-does-not-build", "ask": 4, "at": "2026-11-12", "status": "decided", "text": "What are the security implications?", "source": "record", "read": true}
+{"seq": 1495, "item": "the-console-groups-its-pages-with", "ask": 1, "at": "2026-11-12", "status": "decided", "text": "I don't like run. I prefer System. Or maybe a different name. everything specific to a deployment belongs to the deployment.", "source": "record", "read": true}

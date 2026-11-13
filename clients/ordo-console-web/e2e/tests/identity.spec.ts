@@ -89,6 +89,18 @@ test('sign in at the identity service, touch for a tenant op, invite and end an 
     expect(touches.length, 'the page took a touch at the identity service').toBe(before + 1);
   });
 
+  await test.step('Deploys and Maintenance work with no console key to link', async () => {
+    // With the identity service there is nothing to link; the screens must
+    // not send the person to link a key (seen on the hal instance, 2026-11-13).
+    await open(page, 'Deploys');
+    await expect(page.getByRole('heading', { name: 'Deploys', level: 1 })).toBeVisible();
+    await expect(page.getByLabel('Program (.ordo file)')).toBeVisible();
+    await expect(page.getByText('not linked to the deployment')).toHaveCount(0);
+    await open(page, 'Maintenance');
+    await expect(page.getByRole('heading', { name: 'Maintenance windows', level: 1 })).toBeVisible();
+    await expect(page.getByText('not linked to the deployment')).toHaveCount(0);
+  });
+
   let link = '';
   await test.step('invite a second admin', async () => {
     await open(page, 'Deployment people');

@@ -92,6 +92,15 @@ export interface Link {
   reachError?: string | null;
 }
 
+/**
+ * Whether the console can call the deployment. With a console key it is
+ * linked; with the identity service there is no key and nothing to link,
+ * and every call goes as the signed-in person.
+ */
+export function usable(s: Link): boolean {
+  return s.linked || s.via === 'identity-service';
+}
+
 export interface ConsoleKey {
   id: string;
   name: string;

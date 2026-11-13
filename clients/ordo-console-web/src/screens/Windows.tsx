@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConsoleCallError, explain, SIGNED_OUT } from '../api';
-import { link, type Link } from '../deployment';
+import { link, usable, type Link } from '../deployment';
 import { listTenants, type Tenant } from '../tenants';
 import {
   deleteSkip,
@@ -112,7 +112,7 @@ export function Windows(props: { onSignedOut: () => void }) {
   const load = useCallback(async () => {
     const s = await link();
     setState(s);
-    if (!s.linked) return;
+    if (!usable(s)) return;
     setList(await listWindows());
     try {
       setTenants((await listTenants()).tenants.filter((t) => t.status !== 'reaped'));
@@ -254,7 +254,7 @@ export function Windows(props: { onSignedOut: () => void }) {
       </p>
       {state === null && !error && <p className="muted">Loading…</p>}
 
-      {state && !state.linked && (
+      {state && !usable(state) && (
         <p className="note">The console is not linked to the deployment yet. Link it on the Connection page first.</p>
       )}
 
@@ -265,7 +265,7 @@ export function Windows(props: { onSignedOut: () => void }) {
         </p>
       )}
 
-      {state?.linked && list && (
+      {state && usable(state) && list && (
         <>
           <div className="check">
             <input type="checkbox" id="times-utc" checked={utc} onChange={(e) => setUtc(e.target.checked)} />

@@ -1,6 +1,6 @@
 {
- "date": "2026-11-12",
- "text": "2026-11-12, later: v0.5.1 is tagged from PR 10 with every check green ([[live-instance]]): the first-boot link fix, the console link, the console layout, Runtime and Settings told apart. smg_infrastructure pins both deployments to it. Your Argo sync of cloudflared brings ordo-api.inf.smg.icu and the restart hook. CI's double run on one commit is filed ([[ci-runs-twice-on-one-commit-with-a-pr-open]]). Ask 4 on [[image-name-the-release-does-not-build]] awaits your go. Slice 1 waits on your go.",
+ "date": "2026-11-13",
+ "text": "2026-11-13: the console nav is 2 groups, System and Deployment, with the open group's pages under the bar, built on bleeding with every check green ([[the-console-groups-its-pages-with]]); it reaches the test instances with the next image. The no-program 503 fix is queued for all 4 program pages ([[console-says-busy-when-no-program]]). v0.5.1 runs on both deployments ([[live-instance]]). Your Argo sync of cloudflared brings ordo-api.inf.smg.icu and the restart hook. Ask 4 on [[image-name-the-release-does-not-build]] and slice 1 wait on your go.",
  "tiles": [
   [
    "4,060",
@@ -38,7 +38,7 @@
    "warn"
   ],
   [
-   "up 0.5.0",
+   "up 0.5.1",
    "Live deployment",
    "ok"
   ]
@@ -51,6 +51,10 @@
   {
    "id": "rebuild-ellanor-on-ordo-now-to",
    "why": "go for slice 1"
+  },
+  {
+   "id": "console-says-busy-when-no-program",
+   "why": "queued fix"
   }
  ]
 }

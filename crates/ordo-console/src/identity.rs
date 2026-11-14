@@ -66,8 +66,9 @@ pub const URL_ENV: &str = "ORDO_IDENTITY_URL";
 /// The service's public origin: the `iss` the console requires, and where
 /// the page sends the browser to sign in.
 pub const ISSUER_ENV: &str = "ORDO_IDENTITY_ORIGIN";
-/// The handle the service names in `aud`. When set it must be the
-/// console's own handle, `ORDO_CONSOLE_DEPLOYMENT`.
+/// The handle the service names in `aud`: the console's own handle,
+/// `ORDO_CONSOLE_DEPLOYMENT`, when unset. A shared identity service may
+/// know the deployment by another handle.
 pub const DEPLOYMENT_ENV: &str = "ORDO_IDENTITY_DEPLOYMENT";
 /// `on` lets `ORDO_IDENTITY_URL` be plain `http://` to a host that is not
 /// loopback.
@@ -282,23 +283,32 @@ impl IdentitySettings {
                 ),
             )
         })?;
-        if let Some(named) = set(DEPLOYMENT_ENV) {
-            if named != handle {
-                return Err(ConsoleError::setting(
-                    DEPLOYMENT_ENV,
-                    format!(
-                        "is `{named}`, and this console manages `{handle}` \
-                         ({}), so no token the service issues would be for it",
-                        crate::config::DEPLOYMENT_ENV
-                    ),
-                    format!(
-                        "Set {DEPLOYMENT_ENV} and {} to the same handle, or unset \
-                         {DEPLOYMENT_ENV}",
-                        crate::config::DEPLOYMENT_ENV
-                    ),
-                ));
+        // The handle the service names in `aud`. Unset, it is the console's
+        // own. A shared identity service knows this deployment by its own
+        // handle there (`hal`), which may differ from the console's
+        // (`main`), so the two are no longer required to match.
+        let audience_handle = match set(DEPLOYMENT_ENV) {
+            None => handle.to_string(),
+            Some(named) => {
+                let ok = named.len() <= 63
+                    && !named.starts_with('-')
+                    && named
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+                if !ok {
+                    return Err(ConsoleError::setting(
+                        DEPLOYMENT_ENV,
+                        format!("is `{named}`, which is not a deployment handle"),
+                        format!(
+                            "Set {DEPLOYMENT_ENV} to the handle the identity service knows this \
+                             deployment by (lowercase letters, digits and dashes), or unset it \
+                             for `{handle}`"
+                        ),
+                    ));
+                }
+                named
             }
-        }
+        };
         let base_text = set(BASE_PATH_ENV).unwrap_or_default();
         let base_path = ordo_identity::origin::base_path(&base_text).map_err(|why| {
             ConsoleError::setting(
@@ -314,7 +324,7 @@ impl IdentitySettings {
             url,
             issuer: issuer.to_string(),
             base_path,
-            audience: deployment_token::audience(handle),
+            audience: deployment_token::audience(&audience_handle),
         }))
     }
 
@@ -1015,11 +1025,24 @@ mod tests {
             &vars(&[
                 (URL_ENV, "https://id.example.com"),
                 (ISSUER_ENV, "https://id.example.com"),
-                (DEPLOYMENT_ENV, "other"),
+                (DEPLOYMENT_ENV, "Not A Handle"),
             ]),
             "main",
         );
         assert_eq!(refused_setting(r), DEPLOYMENT_ENV);
+        // A shared identity service knows this deployment as `hal`; the
+        // console's own handle stays `main`.
+        let shared = IdentitySettings::from_vars(
+            &vars(&[
+                (URL_ENV, "https://auth.hominem.ai"),
+                (ISSUER_ENV, "https://auth.hominem.ai"),
+                (DEPLOYMENT_ENV, "hal"),
+            ]),
+            "main",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(shared.audience, "ordo-deployment:hal");
         assert!(IdentitySettings::from_vars(
             &vars(&[
                 (URL_ENV, "https://id.example.com"),

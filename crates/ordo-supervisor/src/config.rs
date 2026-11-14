@@ -291,19 +291,58 @@ impl SupervisorConfig {
             .as_deref()
             .map(str::trim)
         {
-            None | Some("") | Some("console-path") | Some("own-port") => {}
+            None | Some("") | Some("console-path") | Some("own-port") | Some("external") => {}
             Some(other) => {
                 return Err(SupervisorError::setting(
                     crate::children::IDENTITY_ADDRESS,
-                    format!("is `{other}`, which is not `console-path` or `own-port`"),
+                    format!("is `{other}`, which is not `console-path`, `own-port` or `external`"),
                     format!(
                         "Set {} to `console-path` (the console passes the identity service \
-                         through at /identity on its own origin) or `own-port` (its own \
-                         origin, port 8082), or unset it for `console-path`",
-                        crate::children::IDENTITY_ADDRESS
+                         through at /identity on its own origin), `own-port` (its own \
+                         origin, port 8082) or `external` (a shared service elsewhere, at \
+                         {}), or unset it for `console-path`",
+                        crate::children::IDENTITY_ADDRESS,
+                        crate::children::IDENTITY_URL
                     ),
                 ))
             }
+        }
+        // A shared identity service elsewhere needs its address and the
+        // issuer its tokens name; nothing here can fill them.
+        if get(crate::children::IDENTITY_ADDRESS)
+            .as_deref()
+            .map(str::trim)
+            == Some("external")
+            && get(crate::children::IDENTITY_URL).is_none()
+        {
+            return Err(SupervisorError::setting(
+                crate::children::IDENTITY_URL,
+                format!(
+                    "is unset while {} is `external`",
+                    crate::children::IDENTITY_ADDRESS
+                ),
+                format!(
+                    "Set {} to where the door and the console reach the shared identity \
+                     service, such as https://auth.hominem.ai",
+                    crate::children::IDENTITY_URL
+                ),
+            ));
+        }
+        if crate::children::external_identity(&env).is_some()
+            && get(crate::children::IDENTITY_ORIGIN).is_none()
+        {
+            return Err(SupervisorError::setting(
+                crate::children::IDENTITY_ORIGIN,
+                format!(
+                    "is unset, and {} names an identity service elsewhere, whose public origin \
+                     the door and the console must trust as the tokens' issuer",
+                    crate::children::IDENTITY_URL
+                ),
+                format!(
+                    "Set {} to that service's public origin, such as https://auth.hominem.ai",
+                    crate::children::IDENTITY_ORIGIN
+                ),
+            ));
         }
         let relay_always = match get(RELAY_ENV).as_deref().map(str::trim) {
             None | Some("") | Some("auto") => false,
@@ -432,6 +471,22 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn a_service_elsewhere_needs_its_url_and_its_origin() {
+        use crate::children::{IDENTITY_ADDRESS, IDENTITY_ORIGIN, IDENTITY_URL};
+        let e = cfg(&[(IDENTITY_URL, "https://auth.hominem.ai")]).unwrap_err();
+        assert_eq!(e.setting_name(), Some(IDENTITY_ORIGIN));
+        let e = cfg(&[(IDENTITY_ADDRESS, "external")]).unwrap_err();
+        assert_eq!(e.setting_name(), Some(IDENTITY_URL));
+        assert!(cfg(&[
+            (IDENTITY_URL, "https://auth.hominem.ai"),
+            (IDENTITY_ORIGIN, "https://auth.hominem.ai"),
+        ])
+        .is_ok());
+        // The one image's own service, on loopback, needs no origin here.
+        assert!(cfg(&[(IDENTITY_URL, "http://127.0.0.1:8082")]).is_ok());
     }
 
     #[test]

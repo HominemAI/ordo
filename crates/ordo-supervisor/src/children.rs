@@ -36,6 +36,16 @@
 //!
 //! A value the deployment owner set always wins. An upgraded compose file
 //! therefore needs no identity line but the service's own database.
+//!
+//! **A shared identity service elsewhere** ([`external_identity`]). When
+//! `ORDO_IDENTITY_URL` names a host that is not loopback, or
+//! `ORDO_SUPERVISOR_IDENTITY_ADDRESS` is `external`, the deployment signs
+//! in at a service another host runs (such as `https://auth.hominem.ai`).
+//! The supervisor then starts no identity service of its own, fills none
+//! of the defaults above, and hands the door and the console the wiring as
+//! the deployment owner set it: `ORDO_IDENTITY_URL`, `ORDO_IDENTITY_ORIGIN`
+//! (required, [`crate::config`] refuses the boot without it),
+//! `ORDO_IDENTITY_DEPLOYMENT` and `ORDO_IDENTITY_PLAIN_HTTP`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -61,7 +71,7 @@ pub const IDENTITY_CLIENT_ORIGINS: &str = "ORDO_IDENTITY_CLIENT_ORIGINS";
 pub const IDENTITY_DATABASE_URL: &str = "ORDO_IDENTITY_DATABASE_URL";
 pub const IDENTITY_IMPORT_CONSOLE_URL: &str = "ORDO_IDENTITY_IMPORT_CONSOLE_URL";
 pub const IDENTITY_BASE_PATH: &str = "ORDO_IDENTITY_BASE_PATH";
-/// `console-path` (the default) or `own-port` (module docs).
+/// `console-path` (the default), `own-port` or `external` (module docs).
 pub const IDENTITY_ADDRESS: &str = "ORDO_SUPERVISOR_IDENTITY_ADDRESS";
 /// The base path the console passes through in `console-path` mode.
 pub const DEFAULT_BASE_PATH: &str = "/identity";
@@ -110,6 +120,38 @@ pub struct Split {
     pub notes: Vec<String>,
     /// The identity service has a database, so it is started and wired.
     pub identity_enabled: bool,
+    /// Where the shared identity service is, when the deployment signs in
+    /// at one elsewhere ([`external_identity`]). No identity service is
+    /// started here then.
+    pub external: Option<String>,
+}
+
+/// Whether a loopback host: `localhost`, `127.x`, `::1`.
+fn loopback_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h == "localhost"
+        || h == "::1"
+        || h.parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|a| a.is_loopback())
+}
+
+/// The shared identity service's address, when the deployment signs in at
+/// one elsewhere: `ORDO_IDENTITY_URL` on a host that is not loopback, or
+/// any `ORDO_IDENTITY_URL` with `ORDO_SUPERVISOR_IDENTITY_ADDRESS=external`.
+pub fn external_identity(env: &[(String, String)]) -> Option<String> {
+    let get = lookup(env);
+    let url = get(IDENTITY_URL)?;
+    let said = get(IDENTITY_ADDRESS).as_deref().map(str::trim) == Some("external");
+    let host = url
+        .trim()
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    let host = match host.rfind(']') {
+        Some(i) => host[..=i].to_string(),
+        None => host.split(':').next().unwrap_or_default().to_string(),
+    };
+    (said || !loopback_host(&host)).then(|| url.trim().to_string())
 }
 
 fn lookup<'a>(env: &'a [(String, String)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -330,7 +372,13 @@ pub fn split(
 ) -> Split {
     let get = lookup(env);
     let mut notes = Vec::new();
-    let filled = identity_defaults(env);
+    let external = external_identity(env);
+    // A service elsewhere: nothing of this host's is filled for it.
+    let filled = if external.is_some() {
+        Vec::new()
+    } else {
+        identity_defaults(env)
+    };
     let value_of = |name: &str| -> Option<String> {
         get(name).or_else(|| {
             filled
@@ -436,6 +484,25 @@ pub fn split(
     // the opt-in to make one on the console's server (owner, 2026-10-30).
     // An upgraded deployment with neither runs as before: no identity
     // service, no wiring, and the console keeps its own sign-in.
+    if let Some(url) = &external {
+        notes.push(external_note(url, &get));
+        if identity_database_named(&get) {
+            notes.push(format!(
+                "{IDENTITY_DATABASE_URL} (or {SHARE_CONSOLE_DB_SERVER}) is set, and is not read: \
+                 this deployment signs in at the identity service at {url}. Remove it, or unset \
+                 {IDENTITY_URL} to run an identity service here"
+            ));
+        }
+        return Split {
+            identity,
+            console,
+            wiring,
+            filled,
+            notes,
+            identity_enabled: false,
+            external,
+        };
+    }
     let identity_enabled = identity_database_named(&get);
     if !identity_enabled {
         notes.push(identity_off_note());
@@ -454,7 +521,19 @@ pub fn split(
         filled,
         notes,
         identity_enabled,
+        external: None,
     }
+}
+
+/// What the boot log says when the deployment signs in at a shared
+/// identity service elsewhere.
+pub fn external_note(url: &str, get: &dyn Fn(&str) -> Option<String>) -> String {
+    format!(
+        "the identity service is not started here: this deployment signs in at the one at {url} \
+         ({IDENTITY_URL}), as deployment `{}` ({IDENTITY_DEPLOYMENT}). That service must list \
+         it: `ordo-identity-service deployment add` on its host",
+        get(IDENTITY_DEPLOYMENT).unwrap_or_else(|| "main".to_string())
+    )
 }
 
 /// The opt-in to make the identity database on the console's server.
@@ -542,6 +621,60 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "denied",
         ))
+    }
+
+    /// A shared identity service elsewhere (`auth.hominem.ai`): no service
+    /// is started here, nothing is filled from the console's settings, and
+    /// the door and the console get the wiring as the owner set it.
+    #[test]
+    fn a_service_elsewhere_is_wired_and_none_is_started() {
+        let e = env(&[
+            (CONSOLE_ORIGIN, "https://hal.hominem.ai"),
+            (IDENTITY_URL, "https://auth.hominem.ai"),
+            (IDENTITY_ORIGIN, "https://auth.hominem.ai"),
+            (IDENTITY_DEPLOYMENT, "hal"),
+            (
+                IDENTITY_DATABASE_URL,
+                "postgres://identity@db/ordo_identity",
+            ),
+        ]);
+        let s = split(&e, &no_file, 0);
+        assert_eq!(s.external.as_deref(), Some("https://auth.hominem.ai"));
+        assert!(!s.identity_enabled);
+        assert!(s.filled.is_empty(), "{:?}", s.filled);
+        assert_eq!(s.wiring[IDENTITY_URL], "https://auth.hominem.ai");
+        assert_eq!(s.wiring[IDENTITY_ORIGIN], "https://auth.hominem.ai");
+        assert_eq!(s.wiring[IDENTITY_DEPLOYMENT], "hal");
+        assert_eq!(s.console.settings[IDENTITY_URL], "https://auth.hominem.ai");
+        assert_eq!(s.console.settings[IDENTITY_DEPLOYMENT], "hal");
+        assert!(!s.console.settings.contains_key(IDENTITY_BASE_PATH));
+        assert!(s.notes.iter().any(|n| n.contains("not started here")));
+        assert!(
+            s.notes.iter().any(|n| n.contains("is not read")),
+            "a database set beside a shared service is said to be ignored"
+        );
+    }
+
+    #[test]
+    fn only_a_host_that_is_not_loopback_or_the_word_external_means_elsewhere() {
+        for (url, address, elsewhere) in [
+            ("https://auth.hominem.ai", None, true),
+            ("http://127.0.0.1:8082", None, false),
+            ("http://localhost:8082", None, false),
+            ("http://[::1]:8082", None, false),
+            ("http://127.0.0.1:9000", Some("external"), true),
+        ] {
+            let mut list = vec![(IDENTITY_URL, url)];
+            if let Some(a) = address {
+                list.push((IDENTITY_ADDRESS, a));
+            }
+            assert_eq!(
+                external_identity(&env(&list)).is_some(),
+                elsewhere,
+                "{url} {address:?}"
+            );
+        }
+        assert!(external_identity(&env(&[])).is_none());
     }
 
     /// The live notes v2 case (6.2): a console on localhost:8081 and

@@ -118,12 +118,22 @@ export function token(): Promise<string> {
 export function goSignIn(): void {
   if (!service) return;
   const back = encodeURIComponent(window.location.href);
-  window.location.assign(`${service.origin}/sign-in?client=console&return=${back}`);
+  // The service checks `return` against this deployment's own list, so a
+  // shared service (many deployments) knows whose list to read.
+  const handle = encodeURIComponent(service.audience.replace(/^ordo-deployment:/, ''));
+  window.location.assign(
+    `${service.origin}/sign-in?client=console&deployment=${handle}&return=${back}`,
+  );
 }
 
 /** A fresh passkey touch inside the service session: the token held now carries it. */
 export async function touch(): Promise<void> {
-  const issued = await assertWith<Issued>(servicePost, '/touch/begin', '/touch/finish');
+  // The answer is a token for this console's deployment, which may not be
+  // the service's own when the service is shared.
+  const aud = service?.audience;
+  const send = <R>(path: string, body?: unknown): Promise<R> =>
+    servicePost<R>(path, path === '/touch/finish' ? { ...(body as object), aud } : body);
+  const issued = await assertWith<Issued>(send, '/touch/begin', '/touch/finish');
   keep(issued);
 }
 

@@ -387,7 +387,7 @@ pub(crate) fn auth_decl(p: &mut Parser) -> Result<AuthDecl, ParseError> {
                         p,
                         "a sign-in method (`passkey`, `password`, `email` or a provider name)",
                     )?);
-                    if !eat_comma(p) {
+                    if !list_comma(p, "methods")? {
                         break;
                     }
                 }
@@ -431,8 +431,8 @@ pub(crate) fn auth_decl(p: &mut Parser) -> Result<AuthDecl, ParseError> {
                     "domains" => {
                         let mut ds = Vec::new();
                         loop {
-                            ds.push(function_host(p)?);
-                            if !eat_comma(p) {
+                            ds.push(domain(p)?);
+                            if !list_comma(p, "domains")? {
                                 break;
                             }
                         }
@@ -596,6 +596,43 @@ pub(crate) fn auth_decl(p: &mut Parser) -> Result<AuthDecl, ParseError> {
     let end = p.expect(&TokenKind::RBrace, "`}` closing the auth block")?;
     a.span = start.to(end.span);
     Ok(a)
+}
+
+/// The comma between list items. A comma before the next clause word, or
+/// before the closing brace, is a stray one: refused at the comma, so the
+/// next clause is not read as a list item.
+fn list_comma(p: &mut Parser, list: &str) -> Result<bool, ParseError> {
+    if !matches!(p.peek(), TokenKind::Comma) {
+        return Ok(false);
+    }
+    let comma = p.bump().span;
+    let stray = match p.peek() {
+        TokenKind::RBrace => true,
+        TokenKind::Ident(w) => AUTH_CLAUSES.contains(&w.as_str()),
+        _ => false,
+    };
+    if stray {
+        return Err(p.err_at(
+            comma,
+            format!("a comma after the last item of `{list}`; remove it"),
+        ));
+    }
+    Ok(true)
+}
+
+/// One email domain. A label that starts with a digit lexes as a number or
+/// a duration (`3m.com`), so such a domain is written in quotes.
+fn domain(p: &mut Parser) -> Result<FunctionHost, ParseError> {
+    if matches!(
+        p.peek(),
+        TokenKind::Int(_) | TokenKind::Decimal(_) | TokenKind::Duration { .. }
+    ) {
+        return Err(p.err_here(
+            "a domain whose label starts with a digit is written in quotes, such as \
+             `\"3m.example\"`",
+        ));
+    }
+    function_host(p)
 }
 
 fn eat_comma(p: &mut Parser) -> bool {

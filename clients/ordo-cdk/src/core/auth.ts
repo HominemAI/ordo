@@ -112,7 +112,10 @@ export function auth<const P extends Record<string, ProviderSpec> = Record<never
       );
     }
   }
-  for (const m of methods) {
+  for (const [i, m] of methods.entries()) {
+    if (methods.indexOf(m) !== i) {
+      throw new Error(`auth: method \`${m}\` is listed twice`);
+    }
     if (!BUILT_IN.includes(m) && !providers.some((p) => p.name === m)) {
       throw new Error(`auth: method \`${m}\` names no provider`);
     }

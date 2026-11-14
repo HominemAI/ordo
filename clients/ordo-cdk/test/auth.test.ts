@@ -92,6 +92,12 @@ describe('auth', () => {
     );
   });
 
+  it('refuses a method listed twice, as the compiler does', () => {
+    expect(() => auth({ methods: ['passkey', 'email', 'passkey'] })).toThrow(
+      /method `passkey` is listed twice/,
+    );
+  });
+
   it('refuses a bad duration and a provider named like a built-in method', () => {
     expect(() => auth({ session: { token: '1 hour' as '1h' } })).toThrow(/`token` is/);
     expect(() => auth({ methods: ['email'], providers: { email: { kind: 'oidc' } } })).toThrow(

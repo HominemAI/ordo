@@ -215,7 +215,27 @@ fn each_bad_clause_is_refused_where_it_goes_wrong() {
     let cases: &[(&str, &str, &str)] = &[
         ("colour blue", "colour", "unknown auth clause `colour`"),
         ("methods", "}", "a sign-in method"),
-        ("methods passkey,", "}", "a sign-in method"),
+        (
+            "methods passkey,",
+            ",",
+            "a comma after the last item of `methods`",
+        ),
+        (
+            "methods passkey,\n  selfServe on",
+            ",",
+            "a comma after the last item of `methods`",
+        ),
+        (
+            "provisioning domains example.com,\n  guest off",
+            ",",
+            "a comma after the last item of `domains`",
+        ),
+        ("provisioning domains 3m.example", "3m", "written in quotes"),
+        (
+            "provisioning domains example.com, 10.example",
+            "10",
+            "written in quotes",
+        ),
         (
             "provider google",
             "}",

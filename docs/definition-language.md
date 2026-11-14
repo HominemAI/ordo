@@ -3476,7 +3476,7 @@ method = passkey | password | email | <provider name>
 ```
 
 - A duration is `s`, `m`, `h`, `d` or `w`: `30s`, `5m`, `1h`, `30d`.
-- A domain with a hyphen or a label that starts with a digit is quoted:
+- A domain with a hyphen or a label that starts with a digit is quoted, and an all-digit domain such as an IP address is refused:
   `"my-co.example"`.
 - The presets are `discord`, `github`, `google` and `microsoft`.
 
@@ -3510,13 +3510,13 @@ Refusals:
 
 | Class | Refused |
 |---|---|
-| `parse_error` | a clause the parser cannot read, or a clause written twice. It points at the clause or the value |
+| `parse_error` | a clause the parser cannot read, a clause written twice, or a comma after the last item of a list. It points at the clause, the value or the comma |
 | `duplicate_auth` | a second `auth` block |
 | `auth_unknown_method` | a method that is not built in and names no `provider` |
 | `auth_unused_provider` | a `provider` no `methods` line names |
 | `auth_unknown_preset` | a preset the host does not ship |
 | `auth_duration_range` | a duration outside its platform range |
-| `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, a bad or repeated domain, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards |
+| `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, an empty provider `label`, a bad or repeated domain, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards or reaches above the session `max`, a remember `max` below its `idle` |
 
 Where the values go:
 

@@ -889,12 +889,13 @@ pub fn interface_value(schema: &Schema, artifact: &serde_json::Value) -> serde_j
         .iter()
         .map(ordo_plan::artifact::catalog_view)
         .collect();
-    let doc = ordo_plan::interface::interface_document(
+    ordo_plan::interface::interface_document_with(
         &artifact["domain"],
         &ordo_plan::artifact::entity_artifacts(schema),
         &ops,
-    );
-    ordo_plan::interface::with_auth(doc, artifact.get("auth"))
+        ordo_plan::interface::RefineLimits::default(),
+        artifact.get("auth"),
+    )
 }
 
 /// `ordo gen ts <dir|file.ordo> --out <root>` — regenerate both TypeScript

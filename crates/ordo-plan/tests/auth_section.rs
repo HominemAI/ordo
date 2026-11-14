@@ -2,7 +2,7 @@
 //! descriptor (`plan-configuration-in-the-file.md` §2.4, §5.2).
 
 use ordo_plan::artifact::{auth_artifact, catalog_view, entity_artifacts, program_artifact};
-use ordo_plan::interface::{digest, interface_document, with_auth, SCHEMA_VERSION};
+use ordo_plan::interface::{digest, interface_document_with, RefineLimits, SCHEMA_VERSION};
 use ordo_schema::build;
 use ordo_sema::Registry;
 use ordo_syntax::parse_program;
@@ -48,8 +48,13 @@ fn descriptor(art: &Value, schema: &ordo_schema::Schema) -> Value {
         .iter()
         .map(catalog_view)
         .collect();
-    let doc = interface_document(&art["domain"], &entity_artifacts(schema), &ops);
-    with_auth(doc, art.get("auth"))
+    interface_document_with(
+        &art["domain"],
+        &entity_artifacts(schema),
+        &ops,
+        RefineLimits::default(),
+        art.get("auth"),
+    )
 }
 
 #[test]

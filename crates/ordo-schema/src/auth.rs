@@ -11,7 +11,7 @@
 //! | `auth_unused_provider` | a `provider` no `methods` line names: it would never show |
 //! | `auth_unknown_preset` | a preset the host does not ship |
 //! | `auth_duration_range` | a duration outside the platform range; the message names the range |
-//! | `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, a domain that is not a DNS name or is listed twice, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards |
+//! | `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, an empty provider `label`, a domain that is not a DNS name or is listed twice, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards or reaches above the session `max`, a remember `max` below its `idle` |
 //!
 //! A second block is refused by the parser (`duplicate_auth`).
 //!
@@ -216,20 +216,6 @@ fn in_range(d: &AuthDuration, what: &str, r: Range) -> Result<u64, SchemaError> 
     }
 }
 
-/// An email domain: a DNS name with at least two labels.
-fn domain_ok(d: &str) -> bool {
-    let labels: Vec<&str> = d.split('.').collect();
-    d.len() <= 253
-        && labels.len() >= 2
-        && labels.iter().all(|l| {
-            !l.is_empty()
-                && l.len() <= 63
-                && !l.starts_with('-')
-                && !l.ends_with('-')
-                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        })
-}
-
 /// Check the block.
 pub fn check(a: &AuthDecl) -> Result<(), SchemaError> {
     // Providers first: a method's refusal can then say which exist.
@@ -249,6 +235,15 @@ pub fn check(a: &AuthDecl) -> Result<(), SchemaError> {
             ));
         }
         seen.push(name);
+        if p.label.as_deref().is_some_and(|l| l.trim().is_empty()) {
+            return Err(invalid(
+                p.span,
+                format!(
+                    "provider `{name}`: `label` is the button text a person sees; it cannot \
+                     be empty"
+                ),
+            ));
+        }
         if let ordo_syntax::ProviderSource::Preset(preset) = &p.source {
             if !AUTH_PRESETS.iter().any(|(n, _)| *n == preset.name) {
                 let list = AUTH_PRESETS
@@ -320,7 +315,7 @@ pub fn check(a: &AuthDecl) -> Result<(), SchemaError> {
     if let Some(Provisioning::Domains(ds)) = a.provisioning.as_ref().map(|p| &p.mode) {
         let mut names: Vec<&str> = Vec::new();
         for d in ds {
-            if !domain_ok(&d.name) {
+            if !crate::function::is_dns_name(&d.name) {
                 return Err(invalid(
                     d.span,
                     format!("`{}` is not an email domain such as `example.com`", d.name),
@@ -344,8 +339,10 @@ pub fn check(a: &AuthDecl) -> Result<(), SchemaError> {
     }
     if let Some(s) = &a.session {
         let token = in_range(&s.token, "token", SESSION_TOKEN)?;
+        let mut max_secs = DEFAULT_SESSION_MAX_SECS;
         if let Some(m) = &s.max {
             let max = in_range(m, "max", SESSION_MAX)?;
+            max_secs = max;
             if max < token {
                 return Err(invalid(
                     m.span,
@@ -371,6 +368,17 @@ pub fn check(a: &AuthDecl) -> Result<(), SchemaError> {
                     ),
                 ));
             }
+            if hi > max_secs {
+                return Err(invalid(
+                    t.max.span,
+                    format!(
+                        "a tenant's token life of up to {} is above the session `max` of {}; \
+                         every such token would be cut to the max",
+                        t.max.spelled(),
+                        spell_secs(max_secs)
+                    ),
+                ));
+            }
         }
     }
     if let Some(r) = &a.remember {
@@ -378,7 +386,20 @@ pub fn check(a: &AuthDecl) -> Result<(), SchemaError> {
             in_range(i, "idle", REMEMBER)?;
         }
         if let Some(RememberMax::After(m)) = &r.max {
-            in_range(m, "max", REMEMBER)?;
+            let max = in_range(m, "max", REMEMBER)?;
+            if let Some(i) = &r.idle {
+                if i.secs().is_some_and(|idle| max < idle) {
+                    return Err(invalid(
+                        m.span,
+                        format!(
+                            "a remember `max` of {} is below its `idle` of {}; the idle \
+                             life could never be reached",
+                            m.spelled(),
+                            i.spelled()
+                        ),
+                    ));
+                }
+            }
         }
     }
     Ok(())

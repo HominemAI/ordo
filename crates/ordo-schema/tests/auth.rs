@@ -185,6 +185,27 @@ fn each_other_bad_value_is_refused_as_invalid_auth() {
         ),
         ("  session token 2h, max 1h", "1h", "below its `token`"),
         (
+            "  methods work\n  provider work kind oidc, label \"\"",
+            "provider work kind oidc, label \"\"",
+            "cannot be empty",
+        ),
+        (
+            "  provisioning domains \"10.0.0.1\"",
+            "\"10.0.0.1\"",
+            "email domain",
+        ),
+        (
+            "  session token 1h, max 2h, tenants 15m to 3h",
+            "3h",
+            "above the session `max` of 2h",
+        ),
+        (
+            "  session token 1h, tenants 15m to 13h",
+            "13h",
+            "above the session `max` of 12h",
+        ),
+        ("  remember on, idle 60d, max 7d", "7d", "below its `idle`"),
+        (
             "  session token 1h, tenants 4h to 15m",
             "tenants 4h to 15m",
             "runs backwards",

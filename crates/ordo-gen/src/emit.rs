@@ -58,6 +58,7 @@ const IMPORTABLE: &[&str] = &[
     "decLit",
     "desc",
     "asc",
+    "auth",
     "domain",
     "durationLit",
     "each",
@@ -109,6 +110,9 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             None => format!("domain({})", ts::str_lit(&d.name.name)),
         });
     }
+    if let Some(a) = &program.auth {
+        synth_args.push(auth_call(a));
+    }
     for ent in &program.entities {
         let bind = e.bind(&ent.name.name);
         body.push_str(&format!("const {bind} = {};\n\n", e.entity(ent)?));
@@ -152,6 +156,108 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             .collect::<Vec<_>>()
             .join("\n"),
     ))
+}
+
+/// `auth({ … })`: one key per clause written, in `AUTH_CLAUSES` order.
+/// A clause not written is left out, so the compiler fills its default on
+/// both sides of the round trip.
+fn auth_call(a: &ordo_syntax::AuthDecl) -> String {
+    use ordo_syntax::{ProviderSource, Provisioning, RememberMax};
+    let s = |t: &str| ts::str_lit(t);
+    let d = |x: &ordo_syntax::AuthDuration| ts::str_lit(&x.spelled());
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(m) = &a.methods {
+        let names: Vec<String> = m.names.iter().map(|n| s(&n.name)).collect();
+        keys.push(format!("methods: [{}]", names.join(", ")));
+    }
+    if !a.providers.is_empty() {
+        let ps: Vec<String> = a
+            .providers
+            .iter()
+            .map(|p| {
+                let how = match &p.source {
+                    ProviderSource::Preset(i) => format!("preset: {}", s(&i.name)),
+                    ProviderSource::Kind(k) => format!("kind: {}", s(k.as_str())),
+                };
+                let label = p
+                    .label
+                    .as_ref()
+                    .map(|l| format!(", label: {}", s(l)))
+                    .unwrap_or_default();
+                format!("{}: {{ {how}{label} }}", p.name.name)
+            })
+            .collect();
+        keys.push(format!("providers: {{ {} }}", ps.join(", ")));
+    }
+    if let Some(t) = &a.passkey_name {
+        keys.push(format!("passkeyName: {}", s(&t.text)));
+    }
+    if let Some(p) = &a.provisioning {
+        keys.push(match &p.mode {
+            Provisioning::Domains(ds) => format!(
+                "provisioning: {{ domains: [{}] }}",
+                ds.iter().map(|h| s(&h.name)).collect::<Vec<_>>().join(", ")
+            ),
+            other => format!("provisioning: {}", s(other.mode())),
+        });
+    }
+    if let Some(x) = &a.self_serve {
+        keys.push(format!("selfServe: {}", x.on));
+    }
+    if let Some(g) = &a.guest {
+        let keep = g
+            .keep
+            .as_ref()
+            .map(|k| format!(", keep: {}", d(k)))
+            .unwrap_or_default();
+        keys.push(format!("guest: {{ on: {}{keep} }}", g.on));
+    }
+    if let Some(l) = &a.linking {
+        let window = l
+            .window
+            .as_ref()
+            .map(|w| format!(", window: {}", d(w)))
+            .unwrap_or_default();
+        keys.push(format!("linking: {{ on: {}{window} }}", l.on));
+    }
+    if let Some(x) = &a.second_factor {
+        keys.push(format!("secondFactor: {}", s(x.level.as_str())));
+    }
+    if let Some(x) = &a.user_verification {
+        keys.push(format!("userVerification: {}", s(x.level.as_str())));
+    }
+    if let Some(x) = &a.session {
+        let mut v = format!("token: {}", d(&x.token));
+        if let Some(m) = &x.max {
+            v.push_str(&format!(", max: {}", d(m)));
+        }
+        if let Some(t) = &x.tenants {
+            v.push_str(&format!(", tenants: [{}, {}]", d(&t.min), d(&t.max)));
+        }
+        keys.push(format!("session: {{ {v} }}"));
+    }
+    if let Some(r) = &a.remember {
+        let mut v = format!("on: {}", r.on);
+        if let Some(i) = &r.idle {
+            v.push_str(&format!(", idle: {}", d(i)));
+        }
+        match &r.max {
+            None => {}
+            Some(RememberMax::Unbounded { .. }) => v.push_str(", max: 'none'"),
+            Some(RememberMax::After(m)) => v.push_str(&format!(", max: {}", d(m))),
+        }
+        keys.push(format!("remember: {{ {v} }}"));
+    }
+    if keys.is_empty() {
+        return "auth({})".to_string();
+    }
+    format!(
+        "auth({{\n{}\n  }})",
+        keys.iter()
+            .map(|k| format!("    {k},"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// Whole-word mention, so `not` does not match inside `notes`.

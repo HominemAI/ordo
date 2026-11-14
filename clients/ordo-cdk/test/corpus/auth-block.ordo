@@ -1,0 +1,20 @@
+domain hal @ 1.0.0
+
+auth {
+  methods           passkey, email, google, work
+  provider google   preset google
+  provider work     kind oidc, label "Work account"
+  passkeyName       "Human Agent Link"
+  provisioning      domains example.com, "my-co.example"
+  selfServe         off
+  guest             on, keep 7d
+  linking           on, window 5m
+  secondFactor      required-without-passkey
+  userVerification  preferred
+  session           token 1h, max 12h, tenants 15m to 4h
+  remember          on, idle 30d, max none
+}
+
+entity notes {
+  body: text
+}

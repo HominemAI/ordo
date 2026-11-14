@@ -2,7 +2,7 @@
 //
 // The builder's language vocabulary: values, types, functions, aggregates.
 //
-// Source of truth: the parser's own closed tables in `crates/ordo-syntax` (`Keyword`, `ScalarTy`, `CmpOp`, `TextOp`, `BinOp`, `DurationUnit`, `functions()`, `AGGREGATE_SHAPES`, `ALLOCATE_MODES`)
+// Source of truth: the parser's own closed tables in `crates/ordo-syntax` (`Keyword`, `ScalarTy`, `CmpOp`, `TextOp`, `BinOp`, `DurationUnit`, `functions()`, `AGGREGATE_SHAPES`, `ALLOCATE_MODES`, and the `auth` block's tables)
 //
 // This file is the GENERATED half of this package. The hand-written
 // half is under `src/core/` and is versioned by hand; the boundary

@@ -197,10 +197,7 @@ pub fn keyword(k: Keyword) -> Spelling {
             "`client` is under §8's [lean] spelling pin, like `principal`: the \
              mechanism is built and the declaration form is not fixed",
         )),
-        Keyword::Auth => A(DoesNotParse(
-            "`auth` is under §8's [lean] spelling pin; no declaration form for it \
-             parses today",
-        )),
+        Keyword::Auth => Offered("auth"),
         Keyword::Policy => A(DoesNotParse(
             "`policy` is under §8's [lean] spelling pin; no declaration form for \
              it parses today",

@@ -1491,7 +1491,7 @@ pub fn interface_for(
         .map(|(_, m)| m)
         .collect();
     let limits = ordo_api::RefineLimits::from_env();
-    ordo_plan::interface::interface_document_with(
+    let doc = ordo_plan::interface::interface_document_with(
         &serde_json::json!(f.schema.domain),
         &ordo_plan::artifact::entity_artifacts(&f.schema),
         &ops,
@@ -1501,7 +1501,10 @@ pub fn interface_for(
             conditions: limits.max_conditions,
             in_values: limits.max_in_values,
         },
-    )
+    );
+    // The program's sign-in facts: the same for every asker, and the file's
+    // values, which the deployment's ceilings may narrow at run time.
+    ordo_plan::interface::with_auth(doc, ordo_plan::artifact::auth_artifact(&f.schema).as_ref())
 }
 
 /// The catalog as an **LLM-ready document**: compact prose and signatures,

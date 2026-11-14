@@ -22,8 +22,10 @@ name: CI
 on:
   push:
     branches: [bleeding]
+  # A pull request into bleeding is a feature branch about to be squashed
+  # in (owner's merge flow, 2026-11-13); into main it is a release.
   pull_request:
-    branches: [main]
+    branches: [main, bleeding]
   workflow_dispatch:
   # Called by nightly.yml, one suite after another (owner ruling 2026-11-02).
   workflow_call:

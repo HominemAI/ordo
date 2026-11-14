@@ -179,6 +179,10 @@
   "mark": "done",
   "at": "2026-11-14T09:23:48+00:00"
  },
+ "audit-configuration-in-the-syntax:10": {
+  "mark": "questions",
+  "at": "2026-11-14T10:10:32+00:00"
+ },
  "audit-configuration-in-the-syntax:2": {
   "mark": "done",
   "at": "2026-11-14T09:23:57+00:00"
@@ -190,6 +194,22 @@
  "audit-configuration-in-the-syntax:4": {
   "mark": "done",
   "at": "2026-11-14T09:24:24+00:00"
+ },
+ "audit-configuration-in-the-syntax:6": {
+  "mark": "asking",
+  "at": "2026-11-14T10:15:13+00:00"
+ },
+ "audit-configuration-in-the-syntax:7": {
+  "mark": "asking",
+  "at": "2026-11-14T10:14:08+00:00"
+ },
+ "audit-configuration-in-the-syntax:8": {
+  "mark": "questions",
+  "at": "2026-11-14T10:07:37+00:00"
+ },
+ "audit-configuration-in-the-syntax:9": {
+  "mark": "asking",
+  "at": "2026-11-14T10:14:08+00:00"
  },
  "audit-decisions:1": {
   "mark": "done",
@@ -1649,11 +1669,11 @@
  },
  "rebuild-ellanor-on-ordo-now-to:20": {
   "mark": "asking",
-  "at": "2026-11-14T09:58:46+00:00"
+  "at": "2026-11-14T10:14:08+00:00"
  },
  "rebuild-ellanor-on-ordo-now-to:21": {
-  "mark": "asking",
-  "at": "2026-11-14T09:58:47+00:00"
+  "mark": "done",
+  "at": "2026-11-14T10:11:39+00:00"
  },
  "rebuild-ellanor-on-ordo-now-to:4": {
   "mark": "done",
@@ -1910,6 +1930,14 @@
  "serve-sealed-reads:1": {
   "mark": "done",
   "at": "2026-10-05T07:44:49+00:00"
+ },
+ "shared-identity:3": {
+  "mark": "asking",
+  "at": "2026-11-14T10:21:08+00:00"
+ },
+ "shared-identity:4": {
+  "mark": "asking",
+  "at": "2026-11-14T10:21:08+00:00"
  },
  "sharing-under-routing:1": {
   "mark": "done",

@@ -35,6 +35,7 @@
 {"file": "plan-ci-images.md", "kind": "plan", "what": "CI and container images."}
 {"file": "plan-client-cache.md", "kind": "plan", "what": "The client runtime and its local replica (5g-pre)."}
 {"file": "plan-client-loading-fixes.md", "kind": "plan", "what": "How to fix the client loading findings (H1 to H4, M3 first): in-memory rows per screen, batched store writes, chunked sort, sync pacing settings; increments, budgets, invariants"}
+{"file": "plan-configuration-in-the-file.md", "kind": "plan", "what": "Plan for the auth block, the needs declaration and their SDK equivalents, under the 2026-11-14 configuration rule"}
 {"file": "plan-console.md", "kind": "plan", "what": "The plan for the Ordo console (18o): screens and the ops each calls, the gaps, stack, shipping, security, build order, and owner decisions"}
 {"file": "plan-delegation-surface.md", "kind": "plan", "what": "The delegation surface."}
 {"file": "plan-dev-loop.md", "kind": "plan", "what": "ordo dev: the sub-second local loop."}

@@ -41,7 +41,6 @@ auth {
   userVerification  required
   session           token 1h, max 12h, tenants 15m to 4h
   remember          on, idle 30d, max none
-  signOut           app
 }
 ```
 
@@ -60,7 +59,6 @@ clause = methods <method>, ...
        | userVerification required | preferred
        | session token <duration> [, max <duration>] [, tenants <duration> to <duration>]
        | remember off | on [, idle <duration>] [, max <duration> | none]
-       | signOut app | everywhere
 method = passkey | password | email | <provider name>
 ```
 
@@ -89,7 +87,6 @@ Default is what holds when the clause is absent. "Deployment may" is what the ce
 | `userVerification` | `ORDO_AUTH_USER_VERIFICATION` | `required` | Hold it at `required` with `ORDO_AUTH_USER_VERIFICATION_FLOOR=required`. The floor's default is `preferred`, so the file may opt into the looser mode |
 | `session` | `ORDO_SESSION_SECS`, `ORDO_SESSION_MAX_SECS`, the app layer of `std.deployment.setSessionPolicy` | 1h, 12h, tenants inside the ceilings | `ORDO_SESSION_SECS_LIMIT` and `ORDO_SESSION_MAX_SECS_LIMIT` stay |
 | `remember` | `ORDO_REMEMBER`, `ORDO_REMEMBER_SECS`, `ORDO_REMEMBER_MAX_SECS` | `on`, 30d, none | `ORDO_REMEMBER=off` stays, absolute, as today. `ORDO_REMEMBER_SECS_LIMIT` and `ORDO_REMEMBER_MAX_SECS_LIMIT` stay |
-| `signOut` | none today | `app` | What the app's sign-out ends under a shared identity service (owner, 2026-11-14, `shared-identity` ask 5: "dev dependent"). `app` ends the app's own deployment session and leaves the shared sign-in alive, so the next app or tab is in without a passkey. `everywhere` also ends the shared session: the SDK posts to the service's `/sessions/end` with credentials from a listed client origin, and every other app loses its session at its next renewal. The descriptor carries the mode. Tests: the 6 cross-app sequences, one file in the identity service and one browser flow with 2 deployments |
 
 Notes on the table:
 
@@ -256,6 +253,8 @@ The static core changes:
 - A refusal code `set_in_file` and `requirements_unmet` join the refusal union, with the clause or the requirements as data.
 
 ### 5.4 What `ordo-react` gets
+
+> **Sign-out, ruled 2026-11-14 (`shared-identity` ask 5).** Not a clause in the file. The owner: *"a dev should be able to add a button that does either anywhere in the interface."* Under a shared identity service the SDK offers 2 actions: `signOut()` ends this app's deployment session alone and leaves the shared sign-in alive, so the next app or tab is in without a passkey; `signOutEverywhere()` also posts to the identity service's `/sessions/end` with credentials from a listed client origin, and every other Hominem app loses its session at its next renewal. `ordo-react` exposes both from its session hook. The developer places either button anywhere. Tests: the 6 cross-app sequences (sign in at A, open B; sign out of A, reopen A; sign out everywhere, both lose it; a token outliving the shared session; two tabs of one app), one file in the identity service and one browser flow with 2 deployments. Built with the SDK step.
 
 - `useSignInMethods()`: the run-time answer, typed by the generated `SignInMethod`. The sign-in screen builds its buttons from it.
 - `useProvisioning()`: the mode, so a sign-up screen can say "invitation only" or "use your example.com address".

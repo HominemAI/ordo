@@ -1543,3 +1543,4 @@
 {"seq": 1545, "item": "audit-configuration-in-the-syntax", "ask": 6, "at": "2026-11-14", "status": "decided", "text": "go", "source": "record", "read": true}
 {"seq": 1546, "item": "live-instance", "ask": 0, "at": "2026-11-14", "status": "decided", "text": "yeah lets wait and get everything tested in unison", "source": "record", "read": true}
 {"seq": 1547, "item": "shared-identity", "ask": 5, "at": "2026-11-14", "status": "decided", "text": "that should be dev dependent I think. architecture could ask for either", "source": "record", "read": true}
+{"seq": 1548, "item": "shared-identity", "ask": 5, "at": "2026-11-14", "status": "decided", "text": "a dev should be able to add a button that does either anywhere in the interface", "source": "record", "read": true}

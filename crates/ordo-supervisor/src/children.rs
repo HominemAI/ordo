@@ -126,15 +126,6 @@ pub struct Split {
     pub external: Option<String>,
 }
 
-/// Whether a loopback host: `localhost`, `127.x`, `::1`.
-fn loopback_host(host: &str) -> bool {
-    let h = host.trim_start_matches('[').trim_end_matches(']');
-    h == "localhost"
-        || h == "::1"
-        || h.parse::<std::net::Ipv4Addr>()
-            .is_ok_and(|a| a.is_loopback())
-}
-
 /// The shared identity service's address, when the deployment signs in at
 /// one elsewhere: `ORDO_IDENTITY_URL` on a host that is not loopback, or
 /// any `ORDO_IDENTITY_URL` with `ORDO_SUPERVISOR_IDENTITY_ADDRESS=external`.
@@ -142,16 +133,11 @@ pub fn external_identity(env: &[(String, String)]) -> Option<String> {
     let get = lookup(env);
     let url = get(IDENTITY_URL)?;
     let said = get(IDENTITY_ADDRESS).as_deref().map(str::trim) == Some("external");
-    let host = url
-        .trim()
-        .split_once("://")
-        .map(|(_, rest)| rest.split('/').next().unwrap_or_default().to_string())
-        .unwrap_or_default();
-    let host = match host.rfind(']') {
-        Some(i) => host[..=i].to_string(),
-        None => host.split(':').next().unwrap_or_default().to_string(),
-    };
-    (said || !loopback_host(&host)).then(|| url.trim().to_string())
+    // Loopback by the one rule every crate uses (`Origin::is_loopback`):
+    // `localhost`, `<label>.localhost`, `127.0.0.1` and `[::1]`.
+    let loopback =
+        ordo_identity::origin::Origin::of_url(url.trim()).is_some_and(|o| o.is_loopback());
+    (said || !loopback).then(|| url.trim().to_string())
 }
 
 fn lookup<'a>(env: &'a [(String, String)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -662,6 +648,9 @@ mod tests {
             ("http://127.0.0.1:8082", None, false),
             ("http://localhost:8082", None, false),
             ("http://[::1]:8082", None, false),
+            // `<label>.localhost` is loopback, as the door and the
+            // service read it.
+            ("http://app.localhost:8082", None, false),
             ("http://127.0.0.1:9000", Some("external"), true),
         ] {
             let mut list = vec![(IDENTITY_URL, url)];

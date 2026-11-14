@@ -709,7 +709,14 @@ there. Code: `crates/ordo-identity-service/src/deployments.rs`; tests:
   the deployment's members say who may.
 - `POST /sign-in/return` checks a return address against the named
   deployment's list. The sign-in page asks it before it sends the browser
-  on.
+  on. A path refuses any whitespace, control character or second leading
+  separator, the rule `Origin::of_url` applies.
+- The touch needs no membership: every person manages their own
+  account. A token from it needs the membership of its `aud`.
+- Ending a deployment ends its memberships. Registering an ended handle
+  again starts empty, and is refused while live members are left.
+- The registry is held in memory and refreshed each minute and on every
+  change this process makes; only the membership is read per call.
 - A registered deployment's token reaches its own members and invites.
   Ending a person from it ends the membership, never the account.
   Machine keys, the audit log and the registry answer the home's token

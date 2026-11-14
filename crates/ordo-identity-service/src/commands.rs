@@ -176,8 +176,9 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(format!(
-                    "Ended `{handle}`: no new token for it. Tokens already issued work until \
-                     they expire, within {} seconds.\n",
+                    "Ended `{handle}` and its memberships. A running service gives no new \
+                     token for it within a minute. Tokens already issued work until they \
+                     expire, within {} seconds.\n",
                     svc.config().token_secs
                 ))
             }

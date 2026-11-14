@@ -483,3 +483,157 @@ async fn the_binary_boots_alone_with_its_own_settings() {
     assert!(dir.join("first-invite").exists(), "{log}");
     assert!(dir.join("identity.key").exists());
 }
+
+/// Review of PR 12, finding 1: a browser strips tab and newline before it
+/// parses, so `/\t/evil.com` is `//evil.com`, another site. Refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_return_path_that_a_browser_would_read_as_another_site_is_refused() {
+    let h = two("shared-return-tricks").await;
+    for ret in [
+        "/\t/evil.example.com",
+        "/\n/evil.example.com",
+        "/\r/evil.example.com",
+        "/\\evil.example.com",
+        "//evil.example.com",
+        " //evil.example.com",
+        "/ok\u{0}",
+        "/caf\u{e9}",
+    ] {
+        for d in [None, Some("hal")] {
+            let mut body = json!({ "return": ret });
+            if let Some(d) = d {
+                body["deployment"] = json!(d);
+            }
+            let (s, v, _) = h.post("/sign-in/return", None, body).await;
+            assert_eq!(
+                (s, v["error"].as_str()),
+                (StatusCode::BAD_REQUEST, Some("return_refused")),
+                "{ret:?} {d:?}"
+            );
+        }
+    }
+    let (s, v, _) = h
+        .post("/sign-in/return", None, json!({ "return": "/account" }))
+        .await;
+    assert_eq!((s, v["to"].as_str()), (StatusCode::OK, Some("/account")));
+}
+
+/// Review of PR 12, finding 2: a person who belongs to a registered
+/// deployment only still manages their own account: the touch, a new
+/// passkey, new recovery codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_of_a_registered_deployment_only_manages_their_own_account() {
+    let h = two("shared-self").await;
+    let link = h
+        .svc
+        .invite_into(HOST, "Eve", Some("hal"))
+        .await
+        .unwrap()
+        .link;
+    let auth = authenticator(41, b"eve-self");
+    let secret = secret_of(&link);
+    let (_, opts, _) = h
+        .post("/join/begin", None, json!({ "secret": secret }))
+        .await;
+    let mut body = registration(&auth, &challenge(&opts));
+    body["secret"] = json!(secret);
+    body["displayName"] = json!("Eve");
+    let (st, joined, headers) = h.post("/join/finish", None, body).await;
+    assert_eq!(st, StatusCode::OK, "{joined}");
+    let cookie = cookie_of(&headers);
+
+    let (st, opts, _) = h.post("/touch/begin", Some(&cookie), json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{opts}");
+    let (st, v, _) = h
+        .post(
+            "/touch/finish",
+            Some(&cookie),
+            assertion(&auth, &challenge(&opts)),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["touchedAt"], json!(START));
+    assert!(
+        v.get("token").is_none(),
+        "no token of the service's own: {v}"
+    );
+    let (st, v, _) = h.post("/recovery-codes", Some(&cookie), json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v, _) = h.post("/passkeys/begin", Some(&cookie), json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    // Asking the touch for a deployment still needs its membership.
+    let (_, opts, _) = h.post("/touch/begin", Some(&cookie), json!({})).await;
+    let mut body = assertion(&auth, &challenge(&opts));
+    body["aud"] = json!(AUD);
+    let (st, v, _) = h.post("/touch/finish", Some(&cookie), body).await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("not_a_member"))
+    );
+}
+
+/// Review of PR 12, finding 4: a failure of the service's own database is
+/// a 5xx, never a valid registered deployment's token refused as the
+/// wrong audience.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_database_failure_is_not_answered_as_the_wrong_audience() {
+    let h = two("shared-outage").await;
+    let (adam, s) = h.person("Adam").await;
+    h.svc.add_member(HOST, "hal", &adam).await.unwrap();
+    let (_, v) = token_at(&h, HAL, &s.secret, AUD_HAL).await;
+    let hal = v["token"].as_str().unwrap().to_string();
+    let pool = h.svc.store().pool();
+    pool.rows("ALTER TABLE deployments RENAME TO deployments_gone")
+        .await
+        .unwrap();
+    pool.rows("ALTER TABLE deployment_members RENAME TO deployment_members_gone")
+        .await
+        .unwrap();
+    let (st, v) = h.bearer("GET", "/people", &hal, Value::Null).await;
+    assert!(st.is_server_error(), "{st} {v}");
+    assert_ne!(v["error"].as_str(), Some("token_refused"));
+    assert_ne!(v["error"].as_str(), Some("wrong_audience"));
+}
+
+/// Review of PR 12, finding 5: ending a deployment ends its memberships,
+/// so registering the handle again brings nobody back under the new
+/// origins; live members left behind refuse it.
+#[tokio::test(flavor = "multi_thread")]
+async fn registering_an_ended_handle_again_brings_no_member_back() {
+    let h = two("shared-revive").await;
+    let (adam, s) = h.person("Adam").await;
+    h.svc.add_member(HOST, "hal", &adam).await.unwrap();
+    h.svc.end_deployment(HOST, "hal").await.unwrap();
+    let again = Registration {
+        handle: "hal".into(),
+        client_origins: vec![ORDO.into()],
+        return_urls: vec![],
+    };
+    h.svc.register_deployment(HOST, &again).await.unwrap();
+    let (st, v) = token_at(&h, ORDO, &s.secret, AUD_HAL).await;
+    assert_eq!(
+        (st, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("not_a_member"))
+    );
+
+    // A live membership left on an ended deployment (as rows from before
+    // this fix are) refuses the registration and says so.
+    h.svc.add_member(HOST, "hal", &adam).await.unwrap();
+    h.svc.end_deployment(HOST, "hal").await.unwrap();
+    h.svc
+        .store()
+        .pool()
+        .rows(
+            "UPDATE deployment_members SET ended_at = NULL, ended_by = NULL \
+             WHERE ctid = (SELECT ctid FROM deployment_members WHERE target = 'hal' LIMIT 1)",
+        )
+        .await
+        .unwrap();
+    let e = h.svc.register_deployment(HOST, &again).await.unwrap_err();
+    assert_eq!(e.code(), "deployment_has_members", "{e}");
+    assert!(e.to_string().contains("member end hal"), "{e}");
+    // Emptying it, last member included, lets it register again.
+    h.svc.end_member(HOST, "hal", &adam).await.unwrap();
+    h.svc.register_deployment(HOST, &again).await.unwrap();
+}

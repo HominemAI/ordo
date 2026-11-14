@@ -183,11 +183,14 @@ impl Registration {
 fn split_url(url: &str) -> Option<(Origin, String)> {
     let origin = Origin::of_url(url)?;
     let (_, rest) = url.split_once("://")?;
-    let path = match rest.find('/') {
+    // Where the authority ends, as `Origin::of_url` finds it: the first
+    // `/`, `?` or `#`. A query or fragment, before a path or after it, is
+    // refused.
+    let path = match rest.find(['/', '?', '#']) {
         Some(i) => &rest[i..],
         None => "/",
     };
-    if path.contains(['?', '#']) || unsafe_path(path) {
+    if !path.starts_with('/') || path.contains(['?', '#']) || unsafe_path(path) {
         return None;
     }
     Some((origin, path.to_string()))
@@ -291,7 +294,9 @@ pub async fn get(
 }
 
 /// Register a deployment. A handle registered before and ended is
-/// registered again, keeping its members; a live one is refused.
+/// registered again with no members; a live one is refused, and so is an
+/// ended one that still has live members (left from before endings ended
+/// them), so nobody comes back under new origins unasked.
 pub async fn register(
     pool: &Pool,
     home: &str,
@@ -309,6 +314,23 @@ pub async fn register(
         .join(" ");
     let returns = reg.return_urls.join(" ");
     let tx = pool.begin().await?;
+    let left = tx
+        .rows(&format!(
+            "SELECT count(*) FROM deployment_members WHERE {} AND target = {} \
+             AND ended_at IS NULL",
+            dep(home),
+            sql_lit(&reg.handle)
+        ))
+        .await?
+        .first()
+        .and_then(|r| num(r, 0))
+        .unwrap_or(0);
+    if left > 0 {
+        return Err(IdentityError::DeploymentHasMembers {
+            handle: reg.handle,
+            live: left,
+        });
+    }
     let done = tx
         .rows(&format!(
             "INSERT INTO deployments (deployment, handle, client_origins, return_urls, \
@@ -349,8 +371,9 @@ pub async fn register(
     Ok(reg)
 }
 
-/// End a registration: no new token for it from now on. Its members stay,
-/// so registering it again brings them back.
+/// End a registration: no new token for it from now on, and every live
+/// membership ends with it. Registering the handle again starts with no
+/// members.
 pub async fn end(
     pool: &Pool,
     home: &str,
@@ -372,6 +395,17 @@ pub async fn end(
     if done.is_empty() {
         return Err(IdentityError::UnknownDeployment(handle.to_string()));
     }
+    let members = tx
+        .rows(&format!(
+            "UPDATE deployment_members SET ended_at = {now}, ended_by = {} WHERE {} \
+             AND target = {} AND ended_at IS NULL RETURNING 1",
+            sql_lit(by.id),
+            dep(home),
+            sql_lit(handle)
+        ))
+        .await?
+        .len();
+    let detail = format!("members={members}");
     audit::append(
         &tx,
         home,
@@ -382,7 +416,7 @@ pub async fn end(
             subject: handle,
             outcome: "ok",
             client: by.client,
-            detail: "",
+            detail: &detail,
         },
         now,
     )
@@ -529,7 +563,17 @@ pub async fn end_member(
     if !live.iter().any(|p| p == person) {
         return Err(IdentityError::UnknownPerson);
     }
-    if live.len() == 1 {
+    // The last member of a live deployment stays; an ended one may be
+    // emptied, so it can be registered again.
+    let registered = !tx
+        .rows(&format!(
+            "SELECT 1 FROM deployments WHERE {} AND handle = {} AND ended_at IS NULL",
+            dep(home),
+            sql_lit(target)
+        ))
+        .await?
+        .is_empty();
+    if registered && live.len() == 1 {
         return Err(IdentityError::LastAdmin);
     }
     tx.rows(&format!(
@@ -565,10 +609,12 @@ pub async fn end_member(
 pub async fn members(pool: &Pool, home: &str, target: &str) -> Result<Vec<Person>, IdentityError> {
     Ok(pool
         .rows(&format!(
-            "SELECT DISTINCT ON (p.id) p.id, p.display_name, p.role, m.created_at, \
-             COALESCE(p.ended_at, m.ended_at) FROM deployment_members m JOIN people p ON \
-             p.id = m.person_id WHERE m.{} AND m.target = {} \
-             ORDER BY p.id, m.ended_at IS NULL DESC, m.created_at DESC",
+            "SELECT id, display_name, role, since, ended FROM (\
+             SELECT DISTINCT ON (p.id) p.id, p.display_name, p.role, m.created_at AS since, \
+             COALESCE(p.ended_at, m.ended_at) AS ended FROM deployment_members m JOIN people p \
+             ON p.id = m.person_id WHERE m.{} AND m.target = {} \
+             ORDER BY p.id, m.ended_at IS NULL DESC, m.created_at DESC) latest \
+             ORDER BY since, id",
             dep(home),
             sql_lit(target)
         ))
@@ -622,6 +668,18 @@ mod tests {
                 "hal",
                 &["https://hal.hominem.ai"],
                 &["https://hal.hominem.ai/a/../b"],
+            ),
+            // A query or fragment before any path: the slash inside it is
+            // not a path.
+            reg(
+                "hal",
+                &["https://hal.hominem.ai"],
+                &["https://hal.hominem.ai?next=/admin"],
+            ),
+            reg(
+                "hal",
+                &["https://hal.hominem.ai"],
+                &["https://hal.hominem.ai#/admin"],
             ),
         ] {
             assert!(bad.check("hominem").is_err(), "{bad:?}");

@@ -87,9 +87,9 @@ pub(crate) struct Inner {
     /// browser. Rebuilt with [`Service::refresh_deployments`].
     pub(crate) allowed: RwLock<Vec<Origin>>,
     /// The deployments registered here, as last read
-    /// ([`Service::refresh_deployments`]): the CORS list and the return
-    /// URL check read it. Token issuing reads the database instead, so an
-    /// ended deployment gets no new token at once.
+    /// ([`Service::refresh_deployments`]): the CORS list, the return URL
+    /// check and token issuing read it. A change this process makes is
+    /// read at once; one a host command makes, within a minute.
     pub(crate) registered: RwLock<Vec<Registered>>,
     /// Every ceremony but the touch: the service's own origin only.
     pub(crate) provider: Arc<PasskeyProvider>,
@@ -209,33 +209,20 @@ impl Service {
         if let Some(own) = Origin::parse(&cfg.origin) {
             allowed.push(own);
         }
-        if let Ok(mut a) = self.0.allowed.write() {
-            *a = allowed;
-        }
-        if let Ok(mut t) = self.0.touch_provider.write() {
-            *t = Arc::new(touch);
-        }
-        if let Ok(mut r) = self.0.registered.write() {
-            *r = list;
-        }
+        *write(&self.0.allowed, "allowed origins") = allowed;
+        *write(&self.0.touch_provider, "touch relying party") = Arc::new(touch);
+        *write(&self.0.registered, "registered deployments") = list;
         Ok(())
     }
 
     /// The registered deployments as last read.
     pub fn registered(&self) -> Vec<Registered> {
-        self.0
-            .registered
-            .read()
-            .map(|r| r.clone())
-            .unwrap_or_default()
+        read(&self.0.registered, "registered deployments").clone()
     }
 
     /// The touch's provider now.
     pub(crate) fn touch_provider(&self) -> Arc<PasskeyProvider> {
-        match self.0.touch_provider.read() {
-            Ok(t) => t.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        read(&self.0.touch_provider, "touch relying party").clone()
     }
 
     /// Before serving: first the console import (6.1), then, on a
@@ -517,7 +504,7 @@ impl Service {
     fn allowed_origin(&self, headers: &HeaderMap) -> Option<String> {
         let sent = headers.get(ORIGIN)?.to_str().ok()?;
         let origin = Origin::parse(sent)?;
-        let allowed = self.0.allowed.read().ok()?;
+        let allowed = read(&self.0.allowed, "allowed origins");
         allowed.contains(&origin).then(|| sent.to_string())
     }
 
@@ -552,6 +539,28 @@ impl Service {
             None => Err(IdentityError::NotSignedIn),
         }
     }
+}
+
+/// Read a lock even when a panic poisoned it: the value is whole (each
+/// write replaces it in one step), so serving it beats refusing every
+/// browser call until a restart. Said in the log.
+fn read<'a, T>(lock: &'a RwLock<T>, what: &str) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        eprintln!(
+            "ordo-identity-service: the lock on the {what} was poisoned by a panic; reading on"
+        );
+        poisoned.into_inner()
+    })
+}
+
+/// Write a lock even when a panic poisoned it, as [`read`] reads it.
+fn write<'a, T>(lock: &'a RwLock<T>, what: &str) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        eprintln!(
+            "ordo-identity-service: the lock on the {what} was poisoned by a panic; writing on"
+        );
+        poisoned.into_inner()
+    })
 }
 
 /// Write a file only its owner reads, replacing any older one.

@@ -472,9 +472,10 @@ New people for one deployment: `ordo-identity-service invite --deployment
 hal`, or Invite in that deployment's console. They become members of
 `hal` only.
 
-To change a deployment's origins, end it and add it again. Its members
-stay. `deployment end hal` stops new tokens at once; tokens already issued
-work until they expire.
+To change a deployment's origins, end it and add it again, then add its
+members again. `deployment end hal` ends every membership with it, so
+nobody comes back under new origins unasked. A running service stops new
+tokens within a minute; tokens already issued work until they expire.
 
 ### Point a deployment at it
 

@@ -408,13 +408,24 @@ async fn touch_finish(State(s): State<Service>, headers: HeaderMap, body: Bytes)
         async {
             let b = parse(&body)?;
             let live = session(&s, &headers, &b).await?;
-            let own = s.config().audience();
-            let aud = b.get("aud").and_then(Value::as_str).unwrap_or(&own);
-            let issued = s
-                .touch_finish_for(&live, assertion(&b)?, aud, origin_of(&headers).as_ref())
-                .await?;
-            let mut out = token_json(&issued);
-            out["touchedAt"] = json!(issued.claims.touched_at);
+            // `aud` named: a token for that deployment, for its members.
+            // None: the person's own account pages; the touch counts for
+            // everyone, and the service's own token comes with it only for
+            // a person who holds one.
+            if let Some(aud) = b.get("aud").and_then(Value::as_str) {
+                let issued = s
+                    .touch_finish_for(&live, assertion(&b)?, aud, origin_of(&headers).as_ref())
+                    .await?;
+                let mut out = token_json(&issued);
+                out["touchedAt"] = json!(issued.claims.touched_at);
+                return Ok(Reply::json(out));
+            }
+            let fresh = s.touch(&live, assertion(&b)?).await?;
+            let mut out = match s.home_token_after_touch(&fresh).await? {
+                Some(issued) => token_json(&issued),
+                None => json!({}),
+            };
+            out["touchedAt"] = json!(fresh.touched_at);
             Ok(Reply::json(out))
         }
         .await,

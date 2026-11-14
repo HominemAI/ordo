@@ -116,6 +116,9 @@ pub enum IdentityError {
     UnknownDeployment(String),
     /// A live deployment already has that handle.
     DeploymentTaken(String),
+    /// An ended deployment still has live members, so registering it again
+    /// would bring them back under new origins.
+    DeploymentHasMembers { handle: String, live: u64 },
     /// A sign-in asked to send the browser back somewhere the deployment
     /// does not list.
     ReturnRefused,
@@ -218,6 +221,7 @@ impl IdentityError {
             IdentityError::NotAMember(_) => "not_a_member",
             IdentityError::UnknownDeployment(_) => "unknown_deployment",
             IdentityError::DeploymentTaken(_) => "deployment_taken",
+            IdentityError::DeploymentHasMembers { .. } => "deployment_has_members",
             IdentityError::ReturnRefused => "return_refused",
             IdentityError::HomeOnly { .. } => "home_only",
             IdentityError::AuditBroken(_) => "audit_broken",
@@ -251,7 +255,9 @@ impl IdentityError {
             | IdentityError::NotAMember(_)
             | IdentityError::HomeOnly { .. }
             | IdentityError::TouchNeeded { .. } => StatusCode::FORBIDDEN,
-            IdentityError::DeploymentTaken(_) => StatusCode::CONFLICT,
+            IdentityError::DeploymentTaken(_) | IdentityError::DeploymentHasMembers { .. } => {
+                StatusCode::CONFLICT
+            }
             IdentityError::UnknownDeployment(_) => StatusCode::NOT_FOUND,
             IdentityError::ReturnRefused => StatusCode::BAD_REQUEST,
             IdentityError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -362,8 +368,14 @@ impl fmt::Display for IdentityError {
             IdentityError::DeploymentTaken(handle) => write!(
                 f,
                 "deployment `{handle}` is already registered; end it first to change its \
-                 origins (`ordo-identity-service deployment end {handle}`), or choose another \
-                 handle"
+                 origins (`ordo-identity-service deployment end {handle}`, which ends its \
+                 memberships too), or choose another handle"
+            ),
+            IdentityError::DeploymentHasMembers { handle, live } => write!(
+                f,
+                "deployment `{handle}` was ended and still has {live} live members, who would \
+                 come back under the new origins; end each first \
+                 (`ordo-identity-service member end {handle} <person>`), then register it again"
             ),
             IdentityError::ReturnRefused => f.write_str(
                 "that return address is not one this deployment lists; sign-in goes to the \

@@ -181,7 +181,7 @@ impl Service {
     /// so an ended one is refused at once). A browser's `origin` must be
     /// one of that deployment's client origins or the service's own, so
     /// one deployment's page cannot ask for another's token.
-    async fn target_of(&self, aud: &str, origin: Option<&Origin>) -> Result<String, IdentityError> {
+    fn target_of(&self, aud: &str, origin: Option<&Origin>) -> Result<String, IdentityError> {
         let refused = || IdentityError::WrongAudience {
             asked: aud.to_string(),
             serves: self.0.cfg.audience(),
@@ -199,7 +199,9 @@ impl Service {
         let handle = aud
             .strip_prefix(deployment_token::AUD_PREFIX)
             .ok_or_else(refused)?;
-        let Some(d) = deployments::get(self.0.store.pool(), self.handle(), handle).await? else {
+        // The registry as last read ([`Service::registered`]): this process
+        // refreshes it on every change it makes and each minute.
+        let Some(d) = self.registered().into_iter().find(|d| d.handle == handle) else {
             return Err(refused());
         };
         if let Some(o) = origin {
@@ -247,7 +249,7 @@ impl Service {
         aud: &str,
         origin: Option<&Origin>,
     ) -> Result<Issued, IdentityError> {
-        let target = self.target_of(aud, origin).await?;
+        let target = self.target_of(aud, origin)?;
         let live = self.browser(secret).await?;
         if live.must_enrol {
             return Err(IdentityError::MustEnrolPasskey);
@@ -275,8 +277,16 @@ impl Service {
         deployment: Option<&str>,
         asked: &str,
     ) -> Result<String, IdentityError> {
-        let asked = asked.trim();
-        if asked.starts_with('/') && !asked.starts_with("//") && !asked.contains('\\') {
+        // The rule `Origin::of_url` applies: a browser strips tab and
+        // newline before it parses, so `/\t/evil.com` would land as
+        // `//evil.com`, another site.
+        if !ordo_identity::origin::plain_url_text(asked) {
+            return Err(IdentityError::ReturnRefused);
+        }
+        if let Some(rest) = asked.strip_prefix('/') {
+            if rest.starts_with(['/', '\\']) {
+                return Err(IdentityError::ReturnRefused);
+            }
             return Ok(asked.to_string());
         }
         let cfg = &self.0.cfg;
@@ -327,9 +337,15 @@ impl Service {
         let (audience, target) = if named == home_aud {
             (home_aud.clone(), self.handle().to_string())
         } else {
-            match self.target_of(&named, None).await {
+            match self.target_of(&named, None) {
                 Ok(t) => (named.clone(), t),
-                Err(_) => (home_aud.clone(), self.handle().to_string()),
+                // Not an audience this service serves: verify against the
+                // home's, which refuses it as the wrong audience. Any
+                // other failure is the service's own and is answered so.
+                Err(IdentityError::WrongAudience { .. }) => {
+                    (home_aud.clone(), self.handle().to_string())
+                }
+                Err(e) => return Err(e),
             }
         };
         let claims = deployment_token::verify(
@@ -581,8 +597,21 @@ impl Service {
         aud: &str,
         origin: Option<&Origin>,
     ) -> Result<Issued, IdentityError> {
-        let target = self.target_of(aud, origin).await?;
+        let target = self.target_of(aud, origin)?;
         self.member_of(&target, &live.subject).await?;
+        let fresh = self.touch(live, assertion).await?;
+        self.session_token(&fresh, aud)
+    }
+
+    /// The touch alone: the session's `touched_at` is now, and no token.
+    /// Every person may touch for their own account pages (a passkey, new
+    /// recovery codes, a CLI approval), whatever deployments they belong
+    /// to; membership gates deployment tokens, not managing oneself.
+    pub async fn touch(
+        &self,
+        live: &Live,
+        assertion: CompleteRequest,
+    ) -> Result<Live, IdentityError> {
         let CompleteRequest::PasskeyAssertion {
             challenge,
             credential_id,
@@ -631,11 +660,28 @@ impl Service {
         )
         .await?;
         tx.commit().await?;
-        let fresh = Live {
+        Ok(Live {
             touched_at: Some(now),
             ..live.clone()
-        };
-        self.session_token(&fresh, aud)
+        })
+    }
+
+    /// Whether `person` may hold the service's own deployment's tokens.
+    pub async fn has_home(&self, person: &str) -> Result<bool, IdentityError> {
+        deployments::is_member(self.0.store.pool(), self.handle(), self.handle(), person).await
+    }
+
+    /// A token for the service's own deployment for a session just
+    /// touched, when its person holds one; `None` otherwise.
+    pub async fn home_token_after_touch(
+        &self,
+        fresh: &Live,
+    ) -> Result<Option<Issued>, IdentityError> {
+        if !self.has_home(&fresh.subject).await? {
+            return Ok(None);
+        }
+        let aud = self.0.cfg.audience();
+        self.session_token(fresh, &aud).map(Some)
     }
 
     // ───────────────────────────── passkeys ─────────────────────────────

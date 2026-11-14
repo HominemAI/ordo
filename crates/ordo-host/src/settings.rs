@@ -2188,8 +2188,13 @@ mod tests {
     /// Doc sections whose rows are not host settings: the prose sections,
     /// and section 15, the console's and the identity service's own
     /// settings, which those services read and this registry never lists.
-    const NOT_SETTINGS: [&str; 5] =
-        ["Settings that disagree", "Not traced", "How to read", "The rule", "15 "];
+    const NOT_SETTINGS: [&str; 5] = [
+        "Settings that disagree",
+        "Not traced",
+        "How to read",
+        "The rule",
+        "15 ",
+    ];
     const DEV: &str = "14 ";
 
     /// The names in a row's first cell: each backticked `ORDO_*` name, and

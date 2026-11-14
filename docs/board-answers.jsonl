@@ -1539,3 +1539,5 @@
 {"seq": 1541, "item": "audit-configuration-in-the-syntax", "ask": 7, "at": "2026-11-14", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1542, "item": "audit-configuration-in-the-syntax", "ask": 9, "at": "2026-11-14", "status": "decided", "text": "requires or required", "source": "record", "read": true}
 {"seq": 1543, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 20, "at": "2026-11-14", "status": "decided", "text": "ok hominem.ai it is. and for other ones - auth could go through auth.hominem.ai then.", "source": "record", "read": true}
+{"seq": 1544, "item": "audit-configuration-in-the-syntax", "ask": 6, "at": "2026-11-14T10:37:35Z", "status": "open", "text": "go", "source": "page", "read": true}
+{"seq": 1545, "item": "audit-configuration-in-the-syntax", "ask": 6, "at": "2026-11-14", "status": "decided", "text": "go", "source": "record", "read": true}

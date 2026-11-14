@@ -195,13 +195,13 @@
   "mark": "done",
   "at": "2026-11-14T09:24:24+00:00"
  },
- "audit-configuration-in-the-syntax:6": {
-  "mark": "asking",
-  "at": "2026-11-14T10:35:55+00:00"
- },
  "audit-configuration-in-the-syntax:8": {
-  "mark": "questions",
-  "at": "2026-11-14T10:07:37+00:00"
+  "mark": "done",
+  "at": "2026-11-14T10:39:00+00:00"
+ },
+ "audit-configuration-in-the-syntax:9": {
+  "mark": "done",
+  "at": "2026-11-14T10:39:03+00:00"
  },
  "audit-decisions:1": {
   "mark": "done",

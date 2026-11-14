@@ -162,7 +162,7 @@ A need says that a value must exist. It says nothing about its size. Capacity ce
 
 | Where | What the deployment owner sees |
 |---|---|
-| `ordo apply --check` | The list of requirements, met or missing. Nothing is applied |
+| `ordo plan` | The requirements, met or missing, each unmet one as a refusal (owner, 2026-11-14, ask 6: the check belongs to the planning phase). Nothing is applied |
 | `ordo apply` and `std.deployment.apply` | A refusal, `requirements_unmet`, listing each unmet need with its setting. The live program stays active |
 | Boot with the stored program | A boot refusal naming the first unmet setting, as today's `BootRefusal::Missing` |
 | Boot log and apply report | The same rows, in words. The console is incidental: a deployment may run without it, so nothing below is the only place a message appears (owner, 2026-11-14, ask 8) |
@@ -308,7 +308,7 @@ What sets the pace:
 
 ## 9. Open questions for the owner
 
-1. Should an unmet need refuse the apply? **Yes. The live program keeps serving, and `ordo apply --check` lists the needs first.** A warning would let a program go live with sign-in that cannot work.
+1. Should an unmet requirement refuse the apply? **Answered 2026-11-14: the check runs in the planning phase.** `ordo plan` lists each unmet requirement as a refusal, apply runs the same check before it changes anything, and the live program keeps serving.
 2. Once the file holds a value, should the setter ops (`setSessionPolicy`, `setGuest`, `setSelfServe`) be retired, with the console editing only ceilings? **Answered yes, 2026-11-14.** The owner adds: a value that cannot change once used is env-only. The list (deployment handle, database, key provider, apex domain, relying party id, listen addresses) is ask 7 on the board.
 3. Should a deployment whose file has no `auth` block keep reading the old settings for one release? **Answered yes, 2026-11-14.** The banner is the console's copy of a line that is also in the boot log and the apply report. With a block present, an old setting refuses the boot from the start.
 4. Should the compiler derive needs, with the `requires` block only for what it cannot see? **Yes. The file stays the one definition, and most needs are already implied by it.**

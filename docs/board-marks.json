@@ -175,6 +175,22 @@
   "mark": "done",
   "at": "2026-10-11T19:20:14+00:00"
  },
+ "audit-configuration-in-the-syntax:1": {
+  "mark": "done",
+  "at": "2026-11-14T09:23:48+00:00"
+ },
+ "audit-configuration-in-the-syntax:2": {
+  "mark": "done",
+  "at": "2026-11-14T09:23:57+00:00"
+ },
+ "audit-configuration-in-the-syntax:3": {
+  "mark": "done",
+  "at": "2026-11-14T09:24:16+00:00"
+ },
+ "audit-configuration-in-the-syntax:4": {
+  "mark": "done",
+  "at": "2026-11-14T09:24:24+00:00"
+ },
  "audit-decisions:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -1620,12 +1636,16 @@
   "at": "2026-11-10T07:10:51+00:00"
  },
  "rebuild-ellanor-on-ordo-now-to:17": {
-  "mark": "asking",
-  "at": "2026-11-13T21:08:42+00:00"
+  "mark": "done",
+  "at": "2026-11-14T09:27:20+00:00"
  },
  "rebuild-ellanor-on-ordo-now-to:18": {
   "mark": "done",
   "at": "2026-11-13T19:58:13+00:00"
+ },
+ "rebuild-ellanor-on-ordo-now-to:19": {
+  "mark": "asking",
+  "at": "2026-11-14T09:30:34+00:00"
  },
  "rebuild-ellanor-on-ordo-now-to:2": {
   "mark": "done",

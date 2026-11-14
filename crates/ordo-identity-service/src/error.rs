@@ -109,6 +109,22 @@ pub enum IdentityError {
         grant: &'static str,
         holds: Vec<String>,
     },
+    /// The person holds no membership of the deployment a token was asked
+    /// for. Names the handle.
+    NotAMember(String),
+    /// No live registered deployment has that handle.
+    UnknownDeployment(String),
+    /// A live deployment already has that handle.
+    DeploymentTaken(String),
+    /// An ended deployment still has live members, so registering it again
+    /// would bring them back under new origins.
+    DeploymentHasMembers { handle: String, live: u64 },
+    /// A sign-in asked to send the browser back somewhere the deployment
+    /// does not list.
+    ReturnRefused,
+    /// This act is the service's own: a token for a registered deployment
+    /// may not do it. Names the act and the service's handle.
+    HomeOnly { act: &'static str, home: String },
     /// The audit log or one of its checkpoints does not check out.
     AuditBroken(crate::audit::AuditBreak),
     /// The request body or a field in it is malformed.
@@ -202,6 +218,12 @@ impl IdentityError {
             IdentityError::NameTaken(_) => "name_taken",
             IdentityError::MintRefused(_) => "mint_refused",
             IdentityError::GrantNeeded { .. } => "grant_needed",
+            IdentityError::NotAMember(_) => "not_a_member",
+            IdentityError::UnknownDeployment(_) => "unknown_deployment",
+            IdentityError::DeploymentTaken(_) => "deployment_taken",
+            IdentityError::DeploymentHasMembers { .. } => "deployment_has_members",
+            IdentityError::ReturnRefused => "return_refused",
+            IdentityError::HomeOnly { .. } => "home_only",
             IdentityError::AuditBroken(_) => "audit_broken",
             IdentityError::BadRequest(_) => "bad_request",
             IdentityError::Internal(_) => "internal",
@@ -230,7 +252,14 @@ impl IdentityError {
             | IdentityError::MustEnrolPasskey
             | IdentityError::MintRefused(_)
             | IdentityError::GrantNeeded { .. }
+            | IdentityError::NotAMember(_)
+            | IdentityError::HomeOnly { .. }
             | IdentityError::TouchNeeded { .. } => StatusCode::FORBIDDEN,
+            IdentityError::DeploymentTaken(_) | IdentityError::DeploymentHasMembers { .. } => {
+                StatusCode::CONFLICT
+            }
+            IdentityError::UnknownDeployment(_) => StatusCode::NOT_FOUND,
+            IdentityError::ReturnRefused => StatusCode::BAD_REQUEST,
             IdentityError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
             IdentityError::LastAdmin | IdentityError::NameTaken(_) | IdentityError::LastPasskey => {
                 StatusCode::CONFLICT
@@ -274,8 +303,10 @@ impl fmt::Display for IdentityError {
             }
             IdentityError::WrongAudience { asked, serves } => write!(
                 f,
-                "a token was asked for `{asked}`, and this identity service serves `{serves}`; \
-                 ask for `{serves}`, or set {DEPLOYMENT_ENV} to the deployment's handle"
+                "a token was asked for `{asked}`, and this identity service serves `{serves}` \
+                 and the deployments registered with it; ask for one of those, set \
+                 {DEPLOYMENT_ENV} to the deployment's handle, or register the deployment \
+                 (`ordo-identity-service deployment add`)"
             ),
             IdentityError::OriginRefused => write!(
                 f,
@@ -322,6 +353,38 @@ impl fmt::Display for IdentityError {
                 f,
                 "a live machine key is already named `{name}`; choose another name, or end it \
                  first"
+            ),
+            IdentityError::NotAMember(handle) => write!(
+                f,
+                "you are not a member of deployment `{handle}`; an admin of `{handle}` invites \
+                 you, or the identity service's owner runs `ordo-identity-service member add \
+                 {handle} <person>`"
+            ),
+            IdentityError::UnknownDeployment(handle) => write!(
+                f,
+                "no deployment `{handle}` is registered with this identity service; its owner \
+                 runs `ordo-identity-service deployment add {handle} --origin <console origin>`"
+            ),
+            IdentityError::DeploymentTaken(handle) => write!(
+                f,
+                "deployment `{handle}` is already registered; end it first to change its \
+                 origins (`ordo-identity-service deployment end {handle}`, which ends its \
+                 memberships too), or choose another handle"
+            ),
+            IdentityError::DeploymentHasMembers { handle, live } => write!(
+                f,
+                "deployment `{handle}` was ended and still has {live} live members, who would \
+                 come back under the new origins; end each first \
+                 (`ordo-identity-service member end {handle} <person>`), then register it again"
+            ),
+            IdentityError::ReturnRefused => f.write_str(
+                "that return address is not one this deployment lists; sign-in goes to the \
+                 account page instead",
+            ),
+            IdentityError::HomeOnly { act, home } => write!(
+                f,
+                "{act} is done at the identity service's own deployment `{home}`, with a token \
+                 for it"
             ),
             IdentityError::AuditBroken(b) => write!(f, "the audit log does not check out: {b}"),
             IdentityError::BadRequest(why) => write!(f, "bad request: {why}"),

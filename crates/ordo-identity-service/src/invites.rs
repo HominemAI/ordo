@@ -99,6 +99,28 @@ pub struct Live {
     pub hash: String,
     pub label: String,
     pub issued_by: String,
+    /// The registered deployment the joiner becomes a member of, without
+    /// home access; `None` for the service's own people
+    /// ([`crate::deployments`]).
+    pub target: Option<String>,
+}
+
+/// Make the invite `id` one for `target`'s people, inside the `tx` that
+/// minted it.
+pub async fn set_target(
+    tx: &TxConn,
+    handle: &str,
+    id: &str,
+    target: &str,
+) -> Result<(), IdentityError> {
+    tx.rows(&format!(
+        "UPDATE invites SET target = {} WHERE {} AND id = {}",
+        sql_lit(target),
+        dep(handle),
+        sql_lit(id)
+    ))
+    .await?;
+    Ok(())
 }
 
 /// The live invite `typed` opens, or [`IdentityError::CodeRefused`] with
@@ -134,7 +156,7 @@ pub async fn check(
     let hash = invite_hash(&secret);
     let rows = pool
         .rows(&format!(
-            "SELECT id, label, issued_by, expires_at, used_at, revoked_at FROM invites \
+            "SELECT id, label, issued_by, expires_at, used_at, revoked_at, target FROM invites \
              WHERE {} AND secret_hash = {}",
             dep(handle),
             sql_lit(&hash)
@@ -158,6 +180,7 @@ pub async fn check(
         hash,
         label: text(r, 1),
         issued_by: text(r, 2),
+        target: cell(r, 6).map(str::to_string),
     })
 }
 
@@ -188,6 +211,7 @@ pub async fn revoke(
     handle: &str,
     keys: &KeyRing,
     id: &str,
+    target: Option<&str>,
     by: Actor<'_>,
     now: u64,
 ) -> Result<(), IdentityError> {
@@ -195,9 +219,10 @@ pub async fn revoke(
     let done = tx
         .rows(&format!(
             "UPDATE invites SET revoked_at = {now} WHERE {} AND id = {} AND used_at IS NULL \
-             AND revoked_at IS NULL RETURNING 1",
+             AND revoked_at IS NULL{} RETURNING 1",
             dep(handle),
-            sql_lit(id)
+            sql_lit(id),
+            target_filter(target)
         ))
         .await?;
     if done.is_empty() {
@@ -222,13 +247,29 @@ pub async fn revoke(
     Ok(())
 }
 
-/// Every invite, newest first, without secrets.
-pub async fn list(pool: &Pool, handle: &str, now: u64) -> Result<Vec<Value>, IdentityError> {
+/// ` AND target = '<t>'` for a registered deployment's invites only;
+/// nothing for every invite.
+fn target_filter(target: Option<&str>) -> String {
+    match target {
+        Some(t) => format!(" AND target = {}", sql_lit(t)),
+        None => String::new(),
+    }
+}
+
+/// Every invite, newest first, without secrets; with `target`, only the
+/// invites into that registered deployment.
+pub async fn list(
+    pool: &Pool,
+    handle: &str,
+    target: Option<&str>,
+    now: u64,
+) -> Result<Vec<Value>, IdentityError> {
     Ok(pool
         .rows(&format!(
             "SELECT id, label, role, issued_by, issued_at, expires_at, used_at, used_by, \
-             revoked_at FROM invites WHERE {} ORDER BY issued_at DESC, id",
-            dep(handle)
+             revoked_at, target FROM invites WHERE {}{} ORDER BY issued_at DESC, id",
+            dep(handle),
+            target_filter(target)
         ))
         .await?
         .iter()
@@ -252,6 +293,7 @@ pub async fn list(pool: &Pool, handle: &str, now: u64) -> Result<Vec<Value>, Ide
                 "usedAt": num(r, 6),
                 "usedBy": cell(r, 7),
                 "revokedAt": num(r, 8),
+                "deployment": cell(r, 9).unwrap_or(handle),
                 "state": state,
             })
         })

@@ -407,9 +407,105 @@ origin) and `ORDO_IDENTITY_IMPORT_CONSOLE_URL` (the console's database,
 for section 10) when you leave them unset. A value you set always wins,
 and the boot log names each value it filled.
 
+## 14. One service for many deployments
+
+One identity service can serve several deployments, so a person signs in
+once for all of them. Hominem runs one at `https://auth.hominem.ai`.
+Human Agent Link (`hal`) and the `ordo` test instance sign in there.
+
+How it works:
+
+- The service has its own handle, `ORDO_IDENTITY_DEPLOYMENT`, called its
+  home. Its people are accounts: one passkey and one session each.
+- Each other deployment is registered with a handle, its console's
+  origin, and the addresses sign-in may send a browser back to.
+- A person gets a deployment's token only while they are its member. The
+  token names the deployment in `aud`, so `hal`'s door refuses a token
+  for `ordo`.
+- A deployment's console sees and invites its own members only. Machine
+  keys, the audit log and the list of deployments stay with the home.
+
+### Run the service on its own
+
+Run the `ordo-identity-service` binary from the image as its own
+container, with no supervisor. It needs:
+
+| Setting | Example |
+|---|---|
+| `ORDO_IDENTITY_DATABASE_URL_FILE` | a file holding `postgres://ordo_identity@db:5432/ordo_identity` |
+| `ORDO_IDENTITY_ORIGIN` | `https://auth.hominem.ai` |
+| `ORDO_IDENTITY_RP_ID` | `hominem.ai`, so consoles under it can run reauth in their own page |
+| `ORDO_IDENTITY_LISTEN` | `0.0.0.0:8082` |
+| `ORDO_IDENTITY_DATA_DIR` | `/var/lib/ordo-identity`, a persistent volume |
+| `ORDO_IDENTITY_DEPLOYMENT` | `hominem`, its home handle |
+
+`ORDO_IDENTITY_CLIENT_ORIGINS` is optional: the home's own clients, if
+any. Put a TLS proxy in front and send `auth.hominem.ai` to port 8082.
+If the proxy names the visitor in a header, set `ORDO_PROXY_HEADER` and
+`ORDO_PROXY_TRUSTED`. The first start prints the first admin's invite, as
+in section 3.
+
+### Register a deployment
+
+On the service's host, once per deployment:
+
+```
+ordo-identity-service deployment add hal --origin https://hal.hominem.ai
+ordo-identity-service people
+ordo-identity-service member add hal p_…
+```
+
+`--origin` is the console's origin; give it again for each page that asks
+for tokens. `--return <url>` limits where sign-in sends the browser back
+to; by default it is anywhere under each origin. A running service picks
+up the change within a minute.
+
+The same over HTTP, with a token of the home (a fresh reauth) or the
+provisioner's machine key:
+
+```
+POST /deployments  {"handle": "hal", "clientOrigins": ["https://hal.hominem.ai"]}
+POST /deployments/hal/members  {"person": "p_…"}
+```
+
+New people for one deployment: `ordo-identity-service invite --deployment
+hal`, or Invite in that deployment's console. They become members of
+`hal` only.
+
+To change a deployment's origins, end it and add it again, then add its
+members again. `deployment end hal` ends every membership with it, so
+nobody comes back under new origins unasked. A running service stops new
+tokens within a minute; tokens already issued work until they expire.
+
+### Point a deployment at it
+
+On the deployment's container, set:
+
+| Setting | Value |
+|---|---|
+| `ORDO_IDENTITY_URL` | `https://auth.hominem.ai` |
+| `ORDO_IDENTITY_ORIGIN` | `https://auth.hominem.ai` |
+| `ORDO_IDENTITY_DEPLOYMENT` | `hal`, the handle it was registered with |
+
+Leave the identity database settings unset. When `ORDO_IDENTITY_URL` is
+not a loopback address, the supervisor starts no identity service and
+passes these 3 to the door and the console. The boot log says so.
+`ORDO_SUPERVISOR_IDENTITY_ADDRESS=external` says the same for a service
+on a loopback address. The console keeps its own handle,
+`ORDO_CONSOLE_DEPLOYMENT`, which may differ.
+
+Reauth runs in the console's page. That works only when the console's
+host is under the service's `ORDO_IDENTITY_RP_ID`. A console on another
+domain signs in, but cannot reauth yet.
+
+Moving a deployment that ran its own service to a shared one is a new
+relying party: each person signs up again by invite.
+
 ## What it does not do
 
 - Roles beyond `admin`.
 - Sign-in through outside providers for deployment people.
 - Sending invite links by mail. You send the link.
 - More than one copy of the service.
+- Machine keys for a registered deployment. Machine keys belong to the
+  service's home.

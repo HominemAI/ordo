@@ -290,12 +290,7 @@ impl IdentitySettings {
         let audience_handle = match set(DEPLOYMENT_ENV) {
             None => handle.to_string(),
             Some(named) => {
-                let ok = named.len() <= 63
-                    && !named.starts_with('-')
-                    && named
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-                if !ok {
+                if !crate::config::valid_handle(&named) {
                     return Err(ConsoleError::setting(
                         DEPLOYMENT_ENV,
                         format!("is `{named}`, which is not a deployment handle"),

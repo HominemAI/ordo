@@ -1,6 +1,6 @@
 {
- "date": "2026-11-13",
- "text": "PR 11 merged into main by merge commit: the console groups its pages under System and Deployment, and Deploys works under the identity service. The merge flow is ruled: squash into bleeding, merge bleeding into main [[ci-runs-each-workflow-only-when]]. Slice 1 of Human Agent Link is built on its branch, unpushed [[rebuild-ellanor-on-ordo-now-to]]. The configuration audit has started [[audit-configuration-in-the-syntax]].",
+ "date": "2026-11-14",
+ "text": "PR 11 is on main by merge commit; the merge flow is ruled: squash into bleeding, merge bleeding into main [[ci-runs-each-workflow-only-when]]. The shared identity service is PR 12 [[shared-identity]] and the auth block is PR 13 [[audit-configuration-in-the-syntax]], both gated on their suites and a review. Release 0.5.2 follows both [[live-instance]]. Slice 1 of Human Agent Link waits on its push [[rebuild-ellanor-on-ordo-now-to]].",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,16 @@
  ],
  "look": [
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "ask 17, the door's host"
+   "id": "shared-identity",
+   "why": "PR 12"
   },
   {
    "id": "audit-configuration-in-the-syntax",
-   "why": "started"
+   "why": "PR 13, then the host step"
   },
   {
-   "id": "console-setup-wizard",
-   "why": "filed for later"
+   "id": "live-instance",
+   "why": "0.5.2 after both"
   }
  ]
 }

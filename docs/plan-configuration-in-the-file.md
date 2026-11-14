@@ -254,6 +254,8 @@ The static core changes:
 
 ### 5.4 What `ordo-react` gets
 
+> **Sign-out, ruled 2026-11-14 (`shared-identity` ask 5).** Not a clause in the file. The owner: *"a dev should be able to add a button that does either anywhere in the interface."* Under a shared identity service the SDK offers 2 actions: `signOut()` ends this app's deployment session alone and leaves the shared sign-in alive, so the next app or tab is in without a passkey; `signOutEverywhere()` also posts to the identity service's `/sessions/end` with credentials from a listed client origin, and every other Hominem app loses its session at its next renewal. `ordo-react` exposes both from its session hook. The developer places either button anywhere. Tests: the 6 cross-app sequences (sign in at A, open B; sign out of A, reopen A; sign out everywhere, both lose it; a token outliving the shared session; two tabs of one app), one file in the identity service and one browser flow with 2 deployments. Built with the SDK step.
+
 - `useSignInMethods()`: the run-time answer, typed by the generated `SignInMethod`. The sign-in screen builds its buttons from it.
 - `useProvisioning()`: the mode, so a sign-up screen can say "invitation only" or "use your example.com address".
 - `useDeploymentNeeds()`: for the console and an owner's admin page only. It returns the rows, never values.

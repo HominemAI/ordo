@@ -5,6 +5,7 @@
 //! open, and anything outside the grammar fails loudly with a spanned error.
 
 pub mod ast;
+pub mod auth;
 pub mod decl;
 pub mod declparse;
 pub mod lexer;
@@ -19,6 +20,12 @@ pub mod trigger;
 mod function_tests;
 
 pub use ast::{BinOp, CmpOp, CondArm, Condition, Expr, Ident, TextOp};
+pub use auth::{
+    AuthDecl, AuthDuration, AuthGuest, AuthLinking, AuthMethods, AuthProvider, AuthProvisioning,
+    AuthRange, AuthRemember, AuthSecondFactor, AuthSession, AuthSwitch, AuthText,
+    AuthUserVerification, ProviderKind, ProviderSource, Provisioning, RememberMax, SecondFactor,
+    UserVerification, AUTH_BUILT_IN_METHODS, AUTH_CLAUSES, AUTH_PRESETS, PROVISIONING_MODES,
+};
 pub use decl::{
     AggDecl, DomainDecl, EntityDecl, FieldDecl, FieldKind, FunctionDecl, FunctionHost,
     FunctionLimits, GuardAtom, GuardClause, GuardExpr, OpBody, OpDecl, OpFlags, ParamDecl,
@@ -33,8 +40,8 @@ pub use declparse::{
 pub use lexer::{lex, LexError};
 pub use parser::{
     function_names, functions, parse_condition, parse_expr, ParseError, Parser, ALLOCATE_MODES,
-    BARE_FIELD_IN_GROUP, DUPLICATE_RELEASE, INVALID_GUARD_WALK, INVALID_SECRET_HOST, PARSE_ERROR,
-    RELEASE_SUBJECT,
+    BARE_FIELD_IN_GROUP, DUPLICATE_AUTH, DUPLICATE_RELEASE, INVALID_GUARD_WALK,
+    INVALID_SECRET_HOST, PARSE_ERROR, RELEASE_SUBJECT,
 };
 pub use span::Span;
 pub use text::{is_nfc, nfc};

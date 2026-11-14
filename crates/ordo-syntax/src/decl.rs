@@ -40,6 +40,10 @@ pub struct Program {
     /// sets, and the hosts a function may send it to
     /// (`plan-backend-functions.md` §5).
     pub secrets: Vec<SecretDecl>,
+    /// `auth { … }`: how people sign in to the app
+    /// (`plan-configuration-in-the-file.md` §2). At most one per program.
+    /// Absent, the deployment's settings decide, as before the block.
+    pub auth: Option<crate::auth::AuthDecl>,
 }
 
 /// `secret openaiKey for api.openai.com`.

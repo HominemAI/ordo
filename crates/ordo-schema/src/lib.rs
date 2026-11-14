@@ -1871,6 +1871,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
     }
 }
 
@@ -2352,6 +2353,7 @@ pub fn std_ops(schema: &Schema) -> Program {
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
     }
 }
 

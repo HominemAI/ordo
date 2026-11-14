@@ -79,6 +79,17 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `function` is contextual the same way: a declaration head
             // only here, so a field or an expression function keeps it.
             TokenKind::Ident(w) if w == "function" => prog.functions.push(function_decl(&mut p)?),
+            TokenKind::Keyword(Keyword::Auth) => {
+                let a = crate::auth::auth_decl(&mut p)?;
+                if prog.auth.is_some() {
+                    return Err(p.err_class_at(
+                        parser::DUPLICATE_AUTH,
+                        a.span,
+                        "a program has one `auth` block; put every clause in the first",
+                    ));
+                }
+                prog.auth = Some(a);
+            }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -357,7 +368,7 @@ fn skip_newlines(p: &mut Parser) {
     }
 }
 
-fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+pub(crate) fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
     match p.peek().clone() {
         TokenKind::Ident(name) => {
             let t = p.bump();
@@ -380,7 +391,7 @@ fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
 /// `groupMembers`' refs point at `members`. Refusing the word here made
 /// DL's own settled spelling unwritable. Whether the segment names a real
 /// field stays the binder's question, as for any identifier.
-fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+pub(crate) fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
     match p.peek().clone() {
         TokenKind::Ident(name) => {
             let t = p.bump();
@@ -618,7 +629,7 @@ fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError
 
 /// One `egress` host: `api.openai.com` as dotted words, or in quotes for a
 /// name with a hyphen, `"my-model.example.com"`.
-fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
+pub(crate) fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
     if let TokenKind::Str(h) = p.peek().clone() {
         let t = p.bump();
         return Ok(crate::decl::FunctionHost {
@@ -4548,7 +4559,7 @@ mod unbuilt_tests {
     /// implement, which would make a working declaration unusable.
     #[test]
     fn nothing_built_is_in_the_unbuilt_table() {
-        for built in ["domain", "entity", "op", "routine", "trigger"] {
+        for built in ["domain", "entity", "op", "routine", "trigger", "auth"] {
             assert!(
                 !UNBUILT_DECLARATIONS.iter().any(|(k, _)| *k == built),
                 "`{built}` parses and must not be refused as unbuilt"

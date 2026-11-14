@@ -49,6 +49,8 @@ pub const DUPLICATE_RELEASE: &str = "duplicate_release";
 /// A `secret` bound to something other than an exact host name: a URL, a
 /// port or a wildcard (`plan-backend-functions.md` §5).
 pub const INVALID_SECRET_HOST: &str = "invalid_secret_host";
+/// A second `auth` block. One per program (`plan-configuration-in-the-file.md` §2.2).
+pub const DUPLICATE_AUTH: &str = "duplicate_auth";
 /// `$caller` inside a release rule. The seat being released is `$member`,
 /// and the rule is about that seat whoever asks (27aq).
 pub const RELEASE_SUBJECT: &str = "release_subject";
@@ -323,6 +325,15 @@ impl<'t> Parser<'t> {
         match self.pos.checked_sub(1).and_then(|i| self.toks.get(i)) {
             Some(prev) => self.tok().span.line > prev.span.line,
             None => false,
+        }
+    }
+
+    /// The span of the token just consumed. A clause that ends on its last
+    /// value reads its end here.
+    pub(crate) fn prev_span(&self) -> Span {
+        match self.pos.checked_sub(1).and_then(|i| self.toks.get(i)) {
+            Some(prev) => prev.span,
+            None => self.tok().span,
         }
     }
 

@@ -31,6 +31,7 @@ use ordo_syntax::decl::{
 use ordo_syntax::span::Span;
 use ordo_syntax::Expr;
 
+pub mod auth;
 pub mod check;
 pub mod ddl;
 pub mod diff;
@@ -355,6 +356,9 @@ pub struct Schema {
     /// The program's backend functions, checked by [`function::check`].
     /// Called through `POST /v1/fn/<name>`, never as ops.
     pub functions: Vec<ordo_syntax::FunctionDecl>,
+    /// The program's `auth` block, checked by [`auth::check`]. `None`:
+    /// the deployment's settings decide sign-in, as before the block.
+    pub auth: Option<ordo_syntax::AuthDecl>,
 }
 
 impl Schema {
@@ -912,7 +916,11 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
+        auth: program.auth.clone(),
     };
+    if let Some(a) = &program.auth {
+        auth::check(a)?;
+    }
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
     Ok(schema)

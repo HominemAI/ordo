@@ -1512,3 +1512,4 @@
 {"seq": 1514, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 0, "at": "2026-11-14T09:56:54Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1515, "item": "audit-configuration-in-the-syntax", "ask": 5, "at": "2026-11-14", "status": "decided", "text": "agreed document", "source": "record", "read": true}
 {"seq": 1516, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 19, "at": "2026-11-14", "status": "decided", "text": "auth.hominem.ai", "source": "record", "read": true}
+{"seq": 1517, "item": "shared-identity", "ask": 0, "at": "2026-11-14", "status": "decided", "text": "lets build the shared auth", "source": "record", "read": true}

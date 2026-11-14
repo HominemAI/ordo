@@ -179,6 +179,10 @@
   "mark": "done",
   "at": "2026-11-14T09:23:48+00:00"
  },
+ "audit-configuration-in-the-syntax:10": {
+  "mark": "asking",
+  "at": "2026-11-14T10:04:12+00:00"
+ },
  "audit-configuration-in-the-syntax:2": {
   "mark": "done",
   "at": "2026-11-14T09:23:57+00:00"
@@ -190,6 +194,22 @@
  "audit-configuration-in-the-syntax:4": {
   "mark": "done",
   "at": "2026-11-14T09:24:24+00:00"
+ },
+ "audit-configuration-in-the-syntax:6": {
+  "mark": "asking",
+  "at": "2026-11-14T10:04:12+00:00"
+ },
+ "audit-configuration-in-the-syntax:7": {
+  "mark": "asking",
+  "at": "2026-11-14T10:04:12+00:00"
+ },
+ "audit-configuration-in-the-syntax:8": {
+  "mark": "asking",
+  "at": "2026-11-14T10:04:12+00:00"
+ },
+ "audit-configuration-in-the-syntax:9": {
+  "mark": "asking",
+  "at": "2026-11-14T10:04:12+00:00"
  },
  "audit-decisions:1": {
   "mark": "done",

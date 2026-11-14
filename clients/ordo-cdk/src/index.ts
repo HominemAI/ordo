@@ -20,6 +20,17 @@
 export { CALLER, OPEN, g } from './core/guard.js';
 export type { GuardRhs } from './core/guard.js';
 export { MEMBER, rel, release } from './core/release.js';
+export { auth } from './core/auth.js';
+export type {
+  AuthDuration,
+  AuthPreset,
+  AuthProviderKind,
+  AuthSpec,
+  BuiltInMethod,
+  ProviderSpec,
+  SecondFactorLevel,
+  UserVerificationLevel,
+} from './core/auth.js';
 export { Each, Routine, daily, each, every, routine, when } from './core/routine.js';
 export type { RoutineOptions, RoutineTrigger, WhenOptions } from './core/routine.js';
 export {

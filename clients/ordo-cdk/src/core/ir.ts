@@ -319,5 +319,47 @@ export interface RoutineNode {
   readonly statements: readonly WriteStmtNode[];
 }
 
+/** `provider <name> preset <p>` or `kind <k>`, `[, label "…"]`. */
+export type AuthProviderNode =
+  | { readonly name: string; readonly preset: string; readonly label: string | null }
+  | { readonly name: string; readonly kind: string; readonly label: string | null };
+
+/**
+ * `auth { … }` (`plan-configuration-in-the-file.md` §2.2). `null` is a
+ * clause not written; the compiler fills it with its secure default.
+ * Durations are kept as written, `'7d'`.
+ */
+export interface AuthNode {
+  readonly kind: 'auth';
+  readonly methods: readonly string[];
+  readonly providers: readonly AuthProviderNode[];
+  readonly passkeyName: string | null;
+  readonly provisioning: {
+    readonly mode: 'invite-only' | 'open' | 'domains';
+    readonly domains: readonly string[];
+  } | null;
+  readonly selfServe: boolean | null;
+  readonly guest: { readonly on: boolean; readonly keep: string | null } | null;
+  readonly linking: { readonly on: boolean; readonly window: string | null } | null;
+  readonly secondFactor: string | null;
+  readonly userVerification: string | null;
+  readonly session: {
+    readonly token: string;
+    readonly max: string | null;
+    readonly tenants: readonly [string, string] | null;
+  } | null;
+  readonly remember: {
+    readonly on: boolean;
+    readonly idle: string | null;
+    readonly max: string | null;
+  } | null;
+}
+
 /** Anything `synth()` accepts, in written order. */
-export type Declaration = DomainNode | EntityNode | OpNode | RoutineNode | ReleaseNode;
+export type Declaration =
+  | DomainNode
+  | EntityNode
+  | OpNode
+  | RoutineNode
+  | ReleaseNode
+  | AuthNode;

@@ -75,6 +75,11 @@ how a closed set stops being closed.
 | `unsupported_index` | `index (…)` over a `sealed` field: the stored bytes are an envelope with a fresh nonce, so an index over them orders and matches nothing |
 | `unsupported_unique_key` | a composite `unique` this slice cannot lower |
 | `unsupported_default` | a default outside the closed set the DDL can carry (only literals are lowered) |
+| `auth_unknown_method` | an `auth` method that is not built in and names no `provider` (`definition-language.md`, "Sign-in: the `auth` block") |
+| `auth_unused_provider` | an `auth` `provider` no `methods` line names |
+| `auth_unknown_preset` | a provider preset the host does not ship (`discord`, `github`, `google`, `microsoft`) |
+| `auth_duration_range` | an `auth` duration outside its platform range; the message names the range |
+| `invalid_auth` | any other bad value in the `auth` block: a repeated method, provider or domain, a provider named like a built-in method, a bad domain, an empty `passkeyName`, a session `max` below its `token`, a backwards `tenants` range |
 | `duplicate_secret` | two `secret` lines name one secret. Put every host on one line: `secret llmKey for a.example.com, b.example.com` (`howto-functions.md`) |
 | `invalid_function` | a `function` block the declaration alone can refuse: a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a code path that is absolute, climbs out with `..` or is not `.js`/`.mjs`, a host that is not a DNS name or is listed twice, a secret listed twice, or a limit outside the deployment's ceilings. The message names the line and the rule. Fix the block and apply again (`plan-backend-functions.md` §4.1) |
 

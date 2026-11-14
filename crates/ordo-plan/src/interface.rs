@@ -195,6 +195,58 @@ pub fn interface_document_with(
     value
 }
 
+/// Add the program's sign-in facts under `auth`, and digest again.
+///
+/// `auth` is [`crate::artifact::auth_artifact`]'s section; `None` (a
+/// program with no `auth` block) leaves the document as it was. The key
+/// is an addition, so the version stays `/2` (`plan-configuration-in-the-
+/// file.md` §5.2).
+///
+/// It carries what a sign-in page needs to know: the methods, each
+/// provider's name, preset, kind and label, the provisioning **mode**, and
+/// whether guests, linking and self-serve are on, the second factor level
+/// and user verification. **Never the provisioning domains** (owner,
+/// 2026-11-14, ask 10): the app developer decides what a person sees.
+/// Lifetimes stay out too; they are the server's business.
+pub fn with_auth(mut doc: Value, auth: Option<&Value>) -> Value {
+    let Some(a) = auth else {
+        return doc;
+    };
+    let providers: Vec<Value> = a["providers"]
+        .as_array()
+        .map(|ps| {
+            ps.iter()
+                .map(|p| {
+                    json!({
+                        "name": p["name"],
+                        "preset": p["preset"],
+                        "kind": p["kind"],
+                        "label": p["label"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(m) = doc.as_object_mut() {
+        m.remove("digest");
+        m.insert(
+            "auth".into(),
+            json!({
+                "methods": a["methods"],
+                "providers": providers,
+                "provisioning": a["provisioning"]["mode"],
+                "self_serve": a["self_serve"],
+                "guest": a["guest"]["on"],
+                "linking": a["linking"]["on"],
+                "second_factor": a["second_factor"],
+                "user_verification": a["user_verification"],
+            }),
+        );
+    }
+    doc["digest"] = json!(digest(&doc));
+    doc
+}
+
 /// The descriptor's digest: `sha256(to_bytes(doc))`, first 8 bytes, hex.
 ///
 /// Computed over the document **without** its own `digest` key, which is

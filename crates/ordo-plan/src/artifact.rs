@@ -164,7 +164,45 @@ pub fn program_artifact(schema: &Schema, registry: &Registry) -> Result<Value, S
     if !schema.functions.is_empty() {
         doc["functions"] = Value::Array(function_artifacts(schema));
     }
+    // And for the `auth` block: a program without one keeps its version.
+    if let Some(auth) = auth_artifact(schema) {
+        doc["auth"] = auth;
+    }
     Ok(doc)
+}
+
+/// The program's `auth` block with every default filled in
+/// (`plan-configuration-in-the-file.md` §2.4), or `None` when it has no
+/// block. The file's values: the deployment's ceilings narrow them when
+/// the program runs, and are not here.
+pub fn auth_artifact(schema: &Schema) -> Option<Value> {
+    let v = ordo_schema::auth::AuthValues::resolve(schema.auth.as_ref()?);
+    Some(json!({
+        "methods": v.methods,
+        "providers": v.providers.iter().map(|p| json!({
+            "name": p.name,
+            "preset": p.preset,
+            "kind": p.kind,
+            "label": p.label,
+        })).collect::<Vec<_>>(),
+        "passkey_name": v.passkey_name,
+        "provisioning": { "mode": v.provisioning, "domains": v.domains },
+        "self_serve": v.self_serve,
+        "guest": { "on": v.guest, "keep_secs": v.guest_keep_secs },
+        "linking": { "on": v.linking, "window_secs": v.linking_window_secs },
+        "second_factor": v.second_factor,
+        "user_verification": v.user_verification,
+        "session": {
+            "token_secs": v.session_token_secs,
+            "max_secs": v.session_max_secs,
+            "tenants": v.tenant_token_secs.map(|(lo, hi)| json!({ "min_secs": lo, "max_secs": hi })),
+        },
+        "remember": {
+            "on": v.remember,
+            "idle_secs": v.remember_idle_secs,
+            "max_secs": v.remember_max_secs,
+        },
+    }))
 }
 
 /// Every secret, in name order: its name and the hosts it is bound to,

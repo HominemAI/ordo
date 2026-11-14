@@ -160,7 +160,7 @@ readable, with the same reason.
 language's own refusal, arriving one layer earlier. Nothing is owed until the
 grammar moves.
 
-- `principal`, `client`, `auth`, `policy`, `compliance`, `channel`
+- `principal`, `client`, `policy`, `compliance`, `channel`
   : `definition-language.md` §8's *"All illustrative syntax [lean]: concepts
   settled, file format not final"*. A declaration form **is** the file format.
 - `app` / `page`: `ui-gen.md` §5, whose block set is explicitly still open.
@@ -213,6 +213,22 @@ And the release rule (27aq): `release.member.open()`, `.locked()` and
 `.when(rel.none('invoices', g.eq('owner', MEMBER)), [rel.remove('drafts.author')])`.
 Inside a release rule the guard's subject prints as `$member`; `MEMBER` and
 `CALLER` are the same node, and the position decides the word.
+
+And the sign-in block (`plan-configuration-in-the-file.md` §2). A method
+that is not built in must be a key of `providers`, or the call does not
+typecheck. A clause left out takes the compiler's secure default:
+
+```ts
+const signIn = auth({
+  methods: ['passkey', 'email', 'google'],
+  providers: { google: { preset: 'google' } },
+  provisioning: { domains: ['example.com'] },
+  guest: { on: true, keep: '7d' },
+  secondFactor: 'optional',
+  session: { token: '1h', max: '12h' },
+});
+synth(domain('hal', '1.0.0'), signIn, ...rest);
+```
 
 ## Divergences from the demo page's sketch
 

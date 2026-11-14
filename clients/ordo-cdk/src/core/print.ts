@@ -35,6 +35,7 @@
 
 import type {
   AggNode,
+  AuthNode,
   CondNode,
   Declaration,
   EntityNode,
@@ -516,6 +517,64 @@ function printRelease(r: ReleaseNode): string {
   return [`${head} {`, ...lines, '}'].join('\n');
 }
 
+/**
+ * A domain the parser reads bare: dotted labels that each start with a
+ * letter. Any other is printed in quotes, `"my-co.example"`.
+ */
+const BARE_HOST = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
+
+function onOff(on: boolean): string {
+  return on ? 'on' : 'off';
+}
+
+/**
+ * `auth { … }`, one clause per line in the order of
+ * `AUTH_CLAUSES`. Options follow `on` after a comma.
+ */
+function printAuth(a: AuthNode): string {
+  const lines: string[] = [];
+  if (a.methods.length > 0) lines.push(`methods ${a.methods.join(', ')}`);
+  for (const p of a.providers) {
+    const how = 'preset' in p ? `preset ${p.preset}` : `kind ${p.kind}`;
+    lines.push(`provider ${p.name} ${how}${p.label === null ? '' : `, label ${strLit(p.label)}`}`);
+  }
+  if (a.passkeyName !== null) lines.push(`passkeyName ${strLit(a.passkeyName)}`);
+  if (a.provisioning !== null) {
+    const p = a.provisioning;
+    lines.push(
+      p.mode === 'domains'
+        ? `provisioning domains ${p.domains.map((d) => (BARE_HOST.test(d) ? d : strLit(d))).join(', ')}`
+        : `provisioning ${p.mode}`,
+    );
+  }
+  if (a.selfServe !== null) lines.push(`selfServe ${onOff(a.selfServe)}`);
+  if (a.guest !== null) {
+    lines.push(`guest ${onOff(a.guest.on)}${a.guest.keep ? `, keep ${a.guest.keep}` : ''}`);
+  }
+  if (a.linking !== null) {
+    lines.push(
+      `linking ${onOff(a.linking.on)}${a.linking.window ? `, window ${a.linking.window}` : ''}`,
+    );
+  }
+  if (a.secondFactor !== null) lines.push(`secondFactor ${a.secondFactor}`);
+  if (a.userVerification !== null) lines.push(`userVerification ${a.userVerification}`);
+  if (a.session !== null) {
+    const s = a.session;
+    let line = `session token ${s.token}`;
+    if (s.max) line += `, max ${s.max}`;
+    if (s.tenants) line += `, tenants ${s.tenants[0]} to ${s.tenants[1]}`;
+    lines.push(line);
+  }
+  if (a.remember !== null) {
+    const r = a.remember;
+    let line = `remember ${onOff(r.on)}`;
+    if (r.idle) line += `, idle ${r.idle}`;
+    if (r.max) line += `, max ${r.max}`;
+    lines.push(line);
+  }
+  return ['auth {', ...lines.map((l) => `  ${l}`), '}'].join('\n');
+}
+
 /** One declaration, printed. */
 export function printDeclaration(d: Declaration): string {
   switch (d.kind) {
@@ -529,5 +588,7 @@ export function printDeclaration(d: Declaration): string {
       return printRoutine(d);
     case 'release':
       return printRelease(d);
+    case 'auth':
+      return printAuth(d);
   }
 }

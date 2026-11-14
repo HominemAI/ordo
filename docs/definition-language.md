@@ -3378,8 +3378,9 @@ principal ellanor    { kind: agent }
 
 > **Not built yet [2026-10-04]: the compiler refuses `principal` blocks
 > today** ("`principal` is reserved and not implemented"). The same holds for
-> `client`, `auth`, `channel` and `route` below, and for the `policy` blocks
-> further down. The design text stands.
+> `client`, `channel` and `route` below, and for the `policy` blocks
+> further down. The design text stands. `auth` is built: see "Sign-in: the
+> `auth` block" below.
 
 ### Identity clients (OIDC relying parties) [settled]
 One Ordo deployment, one OIDC issuer (horizontally scaled pods are one logical
@@ -3424,13 +3425,113 @@ Methods are pluggable and per-deployment configurable:
   platform email channel)
 - **Configurable:** OAuth providers (Google, Discord, …) per deployment
 
+The app developer chooses the methods in the `auth` block below. The
+deployment owner sets each provider's client id and secret on the instance,
+never in the file.
+
+### Sign-in: the `auth` block [parsed and checked 2026-11-14; the host reads it in a later step]
+
+The block holds the app developer's sign-in choices
+(`plan-configuration-in-the-file.md` §2). The rule (owner, 2026-11-14): the
+file sets the value, the deployment owner's ceiling wins, and the file can
+tighten and never loosen. A value that cannot change once used is set on the
+instance and never here: the deployment handle, the database, the key
+provider, the apex domain, the relying party id and the listen addresses.
+Credentials stay on the instance too.
+
 ```
 auth {
-  methods  passkey, password, email-otp        # defaults
-  method   google  { client: $GOOGLE_CLIENT }  # opt-in per deployment
-  method   discord { client: $DISCORD_CLIENT }
+  methods           passkey, email, google, work
+  provider google   preset google
+  provider work     kind oidc, label "Work account"
+  passkeyName       "Human Agent Link"
+  provisioning      domains example.com, example.org
+  selfServe         off
+  guest             on, keep 7d
+  linking           on, window 5m
+  secondFactor      optional
+  userVerification  required
+  session           token 1h, max 12h, tenants 15m to 4h
+  remember          on, idle 30d, max none
 }
 ```
+
+Grammar. One clause per line, a keyword then values, commas between list
+items. Clauses go in any order. One block per program.
+
+```text
+auth { <clause> ... }
+clause = methods <method>, ...
+       | provider <name> (preset <preset> | kind oauth2 | kind oidc) [, label "<text>"]
+       | passkeyName "<text>"
+       | provisioning invite-only | open | domains <domain>, ...
+       | selfServe on | off
+       | guest off | on [, keep <duration>]
+       | linking off | on [, window <duration>]
+       | secondFactor off | optional | required-without-passkey | required
+       | userVerification required | preferred
+       | session token <duration> [, max <duration>] [, tenants <duration> to <duration>]
+       | remember off | on [, idle <duration>] [, max <duration> | none]
+method = passkey | password | email | <provider name>
+```
+
+- A duration is `s`, `m`, `h`, `d` or `w`: `30s`, `5m`, `1h`, `30d`.
+- A domain with a hyphen or a label that starts with a digit is quoted:
+  `"my-co.example"`.
+- The presets are `discord`, `github`, `google` and `microsoft`.
+
+What holds when a clause is absent. Each default is the secure one.
+
+| Clause | Default |
+|---|---|
+| `methods` | none: nobody signs in |
+| `passkeyName` | the relying party id |
+| `provisioning` | `invite-only` |
+| `selfServe` | `off` |
+| `guest` | `off` |
+| `linking` | `on`, window 5m |
+| `secondFactor` | `optional` |
+| `userVerification` | `required` |
+| `session` | token 1h, max 12h, tenants inside the deployment's ceilings |
+| `remember` | `on`, idle 30d, max none |
+
+Platform ranges. A value outside one is refused and the refusal names the
+range.
+
+| Value | Range |
+|---|---|
+| `linking … window` | 1m to 15m |
+| `guest … keep` | 1m to 400d |
+| `session token`, both ends of `tenants` | 1m to 1d |
+| `session … max` | 1m to 30d, and not below `token` |
+| `remember … idle`, `max` | 1m to 400d |
+
+Refusals:
+
+| Class | Refused |
+|---|---|
+| `parse_error` | a clause the parser cannot read, or a clause written twice. It points at the clause or the value |
+| `duplicate_auth` | a second `auth` block |
+| `auth_unknown_method` | a method that is not built in and names no `provider` |
+| `auth_unused_provider` | a `provider` no `methods` line names |
+| `auth_unknown_preset` | a preset the host does not ship |
+| `auth_duration_range` | a duration outside its platform range |
+| `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, a bad or repeated domain, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards |
+
+Where the values go:
+
+- The compiled program carries an `auth` section with every default filled
+  in. A program without a block keeps its document and its version.
+- The interface descriptor (`ordo.interface/2`) gains an `auth` key: the
+  methods, each provider's name, preset, kind and label, the provisioning
+  **mode**, and whether guests, linking and self-serve are on, the second
+  factor level and user verification. It never lists the provisioning
+  domains (owner, 2026-11-14). The app developer decides what a person sees.
+- The CDK writes the block with `auth({ … })`.
+
+Not yet: the host still reads sign-in from its settings. Reading the block at
+boot and on apply, the ceilings, and the migration of the old settings are
+the next step of the plan.
 
 ### Access model [settled]
 Definitions declare what exists and what it touches (field-scope manifests,

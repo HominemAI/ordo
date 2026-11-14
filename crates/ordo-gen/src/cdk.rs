@@ -31,7 +31,10 @@
 //! genuinely implemented, can get through both.
 
 use ordo_syntax::token::{DurationUnit, Keyword};
-use ordo_syntax::{functions, AggShape, AGGREGATE_SHAPES, ALLOCATE_MODES};
+use ordo_syntax::{
+    functions, AggShape, ProviderKind, SecondFactor, UserVerification, AGGREGATE_SHAPES,
+    ALLOCATE_MODES, AUTH_BUILT_IN_METHODS, AUTH_CLAUSES, AUTH_PRESETS, PROVISIONING_MODES,
+};
 use serde_json::Value;
 
 use crate::spell;
@@ -40,7 +43,7 @@ use crate::ts::{self, GenFile};
 const LANG_SOURCE: &str = "the parser's own closed tables in `crates/ordo-syntax` \
                            (`Keyword`, `ScalarTy`, `CmpOp`, `TextOp`, `BinOp`, \
                            `DurationUnit`, `functions()`, `AGGREGATE_SHAPES`, \
-                           `ALLOCATE_MODES`)";
+                           `ALLOCATE_MODES`, and the `auth` block's tables)";
 const SCHEMA_SOURCE: &str = "the deployment's `interface.json` (`ordo.interface/2`)";
 
 /// The language layer: the same bytes for every deployment.
@@ -224,8 +227,60 @@ fn vocabulary_file() -> String {
             ts::str_lit(sc.wire),
         ));
     }
-    s.push_str("] as const;\n");
+    s.push_str("] as const;\n\n");
+    s.push_str(&auth_tables());
     s
+}
+
+/// The `auth` block's closed word sets (`ordo_syntax::auth`), which
+/// `src/core/auth.ts` types its builder from.
+fn auth_tables() -> String {
+    fn list<'a>(name: &str, doc: &str, words: impl IntoIterator<Item = &'a str>) -> String {
+        let words: Vec<String> = words.into_iter().map(ts::str_lit).collect();
+        format!(
+            "{}export const {name} = [{}] as const;\n",
+            ts::doc(&[doc.to_string()]),
+            words.join(", ")
+        )
+    }
+    [
+        list(
+            "AUTH_CLAUSES",
+            "The `auth` block's clauses, in the order `synth` prints them.",
+            AUTH_CLAUSES.iter().copied(),
+        ),
+        list(
+            "AUTH_BUILT_IN_METHODS",
+            "The sign-in methods that need no `provider` line.",
+            AUTH_BUILT_IN_METHODS.iter().copied(),
+        ),
+        list(
+            "AUTH_PRESETS",
+            "The provider presets the host ships.",
+            AUTH_PRESETS.iter().map(|(n, _)| *n),
+        ),
+        list(
+            "AUTH_PROVIDER_KINDS",
+            "A provider without a preset is `oauth2` or `oidc`.",
+            ProviderKind::ALL.iter().map(|k| k.as_str()),
+        ),
+        list(
+            "PROVISIONING_MODES",
+            "Who may join without an invitation, strictest first.",
+            PROVISIONING_MODES.iter().copied(),
+        ),
+        list(
+            "SECOND_FACTOR_LEVELS",
+            "How much a second step is asked, loosest first.",
+            SecondFactor::ALL.iter().map(|l| l.as_str()),
+        ),
+        list(
+            "USER_VERIFICATION_LEVELS",
+            "Whether a passkey must check the person.",
+            UserVerification::ALL.iter().map(|l| l.as_str()),
+        ),
+    ]
+    .join("\n")
 }
 
 fn shape_tag(s: AggShape) -> &'static str {

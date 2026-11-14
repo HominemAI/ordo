@@ -1416,6 +1416,11 @@ async fn interface_route(
         &ordo_plan::artifact::entity_artifacts(&loaded.fixture.schema),
         &allowed,
     );
+    // The program's sign-in facts, the same for every asker.
+    let doc = ordo_plan::interface::with_auth(
+        doc,
+        ordo_plan::artifact::auth_artifact(&loaded.fixture.schema).as_ref(),
+    );
     (StatusCode::OK, Json(doc)).into_response()
 }
 

@@ -2,7 +2,7 @@
 //
 // The language's closed vocabularies, and what each word is called here.
 //
-// Source of truth: the parser's own closed tables in `crates/ordo-syntax` (`Keyword`, `ScalarTy`, `CmpOp`, `TextOp`, `BinOp`, `DurationUnit`, `functions()`, `AGGREGATE_SHAPES`, `ALLOCATE_MODES`)
+// Source of truth: the parser's own closed tables in `crates/ordo-syntax` (`Keyword`, `ScalarTy`, `CmpOp`, `TextOp`, `BinOp`, `DurationUnit`, `functions()`, `AGGREGATE_SHAPES`, `ALLOCATE_MODES`, and the `auth` block's tables)
 //
 // This file is the GENERATED half of this package. The hand-written
 // half is under `src/core/` and is versioned by hand; the boundary
@@ -77,7 +77,7 @@ export const KEYWORDS: readonly Word[] = [
   { word: 'page', tag: 'does-not-parse', note: '`page` blocks are `ui-gen.md` §5 with `app`: the binding grammar is normative and the block set is explicitly still open' },
   { word: 'principal', tag: 'does-not-parse', note: '`principal` is under §8\'s [lean] spelling pin; the mechanism is built, the declaration is not fixed' },
   { word: 'client', tag: 'does-not-parse', note: '`client` is under §8\'s [lean] spelling pin, like `principal`: the mechanism is built and the declaration form is not fixed' },
-  { word: 'auth', tag: 'does-not-parse', note: '`auth` is under §8\'s [lean] spelling pin; no declaration form for it parses today' },
+  { word: 'auth', tag: 'offered', note: 'auth' },
   { word: 'policy', tag: 'does-not-parse', note: '`policy` is under §8\'s [lean] spelling pin; no declaration form for it parses today' },
   { word: 'compliance', tag: 'does-not-parse', note: '`compliance` is under §8\'s [lean] spelling pin; no declaration form for it parses today' },
   { word: 'channel', tag: 'does-not-parse', note: '`channel` is under §8\'s [lean] spelling pin. Its semantics are settled and there is no engine mechanism behind it either: the only `channel` in this workspace is the invalidation bus, a different sense of the word' },
@@ -187,3 +187,38 @@ export const SCALARS = [
   { ordo: 'uri', ctor: 'uri', ts: 'string', wire: 'JSON string — an address the platform references and does not hold' },
   { ordo: 'json', ctor: 'json', ts: 'JsonValue', wire: 'any JSON value, carried as JSON; larger or deeper than the deployment\'s limit is `bound_violation`' },
 ] as const;
+
+/**
+ * The `auth` block's clauses, in the order `synth` prints them.
+ */
+export const AUTH_CLAUSES = ['methods', 'provider', 'passkeyName', 'provisioning', 'selfServe', 'guest', 'linking', 'secondFactor', 'userVerification', 'session', 'remember'] as const;
+
+/**
+ * The sign-in methods that need no `provider` line.
+ */
+export const AUTH_BUILT_IN_METHODS = ['passkey', 'password', 'email'] as const;
+
+/**
+ * The provider presets the host ships.
+ */
+export const AUTH_PRESETS = ['discord', 'github', 'google', 'microsoft'] as const;
+
+/**
+ * A provider without a preset is `oauth2` or `oidc`.
+ */
+export const AUTH_PROVIDER_KINDS = ['oauth2', 'oidc'] as const;
+
+/**
+ * Who may join without an invitation, strictest first.
+ */
+export const PROVISIONING_MODES = ['invite-only', 'domains', 'open'] as const;
+
+/**
+ * How much a second step is asked, loosest first.
+ */
+export const SECOND_FACTOR_LEVELS = ['off', 'optional', 'required-without-passkey', 'required'] as const;
+
+/**
+ * Whether a passkey must check the person.
+ */
+export const USER_VERIFICATION_LEVELS = ['required', 'preferred'] as const;

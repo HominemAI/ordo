@@ -1505,3 +1505,5 @@
 {"seq": 1507, "item": "audit-configuration-in-the-syntax", "ask": 0, "at": "2026-11-14T09:25:37Z", "status": "decided", "text": "Also plan out the SDK equivalents as needed for this new \"syntax\"", "source": "page", "read": true}
 {"seq": 1508, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 17, "at": "2026-11-14T09:27:17Z", "status": "open", "text": "I think the point i'm trying to make is that if there were a center of credentials it would be hominem since it spans many apps.", "source": "page", "read": true}
 {"seq": 1509, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 0, "at": "2026-11-14T09:27:36Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1510, "item": "audit-configuration-in-the-syntax", "ask": 5, "at": "2026-11-14T09:48:58Z", "status": "open", "text": "I;m not sure what you mean by stays with the deployment,", "source": "page", "read": true}
+{"seq": 1511, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 19, "at": "2026-11-14T09:49:47Z", "status": "open", "text": "in our current design can auth have its own endpoint?", "source": "page", "read": true}

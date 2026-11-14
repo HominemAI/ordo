@@ -12,6 +12,17 @@ here, and `std.deployment.settings` (G7) answers from it. A test fails when
 the two disagree, so a new setting gets a row here and an entry there in
 the same change.
 
+## The rule: the file first (owner, 2026-11-14)
+
+A setting that is not a credential and not needed before the program is
+applied belongs in the `.ordo` file. A value that must differ per instance of
+the same file (apex domain, origins, database, capacity ceilings) is set on the
+instance, and the file declares the need so the console can show what is
+missing. The file sets the app developer's value; the deployment owner's
+ceiling wins; the file can tighten and never loosen. The rows below are the
+settings as they stand today. `audit-configuration-syntax.md` lists which
+ones move into the file, and in what order.
+
 ## How to read this
 
 The four layers, in order: **Deployment** (the deployment owner, on the server

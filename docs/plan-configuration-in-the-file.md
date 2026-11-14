@@ -163,6 +163,7 @@ A need says that a value must exist. It says nothing about its size. Capacity ce
 | `ordo apply --check` | The list of needs, met or missing. Nothing is applied |
 | `ordo apply` and `std.deployment.apply` | A refusal, `needs_unmet`, listing each unmet need with its setting. The live program stays active |
 | Boot with the stored program | A boot refusal naming the first unmet setting, as today's `BootRefusal::Missing` |
+| Boot log and apply report | The same rows, in words. The console is incidental: a deployment may run without it, so nothing below is the only place a message appears (owner, 2026-11-14, ask 8) |
 | Console, Settings | A section "Needed by the program": each need, met or missing, its settings, its file line |
 | Console, future setup wizard | The missing needs in order, one screen each, from the same rows |
 
@@ -232,7 +233,7 @@ export type SignInMethod = 'passkey' | 'email' | 'google';
 export type Provisioning =
   | { readonly mode: 'invite-only' }
   | { readonly mode: 'open' }
-  | { readonly mode: 'domains'; readonly domains: readonly string[] };
+  | { readonly mode: 'domains' };
 export const declaredAuth: {
   readonly methods: readonly SignInMethod[];
   readonly provisioning: Provisioning;
@@ -244,7 +245,7 @@ export const declaredAuth: {
 The static core changes:
 
 - `signInMethods()` stays the run-time truth, since a ceiling can turn a declared method off. It becomes generic over `SignInMethod`. A method in the answer that the file never declared is `malformed`, since a ceiling only narrows.
-- `GET /auth/methods` adds `provisioning`, with the domains. A page can then say which address works. The SDK's `SignInMethods` gains that field.
+- `GET /auth/methods` adds `provisioning` as the mode alone. The domains stay on the server (owner, 2026-11-14, ask 10): Ordo's basic sign-in page lists none, and the app developer's own page decides what a person sees. A sign-up from an address outside the list is refused with a message that names the rule, not the list.
 - `begin` and `beginTenantSignIn` take `SignInMethod`, so a typo fails to compile.
 - The platform ops table gains `deploymentNeeds()`, typed `NeedRow[]`: `{ need, kind, state: 'met' | 'missing', settings: string[], line: string }`. It is owner-only at the door.
 - A refusal code `set_in_file` and `needs_unmet` join the refusal union, with the clause or the needs as data.
@@ -306,7 +307,7 @@ What sets the pace:
 ## 9. Open questions for the owner
 
 1. Should an unmet need refuse the apply? **Yes. The live program keeps serving, and `ordo apply --check` lists the needs first.** A warning would let a program go live with sign-in that cannot work.
-2. Once the file holds a value, should the setter ops (`setSessionPolicy`, `setGuest`, `setSelfServe`) be retired, with the console editing only ceilings? **Yes. Two writers for one value drift. The console shows the file's value and its line, read-only.**
-3. Should a deployment whose file has no `auth` block keep reading the old settings for one release? **Yes, for one release with a console banner. With a block present, an old setting refuses the boot from the start.**
+2. Once the file holds a value, should the setter ops (`setSessionPolicy`, `setGuest`, `setSelfServe`) be retired, with the console editing only ceilings? **Answered yes, 2026-11-14.** The owner adds: a value that cannot change once used is env-only. The list (deployment handle, database, key provider, apex domain, relying party id, listen addresses) is ask 7 on the board.
+3. Should a deployment whose file has no `auth` block keep reading the old settings for one release? **Answered yes, 2026-11-14.** The banner is the console's copy of a line that is also in the boot log and the apply report. With a block present, an old setting refuses the boot from the start.
 4. Should the compiler derive needs, with the `needs` block only for what it cannot see? **Yes. The file stays the one definition, and most needs are already implied by it.**
-5. Should `GET /auth/methods` list the domains of `provisioning domains`? **Yes. A sign-up page needs them to say which address works, and a sign-in button already reveals as much.**
+5. Should `GET /auth/methods` list the domains of `provisioning domains`? **Answered no, 2026-11-14.** The owner: the sign-in page is the app developer's, who may hide it or gate it with their own logic; Ordo's basic page does not list the domains, and the visuals belong to the developer. The SDK carries the mode alone.

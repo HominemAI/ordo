@@ -2185,7 +2185,11 @@ mod tests {
     }
 
     /// The sections of `docs/settings.md` that hold no deployment setting.
-    const NOT_SETTINGS: [&str; 3] = ["Settings that disagree", "Not traced", "How to read"];
+    /// Doc sections whose rows are not host settings: the prose sections,
+    /// and section 15, the console's and the identity service's own
+    /// settings, which those services read and this registry never lists.
+    const NOT_SETTINGS: [&str; 5] =
+        ["Settings that disagree", "Not traced", "How to read", "The rule", "15 "];
     const DEV: &str = "14 ";
 
     /// The names in a row's first cell: each backticked `ORDO_*` name, and
@@ -2302,7 +2306,7 @@ mod tests {
     fn is_deployment_row(section: &str, built: &str) -> bool {
         !NOT_SETTINGS.iter().any(|s| section.starts_with(s))
             && !section.starts_with(DEV)
-            && !["withdrawn", "planned", "not built"]
+            && !["withdrawn", "planned", "not built", "internal"]
                 .iter()
                 .any(|w| built.starts_with(w))
     }

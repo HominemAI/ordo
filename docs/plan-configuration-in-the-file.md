@@ -24,7 +24,7 @@ The layers stay those of `settings-layers` (24a to 24d): deployment, app develop
   - Also refused, as `invalid_auth`: a method, provider or domain listed twice, a provider named like a built-in method, an empty `passkeyName`, a `tenants` range that runs backwards.
   - A domain with a hyphen, or a label that starts with a digit, is written in quotes.
   - The descriptor gives each provider's preset beside its name, kind and label, so a page can draw the right button.
-  - Not built: the check that `secondFactor required` has a method that can carry a second step. See section 9.
+  - Left for a later check: `secondFactor required` with no method that can carry a second step. Every method today can carry one, so the rule waits until a method that cannot exists.
 - Before the build: `auth` was a reserved keyword in the lexer (`crates/ordo-syntax/src/lexer.rs`) with no parser arm.
 - `docs/definition-language.md` section 8 shows an old sketch: `methods passkey, password, email-otp` and `method google { client: $GOOGLE_CLIENT }`. The sketch puts a client id in the file. The ruling forbids that, so the sketch is replaced.
 - The host builds `AuthConfig` once at boot in `auth_from_env` (`crates/ordo-host/src/runtime.rs`).

@@ -1530,3 +1530,14 @@
 {"seq": 1532, "item": "audit-configuration-in-the-syntax", "ask": 9, "at": "2026-11-14", "status": "decided", "text": "ok - but maybe a better word than needs - is needs  mandatory requirements?", "source": "record", "read": true}
 {"seq": 1533, "item": "audit-configuration-in-the-syntax", "ask": 10, "at": "2026-11-14", "status": "decided", "text": "no? having a login page is an app dev's situiation ffirst off - they can hide it or require some way to access it thAT INVOLVES their own logic. If we provide a basic auth page we should not lsit it - but again the visuals belong to the dev.", "source": "record", "read": true}
 {"seq": 1534, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 21, "at": "2026-11-14", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1535, "item": "audit-configuration-in-the-syntax", "ask": 6, "at": "2026-11-14T10:31:48Z", "status": "open", "text": "refusal should happen during the planning phase thoughts?", "source": "page", "read": true}
+{"seq": 1536, "item": "audit-configuration-in-the-syntax", "ask": 7, "at": "2026-11-14T10:32:00Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1537, "item": "audit-configuration-in-the-syntax", "ask": 9, "at": "2026-11-14T10:33:40Z", "status": "open", "text": "requires or required", "source": "page", "read": true}
+{"seq": 1538, "item": "audit-configuration-in-the-syntax", "ask": 0, "at": "2026-11-14T10:33:49Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1539, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 20, "at": "2026-11-14T10:34:45Z", "status": "open", "text": "ok hominem.ai it is. and for other ones - auth could go through auth.hominem.ai then.", "source": "page", "read": true}
+{"seq": 1540, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 0, "at": "2026-11-14T10:34:49Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1541, "item": "audit-configuration-in-the-syntax", "ask": 7, "at": "2026-11-14", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1542, "item": "audit-configuration-in-the-syntax", "ask": 9, "at": "2026-11-14", "status": "decided", "text": "requires or required", "source": "record", "read": true}
+{"seq": 1543, "item": "rebuild-ellanor-on-ordo-now-to", "ask": 20, "at": "2026-11-14", "status": "decided", "text": "ok hominem.ai it is. and for other ones - auth could go through auth.hominem.ai then.", "source": "record", "read": true}
+{"seq": 1544, "item": "audit-configuration-in-the-syntax", "ask": 6, "at": "2026-11-14T10:37:35Z", "status": "open", "text": "go", "source": "page", "read": true}
+{"seq": 1545, "item": "audit-configuration-in-the-syntax", "ask": 6, "at": "2026-11-14", "status": "decided", "text": "go", "source": "record", "read": true}

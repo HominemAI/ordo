@@ -4,7 +4,7 @@ Date: 2026-11-14. Status: plan, nothing built. Source: `docs/audit-configuration
 
 ## 1. Purpose and the rule
 
-The owner ruled on 2026-11-14 (`audit-configuration-in-the-syntax`, `docs/corpus-rulings.md`): a setting that is not a credential and is not needed before the program is applied is defined in the `.ordo` file. A value that must differ per instance of the same file (apex domain, origins, database, capacity ceilings) is set on the instance. The file declares that need, so the console can show what is missing. The file sets the app developer's value. The deployment owner's ceiling wins. The file can tighten and never loosen. The owner approved this order: the `auth` block, then the `needs` declaration, then gaps 3 to 10 as one batch, each with its SDK equivalent. This plan covers the first two in full and outlines the batch.
+The owner ruled on 2026-11-14 (`audit-configuration-in-the-syntax`, `docs/corpus-rulings.md`): a setting that is not a credential and is not needed before the program is applied is defined in the `.ordo` file. A value that must differ per instance of the same file (apex domain, origins, database, capacity ceilings) is set on the instance. The file declares that need, so the console can show what is missing. The file sets the app developer's value. The deployment owner's ceiling wins. The file can tighten and never loosen. The owner approved this order: the `auth` block, then the `requires` declaration, then gaps 3 to 10 as one batch, each with its SDK equivalent. This plan covers the first two in full and outlines the batch.
 
 Three terms used below:
 
@@ -105,14 +105,16 @@ Notes on the table:
 - At boot the host builds `AuthApp` from the stored active program, with the same function the apply uses. One function, two callers, so boot and apply cannot disagree.
 - The tenant and person layers keep their ops and their resolution order: tenant, else file, else deployment.
 
-## 3. The `needs` declaration
+## 3. The `requires` declaration
+
+> **Renamed 2026-11-14.** The owner chose `requires` over `needs` (ask 9). The text below says `requires` everywhere; an entry is a mandatory requirement, and an unmet one refuses the change. The env-only list is settled (ask 7): the deployment handle, the database, the key provider, the apex domain, the relying party id and the listen addresses are never in the file.
 
 ### 3.1 Syntax
 
-`needs` heads a declaration only at the start of a top-level line, like `function` and `secret`. It is not a reserved word, so a field may still be called `needs`.
+`requires` heads a declaration only at the start of a top-level line, like `function` and `secret`. It is not a reserved word, so a field may still be called `requires`.
 
 ```
-needs {
+requires {
   apex
   origins
   publicUrl
@@ -127,14 +129,14 @@ needs {
 Grammar:
 
 ```
-needs { <need> ... }
+requires { <need> ... }
 need = apex | origins | publicUrl | database | mail | blobs
      | secret <name> | provider <name>
 ```
 
-### 3.2 Derived needs
+### 3.2 Derived requirements
 
-Most needs follow from the file. The compiler derives them and the block adds only what it cannot see.
+Most requirements follow from the file. The compiler derives them and the block adds only what it cannot see.
 
 | Need | Derived from | Met by |
 |---|---|---|
@@ -160,14 +162,14 @@ A need says that a value must exist. It says nothing about its size. Capacity ce
 
 | Where | What the deployment owner sees |
 |---|---|
-| `ordo apply --check` | The list of needs, met or missing. Nothing is applied |
-| `ordo apply` and `std.deployment.apply` | A refusal, `needs_unmet`, listing each unmet need with its setting. The live program stays active |
+| `ordo plan` | The requirements, met or missing, each unmet one as a refusal (owner, 2026-11-14, ask 6: the check belongs to the planning phase). Nothing is applied |
+| `ordo apply` and `std.deployment.apply` | A refusal, `requirements_unmet`, listing each unmet need with its setting. The live program stays active |
 | Boot with the stored program | A boot refusal naming the first unmet setting, as today's `BootRefusal::Missing` |
 | Boot log and apply report | The same rows, in words. The console is incidental: a deployment may run without it, so nothing below is the only place a message appears (owner, 2026-11-14, ask 8) |
 | Console, Settings | A section "Needed by the program": each need, met or missing, its settings, its file line |
-| Console, future setup wizard | The missing needs in order, one screen each, from the same rows |
+| Console, future setup wizard | The missing requirements in order, one screen each, from the same rows |
 
-A new owner-only op, `std.deployment.needs`, answers the rows the console shows. It reads the stored program and the process environment. The registry (`ordo_host::settings::REGISTRY`) gains a `need` column, so a setting row can say which need it meets.
+A new owner-only op, `std.deployment.requirements`, answers the rows the console shows. It reads the stored program and the process environment. The registry (`ordo_host::settings::REGISTRY`) gains a `need` column, so a setting row can say which need it meets.
 
 A deployment never runs with an unmet need. So a public page never sees "incomplete". It sees the methods that work.
 
@@ -209,18 +211,18 @@ const signIn = auth({
   secondFactor: 'optional',
   session: { token: '1h', max: '12h' },
 });
-const required = needs(['publicUrl', { secret: 'llmKey' }]);
+const required = requires(['publicUrl', { secret: 'llmKey' }]);
 synth(domain('hal', '1.0.0'), signIn, required, ...rest);
 ```
 
-A method that names no provider fails to typecheck. `synth` prints canonical `auth` and `needs` text, so the round trip test holds.
+A method that names no provider fails to typecheck. `synth` prints canonical `auth` and `requires` text, so the round trip test holds.
 
 ### 5.2 The interface descriptor
 
 `ordo.interface/2` (`crates/ordo-plan/src/interface.rs`) gains 2 additive keys. They are additions, so the version stays `/2`.
 
 - `auth`: the declared methods; each provider's name, label and kind; the provisioning mode and its domains; whether guests, linking and self-serve are on; the second factor level; user verification.
-- `needs`: the need names and kinds, derived and declared. No setting value.
+- `requires`: the need names and kinds, derived and declared. No setting value.
 
 `ordo gen ts` works offline from the file. So the descriptor states the file's values. The deployment's ceilings may narrow them at run time.
 
@@ -247,8 +249,8 @@ The static core changes:
 - `signInMethods()` stays the run-time truth, since a ceiling can turn a declared method off. It becomes generic over `SignInMethod`. A method in the answer that the file never declared is `malformed`, since a ceiling only narrows.
 - `GET /auth/methods` adds `provisioning` as the mode alone. The domains stay on the server (owner, 2026-11-14, ask 10): Ordo's basic sign-in page lists none, and the app developer's own page decides what a person sees. A sign-up from an address outside the list is refused with a message that names the rule, not the list.
 - `begin` and `beginTenantSignIn` take `SignInMethod`, so a typo fails to compile.
-- The platform ops table gains `deploymentNeeds()`, typed `NeedRow[]`: `{ need, kind, state: 'met' | 'missing', settings: string[], line: string }`. It is owner-only at the door.
-- A refusal code `set_in_file` and `needs_unmet` join the refusal union, with the clause or the needs as data.
+- The platform ops table gains `deploymentRequirements()`, typed `RequirementRow[]`: `{ need, kind, state: 'met' | 'missing', settings: string[], line: string }`. It is owner-only at the door.
+- A refusal code `set_in_file` and `requirements_unmet` join the refusal union, with the clause or the requirements as data.
 
 ### 5.4 What `ordo-react` gets
 
@@ -267,12 +269,12 @@ The static core changes:
 
 | Part | Tests |
 |---|---|
-| Parser | Golden parse of the full example. One refusal per bad clause, with its span. `needs` as a field name still parses. `auth` leaves the reserved refusal tests |
+| Parser | Golden parse of the full example. One refusal per bad clause, with its span. `requires` as a field name still parses. `auth` leaves the reserved refusal tests |
 | Schema | Undeclared provider. Unused provider. Unknown preset. Duration outside the platform range, naming the range. Derived needs for each row of 3.2 |
 | Host apply | A file value above a ceiling is held and the report names the ceiling. An unmet need refuses the apply and the live program keeps serving. Methods change on apply without a restart. The tenant layer still resolves over the file. Boot and apply build the same `AuthApp` |
 | Host migration | Each removed setting with a block refuses the boot, naming setting, clause and ceiling. Without a block the old settings still work for one release. `ordo config export` round-trips to the same effective config |
 | Settings registry | `the_registry_and_the_settings_doc_agree` with the new ceilings. The `need` column matches 3.2 |
-| One interface | Each service client's `ready()` error carries its cause. The needs check calls only those |
+| One interface | Each service client's `ready()` error carries its cause. The requirements check calls only those |
 | Console e2e | Sign-in shows each value with source `file` and its line. Settings shows a missing need, then met after the setting is added |
 | SDK | `crates/ordo-gen/tests/generated_files.rs` byte-identical with `auth.ts`. A type test that `begin('discord')` fails to compile when undeclared. Vitest for the new `/auth/methods` field and both refusal codes |
 | CDK | `synth` of the builders equals the hand-written example. Vocabulary test covers the new keywords |
@@ -284,7 +286,7 @@ The static core changes:
 | 1a | M | `auth` parser arm, schema checks, artifact section, CDK builder |
 | 1b | L | Host: split `AuthConfig`, live swap on apply, ceilings, migration refusals, `ordo config export` |
 | 1c | M | Console Sign-in sources, descriptor key, generated `auth.ts`, `ordo-react` hooks |
-| 2 | M | `needs` parse and derivation, `ready()` per client, `needs_unmet`, `std.deployment.needs`, console section |
+| 2 | M | `requires` parse and derivation, `ready()` per client, `requirements_unmet`, `std.deployment.requirements`, console section |
 | 3 | L per 3 or 4 gaps | The batch in the appendix |
 
 What sets the pace:
@@ -306,8 +308,8 @@ What sets the pace:
 
 ## 9. Open questions for the owner
 
-1. Should an unmet need refuse the apply? **Yes. The live program keeps serving, and `ordo apply --check` lists the needs first.** A warning would let a program go live with sign-in that cannot work.
+1. Should an unmet requirement refuse the apply? **Answered 2026-11-14: the check runs in the planning phase.** `ordo plan` lists each unmet requirement as a refusal, apply runs the same check before it changes anything, and the live program keeps serving.
 2. Once the file holds a value, should the setter ops (`setSessionPolicy`, `setGuest`, `setSelfServe`) be retired, with the console editing only ceilings? **Answered yes, 2026-11-14.** The owner adds: a value that cannot change once used is env-only. The list (deployment handle, database, key provider, apex domain, relying party id, listen addresses) is ask 7 on the board.
 3. Should a deployment whose file has no `auth` block keep reading the old settings for one release? **Answered yes, 2026-11-14.** The banner is the console's copy of a line that is also in the boot log and the apply report. With a block present, an old setting refuses the boot from the start.
-4. Should the compiler derive needs, with the `needs` block only for what it cannot see? **Yes. The file stays the one definition, and most needs are already implied by it.**
+4. Should the compiler derive needs, with the `requires` block only for what it cannot see? **Yes. The file stays the one definition, and most needs are already implied by it.**
 5. Should `GET /auth/methods` list the domains of `provisioning domains`? **Answered no, 2026-11-14.** The owner: the sign-in page is the app developer's, who may hide it or gate it with their own logic; Ordo's basic page does not list the domains, and the visuals belong to the developer. The SDK carries the mode alone.

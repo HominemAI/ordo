@@ -21,6 +21,9 @@
 //!
 //! The console import (6.1) and its RP ID warning (6.2): [`import`].
 //!
+//! Many deployments in one service, each with its own members, client
+//! origins and return URLs: [`deployments`].
+//!
 //! Step 2: the service's own page ([`page`]): sign-up by link, sign-in,
 //! CLI approval, and the account (passkeys, recovery codes).
 
@@ -28,6 +31,7 @@ pub mod audit;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod deployments;
 pub mod error;
 pub mod flows;
 pub mod import;

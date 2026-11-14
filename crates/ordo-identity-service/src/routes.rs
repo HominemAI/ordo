@@ -7,10 +7,11 @@
 //! | `GET /.well-known/ordo-audit-keys.json` | anyone | the audit checkpoint keys |
 //! | `POST /join/begin`, `/join/finish` | invite holder | sign up by invite link (5.3) |
 //! | `POST /sign-in/begin`, `/sign-in/finish` | anyone | passkey sign-in (5.4) |
+//! | `POST /sign-in/return` | the page | `{deployment?, return}`: where sign-in may send the browser back to, or `return_refused` |
 //! | `POST /recover` | code holder | recovery code sign-in |
-//! | `POST /token` | session | `{aud}`: a token (5.4, 5.5) |
+//! | `POST /token` | session | `{aud}`: a token for the service's own deployment or a registered one the person is a member of (5.4, 5.5) |
 //! | `POST /sessions/end` | session | sign out |
-//! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it |
+//! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it; `aud` in the finish body names the deployment, default the service's own |
 //! | `POST /passkeys/begin`, `/passkeys/finish` | browser session | enrol another passkey |
 //! | `POST /recovery-codes` | browser session | a new set of recovery codes |
 //! | `POST /me` | browser session | who is signed in, their passkeys, codes left (the account page) |
@@ -22,6 +23,13 @@
 //! | `GET /people`, `POST /people/{id}/end` | bearer | people (5.7) |
 //! | `GET /machine-keys`, `POST /machine-keys`, `POST /machine-keys/{id}/end` | bearer | machine keys |
 //! | `GET /audit?before=&limit=` | bearer | the audit log, newest first, and whether the chain checks out now (plan 7) |
+//! | `GET /deployments`, `POST /deployments`, `POST /deployments/{handle}/end` | bearer, the service's own | the deployments registered here ([`crate::deployments`]) |
+//! | `GET /deployments/{handle}/members`, `POST /deployments/{handle}/members`, `POST /deployments/{handle}/members/{person}/end` | bearer | a deployment's members |
+//!
+//! A bearer token for a registered deployment reaches that deployment's
+//! people and invites only: its members, invites into it, ending a
+//! membership. Machine keys, the audit log and the registry answer the
+//! service's own token alone (`home_only`).
 //!
 //! Bodies are JSON objects; binary fields are base64url, as the console's.
 //!
@@ -32,11 +40,12 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, ORIGIN, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ordo_identity::origin::Origin;
 use ordo_identity::webauthn::b64url_decode;
 use ordo_identity::{ChallengeId, CompleteRequest};
 use serde_json::{json, Value};
@@ -48,7 +57,7 @@ use crate::server::{Service, JWKS_MAX_AGE_SECS};
 use crate::sessions::Opened;
 use crate::throttle::Source;
 use crate::token::Issued;
-use crate::{invites, machine, people};
+use crate::{deployments, invites, machine, people};
 
 /// An answer: a JSON body, and a session cookie to set or clear.
 struct Reply {
@@ -133,6 +142,14 @@ fn signed_in(s: &Service, person: &str, opened: &Opened, mut body: Value) -> Rep
     }
 }
 
+/// The page a browser call came from, when it sent one.
+fn origin_of(headers: &HeaderMap) -> Option<Origin> {
+    headers
+        .get(ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .and_then(Origin::parse)
+}
+
 async fn caller(s: &Service, headers: &HeaderMap) -> Result<Caller, IdentityError> {
     let token = headers
         .get(AUTHORIZATION)
@@ -152,6 +169,7 @@ pub(crate) fn routes() -> Router<Service> {
         .route("/join/finish", post(join_finish))
         .route("/sign-in/begin", post(sign_in_begin))
         .route("/sign-in/finish", post(sign_in_finish))
+        .route("/sign-in/return", post(sign_in_return))
         .route("/recover", post(recover))
         .route("/token", post(token))
         .route("/sessions/end", post(sign_out))
@@ -176,6 +194,19 @@ pub(crate) fn routes() -> Router<Service> {
         )
         .route("/machine-keys/{id}/end", post(machine_key_end))
         .route("/audit", get(audit_page))
+        .route(
+            "/deployments",
+            get(deployments_list).post(deployments_register),
+        )
+        .route("/deployments/{handle}/end", post(deployment_end))
+        .route(
+            "/deployments/{handle}/members",
+            get(members_list).post(member_add),
+        )
+        .route(
+            "/deployments/{handle}/members/{person}/end",
+            post(member_end),
+        )
 }
 
 async fn live() -> Json<Value> {
@@ -283,6 +314,21 @@ async fn sign_in_finish(State(s): State<Service>, headers: HeaderMap, body: Byte
     )
 }
 
+/// Where the page may send the browser once signed in. A refusal sends
+/// it to the account page instead.
+async fn sign_in_return(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
+    respond(
+        async {
+            s.origin_ok(&headers)?;
+            let b = parse(&body)?;
+            let deployment = b.get("deployment").and_then(Value::as_str);
+            let to = s.return_to(deployment, text(&b, "return")?)?;
+            Ok(Reply::json(json!({ "to": to })))
+        }
+        .await,
+    )
+}
+
 async fn recover(
     State(s): State<Service>,
     from: Source,
@@ -312,7 +358,9 @@ async fn token(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Res
         async {
             let b = parse(&body)?;
             let secret = s.secret(&headers, &b)?;
-            let issued = s.token(&secret, text(&b, "aud")?).await?;
+            let issued = s
+                .token_from(&secret, text(&b, "aud")?, origin_of(&headers).as_ref())
+                .await?;
             Ok(Reply::json(token_json(&issued)))
         }
         .await,
@@ -360,7 +408,11 @@ async fn touch_finish(State(s): State<Service>, headers: HeaderMap, body: Bytes)
         async {
             let b = parse(&body)?;
             let live = session(&s, &headers, &b).await?;
-            let issued = s.touch_finish(&live, assertion(&b)?).await?;
+            let own = s.config().audience();
+            let aud = b.get("aud").and_then(Value::as_str).unwrap_or(&own);
+            let issued = s
+                .touch_finish_for(&live, assertion(&b)?, aud, origin_of(&headers).as_ref())
+                .await?;
             let mut out = token_json(&issued);
             out["touchedAt"] = json!(issued.claims.touched_at);
             Ok(Reply::json(out))
@@ -548,8 +600,8 @@ async fn machine_complete(State(s): State<Service>, from: Source, body: Bytes) -
 async fn invites_list(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
-            let list = invites::list(s.store().pool(), s.handle(), s.now()).await?;
+            let c = caller(&s, &headers).await?;
+            let list = invites::list(s.store().pool(), s.handle(), s.scope_of(&c), s.now()).await?;
             Ok(Reply::json(json!({ "invites": list })))
         }
         .await,
@@ -570,11 +622,21 @@ async fn invites_create(State(s): State<Service>, headers: HeaderMap, body: Byte
                 }
             }
             let label = b.get("label").and_then(Value::as_str).unwrap_or("");
-            let m = s.invite(c.actor(), label).await?;
+            // A registered deployment's token invites into it; the
+            // service's own may name any registered deployment.
+            let target = match s.scope_of(&c) {
+                Some(t) => Some(t.to_string()),
+                None => b
+                    .get("deployment")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            let m = s.invite_into(c.actor(), label, target.as_deref()).await?;
             Ok(Reply::json(json!({
                 "id": m.id,
                 "link": m.link,
                 "expiresAt": m.expires_at,
+                "deployment": target.unwrap_or_else(|| s.handle().to_string()),
             })))
         }
         .await,
@@ -590,7 +652,7 @@ async fn invite_revoke(
         async {
             let c = caller(&s, &headers).await?;
             c.may_admin(s.now())?;
-            s.revoke_invite(c.actor(), &id).await?;
+            s.revoke_invite_in(c.actor(), &id, s.scope_of(&c)).await?;
             Ok(Reply::json(json!({ "revoked": id })))
         }
         .await,
@@ -600,9 +662,12 @@ async fn invite_revoke(
 async fn people_list(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
-            let list: Vec<Value> = people::list(s.store().pool(), s.handle())
-                .await?
+            let c = caller(&s, &headers).await?;
+            let found = match s.scope_of(&c) {
+                None => people::list(s.store().pool(), s.handle()).await?,
+                Some(t) => deployments::members(s.store().pool(), s.handle(), t).await?,
+            };
+            let list: Vec<Value> = found
                 .into_iter()
                 .map(|p| {
                     json!({
@@ -629,6 +694,12 @@ async fn person_end(
         async {
             let c = caller(&s, &headers).await?;
             c.may_admin(s.now())?;
+            // A registered deployment's token ends the membership, never
+            // the account.
+            if let Some(t) = s.scope_of(&c) {
+                s.end_member(c.actor(), t, &id).await?;
+                return Ok(Reply::json(json!({ "ended": id, "deployment": t })));
+            }
             let e = s.end_person(c.actor(), &id).await?;
             Ok(Reply::json(json!({
                 "ended": id,
@@ -644,7 +715,14 @@ async fn person_end(
 async fn machine_keys_list(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
+            let c = caller(&s, &headers).await?;
+            // Machine keys are the service's own: a registered deployment's
+            // console sees none, and where they are managed.
+            if !c.home {
+                return Ok(Reply::json(
+                    json!({ "machineKeys": [], "managedAt": s.handle() }),
+                ));
+            }
             let list = machine::list(s.store().pool(), s.handle()).await?;
             Ok(Reply::json(json!({ "machineKeys": list })))
         }
@@ -660,6 +738,7 @@ async fn machine_keys_create(
     respond(
         async {
             let c = caller(&s, &headers).await?;
+            s.home_only(&c, "making a machine key")?;
             c.may_write(s.now())?;
             let b = parse(&body)?;
             let public = match b.get("publicKey").and_then(Value::as_str) {
@@ -700,6 +779,7 @@ async fn machine_key_end(
     respond(
         async {
             let c = caller(&s, &headers).await?;
+            s.home_only(&c, "ending a machine key")?;
             c.may_admin(s.now())?;
             let sessions = s.end_machine_key(c.actor(), &id).await?;
             Ok(Reply::json(json!({ "ended": id, "sessions": sessions })))
@@ -718,7 +798,8 @@ async fn audit_page(
 ) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "reading the audit log")?;
             let number = |k: &str| -> Result<Option<u64>, IdentityError> {
                 q.get(k)
                     .map(|v| {
@@ -756,6 +837,147 @@ async fn audit_page(
                 })
                 .collect();
             Ok(Reply::json(json!({ "entries": entries, "verified": verified })))
+        }
+        .await,
+    )
+}
+
+// ─────────────────────────── the registry ───────────────────────────
+
+async fn deployments_list(State(s): State<Service>, headers: HeaderMap) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "listing the registered deployments")?;
+            let list: Vec<Value> = deployments::list(s.store().pool(), s.handle())
+                .await?
+                .iter()
+                .map(deployments::Registered::json)
+                .collect();
+            Ok(Reply::json(
+                json!({ "home": s.handle(), "deployments": list }),
+            ))
+        }
+        .await,
+    )
+}
+
+/// Register a deployment: `{handle, clientOrigins, returnUrls?}`. An
+/// admin of the service's own deployment, with a fresh touch, or a machine
+/// key holding the `deployment` grant (the provisioner key made from
+/// `ORDO_IDENTITY_PROVISIONER_KEY`).
+async fn deployments_register(
+    State(s): State<Service>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "registering a deployment")?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let asked = deployments::Registration::from_body(&b)?;
+            let made = s.register_deployment(c.actor(), &asked).await?;
+            Ok(Reply::json(made.json()))
+        }
+        .await,
+    )
+}
+
+async fn deployment_end(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "ending a deployment")?;
+            c.may_admin(s.now())?;
+            s.end_deployment(c.actor(), &handle).await?;
+            Ok(Reply::json(json!({ "ended": handle })))
+        }
+        .await,
+    )
+}
+
+/// The service's own token reaches every deployment's members; a
+/// registered deployment's token reaches its own only.
+fn may_reach(s: &Service, c: &Caller, handle: &str) -> Result<(), IdentityError> {
+    match s.scope_of(c) {
+        Some(own) if own != handle => Err(IdentityError::UnknownDeployment(handle.to_string())),
+        _ => Ok(()),
+    }
+}
+
+async fn members_list(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            let list: Vec<Value> = deployments::members(s.store().pool(), s.handle(), &handle)
+                .await?
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "displayName": p.display_name,
+                        "role": p.role,
+                        "since": p.created_at,
+                        "endedAt": p.ended_at,
+                    })
+                })
+                .collect();
+            Ok(Reply::json(
+                json!({ "deployment": handle, "members": list }),
+            ))
+        }
+        .await,
+    )
+}
+
+/// `{person}`: make an account a member of this deployment.
+async fn member_add(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let person = text(&b, "person")?;
+            s.add_member(c.actor(), &handle, person).await?;
+            Ok(Reply::json(
+                json!({ "deployment": handle, "member": person }),
+            ))
+        }
+        .await,
+    )
+}
+
+async fn member_end(
+    State(s): State<Service>,
+    Path((handle, person)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            c.may_admin(s.now())?;
+            s.end_member(c.actor(), &handle, &person).await?;
+            Ok(Reply::json(
+                json!({ "deployment": handle, "ended": person }),
+            ))
         }
         .await,
     )

@@ -11,7 +11,7 @@
 //! admin routes with a deployment token as the bearer.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::{Request, State};
@@ -24,6 +24,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use ordo_identity::ceremony::MemoryCeremonyStore;
 use ordo_identity::clock::Clock;
 use ordo_identity::origin::Origin;
 use ordo_identity::passkey::PasskeyProvider;
@@ -33,6 +34,7 @@ use ordo_identity::Argon2idHasher;
 
 use crate::audit;
 use crate::config::{IdentityConfig, KEY_FILE_ENV, LISTEN_ENV};
+use crate::deployments::{self, Registered};
 use crate::error::IdentityError;
 use crate::import::ImportStep;
 use crate::invites::{self, Minted, FIRST_BOOT};
@@ -80,12 +82,23 @@ pub(crate) struct Inner {
     pub(crate) store: Store,
     pub(crate) keys: KeyRing,
     pub(crate) clock: Clock,
-    pub(crate) allowed: Vec<Origin>,
+    /// The service's own origin, `ORDO_IDENTITY_CLIENT_ORIGINS` and every
+    /// registered deployment's client origins: who may call from a
+    /// browser. Rebuilt with [`Service::refresh_deployments`].
+    pub(crate) allowed: RwLock<Vec<Origin>>,
+    /// The deployments registered here, as last read
+    /// ([`Service::refresh_deployments`]): the CORS list and the return
+    /// URL check read it. Token issuing reads the database instead, so an
+    /// ended deployment gets no new token at once.
+    pub(crate) registered: RwLock<Vec<Registered>>,
     /// Every ceremony but the touch: the service's own origin only.
     pub(crate) provider: Arc<PasskeyProvider>,
     /// The touch: the service's origin and each client origin under the
-    /// RP ID ([`crate::passkeys::ceremony_origins`]).
-    pub(crate) touch_provider: Arc<PasskeyProvider>,
+    /// RP ID ([`crate::passkeys::ceremony_origins`]), registered
+    /// deployments' included. Rebuilt over the same ceremony store when
+    /// the registry changes.
+    pub(crate) touch_provider: RwLock<Arc<PasskeyProvider>>,
+    pub(crate) touch_ceremonies: Arc<MemoryCeremonyStore>,
     pub(crate) hasher: Arc<dyn PasswordHasher>,
     pub(crate) machines: MachineSignIn,
 }
@@ -142,25 +155,87 @@ impl Service {
             &cfg.rp_id,
             std::slice::from_ref(&cfg.origin),
         )?;
+        let touch_ceremonies = Arc::new(MemoryCeremonyStore::new());
         let touch_origins =
             crate::passkeys::ceremony_origins(&cfg.rp_id, &cfg.origin, &cfg.client_origins);
-        let touch_provider =
-            crate::passkeys::provider(store.pool(), &cfg.deployment, &cfg.rp_id, &touch_origins)?;
-        let mut allowed = cfg.client_origins.clone();
-        if let Some(own) = Origin::parse(&cfg.origin) {
-            allowed.push(own);
-        }
-        Ok(Service(Arc::new(Inner {
+        let touch_provider = crate::passkeys::provider_sharing(
+            store.pool(),
+            &cfg.deployment,
+            &cfg.rp_id,
+            &touch_origins,
+            touch_ceremonies.clone(),
+        )?;
+        let service = Service(Arc::new(Inner {
             cfg,
             store,
             keys,
             clock: opts.clock,
-            allowed,
+            allowed: RwLock::new(Vec::new()),
+            registered: RwLock::new(Vec::new()),
             provider: Arc::new(provider),
-            touch_provider: Arc::new(touch_provider),
+            touch_provider: RwLock::new(Arc::new(touch_provider)),
+            touch_ceremonies,
             hasher: opts.hasher,
             machines: MachineSignIn::default(),
-        })))
+        }));
+        service.refresh_deployments().await?;
+        Ok(service)
+    }
+
+    /// Read the registered deployments again and rebuild what depends on
+    /// them: the browser origins allowed and the touch's relying party.
+    /// Runs at boot, each minute, and after this process registers or ends
+    /// one, so a host command's change is served within a minute.
+    pub async fn refresh_deployments(&self) -> Result<(), IdentityError> {
+        let cfg = &self.0.cfg;
+        let list = deployments::list(self.0.store.pool(), &cfg.deployment).await?;
+        let mut clients = cfg.client_origins.clone();
+        for d in &list {
+            for o in &d.client_origins {
+                if !clients.contains(o) {
+                    clients.push(o.clone());
+                }
+            }
+        }
+        let touch_origins = crate::passkeys::ceremony_origins(&cfg.rp_id, &cfg.origin, &clients);
+        let touch = crate::passkeys::provider_sharing(
+            self.0.store.pool(),
+            &cfg.deployment,
+            &cfg.rp_id,
+            &touch_origins,
+            self.0.touch_ceremonies.clone(),
+        )?;
+        let mut allowed = clients;
+        if let Some(own) = Origin::parse(&cfg.origin) {
+            allowed.push(own);
+        }
+        if let Ok(mut a) = self.0.allowed.write() {
+            *a = allowed;
+        }
+        if let Ok(mut t) = self.0.touch_provider.write() {
+            *t = Arc::new(touch);
+        }
+        if let Ok(mut r) = self.0.registered.write() {
+            *r = list;
+        }
+        Ok(())
+    }
+
+    /// The registered deployments as last read.
+    pub fn registered(&self) -> Vec<Registered> {
+        self.0
+            .registered
+            .read()
+            .map(|r| r.clone())
+            .unwrap_or_default()
+    }
+
+    /// The touch's provider now.
+    pub(crate) fn touch_provider(&self) -> Arc<PasskeyProvider> {
+        match self.0.touch_provider.read() {
+            Ok(t) => t.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     /// Before serving: first the console import (6.1), then, on a
@@ -306,6 +381,7 @@ impl Service {
     pub async fn tick(&self) -> Result<(), IdentityError> {
         let now = self.now();
         self.0.keys.tick(self.0.store.pool(), now).await?;
+        self.refresh_deployments().await?;
         audit::checkpoint_if_due(self.0.store.pool(), self.handle(), &self.0.keys, now).await?;
         Ok(())
     }
@@ -342,9 +418,15 @@ impl Service {
                 e,
             )
         })?;
+        let others: Vec<String> = self.registered().into_iter().map(|d| d.handle).collect();
         eprintln!(
-            "ordo-identity-service: listening on {addr} for deployment `{}`, issuer {}",
+            "ordo-identity-service: listening on {addr} for deployment `{}`{}, issuer {}",
             self.handle(),
+            if others.is_empty() {
+                String::new()
+            } else {
+                format!(" and registered deployments `{}`", others.join("`, `"))
+            },
             self.0.cfg.origin
         );
         let ticker = self.clone();
@@ -435,7 +517,8 @@ impl Service {
     fn allowed_origin(&self, headers: &HeaderMap) -> Option<String> {
         let sent = headers.get(ORIGIN)?.to_str().ok()?;
         let origin = Origin::parse(sent)?;
-        self.0.allowed.contains(&origin).then(|| sent.to_string())
+        let allowed = self.0.allowed.read().ok()?;
+        allowed.contains(&origin).then(|| sent.to_string())
     }
 
     /// A call that may come from a browser: an `Origin`, when sent, must be

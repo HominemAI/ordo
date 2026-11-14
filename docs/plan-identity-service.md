@@ -682,8 +682,47 @@ the change.
   (`ordo_identity::oidc`, `oauth2`); wiring it to the service is a later M.
 - Sending invite links by mail. Offered once mail is set up.
 - A support window for Ordo Cloud (`support-window`, filed).
-- Many deployments in one identity service. The handle column is there;
-  the screens and routes for a list are the private provisioning service's.
+- Screens for many deployments. The routes are built (below); a web page
+  listing them is not.
+- Machine keys for a registered deployment. Machine keys stay with the
+  service's own deployment.
+- Reauth in a console page whose host is outside the service's RP ID.
+  Related Origin Requests could allow it; not built.
+- Moving people from a deployment's own service to a shared one. It is a
+  new relying party, so each person joins again by invite.
+
+### 11.1 Many deployments in one service, built 2026-11-14
+
+The owner's go: "lets build the shared auth". One service at
+`https://auth.hominem.ai`; `hal` and the `ordo` test instance sign in
+there. Code: `crates/ordo-identity-service/src/deployments.rs`; tests:
+`tests/shared.rs`; how to: `howto-identity.md` section 14.
+
+- The service's own handle is its home. Its people are accounts: one
+  passkey, one session, every deployment.
+- Migration 4: `deployments` (handle, client origins, return URLs),
+  `deployment_members`, `people.home`, `invites.target`. Every person
+  before it keeps home access.
+- `POST /token` and `/touch/finish` issue for the home or a live
+  registered deployment. The person must be a member, and a browser page
+  must be one of that deployment's client origins. The token says who;
+  the deployment's members say who may.
+- `POST /sign-in/return` checks a return address against the named
+  deployment's list. The sign-in page asks it before it sends the browser
+  on.
+- A registered deployment's token reaches its own members and invites.
+  Ending a person from it ends the membership, never the account.
+  Machine keys, the audit log and the registry answer the home's token
+  alone.
+- Registering: `POST /deployments` (an admin with a fresh reauth, or the
+  provisioner's machine key) or `ordo-identity-service deployment add` on
+  the host.
+- The supervisor starts no identity service when `ORDO_IDENTITY_URL` is
+  not loopback, or `ORDO_SUPERVISOR_IDENTITY_ADDRESS=external`, and hands
+  the door and the console the wiring as set.
+- The console's `ORDO_IDENTITY_DEPLOYMENT` may differ from its own handle.
+- The binary runs alone as its own container; a test boots it with its
+  own settings only.
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`
   origins, as the console link uses today); not in v1.

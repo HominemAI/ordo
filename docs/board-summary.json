@@ -1,6 +1,6 @@
 {
  "date": "2026-11-15",
- "text": "External entities are built on bleeding (PR 14, 3 slices, 2 reviews, 19 fixes): an Ordo app now reads tables another system owns, generated from the live table, checked at apply and watched. The sign-in provider was ruled to run alone at auth.hominem.ai. Next: the HAL console's reauth, then 0.5.2 with the auth block. See [[external-entities]] and [[shared-identity]].",
+ "text": "2026-11-15 You answered external-entities asks 5 to 8: public ops over an external are allowed and are being built; the CDK form goes through the grumpy critic you asked for. The HAL console's reauth outside hominem.ai goes by redirect to auth.hominem.ai, building now. Then 0.5.2 with the auth block (PR 13, held). See [[external-entities]] and [[shared-identity]].",
  "tiles": [
   [
    "4,060",
@@ -46,11 +46,11 @@
  "look": [
   {
    "id": "external-entities",
-   "why": "built, 4 small asks"
+   "why": "public being built, critic on ask 8"
   },
   {
    "id": "shared-identity",
-   "why": "console reauth next"
+   "why": "reauth redirect building"
   },
   {
    "id": "live-instance",

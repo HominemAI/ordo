@@ -13061,9 +13061,12 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
 - [ ] **27i · External entities.** Generated, read-only translations of
       foreign tables. Ops and the SDK see an entity; the schema keeps it as
       its own kind, `schema.externals` (ruled 2026-11-15). Prefixed ids over
-      a raw key, `shared` required, derived get and list only, the
+      a raw key, `shared` required, derived reads only (get, list, count), the
       translation re-imports on apply. `plan-external-entities.md` §2, §3.
       Board: `external-entities`.
+      - Slice A built 2026-11-15 on branch external-entities: syntax, own
+        kind, subquery read, refusals, derived reads. B generator and C
+        apply check and watcher owed.
 - [ ] **27j · Each apply lists what is present but not Ordo's.** §4.
       Board: `external-entities`.
 - [ ] **27k · Ordo's tables under a prefix plus a random identifier per

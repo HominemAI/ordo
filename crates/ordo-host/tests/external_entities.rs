@@ -318,3 +318,179 @@ async fn the_apply_leaves_the_foreign_schema_as_the_other_system_made_it() {
         "a ref to an external takes no foreign key"
     );
 }
+
+// ── `public` externals on the public path ───────────────────────────────
+//
+// Ruled 2026-11-15 (`external-entities`, ask 5): an external may be
+// `public`, and its derived reads then serve its public fields to a visitor
+// with no token, through the same router and the same gate as a native
+// public op. A regression looks like a private column in an anonymous
+// answer, or a private external answering a visitor.
+
+mod anonymous {
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use ordo_conformance::{fixture_space, Fixture, Pg};
+    use ordo_host::runtime::{assemble_embedded, door, CustodyChoice, RuntimeConfig};
+    use serde_json::Value;
+    use tower::util::ServiceExt;
+
+    const PROGRAM: &str = r#"
+external catalog (key: cat) from crm.catalog shared public {
+  id <- "item_id"
+  title: text <- "title"
+  price: int <- "price"
+}
+
+external ledger (key: led) from crm.ledger shared {
+  id <- "entry_id"
+  label: text public <- "label"
+  cost: int <- "cost"
+}
+
+external vault (key: vlt) from crm.vault shared {
+  id <- "vault_id"
+  secret: text <- "secret"
+}
+"#;
+
+    const SEED: &str = r#"
+DROP SCHEMA IF EXISTS crm CASCADE;
+CREATE SCHEMA crm;
+CREATE TABLE crm.catalog (item_id bigint PRIMARY KEY, title text NOT NULL, price bigint NOT NULL);
+INSERT INTO crm.catalog VALUES (1, 'basic', 500), (2, 'pro', 2000);
+CREATE TABLE crm.ledger (entry_id bigint PRIMARY KEY, label text NOT NULL, cost bigint NOT NULL);
+INSERT INTO crm.ledger VALUES (1, 'rent', 9999);
+CREATE TABLE crm.vault (vault_id bigint PRIMARY KEY, secret text NOT NULL);
+INSERT INTO crm.vault VALUES (1, 'hunter2');
+"#;
+
+    fn free_addr() -> std::net::SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    async fn boot(stem: &str) -> (ordo_host::runtime::Runtime, axum::Router) {
+        let pg = Pg::scoped(stem);
+        let f = Fixture::from_source(PROGRAM, SEED).expect("the program compiles");
+        f.reset(&pg).expect("seeded");
+        let cfg = RuntimeConfig {
+            blob_routing: ordo_host::runtime::BlobRouting::Single,
+            pg: ordo_exec::PoolConfig {
+                db: pg.db.clone(),
+                size: 8,
+                ..ordo_exec::PoolConfig::from_env()
+            },
+            addr: free_addr(),
+            shutdown_grace: Duration::from_secs(1),
+            space: fixture_space(),
+            tightened: Vec::new(),
+            custody: CustodyChoice::Test,
+            token_secret: [7u8; 32],
+            page_key: ordo_api::PageKey::from_secret(&[8u8; 32]),
+            checkpoint: None,
+            security_checkpoint: false,
+            apex_domain: None,
+            cors: None,
+            blob: None,
+            exit_bundles: None,
+            import_bundles: None,
+            replica: "external-public-test".into(),
+            usage_flush: Duration::from_secs(60),
+            usage_rollup: Duration::from_secs(3600),
+            sync: Default::default(),
+            auth: None,
+            credentials: None,
+            presence: Default::default(),
+            pausing: Default::default(),
+            version_moves: Default::default(),
+            delegable: Default::default(),
+            access_template: Default::default(),
+            deployment_owners: Vec::new(),
+            provisioning: Default::default(),
+            recovery: Default::default(),
+            second_factor: Default::default(),
+            mail: None,
+        };
+        let f = Fixture::from_source(PROGRAM, SEED).unwrap();
+        let rt = assemble_embedded(cfg, f).await.expect("boots");
+        let app = door(&rt);
+        (rt, app)
+    }
+
+    /// A visitor: no token, no space.
+    async fn visit(app: &axum::Router, uri: &str) -> (u16, String, Value) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body).to_string();
+        let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, text, json)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_visitor_reads_the_public_fields_of_a_public_external() {
+        let (_rt, app) = boot("ordo_ext_public").await;
+
+        // A `public` line: every declared field is served.
+        let (status, text, body) = visit(&app, "/op/std.catalog.list").await;
+        assert_eq!(status, 200, "{text}");
+        let rows: Vec<(String, String, i64)> = body["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["title"].as_str().unwrap().to_string(),
+                    r["price"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("cat_2".to_string(), "pro".to_string(), 2000),
+                ("cat_1".to_string(), "basic".to_string(), 500)
+            ],
+            "{text}"
+        );
+        let (status, text, body) = visit(&app, "/op/std.catalog.get?id=cat_1").await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(body["rows"][0]["title"], "basic", "{text}");
+        let (status, text, body) = visit(&app, "/op/std.catalog.count").await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(body["rows"][0]["n"], 2, "{text}");
+
+        // A field mark: the marked field, and never the other.
+        let (status, text, body) = visit(&app, "/op/std.ledger.list").await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(body["rows"][0]["label"], "rent", "{text}");
+        assert!(!text.contains("cost") && !text.contains("9999"), "{text}");
+        let (status, text, _) = visit(&app, "/op/std.ledger.get?id=led_1").await;
+        assert_eq!(status, 200, "{text}");
+        assert!(!text.contains("cost") && !text.contains("9999"), "{text}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_visitor_is_refused_a_private_external() {
+        let (_rt, app) = boot("ordo_ext_private").await;
+        for op in ["list", "count", "get?id=vlt_1"] {
+            let (status, text, body) = visit(&app, &format!("/op/std.vault.{op}")).await;
+            assert_eq!(status, 403, "{op}: {text}");
+            assert_eq!(body["error"]["code"], "access_denied", "{op}: {text}");
+            assert!(!text.contains("hunter2"), "{op}: {text}");
+        }
+    }
+}

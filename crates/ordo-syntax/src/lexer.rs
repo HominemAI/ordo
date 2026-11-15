@@ -268,7 +268,10 @@ impl<'s> Lexer<'s> {
     fn check_name(&self, word: &str, start: usize, line: u32, col: u32) -> Result<(), LexError> {
         if word.contains('_') {
             return Err(self.err_at(
-                format!("names use lowerCamel, no underscores: `{word}`"),
+                format!(
+                    "names use lowerCamel, no underscores: `{word}`. A foreign table or \
+                     column in an `external` is written in quotes: `\"{word}\"`"
+                ),
                 start,
                 line,
                 col,

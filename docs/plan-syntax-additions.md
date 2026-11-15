@@ -186,9 +186,9 @@ The condition is on `published`, which must itself be `public`
   op may not be a derived std op over a sealed-inclusive manifest; std ops
   are never public (they are not declared `public`).
 - **With `deployment` (§3)**: required. Public rows are the deployment's.
-- **With external entities (§8)**: allowed. An external entity is a
-  deployment entity with no `sealed` fields, so `public` on its fields is
-  always legal.
+- **With external entities (§8)**: not settled. An external entity has no
+  `sealed` fields, but the 2026-11-15 plan gates it by the access profile
+  and does not mention `public`.
 - **With settings (§7)**: the cache and the rate limit of the public path
   are settings (`public.cacheLife`, `public.readRate`), not syntax.
 - **With API keys (§4)**: a key may list a public op; that is harmless and
@@ -466,8 +466,9 @@ boolean` becomes `rhs: 'caller' | 'tenant' | { root, path } | null`. The
 ### Interactions
 
 - **With `public` (§1)**: `public` requires `deployment`.
-- **With external entities (§8)**: an external entity is a deployment
-  entity (it has no `$space` column), so all three levels apply to it.
+- **With external entities (§8)**: an external entity has no `$space` and
+  is declared `shared`. The access profile decides which tenants may call
+  its ops (2026-11-15). Whether the three levels apply is not settled.
 - **With settings (§7)**: a developer who wants a tenant to opt in to a
   feed from the deployment's space exposes a setting, and the guard tests
   it through `subscriptions`-style data the setting op writes.
@@ -693,10 +694,10 @@ columns stay current through the soak, so the reverse is a switch.
 - **With orphans (§6)**: a field that is removed and has no `prev` pointing
   at it is orphaned. A field with a `prev` pointing at it is renamed, and
   nothing is orphaned.
-- **With external entities (§8)**: `prev` is legal on an external entity's
-  name and fields, because a translation is regenerated when the foreign
-  table changes (§3 of that plan) and the regenerated version carries
-  `prev` so the plan knows which Ordo field moved.
+- **With external entities (§8)**: not settled. A breaking change to the
+  foreign table stops every op reading the entity until a regenerated
+  translation is applied (`plan-external-entities.md` §7). Whether `prev`
+  may say which field moved is open.
 - **With settings (§7)**: a renamed setting is a catalogue matter, not a
   program one; the catalogue keeps old names as aliases for one release.
 
@@ -779,9 +780,9 @@ Nothing. The CDK emits the program, and the program has no words for this.
 
 - **With `prev` (§5)**: a `prev` turns a would-be orphan into a rename.
 - **With external entities (§8)**: an external entity cannot be orphaned or
-  dropped by Ordo, because the table is not Ordo's. Removing its
-  declaration simply stops serving it; the plan lists the table under
-  "present, not Ordo's" (27j).
+  dropped by Ordo, because the table is not Ordo's. The schema planner never
+  sees it. Removing its declaration simply stops serving it; the plan lists
+  the table under "present, not Ordo's" (27j).
 - **With `public` (§1)**: an orphaned public field stops being served at
   once, and the public cache drops every result that read it (the exact
   invalidation the plan already requires).
@@ -947,73 +948,50 @@ or reset them to the program's value.
 ## 8 · External entities
 
 **What it is.** A generated, read-only translation of a table Ordo does not
-own, served as an ordinary entity. Ruled 2026-10-01 (`external-entities`;
-checklist 27i; `plan-external-entities.md` §2).
+own, kept in the schema as its own kind (`schema.externals`) and served to
+ops, guards and the SDK as an entity. Ruled 2026-10-01, reshaped 2026-11-15
+(`external-entities`; checklist 27i). **`plan-external-entities.md` is the
+single source.** This section only places the syntax among the others.
 
 ### Spelling
 
 ```
-external customers (key: cust) from "crm"."customers" {
-  id              <- "customer_id"               # the foreign key column; prefixed at query time
-  name:   text    <- "full_name"
-  email:  text    <- "email"             public
-  since:  date    <- "created_at"
-  owner -> crmUsers <- "owner_id"                 # a ref to another external entity
-  access read   region == $tenant.region
-  access write  open
+external customers from crm.customers shared {
+  id      <- customer_id
+  name    : text    <- full_name
+  email   : text?   <- email
+  account -> accounts <- account_id
 }
 ```
 
 - **`external`** opens the block. **`from`** is contextual, legal only here,
-  and names the foreign table as two string literals, schema then table.
-  Strings because foreign names carry underscores and case that Ordo
-  identifiers forbid.
+  and names the schema and table. **`shared`** is required (2026-11-15):
+  every space reads every row and the access profile decides which tenants
+  may call the ops.
 - **`<-`** maps a field to a column. A new two-character token, the mirror
   of `->`: data comes in. Elsewhere it is a parse error (`x <- 1` no longer
   lexes as less-than-minus; write `x < -1`).
-- **`id <- "…"`** is required: the foreign primary key, carried as a typed
-  id with the entity's prefix at query time and stripped on the way back.
+- **`id <- col`** is required: one unique, not null column. Ids reach the SDK
+  as prefixed text over the raw key (`cust_42`).
 - Every field states its Ordo type, so ops type-check without the foreign
   catalogue.
-- Refs point at other external entities only, through the column that holds
-  the foreign key.
-- An external entity is a **deployment entity** (it has no `$space`), so
-  `deployment` is implied and §3's three levels apply: `public` fields, any
-  signed-in person by default, or a guard.
+- A ref may point at another external entity only. A ref from an external
+  entity to a native one is refused.
+- An external entity has no `$space`. The schema planner, DDL, dev reset and
+  erase never see it.
+- It is read-only. Only derived `get` and `list` exist. Writes reach a
+  non-Ordo system through its own API.
 
-The block is **generated** by `ordo introspect` (`migration.md`) and
-regenerated when the foreign table changes; a person edits the guard, the
-`public` marks and the field names, and commits.
-
-### CDK
-
-```ts
-const customers = external('customers', ['crm', 'customers'], {
-  id:    col('customer_id'),
-  name:  t.text().from('full_name'),
-  email: t.text().from('email').public(),
-  since: t.date().from('created_at'),
-  owner: t.ref(crmUsers).from('owner_id'),
-}, { key: 'cust' })
-  .accessRead(g.walk(g.eq('region', g.tenantField('region'))))
-  .accessWrite(g.OPEN);
-```
-
-`external()` is a new declaration; `.from(column)` on `TypeSpec` (refused on
-a field of an ordinary `entity`: `external_only`); `ExternalNode` joins
-`Declaration`.
+The block is **generated** by `ordo introspect --external` and regenerated
+when the foreign table changes (`plan-external-entities.md` §7, §11).
 
 ### Compiler checks
 
-| Class | Refused | Message |
-|---|---|---|
-| `external_readonly` | `set` or `del` on an external entity | `customers` is another system's table; Ordo reads it and does not write it. |
-| `external_modifier` | `sealed`, `unique`, `indexed`, `normalize`, `owned`, `tree`, `index`, `check`, `acl`, a default, `blob` | `email` is a column Ordo does not own; it cannot be sealed. |
-| `external_unmapped` | a field with no `<-` | `name` names no column. |
-| `external_no_id` | no `id <-` line | the translation needs the table's key. |
-| `external_ref_target` | a ref from an external entity to an ordinary entity, or from an ordinary entity to an external one | a ref cannot cross into a table Ordo owns from one it does not. Store the id in an `id` field. |
-| `external_type` | plan time: the column's type cannot carry the declared type | `created_at` is `text` in `crm.customers`; `date` needs a cast. Options: cast with the rows that fail listed; declare `text`. |
-| `external_gone` | plan time: the table or a mapped column is missing | `crm.customers.full_name` is gone. Regenerate the translation and review the difference. |
+The classes and messages are in `plan-external-entities.md` §2:
+`external_read_only`, `external_owned`, `external_acl`, `external_sealed`,
+`external_clause`, `external_inherited_guard`, `external_not_live`,
+`external_ref_native`, `external_composite_key`, `external_no_key` and
+`external_needs_shared`.
 
 ### Alternatives considered
 
@@ -1021,24 +999,19 @@ a field of an ordinary `entity`: `external_only`); `ExternalNode` joins
   (`messages.from`) and `declparse.rs` already refuses it as a borrowed SQL
   spelling in source position with a hint. Contextual, in one position,
   keeps both.
-- **`=` for the mapping** (`name: text = "full_name"`). Rejected: `=` is a
+- **`=` for the mapping** (`name: text = col`). Rejected: `=` is a
   default.
 - **No type on the field, inferred from the column.** Rejected: ops would
   type-check against a catalogue the compiler never reads (compiling never
   looks at a database).
-- **Refs from Ordo entities to external ones**, unenforced by a foreign
-  key. Deferred: the write-time lookup it needs is a new mechanism; an `id`
-  field and a second read serve the first cases.
 
 ### Interactions
 
-- **With `public` (§1)**: always legal on an external field; nothing there
-  is sealed.
-- **With `$tenant` (§3)**: the guard above is the plan's "which tenants may
-  see it": a setting on the entity, written as a guard over the tenant's
-  facts.
-- **With `prev` (§5)**: legal, so a regenerated translation can say which
-  Ordo field a renamed column became.
+- **With `public` (§1)**: not settled by the 2026-11-15 plan, which gates an
+  external entity by the access profile. Open.
+- **With `$tenant` (§3)**: `shared` is slice 1. A tenant-column map comes
+  later.
+- **With `prev` (§5)**: not settled by the plan. Open.
 - **With orphans (§6)**: never orphaned or dropped by Ordo; stops being
   served when undeclared.
 - **With settings (§7)**: `external.checkEvery`.
@@ -1116,7 +1089,7 @@ rule, and the one to build first.
 | Prune | `ordo plan --prune` | the plan and receipt | plan `prune_unknown`, two confirmations | none |
 | Settings | `settings { name = value [tenant [bounds]] [person [bounds]] }` | top-level block | `unknown_setting`, `setting_not_exposable`, `setting_out_of_bounds` | `settings(s.a.b(v).tenant({ max }))` |
 | Rate value | `<int> per <duration>` | setting value | `setting_rate_only` | `rate(n, dur)` |
-| External entity | `external name (key: k) from "s"."t" { f: type <- "col" }` | top-level block | `external_readonly`, `external_modifier`, `external_unmapped`, `external_no_id` | `external(name, [s, t], fields)`, `.from(col)` |
+| External entity | `external name from s.t shared { f: type <- col }` | top-level block | `external_read_only`, `external_clause`, `external_no_key`, `external_needs_shared` (full list in `plan-external-entities.md` §2) | not specified |
 | Sort order stated | none | interface `order` | none | none |
 | Refetch pacing | `live.refetchPace` | settings line | as settings | `s.live.refetchPace(dur)` |
 
@@ -1205,7 +1178,7 @@ with the answer in bold, then one sentence of why, at most 260 characters.
     **suggest:** **Later.** The block covers the app layer now, and the per-op form is best decided with the resolver that reads it.
 
 14. **ask:** Should external entities be read at the same three levels as the deployment's space (public, signed in, narrowed by a guard)?
-    **suggest:** **Yes.** They have no `$space` column, so they are the deployment's by construction, and the plan's "which tenants may see it" is then a guard.
+    **suggest:** **Reshaped 2026-11-15.** `shared` is required and the access profile decides which tenants may call the ops (`plan-external-entities.md` §5).
 
 15. **ask:** Should the reserved-word list in definition-language.md §2 be generated from the `Keyword` enum, ending today's disagreement between them?
     **suggest:** **Yes.** The document claims it is regenerated and nothing does it; the enum is what the lexer reads, so it is the source.

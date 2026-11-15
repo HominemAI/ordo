@@ -432,8 +432,7 @@ fn externals(r: &mut String, plan: &Plan) {
 
 /// One line per external entity that has no `access read`, and one more for
 /// each public external (ruled 2026-11-15, `external-entities` ask 5): the
-/// public path has no guard walk, so a visitor with no token reads the
-/// public fields of every row.
+/// public path has no guard walk, so a public op serves every row.
 pub fn external_notes(schema: &Schema) -> Vec<String> {
     let mut notes = Vec::new();
     for e in &schema.externals {
@@ -450,8 +449,8 @@ pub fn external_notes(schema: &Schema) -> Vec<String> {
                 .map(|f| format!("`{}`", f.name))
                 .collect();
             notes.push(format!(
-                "note: `{}` is public: anonymous callers on the public path read its public \
-                 fields ({}) of every row",
+                "note: `{}` is public: an op declared public may serve its public fields \
+                 ({}) to anonymous callers on the public path",
                 e.name,
                 fields.join(", ")
             ));

@@ -61,9 +61,12 @@ The order on the first line is `external <name> [(key: ...)] from
 - `shared` is the tenancy word. It is required (section 5).
 - `public` after `shared` is optional (owner, 2026-11-15, ask 5). It works as
   on an entity, and `name: text public <- full_name` marks one field as on a
-  native field. The derived `get`, `list` and `count` then serve the public
-  fields on the public path. A guarded external cannot be public, as for an
-  entity (`public_guarded`).
+  native field. An authored `op ... public` may then serve the public fields
+  on the public path. Derived `std.<name>.*` ops are never public, as for a
+  native entity. A guarded external cannot be public, as for an entity
+  (`public_guarded`). The public cache for an external's answers is not
+  invalidated by writes, since Ordo never writes the table, so a cached answer
+  lives until `ORDO_PUBLIC_CDN_S_MAXAGE` ends (default 60 seconds).
 - `id <- customer_id` maps the id to one unique, not null column. Its base
   type is read from the generated types, not guessed.
 - `name : text <- full_name` is a field with its type written out. `?` means
@@ -82,9 +85,9 @@ are proposed, so the build agent may adjust them in one pass.
 | `owned` | `external_owned` | Remove it, the other system owns the rows |
 | `acl` | `external_acl` | Gate with the access profile instead |
 | `sealed` | `external_sealed` | Remove it, Ordo never wrote the value |
-| `tree`, `unique`, `check`, `index` | `external_clause` | The other system owns these |
-| `public*` | `external_clause` | An external owns nothing, so the star reaches nothing. Write `public` |
-| `prev` on a field | `external_clause` | A translation is re-imported on every apply instead |
+| `tree`, `unique`, `check`, `index` | `external_unsupported` | The other system owns these |
+| `public*` | `external_unsupported` | An external owns nothing, so the star reaches nothing. Write `public` |
+| `prev` on a field | `external_unsupported` | A translation is re-imported on every apply instead |
 | Inherited guards (guards that walk `owned` or `acl`) | `external_inherited_guard` | Write a guard over the entity's own fields |
 | Live reads (`?live=1` on an op that reads it) | `external_not_live` | Read it on request, not as a stream |
 | A ref FROM an external entity to a native entity | `external_ref_native` | The other system holds no Ordo ids |

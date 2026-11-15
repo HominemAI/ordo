@@ -2043,13 +2043,14 @@ entity orders {
   external.
 - `public` follows `shared` on the first line: `external <name> [(key: ...)]
   from <schema>.<table> shared [public] {`. It works as on an entity (owner,
-  2026-11-15). The derived `std.<name>.get`, `.list` and `.count` run on the
-  public path and carry the public fields only, and an authored `op ...
-  public` may read them. `public` as a field mark (`name: text public <-
-  "full_name"`) works as on a native field. Without a public field the
-  external is not served to visitors. The public path has no guard walk, so
-  a guarded external cannot be public (`public_guarded`), and every visitor
-  reads every row. `ordo plan` says so for each public external.
+  2026-11-15). An authored `op ... public` may then serve the external's
+  public fields. `public` as a field mark (`name: text public <-
+  "full_name"`) works as on a native field. Derived `std.<name>.*` ops are
+  never public. The public path has no guard walk, so a guarded external
+  cannot be public (`public_guarded`). The public cache for an external's
+  answers is not invalidated by writes, since Ordo never writes the table, so
+  a cached answer lives until `ORDO_PUBLIC_CDN_S_MAXAGE` ends (default 60
+  seconds). `ordo plan` says so for each public external.
 - `id <- column` names the one key column. It must be unique and never null.
   The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
 - Each other line is `field: type <- column`, or `field -> external <-

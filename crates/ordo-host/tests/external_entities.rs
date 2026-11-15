@@ -323,8 +323,8 @@ async fn the_apply_leaves_the_foreign_schema_as_the_other_system_made_it() {
 //
 // Ruled 2026-11-15 (`external-entities`, ask 5): an external may be
 // `public`, and its derived reads then serve its public fields to a visitor
-// with no token, through the same router and the same gate as a native
-// public op. A regression looks like a private column in an anonymous
+// with no token through an authored `op ... public`, the same router and gate as
+// a native public op. A regression looks like a private column in an anonymous
 // answer, or a private external answering a visitor.
 
 mod anonymous {
@@ -354,6 +354,19 @@ external vault (key: vlt) from crm.vault shared {
   id <- "vault_id"
   secret: text <- "secret"
 }
+
+op catalogList public =
+  catalog[title, price]
+  sort title
+  take 50
+
+op ledgerLabels public =
+  ledger[label]
+  take 50
+
+op vaultList =
+  vault[secret]
+  take 50
 "#;
 
     const SEED: &str = r#"
@@ -440,57 +453,41 @@ INSERT INTO crm.vault VALUES (1, 'hunter2');
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_visitor_reads_the_public_fields_of_a_public_external() {
+    async fn a_visitor_reads_a_public_external_through_a_public_op() {
         let (_rt, app) = boot("ordo_ext_public").await;
 
-        // A `public` line: every declared field is served.
-        let (status, text, body) = visit(&app, "/op/std.catalog.list").await;
-        assert_eq!(status, 200, "{text}");
-        let rows: Vec<(String, String, i64)> = body["rows"]
-            .as_array()
-            .expect("rows")
-            .iter()
-            .map(|r| {
-                (
-                    r["id"].as_str().unwrap().to_string(),
-                    r["title"].as_str().unwrap().to_string(),
-                    r["price"].as_i64().unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                ("cat_2".to_string(), "pro".to_string(), 2000),
-                ("cat_1".to_string(), "basic".to_string(), 500)
-            ],
-            "{text}"
-        );
-        let (status, text, body) = visit(&app, "/op/std.catalog.get?id=cat_1").await;
+        let (status, text, body) = visit(&app, "/op/catalogList").await;
         assert_eq!(status, 200, "{text}");
         assert_eq!(body["rows"][0]["title"], "basic", "{text}");
-        let (status, text, body) = visit(&app, "/op/std.catalog.count").await;
-        assert_eq!(status, 200, "{text}");
-        assert_eq!(body["rows"][0]["n"], 2, "{text}");
+        assert_eq!(body["rows"].as_array().unwrap().len(), 2, "{text}");
 
         // A field mark: the marked field, and never the other.
-        let (status, text, body) = visit(&app, "/op/std.ledger.list").await;
+        let (status, text, body) = visit(&app, "/op/ledgerLabels").await;
         assert_eq!(status, 200, "{text}");
         assert_eq!(body["rows"][0]["label"], "rent", "{text}");
         assert!(!text.contains("cost") && !text.contains("9999"), "{text}");
-        let (status, text, _) = visit(&app, "/op/std.ledger.get?id=led_1").await;
-        assert_eq!(status, 200, "{text}");
-        assert!(!text.contains("cost") && !text.contains("9999"), "{text}");
+
+        // A derived read is never public, like every derived op.
+        for uri in [
+            "/op/std.catalog.list",
+            "/op/std.catalog.get?id=cat_1",
+            "/op/std.catalog.count",
+            "/op/std.ledger.list",
+        ] {
+            let (status, text, body) = visit(&app, uri).await;
+            assert_eq!(status, 403, "{uri}: {text}");
+            assert_eq!(body["error"]["code"], "access_denied", "{uri}: {text}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_visitor_is_refused_a_private_external() {
         let (_rt, app) = boot("ordo_ext_private").await;
-        for op in ["list", "count", "get?id=vlt_1"] {
-            let (status, text, body) = visit(&app, &format!("/op/std.vault.{op}")).await;
-            assert_eq!(status, 403, "{op}: {text}");
-            assert_eq!(body["error"]["code"], "access_denied", "{op}: {text}");
-            assert!(!text.contains("hunter2"), "{op}: {text}");
+        for uri in ["/op/vaultList", "/op/std.vault.list", "/op/std.vault.count"] {
+            let (status, text, body) = visit(&app, uri).await;
+            assert_eq!(status, 403, "{uri}: {text}");
+            assert_eq!(body["error"]["code"], "access_denied", "{uri}: {text}");
+            assert!(!text.contains("hunter2"), "{uri}: {text}");
         }
     }
 }

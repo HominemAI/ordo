@@ -328,36 +328,25 @@ fn public_setup() -> (ordo_schema::Schema, Registry) {
 }
 
 #[test]
-fn the_derived_reads_of_a_public_external_are_on_the_public_interface() {
-    let (schema, registry) = public_setup();
+fn an_authored_public_op_over_a_public_external_is_on_the_public_interface() {
+    let program = parse_program(&format!(
+        "{PUBLIC_SRC}\nop catalog public = plans[name, price]\n  take 5\n\
+         op labels public = accounts[label]\n  take 5\n"
+    ))
+    .expect("parses");
+    let schema = build(&program).expect("schema");
+    let mut registry = Registry::from_program(&program);
+    registry.extend_from(&ordo_schema::std_ops(&schema));
     ordo_plan::cost::check_registration(&schema, &registry).expect("the public gate passes");
-    for verb in ["get", "list", "count"] {
-        let art =
-            ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.plans.{verb}"))
-                .expect("artifact");
-        assert_eq!(art["flags"]["public"], true, "std.plans.{verb}");
-        let art =
-            ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.hidden.{verb}"))
-                .expect("artifact");
-        assert!(
-            art["flags"].get("public").is_none(),
-            "std.hidden.{verb} stays private"
-        );
+    for op in ["catalog", "labels"] {
+        let art = ordo_plan::artifact::op_artifact(&schema, &registry, op).expect("artifact");
+        assert_eq!(art["flags"]["public"], true, "{op}");
     }
-}
-
-#[test]
-fn a_public_externals_derived_reads_scope_only_public_fields() {
-    let (schema, registry) = public_setup();
-    let read = |op: &str| {
-        let scopes = ordo_plan::artifact::op_scope(&schema, &registry, op);
-        assert_eq!(scopes.len(), 1, "{op}");
-        scopes[0].read.iter().cloned().collect::<Vec<String>>()
-    };
-    assert_eq!(read("std.plans.get"), ["name", "price"]);
-    assert_eq!(read("std.accounts.get"), ["label"]);
-    assert_eq!(read("std.accounts.list"), ["label"]);
-    assert_eq!(read("std.hidden.get"), ["note"]);
+    // A derived read is never public, like every derived op.
+    for op in ["std.plans.list", "std.plans.get", "std.plans.count"] {
+        let art = ordo_plan::artifact::op_artifact(&schema, &registry, op).expect("artifact");
+        assert!(art["flags"].get("public").is_none(), "{op}");
+    }
 }
 
 #[test]

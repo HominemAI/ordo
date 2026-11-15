@@ -59,10 +59,10 @@ external ledger from crm.ledger shared {
         notes,
         [
             "note: `catalog` has no `access read`: every member of every space reads every row",
-            "note: `catalog` is public: anonymous callers on the public path read its public \
-             fields (`title`, `price`) of every row",
-            "note: `ledger` is public: anonymous callers on the public path read its public \
-             fields (`label`) of every row",
+            "note: `catalog` is public: an op declared public may serve its public fields \
+             (`title`, `price`) to anonymous callers on the public path",
+            "note: `ledger` is public: an op declared public may serve its public fields \
+             (`label`) to anonymous callers on the public path",
         ]
     );
 }

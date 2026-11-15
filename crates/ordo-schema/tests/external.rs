@@ -297,30 +297,11 @@ fn the_public_mark_lands_on_an_external_and_its_fields() {
 }
 
 #[test]
-fn only_a_public_externals_derived_reads_are_public_and_carry_public_fields() {
+fn derived_reads_of_an_external_are_never_public() {
     let s = schema_of(PUBLIC_SHOP);
-    let ops = std_ops(&s).ops;
-    let find = |n: &str| ops.iter().find(|o| o.name.name == n).expect(n);
-    for verb in ["get", "list", "count"] {
-        assert!(find(&format!("std.customers.{verb}")).flags.public);
-        assert!(find(&format!("std.accounts.{verb}")).flags.public);
-        assert!(!find(&format!("std.hidden.{verb}")).flags.public);
+    for op in std_ops(&s).ops {
+        assert!(!op.flags.public, "{} is a derived op", op.name.name);
     }
-    let projected = |n: &str| match &find(n).body {
-        ordo_syntax::decl::OpBody::Read(pl) => pl.sources[0]
-            .projection
-            .as_ref()
-            .expect("projects")
-            .iter()
-            .map(|p| match p {
-                ordo_syntax::decl::ProjItem::Field { path, .. } => path[0].name.clone(),
-                _ => unreachable!("only plain fields"),
-            })
-            .collect::<Vec<_>>(),
-        _ => unreachable!("a read"),
-    };
-    assert_eq!(projected("std.accounts.get"), ["id", "label"]);
-    assert_eq!(projected("std.hidden.get"), ["id", "note"]);
 }
 
 #[test]

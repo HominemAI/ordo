@@ -1,6 +1,6 @@
 {
- "date": "2026-11-14",
- "text": "PR 11 is on main by merge commit; the merge flow is ruled: squash into bleeding, merge bleeding into main [[ci-runs-each-workflow-only-when]]. The shared identity service is PR 12 [[shared-identity]] and the auth block is PR 13 [[audit-configuration-in-the-syntax]], both gated on their suites and a review. Release 0.5.2 follows both [[live-instance]]. Slice 1 of Human Agent Link waits on its push [[rebuild-ellanor-on-ordo-now-to]].",
+ "date": "2026-11-15",
+ "text": "The shared identity service is on bleeding [[shared-identity]], squashed after its suites and a review. The auth block is PR 13 [[audit-configuration-in-the-syntax]], its fixes held locally until the next batch. Release 0.5.2 follows both [[live-instance]]. Slice 1 of Human Agent Link waits on its push [[rebuild-ellanor-on-ordo-now-to]].",
  "tiles": [
   [
    "4,060",
@@ -46,7 +46,7 @@
  "look": [
   {
    "id": "shared-identity",
-   "why": "PR 12"
+   "why": "asks 3 and 4"
   },
   {
    "id": "audit-configuration-in-the-syntax",
@@ -54,7 +54,7 @@
   },
   {
    "id": "live-instance",
-   "why": "0.5.2 after both"
+   "why": "0.5.2 after PR 13"
   }
  ]
 }

@@ -558,6 +558,18 @@ pub async fn plan_with(
     choices: &Choices,
     written: Option<&Schema>,
 ) -> Result<Plan, String> {
+    plan_with_external(pool, program, choices, written, None).await
+}
+
+/// [`plan_with`], given the external report a caller already read from this
+/// same database, so one apply reads the catalog once and not twice.
+pub async fn plan_with_external(
+    pool: &Pool,
+    program: &Program,
+    choices: &Choices,
+    written: Option<&Schema>,
+    external: Option<crate::external_check::ExternalReport>,
+) -> Result<Plan, String> {
     let deployed = deployed_artifact(pool).await;
     let prior = deployed.as_ref().and_then(recompile);
     let prior_doc: Option<serde_json::Value> = deployed
@@ -576,7 +588,10 @@ pub async fn plan_with(
 
     // The external entities against their tables, and the list of what is
     // here and not Ordo's. One read of the catalog; it changes nothing.
-    let external = crate::external_check::check(pool, &program.schema).await?;
+    let external = match external {
+        Some(e) => e,
+        None => crate::external_check::check(pool, &program.schema).await?,
+    };
     let mut refusals = external.refusals();
     let mut destructive = 0usize;
     for a in &mut assessed {
@@ -2802,11 +2817,12 @@ pub async fn apply_safe(
     program: &Program,
     actor: &str,
     op: &str,
+    external: Option<crate::external_check::ExternalReport>,
 ) -> Result<SafeApply, String> {
     if !safe_changes_enabled() {
         return Ok(SafeApply::NotSafe);
     }
-    let plan = plan_with(pool, program, &Choices::default(), None).await?;
+    let plan = plan_with_external(pool, program, &Choices::default(), None, external).await?;
     if !all_safe(&plan) {
         return Ok(SafeApply::NotSafe);
     }

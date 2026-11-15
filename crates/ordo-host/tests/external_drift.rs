@@ -306,8 +306,15 @@ async fn a_role_with_no_select_refuses_external_no_grant_naming_the_grant() {
 // ── the watcher ──────────────────────────────────────────────────────────
 
 fn gated(state: &mut ordo_api::ApiState, f: &Arc<Fixture>) -> Arc<ExternalGate> {
-    let fx = f.clone();
-    let gate = ExternalGate::new(Arc::new(move || fx.clone()));
+    gated_over(state, Arc::new(std::sync::Mutex::new(f.clone())))
+}
+
+/// [`gated`], over a fixture the test can swap, as an apply does.
+fn gated_over(
+    state: &mut ordo_api::ApiState,
+    served: Arc<std::sync::Mutex<Arc<Fixture>>>,
+) -> Arc<ExternalGate> {
+    let gate = ExternalGate::new(Arc::new(move || served.lock().expect("lock").clone()));
     state.executor = Arc::new(ExternalGated::new(state.executor.clone(), gate.clone()));
     gate
 }

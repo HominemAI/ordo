@@ -143,7 +143,7 @@ fn quoted(s: &str) -> String {
 
 /// Does the live type `live` (Postgres' own spelling) satisfy the declared
 /// field type?
-fn accepts(ty: &FieldTy, live: &str) -> bool {
+fn accepts(ty: &FieldTy, live: &str, schema: &Schema) -> bool {
     let lower = live.to_ascii_lowercase();
     let base = lower.split('(').next().unwrap_or(&lower).trim();
     let int = matches!(base, "smallint" | "integer" | "bigint");
@@ -152,7 +152,14 @@ fn accepts(ty: &FieldTy, live: &str) -> bool {
         "text" | "character varying" | "character" | "citext" | "name"
     );
     match ty {
-        FieldTy::Ref { .. } => int || text || base == "uuid",
+        // A ref holds the target's typed id over the target's raw key, so the
+        // column must be of the target's key type.
+        FieldTy::Ref { target, .. } => {
+            match schema.entity(target).and_then(|t| t.external.as_ref()) {
+                Some(src) => accepts_key(src.key_ty, live),
+                None => int || text || base == "uuid",
+            }
+        }
         FieldTy::Scalar(s) => match s {
             ScalarTy::Text | ScalarTy::Uri => text,
             ScalarTy::Int | ScalarTy::Money(_) | ScalarTy::Duration(_) => int,
@@ -195,15 +202,25 @@ fn accepts_key(key: ExternalKeyTy, live: &str) -> bool {
     }
 }
 
-fn spelled(ty: &FieldTy) -> String {
+fn spelled(ty: &FieldTy, schema: &Schema) -> String {
     match ty {
         FieldTy::Scalar(s) => s.as_str().to_string(),
-        FieldTy::Ref { .. } => "a ref".to_string(),
+        FieldTy::Ref { target, .. } => {
+            match schema.entity(target).and_then(|t| t.external.as_ref()) {
+                Some(src) => format!("a ref to `{target}`, whose key is {}", src.key_ty.as_str()),
+                None => format!("a ref to `{target}`"),
+            }
+        }
     }
 }
 
 /// Compare one external with its live table.
-async fn check_one(pool: &Pool, e: &Entity, report: &mut ExternalReport) -> Result<(), String> {
+async fn check_one(
+    pool: &Pool,
+    e: &Entity,
+    schema: &Schema,
+    report: &mut ExternalReport,
+) -> Result<(), String> {
     let Some(src) = &e.external else {
         return Ok(());
     };
@@ -288,10 +305,10 @@ async fn check_one(pool: &Pool, e: &Entity, report: &mut ExternalReport) -> Resu
         };
         match live.get(column) {
             None => wrong.push(format!("column `{column}` is gone")),
-            Some(c) if !accepts(&f.ty, &c.ty) => wrong.push(format!(
+            Some(c) if !accepts(&f.ty, &c.ty, schema) => wrong.push(format!(
                 "column `{column}` is `{}`, and the file reads it as {}",
                 c.ty,
-                spelled(&f.ty)
+                spelled(&f.ty, schema)
             )),
             Some(c) if c.nullable && !f.optional => wrong.push(format!(
                 "column `{column}` admits null, and the file says `{field}` never does. \
@@ -333,7 +350,7 @@ async fn check_one(pool: &Pool, e: &Entity, report: &mut ExternalReport) -> Resu
 pub async fn check(pool: &Pool, schema: &Schema) -> Result<ExternalReport, String> {
     let mut report = ExternalReport::default();
     for e in &schema.externals {
-        check_one(pool, e, &mut report).await?;
+        check_one(pool, e, schema, &mut report).await?;
     }
     report.present = present_not_ordos(pool, schema).await?;
     Ok(report)
@@ -356,6 +373,9 @@ pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<Strin
     let mut lines = Vec::new();
     let mut used_schemas: Vec<&str> = Vec::new();
     for (s, t) in &tables {
+        if ordo_exec::shape::is_ordo_schema(s) {
+            continue;
+        }
         if s == "public" {
             if t.starts_with('$') || schema.native(t).is_some() {
                 continue;
@@ -369,7 +389,7 @@ pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<Strin
         lines.push(format!("table `{s}.{t}`"));
     }
     for s in &schemas {
-        if !used_schemas.contains(&s.as_str()) {
+        if !used_schemas.contains(&s.as_str()) && !ordo_exec::shape::is_ordo_schema(s) {
             lines.push(format!("schema `{s}`, with no tables"));
         }
     }
@@ -389,8 +409,126 @@ pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<Strin
 /// `external_changed`, naming the table, the column and the fix. The hold is
 /// lifted by the first pass that finds the table as the program says.
 pub struct ExternalGate {
-    down: RwLock<BTreeMap<String, String>>,
+    hold: RwLock<Hold>,
     source: Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>,
+    reads: RwLock<Option<Reads>>,
+}
+
+/// What the timer last found, and the fixture it found it for.
+#[derive(Default)]
+struct Hold {
+    down: BTreeMap<String, String>,
+    /// The identity of the fixture the hold was read for. A hold is not
+    /// applied to another one: applying a program checks its translation
+    /// against the tables (`plan_with`), so a newly served fixture starts
+    /// with no hold and the next pass reads it again.
+    for_fixture: usize,
+}
+
+/// The externals each op of one fixture reads, worked out once.
+struct Reads {
+    fixture: Arc<ordo_conformance::Fixture>,
+    by_op: Arc<BTreeMap<String, Vec<String>>>,
+}
+
+fn identity(f: &Arc<ordo_conformance::Fixture>) -> usize {
+    Arc::as_ptr(f) as usize
+}
+
+/// Every quoted name in an op's debug form: entity, field and op names.
+/// What an op's source mentions, for an op the bind cannot settle.
+fn mentioned(op: &impl std::fmt::Debug) -> Vec<String> {
+    let text = format!("{op:?}");
+    let mut out = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find('"') {
+        rest = &rest[i + 1..];
+        let Some(j) = rest.find('"') else { break };
+        out.push(rest[..j].to_string());
+        rest = &rest[j + 1..];
+    }
+    out
+}
+
+/// The externals one op reaches, from the registry and never from a failed
+/// bind. A read the generic bind settles is answered by the planner's own
+/// `externals_read`. One it cannot (a `$caller` used as a value) and every
+/// write are read from the names the op mentions, through the ops it calls.
+/// A read also follows refs, because a hop reaches the target; a write does
+/// not, because naming a ref in an assignment reads nothing (the write path
+/// checks the prefix only).
+fn reads_of(f: &ordo_conformance::Fixture, op: &str) -> Vec<String> {
+    let Some(decl) = f.registry.get(op) else {
+        return Vec::new();
+    };
+    let is_write = matches!(decl.body, ordo_syntax::OpBody::Write(_));
+    if !is_write {
+        if let Ok(q) =
+            ordo_sema::bind_op_generic(&f.schema, &f.registry, op, ordo_sema::Clock::CORPUS)
+        {
+            return ordo_plan::externals_read(&q);
+        }
+    }
+    // What the op mentions. A write mentions only its conditions and the
+    // values it computes, never the field it assigns: naming a ref there
+    // reads nothing, because the write path checks the prefix only.
+    let mut seen_ops: Vec<String> = vec![op.to_string()];
+    let mut names: Vec<String> = Vec::new();
+    let mut todo = vec![op.to_string()];
+    while let Some(o) = todo.pop() {
+        let Some(d) = f.registry.get(&o) else {
+            continue;
+        };
+        let found = match &d.body {
+            ordo_syntax::OpBody::Read(p) => mentioned(p),
+            ordo_syntax::OpBody::Write(stmts) => stmts
+                .iter()
+                .flat_map(|st| match st {
+                    ordo_syntax::WriteStmt::Set { cond, fields, .. } => {
+                        let mut v = mentioned(cond);
+                        for (_, e) in fields {
+                            v.extend(mentioned(e));
+                        }
+                        v
+                    }
+                    ordo_syntax::WriteStmt::Del { cond, .. } => mentioned(cond),
+                })
+                .collect(),
+        };
+        for n in found {
+            if f.registry.get(&n).is_some() && !seen_ops.contains(&n) {
+                seen_ops.push(n.clone());
+                todo.push(n.clone());
+            }
+            names.push(n);
+        }
+    }
+    let mut reached: Vec<String> = names
+        .iter()
+        .filter(|n| f.schema.entity(n).is_some())
+        .cloned()
+        .collect();
+    // A read follows every ref of an entity it names, as a guard or a
+    // projection may hop. A write cannot hop in a condition.
+    if !is_write {
+        let mut i = 0;
+        while i < reached.len() {
+            if let Some(e) = f.schema.entity(&reached[i]) {
+                for fld in &e.fields {
+                    if let ordo_schema::FieldTy::Ref { target, .. } = &fld.ty {
+                        if !reached.contains(target) {
+                            reached.push(target.clone());
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    reached.retain(|n| f.schema.is_external(n));
+    reached.sort();
+    reached.dedup();
+    reached
 }
 
 impl ExternalGate {
@@ -399,19 +537,53 @@ impl ExternalGate {
         source: Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>,
     ) -> Arc<ExternalGate> {
         Arc::new(ExternalGate {
-            down: RwLock::new(BTreeMap::new()),
+            hold: RwLock::new(Hold::default()),
             source,
+            reads: RwLock::new(None),
         })
     }
 
     /// The entities held now, with the line that says why.
     pub fn down(&self) -> BTreeMap<String, String> {
-        self.down.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.hold
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .down
+            .clone()
     }
 
-    /// Replace the hold.
-    pub fn set_down(&self, down: BTreeMap<String, String>) {
-        *self.down.write().unwrap_or_else(|e| e.into_inner()) = down;
+    fn set_hold(&self, down: BTreeMap<String, String>, f: &Arc<ordo_conformance::Fixture>) {
+        *self.hold.write().unwrap_or_else(|e| e.into_inner()) = Hold {
+            down,
+            for_fixture: identity(f),
+        };
+    }
+
+    /// The externals each op reads, once per fixture (keyed by the fixture's
+    /// identity, kept alive here so the identity cannot be reused).
+    fn reads_for(&self, f: &Arc<ordo_conformance::Fixture>) -> Arc<BTreeMap<String, Vec<String>>> {
+        if let Some(r) = self
+            .reads
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if Arc::ptr_eq(&r.fixture, f) {
+                return r.by_op.clone();
+            }
+        }
+        let by_op: BTreeMap<String, Vec<String>> = f
+            .registry
+            .names()
+            .map(|n| (n.clone(), reads_of(f, n)))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        let by_op = Arc::new(by_op);
+        *self.reads.write().unwrap_or_else(|e| e.into_inner()) = Some(Reads {
+            fixture: f.clone(),
+            by_op: by_op.clone(),
+        });
+        by_op
     }
 
     /// One pass: read the tables the served program declares and set the
@@ -419,55 +591,48 @@ impl ExternalGate {
     pub async fn watch_once(&self, pool: &Pool) -> Result<Vec<String>, String> {
         let fixture = (self.source)();
         if fixture.schema.externals.is_empty() {
-            self.set_down(BTreeMap::new());
+            self.set_hold(BTreeMap::new(), &fixture);
             return Ok(Vec::new());
         }
         // The catalog read only: the present list is for a plan.
         let mut report = ExternalReport::default();
         for e in &fixture.schema.externals {
-            check_one(pool, e, &mut report).await?;
+            check_one(pool, e, &fixture.schema, &mut report).await?;
         }
         let lines = report.refusals();
-        self.set_down(
+        self.set_hold(
             report
                 .problems
                 .into_iter()
                 .map(|p| (p.entity.clone(), p.line()))
                 .collect(),
+            &fixture,
         );
         Ok(lines)
     }
 
     /// The refusal for `op`, when it reads a held entity.
     pub fn refusal(&self, op: &str) -> Option<ExecError> {
-        let down = self.down();
-        if down.is_empty() {
+        let (down, for_fixture) = {
+            let h = self.hold.read().unwrap_or_else(|e| e.into_inner());
+            if h.down.is_empty() {
+                return None;
+            }
+            (h.down.clone(), h.for_fixture)
+        };
+        let fixture = (self.source)();
+        // A program applied since the pass: it was checked against the
+        // tables when it was applied, and the next pass reads it again.
+        if identity(&fixture) != for_fixture {
             return None;
         }
-        let fixture = (self.source)();
-        let reads = match fixture.registry.get(op) {
-            // A platform op, or one this program does not declare.
-            None => return None,
-            Some(o) if matches!(o.body, ordo_syntax::OpBody::Write(_)) => return None,
-            Some(_) => match ordo_sema::bind_op_generic(
-                &fixture.schema,
-                &fixture.registry,
-                op,
-                ordo_sema::Clock::CORPUS,
-            ) {
-                Ok(q) => ordo_plan::externals_read(&q),
-                // A read that cannot be bound without a caller may still
-                // reach an external: unknown is held.
-                Err(_) => down.keys().cloned().collect(),
-            },
-        };
-        let hit: Vec<&String> = reads.iter().filter(|e| down.contains_key(*e)).collect();
-        let first = hit.first()?;
+        let reads = self.reads_for(&fixture);
+        let first = reads.get(op)?.iter().find(|e| down.contains_key(*e))?;
         Some(ExecError::new(
             ErrorCode::ExternalChanged,
             format!(
                 "op `{op}` reads the external entity `{first}`, which cannot be read now. {}",
-                down[*first]
+                down[first]
             ),
         ))
     }

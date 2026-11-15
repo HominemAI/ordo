@@ -848,7 +848,7 @@ async fn sequence(
             SchemaOutcome::Matches { pending }
         }
         SchemaState::Behind(changes) => {
-            match sa::apply_safe(pool, program, actor, op)
+            match sa::apply_safe(pool, program, actor, op, Some(external.clone()))
                 .await
                 .map_err(ApplyRefused::Internal)?
             {

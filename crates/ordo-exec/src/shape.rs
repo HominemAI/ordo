@@ -59,6 +59,13 @@ pub const EXPORT_SHADOW: &str = "ordo_shadow_export";
 /// diffs at once never share one.
 pub const DIFF_SHADOW: &str = "ordo_shadow_diff";
 
+/// Is `name` a schema Ordo itself makes: [`SHADOW`], [`EXPORT_SHADOW`] or a
+/// [`DIFF_SHADOW`] with its suffix? The one list the "present, not Ordo's"
+/// report reads, so a shadow left over from a crash is not called foreign.
+pub fn is_ordo_schema(name: &str) -> bool {
+    name == SHADOW || name == EXPORT_SHADOW || name.starts_with(DIFF_SHADOW)
+}
+
 impl Pool {
     /// Build the shadow schema from the deployment's own DDL.
     pub async fn build_shadow(&self, ddl: &str) -> Result<(), PoolError> {

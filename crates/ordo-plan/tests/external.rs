@@ -298,3 +298,74 @@ fn an_exists_nested_in_arithmetic_is_seen() {
         "{sql}"
     );
 }
+
+// ── `public` (ruled 2026-11-15, `external-entities` ask 5) ──────────────
+
+const PUBLIC_SRC: &str = r#"
+domain shop
+external plans from crm.plans shared public {
+  id <- "plan_id"
+  name: text <- name
+  price: int <- price
+}
+external accounts from crm.accounts shared {
+  id <- id
+  label: text public <- label
+  secret: text <- secret
+}
+external hidden from crm.hidden shared {
+  id <- id
+  note: text <- note
+}
+"#;
+
+fn public_setup() -> (ordo_schema::Schema, Registry) {
+    let program = parse_program(PUBLIC_SRC).expect("parses");
+    let schema = build(&program).expect("schema");
+    let mut registry = Registry::from_program(&program);
+    registry.extend_from(&ordo_schema::std_ops(&schema));
+    (schema, registry)
+}
+
+#[test]
+fn the_derived_reads_of_a_public_external_are_on_the_public_interface() {
+    let (schema, registry) = public_setup();
+    ordo_plan::cost::check_registration(&schema, &registry).expect("the public gate passes");
+    for verb in ["get", "list", "count"] {
+        let art = ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.plans.{verb}"))
+            .expect("artifact");
+        assert_eq!(art["flags"]["public"], true, "std.plans.{verb}");
+        let art = ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.hidden.{verb}"))
+            .expect("artifact");
+        assert!(
+            art["flags"].get("public").is_none(),
+            "std.hidden.{verb} stays private"
+        );
+    }
+}
+
+#[test]
+fn a_public_externals_derived_reads_scope_only_public_fields() {
+    let (schema, registry) = public_setup();
+    let read = |op: &str| {
+        let scopes = ordo_plan::artifact::op_scope(&schema, &registry, op);
+        assert_eq!(scopes.len(), 1, "{op}");
+        scopes[0].read.iter().cloned().collect::<Vec<String>>()
+    };
+    assert_eq!(read("std.plans.get"), ["name", "price"]);
+    assert_eq!(read("std.accounts.get"), ["label"]);
+    assert_eq!(read("std.accounts.list"), ["label"]);
+    assert_eq!(read("std.hidden.get"), ["note"]);
+}
+
+#[test]
+fn an_authored_public_op_over_a_private_external_field_is_refused() {
+    let program = parse_program(&format!(
+        "{PUBLIC_SRC}\nop leak public = accounts[label, secret]\n  take 5\n"
+    ))
+    .expect("parses");
+    let schema = build(&program).expect("schema");
+    let registry = Registry::from_program(&program);
+    let e = ordo_plan::cost::check_registration(&schema, &registry).expect_err("refused");
+    assert_eq!(e.code, "public_reads_private");
+}

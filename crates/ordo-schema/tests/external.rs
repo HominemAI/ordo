@@ -286,7 +286,11 @@ fn the_public_mark_lands_on_an_external_and_its_fields() {
 
     let accounts = &s.externals[1];
     assert!(accounts.public.is_none());
-    assert_eq!(public(accounts), ["label"], "a field mark reaches one field");
+    assert_eq!(
+        public(accounts),
+        ["label"],
+        "a field mark reaches one field"
+    );
 
     let hidden = &s.externals[2];
     assert!(!hidden.has_public());

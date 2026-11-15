@@ -332,11 +332,13 @@ fn the_derived_reads_of_a_public_external_are_on_the_public_interface() {
     let (schema, registry) = public_setup();
     ordo_plan::cost::check_registration(&schema, &registry).expect("the public gate passes");
     for verb in ["get", "list", "count"] {
-        let art = ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.plans.{verb}"))
-            .expect("artifact");
+        let art =
+            ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.plans.{verb}"))
+                .expect("artifact");
         assert_eq!(art["flags"]["public"], true, "std.plans.{verb}");
-        let art = ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.hidden.{verb}"))
-            .expect("artifact");
+        let art =
+            ordo_plan::artifact::op_artifact(&schema, &registry, &format!("std.hidden.{verb}"))
+                .expect("artifact");
         assert!(
             art["flags"].get("public").is_none(),
             "std.hidden.{verb} stays private"

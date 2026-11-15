@@ -82,7 +82,7 @@ how a closed set stops being closed.
 | `external_inherited_guard` | an `external` entity would inherit a guard it does not declare. Write its own `access read` |
 | `external_read_only` | a `set` or `del` on an `external` entity, in an op or a routine. Writes go through the other system's own API |
 | `external_live` | a routine that listens for changes on an `external` entity. No change reaches Ordo's log; run it on a schedule |
-| `external_unsupported` | a clause an `external` entity cannot carry (`unique`, `index`, `check`, `public`, a default, a `blob`), or `whole` anchored on one. The parser raises the declaration half; `whole` raises the other |
+| `external_unsupported` | a clause an `external` entity cannot carry (`unique`, `index`, `check`, `prev`, `public*`, a default, a `blob`), or `whole` anchored on one. The parser raises the declaration half; `whole` raises the other |
 
 **Binding and planning.** Raised once a source has been resolved.
 

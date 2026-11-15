@@ -1575,10 +1575,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                     ));
                 }
                 TokenKind::Keyword(
-                    k @ (Keyword::Unique
-                    | Keyword::Index
-                    | Keyword::Tree
-                    | Keyword::Normalize),
+                    k @ (Keyword::Unique | Keyword::Index | Keyword::Tree | Keyword::Normalize),
                 ) => {
                     return Err(p.err_class_at(
                         parser::EXTERNAL_UNSUPPORTED,

@@ -2023,7 +2023,7 @@ external customers from crm.customers shared {
   access read open
 }
 
-external accounts (key: acct) from crm.accounts shared {
+external accounts (key: acct) from crm.accounts shared public {
   id: uuid <- ref
   label: text <- label
 }
@@ -2041,6 +2041,15 @@ entity orders {
   Without `access read`, every member of every space reads every row.
   `shared` is that choice, written down. `ordo plan` says so for each such
   external.
+- `public` follows `shared` on the first line: `external <name> [(key: ...)]
+  from <schema>.<table> shared [public] {`. It works as on an entity (owner,
+  2026-11-15). The derived `std.<name>.get`, `.list` and `.count` run on the
+  public path and carry the public fields only, and an authored `op ...
+  public` may read them. `public` as a field mark (`name: text public <-
+  "full_name"`) works as on a native field. Without a public field the
+  external is not served to visitors. The public path has no guard walk, so
+  a guarded external cannot be public (`public_guarded`), and every visitor
+  reads every row. `ordo plan` says so for each public external.
 - `id <- column` names the one key column. It must be unique and never null.
   The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
 - Each other line is `field: type <- column`, or `field -> external <-
@@ -2167,7 +2176,7 @@ Refusals, each naming the fix:
 | `external_changed` | at plan, apply or a watcher pass: a mapped column is gone, retyped or nullable against the file |
 | `external_no_grant` | at plan, apply or a watcher pass: Ordo's role cannot read the table |
 | `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
-| `external_unsupported` | `unique`, `index`, `check`, `public`, `std sealed`, `tree`, `normalize`, a default or a `blob` on an external, or `whole` anchored on one |
+| `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); a `public` line inside the braces (it goes after `shared`); or `whole` anchored on one |
 
 ---
 

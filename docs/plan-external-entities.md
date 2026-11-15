@@ -162,6 +162,8 @@ A test asserts that a program with an external entity produces an empty plan.
 - **`shared`** means every space may read every row, subject to the access
   profile. In a tenant's own database the database is the boundary. In the
   deployment's database a foreign table is deployment-wide data, like a price list.
+  Without `access read`, every member of every space reads every row. `shared`
+  is that choice, written down.
 - **Access profile gating.** Which tenants may call the ops is the profile's
   op lines (`docs/howto-roles.md` §8). Nothing new is needed.
 - **No `$space`.** There is no space predicate and none may be invented.

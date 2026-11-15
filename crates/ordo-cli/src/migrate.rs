@@ -249,6 +249,7 @@ async fn render_plan(pool: &Pool, r: &mut String, plan: &Plan, path: &str, db: &
         plan.prior.is_some(),
     );
     tenancy(r, pool, &plan.program.schema, &plan.live).await;
+    externals(r, &plan.program.schema);
 
     if plan.assessed.is_empty() {
         // **Not an early return.** A deploy that changes only op bodies has
@@ -407,6 +408,37 @@ async fn tenancy(r: &mut String, pool: &Pool, schema: &Schema, live: &ordo_schem
          it runs on, so the tenants whose database that is. Other tenants are not\n  \
          frozen, and each one's backfill is timed on its own rows.\n\n"
     ));
+}
+
+/// The external entities, one note each where it matters (ruled 2026-11-15,
+/// `external-entities`). Today that is one fact: an external with no `access
+/// read` is read whole by every member of every space, which `shared`
+/// chose. Slice C's "present, not Ordo's" list belongs beside this.
+fn externals(r: &mut String, schema: &Schema) {
+    let notes = external_notes(schema);
+    if notes.is_empty() {
+        return;
+    }
+    r.push_str("EXTERNAL\n");
+    for n in notes {
+        r.push_str(&format!("  {n}\n"));
+    }
+    r.push('\n');
+}
+
+/// One line per external entity that has no `access read`.
+pub fn external_notes(schema: &Schema) -> Vec<String> {
+    schema
+        .externals
+        .iter()
+        .filter(|e| e.guards.is_none())
+        .map(|e| {
+            format!(
+                "note: `{}` has no `access read`: every member of every space reads every row",
+                e.name
+            )
+        })
+        .collect()
 }
 
 fn rate_note(rate: Option<f64>) -> String {

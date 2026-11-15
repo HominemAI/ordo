@@ -713,6 +713,12 @@ fn main() {
         }
     }
     print!("{out}");
+    if cmd == "plan" {
+        // On stderr, so the artifact on stdout stays byte-stable JSON.
+        for n in ordo_cli::plan_notes(&src) {
+            eprintln!("{n}");
+        }
+    }
     if cmd == "check" {
         // On stderr, beside the refusals, so the report on stdout stays the
         // program's shape. A warning never changes the exit code.

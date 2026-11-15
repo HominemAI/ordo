@@ -2038,6 +2038,9 @@ entity orders {
   tables are in `public`, so a foreign table takes a schema of its own.
 - `shared` is required. Every space reads every row, and the access profile
   decides which tenants may call the ops. A tenant column comes later.
+  Without `access read`, every member of every space reads every row.
+  `shared` is that choice, written down. `ordo plan` says so for each such
+  external.
 - `id <- column` names the one key column. It must be unique and never null.
   The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
 - Each other line is `field: type <- column`, or `field -> external <-

@@ -133,6 +133,104 @@ async fn std_list_and_get_read_the_foreign_table_in_key_order() {
     }
 }
 
+/// The real write path (review finding 1): a native row whose ref names an
+/// external is created through the door. The write checks the prefix and
+/// the key's form only, never the other system's table, so a ref to a row
+/// that is not there is accepted and later reads as missing.
+#[tokio::test]
+async fn a_native_row_may_ref_an_external_through_the_write_path() {
+    let state = door("ordo_ext_write", 50).await;
+    for (customer, subject) in [("pat_9", "c"), ("pat_77", "d")] {
+        let (status, body) = call(
+            &state,
+            "POST",
+            "/op/std.tickets.create",
+            Some(serde_json::json!({ "customer": customer, "subject": subject })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{customer}: {body}");
+    }
+    // Not this external's id: refused before any SQL, as a missing row of
+    // an Ordo entity would be.
+    for bad in ["acct_9", "pat_x", "pat_9223372036854775808"] {
+        let (status, body) = call(
+            &state,
+            "POST",
+            "/op/std.tickets.create",
+            Some(serde_json::json!({ "customer": bad, "subject": "e" })),
+        )
+        .await;
+        assert_ne!(status, StatusCode::OK, "{bad}: {body}");
+    }
+    let (status, body) = call(&state, "GET", "/op/ticketsWithCustomer", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let got: Vec<(String, Value)> = rows(&body)
+        .iter()
+        .map(|r| {
+            (
+                r["subject"].as_str().unwrap().to_string(),
+                r["name"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("a".to_string(), Value::from("Ada")),
+            ("b".to_string(), Value::Null),
+            ("c".to_string(), Value::from("Ada")),
+            ("d".to_string(), Value::Null),
+        ],
+        "{body}"
+    );
+}
+
+/// Review finding 4: an integer key past 18 digits is still found by get,
+/// by a filter and by a join, and one past the bigint range is no row.
+#[tokio::test]
+async fn a_nineteen_digit_key_is_found_everywhere() {
+    let state = door("ordo_ext_bigint", 50).await;
+    Pg::named("ordo_ext_bigint")
+        .exec("INSERT INTO crm.customers VALUES (1000000000000000000, 'Di', 'di@example.com')")
+        .expect("inserts");
+    let id = "pat_1000000000000000000";
+    let (status, body) = call(&state, "GET", &format!("/op/std.patrons.get?id={id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"][0]["name"], "Di", "{body}");
+    let (status, body) = call(
+        &state,
+        "GET",
+        "/op/customerByEmail?e=di%40example.com",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"][0]["id"], id, "{body}");
+    let (status, body) = call(
+        &state,
+        "POST",
+        "/op/std.tickets.create",
+        Some(serde_json::json!({ "customer": id, "subject": "z" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = call(&state, "GET", "/op/ticketsWithCustomer", None).await;
+    let z = rows(&body)
+        .into_iter()
+        .find(|r| r["subject"] == "z")
+        .expect("the new ticket");
+    assert_eq!(z["name"], "Di", "the join decodes 19 digits: {body}");
+    let (status, body) = call(
+        &state,
+        "GET",
+        "/op/std.patrons.get?id=pat_9223372036854775808",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(rows(&body).is_empty(), "{body}");
+}
+
 #[tokio::test]
 async fn a_developer_op_joins_a_native_entity_to_the_external() {
     let state = door("ordo_ext_join", 50).await;

@@ -2639,12 +2639,10 @@ pub fn std_ops(schema: &Schema) -> Program {
         }
     }
 
-    // ── external entities: `get` and `list`, nothing else ────────────────
+    // ── external entities: `get`, `list` and `count`, the reads ──────────
     // Ruled 2026-11-15 (`external-entities`): an external is read-only, so
     // it derives no `create`, `update` or `delete`. It has no `rev` either,
-    // so the row shape is `id` and the declared fields. `count` is left
-    // out: it reads the whole foreign table on every call, which is a cost
-    // the author should state in an op of their own.
+    // so the row shape is `id` and the declared fields.
     for e in &schema.externals {
         let mut proj: Vec<ordo_syntax::decl::ProjItem> = vec![ordo_syntax::decl::ProjItem::Field {
             path: vec![ident("id")],
@@ -2700,6 +2698,36 @@ pub fn std_ops(schema: &Schema) -> Program {
                     keys: vec![ordo_syntax::decl::SortKey {
                         expr: path("id"),
                         desc: true,
+                        span: sp,
+                    }],
+                    span: sp,
+                }],
+                span: sp,
+            },
+        ));
+        // `count` is a read, and `std-library.md` derives it for every
+        // entity: `reduce { n: count }` over the same source, one row.
+        ops.push(read(
+            "count",
+            Vec::new(),
+            ordo_syntax::decl::Pipeline {
+                lets: Vec::new(),
+                sources: vec![ordo_syntax::decl::Source {
+                    name: ident(&e.name),
+                    args: Vec::new(),
+                    projection: Some(vec![ordo_syntax::decl::ProjItem::Field {
+                        path: vec![ident("id")],
+                        span: sp,
+                    }]),
+                    span: sp,
+                }],
+                steps: vec![ordo_syntax::decl::Step::Reduce {
+                    aggs: vec![ordo_syntax::decl::AggDecl {
+                        out: ident("n"),
+                        func: ident("count"),
+                        arg: None,
+                        arg2: None,
+                        cond: None,
                         span: sp,
                     }],
                     span: sp,

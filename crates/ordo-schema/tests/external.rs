@@ -75,7 +75,7 @@ fn an_external_is_its_own_kind() {
 }
 
 #[test]
-fn an_external_derives_get_and_list_and_nothing_that_writes() {
+fn an_external_derives_the_reads_and_nothing_that_writes() {
     let s = schema_of(SHOP);
     let ops: Vec<String> = std_ops(&s)
         .ops
@@ -88,8 +88,10 @@ fn an_external_derives_get_and_list_and_nothing_that_writes() {
         [
             "std.customers.get",
             "std.customers.list",
+            "std.customers.count",
             "std.accounts.get",
-            "std.accounts.list"
+            "std.accounts.list",
+            "std.accounts.count"
         ]
     );
 }

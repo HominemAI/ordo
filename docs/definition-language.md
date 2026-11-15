@@ -2061,8 +2061,9 @@ How it reads:
 - The planner reads the table as a subquery, never a view. A view would let
   Ordo block the other system's own `DROP COLUMN`.
 - Per tenant, the same SQL runs in whichever database the space maps to.
-- Derived ops are `std.<name>.get` and `std.<name>.list` only. Developer ops
-  read and join it like any entity.
+- Derived ops are the reads: `std.<name>.get`, `std.<name>.list` and
+  `std.<name>.count`. There is no create, update or delete. Developer ops read
+  and join it like any entity.
 - A native ref to an external is a plain text column with no foreign key. A
   row that is gone reads as missing: a hop through the ref is null, and the
   ref's own row stays.

@@ -122,6 +122,11 @@ async fn std_list_and_get_read_the_foreign_table_in_key_order() {
     assert_eq!(body["rows"][0]["name"], "Bo");
     assert!(body["rows"][0]["email"].is_null(), "{body}");
 
+    // `count` is a read like the other two, derived for every entity.
+    let (status, body) = call(&state, "GET", "/op/std.patrons.count", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rows"][0]["n"], 3, "{body}");
+
     // Not this entity's id: no row, never a cast error.
     for bad in ["pat_x", "acct_10", "pat_99999999999999999999"] {
         let (status, body) = call(

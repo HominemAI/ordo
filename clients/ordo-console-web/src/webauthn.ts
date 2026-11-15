@@ -92,16 +92,24 @@ export function assert<T>(beginPath: string, finishPath: string): Promise<T> {
   return assertWith<T>(post, beginPath, finishPath);
 }
 
+/** What a begin route answers: the options and the challenge in them. */
+export interface Begun {
+  publicKey: Json;
+}
+
 /**
  * Run an assertion through `send`: the console's own API, or the identity
- * service's touch routes (`identity.ts`).
+ * service's touch routes (`identity.ts`). A caller that has begun already
+ * (it read the options first) passes them as `begun`, so the service is
+ * not asked twice.
  */
 export async function assertWith<T>(
   send: <R>(path: string, body?: unknown) => Promise<R>,
   beginPath: string,
   finishPath: string,
+  begun?: Begun,
 ): Promise<T> {
-  const begun = await send<{ publicKey: Json }>(beginPath);
+  begun ??= await send<Begun>(beginPath);
   const publicKey = requestOptions(begun.publicKey);
   const cred = (await navigator.credentials.get({ publicKey })) as PublicKeyCredential | null;
   if (!cred) throw new DOMException('No passkey was used.', 'NotAllowedError');

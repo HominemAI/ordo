@@ -21,8 +21,11 @@ export async function withTouch<T>(f: () => Promise<T>): Promise<T> {
   } catch (e) {
     if (!(e instanceof ConsoleCallError && e.code === 'step_up_required')) throw e;
   }
-  // With the identity service the touch is taken there, and the token the
-  // next call carries holds it; it answers the door's presence_required too.
+  // With the identity service the reauth runs here when this host may use
+  // the passkey, else the page goes to the service and does not come back
+  // to this line (`touch()` never settles); the person repeats the action.
+  // The token the next call carries holds the touch; it answers the door's
+  // presence_required too.
   if (identityMode()) await touch();
   else await assert('stepup/begin', 'stepup/finish');
   return f();

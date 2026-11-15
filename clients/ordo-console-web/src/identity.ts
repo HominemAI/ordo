@@ -11,14 +11,19 @@
  *    this module's memory only, never in storage, and is renewed 1 minute
  *    before it ends.
  * 3. Every console call carries it as a bearer (`api.ts`).
- * 4. A call that needs a fresh touch runs the passkey here against the
- *    service's `/touch/begin` and `/touch/finish`; the answer is a token
- *    with the new touch in it (`touch.ts`).
+ * 4. A call that needs a fresh touch (a reauth) asks the service's
+ *    `/touch/begin`. When this page's host is the passkey's RP ID or under
+ *    it, the ceremony runs here and `/touch/finish` answers a token with
+ *    the new touch. Otherwise the browser cannot use the passkey here, so
+ *    the page goes to the service's sign-in page with `touch=1`, the
+ *    ceremony runs there, and the browser comes back; the next token
+ *    carries the touch. The person repeats the action after the return
+ *    (`touch.ts`).
  * 5. Sign-out ends the service session and forgets the token.
  */
 
 import { ConsoleCallError } from './api';
-import { assertWith } from './webauthn';
+import { assertWith, type Begun } from './webauthn';
 
 export interface IdentityInfo {
   origin: string;
@@ -114,26 +119,49 @@ export function token(): Promise<string> {
   return pending;
 }
 
-/** Send the browser to the service's sign-in page; it comes back here. */
-export function goSignIn(): void {
-  if (!service) return;
+/** The service's sign-in page, with what it needs to send the browser back. */
+function signInUrl(extra = ''): string {
+  if (!service) return '';
   const back = encodeURIComponent(window.location.href);
   // The service checks `return` against this deployment's own list, so a
   // shared service (many deployments) knows whose list to read.
   const handle = encodeURIComponent(service.audience.replace(/^ordo-deployment:/, ''));
-  window.location.assign(
-    `${service.origin}/sign-in?client=console&deployment=${handle}&return=${back}`,
-  );
+  return `${service.origin}/sign-in?client=console&deployment=${handle}&return=${back}${extra}`;
 }
 
-/** A fresh passkey touch inside the service session: the token held now carries it. */
+/** Send the browser to the service's sign-in page; it comes back here. */
+export function goSignIn(): void {
+  if (!service) return;
+  window.location.assign(signInUrl());
+}
+
+/** Whether a passkey with this RP ID can be used at this page's host. */
+function underRpId(rpId: string): boolean {
+  const host = window.location.hostname;
+  return host === rpId || host.endsWith(`.${rpId}`);
+}
+
+/**
+ * A reauth inside the service session: the token held after it carries the
+ * fresh touch. In page when this host may use the passkey; otherwise the
+ * page leaves for the service's sign-in page and never returns here.
+ */
 export async function touch(): Promise<void> {
   // The answer is a token for this console's deployment, which may not be
   // the service's own when the service is shared.
   const aud = service?.audience;
   const send = <R>(path: string, body?: unknown): Promise<R> =>
     servicePost<R>(path, path === '/touch/finish' ? { ...(body as object), aud } : body);
-  const issued = await assertWith<Issued>(send, '/touch/begin', '/touch/finish');
+  const begun = await send<Begun>('/touch/begin');
+  const options = begun.publicKey as { rpId?: string; rp?: { id?: string } };
+  const rpId = options.rpId ?? options.rp?.id;
+  if (rpId && !underRpId(rpId)) {
+    window.location.assign(signInUrl('&touch=1'));
+    // The page is leaving. Nothing after a reauth runs here; the person
+    // repeats the action once the browser is back.
+    return new Promise<void>(() => {});
+  }
+  const issued = await assertWith<Issued>(send, '/touch/begin', '/touch/finish', begun);
   keep(issued);
 }
 

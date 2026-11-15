@@ -3,7 +3,12 @@
 //!
 //! | Command | What |
 //! |---|---|
-//! | `invite [--label <text>] [--role admin]` | a new admin's invite link; also recovery when every passkey is lost |
+//! | `invite [--label <text>] [--role admin] [--deployment <handle>]` | a new admin's invite link; also recovery when every passkey is lost. With `--deployment`, the joiner is a member of that registered deployment only |
+//! | `deployment add <handle> --origin <origin>... [--return <url>]...` | register a deployment that signs in here (`crate::deployments`) |
+//! | `deployment list` | the registered deployments |
+//! | `deployment end <handle>` | no new token for it |
+//! | `member add <handle> <person>`, `member end <handle> <person>`, `member list <handle>` | who may hold a deployment's tokens |
+//! | `people` | every account, with its id, for `member add` |
 //! | `break-glass-token [--minutes <1..60>]` | one admin token for `ordo --token`, default 15 minutes |
 //! | `rotate-keys [--now]` | a new token key; `--now` signs with it at once and retires the old |
 //! | `audit verify [--key <kid>:<x>]...` | check the audit chain and its checkpoints |
@@ -19,11 +24,46 @@ use crate::people::Actor;
 use crate::server::Service;
 
 /// The first words that name a command, so `main` knows to run one.
-pub const COMMANDS: &[&str] = &["invite", "break-glass-token", "rotate-keys", "audit"];
+pub const COMMANDS: &[&str] = &[
+    "invite",
+    "break-glass-token",
+    "rotate-keys",
+    "audit",
+    "deployment",
+    "member",
+    "people",
+];
 
 const USAGE: &str = "usage: ordo-identity-service [invite [--label <text>] [--role admin] \
-                     | break-glass-token [--minutes <1..60>] | rotate-keys [--now] \
-                     | audit verify [--key <kid>:<x>]...]";
+                     [--deployment <handle>] | break-glass-token [--minutes <1..60>] \
+                     | rotate-keys [--now] | audit verify [--key <kid>:<x>]... \
+                     | deployment add <handle> --origin <origin>... [--return <url>]... \
+                     | deployment list | deployment end <handle> \
+                     | member add|end <handle> <person> | member list <handle> | people]";
+
+/// Every value given after `--name`, in order.
+fn flags<'a>(args: &'a [String], name: &str) -> Result<Vec<&'a str>, String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == name {
+            out.push(
+                it.next()
+                    .map(String::as_str)
+                    .ok_or_else(|| format!("{name} needs a value. {USAGE}"))?,
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// The `n`th word after the command, required.
+fn word<'a>(args: &'a [String], n: usize, what: &str) -> Result<&'a str, String> {
+    args.get(n)
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .ok_or_else(|| format!("{what} is required. {USAGE}"))
+}
 
 /// The value after `--name`, if given.
 fn flag<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>, String> {
@@ -59,12 +99,150 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                 }
             }
             let label = flag(args, "--label")?.unwrap_or("");
-            let m = svc.invite(actor, label).await.map_err(|e| e.to_string())?;
+            let target = flag(args, "--deployment")?;
+            let m = svc
+                .invite_into(actor, label, target)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(format!(
                 "{}\nOpen it within {} days to sign up; it works once.\n",
                 m.link,
                 svc.config().invite_days
             ))
+        }
+        Some("deployment") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let origins = flags(args, "--origin")?;
+                if origins.is_empty() {
+                    return Err(format!(
+                        "--origin is required: the console's origin, such as \
+                         https://console.example.com. {USAGE}"
+                    ));
+                }
+                let asked = crate::deployments::Registration {
+                    handle: handle.to_string(),
+                    client_origins: origins.iter().map(|s| s.to_string()).collect(),
+                    return_urls: flags(args, "--return")?
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                };
+                let made = svc
+                    .register_deployment(actor, &asked)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Registered `{}`. Its tokens say aud `{}`.\nClient origins: {}\nReturn URLs: \
+                     {}\nSet on its door and console: ORDO_IDENTITY_URL={o}, \
+                     ORDO_IDENTITY_ORIGIN={o}, ORDO_IDENTITY_DEPLOYMENT={}.\nNext: `member add \
+                     {} <person>`, or `invite --deployment {}`.\n",
+                    made.handle,
+                    ordo_identity::deployment_token::audience(&made.handle),
+                    made.client_origins
+                        .iter()
+                        .map(|o| o.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    made.return_urls.join(" "),
+                    made.handle,
+                    made.handle,
+                    made.handle,
+                    o = svc.config().origin,
+                ))
+            }
+            Some("list") => {
+                let list = crate::deployments::list(svc.store().pool(), svc.handle())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut out = format!("{} (this service's own)\n", svc.handle());
+                for d in list {
+                    out.push_str(&format!(
+                        "{}  clients: {}  returns: {}\n",
+                        d.handle,
+                        d.client_origins
+                            .iter()
+                            .map(|o| o.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        d.return_urls.join(" ")
+                    ));
+                }
+                Ok(out)
+            }
+            Some("end") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                svc.end_deployment(actor, handle)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Ended `{handle}` and its memberships. A running service gives no new \
+                     token for it within a minute. Tokens already issued work until they \
+                     expire, within {} seconds.\n",
+                    svc.config().token_secs
+                ))
+            }
+            _ => Err(USAGE.to_string()),
+        },
+        Some("member") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let person = word(args, 3, "the person's id (p_...)")?;
+                svc.add_member(actor, handle, person)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("{person} is a member of `{handle}`.\n"))
+            }
+            Some("end") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let person = word(args, 3, "the person's id (p_...)")?;
+                svc.end_member(actor, handle, person)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("{person} is no longer a member of `{handle}`.\n"))
+            }
+            Some("list") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let list = crate::deployments::members(svc.store().pool(), svc.handle(), handle)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(list
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}  {}{}\n",
+                            p.id,
+                            p.display_name,
+                            if p.ended_at.is_some() {
+                                "  (ended)"
+                            } else {
+                                ""
+                            }
+                        )
+                    })
+                    .collect())
+            }
+            _ => Err(USAGE.to_string()),
+        },
+        Some("people") => {
+            let list = crate::people::list(svc.store().pool(), svc.handle())
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(list
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{}  {}{}\n",
+                        p.id,
+                        p.display_name,
+                        if p.ended_at.is_some() {
+                            "  (ended)"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect())
         }
         Some("break-glass-token") => {
             let minutes = match flag(args, "--minutes")? {

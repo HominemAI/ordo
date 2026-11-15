@@ -17,7 +17,12 @@ use ordo_exec::{sql_lit, Pool, PoolLimits, TextRow};
 use crate::config::{IdentityConfig, DATABASE_URL_ENV};
 use crate::error::IdentityError;
 
-const MIGRATIONS: &[(i32, &str)] = &[(1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3)];
+const MIGRATIONS: &[(i32, &str)] = &[
+    (1, MIGRATION_1),
+    (2, MIGRATION_2),
+    (3, MIGRATION_3),
+    (4, MIGRATION_4),
+];
 
 /// The advisory lock migrations run under, so two services booting at once
 /// do not race.
@@ -41,6 +46,40 @@ const MIGRATION_3: &str = r#"
 ALTER TABLE machine_keys ADD COLUMN grants text NOT NULL DEFAULT 'deployment';
 ALTER TABLE machine_keys ADD COLUMN mints text NOT NULL DEFAULT '';
 UPDATE machine_keys SET mints = 'deployment' WHERE name = 'provisioner' AND created_by = 'boot';
+"#;
+
+/// Many deployments in one service (`crate::deployments`, 2026-11-14).
+/// `deployment` stays the service's own handle on every row; the
+/// registered handle is `handle` or `target`. Every person before this
+/// keeps home access. An invite with a `target` makes a member of that
+/// deployment, without home access.
+const MIGRATION_4: &str = r#"
+CREATE TABLE deployments (
+  deployment     text   NOT NULL,
+  handle         text   NOT NULL,
+  client_origins text   NOT NULL,
+  return_urls    text   NOT NULL,
+  created_by     text   NOT NULL,
+  created_at     bigint NOT NULL,
+  ended_at       bigint,
+  ended_by       text,
+  PRIMARY KEY (deployment, handle)
+);
+
+CREATE TABLE deployment_members (
+  deployment  text   NOT NULL,
+  target      text   NOT NULL,
+  person_id   text   NOT NULL REFERENCES people (id),
+  granted_by  text   NOT NULL,
+  created_at  bigint NOT NULL,
+  ended_at    bigint,
+  ended_by    text
+);
+CREATE UNIQUE INDEX deployment_members_live ON deployment_members (deployment, target, person_id)
+  WHERE ended_at IS NULL;
+
+ALTER TABLE people ADD COLUMN home boolean NOT NULL DEFAULT true;
+ALTER TABLE invites ADD COLUMN target text;
 "#;
 
 const MIGRATION_1: &str = r#"

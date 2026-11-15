@@ -2,10 +2,11 @@
 // a session that may only make a new passkey (the server holds to this);
 // making one retires the old passkeys and issues new codes, shown once.
 //
-// `?client=console&return=<url>` sends the browser back once signed in.
-// Only this origin and the origins the service lists
-// (ORDO_IDENTITY_CLIENT_ORIGINS) are honoured; anything else goes to the
-// account page.
+// `?client=console&return=<url>&deployment=<handle>` sends the browser
+// back once signed in. The service checks the address against that
+// deployment's return URLs (POST /sign-in/return): its own clients
+// (ORDO_IDENTITY_CLIENT_ORIGINS), or a registered deployment's list.
+// Anything else goes to the account page.
 
 import { $, BASE, busy, explain, me, needPasskeys, post, problem, returnTo, showCodes, step } from './common.js';
 import { assert, passkeysAvailable, register } from './webauthn.js';
@@ -13,8 +14,25 @@ import { assert, passkeysAvailable, register } from './webauthn.js';
 const params = new URLSearchParams(location.search);
 const client = params.get('client') === 'console' ? 'console' : undefined;
 
-function done() {
-  location.replace(returnTo(BASE + '/account'));
+const deployment = params.get('deployment') || undefined;
+
+async function done() {
+  const asked = params.get('return');
+  if (asked) {
+    try {
+      const { to } = await post('/sign-in/return', deployment ? { deployment, return: asked } : { return: asked });
+      const url = new URL(to, location.href);
+      const web = url.protocol === 'https:' || url.protocol === 'http:';
+      if (web && url.origin !== 'null') {
+        // A path here keeps the page's own handling of the base path.
+        location.replace(url.origin === location.origin ? returnTo(BASE + '/account') : url.href);
+        return;
+      }
+    } catch {
+      // Refused, or no answer: the account page.
+    }
+  }
+  location.replace(BASE + '/account');
 }
 
 async function enrol() {

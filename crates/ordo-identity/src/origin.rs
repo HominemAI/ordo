@@ -45,12 +45,7 @@ impl Origin {
     /// nothing, or by a path, a query or a fragment. `None` for anything
     /// that is not plainly that.
     pub fn of_url(url: &str) -> Option<Origin> {
-        if url.is_empty()
-            || !url.is_ascii()
-            || url
-                .bytes()
-                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || b == b'\\')
-        {
+        if !plain_url_text(url) {
             return None;
         }
         let (scheme, rest) = url.split_once("://")?;
@@ -160,6 +155,19 @@ pub fn base_path(text: &str) -> Result<String, &'static str> {
         return Err("a segment is empty or holds a character other than a-z, 0-9, - and _");
     }
     Ok(t.to_string())
+}
+
+/// Text a URL check may trust as written: not empty, ASCII, and no
+/// whitespace, control character or backslash anywhere. A browser strips
+/// tab and newline and reads `\\` as `/` before it parses, so text that
+/// fails this can land somewhere other than it reads. [`Origin::of_url`]
+/// and every return-address check apply it.
+pub fn plain_url_text(url: &str) -> bool {
+    !url.is_empty()
+        && url.is_ascii()
+        && !url
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || b == b'\\')
 }
 
 pub fn is_loopback_host(host: &str) -> bool {

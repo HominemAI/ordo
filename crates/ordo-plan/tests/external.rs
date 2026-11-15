@@ -319,14 +319,6 @@ external hidden from crm.hidden shared {
 }
 "#;
 
-fn public_setup() -> (ordo_schema::Schema, Registry) {
-    let program = parse_program(PUBLIC_SRC).expect("parses");
-    let schema = build(&program).expect("schema");
-    let mut registry = Registry::from_program(&program);
-    registry.extend_from(&ordo_schema::std_ops(&schema));
-    (schema, registry)
-}
-
 #[test]
 fn an_authored_public_op_over_a_public_external_is_on_the_public_interface() {
     let program = parse_program(&format!(

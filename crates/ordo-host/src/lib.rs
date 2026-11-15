@@ -74,6 +74,7 @@ pub mod directory;
 pub mod email_code;
 pub mod enrolment;
 pub mod exit_ops;
+pub mod external_check;
 pub mod federation;
 pub mod fleet;
 pub mod fn_runs;
@@ -316,6 +317,9 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                 bounds: param_bounds(op, p),
             })
             .collect();
+        // Whether this read reaches an external entity, decided from the one
+        // bind below rather than a second one (review findings 2 and 8).
+        let mut reaches_external = false;
         let (kind, mode_label, output_fields, aggregate_only, cost, sync, refinable) =
             match &op.body {
                 OpBody::Write(stmts) => {
@@ -362,6 +366,7 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                         ordo_sema::Clock::CORPUS,
                     ) {
                         Ok(mut q) => {
+                            reaches_external = !ordo_plan::externals_read(&q).is_empty();
                             // The fifth site that plans or describes a read, and the
                             // one the shape gate caught missing (C4e). `build_specs`
                             // feeds one bound query to BOTH `manifest_fields` and
@@ -400,12 +405,19 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                         // It has no anchor either, for the same reason.
                         // And no manifest means nothing a field could be
                         // validated against, so it is not refinable.
-                        Err(_) => (
-                            Vec::new(),
-                            OpCost::default(),
-                            Syncability::NotSyncable(NotSyncable::NoAnchor),
-                            RefineTier::None,
-                        ),
+                        Err(_) => {
+                            // A read the generic bind cannot settle (one that
+                            // reads `$caller` as a value, say) may still reach
+                            // an external, so where the program declares one
+                            // it is not live: unknown is not live.
+                            reaches_external = !f.schema.externals.is_empty();
+                            (
+                                Vec::new(),
+                                OpCost::default(),
+                                Syncability::NotSyncable(NotSyncable::NoAnchor),
+                                RefineTier::None,
+                            )
+                        }
                     };
                     // Keyless-group tail = the op reduces rows to a measure.
                     let agg = pl
@@ -436,7 +448,13 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
             // live-capable *and* blind to its siblings — which is why
             // [`crate::invalidation::PgInvalidationBus`] exists and why
             // it, not this line, is the honest gate on `?live`.
-            live_capable: matches!(kind, OpKind::Read),
+            //
+            // One exception, ruled 2026-11-15 (`external-entities`): a read
+            // that reaches an external entity is never live. Another system
+            // writes that table, no change reaches Ordo's log, and a
+            // subscription would never refresh, so `?live=1` answers
+            // `not_live` rather than a stream that is silently stale.
+            live_capable: matches!(kind, OpKind::Read) && !reaches_external,
             refinable,
             aggregate_only,
             mode_label,

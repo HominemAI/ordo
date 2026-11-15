@@ -519,6 +519,10 @@ pub struct Plan {
     /// Every refusal, `class on entity`, in report order.
     pub refusals: Vec<String>,
     pub destructive: usize,
+    /// What the program's external entities found in this database: the
+    /// refusals (already in `refusals`), the notes, and what is present and
+    /// not Ordo's (slice C, `external-entities`).
+    pub external: crate::external_check::ExternalReport,
     /// What the developer stated, which the triage applies.
     pub choices: Choices,
 }
@@ -554,6 +558,18 @@ pub async fn plan_with(
     choices: &Choices,
     written: Option<&Schema>,
 ) -> Result<Plan, String> {
+    plan_with_external(pool, program, choices, written, None).await
+}
+
+/// [`plan_with`], given the external report a caller already read from this
+/// same database, so one apply reads the catalog once and not twice.
+pub async fn plan_with_external(
+    pool: &Pool,
+    program: &Program,
+    choices: &Choices,
+    written: Option<&Schema>,
+    external: Option<crate::external_check::ExternalReport>,
+) -> Result<Plan, String> {
     let deployed = deployed_artifact(pool).await;
     let prior = deployed.as_ref().and_then(recompile);
     let prior_doc: Option<serde_json::Value> = deployed
@@ -570,7 +586,13 @@ pub async fn plan_with(
     );
     let mut assessed = assess_with(pool, &program.schema, &live, changes, choices).await;
 
-    let mut refusals = Vec::new();
+    // The external entities against their tables, and the list of what is
+    // here and not Ordo's. One read of the catalog; it changes nothing.
+    let external = match external {
+        Some(e) => e,
+        None => crate::external_check::check(pool, &program.schema).await?,
+    };
+    let mut refusals = external.refusals();
     let mut destructive = 0usize;
     for a in &mut assessed {
         // §5 D3, which only a deployed artifact can raise: a drop of
@@ -599,6 +621,7 @@ pub async fn plan_with(
         assessed,
         refusals,
         destructive,
+        external,
         choices: choices.clone(),
     })
 }
@@ -972,7 +995,7 @@ pub async fn probe(
             ..
         } => {
             let unique = schema
-                .entity(entity)
+                .native(entity)
                 .and_then(|e| e.field(field))
                 .is_some_and(|f| f.unique);
             let what = format!("collisions under `normalize({norm})` on `{entity}`.`{field}`");
@@ -1042,7 +1065,7 @@ pub async fn probe(
             declared,
         } if json_conversion(live, declared) == Some(JsonConversion::TextToJson) => {
             let what = format!("`{entity}`.`{field}` values that are not JSON");
-            let Some(f) = schema.entity(entity).and_then(|e| e.field(field)) else {
+            let Some(f) = schema.native(entity).and_then(|e| e.field(field)) else {
                 return Ok(Probe::None);
             };
             let t = ordo_schema::ddl::q(entity);
@@ -1241,7 +1264,7 @@ async fn places_check(
     let Some(choice) = choice else {
         return Err(places_unstated(c));
     };
-    let Some(f) = schema.entity(entity).and_then(|e| e.field(field)) else {
+    let Some(f) = schema.native(entity).and_then(|e| e.field(field)) else {
         return Err(format!("internal — `{entity}.{field}` is not declared"));
     };
     let Some(factor) = power_of_ten(*from, *to) else {
@@ -1454,7 +1477,7 @@ fn dup_report(what: String, found: Vec<migrate::Duplicate>) -> Probe {
 /// sealed field outright, so this only has to be right for the plain case —
 /// but it is written from the same rule rather than assuming it.
 fn resolve_columns(schema: &Schema, entity: &str, key: &[String]) -> Vec<String> {
-    let Some(e) = schema.entity(entity) else {
+    let Some(e) = schema.native(entity) else {
         return key.to_vec();
     };
     key.iter()
@@ -1690,7 +1713,7 @@ pub async fn triage_with(
     for a in assessed {
         match &a.change {
             Change::AddEntity { entity } => {
-                if let Some(e) = schema.entity(entity) {
+                if let Some(e) = schema.native(entity) {
                     for pc in ordo_schema::ddl::physical_columns(e) {
                         arriving.insert((entity.clone(), pc.name));
                     }
@@ -1698,7 +1721,7 @@ pub async fn triage_with(
             }
             Change::AddOptionalField { entity, field }
             | Change::AddConstantField { entity, field, .. } => {
-                if let Some(f) = schema.entity(entity).and_then(|e| e.field(field)) {
+                if let Some(f) = schema.native(entity).and_then(|e| e.field(field)) {
                     arriving.insert((entity.clone(), f.column()));
                     if f.indexed {
                         arriving.insert((entity.clone(), f.index_column()));
@@ -1724,7 +1747,7 @@ pub async fn triage_with(
             });
             continue;
         }
-        let Some(e) = schema.entity(c.entity()) else {
+        let Some(e) = schema.native(c.entity()) else {
             // A drop names an entity the program no longer declares. It is
             // refused by class; nothing here needs its declaration.
             refused.push(not_built(c));
@@ -1768,7 +1791,7 @@ pub async fn triage_with(
                     table: e.name.clone(),
                 });
                 for f in &e.fields {
-                    steps.extend(ordo_schema::ddl::foreign_key(e, f).map(alter));
+                    steps.extend(ordo_schema::ddl::foreign_key(schema, e, f).map(alter));
                     steps.extend(ordo_schema::ddl::unique(e, f).map(alter));
                 }
                 for key in &e.unique_keys {
@@ -1893,7 +1916,7 @@ pub async fn triage_with(
                 let Some(f) = e.field(field) else {
                     return Err(format!("`{}.{field}` is not declared", e.name));
                 };
-                let sql = ordo_schema::ddl::foreign_key(e, f).unwrap_or_default();
+                let sql = ordo_schema::ddl::foreign_key(schema, e, f).unwrap_or_default();
                 steps.extend(not_valid_then_validate(c, e, object, &sql));
             }
             Change::ChangeType {
@@ -2794,11 +2817,12 @@ pub async fn apply_safe(
     program: &Program,
     actor: &str,
     op: &str,
+    external: Option<crate::external_check::ExternalReport>,
 ) -> Result<SafeApply, String> {
     if !safe_changes_enabled() {
         return Ok(SafeApply::NotSafe);
     }
-    let plan = plan_with(pool, program, &Choices::default(), None).await?;
+    let plan = plan_with_external(pool, program, &Choices::default(), None, external).await?;
     if !all_safe(&plan) {
         return Ok(SafeApply::NotSafe);
     }
@@ -2832,6 +2856,12 @@ async fn apply_planned(
     actor: &str,
     op: &str,
 ) -> Result<Applied, ApplyRefusal> {
+    // An external whose table is gone, changed or unreadable refuses the
+    // apply first, on a first apply too: a program that reads a table that is
+    // not there is not one to create a schema for.
+    if !plan.external.problems.is_empty() {
+        return Err(ApplyRefusal::Plan);
+    }
     // The target's state first: a first apply is a create, and a registry
     // over no tables is a refusal, before any change is weighed.
     if plan.present() == 0 {

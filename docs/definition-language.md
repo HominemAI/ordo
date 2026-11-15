@@ -2006,6 +2006,169 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `external`: a table another system owns [ruled 2026-11-15, built slices A, B and C]
+
+Another system can keep its own table in the database where Ordo's SQL runs:
+the deployment's database, or each tenant's database. An `external`
+declaration translates that table into an entity Ordo can read. The
+translation is a plain join inside Ordo's SQL. There is no door, no hop and
+no second connection.
+
+```
+external customers from crm.customers shared {
+  id <- "customer_id"
+  name: text <- "full_name"
+  email: text? <- email
+  account -> accounts? <- "account_id"
+  access read open
+}
+
+external accounts (key: acct) from crm.accounts shared {
+  id: uuid <- ref
+  label: text <- label
+}
+
+entity orders {
+  customer -> customers
+  total: int
+}
+```
+
+- `from crm.customers` names the foreign table with its schema. Ordo's own
+  tables are in `public`, so a foreign table takes a schema of its own.
+- `shared` is required. Every space reads every row, and the access profile
+  decides which tenants may call the ops. A tenant column comes later.
+  Without `access read`, every member of every space reads every row.
+  `shared` is that choice, written down. `ordo plan` says so for each such
+  external.
+- `id <- column` names the one key column. It must be unique and never null.
+  The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
+- Each other line is `field: type <- column`, or `field -> external <-
+  column` for a ref. Types are written out, so the compiler needs no
+  database. `?` admits null.
+- A foreign name that is not a legal Ordo name goes in quotes:
+  `"customer_id"`. Bare names work when they are lowerCamel.
+- `(key: acct)` sets the typed-id prefix, as on an entity. Otherwise it
+  derives from the name. Prefixes are one namespace with the entities.
+- `access read <walk>` is the one guard. It reads the row's own fields and
+  `$caller`.
+- `external` is contextual. A field can still be named `external`.
+
+How it reads:
+
+- Ids are prefixed text over the raw key: row `42` is `cust_42`. Every
+  equality, join, sort and cursor uses the raw key, so the foreign index
+  serves and `cust_10` pages after `cust_9`.
+- An id that is not this entity's (another prefix, a malformed key) matches
+  no row. It never raises a cast error.
+- The planner reads the table as a subquery, never a view. A view would let
+  Ordo block the other system's own `DROP COLUMN`.
+- Per tenant, the same SQL runs in whichever database the space maps to.
+- Derived ops are the reads: `std.<name>.get`, `std.<name>.list` and
+  `std.<name>.count`. There is no create, update or delete. Developer ops read
+  and join it like any entity.
+- A native ref to an external is a plain text column with no foreign key. A
+  row that is gone reads as missing: a hop through the ref is null, and the
+  ref's own row stays.
+- The descriptor marks the entity `external: true`. The SDK and the console
+  read the mark.
+- The DDL, the schema diff, the apply, dev reset, erase and export never see
+  an external. Removing one from the program plans no `DROP`.
+
+An external entity is **not** what an Ordo entity is:
+
+1. It is **not attested**. No chain, checkpoint or signed head covers its
+   rows, and a response's head says nothing about them.
+2. It is **not sealed and has no history**. Its columns are as plain as the
+   other system keeps them, and it cannot be undone or reverted.
+3. Its ids are **not permanent**. The other system can delete, reuse or
+   change a key, and a ref to it can dangle or come to name another row.
+4. It is **not live**. The other system's writes reach no Ordo log, so
+   `?live=1` on an op that reads one answers `not_live`, and a routine cannot
+   listen on it.
+5. Its shape is **not Ordo's promise**. When the other system changes the
+   table, ops that read it fail until the translation is updated and applied.
+
+Writes go through the other system's own API, for example from a backend
+function.
+
+**The generator** (slice B). `ordo introspect --external crm.customers` reads
+the live table and prints the block above, for a person to review.
+
+```
+ordo introspect --external <schema>.<table> [--name <entity>] [--key <column>] [--out <file>] [--db <database>]
+```
+
+- It never writes to the database. `--out` writes the block to a file.
+- The entity name is the table's name in lowerCamel. `--name` sets it.
+- The key is the primary key when it is one column. `--key` names another
+  column that is unique and never null, and wins over the primary key. A
+  composite primary key, or no key, is refused `external_no_key`, and the
+  message names `--key`.
+- Names that are not plain lowerCamel words are quoted: `"customer_id"`.
+- Types: `text`, `varchar` and `char` become `text`. `smallint`, `integer` and
+  `bigint` become `int`. `boolean` becomes `bool`. `timestamptz` becomes
+  `datetime`. `timestamp` also becomes `datetime`, with a note that the zone is
+  read as UTC. `numeric(p,s)` becomes `decimal(s)`, because an Ordo `money` is
+  whole minor units and a `numeric` column is not.
+- A column with no mapping is a comment naming the column and its Postgres
+  type, so the file still parses: `jsonb`, arrays, `bytea`, floats,
+  `interval`, enums, a `numeric` with no scale, and a `uuid` that is not the
+  key.
+- A table that is not there is refused `external_missing`.
+
+**The check at plan and apply** (slice C). Every plan and every apply compares
+each external's translation with the live table in the database the program
+applies to: the deployment's own, and each tenant's when the program is
+brought forward to it.
+
+| Found | Result |
+|---|---|
+| table or schema gone | refused `external_missing`, naming the table |
+| Ordo's role lacks `USAGE` on the schema or `SELECT` on the table | refused `external_no_grant`, naming the `GRANT` to run |
+| a mapped column gone, of another type, or nullable where the file says never | refused `external_changed`, naming each column and `ordo introspect --external` |
+| a column the translation does not read, added, changed or gone | taken, with a note |
+
+A first apply is refused too, so no schema is created for a program that
+reads a table that is not there. `ordo plan` prints the same refusals in its
+verdict. Nothing is changed in the other system's schema.
+
+**Present, not Ordo's** (27j). `ordo plan` and `std.deployment.plan` list the
+tables and schemas the database holds that are not Ordo's and not declared
+externals, under the `EXTERNAL` heading and as notes. Ordo's are the program's
+entities and the platform's `$` tables in `public`. The list is capped at 20
+lines. Nothing is changed.
+
+**The watcher** (slice C). The host re-reads the declared tables every
+`ORDO_EXTERNAL_WATCH_SECS` seconds (default 300, `docs/settings.md`). While a
+table is gone, a mapped column is gone or retyped, or the role lost `SELECT`,
+every op that reads that entity answers `external_changed` (HTTP 500) with the
+table, the column and the fix. An op that does not read it, and a write that
+only names a ref to it, keep answering. A read the generic bind cannot settle
+(one that reads `$caller` as a value) counts as reading it. The first pass
+that finds the table as the program says serves the entity again. The watcher
+reads the deployment's own database. A tenant's own database is checked when a
+program is applied to it.
+
+Refusals, each naming the fix:
+
+| Class | When |
+|---|---|
+| `external_not_shared` | the declaration has no `shared` |
+| `external_composite_key` | the `id` line names more than one column |
+| `external_read_only` | `access write` in the body, or a `set` or `del` on an external in an op or a routine |
+| `external_owned` | `owned` on an external's ref, or a native ref `owned` by an external |
+| `external_acl` | `acl (…)` on an external |
+| `external_sealed` | `sealed` or `indexed` on an external's field |
+| `external_inherited_guard` | an external would inherit a guard it does not declare |
+| `external_ref_to_native` | a ref from an external to an entity Ordo owns, `members` included |
+| `external_live` | a routine that listens for changes on an external |
+| `external_missing` | at plan, apply or a watcher pass: the table or its schema is not in the database |
+| `external_changed` | at plan, apply or a watcher pass: a mapped column is gone, retyped or nullable against the file |
+| `external_no_grant` | at plan, apply or a watcher pass: Ordo's role cannot read the table |
+| `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
+| `external_unsupported` | `unique`, `index`, `check`, `public`, `std sealed`, `tree`, `normalize`, a default or a `blob` on an external, or `whole` anchored on one |
+
 ---
 
 ## 4. Conditions

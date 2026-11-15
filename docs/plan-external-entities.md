@@ -17,7 +17,7 @@ database makes sense. A connector could be a good way to go about this."*
 - **Ordo cannot use them.** A ref points only at an entity. Every entity has
   `$space` and `PRIMARY KEY ($space, id)`. An outside table has neither.
 - **Ordo does not notice them.** Nothing records that other tables exist.
-- **Nothing is built yet.** This plan is the build spec.
+- **Built 2026-11-15** on branches `external-entities` (slice A) and `external-entities-bc` (slices B and C). Section 12 says what each slice did and decided.
 
 Rulings:
 
@@ -162,6 +162,8 @@ A test asserts that a program with an external entity produces an empty plan.
 - **`shared`** means every space may read every row, subject to the access
   profile. In a tenant's own database the database is the boundary. In the
   deployment's database a foreign table is deployment-wide data, like a price list.
+  Without `access read`, every member of every space reads every row. `shared`
+  is that choice, written down.
 - **Access profile gating.** Which tenants may call the ops is the profile's
   op lines (`docs/howto-roles.md` §8). Nothing new is needed.
 - **No `$space`.** There is no space predicate and none may be invented.
@@ -277,6 +279,36 @@ Sized in agent sessions. A and B are independent. C needs both.
 
 What sets the pace: a CI run is about 12 minutes, and one rehearsal against
 real foreign tables. A to C together are about 3 sessions and 4 to 5 CI rounds.
+
+**Built.** A on `external-entities`. B and C on `external-entities-bc`, 2026-11-15.
+What B and C decided where this plan was silent:
+
+- **The verb** is `ordo introspect --external <schema>.<table> [--name] [--key] [--out] [--db]`.
+- **`--key` wins** over a single primary key. It must name a column with a
+  single-column unique index that never holds null. The generator does not pick
+  a unique column by itself: no primary key and no `--key` is `external_no_key`.
+- **`numeric(p,s)` is `decimal(s)`**, not `money`: `money` is whole minor units
+  in a `bigint`. `numeric` with no scale, `jsonb`, arrays, `bytea`, floats,
+  `interval`, enums and a non-key `uuid` are comments on the worklist.
+- **The check compares mapped columns.** A column no op reads is not
+  examined, so the plan's "a column no op reads" row means a column the
+  translation does not map. Every mapped column counts, whether an op reads it
+  or not, because the whole entity is held.
+- **A mapped column that now admits null** where the file has no `?` is
+  `external_changed`.
+- **The check is in `plan_with`**, so `ordo plan`, `ordo apply`, `ordo migrate
+  --apply` and the tenant catch-up share it. `std.deployment.apply` runs it
+  too, before any schema step. A first apply over a missing table is refused.
+- **One wire code**: `external_changed` (HTTP 500) is what a held entity
+  answers at run time, whether the cause is a missing table, a changed column
+  or a lost grant. The message names which.
+- **The watcher watches the deployment's own database.** A tenant's database
+  is checked when a program is applied to it. A tenant database that loses the
+  table later is not held by the timer.
+- **The interval** is `ORDO_EXTERNAL_WATCH_SECS`, default 300.
+- **"Present, not Ordo's"** lists tables in `public` that are not the
+  program's entities or `$` tables, tables in other schemas that are not
+  declared externals, and schemas with no tables. It is capped at 20 lines.
 
 **A. Compiler and planner.**
 - `external ... from s.t shared { ... }` in `ordo-syntax`, `schema.externals`

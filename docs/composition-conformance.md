@@ -77,6 +77,12 @@ how a closed set stops being closed.
 | `unsupported_default` | a default outside the closed set the DDL can carry (only literals are lowered) |
 | `duplicate_secret` | two `secret` lines name one secret. Put every host on one line: `secret llmKey for a.example.com, b.example.com` (`howto-functions.md`) |
 | `invalid_function` | a `function` block the declaration alone can refuse: a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a code path that is absolute, climbs out with `..` or is not `.js`/`.mjs`, a host that is not a DNS name or is listed twice, a secret listed twice, or a limit outside the deployment's ceilings. The message names the line and the rule. Fix the block and apply again (`plan-backend-functions.md` §4.1) |
+| `external_ref_to_native` | a ref from an `external` entity to an entity Ordo owns, `members` included. The other system's column holds its own keys. Map it as a plain field, or point the ref from the native entity (`definition-language.md`, `external`) |
+| `external_owned` | `owned` on a ref that leaves or reaches an `external` entity. Ordo cannot delete with, or lend a guard from, a row it does not hold. Drop `owned` |
+| `external_inherited_guard` | an `external` entity would inherit a guard it does not declare. Write its own `access read` |
+| `external_read_only` | a `set` or `del` on an `external` entity, in an op or a routine. Writes go through the other system's own API |
+| `external_live` | a routine that listens for changes on an `external` entity. No change reaches Ordo's log; run it on a schedule |
+| `external_unsupported` | a clause an `external` entity cannot carry (`unique`, `index`, `check`, `public`, a default, a `blob`), or `whole` anchored on one. The parser raises the declaration half; `whole` raises the other |
 
 **Binding and planning.** Raised once a source has been resolved.
 

@@ -1476,6 +1476,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_EXTERNAL_WATCH_SECS",
+        "Databases and pools",
+        r#"300 s"#,
+        r#"1 or more"#,
+    ),
+    s(
         "ORDO_VERSIONS_TENANT_MOVE_ROLES",
         "Databases and pools",
         r#"none"#,

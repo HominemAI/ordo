@@ -5020,6 +5020,23 @@ async fn assemble_program(
             },
         )
     };
+    // External entities (slice C, `external-entities`): a timer re-reads the
+    // tables the served program declares, and while one is down every op
+    // that reads it answers `external_changed`. The boot read refuses a bad
+    // interval by name.
+    let external_every = crate::external_check::watch_interval_from_env().map_err(|detail| {
+        BootRefusal::Invalid {
+            var: crate::external_check::WATCH_ENV,
+            detail,
+        }
+    })?;
+    let external_gate = {
+        let deployment = deployment.clone();
+        crate::external_check::ExternalGate::new(Arc::new(move || {
+            deployment.current().fixture.clone()
+        }))
+    };
+    crate::external_check::spawn_watch(external_gate.clone(), pool.clone(), external_every);
     let api = ApiState {
         registry: deployment.handle(),
         // Metered outside, platform ops inside, so a platform op's duration
@@ -5027,21 +5044,24 @@ async fn assemble_program(
         // platform executor answers `std.space.*` before the meter is
         // reached, and those ops would never appear in the histograms.
         executor: Arc::new(crate::metrics::MeteredExecutor::new(
-            Arc::new(crate::platform_ops::PlatformExecutor::new(
-                Arc::new(crate::FixtureExecutor {
-                    spaces: spaces.clone(),
-                    // The `Pg` handle `FixtureExecutor` still carries. It is
-                    // used by nothing on the dispatch path — see the note on
-                    // the field — and the door's access question goes
-                    // through `SwappableAccess`, never through
-                    // `MemberAccess`.
-                    pg: ordo_conformance::Pg {
-                        db: pg.db.clone(),
-                        ..ordo_conformance::Pg::default()
-                    },
-                    page_size: 50,
-                }),
-                platform_ops,
+            Arc::new(crate::external_check::ExternalGated::new(
+                Arc::new(crate::platform_ops::PlatformExecutor::new(
+                    Arc::new(crate::FixtureExecutor {
+                        spaces: spaces.clone(),
+                        // The `Pg` handle `FixtureExecutor` still carries. It is
+                        // used by nothing on the dispatch path — see the note on
+                        // the field — and the door's access question goes
+                        // through `SwappableAccess`, never through
+                        // `MemberAccess`.
+                        pg: ordo_conformance::Pg {
+                            db: pg.db.clone(),
+                            ..ordo_conformance::Pg::default()
+                        },
+                        page_size: 50,
+                    }),
+                    platform_ops,
+                )),
+                external_gate,
             )),
             metrics.clone(),
         )),

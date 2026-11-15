@@ -382,6 +382,12 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
     // `identity` runs on the blocking stores of `ordo-host`, which own a
     // thread and a runtime each, so it builds its own for the one statement
     // it makes itself rather than nest inside this one.
+    // `introspect` reads one table and prints text; it builds its own
+    // runtime for the one pool it opens.
+    if cmd == "introspect" {
+        drop(rt);
+        return crate::introspect::run(flags);
+    }
     if cmd == "identity" {
         let Some(sub) = flags.positional.first().cloned() else {
             return Outcome::usage("ordo identity <recover>\n".into());

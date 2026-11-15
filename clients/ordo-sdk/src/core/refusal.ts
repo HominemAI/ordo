@@ -68,6 +68,7 @@ export const REFUSAL_CLASSES = [
   'not_confirmed',
   'space_pinned',
   'schema_drift',
+  'external_changed',
   'server_busy',
   'apply_in_progress',
   'apply_refused',
@@ -227,6 +228,7 @@ const DISPOSITIONS: Partial<Record<DoorCode, Disposition>> = {
   sealed_open_failed: 'fault',
   log_append_failed: 'fault',
   schema_drift: 'fault',
+  external_changed: 'fault',
 
   // The edge words, by what their status says.
   authentication_failed: 'denied',

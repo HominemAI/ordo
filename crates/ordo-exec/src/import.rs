@@ -1165,6 +1165,7 @@ fn import_ops(schema: &Schema) -> ordo_syntax::decl::Program {
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        externals: Vec::new(),
     }
 }
 
@@ -1438,7 +1439,7 @@ pub async fn import_space(
     let mut planned: Vec<(String, Vec<Row>)> = Vec::new();
     for name in &order {
         let entry = &mf.entities[name];
-        let entity = schema.entity(name).ok_or_else(|| {
+        let entity = schema.native(name).ok_or_else(|| {
             ImportError::Bundle(format!(
                 "the bundle carries `{name}` and this schema has no such entity, which the \
                      artifact check should have caught"
@@ -1525,14 +1526,20 @@ pub async fn import_space(
     };
 
     for (name, rows) in &planned {
-        let entity = schema.entity(name).expect("checked above");
+        let entity = schema.native(name).expect("checked above");
         let fields: Vec<FieldPlan> = creatable(entity)
             .into_iter()
             .map(|f| FieldPlan {
                 field: f.clone(),
+                // A ref to an external entity holds the other system's key,
+                // which no import mints and no mapping holds. It is copied
+                // verbatim: the row it names is that system's, in every
+                // space alike (ruled 2026-11-15, `external-entities`).
                 target: match &f.ty {
-                    FieldTy::Ref { target, .. } => Some(target.clone()),
-                    FieldTy::Scalar(_) => None,
+                    FieldTy::Ref { target, .. } if !schema.is_external(target) => {
+                        Some(target.clone())
+                    }
+                    FieldTy::Ref { .. } | FieldTy::Scalar(_) => None,
                 },
             })
             .collect();
@@ -2227,7 +2234,7 @@ fn plan_objects(
             });
         }
         let entity = schema
-            .entity(&o.entity)
+            .native(&o.entity)
             .ok_or_else(|| ImportError::BlobUnplaced {
                 member: o.member.clone(),
                 detail: format!(

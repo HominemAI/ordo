@@ -417,7 +417,46 @@ pub struct Query {
     /// comparison keeps the null-safe form: a query built by hand, or by a
     /// path that forgot to fill this, is slower and never wrong.
     pub not_null: Option<NotNullColumns>,
+    /// How to read each external entity the program declares, by entity
+    /// name. Set beside [`Query::not_null`] on the query the binder hands
+    /// out, and `None` when the program declares no external, so a program
+    /// without one binds to exactly the IR it did before.
+    ///
+    /// The planner reads it in `Planner::table`: an external's source is a
+    /// subquery over the foreign table, never a base table, and its `id`
+    /// compares, joins and sorts by the raw key (ruled 2026-11-15,
+    /// `external-entities`).
+    pub externals: Option<ExternalReads>,
 }
+
+/// One external entity, as the planner reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRead {
+    /// The Postgres schema and table of the foreign table.
+    pub schema: String,
+    pub table: String,
+    /// The one unique, non-null key column, and its base type.
+    pub key_column: String,
+    pub key_ty: ordo_syntax::ExternalKeyTy,
+    /// The typed-id prefix: the entity's key (`cust` in `cust_42`).
+    pub prefix: String,
+    /// Every declared field, in declaration order.
+    pub columns: Vec<ExternalColumn>,
+}
+
+/// One field of an external entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalColumn {
+    pub field: String,
+    /// The foreign column it reads.
+    pub column: String,
+    /// For a ref (to another external), the target's typed-id prefix: the
+    /// column is shown as that target's id.
+    pub ref_prefix: Option<String>,
+}
+
+/// Entity name to how it is read. Shared, for [`NotNullColumns`]' reason.
+pub type ExternalReads = std::sync::Arc<std::collections::BTreeMap<String, ExternalRead>>;
 
 /// Table name to the set of its columns declared `NOT NULL`. Shared, because
 /// the planner clones query nodes freely.

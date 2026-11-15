@@ -40,6 +40,69 @@ pub struct Program {
     /// sets, and the hosts a function may send it to
     /// (`plan-backend-functions.md` §5).
     pub secrets: Vec<SecretDecl>,
+    /// `external customers from crm.customers shared { … }`: a table
+    /// another system owns, read through a translation inside Ordo's SQL
+    /// (ruled 2026-11-15, `external-entities`). Never an entity: the schema
+    /// keeps these apart so DDL, diff, dev reset and erase never see one.
+    pub externals: Vec<ExternalDecl>,
+}
+
+/// The key column's base type, as the `id` line states it:
+/// `id <- customer_id` is `int`, `id: text <- code`, `id: uuid <- ref`.
+///
+/// Not a language type. The id an external row shows is a typed id like
+/// every other (`cust_42`), and this says how to strip the prefix back to
+/// the raw key so a comparison, a join or a sort uses the foreign index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalKeyTy {
+    Int,
+    Text,
+    Uuid,
+}
+
+impl ExternalKeyTy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalKeyTy::Int => "int",
+            ExternalKeyTy::Text => "text",
+            ExternalKeyTy::Uuid => "uuid",
+        }
+    }
+}
+
+/// `external <name> [(key: k)] from <schema>.<table> shared { … }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDecl {
+    pub name: Ident,
+    /// `(key: cust)`: the typed-id prefix, derived from the name otherwise.
+    pub key: Option<Ident>,
+    /// The Postgres schema the foreign table lives in.
+    pub schema: Ident,
+    pub table: Ident,
+    /// `shared`: every space reads every row, and the access profile decides
+    /// which tenants may call the ops. Required in this release; the parser
+    /// refuses a declaration without it, so this is always true.
+    pub shared: bool,
+    /// `id <- customer_id`: the one unique, non-null key column.
+    pub key_column: Ident,
+    pub key_ty: ExternalKeyTy,
+    pub fields: Vec<ExternalField>,
+    /// `access read <walk>`: a read guard over the row's own fields and
+    /// `$caller`. There is no `access write`: an external is read-only.
+    pub access_read: Option<GuardClause>,
+    pub span: Span,
+}
+
+/// One line of an external's body: `name: text <- full_name` or
+/// `account -> accounts <- account_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalField {
+    pub name: Ident,
+    /// A scalar, or a ref. A ref is never `owned` or `tree`.
+    pub kind: FieldKind,
+    pub optional: bool,
+    /// The foreign column this field reads.
+    pub column: Ident,
 }
 
 /// `secret openaiKey for api.openai.com`.

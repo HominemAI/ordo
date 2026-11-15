@@ -1526,6 +1526,12 @@ fn load_order(schema: &Schema) -> (Vec<String>, Vec<String>) {
         if edge.from == edge.to {
             continue;
         }
+        // An external entity's rows are another system's and ride in no
+        // bundle, so nothing waits for them: a ref to one is copied as it is
+        // (ruled 2026-11-15, `external-entities`).
+        if schema.is_external(&edge.to) {
+            continue;
+        }
         if let Some(set) = waiting.get_mut(&edge.from) {
             set.insert(edge.to.clone());
         }

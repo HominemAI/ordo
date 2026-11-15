@@ -1531,9 +1531,15 @@ pub async fn import_space(
             .into_iter()
             .map(|f| FieldPlan {
                 field: f.clone(),
+                // A ref to an external entity holds the other system's key,
+                // which no import mints and no mapping holds. It is copied
+                // verbatim: the row it names is that system's, in every
+                // space alike (ruled 2026-11-15, `external-entities`).
                 target: match &f.ty {
-                    FieldTy::Ref { target, .. } => Some(target.clone()),
-                    FieldTy::Scalar(_) => None,
+                    FieldTy::Ref { target, .. } if !schema.is_external(target) => {
+                        Some(target.clone())
+                    }
+                    FieldTy::Ref { .. } | FieldTy::Scalar(_) => None,
                 },
             })
             .collect();

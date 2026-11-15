@@ -194,3 +194,56 @@ fn a_bare_underscore_name_is_told_to_take_quotes() {
             .expect_err("the lexer refuses underscores");
     assert!(e.message.contains("`\"customer_id\"`"), "{}", e.message);
 }
+
+#[test]
+fn public_goes_after_shared_and_marks_fields() {
+    let p = parse_program(
+        r#"
+external customers from crm.customers shared public {
+  id <- "customer_id"
+  name: text public <- "full_name"
+  email: text? <- email
+}
+external plain from crm.plain shared {
+  id <- id
+}
+"#,
+    )
+    .expect("parses");
+    let c = &p.externals[0];
+    let mark = c.public.expect("the line is public");
+    assert!(!mark.cascade, "an external's public is never a cascade");
+    assert!(c.fields[0].public, "name carries its own mark");
+    assert!(!c.fields[1].public);
+    assert!(p.externals[1].public.is_none());
+}
+
+#[test]
+fn public_star_is_refused_naming_public() {
+    for src in [
+        "external c from crm.c shared public* {\n  id <- id\n}\n",
+        "external c from crm.c shared {\n  id <- id\n  public*\n}\n",
+        "external c from crm.c shared {\n  id <- id\n  n: text public* <- n\n}\n",
+    ] {
+        let (code, msg) = refused(src);
+        assert_eq!(code, EXTERNAL_UNSUPPORTED, "{src}: {msg}");
+        assert!(msg.contains("`public*`"), "{msg}");
+        assert!(msg.contains("Write `public`"), "{msg}");
+    }
+}
+
+#[test]
+fn a_public_line_inside_the_braces_says_where_it_goes() {
+    let (code, msg) = refused("external c from crm.c shared {\n  id <- id\n  public\n}\n");
+    assert_eq!(code, EXTERNAL_UNSUPPORTED);
+    assert!(msg.contains("after `shared`"), "{msg}");
+}
+
+#[test]
+fn prev_on_an_external_field_is_refused_by_name() {
+    let (code, msg) =
+        refused("external c from crm.c shared {\n  id <- id\n  n: text prev(old) <- n\n}\n");
+    assert_eq!(code, EXTERNAL_UNSUPPORTED);
+    assert!(msg.contains("`prev`"), "{msg}");
+    assert!(msg.contains("re-imported on every apply"), "{msg}");
+}

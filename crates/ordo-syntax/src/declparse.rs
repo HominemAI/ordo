@@ -1292,7 +1292,7 @@ fn spell_foreign(name: &str) -> String {
     }
 }
 
-/// `external <name> [(key: k)] from <schema>.<table> shared { … }`
+/// `external <name> [(key: k)] from <schema>.<table> shared [public] { … }`
 /// (ruled 2026-11-15, `external-entities`).
 ///
 /// A translation of a table another system owns, read inside Ordo's SQL as
@@ -1369,6 +1369,20 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             ))
         }
     }
+    // `public` after `shared`: the external's public fields may be served
+    // to a visitor with no token. `public*` has nothing to reach.
+    let mut public = None;
+    if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+        let t = p.bump();
+        if matches!(p.peek(), TokenKind::Star) {
+            let star = p.bump();
+            return Err(public_star_refusal(p, &name.name, t.span.to(star.span)));
+        }
+        public = Some(PublicMark {
+            cascade: false,
+            span: t.span,
+        });
+    }
     p.expect(&TokenKind::LBrace, "`{` to open the translation")?;
 
     let mut key_line: Option<(Ident, ExternalKeyTy)> = None;
@@ -1423,11 +1437,26 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                 ),
             ));
         }
+        if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+            p.bump();
+            if matches!(p.peek(), TokenKind::Star) {
+                let star = p.bump();
+                return Err(public_star_refusal(p, &name.name, here.to(star.span)));
+            }
+            return Err(p.err_class_at(
+                parser::EXTERNAL_UNSUPPORTED,
+                here,
+                format!(
+                    "`public` on `{0}` goes on its first line, after `shared`: write \
+                     `external {0} from ... shared public {{`. Remove the line inside the braces",
+                    name.name
+                ),
+            ));
+        }
         let unsupported = match p.peek() {
             TokenKind::Keyword(Keyword::Unique) => Some("unique"),
             TokenKind::Keyword(Keyword::Index) => Some("index"),
             TokenKind::Keyword(Keyword::Check) => Some("check"),
-            TokenKind::Keyword(Keyword::Public) => Some("public"),
             TokenKind::Ident(w)
                 if w == "std" && matches!(p.peek_at(1), TokenKind::Keyword(Keyword::Sealed)) =>
             {
@@ -1515,6 +1544,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             (FieldKind::Scalar(ty), eat_question(p))
         };
         // The modifiers an ordinary field takes, each refused by name.
+        let mut field_public = false;
         loop {
             let t = p.tok().span;
             match p.peek().clone() {
@@ -1548,8 +1578,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                     k @ (Keyword::Unique
                     | Keyword::Index
                     | Keyword::Tree
-                    | Keyword::Normalize
-                    | Keyword::Public),
+                    | Keyword::Normalize),
                 ) => {
                     return Err(p.err_class_at(
                         parser::EXTERNAL_UNSUPPORTED,
@@ -1560,6 +1589,27 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                             name.name,
                             field.name,
                             k.as_str()
+                        ),
+                    ));
+                }
+                TokenKind::Keyword(Keyword::Public) => {
+                    p.bump();
+                    if matches!(p.peek(), TokenKind::Star) {
+                        let star = p.bump();
+                        return Err(public_star_refusal(p, &name.name, t.to(star.span)));
+                    }
+                    field_public = true;
+                }
+                TokenKind::Ident(w) if w == "prev" => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_UNSUPPORTED,
+                        t,
+                        format!(
+                            "`{}.{}` cannot take `prev`: `prev` tracks Ordo's own renames \
+                             through its schema planner, and a translation is re-imported on \
+                             every apply instead. Remove `prev`; to follow a renamed column, \
+                             change the name after `<-`",
+                            name.name, field.name
                         ),
                     ));
                 }
@@ -1584,6 +1634,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             kind,
             optional,
             column,
+            public: field_public,
         });
     }
     let end = p.bump().span; // `}`
@@ -1603,12 +1654,26 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
         schema,
         table,
         shared: true,
+        public,
         key_column,
         key_ty,
         fields,
         access_read,
         span: start.to(end),
     })
+}
+
+/// `public*` on an external: the star reaches the entities an entity owns,
+/// and an external owns nothing (ruled 2026-11-15, `external-entities`).
+fn public_star_refusal(p: &Parser, name: &str, span: Span) -> ParseError {
+    p.err_class_at(
+        parser::EXTERNAL_UNSUPPORTED,
+        span,
+        format!(
+            "`{name}` cannot take `public*`: an external owns nothing, so the star reaches \
+             nothing. Write `public`"
+        ),
+    )
 }
 
 /// The parenthesised column list shared by `unique (a, b)` and

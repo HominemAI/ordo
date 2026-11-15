@@ -472,6 +472,8 @@ async fn the_page_learns_where_to_sign_in_and_may_call_the_service() {
     assert_eq!(a.status, StatusCode::OK, "{}", a.body);
     assert_eq!(a.body["identity"]["origin"], ISS);
     assert_eq!(a.body["identity"]["audience"], "ordo-deployment:main");
+    // No ORDO_IDENTITY_RP_ID: the issuer's host, as the service defaults it.
+    assert_eq!(a.body["identity"]["rpId"], "console.example.com");
     let csp = a.headers["content-security-policy"].to_str().unwrap();
     assert!(csp.contains(&format!("connect-src 'self' {ISS}")), "{csp}");
     assert!(csp.contains("frame-ancestors 'none'"), "{csp}");

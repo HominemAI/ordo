@@ -578,6 +578,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"/ and lower-case segments"#,
     ),
     s(
+        "ORDO_IDENTITY_RP_ID",
+        "Sign-in and sessions",
+        r#"the origin's host"#,
+        r#"a host name"#,
+    ),
+    s(
         "ORDO_IDENTITY_SHARE_CONSOLE_DB_SERVER",
         "Sign-in and sessions",
         r#"false"#,

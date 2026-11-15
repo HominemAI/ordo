@@ -77,8 +77,10 @@ fn equality_on_an_external_id_uses_the_raw_key() {
     let sql = sql_of("customers(id == \"cust_42\")[id, name]");
     assert!(
         sql.contains(
-            "(\"t0\".\"$key\" = (CASE WHEN 'cust_42' ~ '^cust_-?[0-9]{1,18}$' \
-             THEN CAST(substr('cust_42', 6) AS bigint) END))"
+            "(\"t0\".\"$key\" = (CASE WHEN 'cust_42' ~ '^cust_-?[0-9]{1,19}$' \
+             THEN CASE WHEN CAST(substr('cust_42', 6) AS numeric) \
+             BETWEEN -9223372036854775808 AND 9223372036854775807 \
+             THEN CAST(substr('cust_42', 6) AS bigint) END END))"
         ),
         "{sql}"
     );
@@ -90,6 +92,28 @@ fn equality_on_an_external_id_uses_the_raw_key() {
         sql.contains("(CASE WHEN left('reg_eu', 4) = 'reg_' THEN substr('reg_eu', 5) END)"),
         "{sql}"
     );
+}
+
+#[test]
+fn the_rust_key_check_takes_the_whole_bigint_range_and_nothing_else() {
+    let (schema, _) = setup();
+    let reads = ordo_sema::external_reads(&schema).expect("externals");
+    let c = &reads["customers"];
+    for (id, key) in [
+        ("cust_42", Some("42")),
+        ("cust_1000000000000000000", Some("1000000000000000000")),
+        ("cust_9223372036854775807", Some("9223372036854775807")),
+        ("cust_-9223372036854775808", Some("-9223372036854775808")),
+        ("cust_9223372036854775808", None),
+        ("cust_x", None),
+        ("cust_", None),
+        ("acct_42", None),
+    ] {
+        assert_eq!(ordo_plan::external_key_of(id, c), key, "{id}");
+    }
+    let a = &reads["accounts"];
+    assert!(ordo_plan::external_key_of("acct_0b7e5f2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b", a).is_some());
+    assert!(ordo_plan::external_key_of("acct_0B7E5F2A-1C3D-4E5F-8A9B-0C1D2E3F4A5B", a).is_none());
 }
 
 #[test]
@@ -106,8 +130,10 @@ fn a_native_ref_joins_on_the_raw_key_and_keeps_the_row_when_it_is_gone() {
     );
     assert!(
         sql.contains(
-            ") AS \"t1\" ON \"t1\".\"$key\" = (CASE WHEN \"t0\".\"customer\" ~ '^cust_-?[0-9]{1,18}$' \
-             THEN CAST(substr(\"t0\".\"customer\", 6) AS bigint) END)\n"
+            ") AS \"t1\" ON \"t1\".\"$key\" = (CASE WHEN \"t0\".\"customer\" ~ '^cust_-?[0-9]{1,19}$' \
+             THEN CASE WHEN CAST(substr(\"t0\".\"customer\", 6) AS numeric) \
+             BETWEEN -9223372036854775808 AND 9223372036854775807 \
+             THEN CAST(substr(\"t0\".\"customer\", 6) AS bigint) END END)\n"
         ),
         "{sql}"
     );

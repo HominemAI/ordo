@@ -1374,8 +1374,15 @@ pub fn decode_external_id(x: &str, r: &ExternalRead) -> String {
     let p = &r.prefix;
     let from = p.chars().count() + 2;
     match r.key_ty {
+        // The whole bigint range. The regex admits up to 19 digits, and a
+        // nested CASE checks the range as `numeric` before the cast, so a
+        // 19-digit key past the bigint maximum decodes to null and never
+        // raises. Postgres evaluates CASE arms in order, which a plain `AND`
+        // does not promise.
         ExternalKeyTy::Int => format!(
-            "(CASE WHEN {x} ~ '^{p}_-?[0-9]{{1,18}}$' THEN CAST(substr({x}, {from}) AS bigint) END)"
+            "(CASE WHEN {x} ~ '^{p}_-?[0-9]{{1,19}}$' THEN CASE WHEN CAST(substr({x}, {from}) AS numeric) \
+             BETWEEN -9223372036854775808 AND 9223372036854775807 \
+             THEN CAST(substr({x}, {from}) AS bigint) END END)"
         ),
         ExternalKeyTy::Uuid => format!(
             "(CASE WHEN {x} ~ '^{p}_[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$' \
@@ -1386,6 +1393,33 @@ pub fn decode_external_id(x: &str, r: &ExternalRead) -> String {
             from - 1
         ),
     }
+}
+
+/// The raw key a typed id names on an external entity, or `None` when the id
+/// is not this entity's: the prefix is wrong, or the rest is not a key of
+/// the key's type. The Rust twin of [`decode_external_id`], for the write
+/// path, which checks the prefix and the key's form only and never reads the
+/// other system's table (`plan-external-entities.md` section 6).
+pub fn external_key_of<'a>(id: &'a str, r: &ExternalRead) -> Option<&'a str> {
+    let key = id.strip_prefix(r.prefix.as_str())?.strip_prefix('_')?;
+    let ok = match r.key_ty {
+        ExternalKeyTy::Int => {
+            let digits = key.strip_prefix('-').unwrap_or(key);
+            !digits.is_empty()
+                && digits.len() <= 19
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && key.parse::<i64>().is_ok()
+        }
+        ExternalKeyTy::Uuid => {
+            key.len() == 36
+                && key.bytes().enumerate().all(|(i, b)| match i {
+                    8 | 13 | 18 | 23 => b == b'-',
+                    _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+                })
+        }
+        ExternalKeyTy::Text => true,
+    };
+    ok.then_some(key)
 }
 
 /// The external entities a bound read reaches, at any depth: its sources,

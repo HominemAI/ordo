@@ -244,3 +244,91 @@ fn a_routine_may_neither_write_an_external_nor_wait_on_one() {
     assert_eq!(code, "external_live");
     assert!(msg.contains("trigger every"), "{msg}");
 }
+
+// ── `public` (ruled 2026-11-15, `external-entities` ask 5) ──────────────
+
+const PUBLIC_SHOP: &str = r#"
+domain shop
+external customers from crm.customers shared public {
+  id <- "customer_id"
+  name: text <- "full_name"
+  email: text? <- email
+}
+external accounts from crm.accounts shared {
+  id <- id
+  label: text public <- label
+  secret: text <- secret
+}
+external hidden from crm.hidden shared {
+  id <- id
+  note: text <- note
+}
+"#;
+
+#[test]
+fn the_public_mark_lands_on_an_external_and_its_fields() {
+    let s = schema_of(PUBLIC_SHOP);
+    let customers = &s.externals[0];
+    let mark = customers.public.as_ref().expect("the line is public");
+    assert!(!mark.cascade && mark.from.is_none());
+    let public = |e: &ordo_schema::Entity| {
+        e.declared()
+            .filter(|f| f.public)
+            .map(|f| f.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(public(customers), ["name", "email"], "the line reaches all");
+    assert!(customers.has_public());
+    assert!(
+        !customers.field("id").expect("id").public,
+        "the platform's id is never marked"
+    );
+
+    let accounts = &s.externals[1];
+    assert!(accounts.public.is_none());
+    assert_eq!(public(accounts), ["label"], "a field mark reaches one field");
+
+    let hidden = &s.externals[2];
+    assert!(!hidden.has_public());
+}
+
+#[test]
+fn only_a_public_externals_derived_reads_are_public_and_carry_public_fields() {
+    let s = schema_of(PUBLIC_SHOP);
+    let ops = std_ops(&s).ops;
+    let find = |n: &str| ops.iter().find(|o| o.name.name == n).expect(n);
+    for verb in ["get", "list", "count"] {
+        assert!(find(&format!("std.customers.{verb}")).flags.public);
+        assert!(find(&format!("std.accounts.{verb}")).flags.public);
+        assert!(!find(&format!("std.hidden.{verb}")).flags.public);
+    }
+    let projected = |n: &str| match &find(n).body {
+        ordo_syntax::decl::OpBody::Read(pl) => pl.sources[0]
+            .projection
+            .as_ref()
+            .expect("projects")
+            .iter()
+            .map(|p| match p {
+                ordo_syntax::decl::ProjItem::Field { path, .. } => path[0].name.clone(),
+                _ => unreachable!("only plain fields"),
+            })
+            .collect::<Vec<_>>(),
+        _ => unreachable!("a read"),
+    };
+    assert_eq!(projected("std.accounts.get"), ["id", "label"]);
+    assert_eq!(projected("std.hidden.get"), ["id", "note"]);
+}
+
+#[test]
+fn a_guarded_public_external_is_refused_like_a_native_one() {
+    let (code, _) = refused(
+        r#"
+external customers from crm.customers shared public {
+  id <- id
+  owner: text <- owner
+  access read owner == $caller
+}
+"#,
+    );
+    assert_eq!(code, "public_guarded");
+}

@@ -1089,7 +1089,10 @@ fn lower_external(decl: &ExternalDecl, keys: &KeyTable) -> Result<Entity, Schema
                 tree: false,
             },
         };
-        fields.push(plain(&f.name.name, ty, f.optional, false, f.name.span));
+        let mut field = plain(&f.name.name, ty, f.optional, false, f.name.span);
+        // Only what was written; `resolve_public` adds the entity line's.
+        field.public = f.public;
+        fields.push(field);
         columns.push((f.name.name.clone(), f.column.name.clone()));
     }
     let guards = decl.access_read.as_ref().map(|r| Guards {
@@ -1117,7 +1120,14 @@ fn lower_external(decl: &ExternalDecl, keys: &KeyTable) -> Result<Entity, Schema
         indexes: Vec::new(),
         checks: Vec::new(),
         std_sealed: false,
-        public: None,
+        // `shared public` (ruled 2026-11-15, `external-entities` ask 5): never
+        // a cascade, the parser refuses `public*`. `resolve_public` runs over
+        // externals too, so the sealed, private and guarded refusals apply.
+        public: decl.public.map(|m| EntityPublic {
+            cascade: false,
+            from: None,
+            span: m.span,
+        }),
         external: Some(ExternalSource {
             schema: decl.schema.name.clone(),
             table: decl.table.name.clone(),
@@ -2644,11 +2654,16 @@ pub fn std_ops(schema: &Schema) -> Program {
     // it derives no `create`, `update` or `delete`. It has no `rev` either,
     // so the row shape is `id` and the declared fields.
     for e in &schema.externals {
+        // A public external (ruled 2026-11-15, `external-entities` ask 5):
+        // its derived reads run on the public path and carry its public
+        // fields only. The registration gate (`ordo_plan::public`) checks
+        // that again, as it does for an authored public op.
+        let public = e.has_public();
         let mut proj: Vec<ordo_syntax::decl::ProjItem> = vec![ordo_syntax::decl::ProjItem::Field {
             path: vec![ident("id")],
             span: sp,
         }];
-        for f in e.declared() {
+        for f in e.declared().filter(|f| !public || f.public) {
             proj.push(ordo_syntax::decl::ProjItem::Field {
                 path: vec![ident(&f.name)],
                 span: sp,
@@ -2660,7 +2675,10 @@ pub fn std_ops(schema: &Schema) -> Program {
             ordo_syntax::decl::OpDecl {
                 name: ident(&format!("std.{}.{verb}", e.name)),
                 params,
-                flags: ordo_syntax::decl::OpFlags::default(),
+                flags: ordo_syntax::decl::OpFlags {
+                    public,
+                    ..ordo_syntax::decl::OpFlags::default()
+                },
                 body: ordo_syntax::decl::OpBody::Read(pipeline),
                 span: sp,
             }

@@ -9,10 +9,22 @@
 // Anything else goes to the account page.
 
 import { $, BASE, busy, explain, me, needPasskeys, post, problem, returnTo, showCodes, step } from './common.js';
-import { assert, passkeysAvailable, register } from './webauthn.js';
+import { assert, passkeysAvailable, register, touch } from './webauthn.js';
 
 const params = new URLSearchParams(location.search);
 const client = params.get('client') === 'console' ? 'console' : undefined;
+const wantsTouch = params.get('touch') === '1';
+
+async function confirm() {
+  step('touch');
+  needPasskeys(passkeysAvailable());
+  const area = $('touch-area');
+  // A click starts the ceremony: Safari needs a user gesture for it.
+  $('touch').addEventListener('click', async () => {
+    const touched = await busy(area, 'Follow the passkey prompt from your browser.', () => touch(), 'touch');
+    if (touched) done();
+  });
+}
 
 const deployment = params.get('deployment') || undefined;
 
@@ -63,6 +75,10 @@ async function start() {
   }
   if (who && who.mustEnrol) {
     await enrol();
+    return;
+  }
+  if (who && wantsTouch) {
+    await confirm();
     return;
   }
   if (who) {

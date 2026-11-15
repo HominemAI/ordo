@@ -38,7 +38,10 @@ pub mod public;
 pub mod whole;
 pub mod writes;
 use ordo_schema::SchemaError;
-use ordo_sema::ir::{BCond, BExpr, From, Limit, OutField, Query, Sort};
+use ordo_sema::ir::{
+    BCond, BExpr, ExternalRead, ExternalReads, From, Limit, OutField, Query, Sort,
+};
+use ordo_syntax::ExternalKeyTy;
 
 /// The fixed fractional scale of every `decimal` the language can produce
 /// (`definition-language.md` §2, "Division: determinism across venues"):
@@ -687,6 +690,12 @@ struct Sources {
     /// reference, a union wrapper, the paging wrapper. Their scoping lives
     /// inside them.
     derived: Vec<String>,
+    /// Aliases bound to an external entity's subquery (ruled 2026-11-15,
+    /// `external-entities`). A foreign table has no `$space` column, so it
+    /// owes no space predicate: it is `shared`, every space reads every row,
+    /// and the access profile decides who may call the op. Registered only
+    /// by [`Planner::table`] when the program declares the entity external.
+    external: Vec<String>,
 }
 
 impl Sources {
@@ -698,6 +707,11 @@ impl Sources {
     fn derived(&mut self, alias: &str) {
         if !self.derived.iter().any(|a| a == alias) {
             self.derived.push(alias.to_string());
+        }
+    }
+    fn external(&mut self, alias: &str) {
+        if !self.external.iter().any(|a| a == alias) {
+            self.external.push(alias.to_string());
         }
     }
 }
@@ -794,6 +808,10 @@ fn verify_scoped(sql: &str, sources: &Sources) -> Result<(), PlanError> {
             continue;
         }
         if sources.derived.iter().any(|a| a == &alias) {
+            continue;
+        }
+        // An external entity's subquery: no space column to constrain.
+        if sources.external.iter().any(|a| a == &alias) {
             continue;
         }
         return Err(PlanError {
@@ -957,7 +975,18 @@ pub fn never_null(e: &BExpr, scope: &NullScope<'_>) -> Option<NeverNull> {
 /// so it takes the space like everything else, and `whole` verifies the
 /// statement it splices this into.
 pub fn render_cond(c: &BCond, space: &Space) -> Result<(String, Sourced), PlanError> {
+    render_cond_with(c, space, None)
+}
+
+/// [`render_cond`] for a program that declares external entities, so a
+/// guard that walks into one reads its subquery (`whole`).
+pub fn render_cond_with(
+    c: &BCond,
+    space: &Space,
+    externals: Option<ExternalReads>,
+) -> Result<(String, Sourced), PlanError> {
     let mut p = Planner::new(space.clone());
+    p.externals = externals;
     let sql = p.cond(c)?;
     Ok((sql, Sourced(p.sources)))
 }
@@ -1287,6 +1316,165 @@ fn seek(cols: &[String], terms: &[(String, BExpr, bool)], vals: &[Option<String>
     disjuncts.join("\n   OR ")
 }
 
+/// The column an external entity's subquery carries its raw key under.
+///
+/// `$` is the platform's reserved prefix, so no declared field collides.
+pub const EXTERNAL_KEY: &str = "$key";
+
+/// An external entity as a source: a subquery over the foreign table that
+/// shows each row as an Ordo row (ruled 2026-11-15, `external-entities`).
+///
+/// ```sql
+/// (SELECT "$ext"."customer_id" AS "$key",
+///         'cust_' || "$ext"."customer_id"::text AS "id",
+///         "$ext"."full_name" AS "name"
+///    FROM "crm"."customers" AS "$ext") AS "t0"
+/// ```
+///
+/// A subquery, never a view: a view in Ordo's schema would depend on the
+/// foreign table, and Postgres would then refuse the other system's own
+/// `DROP COLUMN`. Postgres flattens the subquery, so the cost is the
+/// string concatenation of each id returned. `$key` is what every
+/// comparison, join and sort on `id` uses, so the foreign index serves.
+///
+/// Per tenant, the same SQL runs in whichever database the space maps to.
+// slice C: the apply-time check of this translation against the live
+// table (table present, each column present with its type) hooks in where
+// the program is applied, before any op reading the entity is served.
+pub fn external_source(r: &ExternalRead, alias: &str) -> String {
+    let inner = q("$ext");
+    let col = |c: &str| format!("{inner}.{}", q(c));
+    let typed = |prefix: &str, c: &str| format!("'{prefix}_' || {}::text", col(c));
+    let mut cols = vec![
+        format!("{} AS {}", col(&r.key_column), q(EXTERNAL_KEY)),
+        format!("{} AS {}", typed(&r.prefix, &r.key_column), q("id")),
+    ];
+    for c in &r.columns {
+        let value = match &c.ref_prefix {
+            Some(prefix) => typed(prefix, &c.column),
+            None => col(&c.column),
+        };
+        cols.push(format!("{value} AS {}", q(&c.field)));
+    }
+    format!(
+        "(SELECT {} FROM {}.{} AS {inner}) AS {}",
+        cols.join(", "),
+        q(&r.schema),
+        q(&r.table),
+        q(alias)
+    )
+}
+
+/// A typed id, as SQL, decoded to an external entity's raw key: the prefix
+/// checked and stripped, the rest cast to the key's type. Anything that is
+/// not this entity's id (another prefix, a malformed key, null) decodes to
+/// null, which matches no row. It never raises a cast error, so one bad ref
+/// cannot abort a whole read.
+pub fn decode_external_id(x: &str, r: &ExternalRead) -> String {
+    let p = &r.prefix;
+    let from = p.chars().count() + 2;
+    match r.key_ty {
+        ExternalKeyTy::Int => format!(
+            "(CASE WHEN {x} ~ '^{p}_-?[0-9]{{1,18}}$' THEN CAST(substr({x}, {from}) AS bigint) END)"
+        ),
+        ExternalKeyTy::Uuid => format!(
+            "(CASE WHEN {x} ~ '^{p}_[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$' \
+             THEN CAST(substr({x}, {from}) AS uuid) END)"
+        ),
+        ExternalKeyTy::Text => format!(
+            "(CASE WHEN left({x}, {}) = '{p}_' THEN substr({x}, {from}) END)",
+            from - 1
+        ),
+    }
+}
+
+/// The external entities a bound read reaches, at any depth: its sources,
+/// its hops, its guards and its callees. Empty when the program declares
+/// none.
+///
+/// What the host reads to keep such an op off `?live=1`: another system
+/// writes the table, so no change ever reaches Ordo's log and a live
+/// subscription would never refresh (ruled 2026-11-15, `external-entities`).
+pub fn externals_read(q: &Query) -> Vec<String> {
+    let Some(map) = &q.externals else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    tables_of(q, &mut found);
+    let mut out: Vec<String> = found
+        .into_iter()
+        .map(|(e, _)| e)
+        .filter(|e| map.contains_key(e))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `(entity, alias)` a query reads a table under, at any depth.
+fn tables_of(qy: &Query, out: &mut Vec<(String, String)>) {
+    fn from(f: &From, out: &mut Vec<(String, String)>) {
+        match f {
+            From::Table { entity, alias } => out.push((entity.clone(), alias.clone())),
+            From::Sub { query, .. } => tables_of(query, out),
+            From::Union { arms, .. } => arms.iter().for_each(|a| tables_of(a, out)),
+            From::CteRef { .. } => {}
+        }
+    }
+    fn cond(c: &BCond, out: &mut Vec<(String, String)>) {
+        match c {
+            BCond::Exists { query, .. } => tables_of(query, out),
+            BCond::And(cs) | BCond::Or(cs) => cs.iter().for_each(|c| cond(c, out)),
+            BCond::Not(c) => cond(c, out),
+            BCond::Cmp { lhs, rhs, .. } | BCond::Text { lhs, rhs, .. } => {
+                expr(lhs, out);
+                expr(rhs, out);
+            }
+            BCond::In { expr: e, list } => {
+                expr(e, out);
+                list.iter().for_each(|e| expr(e, out));
+            }
+            BCond::IsNull { expr: e, .. } | BCond::Bare(e) => expr(e, out),
+            BCond::TreeWalk { .. } => {}
+        }
+    }
+    fn expr(e: &BExpr, out: &mut Vec<(String, String)>) {
+        match e {
+            BExpr::Cond { arms, else_, .. } => {
+                for (c, v) in arms {
+                    cond(c, out);
+                    expr(v, out);
+                }
+                expr(else_, out);
+            }
+            BExpr::Agg { mask: Some(m), .. } => cond(m, out),
+            _ => {}
+        }
+    }
+    from(&qy.from, out);
+    for j in &qy.joins {
+        out.push((j.table.clone(), j.alias.clone()));
+        if let Some(g) = &j.guard {
+            cond(g, out);
+        }
+    }
+    for j in &qy.source_joins {
+        from(&j.from, out);
+        if let Some(g) = &j.guard {
+            cond(g, out);
+        }
+    }
+    for c in qy.filters.iter().chain(&qy.having) {
+        cond(c, out);
+    }
+    for o in &qy.outputs {
+        expr(&o.expr, out);
+    }
+    for c in &qy.ctes {
+        tables_of(&c.query, out);
+    }
+}
+
 struct Planner {
     params: Vec<String>,
     /// Output expressions whose SQL type is `bytea`, not text: the sealed
@@ -1315,6 +1503,12 @@ struct Planner {
     /// Compile every equality to the null-safe distinctness form, as the
     /// planner did before the never-null rule. Only the parity test sets it.
     legacy_eq: bool,
+    /// How to read each external entity, adopted from the outermost query
+    /// ([`Query::externals`]). `None` when the program declares none.
+    externals: Option<ExternalReads>,
+    /// Every alias in the statement that reads an external entity, so an
+    /// `id` on it compares, joins and sorts by the raw key.
+    ext_alias: std::collections::HashMap<String, ExternalRead>,
 }
 
 impl Planner {
@@ -1337,7 +1531,84 @@ impl Planner {
             present: Vec::new(),
             strict: false,
             legacy_eq: !PROVEN_EQUALITY,
+            externals: None,
+            ext_alias: std::collections::HashMap::new(),
         }
+    }
+
+    /// Adopt the program's external entities from a query and note every
+    /// alias in it that reads one. Called before anything is rendered, so a
+    /// sort term planned ahead of the `FROM` (the paging planner) already
+    /// knows which `id`s are external.
+    fn learn(&mut self, qy: &Query) {
+        if self.externals.is_none() {
+            self.externals = qy.externals.clone();
+        }
+        let Some(map) = self.externals.clone() else {
+            return;
+        };
+        let mut found = Vec::new();
+        tables_of(qy, &mut found);
+        for (entity, alias) in found {
+            if let Some(r) = map.get(&entity) {
+                self.ext_alias.insert(alias, r.clone());
+            }
+        }
+    }
+
+    /// The external alias and its read, when `e` is that alias's `id`.
+    fn external_id(&self, e: &BExpr) -> Option<(String, ExternalRead)> {
+        match e {
+            BExpr::Col { alias, column, .. } if column == "id" => self
+                .ext_alias
+                .get(alias)
+                .map(|r| (alias.clone(), r.clone())),
+            _ => None,
+        }
+    }
+
+    /// An order key as it is sorted: an external's `id` sorts by its raw
+    /// key, so the foreign index serves the order and `cust_10` follows
+    /// `cust_9`. Anything else is itself.
+    fn sort_key(&self, e: &BExpr) -> BExpr {
+        match self.external_id(e) {
+            Some((alias, r)) => BExpr::Col {
+                alias,
+                column: EXTERNAL_KEY.into(),
+                ty: match r.key_ty {
+                    ExternalKeyTy::Int => ScalarTy::Int,
+                    ExternalKeyTy::Text | ExternalKeyTy::Uuid => ScalarTy::Text,
+                },
+            },
+            None => e.clone(),
+        }
+    }
+
+    /// `"alias"."$key" = <the other side, decoded>`, when one side of an
+    /// equality is an external's `id`. `None` when neither side is.
+    fn external_id_equality(
+        &mut self,
+        lhs: &BExpr,
+        rhs: &BExpr,
+        negated: bool,
+    ) -> Result<Option<String>, PlanError> {
+        let (alias, r, other) = match (self.external_id(lhs), self.external_id(rhs)) {
+            (Some((a, r)), _) => (a, r, rhs),
+            (None, Some((a, r))) => (a, r, lhs),
+            (None, None) => return Ok(None),
+        };
+        let key = format!("{}.{}", q(&alias), q(EXTERNAL_KEY));
+        let decoded = decode_external_id(&self.expr(other)?, &r);
+        // The key is never null. `=` serves the index wherever a null answer
+        // drops the row; under `not` it must answer false, which the
+        // distinctness form does (`Planner::strict`).
+        Ok(Some(if negated {
+            format!("({key} IS DISTINCT FROM {decoded})")
+        } else if self.strict {
+            format!("({key} IS NOT DISTINCT FROM {decoded})")
+        } else {
+            format!("({key} = {decoded})")
+        }))
     }
 
     /// The space value as SQL — a literal when the door bound one, the
@@ -1363,12 +1634,23 @@ impl Planner {
     /// there is nothing to forget, because there is nothing to take
     /// separately. It also registers the alias, which is what lets
     /// [`verify_scoped`] find a source that came from anywhere else.
-    fn table(&mut self, entity: &str, alias: &str) -> (String, String) {
+    ///
+    /// **An external entity is not a base table** (ruled 2026-11-15,
+    /// `external-entities`). It renders as a subquery over the foreign
+    /// table, with no space predicate (`None`): the translation is `shared`.
+    /// See [`external_source`].
+    fn table(&mut self, entity: &str, alias: &str) -> (String, Option<String>) {
+        if let Some(r) = self.externals.as_ref().and_then(|m| m.get(entity)).cloned() {
+            self.sources.external(alias);
+            let src = external_source(&r, alias);
+            self.ext_alias.insert(alias.to_string(), r);
+            return (src, None);
+        }
         self.sources.physical(alias);
         let sp = self.space_sql();
         (
             format!("{} AS {}", q(entity), q(alias)),
-            format!("{}.{} = {sp}", q(alias), q(SPACE_COLUMN)),
+            Some(format!("{}.{} = {sp}", q(alias), q(SPACE_COLUMN))),
         )
     }
 
@@ -1436,6 +1718,17 @@ impl Planner {
     }
 
     fn is_collatable(&self, e: &BExpr) -> bool {
+        // A `uuid` key sorts as itself: `COLLATE` on a uuid is an error.
+        if let BExpr::Col { alias, column, .. } = e {
+            if column == EXTERNAL_KEY
+                && self
+                    .ext_alias
+                    .get(alias)
+                    .is_some_and(|r| r.key_ty == ExternalKeyTy::Uuid)
+            {
+                return false;
+            }
+        }
         matches!(e.ty(), ScalarTy::Text | ScalarTy::Id) && !self.sealed.contains(e)
     }
 
@@ -1443,6 +1736,7 @@ impl Planner {
         if self.not_null.is_none() {
             self.not_null = qy.not_null.clone();
         }
+        self.learn(qy);
         // Sealed outputs are a per-LEVEL fact; a nested select has its own
         // host_open, so save and restore rather than accumulating.
         let outer_sealed = std::mem::replace(&mut self.sealed, Self::sealed_of(qy));
@@ -1652,7 +1946,7 @@ impl Planner {
             From::Table { entity, alias } => {
                 let (src, pred) = self.table(entity, alias);
                 s.push_str(&format!("{src}\n"));
-                scoping.push(pred);
+                scoping.extend(pred);
             }
             From::Sub { query, alias } => {
                 self.sources.derived(alias);
@@ -1684,7 +1978,7 @@ impl Planner {
             let target = match &j.from {
                 From::Table { entity, alias } => {
                     let (src, pred) = self.table(entity, alias);
-                    extra.push(pred);
+                    extra.extend(pred);
                     src
                 }
                 From::CteRef { name, alias } => {
@@ -1708,7 +2002,10 @@ impl Planner {
             };
             let on: Result<Vec<String>, PlanError> =
                 j.on.iter()
-                    .map(|(a, b)| Ok(format!("{} = {}", self.expr(a)?, self.expr(b)?)))
+                    .map(|(a, b)| match self.external_id_equality(a, b, false)? {
+                        Some(sql) => Ok(sql),
+                        None => Ok(format!("{} = {}", self.expr(a)?, self.expr(b)?)),
+                    })
                     .collect();
             let mut on = on?;
             on.extend(extra);
@@ -1755,13 +2052,26 @@ impl Planner {
                 ),
                 None => String::new(),
             };
-            s.push_str(&format!(
-                "{pad}LEFT JOIN {src} ON {}.{} = {}.{} AND {pred}{guard}\n",
-                q(&j.from_alias),
-                q(&j.from_column),
-                q(&j.alias),
-                q("id"),
-            ));
+            // A hop into an external entity joins on its raw key, so the
+            // foreign index serves it, and a ref whose row is gone finds
+            // nothing: the hop reads as null, like a null ref.
+            let link = match self.ext_alias.get(&j.alias) {
+                Some(r) => format!(
+                    "{}.{} = {}",
+                    q(&j.alias),
+                    q(EXTERNAL_KEY),
+                    decode_external_id(&format!("{}.{}", q(&j.from_alias), q(&j.from_column)), r)
+                ),
+                None => format!(
+                    "{}.{} = {}.{}",
+                    q(&j.from_alias),
+                    q(&j.from_column),
+                    q(&j.alias),
+                    q("id"),
+                ),
+            };
+            let pred = pred.map(|p| format!(" AND {p}")).unwrap_or_default();
+            s.push_str(&format!("{pad}LEFT JOIN {src} ON {link}{pred}{guard}\n"));
         }
 
         let filters: Result<Vec<String>, PlanError> =
@@ -1820,6 +2130,7 @@ impl Planner {
     /// anchor-id tiebreak, which is exactly the term that makes the order
     /// total. (Regression: `sort status, status` dropped rows when paged.)
     fn order_terms(&mut self, qy: &Query) -> Result<Vec<(String, BExpr, bool)>, PlanError> {
+        self.learn(qy);
         let mut out: Vec<(String, BExpr, bool)> = Vec::new();
         for s in qy.sort.iter().cloned().chain(
             qy.tiebreak
@@ -1831,11 +2142,12 @@ impl Planner {
             // predicate compares under the same collation the ORDER BY
             // sorts under. They are the same string by construction, which
             // is the only way "strictly after this row" stays true.
-            let e = self.collated(&s.expr)?;
+            let key = self.sort_key(&s.expr);
+            let e = self.collated(&key)?;
             if out.iter().any(|(seen, _, _)| seen == &e) {
                 continue;
             }
-            out.push((e, s.expr.clone(), s.desc));
+            out.push((e, key, s.desc));
         }
         Ok(out)
     }
@@ -1847,7 +2159,8 @@ impl Planner {
         let mut seen: Vec<String> = Vec::new();
 
         let mut push = |planner: &mut Self, s: &Sort| -> Result<(), PlanError> {
-            let e = planner.collated(&s.expr)?;
+            let key = planner.sort_key(&s.expr);
+            let e = planner.collated(&key)?;
             if seen.contains(&e) {
                 return Ok(());
             }
@@ -2208,6 +2521,13 @@ impl Planner {
             //
             // `Planner::equality` decides; `tests/equality_parity.rs` in
             // `ordo-conformance` runs both forms and requires the same rows.
+            BCond::Cmp {
+                op: op @ (CmpOp::Eq | CmpOp::Ne),
+                lhs,
+                rhs,
+            } if self.external_id(lhs).is_some() || self.external_id(rhs).is_some() => self
+                .external_id_equality(lhs, rhs, *op == CmpOp::Ne)?
+                .expect("one side is an external id"),
             BCond::Cmp { op, lhs, rhs } => {
                 let (l, r) = (self.expr(lhs)?, self.expr(rhs)?);
                 match op {
@@ -2261,6 +2581,19 @@ impl Planner {
             // cannot express: `null == null` is true, so it matches a null
             // value (DL §4, Comparisons), and `x IN (…, NULL)` never does.
             // It becomes `OR x IS NULL`; the other members stay an `IN`.
+            BCond::In { expr, list } if self.external_id(expr).is_some() => {
+                let (alias, r) = self.external_id(expr).expect("checked");
+                let items: Result<Vec<String>, PlanError> = list
+                    .iter()
+                    .map(|i| Ok(decode_external_id(&self.expr(i)?, &r)))
+                    .collect();
+                format!(
+                    "COALESCE({}.{} IN ({}), false)",
+                    q(&alias),
+                    q(EXTERNAL_KEY),
+                    items?.join(", ")
+                )
+            }
             BCond::In { expr, list } => {
                 let has_null = list.iter().any(|i| {
                     matches!(
@@ -2376,6 +2709,9 @@ impl Planner {
                 let (outer, prefix) = if *above { ("anc", "n") } else { ("n", "anc") };
                 let (o_src, o_pred) = self.table(tree, outer);
                 let (p_src, p_pred) = self.table(tree, prefix);
+                // A tree is always Ordo's: an external is never one.
+                let o_pred = o_pred.unwrap_or_else(|| "true".into());
+                let p_pred = p_pred.unwrap_or_else(|| "true".into());
                 format!(
                     "({node} IN (SELECT {o}.{id} FROM {o_src}, {p_src} \
                      WHERE {p}.{id} = {anch} AND {o_pred} AND {p_pred} \

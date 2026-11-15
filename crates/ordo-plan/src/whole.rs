@@ -187,7 +187,8 @@ fn row_guard(
     match cond {
         None => Ok(String::new()),
         Some(c) => {
-            let (sql, sourced) = crate::render_cond(&c, &sc.space.clone())?;
+            let (sql, sourced) =
+                crate::render_cond_with(&c, &sc.space.clone(), ordo_sema::external_reads(schema))?;
             sc.aliases.extend(sourced.physical_aliases());
             Ok(format!(" AND ({sql})"))
         }
@@ -208,6 +209,18 @@ fn row_object(
         code: "unknown_source",
         message: format!("`{entity}` is not an entity"),
     })?;
+    // `whole` is an owned closure, and an external owns nothing and is owned
+    // by nothing (ruled 2026-11-15, `external-entities`). Read it with
+    // `std.<name>.get` or an op of your own.
+    if e.external.is_some() {
+        return Err(PlanError {
+            code: "external_unsupported",
+            message: format!(
+                "`whole {entity}` reads an owned closure, and `{entity}` is an external \
+                 entity, which owns nothing. Read it with `std.{entity}.get`"
+            ),
+        });
+    }
 
     let mut pairs = scalar_pairs(schema, entity, alias);
 
@@ -216,6 +229,12 @@ fn row_object(
     // hop"; never further, because signposts contain no refs).
     for f in e.declared() {
         if let FieldTy::Ref { target, .. } = &f.ty {
+            // A ref to an external entity shows as its id: the signpost
+            // would read another system's table, which `whole` does not.
+            if schema.is_external(target) {
+                pairs.push(format!("'{}', {}.{}", f.name, q(alias), q(&f.column())));
+                continue;
+            }
             pairs.push(format!(
                 "'{}', {}",
                 f.name,

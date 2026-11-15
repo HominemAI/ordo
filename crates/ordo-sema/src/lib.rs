@@ -1307,6 +1307,7 @@ pub fn write_value_expr(
     };
     let mut q = Query {
         not_null: None,
+        externals: None,
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.to_string(),
@@ -1456,6 +1457,7 @@ pub fn guard_filter_query(
     };
     Ok(Some(Query {
         not_null: Some(not_null_columns(schema)),
+        externals: external_reads(schema),
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.clone(),
@@ -1546,6 +1548,7 @@ pub fn release_query(
     let cond = b.guard_expr_cond(entity, &alias, inner, &env)?;
     Ok(Query {
         not_null: Some(not_null_columns(schema)),
+        externals: external_reads(schema),
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.clone(),
@@ -1883,6 +1886,7 @@ fn const_cond(v: bool) -> BCond {
 fn bare_query(entity: &str, alias: &str, filters: Vec<BCond>) -> Query {
     Query {
         not_null: None,
+        externals: None,
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.to_string(),
@@ -1918,6 +1922,7 @@ fn members_query(caller: &str, cond: BCond, b: &mut Binder) -> Query {
     };
     let mut q = bare_query("members", &m, vec![pin, cond]);
     q.not_null = Some(not_null_columns(b.schema));
+    q.externals = external_reads(b.schema);
     q.outputs = vec![OutField {
         name: "id".into(),
         expr: BExpr::Col {
@@ -2487,10 +2492,12 @@ fn pruned(mut q: Query, schema: &Schema) -> Query {
 /// (`ordo_host::shape`) asks the live database for the same set and refuses
 /// to serve when one of them allows nulls.
 ///
-/// When external entities land (`docs/plan-external-entities.md`), their
-/// columns come from the database's own declaration, never from the Ordo
-/// field's `?`: a column another system owns is never null only if the
-/// catalog says `NOT NULL`.
+/// External entities are not here (ruled 2026-11-15, `external-entities`):
+/// a column another system owns is never null only if the catalog says
+/// `NOT NULL`, and the field's `?` is no evidence of that. So no comparison
+/// over an external's column is ever proven, and each keeps the null-safe
+/// form. The apply-time check (slice C) is where catalog evidence could
+/// enter.
 pub fn not_null_columns(schema: &Schema) -> ir::NotNullColumns {
     let mut out = std::collections::BTreeMap::new();
     for e in &schema.entities {
@@ -2507,7 +2514,46 @@ pub fn not_null_columns(schema: &Schema) -> ir::NotNullColumns {
 /// Attach the schema's `NOT NULL` evidence to a query the binder hands out.
 fn with_not_null(mut q: Query, schema: &Schema) -> Query {
     q.not_null = Some(not_null_columns(schema));
+    q.externals = external_reads(schema);
     q
+}
+
+/// How the planner reads each external entity, or `None` when the program
+/// declares none (ruled 2026-11-15, `external-entities`).
+pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
+    if schema.externals.is_empty() {
+        return None;
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for e in &schema.externals {
+        let Some(src) = &e.external else { continue };
+        let columns = src
+            .columns
+            .iter()
+            .map(|(field, column)| ir::ExternalColumn {
+                field: field.clone(),
+                column: column.clone(),
+                ref_prefix: match e.field(field).map(|f| &f.ty) {
+                    Some(ordo_schema::FieldTy::Ref { target, .. }) => {
+                        schema.entity(target).map(|t| t.key.clone())
+                    }
+                    _ => None,
+                },
+            })
+            .collect();
+        out.insert(
+            e.name.clone(),
+            ir::ExternalRead {
+                schema: src.schema.clone(),
+                table: src.table.clone(),
+                key_column: src.key_column.clone(),
+                key_ty: src.key_ty,
+                prefix: e.key.clone(),
+                columns,
+            },
+        );
+    }
+    Some(std::sync::Arc::new(out))
 }
 
 impl<'a> Binder<'a> {
@@ -2682,6 +2728,7 @@ impl<'a> Binder<'a> {
 
         let mut q = Query {
             not_null: None,
+            externals: None,
             from: From::Table {
                 entity: entity.name.clone(),
                 alias: alias.clone(),
@@ -2900,6 +2947,7 @@ impl<'a> Binder<'a> {
             let ent = self.rebase_entity_at(entity, &rebase, hop_i)?;
             let sub = Query {
                 not_null: None,
+                externals: None,
                 from: From::Table {
                     entity: ent.clone(),
                     alias: self.rebase_alias_of(&link),
@@ -3023,6 +3071,7 @@ impl<'a> Binder<'a> {
         Ok(BCond::Exists {
             query: Box::new(Query {
                 not_null: None,
+                externals: None,
                 from: From::Table {
                     entity: target.to_string(),
                     alias: pa,
@@ -3209,6 +3258,7 @@ impl<'a> Binder<'a> {
                         let inner_cond = self.guard_atom_cond(&target, &pa, &rest, env)?;
                         let sub = Query {
                             not_null: None,
+                            externals: None,
                             from: From::Table {
                                 entity: target.clone(),
                                 alias: pa,
@@ -3275,6 +3325,7 @@ impl<'a> Binder<'a> {
                 let inner_cond = self.guard_expr_cond(step_entity, &sa, inner, env)?;
                 let sub = Query {
                     not_null: None,
+                    externals: None,
                     from: From::Table {
                         entity: step_entity.clone(),
                         alias: sa,
@@ -3437,6 +3488,7 @@ impl<'a> Binder<'a> {
         let scope = Scope::Fields(fields.clone());
         let mut q = Query {
             not_null: None,
+            externals: None,
             from: From::CteRef {
                 name: info.name.clone(),
                 alias,
@@ -3678,6 +3730,7 @@ impl<'a> Binder<'a> {
 
         Ok(Query {
             not_null: None,
+            externals: None,
             from: From::Union { arms, alias },
             joins: Vec::new(),
             filters: Vec::new(),
@@ -4724,6 +4777,7 @@ impl<'a> Binder<'a> {
 
         let q = Query {
             not_null: None,
+            externals: None,
             from: From::Sub {
                 query: Box::new(callee),
                 alias,

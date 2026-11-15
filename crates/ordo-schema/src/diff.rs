@@ -785,15 +785,20 @@ pub fn diff_with(
             });
             continue;
         };
-        let written_as = written.and_then(|w| w.entity(&e.name));
+        let written_as = written.and_then(|w| w.native(&e.name));
         entity_columns(e, t, written_as, &live.places, &mut out);
-        entity_objects(e, t, &mut out);
-        if let Some(p) = prior.and_then(|p| p.entity(&e.name)) {
+        entity_objects(declared, e, t, &mut out);
+        if let Some(p) = prior.and_then(|p| p.native(&e.name)) {
             declaration_only(p, e, &mut out);
         }
     }
 
     // Drops, and ONLY against a prior declaration — see the module doc.
+    //
+    // Natives only, on both sides. An external entity is never in
+    // `entities`, so removing one plans nothing, and a native entity that
+    // became an external of the same name is left alone rather than read as
+    // a table to alter (ruled 2026-11-15, `external-entities`).
     if let Some(prior) = prior {
         for p in &prior.entities {
             if declared.entity(&p.name).is_some() {
@@ -806,7 +811,7 @@ pub fn diff_with(
             }
         }
         for p in &prior.entities {
-            let Some(d) = declared.entity(&p.name) else {
+            let Some(d) = declared.native(&p.name) else {
                 continue;
             };
             let Some(t) = live.table(&p.name) else {
@@ -857,7 +862,7 @@ pub fn diff_with(
         // Constraints and indexes the prior program declared, the new one
         // does not, and the database still holds.
         for p in &prior.entities {
-            let Some(d) = declared.entity(&p.name) else {
+            let Some(d) = declared.native(&p.name) else {
                 continue;
             };
             let Some(t) = live.table(&p.name) else {
@@ -1068,7 +1073,7 @@ fn added_field(e: &Entity, f: &Field) -> Change {
 }
 
 /// Constraint-grain classification, by the names `ddl_for` mints.
-fn entity_objects(e: &Entity, t: &LiveTable, out: &mut Vec<Change>) {
+fn entity_objects(schema: &Schema, e: &Entity, t: &LiveTable, out: &mut Vec<Change>) {
     for f in &e.fields {
         if f.unique && !f.implicit {
             let object = unique_name(&e.name, &f.name);
@@ -1098,7 +1103,11 @@ fn entity_objects(e: &Entity, t: &LiveTable, out: &mut Vec<Change>) {
                 }
             }
         }
+        // A ref to an external entity carries no foreign key (`ddl::foreign_key`).
         if let FieldTy::Ref { target, .. } = &f.ty {
+            if schema.is_external(target) {
+                continue;
+            }
             let object = fk_name(&e.name, &f.name);
             if !t.has_object(&object) {
                 out.push(Change::AddForeignKey {

@@ -436,7 +436,13 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
             // live-capable *and* blind to its siblings — which is why
             // [`crate::invalidation::PgInvalidationBus`] exists and why
             // it, not this line, is the honest gate on `?live`.
-            live_capable: matches!(kind, OpKind::Read),
+            //
+            // One exception, ruled 2026-11-15 (`external-entities`): a read
+            // that reaches an external entity is never live. Another system
+            // writes that table, no change reaches Ordo's log, and a
+            // subscription would never refresh, so `?live=1` answers
+            // `not_live` rather than a stream that is silently stale.
+            live_capable: matches!(kind, OpKind::Read) && !reads_external(f, name),
             refinable,
             aggregate_only,
             mode_label,
@@ -1479,6 +1485,14 @@ pub fn catalog_for(
 /// The digest differs per asker, and that is correct: two callers holding
 /// different surfaces hold different contracts, and a shared digest would
 /// tell each of them their document was the whole one.
+/// Does this read op reach an external entity? Binds it only when the
+/// program declares one, so a program without externals pays nothing.
+fn reads_external(f: &Fixture, name: &str) -> bool {
+    !f.schema.externals.is_empty()
+        && ordo_sema::bind_op_generic(&f.schema, &f.registry, name, ordo_sema::Clock::CORPUS)
+            .is_ok_and(|q| !ordo_plan::externals_read(&q).is_empty())
+}
+
 pub fn interface_for(
     f: &Fixture,
     access: &dyn AccessChecker,

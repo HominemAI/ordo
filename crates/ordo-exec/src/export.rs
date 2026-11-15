@@ -761,7 +761,7 @@ async fn write_blobs(
         let Some(handle) = parse_blob_handle(hex) else {
             continue;
         };
-        let declared = req.schema.entity(entity).and_then(|e| e.field(field));
+        let declared = req.schema.native(entity).and_then(|e| e.field(field));
         let inline = declared.map(|f| f.inline).unwrap_or(false);
         let private = declared.map(|f| f.private).unwrap_or(false);
         // Which row holds it. The column IS the reference — that is what

@@ -1,6 +1,6 @@
 {
  "date": "2026-11-15",
- "text": "Federation planned in chat today: the sign-in provider is the identity service alone at auth.hominem.ai, and external entities, Ordo apps reading non-Ordo tables, were reviewed 3 ways and ruled. Building external entities now, then the HAL console's reauth, then 0.5.2 with the auth block. See [[external-entities]] and [[shared-identity]].",
+ "text": "External entities are built on bleeding (PR 14, 3 slices, 2 reviews, 19 fixes): an Ordo app now reads tables another system owns, generated from the live table, checked at apply and watched. The sign-in provider was ruled to run alone at auth.hominem.ai. Next: the HAL console's reauth, then 0.5.2 with the auth block. See [[external-entities]] and [[shared-identity]].",
  "tiles": [
   [
    "4,060",
@@ -46,15 +46,15 @@
  "look": [
   {
    "id": "external-entities",
-   "why": "ruled after 3 reviews, building"
+   "why": "built, 4 small asks"
   },
   {
    "id": "shared-identity",
-   "why": "decision 1 ruled, order set"
+   "why": "console reauth next"
   },
   {
    "id": "live-instance",
-   "why": "0.5.2 waits for PR 13 and external entities"
+   "why": "0.5.2 waits for PR 13"
   }
  ]
 }

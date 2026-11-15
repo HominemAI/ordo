@@ -11,10 +11,11 @@
  *    this module's memory only, never in storage, and is renewed 1 minute
  *    before it ends.
  * 3. Every console call carries it as a bearer (`api.ts`).
- * 4. A call that needs a fresh touch (a reauth) asks the service's
- *    `/touch/begin`. When this page's host is the passkey's RP ID or under
- *    it, the ceremony runs here and `/touch/finish` answers a token with
- *    the new touch. Otherwise the browser cannot use the passkey here, so
+ * 4. A call that needs a fresh touch (a reauth) is decided from the RP ID
+ *    the console's status carries, before any network call. When this
+ *    page's host is the RP ID or under it, the ceremony runs here against
+ *    `/touch/begin` and `/touch/finish`, which answers a token with the
+ *    new touch. Otherwise the browser cannot use the passkey here, so
  *    the page goes to the service's sign-in page with `touch=1`, the
  *    ceremony runs there, and the browser comes back; the next token
  *    carries the touch. The person repeats the action after the return
@@ -23,11 +24,13 @@
  */
 
 import { ConsoleCallError } from './api';
-import { assertWith, type Begun } from './webauthn';
+import { assertWith } from './webauthn';
 
 export interface IdentityInfo {
   origin: string;
   audience: string;
+  /** The passkeys' RP ID, from the console's status. Absent on an old console. */
+  rpId?: string;
 }
 
 interface Issued {
@@ -120,48 +123,72 @@ export function token(): Promise<string> {
 }
 
 /** The service's sign-in page, with what it needs to send the browser back. */
-function signInUrl(extra = ''): string {
-  if (!service) return '';
+function signInUrl(info: IdentityInfo, extra = ''): string {
   const back = encodeURIComponent(window.location.href);
   // The service checks `return` against this deployment's own list, so a
   // shared service (many deployments) knows whose list to read.
-  const handle = encodeURIComponent(service.audience.replace(/^ordo-deployment:/, ''));
-  return `${service.origin}/sign-in?client=console&deployment=${handle}&return=${back}${extra}`;
+  const handle = encodeURIComponent(info.audience.replace(/^ordo-deployment:/, ''));
+  return `${info.origin}/sign-in?client=console&deployment=${handle}&return=${back}${extra}`;
 }
 
 /** Send the browser to the service's sign-in page; it comes back here. */
 export function goSignIn(): void {
   if (!service) return;
-  window.location.assign(signInUrl());
+  window.location.assign(signInUrl(service));
 }
 
-/** Whether a passkey with this RP ID can be used at this page's host. */
-function underRpId(rpId: string): boolean {
-  const host = window.location.hostname;
-  return host === rpId || host.endsWith(`.${rpId}`);
+/**
+ * Whether a passkey with this RP ID can be used at `host`. The server's
+ * rule (`RelyingParty` in crates/ordo-identity/src/passkey.rs): lowercase
+ * host, equal to the RP ID or ending in `.` and the RP ID.
+ */
+function hostUnder(host: string, rpId: string): boolean {
+  const h = host.toLowerCase();
+  const rp = rpId.toLowerCase();
+  return h === rp || h.endsWith(`.${rp}`);
 }
+
+/**
+ * Whether this page may run the passkey ceremony itself. A status with no
+ * `rpId` (an older console) is judged by the service's own host, the
+ * service's default RP ID: this page can run it only when it shares that
+ * host.
+ */
+function ceremonyHere(info: IdentityInfo): boolean {
+  const host = window.location.hostname;
+  if (info.rpId) return hostUnder(host, info.rpId);
+  return hostUnder(host, new URL(info.origin).hostname);
+}
+
+/** How long the page waits to be taken away before it says the redirect failed. */
+const REDIRECT_WAIT_MS = 5000;
 
 /**
  * A reauth inside the service session: the token held after it carries the
  * fresh touch. In page when this host may use the passkey; otherwise the
- * page leaves for the service's sign-in page and never returns here.
+ * page goes to the service's sign-in page, and the person repeats the
+ * action after the return.
  */
 export async function touch(): Promise<void> {
+  if (!service) throw new ConsoleCallError('not_signed_in', 'No identity service is set.', 0, false);
+  const info = service;
+  if (!ceremonyHere(info)) {
+    window.location.assign(signInUrl(info, '&touch=1'));
+    // The page is leaving. If it is still here, the browser did not go.
+    await new Promise((resolve) => setTimeout(resolve, REDIRECT_WAIT_MS));
+    throw new ConsoleCallError(
+      'reauth_redirect',
+      'Confirm it is you at the sign-in page, then try again.',
+      0,
+      false,
+    );
+  }
   // The answer is a token for this console's deployment, which may not be
   // the service's own when the service is shared.
-  const aud = service?.audience;
+  const aud = info.audience;
   const send = <R>(path: string, body?: unknown): Promise<R> =>
     servicePost<R>(path, path === '/touch/finish' ? { ...(body as object), aud } : body);
-  const begun = await send<Begun>('/touch/begin');
-  const options = begun.publicKey as { rpId?: string; rp?: { id?: string } };
-  const rpId = options.rpId ?? options.rp?.id;
-  if (rpId && !underRpId(rpId)) {
-    window.location.assign(signInUrl('&touch=1'));
-    // The page is leaving. Nothing after a reauth runs here; the person
-    // repeats the action once the browser is back.
-    return new Promise<void>(() => {});
-  }
-  const issued = await assertWith<Issued>(send, '/touch/begin', '/touch/finish', begun);
+  const issued = await assertWith<Issued>(send, '/touch/begin', '/touch/finish');
   keep(issued);
 }
 

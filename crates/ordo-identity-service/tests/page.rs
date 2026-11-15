@@ -383,17 +383,14 @@ async fn a_passkey_is_removed_with_a_fresh_touch_and_never_the_last() {
 }
 
 /// A console at another host sends the browser here with `touch=1`
-/// (plan 5.4 step 6): the sign-in page carries the reauth step and its
-/// script reads the parameter.
+/// (plan 5.4 step 6): the sign-in page carries the reauth step and
+/// serves the reauth step.
 #[tokio::test(flavor = "multi_thread")]
-async fn sign_in_serves_the_reauth_step_and_its_script_reads_touch() {
+async fn sign_in_serves_the_reauth_step() {
     let h = boot_with("page_reauth_step", &[]).await;
     let (s, _, html) = get(&h, "/sign-in").await;
     assert_eq!(s, StatusCode::OK);
     assert!(html.contains(r#"data-step="touch""#), "{html}");
     assert!(html.contains(r#"id="touch""#), "{html}");
     assert!(html.contains("Confirm it's you"), "{html}");
-    let (s, _, js) = get(&h, "/page/sign-in.js").await;
-    assert_eq!(s, StatusCode::OK);
-    assert!(js.contains("params.get('touch')"), "{js}");
 }

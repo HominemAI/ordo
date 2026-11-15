@@ -1,6 +1,6 @@
 {
  "date": "2026-11-15",
- "text": "The shared identity service is on bleeding [[shared-identity]], squashed after its suites and a review. The auth block is PR 13 [[audit-configuration-in-the-syntax]], its fixes held locally until the next batch. Release 0.5.2 follows both [[live-instance]]. Slice 1 of Human Agent Link waits on its push [[rebuild-ellanor-on-ordo-now-to]].",
+ "text": "Federation planned in chat today: the sign-in provider is the identity service alone at auth.hominem.ai, and external entities, Ordo apps reading non-Ordo tables, were reviewed 3 ways and ruled. Building external entities now, then the HAL console's reauth, then 0.5.2 with the auth block. See [[external-entities]] and [[shared-identity]].",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,16 @@
  ],
  "look": [
   {
-   "id": "shared-identity",
-   "why": "asks 3 and 4"
+   "id": "external-entities",
+   "why": "ruled after 3 reviews, building"
   },
   {
-   "id": "audit-configuration-in-the-syntax",
-   "why": "PR 13, then the host step"
+   "id": "shared-identity",
+   "why": "decision 1 ruled, order set"
   },
   {
    "id": "live-instance",
-   "why": "0.5.2 after PR 13"
+   "why": "0.5.2 waits for PR 13 and external entities"
   }
  ]
 }

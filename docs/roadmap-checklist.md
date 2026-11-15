@@ -13059,13 +13059,18 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       batch every 5 minutes over an hour), all at once, random canary,
       blue/green, and by query. §2.4, §4. Needs 18ac. Board: `environments`.
 - [ ] **27i · External entities.** Generated, read-only translations of
-      foreign tables that Ordo serves as ordinary entities.
-      `plan-external-entities.md` §2, §3. Board: `external-entities`.
+      foreign tables. Ops and the SDK see an entity; the schema keeps it as
+      its own kind, `schema.externals` (ruled 2026-11-15). Prefixed ids over
+      a raw key, `shared` required, derived get and list only, the
+      translation re-imports on apply. `plan-external-entities.md` §2, §3.
+      Board: `external-entities`.
 - [ ] **27j · Each apply lists what is present but not Ordo's.** §4.
       Board: `external-entities`.
 - [ ] **27k · Ordo's tables under a prefix plus a random identifier per
-      database.** Ruled 2026-10-01. In place of `public`;
-      `schema_apply::LIVE` becomes per database. §5. Board:
+      database.** Ruled 2026-10-01; deferred 2026-11-15 until a real
+      collision appears. Foreign tables take their own schema instead. An
+      external entity creates no table, so 27i does not depend on this.
+      `schema_apply::LIVE` becomes per database when built. §5. Board:
       `external-entities`.
 - [ ] **27l · Audit what the deployment's and each tenant's database hold,
       and who owns what.** §8. Board: `deploy-schema-audit`.

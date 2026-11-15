@@ -421,6 +421,17 @@ pub enum ErrorCode {
     /// export is the first producer that meets a caller, and both are the
     /// same fact.
     SchemaDrift,
+    /// An external entity's table no longer matches the program that reads
+    /// it: the table is gone, a column the translation maps is gone or has
+    /// another type, or Ordo's role lost its `SELECT`. Raised for every op
+    /// that reads the entity, until a regenerated translation is applied
+    /// (ruled 2026-11-15, `external-entities`, slice C).
+    ///
+    /// **500, and its own code.** The caller did nothing wrong and cannot fix
+    /// it. The deployment owner can: the message names the table, the column
+    /// and the fix. Like `schema_drift`, it is not `internal`, so nobody goes
+    /// looking for a panic.
+    ExternalChanged,
     /// An irreversible act was refused because the space still owes
     /// something: an archive that has not received the history it is the
     /// copy of record for, a client-first device that is the authoritative
@@ -784,6 +795,7 @@ impl ErrorCode {
             ErrorCode::LogAppendFailed => "log_append_failed",
             ErrorCode::SealedUnsupported => "sealed_unsupported",
             ErrorCode::SchemaDrift => "schema_drift",
+            ErrorCode::ExternalChanged => "external_changed",
             ErrorCode::SpacePinned => "space_pinned",
             ErrorCode::NotConfirmed => "not_confirmed",
             ErrorCode::EgressRefused => "egress_refused",
@@ -862,6 +874,7 @@ impl ErrorCode {
         ErrorCode::LogAppendFailed,
         ErrorCode::SealedUnsupported,
         ErrorCode::SchemaDrift,
+        ErrorCode::ExternalChanged,
         ErrorCode::SpacePinned,
         ErrorCode::NotConfirmed,
         ErrorCode::EgressRefused,
@@ -981,6 +994,7 @@ impl ErrorCode {
             | ErrorCode::LogAppendFailed
             | ErrorCode::SealedUnsupported
             | ErrorCode::SchemaDrift
+            | ErrorCode::ExternalChanged
             | ErrorCode::SpacePinned
             | ErrorCode::NotConfirmed
             // Both are a platform op's, and a platform op runs as an
@@ -1140,6 +1154,7 @@ impl ErrorCode {
             | ErrorCode::SealedUnreadable
             | ErrorCode::LogAppendFailed
             | ErrorCode::SchemaDrift
+            | ErrorCode::ExternalChanged
             | ErrorCode::Internal => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

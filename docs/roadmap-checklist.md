@@ -13065,10 +13065,14 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       translation re-imports on apply. `plan-external-entities.md` §2, §3.
       Board: `external-entities`.
       - Slice A built 2026-11-15 on branch external-entities: syntax, own
-        kind, subquery read, refusals, derived reads. B generator and C
-        apply check and watcher owed.
-- [ ] **27j · Each apply lists what is present but not Ordo's.** §4.
-      Board: `external-entities`.
+        kind, subquery read, refusals, derived reads.
+      - Slices B and C built 2026-11-15 on branch external-entities-bc:
+        `ordo introspect --external`, the apply and plan check, the
+        present-not-Ordo's list, the watcher (`ORDO_EXTERNAL_WATCH_SECS`).
+- [x] **27j · Each apply lists what is present but not Ordo's.** §4.
+      Board: `external-entities`. **Built 2026-11-15** on branch
+      external-entities-bc: `external_check::present_not_ordos`, printed by
+      `ordo plan` under `EXTERNAL` and by `std.deployment.plan` as notes.
 - [ ] **27k · Ordo's tables under a prefix plus a random identifier per
       database.** Ruled 2026-10-01; deferred 2026-11-15 until a real
       collision appears. Foreign tables take their own schema instead. An

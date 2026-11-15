@@ -167,8 +167,10 @@ pub async fn unique_keys(
 }
 
 /// What the connected role may do with one foreign table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Access {
+    /// The role the pool connects as, for the `GRANT` a refusal prints.
+    pub role: String,
     pub schema_usage: bool,
     pub select: bool,
 }
@@ -183,7 +185,7 @@ pub async fn access_to(
 ) -> Result<Option<Access>, PoolError> {
     let rows = pool
         .rows(&format!(
-            "SELECT has_schema_privilege(current_user, n.oid, 'USAGE'), \
+            "SELECT current_user::text, has_schema_privilege(current_user, n.oid, 'USAGE'), \
                     has_table_privilege(current_user, t.oid, 'SELECT') \
              FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace \
              WHERE n.nspname = {} AND t.relname = {} AND t.relkind IN ('r', 'p', 'v', 'm', 'f')",
@@ -194,10 +196,52 @@ pub async fn access_to(
     Ok(rows.first().map(|r| {
         let b = |i: usize| r.get(i).cloned().flatten().as_deref() == Some("t");
         Access {
-            schema_usage: b(0),
-            select: b(1),
+            role: r.first().cloned().flatten().unwrap_or_default(),
+            schema_usage: b(1),
+            select: b(2),
         }
     }))
+}
+
+/// The columns of one table, view, materialized view or foreign table, as
+/// the catalog spells them. `None` when it does not exist. What the
+/// apply-time check of an external entity compares its translation with.
+pub async fn table_columns(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Option<std::collections::BTreeMap<String, LiveColumn>>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull \
+             FROM pg_class t \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 \
+               AND NOT a.attisdropped \
+             WHERE n.nspname = {} AND t.relname = {} AND t.relkind IN ('r', 'p', 'v', 'm', 'f') \
+             ORDER BY a.attnum",
+            crate::sql_lit(schema),
+            crate::sql_lit(table)
+        ))
+        .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for r in rows {
+        let Some(Some(name)) = r.first().cloned() else {
+            continue;
+        };
+        out.insert(
+            name,
+            LiveColumn {
+                ty: r.get(1).cloned().flatten().unwrap_or_default(),
+                nullable: r.get(2).cloned().flatten().as_deref() == Some("t"),
+                has_default: false,
+            },
+        );
+    }
+    Ok(Some(out))
 }
 
 /// Every schema and every table outside the system schemas, as

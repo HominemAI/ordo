@@ -103,8 +103,8 @@ candidates are flagged, never auto-marked (ownership is a claim, spec §3);
 everything outside the closed type inventory lands on an explicit worklist.
 
 The Postgres reader is **one reader**. The external-entities generator
-(`ordo introspect --external crm.customers`) is built on it, and this
-command reuses it (`plan-external-entities.md` §11, 2026-11-15). The type
+(`ordo introspect --external crm.customers`, built 2026-11-15) is built on it,
+and this command reuses it (`plan-external-entities.md` §11, 2026-11-15). The type
 table of §2a serves both.
 
 ### 2a. Raw Postgres

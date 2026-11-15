@@ -519,6 +519,10 @@ pub struct Plan {
     /// Every refusal, `class on entity`, in report order.
     pub refusals: Vec<String>,
     pub destructive: usize,
+    /// What the program's external entities found in this database: the
+    /// refusals (already in `refusals`), the notes, and what is present and
+    /// not Ordo's (slice C, `external-entities`).
+    pub external: crate::external_check::ExternalReport,
     /// What the developer stated, which the triage applies.
     pub choices: Choices,
 }
@@ -570,7 +574,10 @@ pub async fn plan_with(
     );
     let mut assessed = assess_with(pool, &program.schema, &live, changes, choices).await;
 
-    let mut refusals = Vec::new();
+    // The external entities against their tables, and the list of what is
+    // here and not Ordo's. One read of the catalog; it changes nothing.
+    let external = crate::external_check::check(pool, &program.schema).await?;
+    let mut refusals = external.refusals();
     let mut destructive = 0usize;
     for a in &mut assessed {
         // §5 D3, which only a deployed artifact can raise: a drop of
@@ -599,6 +606,7 @@ pub async fn plan_with(
         assessed,
         refusals,
         destructive,
+        external,
         choices: choices.clone(),
     })
 }
@@ -2832,6 +2840,12 @@ async fn apply_planned(
     actor: &str,
     op: &str,
 ) -> Result<Applied, ApplyRefusal> {
+    // An external whose table is gone, changed or unreadable refuses the
+    // apply first, on a first apply too: a program that reads a table that is
+    // not there is not one to create a schema for.
+    if !plan.external.problems.is_empty() {
+        return Err(ApplyRefusal::Plan);
+    }
     // The target's state first: a first apply is a create, and a registry
     // over no tables is a refusal, before any change is weighed.
     if plan.present() == 0 {

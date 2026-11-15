@@ -1,0 +1,557 @@
+//! External entities, slice C (ruled 2026-11-15, `external-entities`): the
+//! check of each translation against the live table, the list of what is in
+//! the database and not Ordo's, and the watcher that keeps the first current.
+//!
+//! # What the check compares
+//!
+//! For each declared `external`, read from the database the program applies
+//! to (the deployment's own, or one tenant's):
+//!
+//! | Found | Result |
+//! |---|---|
+//! | the table is not there | `external_missing`, a refusal |
+//! | Ordo's role lacks `USAGE` on the schema or `SELECT` on the table | `external_no_grant`, a refusal naming the `GRANT` |
+//! | a mapped column is gone, has another type, or admits null where the file says it never does | `external_changed`, a refusal naming each column |
+//! | a column the translation does not read | a note, never a refusal |
+//!
+//! The comparison is by type family, as `docs/migration.md` section 2a draws
+//! them: `varchar(120)` satisfies `text`, `integer` satisfies `int`. A
+//! `decimal(s)` field needs `numeric` at exactly that scale. Nothing here
+//! writes. A refusal is a line that says what the deployment owner can do.
+//!
+//! # Where it runs
+//!
+//! [`check`] is called from `schema_apply::plan_with`, the one place a plan
+//! is read, so `ordo plan --against`, `ordo apply`, `ordo migrate --apply`
+//! and the tenant catch-up all see it. [`ExternalGate`] is the runtime half:
+//! a timer re-runs the check on the deployment's database, and while an
+//! entity is down every op that reads it answers `external_changed`. When
+//! the table comes back unchanged, the next tick lifts the hold.
+//!
+//! Tenant databases are checked when a program is applied to them. The
+//! timer watches the deployment's own database.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use futures::future::BoxFuture;
+use ordo_api::{ErrorCode, ExecError, ExecOutcome, OpExecutor, OpSpec};
+use ordo_exec::migrate;
+use ordo_exec::Pool;
+use ordo_schema::{Entity, FieldTy, Schema};
+use ordo_syntax::{ExternalKeyTy, ScalarTy};
+
+/// The setting that names how often the watcher re-reads the tables.
+pub const WATCH_ENV: &str = "ORDO_EXTERNAL_WATCH_SECS";
+/// Five minutes.
+pub const WATCH_DEFAULT_SECS: u64 = 300;
+
+/// [`WATCH_ENV`], or the default when unset. A value that is not a whole
+/// number of seconds from 1 is refused at boot, naming the setting.
+pub fn watch_interval_from_env() -> Result<Duration, String> {
+    match std::env::var(WATCH_ENV) {
+        Err(_) => Ok(Duration::from_secs(WATCH_DEFAULT_SECS)),
+        Ok(v) if v.trim().is_empty() => Ok(Duration::from_secs(WATCH_DEFAULT_SECS)),
+        Ok(v) => match v.trim().parse::<u64>() {
+            Ok(n) if n >= 1 => Ok(Duration::from_secs(n)),
+            _ => Err(format!(
+                "{WATCH_ENV} is `{v}`: it is a whole number of seconds, 1 or more. Set \
+                 {WATCH_ENV}={WATCH_DEFAULT_SECS}, the default, or unset it"
+            )),
+        },
+    }
+}
+
+/// What kind of problem one external has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemKind {
+    /// The table is not in this database.
+    Missing,
+    /// Ordo's role cannot read the table.
+    NoGrant,
+    /// A mapped column is gone, retyped, or nullable against the file.
+    Changed,
+}
+
+impl ProblemKind {
+    /// The greppable class.
+    pub fn class(self) -> &'static str {
+        match self {
+            ProblemKind::Missing => "external_missing",
+            ProblemKind::NoGrant => "external_no_grant",
+            ProblemKind::Changed => "external_changed",
+        }
+    }
+}
+
+/// One external that cannot be read as the program says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    pub entity: String,
+    pub kind: ProblemKind,
+    /// What is wrong and what to do, in short sentences.
+    pub detail: String,
+}
+
+impl Problem {
+    /// `external_changed on `customers`: …`, the shape a plan lists.
+    pub fn line(&self) -> String {
+        format!(
+            "{} on `{}`: {}",
+            self.kind.class(),
+            self.entity,
+            self.detail
+        )
+    }
+}
+
+/// Everything one pass learned about a program's externals in one database.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExternalReport {
+    pub problems: Vec<Problem>,
+    /// What was taken: columns the translation does not read.
+    pub notes: Vec<String>,
+    /// What the database holds that is not Ordo's and not a declared
+    /// external (27j, "present, not Ordo's"). One line each.
+    pub present: Vec<String>,
+}
+
+impl ExternalReport {
+    /// The refusals, one line each.
+    pub fn refusals(&self) -> Vec<String> {
+        self.problems.iter().map(Problem::line).collect()
+    }
+
+    /// The notes and the present list, as the lines a plan prints.
+    pub fn display_notes(&self) -> Vec<String> {
+        let mut out = self.notes.clone();
+        if !self.present.is_empty() {
+            out.push("present, not Ordo's (nothing is changed):".to_string());
+            out.extend(self.present.iter().map(|p| format!("  {p}")));
+        }
+        out
+    }
+}
+
+/// The most "present, not Ordo's" lines one plan prints.
+const PRESENT_CAP: usize = 20;
+
+fn quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Does the live type `live` (Postgres' own spelling) satisfy the declared
+/// field type?
+fn accepts(ty: &FieldTy, live: &str) -> bool {
+    let lower = live.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or(&lower).trim();
+    let int = matches!(base, "smallint" | "integer" | "bigint");
+    let text = matches!(
+        base,
+        "text" | "character varying" | "character" | "citext" | "name"
+    );
+    match ty {
+        FieldTy::Ref { .. } => int || text || base == "uuid",
+        FieldTy::Scalar(s) => match s {
+            ScalarTy::Text | ScalarTy::Uri => text,
+            ScalarTy::Int | ScalarTy::Money(_) | ScalarTy::Duration(_) => int,
+            ScalarTy::Bool => base == "boolean",
+            ScalarTy::Date => base == "date",
+            ScalarTy::Datetime => {
+                matches!(
+                    base,
+                    "timestamp with time zone" | "timestamp without time zone"
+                )
+            }
+            ScalarTy::Decimal(places) => {
+                base == "numeric"
+                    && lower
+                        .split_once('(')
+                        .and_then(|(_, r)| r.strip_suffix(')'))
+                        .and_then(|inner| match inner.split_once(',') {
+                            Some((_, s)) => s.trim().parse::<u8>().ok(),
+                            None => Some(0),
+                        })
+                        == Some(*places)
+            }
+            ScalarTy::Json => matches!(base, "json" | "jsonb"),
+            // A blob is Ordo's own handle, an id is Ordo's own key. Neither
+            // reads a foreign column.
+            ScalarTy::Blob | ScalarTy::Id => false,
+        },
+    }
+}
+
+fn accepts_key(key: ExternalKeyTy, live: &str) -> bool {
+    let lower = live.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or(&lower).trim();
+    match key {
+        ExternalKeyTy::Int => matches!(base, "smallint" | "integer" | "bigint"),
+        ExternalKeyTy::Text => {
+            matches!(base, "text" | "character varying" | "character" | "citext")
+        }
+        ExternalKeyTy::Uuid => base == "uuid",
+    }
+}
+
+fn spelled(ty: &FieldTy) -> String {
+    match ty {
+        FieldTy::Scalar(s) => s.as_str().to_string(),
+        FieldTy::Ref { .. } => "a ref".to_string(),
+    }
+}
+
+/// Compare one external with its live table.
+async fn check_one(pool: &Pool, e: &Entity, report: &mut ExternalReport) -> Result<(), String> {
+    let Some(src) = &e.external else {
+        return Ok(());
+    };
+    let table = format!("{}.{}", src.schema, src.table);
+    let regenerate = format!(
+        "Regenerate it with `ordo introspect --external {table}`, review the change and apply it"
+    );
+    let db = |what: &str, err: ordo_exec::PoolError| format!("reading {what} of {table}: {err}");
+    let Some(live) = migrate::table_columns(pool, &src.schema, &src.table)
+        .await
+        .map_err(|err| db("the columns", err))?
+    else {
+        report.problems.push(Problem {
+            entity: e.name.clone(),
+            kind: ProblemKind::Missing,
+            detail: format!(
+                "table `{table}` is not in this database. Create it, or remove `external {}` \
+                 from the program",
+                e.name
+            ),
+        });
+        return Ok(());
+    };
+    if let Some(a) = migrate::access_to(pool, &src.schema, &src.table)
+        .await
+        .map_err(|err| db("the grants", err))?
+    {
+        if !a.schema_usage || !a.select {
+            let mut grants = Vec::new();
+            if !a.schema_usage {
+                grants.push(format!(
+                    "GRANT USAGE ON SCHEMA {} TO {};",
+                    quoted(&src.schema),
+                    quoted(&a.role)
+                ));
+            }
+            if !a.select {
+                grants.push(format!(
+                    "GRANT SELECT ON {}.{} TO {};",
+                    quoted(&src.schema),
+                    quoted(&src.table),
+                    quoted(&a.role)
+                ));
+            }
+            report.problems.push(Problem {
+                entity: e.name.clone(),
+                kind: ProblemKind::NoGrant,
+                detail: format!(
+                    "role `{}` cannot read `{table}`. Run {}",
+                    a.role,
+                    grants.join(" ")
+                ),
+            });
+            return Ok(());
+        }
+    }
+
+    let mut wrong: Vec<String> = Vec::new();
+    let mut read: Vec<&str> = vec![src.key_column.as_str()];
+    match live.get(&src.key_column) {
+        None => wrong.push(format!("key column `{}` is gone", src.key_column)),
+        Some(c) => {
+            if !accepts_key(src.key_ty, &c.ty) {
+                wrong.push(format!(
+                    "key column `{}` is `{}`, and the file reads it as {}",
+                    src.key_column,
+                    c.ty,
+                    src.key_ty.as_str()
+                ));
+            } else if c.nullable {
+                wrong.push(format!(
+                    "key column `{}` now admits null, and a key never does",
+                    src.key_column
+                ));
+            }
+        }
+    }
+    for (field, column) in &src.columns {
+        read.push(column.as_str());
+        let Some(f) = e.field(field) else {
+            continue;
+        };
+        match live.get(column) {
+            None => wrong.push(format!("column `{column}` is gone")),
+            Some(c) if !accepts(&f.ty, &c.ty) => wrong.push(format!(
+                "column `{column}` is `{}`, and the file reads it as {}",
+                c.ty,
+                spelled(&f.ty)
+            )),
+            Some(c) if c.nullable && !f.optional => wrong.push(format!(
+                "column `{column}` admits null, and the file says `{field}` never does. \
+                 Write `{field}` with a `?`"
+            )),
+            Some(_) => {}
+        }
+    }
+    if !wrong.is_empty() {
+        report.problems.push(Problem {
+            entity: e.name.clone(),
+            kind: ProblemKind::Changed,
+            detail: format!("{}. {regenerate}", wrong.join("; ")),
+        });
+        return Ok(());
+    }
+    let unused: Vec<String> = live
+        .keys()
+        .filter(|c| !read.contains(&c.as_str()))
+        .map(|c| format!("`{c}`"))
+        .collect();
+    if !unused.is_empty() {
+        report.notes.push(format!(
+            "note: `{table}` has {} the translation of `{}` does not read: {}",
+            if unused.len() == 1 {
+                "a column"
+            } else {
+                "columns"
+            },
+            e.name,
+            unused.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Compare every external of `schema` with the database `pool` reads, and
+/// list what that database holds that is not Ordo's. Read-only.
+pub async fn check(pool: &Pool, schema: &Schema) -> Result<ExternalReport, String> {
+    let mut report = ExternalReport::default();
+    for e in &schema.externals {
+        check_one(pool, e, &mut report).await?;
+    }
+    report.present = present_not_ordos(pool, schema).await?;
+    Ok(report)
+}
+
+/// Tables and schemas the database holds that are not Ordo's and not a
+/// declared external (27j). Ordo's are the program's entities and the
+/// platform's `$` tables in `public`.
+pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<String>, String> {
+    let (schemas, tables) = migrate::schemas_and_tables(pool)
+        .await
+        .map_err(|e| format!("reading what the database holds: {e}"))?;
+    let declared = |s: &str, t: &str| {
+        schema.externals.iter().any(|e| {
+            e.external
+                .as_ref()
+                .is_some_and(|x| x.schema == s && x.table == t)
+        })
+    };
+    let mut lines = Vec::new();
+    let mut used_schemas: Vec<&str> = Vec::new();
+    for (s, t) in &tables {
+        if s == "public" {
+            if t.starts_with('$') || schema.native(t).is_some() {
+                continue;
+            }
+        } else {
+            used_schemas.push(s);
+            if declared(s, t) {
+                continue;
+            }
+        }
+        lines.push(format!("table `{s}.{t}`"));
+    }
+    for s in &schemas {
+        if !used_schemas.contains(&s.as_str()) {
+            lines.push(format!("schema `{s}`, with no tables"));
+        }
+    }
+    if lines.len() > PRESENT_CAP {
+        let more = lines.len() - PRESENT_CAP;
+        lines.truncate(PRESENT_CAP);
+        lines.push(format!("and {more} more"));
+    }
+    Ok(lines)
+}
+
+// ── the watcher ──────────────────────────────────────────────────────────
+
+/// The hold on the entities that are down, and the timer's read of them.
+///
+/// While an entity is held, every op that reads it answers
+/// `external_changed`, naming the table, the column and the fix. The hold is
+/// lifted by the first pass that finds the table as the program says.
+pub struct ExternalGate {
+    down: RwLock<BTreeMap<String, String>>,
+    source: Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>,
+}
+
+impl ExternalGate {
+    /// `source` returns the fixture the deployment serves now.
+    pub fn new(
+        source: Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>,
+    ) -> Arc<ExternalGate> {
+        Arc::new(ExternalGate {
+            down: RwLock::new(BTreeMap::new()),
+            source,
+        })
+    }
+
+    /// The entities held now, with the line that says why.
+    pub fn down(&self) -> BTreeMap<String, String> {
+        self.down.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replace the hold.
+    pub fn set_down(&self, down: BTreeMap<String, String>) {
+        *self.down.write().unwrap_or_else(|e| e.into_inner()) = down;
+    }
+
+    /// One pass: read the tables the served program declares and set the
+    /// hold to what is wrong with them. Returns the lines now held.
+    pub async fn watch_once(&self, pool: &Pool) -> Result<Vec<String>, String> {
+        let fixture = (self.source)();
+        if fixture.schema.externals.is_empty() {
+            self.set_down(BTreeMap::new());
+            return Ok(Vec::new());
+        }
+        // The catalog read only: the present list is for a plan.
+        let mut report = ExternalReport::default();
+        for e in &fixture.schema.externals {
+            check_one(pool, e, &mut report).await?;
+        }
+        let lines = report.refusals();
+        self.set_down(
+            report
+                .problems
+                .into_iter()
+                .map(|p| (p.entity.clone(), p.line()))
+                .collect(),
+        );
+        Ok(lines)
+    }
+
+    /// The refusal for `op`, when it reads a held entity.
+    pub fn refusal(&self, op: &str) -> Option<ExecError> {
+        let down = self.down();
+        if down.is_empty() {
+            return None;
+        }
+        let fixture = (self.source)();
+        let reads = match fixture.registry.get(op) {
+            // A platform op, or one this program does not declare.
+            None => return None,
+            Some(o) if matches!(o.body, ordo_syntax::OpBody::Write(_)) => return None,
+            Some(_) => match ordo_sema::bind_op_generic(
+                &fixture.schema,
+                &fixture.registry,
+                op,
+                ordo_sema::Clock::CORPUS,
+            ) {
+                Ok(q) => ordo_plan::externals_read(&q),
+                // A read that cannot be bound without a caller may still
+                // reach an external: unknown is held.
+                Err(_) => down.keys().cloned().collect(),
+            },
+        };
+        let hit: Vec<&String> = reads.iter().filter(|e| down.contains_key(*e)).collect();
+        let first = hit.first()?;
+        Some(ExecError::new(
+            ErrorCode::ExternalChanged,
+            format!(
+                "op `{op}` reads the external entity `{first}`, which cannot be read now. {}",
+                down[*first]
+            ),
+        ))
+    }
+}
+
+/// Run [`ExternalGate::watch_once`] on a timer, until the process ends.
+pub fn spawn_watch(
+    gate: Arc<ExternalGate>,
+    pool: Pool,
+    every: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut held = false;
+        loop {
+            tick.tick().await;
+            match gate.watch_once(&pool).await {
+                Ok(lines) => {
+                    for l in &lines {
+                        eprintln!("external: {l}");
+                    }
+                    if held && lines.is_empty() {
+                        println!("external: every external table is as the program says again");
+                    }
+                    held = !lines.is_empty();
+                }
+                // A database that cannot be asked changes nothing: the last
+                // answer holds until it can.
+                Err(e) => {
+                    eprintln!("external: the tables were not read ({e}); the hold is unchanged")
+                }
+            }
+        }
+    })
+}
+
+/// The decorator that applies an [`ExternalGate`]: an op that reads a held
+/// entity is refused before it runs, and again when a live read re-checks.
+pub struct ExternalGated {
+    pub inner: Arc<dyn OpExecutor>,
+    pub gate: Arc<ExternalGate>,
+}
+
+impl ExternalGated {
+    pub fn new(inner: Arc<dyn OpExecutor>, gate: Arc<ExternalGate>) -> ExternalGated {
+        ExternalGated { inner, gate }
+    }
+}
+
+impl OpExecutor for ExternalGated {
+    fn held(&self, op: &OpSpec, space: &str) -> Option<ExecError> {
+        self.gate
+            .refusal(&op.name)
+            .or_else(|| self.inner.held(op, space))
+    }
+
+    fn execute<'a>(
+        &'a self,
+        op: &'a OpSpec,
+        space: &'a str,
+        bound: ordo_api::BoundParams,
+        refine: Option<ordo_api::Refinement>,
+        page: Option<ordo_api::PageCursor>,
+        lease: Option<ordo_api::ReplayLease>,
+    ) -> BoxFuture<'a, Result<ExecOutcome, ExecError>> {
+        self.execute_sized(op, space, bound, refine, page, lease, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_sized<'a>(
+        &'a self,
+        op: &'a OpSpec,
+        space: &'a str,
+        bound: ordo_api::BoundParams,
+        refine: Option<ordo_api::Refinement>,
+        page: Option<ordo_api::PageCursor>,
+        lease: Option<ordo_api::ReplayLease>,
+        page_rows: Option<usize>,
+    ) -> BoxFuture<'a, Result<ExecOutcome, ExecError>> {
+        if let Some(e) = self.gate.refusal(&op.name) {
+            return Box::pin(async move { Err(e) });
+        }
+        self.inner
+            .execute_sized(op, space, bound, refine, page, lease, page_rows)
+    }
+}

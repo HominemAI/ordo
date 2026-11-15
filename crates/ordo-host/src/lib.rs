@@ -74,6 +74,7 @@ pub mod directory;
 pub mod email_code;
 pub mod enrolment;
 pub mod exit_ops;
+pub mod external_check;
 pub mod federation;
 pub mod fleet;
 pub mod fn_runs;

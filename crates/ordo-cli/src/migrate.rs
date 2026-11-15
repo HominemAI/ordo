@@ -249,7 +249,7 @@ async fn render_plan(pool: &Pool, r: &mut String, plan: &Plan, path: &str, db: &
         plan.prior.is_some(),
     );
     tenancy(r, pool, &plan.program.schema, &plan.live).await;
-    externals(r, &plan.program.schema);
+    externals(r, plan);
 
     if plan.assessed.is_empty() {
         // **Not an early return.** A deploy that changes only op bodies has
@@ -410,17 +410,21 @@ async fn tenancy(r: &mut String, pool: &Pool, schema: &Schema, live: &ordo_schem
     ));
 }
 
-/// The external entities, one note each where it matters (ruled 2026-11-15,
-/// `external-entities`). Today that is one fact: an external with no `access
-/// read` is read whole by every member of every space, which `shared`
-/// chose. Slice C's "present, not Ordo's" list belongs beside this.
-fn externals(r: &mut String, schema: &Schema) {
-    let notes = external_notes(schema);
-    if notes.is_empty() {
+/// The external entities and what sits beside them (ruled 2026-11-15,
+/// `external-entities`): a note for each external with no `access read`
+/// (which `shared` chose, and every member of every space reads whole), the
+/// columns each translation does not read, and the "present, not Ordo's"
+/// list of tables and schemas the database holds that are not Ordo's. Nothing
+/// is changed. A table that is gone, changed or unreadable is a refusal in
+/// the verdict, not here.
+fn externals(r: &mut String, plan: &Plan) {
+    let mut lines = external_notes(&plan.program.schema);
+    lines.extend(plan.external.display_notes());
+    if lines.is_empty() {
         return;
     }
     r.push_str("EXTERNAL\n");
-    for n in notes {
+    for n in lines {
         r.push_str(&format!("  {n}\n"));
     }
     r.push('\n');

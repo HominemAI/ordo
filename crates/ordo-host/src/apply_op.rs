@@ -484,6 +484,11 @@ pub enum ApplyRefused {
     /// activated or rolled back to. The text names the revoke and the
     /// command that lifts it.
     Revoked(String),
+    /// An external entity's table is gone, changed or unreadable in this
+    /// database (slice C, `external-entities`). One line per entity, each
+    /// leading with its class (`external_missing`, `external_changed`,
+    /// `external_no_grant`) and ending with the fix. Nothing was applied.
+    External(Vec<String>),
 }
 
 impl ApplyRefused {
@@ -502,6 +507,7 @@ impl ApplyRefused {
             ApplyRefused::VersionBehind { .. } => "version_behind",
             ApplyRefused::Provenance(_) => "provenance_refused",
             ApplyRefused::Revoked(_) => "version_revoked",
+            ApplyRefused::External(_) => "external_refused",
         }
     }
 
@@ -517,7 +523,8 @@ impl ApplyRefused {
             | ApplyRefused::Code(_)
             | ApplyRefused::VersionTaken { .. }
             | ApplyRefused::VersionBehind { .. }
-            | ApplyRefused::Revoked(_) => ErrorCode::ApplyRefused,
+            | ApplyRefused::Revoked(_)
+            | ApplyRefused::External(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -577,6 +584,14 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
             // Its text leads with the class already.
             ApplyRefused::Revoked(e) => write!(f, "{e}"),
+            ApplyRefused::External(lines) => write!(
+                f,
+                "external_refused: {} external entit{} cannot be read, so nothing was \
+                 applied:\n{}",
+                lines.len(),
+                if lines.len() == 1 { "y" } else { "ies" },
+                lines.join("\n")
+            ),
             ApplyRefused::Internal(e) => write!(f, "{e}"),
             ApplyRefused::VersionTaken { version, next } => write!(
                 f,
@@ -788,6 +803,20 @@ async fn sequence(
     } else {
         program
     };
+
+    // **The external entities, before anything is written.** Each declared
+    // `external` is compared with its table in this database. A table that is
+    // gone, a mapped column that is gone or retyped, or a role that cannot
+    // read it refuses the apply, naming the fix. What is taken (columns the
+    // translation does not read) and what is present and not Ordo's come back
+    // as notes.
+    let external = crate::external_check::check(pool, &program.schema)
+        .await
+        .map_err(ApplyRefused::Internal)?;
+    if !external.problems.is_empty() {
+        return Err(ApplyRefused::External(external.refusals()));
+    }
+    notes.extend(external.display_notes());
 
     // The schema, before the artifact: a first apply creates it, a match
     // proceeds, and a database that is behind stores but does not activate.
@@ -1413,8 +1442,11 @@ pub async fn preview(pool: &Pool, source: &str) -> Result<Preview, ApplyRefused>
         })
         .collect();
     let safe_changes = sa::safe_changes_enabled();
+    notes.extend(plan.external.display_notes());
     let would = if !broken.is_empty() {
         Would::Refuse(ApplyRefused::Broken { ops: broken })
+    } else if !plan.external.problems.is_empty() {
+        Would::Refuse(ApplyRefused::External(plan.external.refusals()))
     } else {
         match sa::schema_state(pool, &program.schema)
             .await

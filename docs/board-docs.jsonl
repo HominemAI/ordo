@@ -44,7 +44,7 @@
 {"file": "plan-environments.md", "kind": "plan", "what": "Dev, staging and production as things Ordo supports: apply promotion, dev branches as tenants, staging clones, per-tenant rollout, seeding"}
 {"file": "plan-evolution-plans.md", "kind": "plan", "what": "How a schema change is made today, and the proposal to render, store, apply and undo it as a plan per step; answers the owner's grief notes on migrations"}
 {"file": "plan-export.md", "kind": "plan", "what": "Full space export and space deletion."}
-{"file": "plan-external-entities.md", "kind": "plan", "what": "Tables another system owns in the same database: external entities as generated read-only projections, random schema names, the audit owed"}
+{"file": "plan-external-entities.md", "kind": "plan", "what": "External entities: Ordo apps reading tables another system owns in the same database; ruled 2026-10-01 and 2026-11-15"}
 {"file": "plan-first-program.md", "kind": "plan", "what": "The first program: a notes app signed in to with a passkey, its program, page, deployment and measurements (17ae)."}
 {"file": "plan-idempotency.md", "kind": "plan", "what": "Durable idempotency's last window (8q)."}
 {"file": "plan-identity-service.md", "kind": "plan", "what": "Ordo's own minimal identity service: a third service in the one image for deployment people, the CLI and machines"}

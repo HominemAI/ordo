@@ -729,7 +729,10 @@ there. Code: `crates/ordo-identity-service/src/deployments.rs`; tests:
   the door and the console the wiring as set.
 - The console's `ORDO_IDENTITY_DEPLOYMENT` may differ from its own handle.
 - The binary runs alone as its own container; a test boots it with its
-  own settings only.
+  own settings only. The shared provider is this service by itself: no
+  deployment wraps it and no app lives beside it (owner, 2026-11-15). The
+  account app, where a person manages passkeys, is a client of its contract
+  like any other app.
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`
   origins, as the console link uses today); not in v1.

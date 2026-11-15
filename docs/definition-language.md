@@ -2006,6 +2006,105 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `external`: a table another system owns [ruled 2026-11-15, built slice A]
+
+Another system can keep its own table in the database where Ordo's SQL runs:
+the deployment's database, or each tenant's database. An `external`
+declaration translates that table into an entity Ordo can read. The
+translation is a plain join inside Ordo's SQL. There is no door, no hop and
+no second connection.
+
+```
+external customers from crm.customers shared {
+  id <- "customer_id"
+  name: text <- "full_name"
+  email: text? <- email
+  account -> accounts? <- "account_id"
+  access read open
+}
+
+external accounts (key: acct) from crm.accounts shared {
+  id: uuid <- ref
+  label: text <- label
+}
+
+entity orders {
+  customer -> customers
+  total: int
+}
+```
+
+- `from crm.customers` names the foreign table with its schema. Ordo's own
+  tables are in `public`, so a foreign table takes a schema of its own.
+- `shared` is required. Every space reads every row, and the access profile
+  decides which tenants may call the ops. A tenant column comes later.
+- `id <- column` names the one key column. It must be unique and never null.
+  The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
+- Each other line is `field: type <- column`, or `field -> external <-
+  column` for a ref. Types are written out, so the compiler needs no
+  database. `?` admits null.
+- A foreign name that is not a legal Ordo name goes in quotes:
+  `"customer_id"`. Bare names work when they are lowerCamel.
+- `(key: acct)` sets the typed-id prefix, as on an entity. Otherwise it
+  derives from the name. Prefixes are one namespace with the entities.
+- `access read <walk>` is the one guard. It reads the row's own fields and
+  `$caller`.
+- `external` is contextual. A field can still be named `external`.
+
+How it reads:
+
+- Ids are prefixed text over the raw key: row `42` is `cust_42`. Every
+  equality, join, sort and cursor uses the raw key, so the foreign index
+  serves and `cust_10` pages after `cust_9`.
+- An id that is not this entity's (another prefix, a malformed key) matches
+  no row. It never raises a cast error.
+- The planner reads the table as a subquery, never a view. A view would let
+  Ordo block the other system's own `DROP COLUMN`.
+- Per tenant, the same SQL runs in whichever database the space maps to.
+- Derived ops are `std.<name>.get` and `std.<name>.list` only. Developer ops
+  read and join it like any entity.
+- A native ref to an external is a plain text column with no foreign key. A
+  row that is gone reads as missing: a hop through the ref is null, and the
+  ref's own row stays.
+- The descriptor marks the entity `external: true`. The SDK and the console
+  read the mark.
+- The DDL, the schema diff, the apply, dev reset, erase and export never see
+  an external. Removing one from the program plans no `DROP`.
+
+An external entity is **not** what an Ordo entity is:
+
+1. It is **not attested**. No chain, checkpoint or signed head covers its
+   rows, and a response's head says nothing about them.
+2. It is **not sealed and has no history**. Its columns are as plain as the
+   other system keeps them, and it cannot be undone or reverted.
+3. Its ids are **not permanent**. The other system can delete, reuse or
+   change a key, and a ref to it can dangle or come to name another row.
+4. It is **not live**. The other system's writes reach no Ordo log, so
+   `?live=1` on an op that reads one answers `not_live`, and a routine cannot
+   listen on it.
+5. Its shape is **not Ordo's promise**. When the other system changes the
+   table, ops that read it fail until the translation is updated and applied.
+
+Not built yet: the generator that writes the block from the live table, and
+the check at apply time that the table and columns still match (slices B
+and C). Writes go through the other system's own API, for example from a
+backend function.
+
+Refusals, each naming the fix:
+
+| Class | When |
+|---|---|
+| `external_not_shared` | the declaration has no `shared` |
+| `external_composite_key` | the `id` line names more than one column |
+| `external_read_only` | `access write` in the body, or a `set` or `del` on an external in an op or a routine |
+| `external_owned` | `owned` on an external's ref, or a native ref `owned` by an external |
+| `external_acl` | `acl (…)` on an external |
+| `external_sealed` | `sealed` or `indexed` on an external's field |
+| `external_inherited_guard` | an external would inherit a guard it does not declare |
+| `external_ref_to_native` | a ref from an external to an entity Ordo owns, `members` included |
+| `external_live` | a routine that listens for changes on an external |
+| `external_unsupported` | `unique`, `index`, `check`, `public`, `std sealed`, `tree`, `normalize`, a default or a `blob` on an external, or `whole` anchored on one |
+
 ---
 
 ## 4. Conditions

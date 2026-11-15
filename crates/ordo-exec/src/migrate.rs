@@ -203,6 +203,27 @@ pub async fn access_to(
     }))
 }
 
+/// Is this relation a table (ordinary or partitioned), as opposed to a view,
+/// a materialized view or a foreign table? Only a table states its keys and
+/// its NOT NULLs in the catalog.
+pub async fn is_table(pool: &Pool, schema: &str, table: &str) -> Result<bool, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT t.relkind::text FROM pg_class t \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = {} AND t.relname = {}",
+            crate::sql_lit(schema),
+            crate::sql_lit(table)
+        ))
+        .await?;
+    Ok(matches!(
+        rows.first()
+            .and_then(|r| r.first().cloned().flatten())
+            .as_deref(),
+        Some("r" | "p")
+    ))
+}
+
 /// The columns of one table, view, materialized view or foreign table, as
 /// the catalog spells them. `None` when it does not exist. What the
 /// apply-time check of an external entity compares its translation with.
@@ -213,7 +234,8 @@ pub async fn table_columns(
 ) -> Result<Option<std::collections::BTreeMap<String, LiveColumn>>, PoolError> {
     let rows = pool
         .rows(&format!(
-            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull \
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), \
+                    (NOT a.attnotnull AND t.relkind IN ('r', 'p', 'f')) \
              FROM pg_class t \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 \

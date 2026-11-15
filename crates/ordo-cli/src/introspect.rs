@@ -50,6 +50,9 @@ pub enum IntrospectError {
     },
     /// A name that cannot be an Ordo name. Fix: pass `--name`.
     Name { name: String, why: String },
+    /// The block the generator wrote does not compile, and the name is not
+    /// the cause. Carries the compiler's message and the block it tried.
+    Block { why: String, text: String },
     /// The database could not be read. Retry.
     Database(String),
 }
@@ -61,6 +64,7 @@ impl IntrospectError {
             IntrospectError::Missing { .. } => "external_missing",
             IntrospectError::NoKey { .. } => "external_no_key",
             IntrospectError::Name { .. } => "external_name",
+            IntrospectError::Block { .. } => "external_block",
             IntrospectError::Database(_) => "database",
         }
     }
@@ -85,6 +89,10 @@ impl std::fmt::Display for IntrospectError {
                 "external_name: `{name}` cannot be the entity's name ({why}). Pass \
                  `--name <entity>`, a lowerCamel word"
             ),
+            IntrospectError::Block { why, text } => write!(
+                f,
+                "external_block: the block does not compile: {why}\nThe block it tried:\n{text}"
+            ),
             IntrospectError::Database(e) => write!(f, "database: {e}"),
         }
     }
@@ -98,6 +106,10 @@ pub struct TableRead<'a> {
     pub table: &'a str,
     pub shape: &'a LiveTable,
     pub keys: &'a [UniqueKey],
+    /// A table, whose keys and nulls the catalog states. A view or a
+    /// materialized view has no constraints to read, so `--key` is taken as
+    /// the developer's word for it.
+    pub verifiable: bool,
 }
 
 /// What the caller chose.
@@ -203,9 +215,11 @@ fn spell(name: &str, all: bool) -> String {
 
 /// Does the parser take this block?
 fn parses(text: &str) -> Result<(), String> {
-    ordo_syntax::parse_program(text)
-        .map(|_| ())
-        .map_err(|e| e.message)
+    crate::load_sources(&crate::Sources::from_parts(vec![(
+        "external.ordo".into(),
+        text.to_string(),
+    )]))
+    .map(|_| ())
 }
 
 /// Pick the key column and its type word.
@@ -227,7 +241,7 @@ fn pick_key(
             if !t.shape.columns.contains_key(k) {
                 return Err(no_key(format!("`--key {k}` is not a column of the table")));
             }
-            if !unique {
+            if !unique && t.verifiable {
                 return Err(no_key(format!(
                     "`--key {k}` is not unique: no single-column unique index covers it"
                 )));
@@ -246,7 +260,7 @@ fn pick_key(
         },
     };
     let col = &t.shape.columns[&column];
-    if col.nullable {
+    if col.nullable && t.verifiable {
         return Err(no_key(format!("the key column `{column}` admits null")));
     }
     match key_type(&col.ty) {
@@ -265,15 +279,25 @@ fn pick_key(
 pub fn external_block(t: &TableRead, opts: &Options) -> Result<String, IntrospectError> {
     let (key_column, key_word) = pick_key(t, opts)?;
     let name = opts.name.clone().unwrap_or_else(|| lower_camel(t.table));
+    // The name alone first, so a name the parser refuses is blamed as one
+    // and any other failure is shown as the compiler said it.
+    let key_ty = key_word.map(|w| format!(": {w}")).unwrap_or_default();
+    let alone = format!("external {name} from s.t shared {{\n  id{key_ty} <- k\n}}\n");
+    if let Err(why) = parses(&alone) {
+        return Err(IntrospectError::Name { name, why });
+    }
+    let mut last = (String::new(), String::new());
     for quote_all in [false, true] {
         let text = render(t, &name, &key_column, key_word, quote_all);
         match parses(&text) {
             Ok(()) => return Ok(text),
-            Err(e) if quote_all => return Err(IntrospectError::Name { name, why: e }),
-            Err(_) => {}
+            Err(why) => last = (why, text),
         }
     }
-    unreachable!("the loop returns on its second pass")
+    Err(IntrospectError::Block {
+        why: last.0,
+        text: last.1,
+    })
 }
 
 fn render(
@@ -303,7 +327,8 @@ fn render(
         Some(w) => out.push_str(&format!("  id: {w} <- {}\n", spell(key_column, quote_all))),
         None => out.push_str(&format!("  id <- {}\n", spell(key_column, quote_all))),
     }
-    let mut used: Vec<String> = Vec::new();
+    // `id` is the key line's name, so a field cannot take it.
+    let mut used: Vec<String> = vec!["id".to_string()];
     for (column, c) in &t.shape.columns {
         if column == key_column {
             continue;
@@ -359,12 +384,21 @@ pub async fn generate(
     opts: &Options,
 ) -> Result<String, IntrospectError> {
     let db = |e: ordo_exec::PoolError| IntrospectError::Database(e.to_string());
-    let shape = migrate::live_shape(pool, schema).await.map_err(db)?;
-    let Some(live) = shape.table(table) else {
+    // The same reader the apply-time check uses, so a view or a partitioned
+    // table the runtime reads is one the generator writes.
+    let Some(columns) = migrate::table_columns(pool, schema, table)
+        .await
+        .map_err(db)?
+    else {
         return Err(IntrospectError::Missing {
             schema: schema.to_string(),
             table: table.to_string(),
         });
+    };
+    let verifiable = migrate::is_table(pool, schema, table).await.map_err(db)?;
+    let live = LiveTable {
+        columns,
+        ..Default::default()
     };
     let keys = migrate::unique_keys(pool, schema, table)
         .await
@@ -373,8 +407,9 @@ pub async fn generate(
         &TableRead {
             schema,
             table,
-            shape: live,
+            shape: &live,
             keys: &keys,
+            verifiable,
         },
         opts,
     )

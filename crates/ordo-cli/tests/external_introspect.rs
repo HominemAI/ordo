@@ -318,3 +318,51 @@ fn a_column_that_cannot_be_a_field_is_a_comment() {
         out.report
     );
 }
+
+/// Review item 4: a view is a relation the runtime reads, so the generator
+/// writes it, through the same reader the apply-time check uses. A view has
+/// no constraints to read, so `--key` is taken as given.
+#[test]
+fn a_view_is_written_through_the_same_reader_as_the_check() {
+    let db = "ordo_xintro_view";
+    reset(
+        db,
+        "CREATE TABLE crm.base (n int PRIMARY KEY, label text); \
+         CREATE VIEW crm.shown AS SELECT n, label FROM crm.base;",
+    );
+    let out = introspect(db, &["--external", "crm.shown"]);
+    assert_eq!(out.code, 1, "{}", out.report);
+    assert!(out.report.contains("external_no_key"), "{}", out.report);
+    let out = introspect(db, &["--external", "crm.shown", "--key", "n"]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    assert!(out.report.contains("external shown from crm.shown shared"));
+    assert!(out.report.contains("  id <- n\n"), "{}", out.report);
+    assert!(ordo_cli::check_sources(&one(&out.report)).is_ok());
+}
+
+/// Review item 10: a name the parser refuses is blamed as one, with the fix.
+#[test]
+fn a_bad_entity_name_is_named_as_the_cause() {
+    let db = "ordo_xintro_badname";
+    reset(db, "CREATE TABLE crm.t (id int PRIMARY KEY);");
+    let out = introspect(db, &["--external", "crm.t", "--name", "Bad_Name"]);
+    assert_eq!(out.code, 1, "{}", out.report);
+    assert!(out.report.contains("external_name"), "{}", out.report);
+    assert!(out.report.contains("--name <entity>"), "{}", out.report);
+}
+
+/// Review item 3: a column called `id` that is not the key is a comment, and
+/// the block applies (it used to be a second `id` line).
+#[test]
+fn a_non_key_column_named_id_never_becomes_a_second_id_line() {
+    let db = "ordo_xintro_idcol";
+    reset(
+        db,
+        "CREATE TABLE crm.k (pk int PRIMARY KEY, id text, label text);",
+    );
+    let out = introspect(db, &["--external", "crm.k"]);
+    assert_eq!(out.code, 0, "{}", out.report);
+    assert_eq!(out.report.matches("\n  id").count(), 1, "{}", out.report);
+    assert!(out.report.contains("# unmapped: `id`"), "{}", out.report);
+    assert!(ordo_cli::check_sources(&one(&out.report)).is_ok());
+}

@@ -316,6 +316,9 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                 bounds: param_bounds(op, p),
             })
             .collect();
+        // Whether this read reaches an external entity, decided from the one
+        // bind below rather than a second one (review findings 2 and 8).
+        let mut reaches_external = false;
         let (kind, mode_label, output_fields, aggregate_only, cost, sync, refinable) =
             match &op.body {
                 OpBody::Write(stmts) => {
@@ -362,6 +365,7 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                         ordo_sema::Clock::CORPUS,
                     ) {
                         Ok(mut q) => {
+                            reaches_external = !ordo_plan::externals_read(&q).is_empty();
                             // The fifth site that plans or describes a read, and the
                             // one the shape gate caught missing (C4e). `build_specs`
                             // feeds one bound query to BOTH `manifest_fields` and
@@ -400,12 +404,19 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                         // It has no anchor either, for the same reason.
                         // And no manifest means nothing a field could be
                         // validated against, so it is not refinable.
-                        Err(_) => (
-                            Vec::new(),
-                            OpCost::default(),
-                            Syncability::NotSyncable(NotSyncable::NoAnchor),
-                            RefineTier::None,
-                        ),
+                        Err(_) => {
+                            // A read the generic bind cannot settle (one that
+                            // reads `$caller` as a value, say) may still reach
+                            // an external, so where the program declares one
+                            // it is not live: unknown is not live.
+                            reaches_external = !f.schema.externals.is_empty();
+                            (
+                                Vec::new(),
+                                OpCost::default(),
+                                Syncability::NotSyncable(NotSyncable::NoAnchor),
+                                RefineTier::None,
+                            )
+                        }
                     };
                     // Keyless-group tail = the op reduces rows to a measure.
                     let agg = pl
@@ -442,7 +453,7 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
             // writes that table, no change reaches Ordo's log, and a
             // subscription would never refresh, so `?live=1` answers
             // `not_live` rather than a stream that is silently stale.
-            live_capable: matches!(kind, OpKind::Read) && !reads_external(f, name),
+            live_capable: matches!(kind, OpKind::Read) && !reaches_external,
             refinable,
             aggregate_only,
             mode_label,
@@ -1485,14 +1496,6 @@ pub fn catalog_for(
 /// The digest differs per asker, and that is correct: two callers holding
 /// different surfaces hold different contracts, and a shared digest would
 /// tell each of them their document was the whole one.
-/// Does this read op reach an external entity? Binds it only when the
-/// program declares one, so a program without externals pays nothing.
-fn reads_external(f: &Fixture, name: &str) -> bool {
-    !f.schema.externals.is_empty()
-        && ordo_sema::bind_op_generic(&f.schema, &f.registry, name, ordo_sema::Clock::CORPUS)
-            .is_ok_and(|q| !ordo_plan::externals_read(&q).is_empty())
-}
-
 pub fn interface_for(
     f: &Fixture,
     access: &dyn AccessChecker,

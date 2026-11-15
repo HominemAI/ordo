@@ -48,6 +48,9 @@ op ticketsWithCustomer =
 
 op customerByEmail($e: text) =
   patrons(email == $e)[id, name]
+
+op mine =
+  patrons(name == $caller)[id]
 "#;
 
 /// The other system's table, made the way that system would make it, and
@@ -271,6 +274,11 @@ async fn a_developer_op_joins_a_native_entity_to_the_external() {
 async fn a_read_of_an_external_is_never_live() {
     let state = door("ordo_ext_live", 50).await;
     let (status, body) = call(&state, "GET", "/op/std.patrons.list?live=1", None).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(body.to_string().contains("not_live"), "{body}");
+    // Review finding 2: an op the generic bind cannot settle (`$caller` in
+    // a value position) is not live either. Unknown is not live.
+    let (status, body) = call(&state, "GET", "/op/mine?live=1", None).await;
     assert_ne!(status, StatusCode::OK, "{body}");
     assert!(body.to_string().contains("not_live"), "{body}");
     // A read of the native side alone stays live-capable.

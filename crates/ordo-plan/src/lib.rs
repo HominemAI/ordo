@@ -987,6 +987,11 @@ pub fn render_cond_with(
 ) -> Result<(String, Sourced), PlanError> {
     let mut p = Planner::new(space.clone());
     p.externals = externals;
+    if p.externals.is_some() {
+        let mut found = Vec::new();
+        cond_tables(c, &mut found);
+        p.note_externals(found);
+    }
     let sql = p.cond(c)?;
     Ok((sql, Sourced(p.sources)))
 }
@@ -1086,7 +1091,7 @@ pub fn plan_legacy_equality(query: &Query, space: &Space) -> Result<Plan, PlanEr
 }
 
 fn plan_with(query: &Query, space: &Space, legacy_eq: bool) -> Result<Plan, PlanError> {
-    let mut p = Planner::new(space.clone());
+    let mut p = Planner::for_query(space.clone(), query);
     p.legacy_eq = legacy_eq;
     let sql = p.select(query, 0)?;
     let outputs = query
@@ -1134,7 +1139,7 @@ pub fn plan_paged(
     page_size: i64,
     after: Option<&[Option<String>]>,
 ) -> Result<PagedPlan, PlanError> {
-    let mut p = Planner::new(space.clone());
+    let mut p = Planner::for_query(space.clone(), query);
     p.sealed = Planner::sealed_of(query);
     let terms = p.order_terms(query)?;
     if terms.is_empty() {
@@ -1247,7 +1252,7 @@ pub fn plan_paged(
 /// `output_named` compares whole expressions, type included, so a rebuilt one
 /// would fail to match its own order term and ride both projected and hidden.
 pub fn order_key_of_col(query: &Query, alias: &str, column: &str) -> Option<(usize, BExpr)> {
-    let mut p = Planner::new(Space::Slot);
+    let mut p = Planner::for_query(Space::Slot, query);
     p.sealed = Planner::sealed_of(query);
     let terms = p.order_terms(query).ok()?;
     terms.iter().enumerate().find_map(|(i, (_, key, _))| {
@@ -1259,7 +1264,7 @@ pub fn order_key_of_col(query: &Query, alias: &str, column: &str) -> Option<(usi
 pub fn order_key_outputs(query: &Query) -> Vec<Option<String>> {
     // A rendering detail of the ORDER BY, not a statement: no source is
     // reached, so the space is irrelevant and a placeholder is honest.
-    let mut p = Planner::new(Space::Slot);
+    let mut p = Planner::for_query(Space::Slot, query);
     p.sealed = Planner::sealed_of(query);
     let Ok(terms) = p.order_terms(query) else {
         return Vec::new();
@@ -1430,7 +1435,7 @@ pub fn external_key_of<'a>(id: &'a str, r: &ExternalRead) -> Option<&'a str> {
 /// writes the table, so no change ever reaches Ordo's log and a live
 /// subscription would never refresh (ruled 2026-11-15, `external-entities`).
 pub fn externals_read(q: &Query) -> Vec<String> {
-    let Some(map) = &q.externals else {
+    let Some(map) = externals_of(q) else {
         return Vec::new();
     };
     let mut found = Vec::new();
@@ -1445,68 +1450,142 @@ pub fn externals_read(q: &Query) -> Vec<String> {
     out
 }
 
-/// Every `(entity, alias)` a query reads a table under, at any depth.
+/// Every `(entity, alias)` a query reads a table under, at any depth: its
+/// sources, hops, joins, guards, CTEs, and every `exists` nested anywhere in
+/// an expression (arithmetic, a function's arguments, an aggregate, a sort
+/// key). An `exists` over an external that this walk missed would leave the
+/// op live and the `id` unrewritten (review finding 5).
 fn tables_of(qy: &Query, out: &mut Vec<(String, String)>) {
-    fn from(f: &From, out: &mut Vec<(String, String)>) {
-        match f {
-            From::Table { entity, alias } => out.push((entity.clone(), alias.clone())),
-            From::Sub { query, .. } => tables_of(query, out),
-            From::Union { arms, .. } => arms.iter().for_each(|a| tables_of(a, out)),
-            From::CteRef { .. } => {}
-        }
-    }
-    fn cond(c: &BCond, out: &mut Vec<(String, String)>) {
-        match c {
-            BCond::Exists { query, .. } => tables_of(query, out),
-            BCond::And(cs) | BCond::Or(cs) => cs.iter().for_each(|c| cond(c, out)),
-            BCond::Not(c) => cond(c, out),
-            BCond::Cmp { lhs, rhs, .. } | BCond::Text { lhs, rhs, .. } => {
-                expr(lhs, out);
-                expr(rhs, out);
-            }
-            BCond::In { expr: e, list } => {
-                expr(e, out);
-                list.iter().for_each(|e| expr(e, out));
-            }
-            BCond::IsNull { expr: e, .. } | BCond::Bare(e) => expr(e, out),
-            BCond::TreeWalk { .. } => {}
-        }
-    }
-    fn expr(e: &BExpr, out: &mut Vec<(String, String)>) {
-        match e {
-            BExpr::Cond { arms, else_, .. } => {
-                for (c, v) in arms {
-                    cond(c, out);
-                    expr(v, out);
-                }
-                expr(else_, out);
-            }
-            BExpr::Agg { mask: Some(m), .. } => cond(m, out),
-            _ => {}
-        }
-    }
-    from(&qy.from, out);
+    from_tables(&qy.from, out);
     for j in &qy.joins {
         out.push((j.table.clone(), j.alias.clone()));
         if let Some(g) = &j.guard {
-            cond(g, out);
+            cond_tables(g, out);
         }
     }
     for j in &qy.source_joins {
-        from(&j.from, out);
+        from_tables(&j.from, out);
+        for (a, b) in &j.on {
+            expr_tables(a, out);
+            expr_tables(b, out);
+        }
         if let Some(g) = &j.guard {
-            cond(g, out);
+            cond_tables(g, out);
         }
     }
     for c in qy.filters.iter().chain(&qy.having) {
-        cond(c, out);
+        cond_tables(c, out);
     }
     for o in &qy.outputs {
-        expr(&o.expr, out);
+        expr_tables(&o.expr, out);
+    }
+    for s in &qy.sort {
+        expr_tables(&s.expr, out);
+    }
+    for e in qy
+        .tiebreak
+        .iter()
+        .chain(qy.group.iter().flat_map(|g| &g.keys))
+    {
+        expr_tables(e, out);
     }
     for c in &qy.ctes {
         tables_of(&c.query, out);
     }
+}
+
+fn from_tables(f: &From, out: &mut Vec<(String, String)>) {
+    match f {
+        From::Table { entity, alias } => out.push((entity.clone(), alias.clone())),
+        From::Sub { query, .. } => tables_of(query, out),
+        From::Union { arms, .. } => arms.iter().for_each(|a| tables_of(a, out)),
+        From::CteRef { .. } => {}
+    }
+}
+
+fn cond_tables(c: &BCond, out: &mut Vec<(String, String)>) {
+    match c {
+        BCond::Exists { query, .. } => tables_of(query, out),
+        BCond::And(cs) | BCond::Or(cs) => cs.iter().for_each(|c| cond_tables(c, out)),
+        BCond::Not(c) => cond_tables(c, out),
+        BCond::Cmp { lhs, rhs, .. } | BCond::Text { lhs, rhs, .. } => {
+            expr_tables(lhs, out);
+            expr_tables(rhs, out);
+        }
+        BCond::In { expr, list } => {
+            expr_tables(expr, out);
+            list.iter().for_each(|e| expr_tables(e, out));
+        }
+        BCond::IsNull { expr, .. } | BCond::Bare(expr) => expr_tables(expr, out),
+        BCond::TreeWalk { expr, anchor, .. } => {
+            expr_tables(expr, out);
+            expr_tables(anchor, out);
+        }
+    }
+}
+
+/// Every variant that carries a sub-expression is walked; the leaves
+/// (columns, literals, parameters, digests, CTE scalars) carry none.
+fn expr_tables(e: &BExpr, out: &mut Vec<(String, String)>) {
+    match e {
+        BExpr::Neg { expr, .. } => expr_tables(expr, out),
+        BExpr::Binary { lhs, rhs, .. } => {
+            expr_tables(lhs, out);
+            expr_tables(rhs, out);
+        }
+        BExpr::Fn { args, .. } => args.iter().for_each(|a| expr_tables(a, out)),
+        BExpr::Cond { arms, else_, .. } => {
+            for (c, v) in arms {
+                cond_tables(c, out);
+                expr_tables(v, out);
+            }
+            expr_tables(else_, out);
+        }
+        BExpr::Agg {
+            arg,
+            arg2,
+            order,
+            mask,
+            ..
+        } => {
+            for a in arg.iter().chain(arg2) {
+                expr_tables(a, out);
+            }
+            for s in order {
+                expr_tables(&s.expr, out);
+            }
+            if let Some(m) = mask {
+                cond_tables(m, out);
+            }
+        }
+        BExpr::RowNumber {
+            partition, order, ..
+        } => {
+            partition.iter().for_each(|p| expr_tables(p, out));
+            order.iter().for_each(|s| expr_tables(&s.expr, out));
+        }
+        BExpr::DocPath { doc, .. } => expr_tables(doc, out),
+        BExpr::Col { .. }
+        | BExpr::Lit { .. }
+        | BExpr::Param { .. }
+        | BExpr::BlindDigest { .. }
+        | BExpr::ByteaLit { .. }
+        | BExpr::ScalarSub { .. } => {}
+    }
+}
+
+/// The program's external entities as a query carries them: the outermost
+/// level's, or the first nested level that has them.
+fn externals_of(qy: &Query) -> Option<ExternalReads> {
+    if qy.externals.is_some() {
+        return qy.externals.clone();
+    }
+    let nested = match &qy.from {
+        From::Sub { query, .. } => externals_of(query),
+        From::Union { arms, .. } => arms.iter().find_map(externals_of),
+        _ => None,
+    };
+    nested.or_else(|| qy.ctes.iter().find_map(|c| externals_of(&c.query)))
 }
 
 struct Planner {
@@ -1570,19 +1649,26 @@ impl Planner {
         }
     }
 
-    /// Adopt the program's external entities from a query and note every
-    /// alias in it that reads one. Called before anything is rendered, so a
-    /// sort term planned ahead of the `FROM` (the paging planner) already
-    /// knows which `id`s are external.
-    fn learn(&mut self, qy: &Query) {
-        if self.externals.is_none() {
-            self.externals = qy.externals.clone();
+    /// A planner for one statement over `qy`: the program's external
+    /// entities adopted, and every alias in the whole tree that reads one
+    /// noted, once, before anything is rendered. A sort term planned ahead
+    /// of the `FROM` (the paging planner) then already knows which `id`s are
+    /// external, and no nested level walks the tree again (review finding 8).
+    fn for_query(space: Space, qy: &Query) -> Self {
+        let mut p = Planner::new(space);
+        p.externals = externals_of(qy);
+        if p.externals.is_some() {
+            let mut found = Vec::new();
+            tables_of(qy, &mut found);
+            p.note_externals(found);
         }
+        p
+    }
+
+    fn note_externals(&mut self, found: Vec<(String, String)>) {
         let Some(map) = self.externals.clone() else {
             return;
         };
-        let mut found = Vec::new();
-        tables_of(qy, &mut found);
         for (entity, alias) in found {
             if let Some(r) = map.get(&entity) {
                 self.ext_alias.insert(alias, r.clone());
@@ -1770,7 +1856,6 @@ impl Planner {
         if self.not_null.is_none() {
             self.not_null = qy.not_null.clone();
         }
-        self.learn(qy);
         // Sealed outputs are a per-LEVEL fact; a nested select has its own
         // host_open, so save and restore rather than accumulating.
         let outer_sealed = std::mem::replace(&mut self.sealed, Self::sealed_of(qy));
@@ -2164,7 +2249,6 @@ impl Planner {
     /// anchor-id tiebreak, which is exactly the term that makes the order
     /// total. (Regression: `sort status, status` dropped rows when paged.)
     fn order_terms(&mut self, qy: &Query) -> Result<Vec<(String, BExpr, bool)>, PlanError> {
-        self.learn(qy);
         let mut out: Vec<(String, BExpr, bool)> = Vec::new();
         for s in qy.sort.iter().cloned().chain(
             qy.tiebreak

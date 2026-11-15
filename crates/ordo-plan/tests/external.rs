@@ -228,3 +228,73 @@ fn the_descriptor_marks_an_external_and_lists_its_ops() {
         "a native entity keeps its bytes"
     );
 }
+
+/// Review finding 5: an `exists` over an external nested inside arithmetic
+/// (`cond(exists(customers …) -> 1, 0) + 1`) is still seen. It makes the
+/// op read an external, and its `id` compares by the raw key inside the
+/// subquery it renders.
+#[test]
+fn an_exists_nested_in_arithmetic_is_seen() {
+    use ordo_sema::ir::{BCond, BExpr, From, OutField};
+    use ordo_syntax::decl::ScalarTy;
+    use ordo_syntax::{BinOp, CmpOp, Expr, Span};
+    let (schema, registry) = setup();
+    let pl = parse_pipeline("orders[total]").expect("parses");
+    let mut q = bind(&schema, &registry, &pl, ordo_sema::Clock::CORPUS).expect("binds");
+    assert!(ordo_plan::externals_read(&q).is_empty());
+
+    let sp = Span::new(0, 0, 1, 1);
+    let int = |n: i128| BExpr::Lit {
+        value: Expr::IntLit { value: n, span: sp },
+        ty: ScalarTy::Int,
+    };
+    let mut inner = q.clone();
+    inner.from = From::Table {
+        entity: "customers".into(),
+        alias: "x9".into(),
+    };
+    inner.filters = vec![BCond::Cmp {
+        op: CmpOp::Eq,
+        lhs: BExpr::Col {
+            alias: "x9".into(),
+            column: "id".into(),
+            ty: ScalarTy::Id,
+        },
+        rhs: BExpr::Col {
+            alias: "t0".into(),
+            column: "customer".into(),
+            ty: ScalarTy::Id,
+        },
+    }];
+    inner.outputs = Vec::new();
+    inner.sort = Vec::new();
+    inner.tiebreak = Vec::new();
+    inner.externals = None;
+    let exists = BCond::Exists {
+        query: Box::new(inner),
+        negated: false,
+    };
+    q.outputs.push(OutField {
+        name: "flag".into(),
+        expr: BExpr::Binary {
+            op: BinOp::Add,
+            lhs: Box::new(BExpr::Cond {
+                arms: vec![(exists, int(1))],
+                else_: Box::new(int(0)),
+                ty: ScalarTy::Int,
+            }),
+            rhs: Box::new(int(1)),
+            ty: ScalarTy::Int,
+        },
+    });
+    assert_eq!(ordo_plan::externals_read(&q), ["customers"]);
+    let sql = plan(&q, &Space::bound("s1")).expect("plans").sql;
+    assert!(
+        sql.contains("FROM \"crm\".\"customers\" AS \"$ext\") AS \"x9\""),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("\"x9\".\"$key\" = (CASE WHEN \"t0\".\"customer\""),
+        "{sql}"
+    );
+}

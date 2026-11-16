@@ -32,10 +32,10 @@
 use std::collections::BTreeMap;
 
 use ordo_syntax::decl::{
-    AggDecl, CheckDecl, EntityDecl, ExternalDecl, FieldDecl, FieldKind, GuardAtom, GuardClause, GuardExpr,
-    LetDecl, MatchKind, OpBody, OpDecl, ParamDecl, Pipeline, ProjItem, ReassignTarget, ReleaseDecl,
-    ReleaseEffect, ReleaseMode, RoutineDecl, RoutineTrigger, ScalarTy, Source, SourceArg, Step,
-    TakeCount, WriteStmt,
+    AggDecl, CheckDecl, EntityDecl, ExternalDecl, FieldDecl, FieldKind, GuardAtom, GuardClause,
+    GuardExpr, LetDecl, MatchKind, OpBody, OpDecl, ParamDecl, Pipeline, ProjItem, ReassignTarget,
+    ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineTrigger, ScalarTy, Source,
+    SourceArg, Step, TakeCount, WriteStmt,
 };
 use ordo_syntax::{AggShape, CondArm, Condition, Expr, Program};
 use ordo_syntax::{AGGREGATE_SHAPES, ALLOCATE_MODES};

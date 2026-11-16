@@ -115,7 +115,7 @@ service (`plan-console.md` 11):
 | `ORDO_IDENTITY_DATABASE_URL[_FILE]` | its database. Required |
 | `ORDO_IDENTITY_IMPORT_CONSOLE_URL[_FILE]` | the console's database, read once at first start to move its owners in (6.1). The supervisor sets it in the one image; unset means no import |
 | `ORDO_IDENTITY_KEY_FILE` | the sealing key for signing keys at rest; made at first boot on the volume |
-| `ORDO_IDENTITY_CLIENT_ORIGINS` | origins allowed to ask it for tokens from a browser, with credentials: the console's origin. One whose host is the RP ID or under it may also run the touch ceremony in its own page (5.4 step 6) |
+| `ORDO_IDENTITY_CLIENT_ORIGINS` | origins allowed to ask it for tokens from a browser, with credentials: the console's origin. One whose host is the RP ID or under it may also run the touch ceremony in its own page (5.4 step 6). Other client origins reach the ceremony by the redirect to the service's sign-in page |
 | `ORDO_IDENTITY_DEPLOYMENT` | the deployment handle tokens name in `aud`; default `main`, the console's `DEFAULT_DEPLOYMENT`. The import reads the console rows of this handle |
 | `ORDO_IDENTITY_PROVISIONER_KEY` | an Ed25519 public key of the provisioning service; at first boot it becomes machine key `provisioner`. Hosting-bound, so it lives in the container's environment (Ordo Cloud v1 ruling) |
 | `ORDO_IDENTITY_INVITE_DAYS` | invite life, default 7, 1 to 30 (Q9) |
@@ -374,12 +374,25 @@ in here with that same passkey (6.2); nothing is re-enrolled.
 5. For in-app management the console server calls the door with the same
    token, as that person. The console no longer holds a credential of its
    own at the door. G14 (console key) and G15 (relayed touch) go.
-6. A write the door refuses with `presence_required`: the console page asks
-   the service for a step-up (`POST /touch`, a passkey assertion inside the
-   session), gets a token with a fresh `touched_at`, and retries. One touch
-   covers 300 seconds, as today. The ceremony runs in the console page, so
-   the browser signs the console's origin into the assertion; the service
-   accepts each client origin under its RP ID for that (built in step 6).
+6. A write the door refuses with `presence_required` needs a reauth. The
+   console page asks the service for the ceremony (`POST /touch/begin`) and
+   reads the RP ID in the options. One touch covers 300 seconds, as today.
+   - **Console host is the RP ID or under it:** the ceremony runs in the
+     console page. The browser signs the console's origin into the
+     assertion, and the service accepts each client origin under its RP ID
+     for that (built in step 6). `POST /touch/finish` answers a token with
+     a fresh `touched_at`, and the page retries.
+   - **Any other host** (Human Agent Link's console, owner, 2026-11-15): a
+     passkey made under RP ID `hominem.ai` cannot be used at another
+     host, so the page goes to the service's
+     `/sign-in?client=console&deployment=<handle>&return=<url>&touch=1`.
+     A live session sees "Confirm it's you" and one passkey button; with
+     no session the normal sign-in runs, which is a fresh touch itself.
+     The browser then returns to the console. The next token the page
+     fetches carries the touch.
+   - After the return the person repeats the action. Carrying the pending
+     action across the redirect is a later improvement.
+
    The console answers the door's `presence_required` and its own stale
    reauth with the one word `step_up_required`.
 7. Sign-out ends the service session (`POST /sessions/end`); the console
@@ -614,12 +627,13 @@ newest first, and a red line when verify last failed.
 | Store, identity service | `crates/ordo-identity-service/tests/store.rs` (Postgres) | migrations; the boot refusal on the deployment's or console's database; first-invite once; provisioner key once |
 | Import, identity service | `crates/ordo-identity-service/tests/import.rs` (Postgres, a console database made by the console's own migrations) | 2 owners, 3 passkeys and live recovery codes move column for column; a removed owner arrives ended; used and voided codes stay behind; unspent setup codes are voided in the audit; a second boot imports nothing; a boot killed before the `imports` row redoes it all with no duplicate; no console URL means no import; the console tables are unchanged byte for byte; a live import means no first invite; the RP ID refusal names both settings |
 | Upgrade | `crates/ordo-identity-service/tests/upgrade.rs`, with the SDK's software authenticator | a passkey registered against the console's relying party on a copy of the live schema asserts at the service after the import, under RP ID `localhost` from port 8082 and under `console.example.com` from `console.example.com:8082`; the same passkey fails under `id.example.com`, which is the refusal, not a silent sign-in failure; an old recovery code signs in once |
+| Reauth, identity service | `crates/ordo-identity-service/tests/page.rs`, `tests/flows.rs` | `/sign-in` serves the reauth step; a touch taken at the service page with no `aud` shows in the next `POST /token` for a deployment |
 | Host integration | `crates/ordo-host/tests/identity_tokens.rs`, with an in-process fake issuer (a signer and a JWKS route) | admin token reaches platform ops; machine token applies; stale touch answers `presence_required`; tenant op denied; app op denied; app owner of the home space denied platform ops; ended `sid`; unknown `kid` refetches once; service down, cached and `$identitykeys` still verify; 2 segment token never hits the JWS path |
 | Authorization matrix | `tests/authz_support/actors.rs`, `policy.rs` | new actors: `deployment_admin` (fresh), `deployment_admin_stale`, `machine_key`, `cli_session`, `deployment_ended` (Dead), `deployment_wrong_aud` (Dead), `deployment_foreign_issuer` (Dead). Realm proofs as rows: every app actor × every platform op is `Denied`; every deployment actor × every app op in every space is `Denied`; `machine_key` × every tenant op is `Denied`. The route guard keeps every new route in the policy |
-| Console | `crates/ordo-console/tests/console.rs`, `door_link.rs` becomes `door_as_person.rs` | sign-in by redirect with a fake issuer; API refuses a token for another `aud`; door calls carry the person's token; `presence_required` surfaces as a reauth ask; no runtime routes without the socket setting |
+| Console | `crates/ordo-console/tests/console.rs`, `door_link.rs` becomes `door_as_person.rs` | sign-in by redirect with a fake issuer; API refuses a token for another `aud`; door calls carry the person's token; `presence_required` surfaces as a reauth ask; `status.identity.rpId` follows `ORDO_IDENTITY_RP_ID`, else the origin's host; no runtime routes without the socket setting |
 | Supervisor | `crates/ordo-supervisor/tests/` with the fake host | 3 children start; kill each one, the other 2 keep answering; crash loop in one; the socket refuses `apply` for any child but `deployment`; the socket is unreachable as 65533; revision 1 from the environment; a sealed spec survives a restart |
 | Images smoke | `images.yml`, the `ordo` job | 3 processes as 65531, 65532, 65533; the supervisor's caps and the console's lack of them; `/.well-known/jwks.json` answers; the first invite is printed; `docker kill` of `ordo-console` leaves the door answering; `break-glass-token` plus `ordo apply` of the notes program succeeds |
-| Console e2e | `clients/ordo-console-web/e2e` | sign-up by invite link; console sign-in; invite a second admin; end their access and see the refusal; make a machine key; the upgrade case: enrol at the old console, upgrade the image, open the console and sign in with that same passkey, no invite, no setup code |
+| Console e2e | `clients/ordo-console-web/e2e` | sign-up by invite link; console sign-in; invite a second admin; end their access and see the refusal; make a machine key; reauth in the console page, where the console's host is the RP ID (the redirect case is not in e2e: the stack lists one console origin on `localhost`, and a second origin would change it for every test; the redirect is guarded by the page and flow tests and the build); the upgrade case: enrol at the old console, upgrade the image, open the console and sign in with that same passkey, no invite, no setup code |
 | CLI | `crates/ordo-cli/tests/login.rs` | the loopback flow against the fake issuer; the session file mode; `--touch`; `ORDO_MACHINE_KEY` sign-in; `ORDO_TOKEN` still wins when given |
 
 ---

@@ -79,6 +79,11 @@ pub const PLAIN_HTTP_ENV: &str = "ORDO_IDENTITY_PLAIN_HTTP";
 /// under it through to the service ([`IdentityClient::forward`]), so no new
 /// port is needed and the passkeys' relying party stays the console's host.
 pub const BASE_PATH_ENV: &str = "ORDO_IDENTITY_BASE_PATH";
+/// The passkeys' relying party id, the value the service has. The page
+/// reads it to tell whether it can run a reauth itself or must go to the
+/// service. Unset, it is the host of [`ISSUER_ENV`], the service's own
+/// default.
+pub const RP_ID_ENV: &str = "ORDO_IDENTITY_RP_ID";
 /// The largest request or answer the console passes through.
 pub const MAX_PASS_BYTES: usize = 1024 * 1024;
 /// How long one passed-through call may take.
@@ -232,6 +237,9 @@ pub struct IdentitySettings {
     pub base_path: String,
     /// `ordo-deployment:<handle>`, the console's own handle.
     pub audience: String,
+    /// The passkeys' relying party id: [`RP_ID_ENV`], lowercased, else the
+    /// issuer's host (the service's own rule, `ORDO_IDENTITY_RP_ID`).
+    pub rp_id: String,
 }
 
 impl IdentitySettings {
@@ -315,9 +323,13 @@ impl IdentitySettings {
                 ),
             )
         })?;
+        let rp_id = set(RP_ID_ENV)
+            .map(|r| r.to_ascii_lowercase())
+            .unwrap_or_else(|| issuer.host().to_string());
         Ok(Some(IdentitySettings {
             url,
             issuer: issuer.to_string(),
+            rp_id,
             base_path,
             audience: deployment_token::audience(&audience_handle),
         }))

@@ -9,10 +9,34 @@
 // Anything else goes to the account page.
 
 import { $, BASE, busy, explain, me, needPasskeys, post, problem, returnTo, showCodes, step } from './common.js';
-import { assert, passkeysAvailable, register } from './webauthn.js';
+import { assert, passkeysAvailable, register, touch } from './webauthn.js';
 
 const params = new URLSearchParams(location.search);
 const client = params.get('client') === 'console' ? 'console' : undefined;
+const wantsTouch = params.get('touch') === '1';
+
+async function confirm() {
+  step('touch');
+  needPasskeys(passkeysAvailable());
+  const area = $('touch-area');
+  // A click starts the ceremony: Safari needs a user gesture for it.
+  $('touch').addEventListener('click', async () => {
+    let gone = false;
+    const touched = await busy(
+      area,
+      'Follow the passkey prompt from your browser.',
+      () =>
+        touch().catch((e) => {
+          // The session ended since the page loaded: sign in instead.
+          if (e?.code === 'not_signed_in' || e?.code === 'session_ended') gone = true;
+          throw e;
+        }),
+      'touch',
+    );
+    if (touched) done();
+    else if (gone) await signIn();
+  });
+}
 
 const deployment = params.get('deployment') || undefined;
 
@@ -54,21 +78,8 @@ async function enrol() {
   });
 }
 
-async function start() {
-  let who = null;
-  try {
-    who = await me();
-  } catch (e) {
-    problem(explain(e));
-  }
-  if (who && who.mustEnrol) {
-    await enrol();
-    return;
-  }
-  if (who) {
-    done();
-    return;
-  }
+/** The sign-in step: a passkey, or a recovery code. */
+async function signIn() {
   step('sign-in');
   needPasskeys(passkeysAvailable());
 
@@ -106,6 +117,28 @@ async function start() {
     code.value = '';
     await enrol();
   });
+}
+
+async function start() {
+  let who = null;
+  try {
+    who = await me();
+  } catch (e) {
+    problem(explain(e));
+  }
+  if (who && who.mustEnrol) {
+    await enrol();
+    return;
+  }
+  if (who && wantsTouch) {
+    await confirm();
+    return;
+  }
+  if (who) {
+    done();
+    return;
+  }
+  await signIn();
 }
 
 start();

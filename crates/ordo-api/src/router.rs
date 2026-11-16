@@ -1646,8 +1646,13 @@ async fn public_call(
     public.ensure_subscribed(&state.bus, &op.name, &space).await;
     let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
+    // How long a shared cache may hold the answer, when the op has a clock.
+    let mut remaining = None;
     let (body, etag, outcome) = match public.lookup(&key) {
-        Some(hit) => (hit.body, hit.etag, "hit"),
+        Some(hit) => {
+            remaining = hit.remaining;
+            (hit.body, hit.etag, "hit")
+        }
         None => {
             if !public.admit_miss(&op.name) {
                 return Err(ApiError::for_op(
@@ -1687,11 +1692,14 @@ async fn public_call(
             let envelope = success_envelope(state, &space, op, ANONYMOUS, result);
             let bytes = serde_json::to_vec(&envelope).unwrap_or_default();
             let (body, etag) = public.store(ticket, bytes);
+            if op.reads_external {
+                remaining = Some(std::time::Duration::from_secs(public.settings().s_maxage));
+            }
             (body, etag, "miss")
         }
     };
 
-    let described = public.headers(&op.name, &etag);
+    let described = public.headers_lived(&op.name, &etag, remaining);
     let not_modified = crate::public::not_modified(if_none_match, &etag);
     let mut res = Response::builder()
         .status(if not_modified {

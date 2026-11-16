@@ -491,3 +491,26 @@ INSERT INTO crm.vault VALUES (1, 'hunter2');
         }
     }
 }
+
+/// A native public op gets no cache clock because an unrelated external
+/// exists: `reads_external` is what the bound query read, nothing more.
+#[test]
+fn only_an_op_that_reads_an_external_has_a_cache_clock() {
+    let src = format!(
+        "{FIXTURE}\n{PROGRAM}\n\
+         entity notices {{ body: text public }}\n\
+         op noticeList public =\n  notices[body]\n  sort body\n  take 50\n\
+         op patronNames =\n  patrons[name]\n  take 50\n"
+    );
+    let f = Fixture::from_source(&src, SEED).expect("compiles");
+    let specs = ordo_host::build_specs(&f);
+    let reads = |op: &str| {
+        specs
+            .iter()
+            .find(|s| s.name == op)
+            .unwrap_or_else(|| panic!("{op}"))
+            .reads_external
+    };
+    assert!(!reads("noticeList"), "a native op reads no external");
+    assert!(reads("patronNames"));
+}

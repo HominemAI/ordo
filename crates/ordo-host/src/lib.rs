@@ -320,6 +320,9 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
         // Whether this read reaches an external entity, decided from the one
         // bind below rather than a second one (review findings 2 and 8).
         let mut reaches_external = false;
+        // Only what the bound query read, never a guess: this one reaches the
+        // public cache's clock, where `reaches_external` only means "not live".
+        let mut reads_external = false;
         let (kind, mode_label, output_fields, aggregate_only, cost, sync, refinable) =
             match &op.body {
                 OpBody::Write(stmts) => {
@@ -367,6 +370,7 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
                     ) {
                         Ok(mut q) => {
                             reaches_external = !ordo_plan::externals_read(&q).is_empty();
+                            reads_external = reaches_external;
                             // The fifth site that plans or describes a read, and the
                             // one the shape gate caught missing (C4e). `build_specs`
                             // feeds one bound query to BOTH `manifest_fields` and
@@ -455,7 +459,7 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
             // subscription would never refresh, so `?live=1` answers
             // `not_live` rather than a stream that is silently stale.
             live_capable: matches!(kind, OpKind::Read) && !reaches_external,
-            reads_external: reaches_external,
+            reads_external,
             refinable,
             aggregate_only,
             mode_label,

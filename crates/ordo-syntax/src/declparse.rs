@@ -1590,7 +1590,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                 }
                 TokenKind::Keyword(Keyword::Public) => {
                     p.bump();
-                    if matches!(p.peek(), TokenKind::Star) {
+                    if matches!(p.peek(), TokenKind::Star) && !p.at_line_break() {
                         let star = p.bump();
                         return Err(public_star_refusal(p, &name.name, t.to(star.span)));
                     }

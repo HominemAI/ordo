@@ -452,9 +452,10 @@ pub fn external_notes(schema: &Schema) -> Vec<String> {
                 "note: `{}` is public: an op declared public may serve its public fields \
                  ({}) to anonymous callers on the public path. Ordo never writes the \
                  table, so a cached answer lives until ORDO_PUBLIC_CDN_S_MAXAGE ends \
-                 (default 60 seconds)",
+                 (default {} seconds)",
                 e.name,
-                fields.join(", ")
+                fields.join(", "),
+                ordo_api::PublicSettings::default().s_maxage
             ));
         }
     }

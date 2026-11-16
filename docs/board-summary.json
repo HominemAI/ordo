@@ -1,6 +1,6 @@
 {
- "date": "2026-11-15",
- "text": "2026-11-15 You answered external-entities asks 5 to 8: public ops over an external are allowed and are being built; the CDK form goes through the grumpy critic you asked for. The HAL console's reauth outside hominem.ai goes by redirect to auth.hominem.ai, building now. Then 0.5.2 with the auth block (PR 13, held). See [[external-entities]] and [[shared-identity]].",
+ "date": "2026-11-16",
+ "text": "PR 15 (console reauth by redirect) and PR 16 (public externals) are on bleeding; PR 17 (CDK external form) is in CI and merges on green. The example apps that exercise federation as one system start with [[example-apps-notes-v2-plus-note_viewer]]: decision 1, how note_viewer reaches the notes, needs you. 0.5.2 waits for PR 13 (held). Deployed infrastructure waits until design and build finish.",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,16 @@
  ],
  "look": [
   {
+   "id": "example-apps-notes-v2-plus-note_viewer",
+   "why": "decision 1 needs you"
+  },
+  {
    "id": "external-entities",
-   "why": "public being built, critic on ask 8"
+   "why": "public built, CDK form in CI"
   },
   {
    "id": "shared-identity",
-   "why": "reauth redirect building"
-  },
-  {
-   "id": "live-instance",
-   "why": "0.5.2 waits for PR 13"
+   "why": "reauth redirect built; infra waits"
   }
  ]
 }

@@ -70,7 +70,7 @@ impl ExternalKeyTy {
     }
 }
 
-/// `external <name> [(key: k)] from <schema>.<table> shared [public] { … }`.
+/// `external <name> [(key: k)] from <schema>.<table> shared { … }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalDecl {
     pub name: Ident,
@@ -83,7 +83,7 @@ pub struct ExternalDecl {
     /// which tenants may call the ops. Required in this release; the parser
     /// refuses a declaration without it, so this is always true.
     pub shared: bool,
-    /// `shared public`: a public op may serve this external's public fields
+    /// The entity line `public`: a public op may serve this external's public fields
     /// to a visitor with no token (ruled 2026-11-15, `external-entities`
     /// ask 5). Never a cascade: the parser refuses `public*`, since an
     /// external owns nothing for the star to reach.

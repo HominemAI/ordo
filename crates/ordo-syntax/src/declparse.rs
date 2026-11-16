@@ -1292,7 +1292,7 @@ fn spell_foreign(name: &str) -> String {
     }
 }
 
-/// `external <name> [(key: k)] from <schema>.<table> shared [public] { … }`
+/// `external <name> [(key: k)] from <schema>.<table> shared { … }`
 /// (ruled 2026-11-15, `external-entities`).
 ///
 /// A translation of a table another system owns, read inside Ordo's SQL as
@@ -1369,20 +1369,10 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             ))
         }
     }
-    // `public` after `shared`: the external's public fields may be served
-    // to a visitor with no token. `public*` has nothing to reach.
-    let mut public = None;
-    if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
-        let t = p.bump();
-        if matches!(p.peek(), TokenKind::Star) {
-            let star = p.bump();
-            return Err(public_star_refusal(p, &name.name, t.span.to(star.span)));
-        }
-        public = Some(PublicMark {
-            cascade: false,
-            span: t.span,
-        });
-    }
+    // `public` on a line of its own, as on an entity: a public op may serve
+    // the external's fields to a visitor with no token. `public*` has
+    // nothing to reach.
+    let mut public: Option<PublicMark> = None;
     p.expect(&TokenKind::LBrace, "`{` to open the translation")?;
 
     let mut key_line: Option<(Ident, ExternalKeyTy)> = None;
@@ -1438,20 +1428,19 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             ));
         }
         if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
-            p.bump();
-            if matches!(p.peek(), TokenKind::Star) {
+            let t = p.bump();
+            if matches!(p.peek(), TokenKind::Star) && !p.at_line_break() {
                 let star = p.bump();
-                return Err(public_star_refusal(p, &name.name, here.to(star.span)));
+                return Err(public_star_refusal(p, &name.name, t.span.to(star.span)));
             }
-            return Err(p.err_class_at(
-                parser::EXTERNAL_UNSUPPORTED,
-                here,
-                format!(
-                    "`public` on `{0}` goes on its first line, after `shared`: write \
-                     `external {0} from ... shared public {{`. Remove the line inside the braces",
-                    name.name
-                ),
-            ));
+            if public.is_some() {
+                return Err(p.err_at(t.span, "duplicate `public` line"));
+            }
+            public = Some(PublicMark {
+                cascade: false,
+                span: t.span,
+            });
+            continue;
         }
         let unsupported = match p.peek() {
             TokenKind::Keyword(Keyword::Unique) => Some("unique"),
@@ -1498,6 +1487,16 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             } else {
                 ExternalKeyTy::Int
             };
+            if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+                return Err(p.err_class_here(
+                    parser::EXTERNAL_UNSUPPORTED,
+                    format!(
+                        "`{}.id` cannot be `public`: the key is never a public field, it \
+                         rides with every public row. Mark the other fields `public`",
+                        name.name
+                    ),
+                ));
+            }
             expect_from_arrow(p, "id")?;
             let col = foreign_name(p, "the key column")?;
             if matches!(p.peek(), TokenKind::Comma) {
@@ -1602,10 +1601,9 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                         parser::EXTERNAL_UNSUPPORTED,
                         t,
                         format!(
-                            "`{}.{}` cannot take `prev`: `prev` tracks Ordo's own renames \
-                             through its schema planner, and a translation is re-imported on \
-                             every apply instead. Remove `prev`; to follow a renamed column, \
-                             change the name after `<-`",
+                            "`{}.{}`: `prev` is not a clause an external takes: a translation is \
+                             re-imported on every apply. Remove `prev`; to follow a renamed \
+                             column, change the name after `<-`",
                             name.name, field.name
                         ),
                     ));

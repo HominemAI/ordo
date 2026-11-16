@@ -1662,7 +1662,11 @@ async fn public_call(
                     ),
                 ));
             }
-            let ticket = public.ticket(key, &op.name);
+            let ticket = if op.reads_external {
+                public.ticket_lived(key, &op.name)
+            } else {
+                public.ticket(key, &op.name)
+            };
             let mut bound = bound;
             gate.bind_caller(&mut bound);
             let result = match state

@@ -303,7 +303,8 @@ fn an_exists_nested_in_arithmetic_is_seen() {
 
 const PUBLIC_SRC: &str = r#"
 domain shop
-external plans from crm.plans shared public {
+external plans from crm.plans shared {
+  public
   id <- "plan_id"
   name: text <- name
   price: int <- price

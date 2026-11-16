@@ -52,21 +52,23 @@ external customers from crm.customers shared {
 }
 ```
 
-The order on the first line is `external <name> [(key: ...)] from
-<schema>.<table> shared [public] {`.
+The first line is `external <name> [(key: ...)] from <schema>.<table>
+shared {`. `public` is a line inside the braces, as on an entity.
 
 - `external customers` names the entity. Its key derives by the usual rule
   (`cust`), and `(key: ...)` may override it. A key collision fails the compile.
 - `from crm.customers` is the schema and table. Both are always written.
 - `shared` is the tenancy word. It is required (section 5).
-- `public` after `shared` is optional (owner, 2026-11-15, ask 5). It works as
-  on an entity, and `name: text public <- full_name` marks one field as on a
-  native field. An authored `op ... public` may then serve the public fields
-  on the public path. Derived `std.<name>.*` ops are never public, as for a
-  native entity. A guarded external cannot be public, as for an entity
-  (`public_guarded`). The public cache for an external's answers is not
-  invalidated by writes, since Ordo never writes the table, so a cached answer
-  lives until `ORDO_PUBLIC_CDN_S_MAXAGE` ends (default 60 seconds).
+- `public` on a line of its own is optional (owner, 2026-11-15, ask 5). It
+  works as on an entity, and `name: text public <- full_name` marks one field
+  as on a native field. The key is never public, so a `public` line needs at
+  least one declared field to reach (`public_no_field`). An authored
+  `op ... public` may then serve the public fields on the public path.
+  Derived `std.<name>.*` ops are never public, as for a native entity. A
+  guarded external cannot be public, as for an entity (`public_guarded`). The
+  public cache for an external's answers is not invalidated by writes, since
+  Ordo never writes the table, so the origin holds an answer for
+  `ORDO_PUBLIC_CDN_S_MAXAGE` seconds at most (default 60).
 - `id <- customer_id` maps the id to one unique, not null column. Its base
   type is read from the generated types, not guessed.
 - `name : text <- full_name` is a field with its type written out. `?` means
@@ -87,7 +89,8 @@ are proposed, so the build agent may adjust them in one pass.
 | `sealed` | `external_sealed` | Remove it, Ordo never wrote the value |
 | `tree`, `unique`, `check`, `index` | `external_unsupported` | The other system owns these |
 | `public*` | `external_unsupported` | An external owns nothing, so the star reaches nothing. Write `public` |
-| `prev` on a field | `external_unsupported` | A translation is re-imported on every apply instead |
+| `public` on the `id` line | `external_unsupported` | The key is never public. Mark the other fields |
+| `prev` on a field | `external_unsupported` | `prev` is not a clause an external takes: a translation is re-imported on every apply |
 | Inherited guards (guards that walk `owned` or `acl`) | `external_inherited_guard` | Write a guard over the entity's own fields |
 | Live reads (`?live=1` on an op that reads it) | `external_not_live` | Read it on request, not as a stream |
 | A ref FROM an external entity to a native entity | `external_ref_native` | The other system holds no Ordo ids |

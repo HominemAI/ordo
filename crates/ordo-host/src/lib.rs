@@ -455,6 +455,7 @@ pub fn build_specs(f: &Fixture) -> Vec<OpSpec> {
             // subscription would never refresh, so `?live=1` answers
             // `not_live` rather than a stream that is silently stale.
             live_capable: matches!(kind, OpKind::Read) && !reaches_external,
+            reads_external: reaches_external,
             refinable,
             aggregate_only,
             mode_label,

@@ -42,7 +42,8 @@ fn a_program_without_externals_has_no_notes() {
 #[test]
 fn a_public_external_says_what_a_visitor_reads() {
     let src = "\
-external catalog from crm.catalog shared public {
+external catalog from crm.catalog shared {
+  public
   id <- \"item_id\"
   title: text <- title
   price: int <- price
@@ -60,9 +61,13 @@ external ledger from crm.ledger shared {
         [
             "note: `catalog` has no `access read`: every member of every space reads every row",
             "note: `catalog` is public: an op declared public may serve its public fields \
-             (`title`, `price`) to anonymous callers on the public path",
+             (`title`, `price`) to anonymous callers on the public path. Ordo never writes the \
+             table, so a cached answer lives until ORDO_PUBLIC_CDN_S_MAXAGE ends \
+             (default 60 seconds)",
             "note: `ledger` is public: an op declared public may serve its public fields \
-             (`label`) to anonymous callers on the public path",
+             (`label`) to anonymous callers on the public path. Ordo never writes the \
+             table, so a cached answer lives until ORDO_PUBLIC_CDN_S_MAXAGE ends \
+             (default 60 seconds)",
         ]
     );
 }

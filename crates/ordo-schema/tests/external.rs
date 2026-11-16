@@ -249,7 +249,8 @@ fn a_routine_may_neither_write_an_external_nor_wait_on_one() {
 
 const PUBLIC_SHOP: &str = r#"
 domain shop
-external customers from crm.customers shared public {
+external customers from crm.customers shared {
+  public
   id <- "customer_id"
   name: text <- "full_name"
   email: text? <- email
@@ -308,7 +309,8 @@ fn derived_reads_of_an_external_are_never_public() {
 fn a_guarded_public_external_is_refused_like_a_native_one() {
     let (code, _) = refused(
         r#"
-external customers from crm.customers shared public {
+external customers from crm.customers shared {
+  public
   id <- id
   owner: text <- owner
   access read owner == $caller
@@ -316,4 +318,18 @@ external customers from crm.customers shared public {
 "#,
     );
     assert_eq!(code, "public_guarded");
+}
+
+#[test]
+fn a_public_line_that_reaches_no_field_is_refused_naming_the_fix() {
+    let (code, msg) = refused(
+        r#"
+external customers from crm.customers shared {
+  id <- id
+  public
+}
+"#,
+    );
+    assert_eq!(code, "public_no_field");
+    assert!(msg.contains("Add a field to the translation"), "{msg}");
 }

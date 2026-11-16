@@ -338,7 +338,8 @@ mod anonymous {
     use tower::util::ServiceExt;
 
     const PROGRAM: &str = r#"
-external catalog (key: cat) from crm.catalog shared public {
+external catalog (key: cat) from crm.catalog shared {
+  public
   id <- "item_id"
   title: text <- "title"
   price: int <- "price"
@@ -429,7 +430,6 @@ INSERT INTO crm.vault VALUES (1, 'hunter2');
             second_factor: Default::default(),
             mail: None,
         };
-        let f = Fixture::from_source(PROGRAM, SEED).unwrap();
         let rt = assemble_embedded(cfg, f).await.expect("boots");
         let app = door(&rt);
         (rt, app)

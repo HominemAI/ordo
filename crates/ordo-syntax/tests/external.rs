@@ -125,7 +125,6 @@ fn every_write_shaped_or_owner_shaped_clause_is_refused_by_name() {
         ("  index (a, b)\n", EXTERNAL_UNSUPPORTED, "`index`"),
         ("  check a > 0\n", EXTERNAL_UNSUPPORTED, "`check`"),
         ("  std sealed\n", EXTERNAL_UNSUPPORTED, "`std sealed`"),
-        ("  public\n", EXTERNAL_UNSUPPORTED, "`public`"),
         (
             "  name: text unique <- \"full_name\"\n",
             EXTERNAL_UNSUPPORTED,
@@ -196,13 +195,14 @@ fn a_bare_underscore_name_is_told_to_take_quotes() {
 }
 
 #[test]
-fn public_goes_after_shared_and_marks_fields() {
+fn public_is_a_line_inside_the_braces_and_marks_fields() {
     let p = parse_program(
         r#"
-external customers from crm.customers shared public {
+external customers from crm.customers shared {
   id <- "customer_id"
   name: text public <- "full_name"
   email: text? <- email
+  public
 }
 external plain from crm.plain shared {
   id <- id
@@ -221,7 +221,6 @@ external plain from crm.plain shared {
 #[test]
 fn public_star_is_refused_naming_public() {
     for src in [
-        "external c from crm.c shared public* {\n  id <- id\n}\n",
         "external c from crm.c shared {\n  id <- id\n  public*\n}\n",
         "external c from crm.c shared {\n  id <- id\n  n: text public* <- n\n}\n",
     ] {
@@ -233,10 +232,10 @@ fn public_star_is_refused_naming_public() {
 }
 
 #[test]
-fn a_public_line_inside_the_braces_says_where_it_goes() {
-    let (code, msg) = refused("external c from crm.c shared {\n  id <- id\n  public\n}\n");
+fn the_key_is_never_public() {
+    let (code, msg) = refused("external c from crm.c shared {\n  id public <- id\n}\n");
     assert_eq!(code, EXTERNAL_UNSUPPORTED);
-    assert!(msg.contains("after `shared`"), "{msg}");
+    assert!(msg.contains("key is never a public field"), "{msg}");
 }
 
 #[test]
@@ -244,6 +243,9 @@ fn prev_on_an_external_field_is_refused_by_name() {
     let (code, msg) =
         refused("external c from crm.c shared {\n  id <- id\n  n: text prev(old) <- n\n}\n");
     assert_eq!(code, EXTERNAL_UNSUPPORTED);
-    assert!(msg.contains("`prev`"), "{msg}");
+    assert!(
+        msg.contains("`prev` is not a clause an external takes"),
+        "{msg}"
+    );
     assert!(msg.contains("re-imported on every apply"), "{msg}");
 }

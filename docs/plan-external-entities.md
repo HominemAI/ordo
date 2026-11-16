@@ -93,7 +93,7 @@ are proposed, so the build agent may adjust them in one pass.
 | `prev` on a field | `external_unsupported` | `prev` is not a clause an external takes: a translation is re-imported on every apply |
 | Inherited guards (guards that walk `owned` or `acl`) | `external_inherited_guard` | Write a guard over the entity's own fields |
 | Live reads (`?live=1` on an op that reads it) | `external_not_live` | Read it on request, not as a stream |
-| A ref FROM an external entity to a native entity | `external_ref_native` | The other system holds no Ordo ids |
+| A ref FROM an external entity to a native entity | `external_ref_to_native` | The other system holds no Ordo ids |
 | A composite key | `external_composite_key` | Pick one unique column |
 | No unique, not null column | `external_no_key` | The table has no identity Ordo can use |
 | `shared` missing | `external_needs_shared` | Write `shared` |

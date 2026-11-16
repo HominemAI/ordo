@@ -990,7 +990,7 @@ when the foreign table changes (`plan-external-entities.md` §7, §11).
 The classes and messages are in `plan-external-entities.md` §2:
 `external_read_only`, `external_owned`, `external_acl`, `external_sealed`,
 `external_unsupported`, `external_inherited_guard`, `external_not_live`,
-`external_ref_native`, `external_composite_key`, `external_no_key` and
+`external_ref_to_native`, `external_composite_key`, `external_no_key` and
 `external_needs_shared`.
 
 ### Alternatives considered

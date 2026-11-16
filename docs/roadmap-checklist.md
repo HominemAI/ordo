@@ -13058,7 +13058,7 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       name their environment.** Ruled 2026-10-01: rolling by default (a
       batch every 5 minutes over an hour), all at once, random canary,
       blue/green, and by query. §2.4, §4. Needs 18ac. Board: `environments`.
-- [x] **27i · External entities.** Built 2026-11-15, bleeding 17f02c3c (PR 14, slices A to C, 2 reviews, 19 fixes). Asks 5 to 8 on the board are syntax refinements, not blockers. Generated, read-only translations of
+- [x] **27i · External entities.** Built 2026-11-15, bleeding 17f02c3c (PR 14, slices A to C, 2 reviews, 19 fixes). Asks 5 to 8 answered 2026-11-15: `public` as on a native entity (PR 16, bleeding 05dfab16), access levels unchanged, `prev` refused, the CDK form to the critic's ruling (PR 17). Generated, read-only translations of
       foreign tables. Ops and the SDK see an entity; the schema keeps it as
       its own kind, `schema.externals` (ruled 2026-11-15). Prefixed ids over
       a raw key, `shared` required, derived reads only (get, list, count), the
@@ -13069,6 +13069,10 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       - Slices B and C built 2026-11-15 on branch external-entities-bc:
         `ordo introspect --external`, the apply and plan check, the
         present-not-Ordo's list, the watcher (`ORDO_EXTERNAL_WATCH_SECS`).
+      - `public` built 2026-11-15 (PR 16): a line inside the braces and
+        field marks, authored public ops over it, `public*` and `prev`
+        refused, a cache lifetime of `ORDO_PUBLIC_CDN_S_MAXAGE` for an
+        op over an external. CDK `external()` in PR 17.
 - [x] **27j · Each apply lists what is present but not Ordo's.** §4.
       Board: `external-entities`. **Built 2026-11-15** on branch
       external-entities-bc: `external_check::present_not_ordos`, printed by

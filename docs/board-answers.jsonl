@@ -1561,4 +1561,6 @@
 {"seq": 1563, "item": "external-entities", "ask": 6, "at": "2026-11-15", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1564, "item": "external-entities", "ask": 7, "at": "2026-11-15", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1565, "item": "shared-identity", "ask": 0, "at": "2026-11-15", "status": "decided", "text": "redirect makes sense.", "source": "record", "read": true}
-{"seq": 1566, "item": "external-entities", "ask": 8, "at": "2026-11-15T22:05:59Z", "status": "open", "text": "run it through a grumpy dev critic", "source": "page", "read": false}
+{"seq": 1566, "item": "external-entities", "ask": 8, "at": "2026-11-15T22:06:16Z", "status": "open", "text": "run it through a grumpy dev critic that hates trying new things audit and let him answer it.", "source": "page", "read": true}
+{"seq": 1567, "item": "external-entities", "ask": 8, "at": "2026-11-15", "status": "decided", "text": "Critic's answer (owner delegated, 2026-11-15): reuse entity()'s shape, t.* types, ref(), .public(), .accessRead(); add one modifier .column() and a key helper (key.int/text/uuid). No col()/text(col()). schema and table as separate strings, shared: true a required literal type. No public on the key line. Built after public on externals lands.", "source": "record", "read": true}
+{"seq": 1568, "item": "shared-identity", "ask": 0, "at": "2026-11-15", "status": "decided", "text": "We'll work on our deployed infra once the rest is finished being designed and implemented", "source": "record", "read": true}

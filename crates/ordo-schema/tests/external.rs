@@ -244,3 +244,92 @@ fn a_routine_may_neither_write_an_external_nor_wait_on_one() {
     assert_eq!(code, "external_live");
     assert!(msg.contains("trigger every"), "{msg}");
 }
+
+// ── `public` (ruled 2026-11-15, `external-entities` ask 5) ──────────────
+
+const PUBLIC_SHOP: &str = r#"
+domain shop
+external customers from crm.customers shared {
+  public
+  id <- "customer_id"
+  name: text <- "full_name"
+  email: text? <- email
+}
+external accounts from crm.accounts shared {
+  id <- id
+  label: text public <- label
+  secret: text <- secret
+}
+external hidden from crm.hidden shared {
+  id <- id
+  note: text <- note
+}
+"#;
+
+#[test]
+fn the_public_mark_lands_on_an_external_and_its_fields() {
+    let s = schema_of(PUBLIC_SHOP);
+    let customers = &s.externals[0];
+    let mark = customers.public.as_ref().expect("the line is public");
+    assert!(!mark.cascade && mark.from.is_none());
+    let public = |e: &ordo_schema::Entity| {
+        e.declared()
+            .filter(|f| f.public)
+            .map(|f| f.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(public(customers), ["name", "email"], "the line reaches all");
+    assert!(customers.has_public());
+    assert!(
+        !customers.field("id").expect("id").public,
+        "the platform's id is never marked"
+    );
+
+    let accounts = &s.externals[1];
+    assert!(accounts.public.is_none());
+    assert_eq!(
+        public(accounts),
+        ["label"],
+        "a field mark reaches one field"
+    );
+
+    let hidden = &s.externals[2];
+    assert!(!hidden.has_public());
+}
+
+#[test]
+fn derived_reads_of_an_external_are_never_public() {
+    let s = schema_of(PUBLIC_SHOP);
+    for op in std_ops(&s).ops {
+        assert!(!op.flags.public, "{} is a derived op", op.name.name);
+    }
+}
+
+#[test]
+fn a_guarded_public_external_is_refused_like_a_native_one() {
+    let (code, _) = refused(
+        r#"
+external customers from crm.customers shared {
+  public
+  id <- id
+  owner: text <- owner
+  access read owner == $caller
+}
+"#,
+    );
+    assert_eq!(code, "public_guarded");
+}
+
+#[test]
+fn a_public_line_that_reaches_no_field_is_refused_naming_the_fix() {
+    let (code, msg) = refused(
+        r#"
+external customers from crm.customers shared {
+  id <- id
+  public
+}
+"#,
+    );
+    assert_eq!(code, "public_no_field");
+    assert!(msg.contains("Add a field to the translation"), "{msg}");
+}

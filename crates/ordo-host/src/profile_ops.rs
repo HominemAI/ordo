@@ -917,6 +917,7 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
         params,
         output_fields: out.iter().map(|f| FieldSpec::new(*f)).collect(),
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(match kind {
             OpKind::Read => NotSyncable::NoAnchor,
             _ => NotSyncable::NotARead,

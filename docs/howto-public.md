@@ -287,7 +287,7 @@ and the default.
 | Variable | Default | Means |
 |---|---|---|
 | `ORDO_PUBLIC_CACHE_BYTES` | 268435456 (256 MiB) | Cache size per node, 0 to 64 GiB. 0 turns the cache off. |
-| `ORDO_PUBLIC_CDN_S_MAXAGE` | 60 | Seconds a CDN may keep an answer, 0 to 604800 (7 days). |
+| `ORDO_PUBLIC_CDN_S_MAXAGE` | 60 | Seconds a CDN may keep an answer, 0 to 604800 (7 days). 0 also turns off the origin cache for ops over external entities. |
 | `ORDO_PUBLIC_CDN_SWR` | 300 | Seconds a CDN may serve a stale answer, 0 to 604800. |
 | `ORDO_PUBLIC_MISSES_PER_MINUTE` | 600 | Misses one public op may send to the database per minute, per node, 0 to 1000000. 0 turns the cap off. |
 | `ORDO_PUBLIC_CDN_PURGE_URL` | unset | Where to post purges. Unset posts nothing. https only. |

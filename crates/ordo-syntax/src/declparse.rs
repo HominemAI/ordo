@@ -1369,6 +1369,10 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             ))
         }
     }
+    // `public` on a line of its own, as on an entity: a public op may serve
+    // the external's fields to a visitor with no token. `public*` has
+    // nothing to reach.
+    let mut public: Option<PublicMark> = None;
     p.expect(&TokenKind::LBrace, "`{` to open the translation")?;
 
     let mut key_line: Option<(Ident, ExternalKeyTy)> = None;
@@ -1423,11 +1427,25 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                 ),
             ));
         }
+        if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+            let t = p.bump();
+            if matches!(p.peek(), TokenKind::Star) && !p.at_line_break() {
+                let star = p.bump();
+                return Err(public_star_refusal(p, &name.name, t.span.to(star.span)));
+            }
+            if public.is_some() {
+                return Err(p.err_at(t.span, "duplicate `public` line"));
+            }
+            public = Some(PublicMark {
+                cascade: false,
+                span: t.span,
+            });
+            continue;
+        }
         let unsupported = match p.peek() {
             TokenKind::Keyword(Keyword::Unique) => Some("unique"),
             TokenKind::Keyword(Keyword::Index) => Some("index"),
             TokenKind::Keyword(Keyword::Check) => Some("check"),
-            TokenKind::Keyword(Keyword::Public) => Some("public"),
             TokenKind::Ident(w)
                 if w == "std" && matches!(p.peek_at(1), TokenKind::Keyword(Keyword::Sealed)) =>
             {
@@ -1469,6 +1487,16 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             } else {
                 ExternalKeyTy::Int
             };
+            if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+                return Err(p.err_class_here(
+                    parser::EXTERNAL_UNSUPPORTED,
+                    format!(
+                        "`{}.id` cannot be `public`: the key is never a public field, it \
+                         rides with every public row. Mark the other fields `public`",
+                        name.name
+                    ),
+                ));
+            }
             expect_from_arrow(p, "id")?;
             let col = foreign_name(p, "the key column")?;
             if matches!(p.peek(), TokenKind::Comma) {
@@ -1515,6 +1543,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             (FieldKind::Scalar(ty), eat_question(p))
         };
         // The modifiers an ordinary field takes, each refused by name.
+        let mut field_public = false;
         loop {
             let t = p.tok().span;
             match p.peek().clone() {
@@ -1545,11 +1574,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                     ));
                 }
                 TokenKind::Keyword(
-                    k @ (Keyword::Unique
-                    | Keyword::Index
-                    | Keyword::Tree
-                    | Keyword::Normalize
-                    | Keyword::Public),
+                    k @ (Keyword::Unique | Keyword::Index | Keyword::Tree | Keyword::Normalize),
                 ) => {
                     return Err(p.err_class_at(
                         parser::EXTERNAL_UNSUPPORTED,
@@ -1560,6 +1585,26 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
                             name.name,
                             field.name,
                             k.as_str()
+                        ),
+                    ));
+                }
+                TokenKind::Keyword(Keyword::Public) => {
+                    p.bump();
+                    if matches!(p.peek(), TokenKind::Star) && !p.at_line_break() {
+                        let star = p.bump();
+                        return Err(public_star_refusal(p, &name.name, t.to(star.span)));
+                    }
+                    field_public = true;
+                }
+                TokenKind::Ident(w) if w == "prev" => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_UNSUPPORTED,
+                        t,
+                        format!(
+                            "`{}.{}`: `prev` is not a clause an external takes: a translation is \
+                             re-imported on every apply. Remove `prev`; to follow a renamed \
+                             column, change the name after `<-`",
+                            name.name, field.name
                         ),
                     ));
                 }
@@ -1584,6 +1629,7 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
             kind,
             optional,
             column,
+            public: field_public,
         });
     }
     let end = p.bump().span; // `}`
@@ -1603,12 +1649,26 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
         schema,
         table,
         shared: true,
+        public,
         key_column,
         key_ty,
         fields,
         access_read,
         span: start.to(end),
     })
+}
+
+/// `public*` on an external: the star reaches the entities an entity owns,
+/// and an external owns nothing (ruled 2026-11-15, `external-entities`).
+fn public_star_refusal(p: &Parser, name: &str, span: Span) -> ParseError {
+    p.err_class_at(
+        parser::EXTERNAL_UNSUPPORTED,
+        span,
+        format!(
+            "`{name}` cannot take `public*`: an external owns nothing, so the star reaches \
+             nothing. Write `public`"
+        ),
+    )
 }
 
 /// The parenthesised column list shared by `unique (a, b)` and

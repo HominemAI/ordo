@@ -430,19 +430,36 @@ fn externals(r: &mut String, plan: &Plan) {
     r.push('\n');
 }
 
-/// One line per external entity that has no `access read`.
+/// One line per external entity that has no `access read`, and one more for
+/// each public external (ruled 2026-11-15, `external-entities` ask 5): the
+/// public path has no guard walk, so a public op serves every row.
 pub fn external_notes(schema: &Schema) -> Vec<String> {
-    schema
-        .externals
-        .iter()
-        .filter(|e| e.guards.is_none())
-        .map(|e| {
-            format!(
+    let mut notes = Vec::new();
+    for e in &schema.externals {
+        if e.guards.is_none() {
+            notes.push(format!(
                 "note: `{}` has no `access read`: every member of every space reads every row",
                 e.name
-            )
-        })
-        .collect()
+            ));
+        }
+        if e.has_public() {
+            let fields: Vec<String> = e
+                .declared()
+                .filter(|f| f.public)
+                .map(|f| format!("`{}`", f.name))
+                .collect();
+            notes.push(format!(
+                "note: `{}` is public: an op declared public may serve its public fields \
+                 ({}) to anonymous callers on the public path. Ordo never writes the \
+                 table, so a cached answer lives until ORDO_PUBLIC_CDN_S_MAXAGE ends \
+                 (default {} seconds)",
+                e.name,
+                fields.join(", "),
+                ordo_api::PublicSettings::default().s_maxage
+            ));
+        }
+    }
+    notes
 }
 
 fn rate_note(rate: Option<f64>) -> String {

@@ -275,6 +275,7 @@ fn door_spec(f: &FunctionDecl, version: &str, code_hash: &str) -> OpSpec {
         params,
         output_fields: Vec::new(),
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(NotSyncable::NoAnchor),
         requires_idempotency_key: false,
         public: Default::default(),

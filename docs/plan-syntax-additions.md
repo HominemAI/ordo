@@ -989,7 +989,7 @@ when the foreign table changes (`plan-external-entities.md` §7, §11).
 
 The classes and messages are in `plan-external-entities.md` §2:
 `external_read_only`, `external_owned`, `external_acl`, `external_sealed`,
-`external_clause`, `external_inherited_guard`, `external_not_live`,
+`external_unsupported`, `external_inherited_guard`, `external_not_live`,
 `external_ref_native`, `external_composite_key`, `external_no_key` and
 `external_needs_shared`.
 
@@ -1089,7 +1089,7 @@ rule, and the one to build first.
 | Prune | `ordo plan --prune` | the plan and receipt | plan `prune_unknown`, two confirmations | none |
 | Settings | `settings { name = value [tenant [bounds]] [person [bounds]] }` | top-level block | `unknown_setting`, `setting_not_exposable`, `setting_out_of_bounds` | `settings(s.a.b(v).tenant({ max }))` |
 | Rate value | `<int> per <duration>` | setting value | `setting_rate_only` | `rate(n, dur)` |
-| External entity | `external name from s.t shared { f: type <- col }` | top-level block | `external_read_only`, `external_clause`, `external_no_key`, `external_needs_shared` (full list in `plan-external-entities.md` §2) | not specified |
+| External entity | `external name from s.t shared { f: type <- col }` | top-level block | `external_read_only`, `external_unsupported`, `external_no_key`, `external_needs_shared` (full list in `plan-external-entities.md` §2) | not specified |
 | Sort order stated | none | interface `order` | none | none |
 | Refetch pacing | `live.refetchPace` | settings line | as settings | `s.live.refetchPace(dur)` |
 

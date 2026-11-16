@@ -30,6 +30,9 @@
 //! The key is the table's primary key when it is one column. `--key` names
 //! another unique, not null column. A composite primary key with no `--key`,
 //! or a table with no key, is refused `external_no_key`, naming the fix.
+//!
+//! The block never says `public`: whether a visitor with no token may read
+//! the table is the developer's call, written after `shared` by hand.
 
 use ordo_exec::migrate::{self, UniqueKey};
 use ordo_schema::diff::LiveTable;

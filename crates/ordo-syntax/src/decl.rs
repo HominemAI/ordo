@@ -83,6 +83,11 @@ pub struct ExternalDecl {
     /// which tenants may call the ops. Required in this release; the parser
     /// refuses a declaration without it, so this is always true.
     pub shared: bool,
+    /// The entity line `public`: a public op may serve this external's public fields
+    /// to a visitor with no token (ruled 2026-11-15, `external-entities`
+    /// ask 5). Never a cascade: the parser refuses `public*`, since an
+    /// external owns nothing for the star to reach.
+    pub public: Option<PublicMark>,
     /// `id <- customer_id`: the one unique, non-null key column.
     pub key_column: Ident,
     pub key_ty: ExternalKeyTy,
@@ -103,6 +108,8 @@ pub struct ExternalField {
     pub optional: bool,
     /// The foreign column this field reads.
     pub column: Ident,
+    /// `name: text public <- full_name`: as on a native field.
+    pub public: bool,
 }
 
 /// `secret openaiKey for api.openai.com`.

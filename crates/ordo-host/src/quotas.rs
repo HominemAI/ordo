@@ -417,6 +417,7 @@ fn spec(name: &str, kind: ordo_api::OpKind, params: Vec<ordo_api::ParamSpec>) ->
         .map(|f| ordo_api::FieldSpec::new(*f))
         .collect(),
         live_capable: false,
+        reads_external: false,
         sync: ordo_api::Syncability::NotSyncable(ordo_api::NotSyncable::NoAnchor),
         requires_idempotency_key: false,
         public: Default::default(),
@@ -665,6 +666,7 @@ mod tests {
             params: vec![],
             output_fields: vec![],
             live_capable: false,
+            reads_external: false,
             refinable: RefineTier::None,
             aggregate_only: false,
             mode_label: None,

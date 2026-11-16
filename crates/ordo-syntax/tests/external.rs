@@ -125,7 +125,6 @@ fn every_write_shaped_or_owner_shaped_clause_is_refused_by_name() {
         ("  index (a, b)\n", EXTERNAL_UNSUPPORTED, "`index`"),
         ("  check a > 0\n", EXTERNAL_UNSUPPORTED, "`check`"),
         ("  std sealed\n", EXTERNAL_UNSUPPORTED, "`std sealed`"),
-        ("  public\n", EXTERNAL_UNSUPPORTED, "`public`"),
         (
             "  name: text unique <- \"full_name\"\n",
             EXTERNAL_UNSUPPORTED,
@@ -193,4 +192,60 @@ fn a_bare_underscore_name_is_told_to_take_quotes() {
         parse_program("external customers from crm.customers shared {\n  id <- customer_id\n}\n")
             .expect_err("the lexer refuses underscores");
     assert!(e.message.contains("`\"customer_id\"`"), "{}", e.message);
+}
+
+#[test]
+fn public_is_a_line_inside_the_braces_and_marks_fields() {
+    let p = parse_program(
+        r#"
+external customers from crm.customers shared {
+  id <- "customer_id"
+  name: text public <- "full_name"
+  email: text? <- email
+  public
+}
+external plain from crm.plain shared {
+  id <- id
+}
+"#,
+    )
+    .expect("parses");
+    let c = &p.externals[0];
+    let mark = c.public.expect("the line is public");
+    assert!(!mark.cascade, "an external's public is never a cascade");
+    assert!(c.fields[0].public, "name carries its own mark");
+    assert!(!c.fields[1].public);
+    assert!(p.externals[1].public.is_none());
+}
+
+#[test]
+fn public_star_is_refused_naming_public() {
+    for src in [
+        "external c from crm.c shared {\n  id <- id\n  public*\n}\n",
+        "external c from crm.c shared {\n  id <- id\n  n: text public* <- n\n}\n",
+    ] {
+        let (code, msg) = refused(src);
+        assert_eq!(code, EXTERNAL_UNSUPPORTED, "{src}: {msg}");
+        assert!(msg.contains("`public*`"), "{msg}");
+        assert!(msg.contains("Write `public`"), "{msg}");
+    }
+}
+
+#[test]
+fn the_key_is_never_public() {
+    let (code, msg) = refused("external c from crm.c shared {\n  id public <- id\n}\n");
+    assert_eq!(code, EXTERNAL_UNSUPPORTED);
+    assert!(msg.contains("key is never a public field"), "{msg}");
+}
+
+#[test]
+fn prev_on_an_external_field_is_refused_by_name() {
+    let (code, msg) =
+        refused("external c from crm.c shared {\n  id <- id\n  n: text prev(old) <- n\n}\n");
+    assert_eq!(code, EXTERNAL_UNSUPPORTED);
+    assert!(
+        msg.contains("`prev` is not a clause an external takes"),
+        "{msg}"
+    );
+    assert!(msg.contains("re-imported on every apply"), "{msg}");
 }

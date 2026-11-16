@@ -2024,6 +2024,7 @@ external customers from crm.customers shared {
 }
 
 external accounts (key: acct) from crm.accounts shared {
+  public
   id: uuid <- ref
   label: text <- label
 }
@@ -2041,6 +2042,16 @@ entity orders {
   Without `access read`, every member of every space reads every row.
   `shared` is that choice, written down. `ordo plan` says so for each such
   external.
+- `public` on a line of its own works as on an entity (owner, 2026-11-15).
+  An authored `op ... public` may then serve the external's public fields.
+  `public` as a field mark (`name: text public <- "full_name"`) works as on a
+  native field. The key is never public, so the line needs one declared field
+  to reach (`public_no_field`). Derived `std.<name>.*` ops are never public.
+  The public path has no guard walk, so a guarded external cannot be public
+  (`public_guarded`). The public cache for an external's answers is not
+  invalidated by writes, since Ordo never writes the table, so the origin
+  holds an answer for `ORDO_PUBLIC_CDN_S_MAXAGE` seconds at most (default 60).
+  `ordo plan` says so for each public external.
 - `id <- column` names the one key column. It must be unique and never null.
   The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
 - Each other line is `field: type <- column`, or `field -> external <-
@@ -2167,7 +2178,7 @@ Refusals, each naming the fix:
 | `external_changed` | at plan, apply or a watcher pass: a mapped column is gone, retyped or nullable against the file |
 | `external_no_grant` | at plan, apply or a watcher pass: Ordo's role cannot read the table |
 | `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
-| `external_unsupported` | `unique`, `index`, `check`, `public`, `std sealed`, `tree`, `normalize`, a default or a `blob` on an external, or `whole` anchored on one |
+| `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); `public` on the `id` line; or `whole` anchored on one |
 
 ---
 

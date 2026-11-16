@@ -1089,7 +1089,10 @@ fn lower_external(decl: &ExternalDecl, keys: &KeyTable) -> Result<Entity, Schema
                 tree: false,
             },
         };
-        fields.push(plain(&f.name.name, ty, f.optional, false, f.name.span));
+        let mut field = plain(&f.name.name, ty, f.optional, false, f.name.span);
+        // Only what was written; `resolve_public` adds the entity line's.
+        field.public = f.public;
+        fields.push(field);
         columns.push((f.name.name.clone(), f.column.name.clone()));
     }
     let guards = decl.access_read.as_ref().map(|r| Guards {
@@ -1117,7 +1120,14 @@ fn lower_external(decl: &ExternalDecl, keys: &KeyTable) -> Result<Entity, Schema
         indexes: Vec::new(),
         checks: Vec::new(),
         std_sealed: false,
-        public: None,
+        // The entity line `public` (ruled 2026-11-15, `external-entities` ask 5): never
+        // a cascade, the parser refuses `public*`. `resolve_public` runs over
+        // externals too, so the sealed, private and guarded refusals apply.
+        public: decl.public.map(|m| EntityPublic {
+            cascade: false,
+            from: None,
+            span: m.span,
+        }),
         external: Some(ExternalSource {
             schema: decl.schema.name.clone(),
             table: decl.table.name.clone(),
@@ -2847,6 +2857,19 @@ fn resolve_public(entities: &mut [Entity]) -> Result<(), SchemaError> {
             f.public = true;
         }
         if !e.has_public() {
+            // An external's `public` line with no declared field to reach
+            // would pass here and fail later at an op, "has no public
+            // field". Say it where the mark is.
+            if let (Some(l), true) = (line.as_ref(), e.external.is_some()) {
+                return Err(SchemaError {
+                    code: "public_no_field",
+                    message: format!(
+                        "`{entity}` is `public` but declares no field for it to reach: the id \
+                         is never public. Add a field to the translation, or remove `public`."
+                    ),
+                    span: l.span,
+                });
+            }
             continue;
         }
         let guarded = e

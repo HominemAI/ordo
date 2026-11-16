@@ -298,3 +298,58 @@ fn an_exists_nested_in_arithmetic_is_seen() {
         "{sql}"
     );
 }
+
+// ── `public` (ruled 2026-11-15, `external-entities` ask 5) ──────────────
+
+const PUBLIC_SRC: &str = r#"
+domain shop
+external plans from crm.plans shared {
+  public
+  id <- "plan_id"
+  name: text <- name
+  price: int <- price
+}
+external accounts from crm.accounts shared {
+  id <- id
+  label: text public <- label
+  secret: text <- secret
+}
+external hidden from crm.hidden shared {
+  id <- id
+  note: text <- note
+}
+"#;
+
+#[test]
+fn an_authored_public_op_over_a_public_external_is_on_the_public_interface() {
+    let program = parse_program(&format!(
+        "{PUBLIC_SRC}\nop catalog public = plans[name, price]\n  take 5\n\
+         op labels public = accounts[label]\n  take 5\n"
+    ))
+    .expect("parses");
+    let schema = build(&program).expect("schema");
+    let mut registry = Registry::from_program(&program);
+    registry.extend_from(&ordo_schema::std_ops(&schema));
+    ordo_plan::cost::check_registration(&schema, &registry).expect("the public gate passes");
+    for op in ["catalog", "labels"] {
+        let art = ordo_plan::artifact::op_artifact(&schema, &registry, op).expect("artifact");
+        assert_eq!(art["flags"]["public"], true, "{op}");
+    }
+    // A derived read is never public, like every derived op.
+    for op in ["std.plans.list", "std.plans.get", "std.plans.count"] {
+        let art = ordo_plan::artifact::op_artifact(&schema, &registry, op).expect("artifact");
+        assert!(art["flags"].get("public").is_none(), "{op}");
+    }
+}
+
+#[test]
+fn an_authored_public_op_over_a_private_external_field_is_refused() {
+    let program = parse_program(&format!(
+        "{PUBLIC_SRC}\nop leak public = accounts[label, secret]\n  take 5\n"
+    ))
+    .expect("parses");
+    let schema = build(&program).expect("schema");
+    let registry = Registry::from_program(&program);
+    let e = ordo_plan::cost::check_registration(&schema, &registry).expect_err("refused");
+    assert_eq!(e.code, "public_reads_private");
+}

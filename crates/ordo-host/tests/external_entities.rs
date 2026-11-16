@@ -318,3 +318,199 @@ async fn the_apply_leaves_the_foreign_schema_as_the_other_system_made_it() {
         "a ref to an external takes no foreign key"
     );
 }
+
+// ── `public` externals on the public path ───────────────────────────────
+//
+// Ruled 2026-11-15 (`external-entities`, ask 5): an external may be
+// `public`, and its derived reads then serve its public fields to a visitor
+// with no token through an authored `op ... public`, the same router and gate as
+// a native public op. A regression looks like a private column in an anonymous
+// answer, or a private external answering a visitor.
+
+mod anonymous {
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use ordo_conformance::{fixture_space, Fixture, Pg};
+    use ordo_host::runtime::{assemble_embedded, door, CustodyChoice, RuntimeConfig};
+    use serde_json::Value;
+    use tower::util::ServiceExt;
+
+    const PROGRAM: &str = r#"
+external catalog (key: cat) from crm.catalog shared {
+  public
+  id <- "item_id"
+  title: text <- "title"
+  price: int <- "price"
+}
+
+external ledger (key: led) from crm.ledger shared {
+  id <- "entry_id"
+  label: text public <- "label"
+  cost: int <- "cost"
+}
+
+external vault (key: vlt) from crm.vault shared {
+  id <- "vault_id"
+  secret: text <- "secret"
+}
+
+op catalogList public =
+  catalog[title, price]
+  sort title
+  take 50
+
+op ledgerLabels public =
+  ledger[label]
+  take 50
+
+op vaultList =
+  vault[secret]
+  take 50
+"#;
+
+    const SEED: &str = r#"
+DROP SCHEMA IF EXISTS crm CASCADE;
+CREATE SCHEMA crm;
+CREATE TABLE crm.catalog (item_id bigint PRIMARY KEY, title text NOT NULL, price bigint NOT NULL);
+INSERT INTO crm.catalog VALUES (1, 'basic', 500), (2, 'pro', 2000);
+CREATE TABLE crm.ledger (entry_id bigint PRIMARY KEY, label text NOT NULL, cost bigint NOT NULL);
+INSERT INTO crm.ledger VALUES (1, 'rent', 9999);
+CREATE TABLE crm.vault (vault_id bigint PRIMARY KEY, secret text NOT NULL);
+INSERT INTO crm.vault VALUES (1, 'hunter2');
+"#;
+
+    fn free_addr() -> std::net::SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    async fn boot(stem: &str) -> (ordo_host::runtime::Runtime, axum::Router) {
+        let pg = Pg::scoped(stem);
+        let f = Fixture::from_source(PROGRAM, SEED).expect("the program compiles");
+        f.reset(&pg).expect("seeded");
+        let cfg = RuntimeConfig {
+            blob_routing: ordo_host::runtime::BlobRouting::Single,
+            pg: ordo_exec::PoolConfig {
+                db: pg.db.clone(),
+                size: 8,
+                ..ordo_exec::PoolConfig::from_env()
+            },
+            addr: free_addr(),
+            shutdown_grace: Duration::from_secs(1),
+            space: fixture_space(),
+            tightened: Vec::new(),
+            custody: CustodyChoice::Test,
+            token_secret: [7u8; 32],
+            page_key: ordo_api::PageKey::from_secret(&[8u8; 32]),
+            checkpoint: None,
+            security_checkpoint: false,
+            apex_domain: None,
+            cors: None,
+            blob: None,
+            exit_bundles: None,
+            import_bundles: None,
+            replica: "external-public-test".into(),
+            usage_flush: Duration::from_secs(60),
+            usage_rollup: Duration::from_secs(3600),
+            sync: Default::default(),
+            auth: None,
+            credentials: None,
+            presence: Default::default(),
+            pausing: Default::default(),
+            version_moves: Default::default(),
+            delegable: Default::default(),
+            access_template: Default::default(),
+            deployment_owners: Vec::new(),
+            provisioning: Default::default(),
+            recovery: Default::default(),
+            second_factor: Default::default(),
+            mail: None,
+        };
+        let rt = assemble_embedded(cfg, f).await.expect("boots");
+        let app = door(&rt);
+        (rt, app)
+    }
+
+    /// A visitor: no token, no space.
+    async fn visit(app: &axum::Router, uri: &str) -> (u16, String, Value) {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body).to_string();
+        let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, text, json)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_visitor_reads_a_public_external_through_a_public_op() {
+        let (_rt, app) = boot("ordo_ext_public").await;
+
+        let (status, text, body) = visit(&app, "/op/catalogList").await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(body["rows"][0]["title"], "basic", "{text}");
+        assert_eq!(body["rows"].as_array().unwrap().len(), 2, "{text}");
+
+        // A field mark: the marked field, and never the other.
+        let (status, text, body) = visit(&app, "/op/ledgerLabels").await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(body["rows"][0]["label"], "rent", "{text}");
+        assert!(!text.contains("cost") && !text.contains("9999"), "{text}");
+
+        // A derived read is never public, like every derived op.
+        for uri in [
+            "/op/std.catalog.list",
+            "/op/std.catalog.get?id=cat_1",
+            "/op/std.catalog.count",
+            "/op/std.ledger.list",
+        ] {
+            let (status, text, body) = visit(&app, uri).await;
+            assert_eq!(status, 403, "{uri}: {text}");
+            assert_eq!(body["error"]["code"], "access_denied", "{uri}: {text}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_visitor_is_refused_a_private_external() {
+        let (_rt, app) = boot("ordo_ext_private").await;
+        for uri in ["/op/vaultList", "/op/std.vault.list", "/op/std.vault.count"] {
+            let (status, text, body) = visit(&app, uri).await;
+            assert_eq!(status, 403, "{uri}: {text}");
+            assert_eq!(body["error"]["code"], "access_denied", "{uri}: {text}");
+            assert!(!text.contains("hunter2"), "{uri}: {text}");
+        }
+    }
+}
+
+/// A native public op gets no cache clock because an unrelated external
+/// exists: `reads_external` is what the bound query read, nothing more.
+#[test]
+fn only_an_op_that_reads_an_external_has_a_cache_clock() {
+    let src = format!(
+        "{FIXTURE}\n{PROGRAM}\n\
+         entity notices {{ body: text public }}\n\
+         op noticeList public =\n  notices[body]\n  sort body\n  take 50\n\
+         op patronNames =\n  patrons[name]\n  take 50\n"
+    );
+    let f = Fixture::from_source(&src, SEED).expect("compiles");
+    let specs = ordo_host::build_specs(&f);
+    let reads = |op: &str| {
+        specs
+            .iter()
+            .find(|s| s.name == op)
+            .unwrap_or_else(|| panic!("{op}"))
+            .reads_external
+    };
+    assert!(!reads("noticeList"), "a native op reads no external");
+    assert!(reads("patronNames"));
+}

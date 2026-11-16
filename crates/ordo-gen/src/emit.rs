@@ -32,7 +32,7 @@
 use std::collections::BTreeMap;
 
 use ordo_syntax::decl::{
-    AggDecl, CheckDecl, EntityDecl, FieldDecl, FieldKind, GuardAtom, GuardClause, GuardExpr,
+    AggDecl, CheckDecl, EntityDecl, ExternalDecl, FieldDecl, FieldKind, GuardAtom, GuardClause, GuardExpr,
     LetDecl, MatchKind, OpBody, OpDecl, ParamDecl, Pipeline, ProjItem, ReassignTarget, ReleaseDecl,
     ReleaseEffect, ReleaseMode, RoutineDecl, RoutineTrigger, ScalarTy, Source, SourceArg, Step,
     TakeCount, WriteStmt,
@@ -63,9 +63,11 @@ const IMPORTABLE: &[&str] = &[
     "each",
     "entity",
     "every",
+    "external",
     "f",
     "fn",
     "g",
+    "key",
     "lit",
     "minus",
     "named",
@@ -114,6 +116,11 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
         body.push_str(&format!("const {bind} = {};\n\n", e.entity(ent)?));
         synth_args.push(bind);
     }
+    for ext in &program.externals {
+        let bind = e.bind(&ext.name.name);
+        body.push_str(&format!("const {bind} = {};\n\n", e.external(ext)?));
+        synth_args.push(bind);
+    }
     for op in &program.ops {
         let bind = e.bind(&op.name.name);
         body.push_str(&format!("const {bind} = {};\n\n", e.op(op)?));
@@ -131,7 +138,23 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let used: Vec<&str> = IMPORTABLE
         .iter()
         .copied()
-        .filter(|n| mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n)))
+        .filter(|n| {
+            // `key` and `external` are also option and field words, so a
+            // whole-word mention would import them for nothing, and the
+            // package compiles under `noUnusedLocals`. Their uses are calls.
+            let uses_key = ["key.int(", "key.text(", "key.uuid("]
+                .iter()
+                .any(|c| body.contains(c));
+            let uses_external = body.contains("= external(");
+            let mentioned = mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n));
+            if *n == "key" {
+                uses_key
+            } else if *n == "external" {
+                uses_external
+            } else {
+                mentioned
+            }
+        })
         .chain(std::iter::once("synth"))
         .collect();
     let mut imports: Vec<&str> = used;
@@ -270,6 +293,51 @@ impl Emitter {
         }
         if let Some(gw) = &e.access_write {
             s.push_str(&format!("\n  .accessWrite({})", self.guard_clause(gw)?));
+        }
+        Ok(s)
+    }
+
+    /// An `external`: the key line, then each mapped field with its
+    /// `.column()`, then `.public()` and `.accessRead()` as `entity` does.
+    fn external(&self, x: &ExternalDecl) -> Result<String, String> {
+        let mut lines = vec![format!(
+            "  id: key.{}({}),",
+            x.key_ty.as_str(),
+            ts::str_lit(&x.key_column.name)
+        )];
+        for f in &x.fields {
+            let mut s = match &f.kind {
+                FieldKind::Ref { target, .. } => format!("t.ref({})", ts::str_lit(&target.name)),
+                FieldKind::Scalar(ty) => self.scalar_ctor(*ty)?,
+            };
+            if f.optional {
+                s.push_str(".optional()");
+            }
+            if f.public {
+                s.push_str(".public()");
+            }
+            s.push_str(&format!(".column({})", ts::str_lit(&f.column.name)));
+            lines.push(format!("  {}: {s},", ts::key(&f.name.name)));
+        }
+        let mut opts = format!(
+            "schema: {}, table: {}",
+            ts::str_lit(&x.schema.name),
+            ts::str_lit(&x.table.name)
+        );
+        if let Some(k) = &x.key {
+            opts.push_str(&format!(", key: {}", ts::str_lit(&k.name)));
+        }
+        opts.push_str(", shared: true");
+        let mut s = format!(
+            "external({}, {{\n{}\n}}, {{ {opts} }})",
+            ts::str_lit(&x.name.name),
+            lines.join("\n"),
+        );
+        if x.public.is_some() {
+            s.push_str("\n  .public()");
+        }
+        if let Some(gr) = &x.access_read {
+            s.push_str(&format!("\n  .accessRead({})", self.guard_clause(gr)?));
         }
         Ok(s)
     }

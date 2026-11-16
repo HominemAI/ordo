@@ -135,6 +135,34 @@ export interface EntityNode {
   readonly checks: readonly CondNode[];
 }
 
+/** The key column's base type on an external's `id` line. */
+export type ExternalKeyType = 'int' | 'text' | 'uuid';
+
+/** One mapped field of an external: `name: text public <- "full_name"`. */
+export interface ExternalFieldNode {
+  readonly name: string;
+  readonly kind: FieldKindNode;
+  readonly optional: boolean;
+  readonly public: boolean;
+  /** The foreign column, printed quoted and exact. */
+  readonly column: string;
+}
+
+/** `external customers (key: cust) from crm.customers shared { … }` */
+export interface ExternalNode {
+  readonly kind: 'external';
+  readonly name: string;
+  readonly key: string | null;
+  readonly schema: string;
+  readonly table: string;
+  readonly keyColumn: string;
+  readonly keyType: ExternalKeyType;
+  readonly fields: readonly ExternalFieldNode[];
+  /** The body line `public`. */
+  readonly public: boolean;
+  readonly accessRead: GuardClauseNode | null;
+}
+
 // ── pipelines ────────────────────────────────────────────────────────────
 
 export type SourceArgNode =
@@ -320,4 +348,4 @@ export interface RoutineNode {
 }
 
 /** Anything `synth()` accepts, in written order. */
-export type Declaration = DomainNode | EntityNode | OpNode | RoutineNode | ReleaseNode;
+export type Declaration = DomainNode | EntityNode | ExternalNode | OpNode | RoutineNode | ReleaseNode;

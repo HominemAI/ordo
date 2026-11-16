@@ -100,6 +100,14 @@ are proposed, so the build agent may adjust them in one pass.
 
 A ref from an external entity to another external entity is allowed.
 
+**CDK form** (owner, 2026-11-15). `external(name, fields, { schema, table, key?, shared: true })`
+in `@hominemai/ordo-cdk` reuses `entity()`'s shape, the `t.*` types, `ref()`,
+`.public()` and `.accessRead()`. `.column("name")` is the one new field
+modifier. `key.int(col)`, `key.text(col)` and `key.uuid(col)` write the `id`
+line, which prints first. `synth` quotes every column and refuses what the
+parser refuses, with the same class: `external_ref_to_native` for a ref to a
+native or unknown entity, `external_unsupported` and its kin for a field word.
+
 ## 3 · How it compiles
 
 `Planner::table` (`crates/ordo-plan/src/lib.rs:1366`) is the one place a base

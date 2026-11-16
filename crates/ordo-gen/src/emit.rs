@@ -104,6 +104,8 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut e = Emitter::default();
     let mut body = String::new();
     let mut synth_args: Vec<String> = Vec::new();
+    let mut needs_external = false;
+    let mut needs_key = false;
 
     if let Some(d) = &program.domain {
         synth_args.push(match &d.version {
@@ -117,6 +119,9 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
         synth_args.push(bind);
     }
     for ext in &program.externals {
+        // `external(...)` and its `key.<ty>(...)` line are written by `Emitter::external`.
+        needs_external = true;
+        needs_key = true;
         let bind = e.bind(&ext.name.name);
         body.push_str(&format!("const {bind} = {};\n\n", e.external(ext)?));
         synth_args.push(bind);
@@ -142,15 +147,11 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             // `key` and `external` are also option and field words, so a
             // whole-word mention would import them for nothing, and the
             // package compiles under `noUnusedLocals`. Their uses are calls.
-            let uses_key = ["key.int(", "key.text(", "key.uuid("]
-                .iter()
-                .any(|c| body.contains(c));
-            let uses_external = body.contains("= external(");
             let mentioned = mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n));
             if *n == "key" {
-                uses_key
+                needs_key
             } else if *n == "external" {
-                uses_external
+                needs_external
             } else {
                 mentioned
             }

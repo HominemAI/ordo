@@ -224,6 +224,9 @@ impl std::fmt::Debug for PublicPath {
 pub struct Hit {
     pub body: Arc<Vec<u8>>,
     pub etag: String,
+    /// For an entry over an external entity: how long it may still be
+    /// served. A shared cache is told no more than this.
+    pub remaining: Option<std::time::Duration>,
 }
 
 /// A miss's ticket: what to compare when the answer comes back.
@@ -403,6 +406,7 @@ impl PublicPath {
         let hit = Hit {
             body: entry.body.clone(),
             etag: entry.etag.clone(),
+            remaining: entry.expires_at.map(|t| t.saturating_duration_since(now)),
         };
         st.order.remove(&old);
         st.order.insert(tick, key.to_string());
@@ -491,7 +495,9 @@ impl PublicPath {
     }
 
     /// A ticket for an op that reads an external entity: the stored entry
-    /// is served for `ORDO_PUBLIC_CDN_S_MAXAGE` seconds and no longer.
+    /// is served for `ORDO_PUBLIC_CDN_S_MAXAGE` seconds and no longer. At 0
+    /// nothing stored is ever served, so the origin cache is off for these
+    /// ops.
     pub fn ticket_lived(&self, key: String, op: &str) -> Ticket {
         let mut t = self.ticket(key, op);
         t.lifetime = Some(std::time::Duration::from_secs(self.inner.settings.s_maxage));
@@ -519,6 +525,20 @@ impl PublicPath {
         if let Some(old) = st.entries.remove(&ticket.key) {
             st.order.remove(&old.used);
             st.bytes -= old.body.len() + ticket.key.len();
+        }
+        // Expired entries go before any live one is evicted.
+        let now = std::time::Instant::now();
+        let gone: Vec<String> = st
+            .entries
+            .iter()
+            .filter(|(_, e)| e.expires_at.is_some_and(|t| now >= t))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in gone {
+            if let Some(e) = st.entries.remove(&k) {
+                st.order.remove(&e.used);
+                st.bytes -= e.body.len() + k.len();
+            }
         }
         while st.bytes + size > cap {
             let Some((_, victim)) = st.order.pop_first() else {
@@ -615,11 +635,26 @@ impl PublicPath {
 
     /// The headers a public answer carries (`design-public-path.md` §3).
     pub fn headers(&self, op: &str, etag: &str) -> Headers {
+        self.headers_lived(op, etag, None)
+    }
+
+    /// [`PublicPath::headers`] for an answer that has a lifetime (an op over
+    /// an external entity): the shared cache is told the time left, floored
+    /// to whole seconds, and no `stale-while-revalidate`, so it never holds
+    /// the answer past the origin's own clock.
+    pub fn headers_lived(
+        &self,
+        op: &str,
+        etag: &str,
+        remaining: Option<std::time::Duration>,
+    ) -> Headers {
         let s = &self.inner.settings;
         let cache_control = if self.deaf() {
             // The listener is lost: what is served now could go stale with
             // no signal, so no shared cache may hold it.
             "public, max-age=0, s-maxage=0".to_string()
+        } else if let Some(left) = remaining {
+            format!("public, max-age=0, s-maxage={}", left.as_secs())
         } else {
             format!(
                 "public, max-age=0, s-maxage={}, stale-while-revalidate={}",
@@ -766,6 +801,57 @@ mod tests {
             cache.lookup_at("own", later).is_some(),
             "an op over Ordo's own tables has no clock"
         );
+    }
+
+    #[test]
+    fn a_lived_hit_tells_the_cdn_the_time_left_and_no_swr() {
+        let cache = PublicPath::new(
+            PublicSettings {
+                s_maxage: 60,
+                ..PublicSettings::default()
+            },
+            None,
+        );
+        cache.store(
+            cache.ticket_lived("ext".into(), "catalog"),
+            b"rows".to_vec(),
+        );
+        let at = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        let hit = cache.lookup_at("ext", at).expect("served");
+        let left = hit.remaining.expect("a lifetime");
+        assert!(left <= std::time::Duration::from_secs(15), "{left:?}");
+        let h = cache.headers_lived("catalog", &hit.etag, Some(left));
+        assert!(
+            h.cache_control.contains("s-maxage=14") || h.cache_control.contains("s-maxage=15"),
+            "{}",
+            h.cache_control
+        );
+        assert!(!h.cache_control.contains("stale-while-revalidate"));
+        let h = cache.headers_lived("catalog", &hit.etag, Some(std::time::Duration::ZERO));
+        assert!(
+            h.cache_control.contains("s-maxage=0"),
+            "{}",
+            h.cache_control
+        );
+    }
+
+    #[test]
+    fn an_expired_entry_is_freed_by_the_next_store() {
+        let cache = PublicPath::new(
+            PublicSettings {
+                s_maxage: 0,
+                ..PublicSettings::default()
+            },
+            None,
+        );
+        cache.store(
+            cache.ticket_lived("ext".into(), "catalog"),
+            b"rows".to_vec(),
+        );
+        assert_eq!(cache.size().0, 1);
+        cache.store(cache.ticket("own".into(), "pricing"), b"rows".to_vec());
+        assert_eq!(cache.size().0, 1, "the expired entry went with the store");
+        assert!(cache.lookup("own").is_some());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
  "date": "2026-11-17",
- "text": "2026-11-17 PRs 15, 16 and 17 are on bleeding: console reauth by redirect, public externals, the CDK external form. [[example-apps-notes-v2-plus-note_viewer]] has decisions 1 to 5 ruled; decision 5 is a peer line with its schema in a setting. 4 new asks need you there, the last is the go to build. 0.5.2 waits for PR 13 (held). Deployed infrastructure waits until design and build finish.",
+ "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: decisions 1 to 7 and the go to build are ruled. Building in 4 steps, each its own PR to bleeding: schema setting, peer line, open sign-up, then the viewer and its e2e. Step 1 has started and nothing has landed. Ask 8 on plain externals is put again because Yes could mean either option. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,7 +46,7 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "asks 6 to 9 need you"
+   "why": "ask 8 put again; step 1 of 4 building"
   },
   {
    "id": "external-entities",

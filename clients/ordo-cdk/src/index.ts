@@ -26,6 +26,9 @@ export {
   Body,
   DelStmt,
   Entity,
+  External,
+  KeySpec,
+  MappedSpec,
   Op,
   Q,
   SetStmt,
@@ -36,6 +39,8 @@ export {
   desc,
   domain,
   entity,
+  external,
+  key,
   minus,
   named,
   op,
@@ -46,6 +51,8 @@ export {
 } from './core/build.js';
 export type {
   EntityOptions,
+  ExternalFields,
+  ExternalOptions,
   ParamsOf,
   PickItem,
   SortArg,

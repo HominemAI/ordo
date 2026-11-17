@@ -58,6 +58,7 @@ use ordo_syntax::{parse_program, Program};
 
 const SYNTAX: &str = include_str!("../../../docs/syntax-examples.md");
 const MARKET: &str = include_str!("../../../crates/ordo-conformance/fixtures/market.ordo");
+const EXTERNAL: &str = include_str!("fixtures/external.ordo");
 const WIDE: &str = include_str!("../../../crates/ordo-conformance/fixtures/wide.ordo");
 
 /// Where the emitted fixtures live: inside the package that runs leg B.
@@ -160,6 +161,12 @@ fn candidates() -> Vec<Candidate> {
         Candidate {
             name: "fixture-wide".into(),
             source: WIDE.to_string(),
+        },
+        // The corpus's own source has no `external` block, so this file is
+        // the one that keeps the CDK form honest.
+        Candidate {
+            name: "fixture-external".into(),
+            source: EXTERNAL.to_string(),
         },
     ];
     for (line, text) in blocks(SYNTAX) {

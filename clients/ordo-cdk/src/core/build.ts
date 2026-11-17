@@ -24,6 +24,9 @@ import type {
   DomainNode,
   EntityNode,
   ExprNode,
+  ExternalFieldNode,
+  ExternalKeyType,
+  ExternalNode,
   FieldKindNode,
   FieldNode,
   GuardClauseNode,
@@ -174,6 +177,49 @@ export class TypeSpec {
     return this;
   }
 
+  /**
+   * `<- "column"`: map this field to a column of a foreign table. Only an
+   * `external()` takes the result; `entity()` refuses it at the type level.
+   *
+   * The column is written exactly as the other system spells it and is never
+   * inferred from the field name. An external reads a table another system
+   * owns, so the words that mean Ordo owns the column are refused here, each
+   * with the parser's class.
+   */
+  column(name: string): MappedSpec {
+    const refuse = (cls: string, word: string, why: string): never => {
+      throw new Error(`${cls}: \`${word}\` cannot map a foreign column: ${why}`);
+    };
+    if (this.sealedFlag) refuse('external_sealed', 'sealed', 'Ordo never wrote the value');
+    if (this.indexedFlag) refuse('external_sealed', 'indexed', 'the other system owns the index');
+    if (this.kind.k === 'ref' && this.kind.owned) {
+      refuse('external_owned', 'owned', 'the other system owns the rows');
+    }
+    if (this.uniqueFlag) refuse('external_unsupported', 'unique', 'the other system owns it');
+    if (this.kind.k === 'ref' && this.kind.tree) {
+      refuse('external_unsupported', 'tree', 'the other system owns it');
+    }
+    if (this.normalizeName !== null) {
+      refuse('external_unsupported', 'normalize', 'the other system owns the column');
+    }
+    if (this.defaultValue !== null) {
+      refuse('external_unsupported', 'default', 'Ordo never writes the row');
+    }
+    if (this.kind.k === 'scalar' && this.kind.ty.name === 'blob') {
+      refuse('external_unsupported', 'blob', 'a blob is a handle into Ordo\'s own store; map the column as text or uri');
+    }
+    for (const [flag, word] of [
+      [this.refinableFlag, 'refinable'],
+      [this.inlineFlag, 'inline'],
+      [this.privateFlag, 'private'],
+      [this.maxValue !== null, 'max'],
+    ] as const) {
+      if (flag) refuse('external_unsupported', word, 'an external field takes no such word');
+    }
+    if (name === '') throw new Error('`column` needs the foreign column\'s name');
+    return new MappedSpec(this.kind, this.optionalFlag, this.publicFlag, name);
+  }
+
   /** `owned` — the ownership edge. A ref modifier; a scalar refuses it. */
   owned(): this {
     if (this.kind.k !== 'ref') throw new Error('`owned` marks a ref, not a scalar field');
@@ -188,6 +234,48 @@ export class TypeSpec {
     return this;
   }
 }
+
+/**
+ * A field already mapped to a foreign column, by `.column()`. A different
+ * class from {@link TypeSpec} on purpose: `external()` takes only these, so a
+ * forgotten column is a type error, and `entity()` takes none of them.
+ */
+export class MappedSpec {
+  readonly #brand = 'mapped' as const;
+  readonly kind: FieldKindNode;
+  readonly optional: boolean;
+  readonly public: boolean;
+  readonly column: string;
+
+  constructor(kind: FieldKindNode, optional: boolean, isPublic: boolean, column: string) {
+    this.kind = kind;
+    this.optional = optional;
+    this.public = isPublic;
+    this.column = column;
+    void this.#brand;
+  }
+}
+
+/** An external's `id` line, from {@link key}. It takes no `optional` and no `public`. */
+export class KeySpec {
+  readonly #brand = 'key' as const;
+  readonly type: ExternalKeyType;
+  readonly column: string;
+
+  constructor(type: ExternalKeyType, column: string) {
+    if (column === '') throw new Error('a key needs the foreign column\'s name');
+    this.type = type;
+    this.column = column;
+    void this.#brand;
+  }
+}
+
+/** `key.int('customer_id')`, `key.text(col)`, `key.uuid(col)`: an external's `id` line. */
+export const key = {
+  int: (column: string): KeySpec => new KeySpec('int', column),
+  text: (column: string): KeySpec => new KeySpec('text', column),
+  uuid: (column: string): KeySpec => new KeySpec('uuid', column),
+} as const;
 
 function fieldNode(name: string, s: TypeSpec): FieldNode {
   if (s.maxValue !== null) {
@@ -716,6 +804,119 @@ export function entity(
   return new Entity(name, fields, options);
 }
 
+export interface ExternalOptions {
+  /** `external projects (key: proj)`: the typed-id prefix override. */
+  readonly key?: string;
+  /** The Postgres schema the foreign table lives in. Never split from `table` on a dot. */
+  readonly schema: string;
+  readonly table: string;
+  /** Required, and only ever `true`: every space reads every row. */
+  readonly shared: true;
+}
+
+/** The fields of an external: the key line, and mapped fields. */
+export type ExternalFields = { readonly id: KeySpec } & {
+  readonly [field: string]: MappedSpec | KeySpec;
+};
+
+/** An external declaration: a table another system owns. Read-only, usable as a source. */
+export class External implements Sourceable {
+  readonly kind = 'external' as const;
+  readonly name: string;
+  readonly key: string | null;
+  readonly schema: string;
+  readonly table: string;
+  readonly keySpec: KeySpec;
+  readonly fields: ExternalFieldNode[];
+  publicFlag = false;
+  accessReadClause: GuardClauseNode | null = null;
+
+  constructor(name: string, fields: ExternalFields, options: ExternalOptions) {
+    if ((options as { shared?: unknown }).shared !== true) {
+      throw new Error(`external_not_shared: \`${name}\` needs \`shared: true\``);
+    }
+    this.name = name;
+    this.key = options.key ?? null;
+    this.schema = options.schema;
+    this.table = options.table;
+    this.keySpec = fields.id;
+    if (!(this.keySpec instanceof KeySpec)) {
+      throw new Error(`external ${name}: \`id\` is a key line, write \`id: key.int('column')\``);
+    }
+    this.fields = [];
+    for (const [n, spec] of Object.entries(fields)) {
+      if (n === 'id') continue;
+      if (!(spec instanceof MappedSpec)) {
+        throw new Error(
+          `external ${name}: \`${n}\` needs \`.column('…')\`; only \`id\` takes a \`key\` helper`,
+        );
+      }
+      this.fields.push({
+        name: n,
+        kind: spec.kind,
+        optional: spec.optional,
+        public: spec.public,
+        column: spec.column,
+      });
+    }
+  }
+
+  sourceName(): string {
+    return this.name;
+  }
+
+  where(...conds: Cond[]): Src {
+    return new Src(this.name).where(...conds);
+  }
+
+  bind(name: string, value: Value): Src {
+    return new Src(this.name).bind(name, value);
+  }
+
+  pick(...items: PickItem[]): Src {
+    return new Src(this.name).pick(...items);
+  }
+
+  args(...items: (SourceArgNode | Cond)[]): Src {
+    return new Src(this.name).args(...items);
+  }
+
+  /** Body line `public`. There is no `publicAll()`: an external owns nothing for the star to reach. */
+  public(): this {
+    this.publicFlag = true;
+    return this;
+  }
+
+  /** `access read <walk>`. There is no write: an external is read-only. */
+  accessRead(clause: GuardClauseNode): this {
+    this.accessReadClause = clause;
+    return this;
+  }
+
+  node(): ExternalNode {
+    return {
+      kind: 'external',
+      name: this.name,
+      key: this.key,
+      schema: this.schema,
+      table: this.table,
+      keyColumn: this.keySpec.column,
+      keyType: this.keySpec.type,
+      fields: this.fields,
+      public: this.publicFlag,
+      accessRead: this.accessReadClause,
+    };
+  }
+}
+
+export function external(
+  name: string,
+  fields: ExternalFields,
+  options: ExternalOptions,
+): External {
+  return new External(name, fields, options);
+}
+
 /** `t.ref(vendors)` / `t.ref('categories')` — the self-reference needs the name. */
 export function ref(target: Sourceable | string): TypeSpec {
   return new TypeSpec({ k: 'ref', target: sourceName(target), owned: false, tree: false });
@@ -849,10 +1050,12 @@ export function op<P extends Record<string, TypeSpec>>(
 // ── synth ────────────────────────────────────────────────────────────────
 
 /** Anything `synth` accepts: a declaration, or a builder that produces one. */
-export type Synthesizable = Declaration | Entity | Op | Routine;
+export type Synthesizable = Declaration | Entity | External | Op | Routine;
 
 function declaration(d: Synthesizable): Declaration {
-  return d instanceof Entity || d instanceof Op || d instanceof Routine ? d.node() : d;
+  return d instanceof Entity || d instanceof External || d instanceof Op || d instanceof Routine
+    ? d.node()
+    : d;
 }
 
 /**
@@ -864,6 +1067,35 @@ function declaration(d: Synthesizable): Declaration {
  * over, so the file's layout is the author's.
  */
 export function synth(...decls: Synthesizable[]): string {
-  const out = decls.map((d) => printDeclaration(declaration(d)));
+  const nodes = decls.map(declaration);
+  checkExternalRefs(nodes);
+  const out = nodes.map(printDeclaration);
   return out.join('\n\n') + '\n';
+}
+
+/**
+ * An external's ref may name another external of the same file and nothing
+ * else: the other system holds no Ordo ids. The parser refuses a ref to a
+ * native entity (`external_ref_to_native`); this says so before the text exists.
+ */
+function checkExternalRefs(nodes: Declaration[]): void {
+  const externals = new Set<string>();
+  const natives = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind === 'external') externals.add(n.name);
+    else if (n.kind === 'entity') natives.add(n.name);
+  }
+  for (const n of nodes) {
+    if (n.kind !== 'external') continue;
+    for (const f of n.fields) {
+      if (f.kind.k !== 'ref' || externals.has(f.kind.target)) continue;
+      const why = natives.has(f.kind.target)
+        ? `\`${f.kind.target}\` is an entity Ordo owns, and the other system holds no Ordo ids`
+        : `\`${f.kind.target}\` is not an external declared in this file`;
+      throw new Error(
+        `external_ref_to_native: \`${n.name}.${f.name}\` refs ${why}. ` +
+          'Map the column as a plain field, or declare the target as an external',
+      );
+    }
+  }
 }

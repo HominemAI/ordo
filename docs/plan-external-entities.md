@@ -93,12 +93,20 @@ are proposed, so the build agent may adjust them in one pass.
 | `prev` on a field | `external_unsupported` | `prev` is not a clause an external takes: a translation is re-imported on every apply |
 | Inherited guards (guards that walk `owned` or `acl`) | `external_inherited_guard` | Write a guard over the entity's own fields |
 | Live reads (`?live=1` on an op that reads it) | `external_not_live` | Read it on request, not as a stream |
-| A ref FROM an external entity to a native entity | `external_ref_native` | The other system holds no Ordo ids |
+| A ref FROM an external entity to a native entity | `external_ref_to_native` | The other system holds no Ordo ids |
 | A composite key | `external_composite_key` | Pick one unique column |
 | No unique, not null column | `external_no_key` | The table has no identity Ordo can use |
 | `shared` missing | `external_needs_shared` | Write `shared` |
 
 A ref from an external entity to another external entity is allowed.
+
+**CDK form** (owner, 2026-11-15). `external(name, fields, { schema, table, key?, shared: true })`
+in `@hominemai/ordo-cdk` reuses `entity()`'s shape, the `t.*` types, `ref()`,
+`.public()` and `.accessRead()`. `.column("name")` is the one new field
+modifier. `key.int(col)`, `key.text(col)` and `key.uuid(col)` write the `id`
+line, which prints first. `synth` quotes every column and refuses what the
+parser refuses, with the same class: `external_ref_to_native` for a ref to a
+native or unknown entity, `external_unsupported` and its kin for a field word.
 
 ## 3 · How it compiles
 

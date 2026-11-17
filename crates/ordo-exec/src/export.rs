@@ -131,7 +131,7 @@ use ordo_syntax::ScalarTy;
 use sha2::{Digest, Sha256};
 
 use crate::registry::Artifact;
-use crate::shape::{Drift, EXPORT_SHADOW};
+use crate::shape::{export_shadow_for, Drift};
 use crate::{sql_lit, Pool, PoolError};
 
 /// The bundle's format tag. A reader that does not recognise it should
@@ -1054,10 +1054,14 @@ pub async fn export_space(
 /// the DDL on every call, so leaving one behind buys nothing and leaves a
 /// schema in the operator's catalog that looks like state.
 async fn assert_no_drift(pool: &Pool, artifact: &Artifact) -> Result<(), ExportError> {
-    pool.build_shadow_in(EXPORT_SHADOW, &artifact.ddl).await?;
-    let drift = pool.live_drift(EXPORT_SHADOW, "public").await;
+    let shadow = export_shadow_for(pool.schema());
+    pool.build_shadow_in(&shadow, &artifact.ddl).await?;
+    let drift = pool.live_drift(&shadow, pool.schema()).await;
     let _ = pool
-        .rows(&format!("DROP SCHEMA IF EXISTS {EXPORT_SHADOW} CASCADE"))
+        .rows(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            ordo_schema::ddl::q(&shadow)
+        ))
         .await;
     let drift = drift?;
     if !drift.is_empty() {

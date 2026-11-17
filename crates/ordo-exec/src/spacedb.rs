@@ -303,7 +303,10 @@ pub async fn apply_schema_at_version(
 /// database that did not exist a moment ago.
 async fn apply(pool: &Pool, ddl: &str, trailing: Option<&str>) -> Result<bool, PoolError> {
     let present = pool
-        .rows("SELECT to_regclass('public.members') IS NOT NULL")
+        .rows(&format!(
+            "SELECT to_regclass({}) IS NOT NULL",
+            crate::sql_lit(&format!("{}.members", pool.schema_ident()))
+        ))
         .await?;
     if present
         .first()
@@ -441,7 +444,10 @@ pub enum TargetVersion {
 /// function answers only what the target says about its version.
 pub async fn recorded_version(pool: &Pool) -> Result<TargetVersion, PoolError> {
     let present = pool
-        .rows("SELECT to_regclass('public.\"$migrations\"') IS NOT NULL")
+        .rows(&format!(
+            "SELECT to_regclass({}) IS NOT NULL",
+            crate::sql_lit(&format!("{}.\"$migrations\"", pool.schema_ident()))
+        ))
         .await?;
     if present
         .first()

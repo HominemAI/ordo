@@ -59,27 +59,59 @@ pub const EXPORT_SHADOW: &str = "ordo_shadow_export";
 /// diffs at once never share one.
 pub const DIFF_SHADOW: &str = "ordo_shadow_diff";
 
-/// Is `name` a schema Ordo itself makes: [`SHADOW`], [`EXPORT_SHADOW`] or a
-/// [`DIFF_SHADOW`] with its suffix? The one list the "present, not Ordo's"
-/// report reads, so a shadow left over from a crash is not called foreign.
+/// The shadow the load gate builds for a deployment whose tables live in
+/// `schema` (`ORDO_PG_SCHEMA`, [`crate::PoolConfig::schema`]).
+///
+/// [`SHADOW`] itself for [`crate::DEFAULT_SCHEMA`], so a deployment that
+/// sets nothing builds the shadow it always built. Any other schema gets
+/// `ordo_shadow_of_<schema>`: two deployments sharing one database each
+/// drop and rebuild their own shadow, and neither deletes the other's
+/// mid-verification. The `_of_` keeps it apart from [`EXPORT_SHADOW`] and
+/// [`DIFF_SHADOW`] whatever the schema is called.
+pub fn shadow_for(schema: &str) -> String {
+    if schema == crate::DEFAULT_SCHEMA {
+        SHADOW.to_string()
+    } else {
+        format!("{SHADOW}_of_{schema}")
+    }
+}
+
+/// [`EXPORT_SHADOW`] for a deployment in `schema`, by [`shadow_for`]'s rule.
+pub fn export_shadow_for(schema: &str) -> String {
+    if schema == crate::DEFAULT_SCHEMA {
+        EXPORT_SHADOW.to_string()
+    } else {
+        format!("{EXPORT_SHADOW}_of_{schema}")
+    }
+}
+
+/// Is `name` a schema Ordo itself makes: [`SHADOW`], [`EXPORT_SHADOW`], a
+/// [`DIFF_SHADOW`] with its suffix, or the shadow of a deployment in a
+/// schema of its own ([`shadow_for`])? The one list the "present, not
+/// Ordo's" report reads, so a shadow left over from a crash is not called
+/// foreign. A deployment's schema may not start with [`SHADOW`]
+/// ([`crate::check_schema_name`]), so this never claims one.
 pub fn is_ordo_schema(name: &str) -> bool {
-    name == SHADOW || name == EXPORT_SHADOW || name.starts_with(DIFF_SHADOW)
+    name == SHADOW || name.starts_with(&format!("{SHADOW}_"))
 }
 
 impl Pool {
-    /// Build the shadow schema from the deployment's own DDL.
+    /// Build the deployment's shadow schema ([`Pool::shadow`]) from the
+    /// deployment's own DDL.
     pub async fn build_shadow(&self, ddl: &str) -> Result<(), PoolError> {
-        self.build_shadow_in(SHADOW, ddl).await
+        self.build_shadow_in(&self.shadow(), ddl).await
     }
 
     /// Build a shadow schema under a caller-chosen name.
     ///
     /// `schema` is interpolated into DDL, so it is **not** caller data:
-    /// every call site passes one of this module's own constants, or
-    /// [`DIFF_SHADOW`] with a hex suffix the caller drew. It is a
+    /// every call site passes one of this module's own names ([`shadow_for`],
+    /// [`export_shadow_for`]), or [`DIFF_SHADOW`] with a hex suffix the
+    /// caller drew. It is quoted all the same. It is a
     /// parameter so the two shadows cannot collide, not so a name can come
     /// from a request.
     pub async fn build_shadow_in(&self, schema: &str, ddl: &str) -> Result<(), PoolError> {
+        let schema = &ordo_schema::ddl::q(schema);
         self.rows(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
             .await?;
         self.rows(&format!("CREATE SCHEMA {schema}")).await?;
@@ -99,6 +131,10 @@ impl Pool {
         // production. A failure mid-DDL rolls the implicit transaction
         // back, `SET` included, so the reset is not needed on that path
         // and is harmless on it.
+        //
+        // `RESET` returns the path to the session's own default, which is
+        // the deployment's schema when `ORDO_PG_SCHEMA` names one: the dial
+        // options set it, and `RESET` restores what the dial set.
         self.rows(&format!(
             "SET search_path TO {schema}; {ddl}; RESET search_path"
         ))
@@ -114,6 +150,7 @@ impl Pool {
     /// expression and reports the row type, but evaluates nothing.
     pub async fn observed_shape(&self, sql: &str) -> Result<Vec<(String, String)>, PoolError> {
         let inner = sql.trim().trim_end_matches(';');
+        let shadow = ordo_schema::ddl::q(&self.shadow());
         let probe = format!(
             // DROP then CREATE, never CREATE OR REPLACE: replacing a view
             // may not change its column list, and every op has a different
@@ -124,7 +161,7 @@ impl Pool {
             // view is looked up through `pg_temp`, this session's own temp
             // schema: every concurrent probe has a `$shape`, and matching
             // `relname` alone returned the union of their columns.
-            "SET LOCAL search_path TO {SHADOW}; \
+            "SET LOCAL search_path TO {shadow}; \
              DROP VIEW IF EXISTS pg_temp.\"$shape\"; \
              CREATE TEMP VIEW \"$shape\" AS {inner}; \
              SELECT a.attname, format_type(a.atttypid, a.atttypmod) \

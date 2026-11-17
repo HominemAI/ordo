@@ -1498,7 +1498,7 @@ pub async fn listen_for_changes(
 pub async fn announce_members(pool: &Pool, space: &str) -> Result<(), String> {
     pool.rows(&format!(
         "SELECT pg_notify({}, {})",
-        ordo_exec::sql_lit(ordo_exec::jobs::MEMBERS_CHANNEL),
+        ordo_exec::sql_lit(&pool.channel(ordo_exec::jobs::MEMBERS_CHANNEL)),
         ordo_exec::sql_lit(space),
     ))
     .await

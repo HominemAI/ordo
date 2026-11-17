@@ -1037,7 +1037,7 @@ impl Spaces {
                 return Ok(());
             }
         }
-        let shape = ordo_exec::migrate::live_shape(pool, crate::schema_apply::LIVE)
+        let shape = ordo_exec::migrate::live_shape(pool, pool.schema())
             .await
             .map_err(|e| format!("its database's shape could not be read: {e}"))?;
         let changes = ordo_schema::diff(&shape, None, &live.fixture.schema);

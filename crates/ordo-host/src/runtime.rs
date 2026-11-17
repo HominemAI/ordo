@@ -1192,6 +1192,15 @@ impl RuntimeConfig {
             "`ordo_conformance` is a test database's name, not a default",
         )?;
         let port: u16 = parsed("ORDO_PG_PORT", 5432)?;
+        // The schema the deployment's tables live in (`ORDO_PG_SCHEMA`,
+        // `public` when unset). Read once, here, and carried by the pool's
+        // config: every connection is dialled into it and every catalog
+        // read asks the pool for it.
+        let schema = ordo_exec::schema_from_env();
+        ordo_exec::check_schema_name(&schema).map_err(|detail| BootRefusal::Invalid {
+            var: ordo_exec::SCHEMA_ENV,
+            detail,
+        })?;
         // The password, or the file that holds it (`ordo_env::secret`).
         // Read here so an unreadable file refuses before the dial;
         // `PoolConfig::from_env` reads it again for the pool.
@@ -1401,6 +1410,7 @@ impl RuntimeConfig {
             size,
             acquire_timeout: Duration::from_millis(acquire_ms),
             password: PoolConfig::from_env().password,
+            schema,
         };
 
         // ── the socket ──

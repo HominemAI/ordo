@@ -66,7 +66,9 @@
 //! # Why verification runs on its own connections
 //!
 //! `build_shadow` and `observed_shape` both issue `SET search_path TO
-//! ordo_shadow`, and `search_path` is **connection state**. A pooled
+//! ordo_shadow` (the deployment's own shadow, `Pool::shadow`, when
+//! `ORDO_PG_SCHEMA` names a schema), and `search_path` is **connection
+//! state**. A pooled
 //! connection handed back to the idle list still carrying it would aim the
 //! next caller's ordinary read at an empty schema — silently zero rows, the
 //! worst possible failure. So verification takes a short-lived pool of its
@@ -262,10 +264,11 @@ pub async fn never_null_gone(
     schema: &ordo_schema::Schema,
 ) -> Result<Vec<String>, ordo_exec::PoolError> {
     let nullable: std::collections::BTreeSet<(String, String)> = pool
-        .rows(
+        .rows(&format!(
             "SELECT table_name, column_name FROM information_schema.columns \
-             WHERE table_schema = 'public' AND is_nullable = 'YES'",
-        )
+             WHERE table_schema = {} AND is_nullable = 'YES'",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| match r.as_slice() {
@@ -274,17 +277,21 @@ pub async fn never_null_gone(
         })
         .collect();
     let tables: std::collections::BTreeSet<String> = pool
-        .rows("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+        .rows(&format!(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = {}",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())
         .collect();
     let keys: std::collections::BTreeSet<String> = pool
-        .rows(
+        .rows(&format!(
             "SELECT c.conname FROM pg_constraint c \
              JOIN pg_namespace n ON n.oid = c.connamespace \
-             WHERE n.nspname = 'public' AND c.contype = 'f' AND c.convalidated",
-        )
+             WHERE n.nspname = {} AND c.contype = 'f' AND c.convalidated",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())
@@ -347,7 +354,12 @@ pub async fn verify_registry(
     // Best effort: the shadow is rebuilt from scratch on every verification
     // anyway, so a failure to tidy it is not a reason to refuse a boot that
     // otherwise passed.
-    let _ = pool.rows("DROP SCHEMA IF EXISTS ordo_shadow CASCADE").await;
+    let _ = pool
+        .rows(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            ordo_schema::ddl::q(&pool.shadow())
+        ))
+        .await;
     drop(pool);
     report
 }
@@ -361,7 +373,7 @@ async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, S
     // second caller building a second shadow. It does not refuse — see
     // `ShapeReport::drift`.
     let drift = pool
-        .live_drift(ordo_exec::shape::SHADOW, "public")
+        .live_drift(&pool.shadow(), pool.schema())
         .await
         .map_err(|e| {
             ShapeRefusal::Unavailable(format!("the live schema could not be read: {e}"))

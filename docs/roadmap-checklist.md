@@ -13083,6 +13083,21 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       external entity creates no table, so 27i does not depend on this.
       `schema_apply::LIVE` becomes per database when built. §5. Board:
       `external-entities`.
+      **Built 2026-11-17 on branch `deployment-schema-setting`**, as the
+      collision the 2026-11-16 ruling names
+      (`example-apps-notes-v2-plus-note_viewer` ask 1). It is a setting, not a
+      random identifier:
+      - `ORDO_PG_SCHEMA` names the deployment's schema. Unset, it is `public`
+        and a pool dials as before.
+      - `PoolConfig::schema` carries it. Every connection is dialled with it
+        as `search_path`, and catalog reads ask `Pool::schema`.
+        `schema_apply::LIVE` is gone.
+      - Each deployment has its own shadow, `ordo_shadow_of_<schema>`.
+        `public` keeps `ordo_shadow`.
+      - `NOTIFY` channels and leadership locks are per deployment.
+      - The schema is created at first start and never dropped.
+      - A bad name refuses the boot naming the setting.
+      - Tests: `crates/ordo-host/tests/deployment_schema.rs`.
 - [ ] **27l · Audit what the deployment's and each tenant's database hold,
       and who owns what.** §8. Board: `deploy-schema-audit`.
 - [ ] **27m · Who may delete a note's owned rows is the app developer's

@@ -358,7 +358,10 @@ pub async fn check(pool: &Pool, schema: &Schema) -> Result<ExternalReport, Strin
 
 /// Tables and schemas the database holds that are not Ordo's and not a
 /// declared external (27j). Ordo's are the program's entities and the
-/// platform's `$` tables in `public`.
+/// platform's `$` tables in the deployment's own schema (`Pool::schema`,
+/// `public` unless `ORDO_PG_SCHEMA` names another). Another deployment's
+/// schema in the same database is listed: its tables are not this
+/// program's.
 pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<String>, String> {
     let (schemas, tables) = migrate::schemas_and_tables(pool)
         .await
@@ -376,7 +379,7 @@ pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<Strin
         if ordo_exec::shape::is_ordo_schema(s) {
             continue;
         }
-        if s == "public" {
+        if s == pool.schema() {
             if t.starts_with('$') || schema.native(t).is_some() {
                 continue;
             }

@@ -1,6 +1,6 @@
 {
- "date": "2026-11-16",
- "text": "PR 15 (console reauth by redirect) and PR 16 (public externals) are on bleeding; PR 17 (CDK external form) is in CI and merges on green. The example apps that exercise federation as one system start with [[example-apps-notes-v2-plus-note_viewer]]: decision 1, how note_viewer reaches the notes, needs you. 0.5.2 waits for PR 13 (held). Deployed infrastructure waits until design and build finish.",
+ "date": "2026-11-17",
+ "text": "2026-11-17 PRs 15, 16 and 17 are on bleeding: console reauth by redirect, public externals, the CDK external form. [[example-apps-notes-v2-plus-note_viewer]] has decisions 1 to 5 ruled; decision 5 is a peer line with its schema in a setting. Nothing of it is built, and 2 later decisions are not yet asked. 0.5.2 waits for PR 13 (held). Deployed infrastructure waits until design and build finish.",
  "tiles": [
   [
    "4,060",
@@ -46,11 +46,11 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "decision 1 needs you"
+   "why": "decisions 1 to 5 ruled, unbuilt"
   },
   {
    "id": "external-entities",
-   "why": "public built, CDK form in CI"
+   "why": "public and CDK form built"
   },
   {
    "id": "shared-identity",

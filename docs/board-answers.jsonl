@@ -1573,3 +1573,4 @@
 {"seq": 1575, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 4, "at": "2026-11-17", "status": "decided", "text": "for this notes app lets do an open sign up, but there is also invite mechanism", "source": "record", "read": true}
 {"seq": 1576, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 5, "at": "2026-11-17T06:15:21Z", "status": "open", "text": "elaborate the context", "source": "page", "read": true}
 {"seq": 1577, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 0, "at": "2026-11-17T06:15:23Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1578, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 5, "at": "2026-11-17", "status": "decided", "text": "\"I approve of this\" (decision 5: a peer line with its schema in a deployment setting, after the chat explanation that the name is a local nickname and that plain Postgres externals take no peer line)", "source": "record", "read": true}

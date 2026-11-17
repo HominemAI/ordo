@@ -1,6 +1,6 @@
 {
  "date": "2026-11-17",
- "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4 landed on bleeding as PR 19, the schema setting ORDO_PG_SCHEMA, default public, every check green. Step 2, the peer line, waits on ask 10 there: the name of the peer's schema setting. The build found a defect, [[required-ref-to-external-refused]], not yet fixed. 0.5.2 waits for PR 13 (held).",
+ "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4 landed as PR 19, the schema setting ORDO_PG_SCHEMA. Asks 10 and 11 there need you; step 2 waits on ask 10. [[required-ref-to-external-refused]] is fixed in PR 20. The CI audit check is red on a new picomatch advisory with no patch: [[the-audit-check-fails-on-a]] needs you and blocks any merge to main. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,15 +46,15 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "ask 10 needs you; step 1 landed"
+   "why": "asks 10 and 11 need you"
+  },
+  {
+   "id": "the-audit-check-fails-on-a",
+   "why": "audit red, needs you"
   },
   {
    "id": "required-ref-to-external-refused",
-   "why": "new defect, unfixed"
-  },
-  {
-   "id": "shared-identity",
-   "why": "reauth redirect built; infra waits"
+   "why": "fixed, PR 20"
   }
  ]
 }

@@ -303,7 +303,7 @@ external patrons (key: pat) from crm.customers shared {
 }
 
 entity tickets {
-  customer -> patrons?
+  customer -> patrons
   subject: text
 }
 

@@ -13058,7 +13058,7 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       name their environment.** Ruled 2026-10-01: rolling by default (a
       batch every 5 minutes over an hour), all at once, random canary,
       blue/green, and by query. §2.4, §4. Needs 18ac. Board: `environments`.
-- [x] **27i · External entities.** Built 2026-11-15, bleeding 17f02c3c (PR 14, slices A to C, 2 reviews, 19 fixes). Asks 5 to 8 answered 2026-11-15: `public` as on a native entity (PR 16, bleeding 05dfab16), access levels unchanged, `prev` refused, the CDK form to the critic's ruling (PR 17). Generated, read-only translations of
+- [x] **27i · External entities.** Built 2026-11-15, bleeding 17f02c3c (PR 14, slices A to C, 2 reviews, 19 fixes). Asks 5 to 8 answered 2026-11-15: `public` as on a native entity (PR 16, bleeding 05dfab16), access levels unchanged, `prev` refused, the CDK form to the critic's ruling (PR 17, bleeding 32df59f5). Generated, read-only translations of
       foreign tables. Ops and the SDK see an entity; the schema keeps it as
       its own kind, `schema.externals` (ruled 2026-11-15). Prefixed ids over
       a raw key, `shared` required, derived reads only (get, list, count), the

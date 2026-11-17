@@ -37,7 +37,7 @@ jobs:
   images:
     name: Confirm the images published
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Note
@@ -57,8 +57,8 @@ jobs:
   binaries:
     name: ${{ matrix.target }}
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 45 || 90 }}
 
     strategy:
       # One target failing should not hide the other two's results.
@@ -68,7 +68,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             # The self-hosted runner, which is linux/x64, and since
             # 2026-09-25 the only target this workflow builds.
-            runner: [self-hosted, ordo-k8s]
           # **No macOS and no arm64 Linux.** Ruled 2026-09-25
           # (`actions-billing`): *"We shouldnt be building for apple or
           # arm. Done."*
@@ -91,6 +90,12 @@ jobs:
           # the machine that will run it.
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -179,7 +184,7 @@ jobs:
     name: GitHub release
     needs: [binaries]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
 
     steps:

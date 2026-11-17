@@ -47,7 +47,7 @@ jobs:
   changes:
     name: changes (identity e2e)
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       reached: ${{ steps.affected.outputs.identity_e2e }}
@@ -73,8 +73,8 @@ jobs:
     name: identity e2e
     needs: changes
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 30
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 30 || 60 }}
 
     services:
       postgres:
@@ -101,6 +101,12 @@ jobs:
       ORDO_PSQL: psql
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - name: Not reached by this change
         if: env.REACHED != 'true'
         run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"

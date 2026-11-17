@@ -47,7 +47,7 @@ jobs:
   prep:
     name: Repository name (lowercase, for GHCR)
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 2
     outputs:
       repo_lc: ${{ steps.lc.outputs.repo }}
@@ -63,10 +63,16 @@ jobs:
     name: ordo-cli
     needs: prep
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 45
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 45 || 90 }}
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -220,8 +226,8 @@ jobs:
     name: ordo, the one image
     needs: prep
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 60
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 60 || 120 }}
 
     # The console's own database, and the cluster the identity service makes
     # its own database on, by the opt-in. Each refuses to boot
@@ -241,6 +247,12 @@ jobs:
           --health-retries 5
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -509,8 +521,8 @@ jobs:
     name: ordo-playground
     needs: prep
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 45
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 45 || 90 }}
 
     services:
       postgres:
@@ -527,6 +539,12 @@ jobs:
           --health-retries 5
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Increment 0c landed `ORDO_PLAYGROUND_ADDR` in `main.rs`, so this

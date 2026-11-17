@@ -319,6 +319,28 @@ async fn the_apply_leaves_the_foreign_schema_as_the_other_system_made_it() {
     );
 }
 
+/// Reported 2026-11-17 (`required-ref-to-external-refused`): the boot gate
+/// asked for a foreign key on every required ref, and `tickets.customer`
+/// has none because its target is external. A regression is a
+/// `NeverNullGone` refusal naming `tickets$customer$fk`.
+#[tokio::test]
+async fn a_required_ref_to_an_external_passes_the_never_null_gate() {
+    let _state = door("ordo_ext_gate", 50).await;
+    let f = Fixture::from_source(&format!("{FIXTURE}\n{PROGRAM}"), "")
+        .expect("a program with an external compiles");
+    let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
+        db: "ordo_ext_gate".into(),
+        size: 1,
+        ..ordo_exec::PoolConfig::from_env()
+    })
+    .await
+    .expect("connects");
+    let gone = ordo_host::shape::never_null_gone(&pool, &f.schema)
+        .await
+        .expect("the catalog reads");
+    assert!(gone.is_empty(), "{gone:?}");
+}
+
 // ── `public` externals on the public path ───────────────────────────────
 //
 // Ruled 2026-11-15 (`external-entities`, ask 5): an external may be

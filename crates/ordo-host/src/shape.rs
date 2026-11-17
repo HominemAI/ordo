@@ -255,7 +255,7 @@ fn probe_call(spec: &OpSpec) -> Option<String> {
 /// - Each required ref's foreign key (`entity$field$fk`) must exist and be
 ///   validated: a hop through a required ref is proven present because that
 ///   key names a row. A key added `NOT VALID` has not checked the rows
-///   already there.
+///   already there. A ref to an external is exempt: it never has a key.
 ///
 /// A table or column missing outright is drift, reported and refused by the
 /// drift gate, and is not repeated here.
@@ -313,7 +313,14 @@ pub async fn never_null_gone(
             continue;
         }
         for field in &e.fields {
-            if field.optional || !matches!(field.ty, ordo_schema::FieldTy::Ref { .. }) {
+            let ordo_schema::FieldTy::Ref { target, .. } = &field.ty else {
+                continue;
+            };
+            // A ref to an external has no foreign key to restore
+            // (`ordo_schema::ddl::foreign_key`, ruled 2026-11-15): the row
+            // belongs to another system and may be gone, and a read through
+            // it already yields null.
+            if field.optional || schema.is_external(target) {
                 continue;
             }
             let key = format!("{}${}$fk", e.name, field.name);

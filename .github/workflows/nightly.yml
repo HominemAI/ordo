@@ -43,7 +43,7 @@ concurrency:
 jobs:
   decide:
     name: changed since last nightly
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       changed: ${{ steps.compare.outputs.changed }}

@@ -13083,7 +13083,7 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       external entity creates no table, so 27i does not depend on this.
       `schema_apply::LIVE` becomes per database when built. §5. Board:
       `external-entities`.
-      **Built 2026-11-17 on branch `deployment-schema-setting`**, as the
+      **Built 2026-11-17 (PR 19, commit 7081980d)**, as the
       collision the 2026-11-16 ruling names
       (`example-apps-notes-v2-plus-note_viewer` ask 1). It is a setting, not a
       random identifier:

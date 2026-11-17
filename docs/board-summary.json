@@ -1,6 +1,6 @@
 {
  "date": "2026-11-17",
- "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4, the schema setting ORDO_PG_SCHEMA, is in PR 19 with CI running and is not merged. Ask 10 there needs you: the name of the peer's schema setting. The build found a defect, [[required-ref-to-external-refused]], not yet fixed. 0.5.2 waits for PR 13 (held).",
+ "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4 landed on bleeding as PR 19, the schema setting ORDO_PG_SCHEMA, default public, every check green. Step 2, the peer line, waits on ask 10 there: the name of the peer's schema setting. The build found a defect, [[required-ref-to-external-refused]], not yet fixed. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,7 +46,7 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "ask 10 needs you; step 1 in PR 19"
+   "why": "ask 10 needs you; step 1 landed"
   },
   {
    "id": "required-ref-to-external-refused",

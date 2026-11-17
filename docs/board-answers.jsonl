@@ -1571,3 +1571,5 @@
 {"seq": 1573, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 3, "at": "2026-11-17", "status": "decided", "text": "identity service being the built in credential system (passkey by default?)?", "source": "record", "read": true}
 {"seq": 1574, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 4, "at": "2026-11-17T02:46:44Z", "status": "open", "text": "for this notes app lets do an open sign up, but there is also invite mechanism", "source": "page", "read": true}
 {"seq": 1575, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 4, "at": "2026-11-17", "status": "decided", "text": "for this notes app lets do an open sign up, but there is also invite mechanism", "source": "record", "read": true}
+{"seq": 1576, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 5, "at": "2026-11-17T06:15:21Z", "status": "open", "text": "elaborate the context", "source": "page", "read": true}
+{"seq": 1577, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 0, "at": "2026-11-17T06:15:23Z", "status": "decided", "text": "", "source": "page", "read": true}

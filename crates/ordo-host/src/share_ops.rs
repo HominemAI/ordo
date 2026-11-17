@@ -901,7 +901,7 @@ impl ShareOps {
             for name in [entity.clone(), format!("{entity}Access")] {
                 pool.rows(&format!(
                     "SELECT pg_notify({}, {})",
-                    sql_lit(ordo_exec::jobs::INVALIDATE_CHANNEL),
+                    sql_lit(&pool.channel(ordo_exec::jobs::INVALIDATE_CHANNEL)),
                     sql_lit(&name)
                 ))
                 .await

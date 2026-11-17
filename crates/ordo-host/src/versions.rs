@@ -659,8 +659,7 @@ pub fn pins_reconcile_from_env() -> Result<std::time::Duration, String> {
 async fn repin(tx: &ordo_exec::TxConn, sql: &str) -> Result<Vec<Vec<Option<String>>>, PoolError> {
     let rows = tx.rows(sql).await?;
     if !rows.is_empty() {
-        tx.rows(&format!("SELECT pg_notify({}, '')", sql_lit(PINS_CHANNEL)))
-            .await?;
+        tx.notify(PINS_CHANNEL, "").await?;
     }
     Ok(rows)
 }
@@ -2888,8 +2887,7 @@ impl<'a> Versions<'a> {
             sql_lit(reason),
         ))
         .await?;
-        tx.rows(&format!("SELECT pg_notify({}, '')", sql_lit(PINS_CHANNEL)))
-            .await?;
+        tx.notify(PINS_CHANNEL, "").await?;
         tx.commit().await?;
         Ok(Some(SettingSet::Changed(now.with(setting, value))))
     }

@@ -268,16 +268,20 @@ pub async fn table_columns(
 
 /// Every schema and every table outside the system schemas, as
 /// `(schemas, (schema, table) pairs)`. The caller decides which are Ordo's
-/// (27j, "present, not Ordo's"). Read-only.
+/// (27j, "present, not Ordo's"). Read-only. The schema list leaves out
+/// `public`, which every database has, and the deployment's own schema
+/// ([`Pool::schema`]); the table list leaves out neither.
 pub async fn schemas_and_tables(
     pool: &Pool,
 ) -> Result<(Vec<String>, Vec<(String, String)>), PoolError> {
     let schemas = pool
-        .rows(
+        .rows(&format!(
             "SELECT nspname FROM pg_namespace \
-             WHERE nspname <> 'public' AND nspname <> 'information_schema' \
-               AND nspname NOT LIKE 'pg\\_%' ORDER BY 1",
-        )
+                 WHERE nspname <> 'public' AND nspname <> {} \
+                   AND nspname <> 'information_schema' \
+                   AND nspname NOT LIKE 'pg\\_%' ORDER BY 1",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| r.first().cloned().flatten())
@@ -452,11 +456,11 @@ where
 
 /// The places each recorded field's stored amounts are held at now: the
 /// latest `$places` row per `(entity, field)`. Empty when no places change
-/// was ever applied here.
+/// was ever applied here. Read from the deployment's own schema.
 pub async fn held_places(
     pool: &Pool,
 ) -> Result<std::collections::BTreeMap<(String, String), u8>, PoolError> {
-    held_places_in(pool, "public").await
+    held_places_in(pool, pool.schema()).await
 }
 
 async fn held_places_in(
@@ -490,15 +494,16 @@ pub async fn stated_places(
     pool: &Pool,
 ) -> Result<std::collections::BTreeMap<(String, String, u8), String>, PoolError> {
     let mut out = std::collections::BTreeMap::new();
-    if !places_table_exists(pool, "public.\"$places\"").await? {
+    let table = format!("{}.\"$places\"", pool.schema_ident());
+    if !places_table_exists(pool, &table).await? {
         return Ok(out);
     }
     let rows = pool
-        .rows(
+        .rows(&format!(
             "SELECT DISTINCT ON (\"entity\", \"field\", \"places\") \
                     \"entity\", \"field\", \"places\", \"choice\" \
-             FROM public.\"$places\" ORDER BY \"entity\", \"field\", \"places\", \"seq\" DESC",
-        )
+             FROM {table} ORDER BY \"entity\", \"field\", \"places\", \"seq\" DESC"
+        ))
         .await?;
     for r in rows {
         let g = |i: usize| r.get(i).cloned().flatten();

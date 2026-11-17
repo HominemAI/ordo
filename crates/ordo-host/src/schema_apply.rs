@@ -88,10 +88,10 @@ use ordo_exec::{Pool, PoolError};
 use ordo_schema::diff::{Change, Class, PlacesChoice};
 use ordo_schema::{LiveShape, Schema};
 
-/// The schema of a live deployment. Not configurable: `live_drift` compares
-/// the shadow against the literal `"public"`, and a plan that looked
-/// somewhere else would classify against a schema the gate never checks.
-pub const LIVE: &str = "public";
+// The schema of a live deployment is the pool's (`Pool::schema`,
+// `ORDO_PG_SCHEMA`, `public` when unset). It was a constant here while
+// `live_drift` compared the shadow against the literal `"public"`; the gate
+// now asks the same pool, so a plan and the gate read one schema.
 
 /// How many offending values a probe carries. Enough to recognise the shape
 /// of the problem; not so many that the refusal scrolls past the verdict.
@@ -575,7 +575,7 @@ pub async fn plan_with_external(
     let prior_doc: Option<serde_json::Value> = deployed
         .as_ref()
         .and_then(|a| serde_json::from_str(&a.artifact).ok());
-    let live = migrate::live_shape(pool, LIVE)
+    let live = migrate::live_shape(pool, pool.schema())
         .await
         .map_err(|e| format!("reading the live schema: {e}"))?;
     let changes = ordo_schema::diff_with(
@@ -1513,7 +1513,7 @@ pub enum SchemaState {
 
 /// Read the state. Read-only.
 pub async fn schema_state(pool: &Pool, schema: &Schema) -> Result<SchemaState, String> {
-    let live = migrate::live_shape(pool, LIVE)
+    let live = migrate::live_shape(pool, pool.schema())
         .await
         .map_err(|e| format!("reading the live schema: {e}"))?;
     let deployed = deployed_artifact(pool).await;
@@ -2478,7 +2478,7 @@ pub async fn execute_with(
                     error: error.to_string(),
                 });
             }
-            let valid = migrate::index_valid(pool, LIVE, &name).await;
+            let valid = migrate::index_valid(pool, pool.schema(), &name).await;
             match (sent, valid) {
                 (Ok(_), Ok(Some(true))) => {
                     indexes += 1;

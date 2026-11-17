@@ -1377,6 +1377,7 @@ pub static REGISTRY: &[Setting] = &[
         r#"none, required"#,
         r#""#,
     ),
+    s("ORDO_PG_SCHEMA", "Databases and pools", r#"public"#, r#""#),
     s("ORDO_PG_PASSWORD", "Databases and pools", r#"none"#, r#""#),
     s(
         "ORDO_PG_POOL_SIZE",

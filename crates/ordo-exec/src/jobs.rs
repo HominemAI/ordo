@@ -83,10 +83,13 @@ impl TxConn {
     /// the ordinary op under their own scope, so a notification carries no
     /// rows and therefore leaks nothing to a subscriber whose guards would
     /// have hidden them.
+    ///
+    /// `channel` is the plain name; it is sent on the deployment's own
+    /// spelling of it ([`crate::PoolConfig::channel`]).
     pub async fn notify(&self, channel: &str, op: &str) -> Result<(), PoolError> {
         self.rows(&format!(
             "SELECT pg_notify({}, {})",
-            sql_lit(channel),
+            sql_lit(&self.pool.channel(channel)),
             sql_lit(op)
         ))
         .await
@@ -328,6 +331,14 @@ pub async fn listen(
         .await
         .map_err(crate::driver_error)?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    // Each channel is heard on the deployment's own spelling of it
+    // (`PoolConfig::channel`) and handed on under its plain name, so a
+    // subscriber compares against the constant whatever the schema is.
+    let heard: Vec<(String, String)> = channels
+        .iter()
+        .map(|c| (cfg.channel(c), c.to_string()))
+        .collect();
+    let names = heard.clone();
     // The driver has to be running before the client can issue anything, so
     // it is spawned first and the `LISTEN`s go out underneath it.
     tokio::spawn(async move {
@@ -336,9 +347,14 @@ pub async fn listen(
             let msg = std::future::poll_fn(|cx| connection.as_mut().poll_message(cx)).await;
             match msg {
                 Some(Ok(tokio_postgres::AsyncMessage::Notification(n))) => {
+                    let channel = names
+                        .iter()
+                        .find(|(wire, _)| wire == n.channel())
+                        .map(|(_, plain)| plain.clone())
+                        .unwrap_or_else(|| n.channel().to_string());
                     if tx
                         .send(Notification {
-                            channel: n.channel().to_string(),
+                            channel,
                             payload: n.payload().to_string(),
                         })
                         .is_err()
@@ -354,7 +370,7 @@ pub async fn listen(
             }
         }
     });
-    for ch in channels {
+    for (ch, _) in &heard {
         // A channel name is an identifier to `LISTEN` and a string to
         // `pg_notify`, so `ordo.invalidate` has to be quoted here or the
         // dot would parse as a qualification.
@@ -406,7 +422,10 @@ impl Leadership {
         cfg: &crate::PoolConfig,
         realm: &str,
     ) -> Result<Option<Leadership>, String> {
-        let key = realm_key(realm);
+        // Per deployment: advisory locks are per database, and two
+        // deployments sharing one (`ORDO_PG_SCHEMA`) must each have a
+        // leader. `public` keeps the key it always had.
+        let key = realm_key(&cfg.channel(realm));
         let (client, conn) = cfg
             .connect_config()
             .connect(tokio_postgres::NoTls)

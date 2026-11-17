@@ -57,7 +57,9 @@ jobs:
   binaries:
     name: ${{ matrix.target }}
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    # Hosted: ubuntu-22.04, not latest, keeps the binary on glibc 2.35 so it
+    # runs on the older systems the pod build did.
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-22.04' }}
     timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 45 || 90 }}
 
     strategy:

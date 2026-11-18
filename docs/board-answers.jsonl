@@ -1588,3 +1588,11 @@
 {"seq": 1590, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 0, "at": "2026-11-18T04:32:30Z", "status": "decided", "text": "", "source": "page", "read": true}
 {"seq": 1591, "item": "the-audit-check-fails-on-a", "ask": 1, "at": "2026-11-18T04:40:43Z", "status": "open", "text": "severity is high...  can we upgrade instead? is there a new released version? check", "source": "page", "read": true}
 {"seq": 1592, "item": "the-audit-check-fails-on-a", "ask": 0, "at": "2026-11-18T04:40:47Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1593, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 10, "at": "2026-11-18T05:00:10Z", "status": "open", "text": "Okay", "source": "page", "read": true}
+{"seq": 1594, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 11, "at": "2026-11-18T05:00:26Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1595, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 0, "at": "2026-11-18T05:00:39Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1596, "item": "the-audit-check-fails-on-a", "ask": 1, "at": "2026-11-18T05:01:34Z", "status": "open", "text": "Accept it. We will have dependabot that can patch it when a fix is out.", "source": "page", "read": true}
+{"seq": 1597, "item": "the-audit-check-fails-on-a", "ask": 0, "at": "2026-11-18T05:01:37Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1598, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 10, "at": "2026-11-17", "status": "decided", "text": "\"Okay\" (the peer schema setting is an environment variable spelled ORDO_PEER_<NAME>_SCHEMA, like ORDO_PG_SCHEMA)", "source": "record", "read": true}
+{"seq": 1599, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 11, "at": "2026-11-17", "status": "decided", "text": "\"ok\" (the schema setting closes checklist item 27k; no prefix or random identifier on table names)", "source": "record", "read": true}
+{"seq": 1600, "item": "the-audit-check-fails-on-a", "ask": 1, "at": "2026-11-17", "status": "decided", "text": "\"Accept it. We will have dependabot that can patch it when a fix is out.\"", "source": "record", "read": true}

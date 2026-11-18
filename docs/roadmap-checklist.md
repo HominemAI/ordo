@@ -13077,8 +13077,10 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       Board: `external-entities`. **Built 2026-11-15** on branch
       external-entities-bc: `external_check::present_not_ordos`, printed by
       `ordo plan` under `EXTERNAL` and by `std.deployment.plan` as notes.
-- [ ] **27k · Ordo's tables under a prefix plus a random identifier per
-      database.** Ruled 2026-10-01; deferred 2026-11-15 until a real
+- [x] **27k · Ordo's tables under a prefix plus a random identifier per
+      database.** **Closed 2026-11-17 by owner ruling**
+      (`example-apps-notes-v2-plus-note_viewer` ask 11): the schema setting
+      below meets it, and no prefix or random identifier is built. Ruled 2026-10-01; deferred 2026-11-15 until a real
       collision appears. Foreign tables take their own schema instead. An
       external entity creates no table, so 27i does not depend on this.
       `schema_apply::LIVE` becomes per database when built. §5. Board:

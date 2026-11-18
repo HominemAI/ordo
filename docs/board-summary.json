@@ -1,6 +1,6 @@
 {
- "date": "2026-11-17",
- "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4 landed as PR 19, the schema setting ORDO_PG_SCHEMA. Asks 10 and 11 there need you; step 2 waits on ask 10. [[required-ref-to-external-refused]] is fixed in PR 20. The CI audit check is red on a new picomatch advisory with no patch: [[the-audit-check-fails-on-a]] needs you and blocks any merge to main. 0.5.2 waits for PR 13 (held).",
+ "date": "2026-11-18",
+ "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4 landed, step 2 (the peer line) is starting, and 27k is closed by ruling. Ask 12 there needs you: how a plain external takes its schema from a setting. [[the-audit-check-fails-on-a]]: the picomatch advisory is accepted, its exception is in PR 21 with CI running, and ask 2 on Dependabot needs you. [[required-ref-to-external-refused]] is fixed. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,11 +46,11 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "asks 10 and 11 need you"
+   "why": "ask 12 needs you; step 2 starting"
   },
   {
    "id": "the-audit-check-fails-on-a",
-   "why": "audit red, needs you"
+   "why": "ask 2 needs you; PR 21 in CI"
   },
   {
    "id": "required-ref-to-external-refused",

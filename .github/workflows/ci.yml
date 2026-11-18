@@ -885,6 +885,12 @@ jobs:
         if: env.REACHED == 'true'
         run: node scripts/ci-affected.test.mjs
 
+      # The dev audit excepts advisories by id (owner rulings); its judgement
+      # is tested here before it is trusted below.
+      - name: The dev audit's tests
+        if: env.REACHED == 'true'
+        run: node scripts/ci-npm-audit.test.mjs
+
       - name: cargo audit
         if: env.REACHED == 'true'
         run: cargo audit
@@ -901,6 +907,8 @@ jobs:
           done
           exit $fail
 
+      # High and critical fail, except the advisories listed by id in
+      # scripts/ci-npm-audit.mjs. The runtime audit above takes no exceptions.
       - name: npm audit, dev dependencies
         if: env.REACHED == 'true'
         run: |
@@ -909,6 +917,6 @@ jobs:
           for lock in $(git ls-files '*package-lock.json'); do
             dir=$(dirname "$lock")
             echo "== $dir (all)"
-            (cd "$dir" && npm audit --audit-level=high) || fail=1
+            (cd "$dir" && node "$GITHUB_WORKSPACE/scripts/ci-npm-audit.mjs") || fail=1
           done
           exit $fail

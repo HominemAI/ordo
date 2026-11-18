@@ -1583,3 +1583,8 @@
 {"seq": 1585, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 9, "at": "2026-11-17", "status": "decided", "text": "\"yes\" (go to build decisions 1 to 5 in order: schema setting, peer line with $caller, open sign-up, then note_viewer and its e2e)", "source": "record", "read": true}
 {"seq": 1586, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 8, "at": "2026-11-17T10:27:32Z", "status": "open", "text": "yes on now", "source": "page", "read": true}
 {"seq": 1587, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 8, "at": "2026-11-17", "status": "decided", "text": "\"yes on now\" (a plain Postgres external also takes its schema from a setting, built now together with the peer line)", "source": "record", "read": true}
+{"seq": 1588, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 10, "at": "2026-11-18T04:30:28Z", "status": "open", "text": "eli5", "source": "page", "read": true}
+{"seq": 1589, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 11, "at": "2026-11-18T04:32:27Z", "status": "open", "text": "explain what you mean by separating by schema", "source": "page", "read": true}
+{"seq": 1590, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 0, "at": "2026-11-18T04:32:30Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1591, "item": "the-audit-check-fails-on-a", "ask": 1, "at": "2026-11-18T04:40:43Z", "status": "open", "text": "severity is high...  can we upgrade instead? is there a new released version? check", "source": "page", "read": true}
+{"seq": 1592, "item": "the-audit-check-fails-on-a", "ask": 0, "at": "2026-11-18T04:40:47Z", "status": "decided", "text": "", "source": "page", "read": true}

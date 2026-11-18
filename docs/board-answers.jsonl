@@ -1605,3 +1605,4 @@
 {"seq": 1607, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 13, "at": "2026-11-18T05:58:34Z", "status": "open", "text": "Did we not have a ruling that included shared tables implies shared auth?", "source": "page", "read": true}
 {"seq": 1608, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 14, "at": "2026-11-18T06:02:03Z", "status": "open", "text": "Refer to above before we continue on this", "source": "page", "read": true}
 {"seq": 1609, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 15, "at": "2026-11-18T06:03:26Z", "status": "open", "text": "Figure out above first?", "source": "page", "read": true}
+{"seq": 1610, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 13, "at": "2026-11-18T06:29:50Z", "status": "open", "text": "I just don't know if it can work. Use an adverserial agent to come up with use cases for either case - joint and not joint.", "source": "page", "read": true}

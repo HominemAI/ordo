@@ -1,6 +1,6 @@
 {
  "date": "2026-11-18",
- "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: step 1 of 4 landed, step 2 (the peer line) is starting, and 27k is closed by ruling. Ask 12 there needs you: how a plain external takes its schema from a setting. [[the-audit-check-fails-on-a]]: the picomatch advisory is accepted, its exception is in PR 21 with CI running, and ask 2 on Dependabot needs you. [[required-ref-to-external-refused]] is fixed. 0.5.2 waits for PR 13 (held).",
+ "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: all 12 asks are ruled. Step 1 of 4 landed and step 2 is building: the peer line, and a label that swaps a plain external's schema. 27k is closed by ruling. [[the-audit-check-fails-on-a]]: the picomatch advisory is accepted and its exception is in PR 21 with CI running. [[required-ref-to-external-refused]] is fixed. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,11 +46,11 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "ask 12 needs you; step 2 starting"
+   "why": "step 2 of 4 building"
   },
   {
    "id": "the-audit-check-fails-on-a",
-   "why": "ask 2 needs you; PR 21 in CI"
+   "why": "PR 21 in CI"
   },
   {
    "id": "required-ref-to-external-refused",

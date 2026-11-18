@@ -1,6 +1,6 @@
 {
  "date": "2026-11-18",
- "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: all 12 asks are ruled. Step 1 of 4 landed and step 2 is building: the peer line, and a label that swaps a plain external's schema. 27k is closed by ruling. [[the-audit-check-fails-on-a]]: the picomatch advisory is accepted and its exception is in PR 21 with CI running. [[required-ref-to-external-refused]] is fixed. 0.5.2 waits for PR 13 (held).",
+ "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: all 12 asks are ruled. Step 1 of 4 landed and step 2 is building: the peer line, and a label that swaps a plain external's schema. 27k is closed by ruling. [[the-audit-check-fails-on-a]]: the picomatch advisory is accepted, its exception landed as PR 21, and the audit check is green again. [[required-ref-to-external-refused]] is fixed. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -50,7 +50,7 @@
   },
   {
    "id": "the-audit-check-fails-on-a",
-   "why": "PR 21 in CI"
+   "why": "landed, audit green"
   },
   {
    "id": "required-ref-to-external-refused",

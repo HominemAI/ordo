@@ -72,6 +72,9 @@ pub enum ProblemKind {
     NoGrant,
     /// A mapped column is gone, retyped, or nullable against the file.
     Changed,
+    /// A peer's schema holds no Ordo deployment, so `$caller` cannot be
+    /// resolved there.
+    PeerNotOrdo,
 }
 
 impl ProblemKind {
@@ -81,6 +84,7 @@ impl ProblemKind {
             ProblemKind::Missing => "external_missing",
             ProblemKind::NoGrant => "external_no_grant",
             ProblemKind::Changed => "external_changed",
+            ProblemKind::PeerNotOrdo => "peer_not_ordo",
         }
     }
 }
@@ -224,12 +228,15 @@ async fn check_one(
     let Some(src) = &e.external else {
         return Ok(());
     };
-    let table = format!("{}.{}", src.schema, src.table);
+    // The schema this environment reads: a peer's resolved schema, or a
+    // plain external's swap (`ordo_exec::peer`).
+    let pg = src.pg_schema();
+    let table = format!("{pg}.{}", src.table);
     let regenerate = format!(
         "Regenerate it with `ordo introspect --external {table}`, review the change and apply it"
     );
     let db = |what: &str, err: ordo_exec::PoolError| format!("reading {what} of {table}: {err}");
-    let Some(live) = migrate::table_columns(pool, &src.schema, &src.table)
+    let Some(live) = migrate::table_columns(pool, &pg, &src.table)
         .await
         .map_err(|err| db("the columns", err))?
     else {
@@ -244,7 +251,7 @@ async fn check_one(
         });
         return Ok(());
     };
-    if let Some(a) = migrate::access_to(pool, &src.schema, &src.table)
+    if let Some(a) = migrate::access_to(pool, &pg, &src.table)
         .await
         .map_err(|err| db("the grants", err))?
     {
@@ -253,14 +260,14 @@ async fn check_one(
             if !a.schema_usage {
                 grants.push(format!(
                     "GRANT USAGE ON SCHEMA {} TO {};",
-                    quoted(&src.schema),
+                    quoted(&pg),
                     quoted(&a.role)
                 ));
             }
             if !a.select {
                 grants.push(format!(
                     "GRANT SELECT ON {}.{} TO {};",
-                    quoted(&src.schema),
+                    quoted(&pg),
                     quoted(&src.table),
                     quoted(&a.role)
                 ));
@@ -352,6 +359,21 @@ pub async fn check(pool: &Pool, schema: &Schema) -> Result<ExternalReport, Strin
     for e in &schema.externals {
         check_one(pool, e, schema, &mut report).await?;
     }
+    if let Err(refusal) = ordo_exec::peer::check(pool, schema).await {
+        if let ordo_exec::peer::SchemaRefusal::Database(e) = refusal {
+            return Err(format!("reading the peer schemas: {e}"));
+        }
+        report.problems.push(Problem {
+            entity: schema
+                .externals
+                .iter()
+                .find(|e| e.external.as_ref().is_some_and(|x| x.peer.is_some()))
+                .map(|e| e.name.clone())
+                .unwrap_or_default(),
+            kind: ProblemKind::PeerNotOrdo,
+            detail: refusal.to_string(),
+        });
+    }
     report.present = present_not_ordos(pool, schema).await?;
     Ok(report)
 }
@@ -370,7 +392,7 @@ pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<Strin
         schema.externals.iter().any(|e| {
             e.external
                 .as_ref()
-                .is_some_and(|x| x.schema == s && x.table == t)
+                .is_some_and(|x| x.pg_schema() == s && x.table == t)
         })
     };
     let mut lines = Vec::new();

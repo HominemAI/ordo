@@ -45,6 +45,22 @@ pub struct Program {
     /// (ruled 2026-11-15, `external-entities`). Never an entity: the schema
     /// keeps these apart so DDL, diff, dev reset and erase never see one.
     pub externals: Vec<ExternalDecl>,
+    /// `peer journal`: a local nickname for another Ordo deployment in the
+    /// same database (owner rulings 2026-11-17,
+    /// `example-apps-notes-v2-plus-note_viewer` asks 5 and 10). An external
+    /// `from journal.notes` then reads the peer's `notes`, in the schema the
+    /// setting `ORDO_PEER_JOURNAL_SCHEMA` names, and `$caller` on it means
+    /// the peer's member for the same person.
+    pub peers: Vec<PeerDecl>,
+}
+
+/// `peer <name>`: a local nickname for another Ordo deployment. It does not
+/// name or change that deployment. The schema comes from the environment,
+/// never from the file, so one file works in every environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDecl {
+    pub name: Ident,
+    pub span: Span,
 }
 
 /// The key column's base type, as the `id` line states it:

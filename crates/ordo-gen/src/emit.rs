@@ -64,6 +64,7 @@ const IMPORTABLE: &[&str] = &[
     "entity",
     "every",
     "external",
+    "peer",
     "f",
     "fn",
     "g",
@@ -106,12 +107,23 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut synth_args: Vec<String> = Vec::new();
     let mut needs_external = false;
     let mut needs_key = false;
+    let needs_peer = !program.peers.is_empty();
 
     if let Some(d) = &program.domain {
         synth_args.push(match &d.version {
             Some(v) => format!("domain({}, {})", ts::str_lit(&d.name.name), ts::str_lit(v)),
             None => format!("domain({})", ts::str_lit(&d.name.name)),
         });
+    }
+    // Peers print before the externals that read them, as `synth` requires.
+    for p in &program.peers {
+        let bind = e.bind(&p.name.name);
+        body.push_str(&format!(
+            "const {bind} = peer({});\n\n",
+            ts::str_lit(&p.name.name)
+        ));
+        e.peers.insert(p.name.name.clone(), bind.clone());
+        synth_args.push(bind);
     }
     for ent in &program.entities {
         let bind = e.bind(&ent.name.name);
@@ -144,7 +156,7 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
         .iter()
         .copied()
         .filter(|n| {
-            // `key` and `external` are also option and field words, so a
+            // `key`, `external` and `peer` are also option and field words, so a
             // whole-word mention would import them for nothing, and the
             // package compiles under `noUnusedLocals`. Their uses are calls.
             let mentioned = mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n));
@@ -152,6 +164,8 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
                 needs_key
             } else if *n == "external" {
                 needs_external
+            } else if *n == "peer" {
+                needs_peer
             } else {
                 mentioned
             }
@@ -204,6 +218,9 @@ fn mentions(hay: &str, needle: &str) -> bool {
 #[derive(Default)]
 struct Emitter {
     used: BTreeMap<String, usize>,
+    /// Each `peer` line's nickname and the binding its `peer(...)` call got,
+    /// so an external `from journal.notes` passes `{ peer: journal }`.
+    peers: BTreeMap<String, String>,
     /// The parameters the op currently being emitted declares.
     ///
     /// `$caller` is the reason this field exists. It is an `Expr::Param` like
@@ -320,11 +337,14 @@ impl Emitter {
             s.push_str(&format!(".column({})", ts::str_lit(&f.column.name)));
             lines.push(format!("  {}: {s},", ts::key(&f.name.name)));
         }
-        let mut opts = format!(
-            "schema: {}, table: {}",
-            ts::str_lit(&x.schema.name),
-            ts::str_lit(&x.table.name)
-        );
+        let mut opts = match self.peers.get(&x.schema.name) {
+            Some(bind) => format!("peer: {bind}, table: {}", ts::str_lit(&x.table.name)),
+            None => format!(
+                "schema: {}, table: {}",
+                ts::str_lit(&x.schema.name),
+                ts::str_lit(&x.table.name)
+            ),
+        };
         if let Some(k) = &x.key {
             opts.push_str(&format!(", key: {}", ts::str_lit(&k.name)));
         }

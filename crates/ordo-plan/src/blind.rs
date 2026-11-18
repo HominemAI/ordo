@@ -113,6 +113,12 @@ fn cond(
             expr(e, p, space, params)?;
             expr(anchor, p, space, params)
         }
+        BCond::PeerCaller {
+            expr: e, caller, ..
+        } => {
+            expr(e, p, space, params)?;
+            expr(caller, p, space, params)
+        }
     }
 }
 

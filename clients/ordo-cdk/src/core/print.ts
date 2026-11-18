@@ -558,6 +558,8 @@ export function printDeclaration(d: Declaration): string {
   switch (d.kind) {
     case 'domain':
       return d.version ? `domain ${d.name} @ ${d.version}` : `domain ${d.name}`;
+    case 'peer':
+      return `peer ${d.name}`;
     case 'entity':
       return printEntity(d);
     case 'external':

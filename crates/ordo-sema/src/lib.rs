@@ -1377,6 +1377,7 @@ fn cond_reads_row(c: &BCond) -> bool {
         BCond::And(items) | BCond::Or(items) => items.iter().any(cond_reads_row),
         BCond::Not(inner) => cond_reads_row(inner),
         BCond::TreeWalk { expr, anchor, .. } => reads_row(expr) || reads_row(anchor),
+        BCond::PeerCaller { expr, caller, .. } => reads_row(expr) || reads_row(caller),
         // A semi-join is a read of other rows; the bind above has already
         // refused the shapes that could produce one here.
         BCond::Exists { .. } => true,
@@ -2544,7 +2545,8 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
         out.insert(
             e.name.clone(),
             ir::ExternalRead {
-                schema: src.schema.clone(),
+                schema: src.pg_schema(),
+                peer: src.peer.as_ref().map(|_| src.pg_schema()),
                 table: src.table.clone(),
                 key_column: src.key_column.clone(),
                 key_ty: src.key_ty,
@@ -2556,7 +2558,81 @@ pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
     Some(std::sync::Arc::new(out))
 }
 
+/// The peer's Postgres schema when `entity` is an external from a peer.
+fn peer_of(schema: &Schema, entity: &str) -> Option<String> {
+    let src = schema.entity(entity)?.external.as_ref()?;
+    src.peer.as_ref().map(|_| src.pg_schema())
+}
+
+/// The entity a bound alias reads, found in the scope or the query's joins.
+fn entity_of_alias(scope: &Scope, q: &Query, alias: &str) -> Option<String> {
+    fn in_scope(scope: &Scope, alias: &str) -> Option<String> {
+        match scope {
+            Scope::Entity { entity, alias: a } if a == alias => Some(entity.clone()),
+            Scope::Entity { .. } | Scope::Fields(_) => None,
+            Scope::Multi(v) => v.iter().find_map(|(_, s)| in_scope(s, alias)),
+            Scope::Layered(v) => v.iter().find_map(|s| in_scope(s, alias)),
+        }
+    }
+    in_scope(scope, alias).or_else(|| {
+        q.joins
+            .iter()
+            .find(|j| j.alias == alias)
+            .map(|j| j.table.clone())
+    })
+}
+
 impl<'a> Binder<'a> {
+    /// `field == $caller` or `field != $caller` in an op's filter, where the
+    /// field belongs to an external from a peer: `$caller` means the peer's
+    /// member for the same person, as in a guard (ask 2). Any other
+    /// comparison of such a field with `$caller` is refused, since only
+    /// equality has a meaning across two deployments.
+    #[allow(clippy::too_many_arguments)]
+    fn peer_caller_cmp(
+        &self,
+        op: ordo_syntax::CmpOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        l: &BExpr,
+        r: &BExpr,
+        scope: &Scope,
+        q: &Query,
+        span: Span,
+    ) -> Result<Option<BCond>, SemaError> {
+        let is_caller = |e: &Expr| matches!(e, Expr::Param { name, .. } if name == "caller");
+        let (col, caller) = if is_caller(rhs) {
+            (l, r)
+        } else if is_caller(lhs) {
+            (r, l)
+        } else {
+            return Ok(None);
+        };
+        let BExpr::Col { alias, .. } = col else {
+            return Ok(None);
+        };
+        let Some(peer) = entity_of_alias(scope, q, alias).and_then(|e| peer_of(self.schema, &e))
+        else {
+            return Ok(None);
+        };
+        let pc = BCond::PeerCaller {
+            expr: col.clone(),
+            caller: caller.clone(),
+            peer,
+        };
+        match op {
+            ordo_syntax::CmpOp::Eq => Ok(Some(pc)),
+            ordo_syntax::CmpOp::Ne => Ok(Some(BCond::Not(Box::new(pc)))),
+            _ => Err(err(
+                "peer_caller_compare",
+                span,
+                "rule: on a table of a peer, `$caller` is the peer's member for the same \
+                 person, so it is compared with `==` or `!=` only.\n\
+                 fix: write `field == $caller`",
+            )),
+        }
+    }
+
     fn alias(&mut self) -> String {
         let a = format!("t{}", self.alias_n);
         self.alias_n += 1;
@@ -3150,6 +3226,17 @@ impl<'a> Binder<'a> {
                     column: f.column(),
                     ty: f.ty.value_ty(),
                 };
+                if *caller {
+                    // A field of an external from a peer: `$caller` is the
+                    // peer's member for the same person (ask 2).
+                    if let Some(peer) = peer_of(self.schema, &lhs) {
+                        return Ok(BCond::PeerCaller {
+                            expr: col,
+                            caller: self.caller_expr(env),
+                            peer,
+                        });
+                    }
+                }
                 let rhs = if *caller {
                     self.caller_expr(env)
                 } else {
@@ -6268,6 +6355,9 @@ impl<'a> Binder<'a> {
                 }
                 let l = self.operand(lhs, scope, q, env)?;
                 let r = self.operand(rhs, scope, q, env)?;
+                if let Some(pc) = self.peer_caller_cmp(*op, lhs, rhs, &l, &r, scope, q, *span)? {
+                    return Ok(pc);
+                }
                 if is_doc(&l) || is_doc(&r) {
                     let (l, r) = doc_pair(l, r, *span)?;
                     return Ok(BCond::Cmp {

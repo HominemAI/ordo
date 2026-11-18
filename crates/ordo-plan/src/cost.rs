@@ -141,6 +141,7 @@ fn cond_has_blind(c: &BCond) -> bool {
         BCond::Not(i) => cond_has_blind(i),
         BCond::Exists { query, .. } => query_has_blind(query),
         BCond::TreeWalk { expr, anchor, .. } => expr_has_blind(expr) || expr_has_blind(anchor),
+        BCond::PeerCaller { expr, caller, .. } => expr_has_blind(expr) || expr_has_blind(caller),
     }
 }
 

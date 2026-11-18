@@ -1521,6 +1521,10 @@ fn cond_tables(c: &BCond, out: &mut Vec<(String, String)>) {
             expr_tables(expr, out);
             expr_tables(anchor, out);
         }
+        BCond::PeerCaller { expr, caller, .. } => {
+            expr_tables(expr, out);
+            expr_tables(caller, out);
+        }
     }
 }
 
@@ -1622,6 +1626,9 @@ struct Planner {
     /// Every alias in the statement that reads an external entity, so an
     /// `id` on it compares, joins and sorts by the raw key.
     ext_alias: std::collections::HashMap<String, ExternalRead>,
+    /// How many peer member lookups this statement has rendered, so each
+    /// takes aliases of its own ([`Planner::peer_caller`]).
+    peer_n: usize,
 }
 
 impl Planner {
@@ -1646,6 +1653,7 @@ impl Planner {
             legacy_eq: !PROVEN_EQUALITY,
             externals: None,
             ext_alias: std::collections::HashMap::new(),
+            peer_n: 0,
         }
     }
 
@@ -1733,6 +1741,76 @@ impl Planner {
 
     /// The space value as SQL — a literal when the door bound one, the
     /// reserved `$1` slot otherwise.
+    /// `expr` is a member id the person behind `caller` holds in the peer
+    /// deployment whose schema is `peer` (owner, 2026-11-16,
+    /// `example-apps-notes-v2-plus-note_viewer` ask 2).
+    ///
+    /// The join, from the caller out:
+    ///
+    /// 1. `members` here: the caller's row in this space gives the person's
+    ///    principal.
+    /// 2. `$authenticator` here: the sign-in subjects linked to it. Only an
+    ///    outside provider's subject counts (`oidc:`, `saml:`, `oauth2:`),
+    ///    the one both deployments hold for one person. A password name or a
+    ///    passkey id is local to a deployment and is never matched.
+    /// 3. `$authenticator` in the peer: the same subject, and its principal
+    ///    there. A retired link on either side does not count.
+    /// 4. `$principal` in the peer: an account that is not deleted.
+    /// 5. `members` in the peer: that principal's active members, in any
+    ///    space. The external has no `$space`, so a row in any of the peer's
+    ///    spaces is matched by the person's member of that space.
+    ///
+    /// Never null: a null `expr`, or no member in the peer, is false, so a
+    /// guard denies and `not` of it admits, as two-valued logic requires.
+    /// There is no fallback to the local member.
+    fn peer_caller(
+        &mut self,
+        expr: &BExpr,
+        caller: &BExpr,
+        peer: &str,
+    ) -> Result<String, PlanError> {
+        let x = self.expr(expr)?;
+        let who = self.expr(caller)?;
+        let space = self.space_sql();
+        let n = self.peer_n;
+        self.peer_n += 1;
+        let a = |s: &str| format!("$peer{n}_{s}");
+        let (lm, la, pa, pp, pm) = (a("lm"), a("la"), a("pa"), a("pp"), a("pm"));
+        self.sources.physical(&lm);
+        for e in [&la, &pa, &pp, &pm] {
+            self.sources.external(e);
+        }
+        let p = q(peer);
+        let c = |alias: &str, col: &str| format!("{}.{}", q(alias), q(col));
+        Ok(format!(
+            "({x} IS NOT NULL AND {x} IN (SELECT {pm_id} FROM {p}.{members} AS {pm_q}              JOIN {p}.{prin} AS {pp_q} ON {pp_id} = {pm_prin} AND {pp_del} = 0              JOIN {p}.{auth} AS {pa_q} ON {pa_prin} = {pm_prin} AND {pa_ret} = ''              JOIN {auth} AS {la_q} ON {la_auth} = {pa_auth} AND {la_ret} = ''              JOIN {members} AS {lm_q} ON {lm_prin} = {la_prin}              WHERE {lm_space} = {space} AND {lm_id} = {who} AND {lm_kind} = 'principal'              AND {pm_kind} = 'principal' AND {pm_status} = 'active'              AND (left({la_auth}, 5) = 'oidc:' OR left({la_auth}, 5) = 'saml:'              OR left({la_auth}, 7) = 'oauth2:')))",
+            members = q("members"),
+            prin = q("$principal"),
+            auth = q("$authenticator"),
+            pm_q = q(&pm),
+            pp_q = q(&pp),
+            pa_q = q(&pa),
+            la_q = q(&la),
+            lm_q = q(&lm),
+            pm_id = c(&pm, "id"),
+            pm_prin = c(&pm, "principal"),
+            pm_kind = c(&pm, "kind"),
+            pm_status = c(&pm, "status"),
+            pp_id = c(&pp, "id"),
+            pp_del = c(&pp, "deleted_at"),
+            pa_prin = c(&pa, "principal"),
+            pa_auth = c(&pa, "authenticator"),
+            pa_ret = c(&pa, "retired_case"),
+            la_auth = c(&la, "authenticator"),
+            la_ret = c(&la, "retired_case"),
+            la_prin = c(&la, "principal"),
+            lm_prin = c(&lm, "principal"),
+            lm_space = c(&lm, SPACE_COLUMN),
+            lm_id = c(&lm, "id"),
+            lm_kind = c(&lm, "kind"),
+        ))
+    }
+
     fn space_sql(&mut self) -> String {
         match self.space.clone() {
             Space::Bound(s) => format!("'{}'", s.replace('\'', "''")),
@@ -2806,6 +2884,7 @@ impl Planner {
                     if *negated { "NOT " } else { "" }
                 )
             }
+            BCond::PeerCaller { expr, caller, peer } => self.peer_caller(expr, caller, peer)?,
             BCond::TreeWalk {
                 expr,
                 tree,

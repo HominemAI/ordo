@@ -153,7 +153,10 @@ export interface ExternalNode {
   readonly kind: 'external';
   readonly name: string;
   readonly key: string | null;
+  /** The schema as written: the peer's nickname when `peer` is set. */
   readonly schema: string;
+  /** The `peer` this external reads from, or `null` for a plain schema. */
+  readonly peer: string | null;
   readonly table: string;
   readonly keyColumn: string;
   readonly keyType: ExternalKeyType;
@@ -347,5 +350,18 @@ export interface RoutineNode {
   readonly statements: readonly WriteStmtNode[];
 }
 
+/** `peer journal`: a local nickname for another Ordo deployment. */
+export interface PeerNode {
+  readonly kind: 'peer';
+  readonly name: string;
+}
+
 /** Anything `synth()` accepts, in written order. */
-export type Declaration = DomainNode | EntityNode | ExternalNode | OpNode | RoutineNode | ReleaseNode;
+export type Declaration =
+  | DomainNode
+  | PeerNode
+  | EntityNode
+  | ExternalNode
+  | OpNode
+  | RoutineNode
+  | ReleaseNode;

@@ -82,6 +82,23 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `external` is contextual the same way (ruled 2026-11-15,
             // `external-entities`): a declaration head only here.
             TokenKind::Ident(w) if w == "external" => prog.externals.push(external_decl(&mut p)?),
+            // `peer` is contextual the same way (owner, 2026-11-17,
+            // `example-apps-notes-v2-plus-note_viewer` ask 5).
+            TokenKind::Ident(w) if w == "peer" => {
+                let peer = peer_decl(&mut p)?;
+                if prog.peers.iter().any(|q| q.name.name == peer.name.name) {
+                    return Err(p.err_class_at(
+                        parser::PEER_NAME,
+                        peer.span,
+                        format!(
+                            "`peer {}` is declared twice. Keep one line; every external \
+                             `from {}.<table>` uses it",
+                            peer.name.name, peer.name.name
+                        ),
+                    ));
+                }
+                prog.peers.push(peer);
+            }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -1290,6 +1307,48 @@ fn spell_foreign(name: &str) -> String {
     } else {
         format!("\"{name}\"")
     }
+}
+
+/// `peer <name>` (owner, 2026-11-17, `example-apps-notes-v2-plus-note_viewer`
+/// asks 5 and 10): a local nickname for another Ordo deployment.
+///
+/// The name is lowercase letters and digits, so the setting that names the
+/// peer's schema, `ORDO_PEER_<NAME>_SCHEMA`, is the name upper-cased with no
+/// two names sharing one variable.
+fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
+    let start = p.bump().span; // `peer`
+    let name = ident(p, "a peer name")?;
+    let span = start.to(name.span);
+    let ok = name
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if !ok {
+        return Err(p.err_class_at(
+            parser::PEER_NAME,
+            name.span,
+            format!(
+                "`peer {}`: a peer name is lowercase letters and digits, starting with a \
+                 letter, such as `peer journal`. It is upper-cased into the setting \
+                 `ORDO_PEER_<NAME>_SCHEMA`, so two names must never meet there",
+                name.name
+            ),
+        ));
+    }
+    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_here(format!(
+            "`peer {}` is the whole line. The peer's schema is set by \
+             `ORDO_PEER_{}_SCHEMA`, never in the file",
+            name.name,
+            name.name.to_ascii_uppercase()
+        )));
+    }
+    Ok(PeerDecl { name, span })
 }
 
 /// `external <name> [(key: k)] from <schema>.<table> shared { … }`

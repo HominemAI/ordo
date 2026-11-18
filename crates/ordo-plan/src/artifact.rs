@@ -1418,6 +1418,13 @@ fn entity_artifact(e: &ordo_schema::Entity) -> Value {
                 .map(|(f, c)| json!({ "field": f, "column": c }))
                 .collect::<Vec<_>>(),
         });
+        // A peer's table: `schema` above is the nickname as written, never
+        // the schema this environment resolves, so the artifact and its
+        // identity are the same in every environment. Absent on a plain
+        // external, so its bytes do not change.
+        if let Some(p) = &x.peer {
+            out["source"]["peer"] = json!(p.name);
+        }
     }
     out
 }
@@ -2882,6 +2889,12 @@ impl Reads {
                 self.expr(expr);
                 self.expr(anchor);
                 self.trees.push(tree.clone());
+            }
+            // A peer's members, for the same person: a set, never the one
+            // row a `$caller` comparison pins, so it bounds nothing.
+            BCond::PeerCaller { expr, caller, .. } => {
+                self.expr(expr);
+                self.expr(caller);
             }
         }
     }

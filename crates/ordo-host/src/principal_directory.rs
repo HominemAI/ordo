@@ -118,17 +118,23 @@ pub const SIGNEDIN_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$signedin" (
   PRIMARY KEY ("principal")
 )"#;
 
+/// Every statement that makes the directory's tables, in order. The shape
+/// gate's shadow takes them too when a program reads a peer
+/// (`crate::shape`), since `$caller` there joins `$authenticator`.
+pub fn directory_ddl() -> impl Iterator<Item = &'static str> {
+    [PRINCIPAL_DDL, PRINCIPAL_DELETED_DDL, AUTHENTICATOR_DDL]
+        .into_iter()
+        .chain(AUTHENTICATOR_RECOVERY_DDL)
+        .chain([AUTHENTICATOR_INDEX_DDL, SIGNEDIN_DDL])
+}
+
 /// Create `$principal` and `$authenticator`.
 ///
 /// Called at boot beside `$credential` and `$sessionrevocation`. Retry-once
 /// for the reason `Pool::ensure_platform_tables` does it: `CREATE TABLE IF
 /// NOT EXISTS` is not race-free between two processes booting together.
 pub async fn ensure_table(pool: &Pool) -> Result<(), PoolError> {
-    for ddl in [PRINCIPAL_DDL, PRINCIPAL_DELETED_DDL, AUTHENTICATOR_DDL]
-        .into_iter()
-        .chain(AUTHENTICATOR_RECOVERY_DDL)
-        .chain([AUTHENTICATOR_INDEX_DDL, SIGNEDIN_DDL])
-    {
+    for ddl in directory_ddl() {
         if pool.rows(ddl).await.is_err() {
             pool.rows(ddl).await?;
         }

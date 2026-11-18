@@ -1,0 +1,18 @@
+peer journal
+
+external entries from journal.notes shared {
+  id: text <- "id"
+  title: text <- "title"
+  owner: text <- "owner"
+  access read owner == $caller
+}
+
+external customers from crm.customers shared {
+  id <- "customer_id"
+  name: text <- "full_name"
+}
+
+op myEntries =
+  entries[title]
+    sort title
+    take 50

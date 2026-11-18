@@ -13104,7 +13104,15 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       the `peer <name>` line, `ORDO_PEER_<NAME>_SCHEMA`, `$caller` on a
       peer's table, and the plain external's `ORDO_EXTERNAL_<NAME>_SCHEMA`
       swap (ask 12) are built on this setting. Code: `ordo_exec::peer`.
-      Tests: `crates/ordo-host/tests/peer_entities.rs`. Not yet on the board.
+      Tests: `crates/ordo-host/tests/peer_entities.rs`. Board:
+      `example-apps-notes-v2-plus-note_viewer`.
+      **Note, 2026-11-18 (asks 13 to 16 ruled):** still to build on the
+      peer line, in order: the matching rule (provider fingerprint plus
+      subject, a double match refused, start refusals); real database
+      grants, a role per deployment (waits on ask 17); app users signing in
+      through the identity service. Peers stay off `main` until all 3 land.
+      Tying a peer's spaces to the reader's is filed for later, board
+      `peer-spaces-tied`.
 - [ ] **27l · Audit what the deployment's and each tenant's database hold,
       and who owns what.** §8. Board: `deploy-schema-audit`.
 - [ ] **27m · Who may delete a note's owned rows is the app developer's

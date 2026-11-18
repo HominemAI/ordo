@@ -1,6 +1,6 @@
 {
  "date": "2026-11-18",
- "text": "2026-11-17 [[example-apps-notes-v2-plus-note_viewer]]: steps 1 and 2 of 4 are on bleeding. A 3-expert panel agreed a rule for who counts as the same person in a peer; asks 13 to 16 there need you. It fixes a hole in step 2, where a reused connection name can match the wrong person, so peers stay off main until it is built. Ask 16 is a new step: the identity service as a sign-in provider for apps. 0.5.2 waits for PR 13 (held).",
+ "text": "[[example-apps-notes-v2-plus-note_viewer]]: asks 13 to 16 are ruled. The matching rule for who is the same person in a peer is being built. Real database grants are next and wait on ask 17, the spelling of the reader line. Tying spaces is filed for later as [[peer-spaces-tied]]. Peers stay off main until the rule, the grants and app sign-in through the identity service land. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,15 +46,11 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "asks 13 to 16 need you"
+   "why": "ask 17 needs you"
   },
   {
-   "id": "the-audit-check-fails-on-a",
-   "why": "landed, audit green"
-  },
-  {
-   "id": "required-ref-to-external-refused",
-   "why": "fixed, PR 20"
+   "id": "peer-spaces-tied",
+   "why": "filed for later"
   }
  ]
 }

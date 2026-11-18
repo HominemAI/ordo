@@ -1606,3 +1606,12 @@
 {"seq": 1608, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 14, "at": "2026-11-18T06:02:03Z", "status": "open", "text": "Refer to above before we continue on this", "source": "page", "read": true}
 {"seq": 1609, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 15, "at": "2026-11-18T06:03:26Z", "status": "open", "text": "Figure out above first?", "source": "page", "read": true}
 {"seq": 1610, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 13, "at": "2026-11-18T06:29:50Z", "status": "open", "text": "I just don't know if it can work. Use an adverserial agent to come up with use cases for either case - joint and not joint.", "source": "page", "read": true}
+{"seq": 1611, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 13, "at": "2026-11-18T07:58:44Z", "status": "open", "text": "agreed", "source": "page", "read": true}
+{"seq": 1612, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 14, "at": "2026-11-18T07:59:49Z", "status": "open", "text": "No, it should be now. We can nuke my deployment if necessary it houses nothing.", "source": "page", "read": true}
+{"seq": 1613, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 15, "at": "2026-11-18T08:00:27Z", "status": "open", "text": "Okay. Document the gap. Put it on v2 roadmap", "source": "page", "read": true}
+{"seq": 1614, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 16, "at": "2026-11-18T08:00:34Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1615, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 0, "at": "2026-11-18T08:00:39Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1616, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 13, "at": "2026-11-18", "status": "decided", "text": "agreed", "source": "record", "read": true}
+{"seq": 1617, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 14, "at": "2026-11-18", "status": "decided", "text": "No, it should be now. We can nuke my deployment if necessary it houses nothing.", "source": "record", "read": true}
+{"seq": 1618, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 15, "at": "2026-11-18", "status": "decided", "text": "Okay. Document the gap. Put it on v2 roadmap", "source": "record", "read": true}
+{"seq": 1619, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 16, "at": "2026-11-18", "status": "decided", "text": "ok", "source": "record", "read": true}

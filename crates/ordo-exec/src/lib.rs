@@ -57,6 +57,7 @@ pub mod metrics;
 pub mod migrate;
 pub mod nfc;
 pub mod nodes;
+pub mod peer;
 mod pool_error;
 pub mod prune;
 pub mod registry;
@@ -143,9 +144,17 @@ pub const SCHEMA_MAX_LEN: usize = 41;
 /// unset or blank. The one reader of the variable; it does not check the
 /// name, which [`check_schema_name`] does where a refusal can be answered.
 pub fn schema_from_env() -> String {
-    match std::env::var(SCHEMA_ENV) {
-        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => DEFAULT_SCHEMA.to_string(),
+    schema_setting(SCHEMA_ENV).unwrap_or_else(|| DEFAULT_SCHEMA.to_string())
+}
+
+/// A setting that names a Postgres schema, as this process was given it:
+/// trimmed, and `None` when unset or blank. The one reader of every schema
+/// setting: the deployment's own ([`SCHEMA_ENV`]) and each peer's
+/// ([`peer::schema_env`]). A later kind of schema setting reads here too.
+pub fn schema_setting(var: &str) -> Option<String> {
+    match std::env::var(var) {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => None,
     }
 }
 
@@ -159,31 +168,40 @@ pub fn schema_from_env() -> String {
 /// names Postgres keeps (`pg_*`, `information_schema`) and names Ordo keeps
 /// for its shadow schemas (`ordo_shadow*`).
 pub fn check_schema_name(name: &str) -> Result<(), String> {
-    let fix = format!(
-        "Set {SCHEMA_ENV} to another name, such as `notes`, or unset it to use \
-         `{DEFAULT_SCHEMA}`."
-    );
+    check_schema_setting(
+        SCHEMA_ENV,
+        name,
+        &format!(
+            "Set {SCHEMA_ENV} to another name, such as `notes`, or unset it to use \
+             `{DEFAULT_SCHEMA}`."
+        ),
+    )
+}
+
+/// [`check_schema_name`] for any schema setting: `var` is the setting the
+/// refusal names, and `fix` the sentence that says what to set.
+pub fn check_schema_setting(var: &str, name: &str, fix: &str) -> Result<(), String> {
     if name.len() > SCHEMA_MAX_LEN {
         return Err(format!(
-            "{SCHEMA_ENV} is `{name}`, which is {} bytes; a schema name is at most \
+            "{var} is `{name}`, which is {} bytes; a schema name is at most \
              {SCHEMA_MAX_LEN}, so Ordo's shadow of it fits Postgres' 63. {fix}",
             name.len()
         ));
     }
     if name.is_empty() || !valid_database_name(name) {
         return Err(format!(
-            "{SCHEMA_ENV} is `{name}`; a schema name is lowercase letters, digits and \
+            "{var} is `{name}`; a schema name is lowercase letters, digits and \
              underscores, starting with a letter or an underscore. {fix}"
         ));
     }
     if name.starts_with("pg_") || name == "information_schema" {
         return Err(format!(
-            "{SCHEMA_ENV} is `{name}`, a name Postgres keeps for itself. {fix}"
+            "{var} is `{name}`, a name Postgres keeps for itself. {fix}"
         ));
     }
     if name.starts_with(shape::SHADOW) {
         return Err(format!(
-            "{SCHEMA_ENV} is `{name}`; names starting `{}` are Ordo's shadow schemas, \
+            "{var} is `{name}`; names starting `{}` are Ordo's shadow schemas, \
              which it drops and rebuilds. {fix}",
             shape::SHADOW
         ));

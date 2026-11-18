@@ -27,6 +27,7 @@ import type {
   ExternalFieldNode,
   ExternalKeyType,
   ExternalNode,
+  PeerNode,
   FieldKindNode,
   FieldNode,
   GuardClauseNode,
@@ -804,15 +805,57 @@ export function entity(
   return new Entity(name, fields, options);
 }
 
-export interface ExternalOptions {
+/**
+ * `peer journal`: a local nickname for another Ordo deployment in the same
+ * database. An external with `{ peer: journal, table: 'notes' }` reads the
+ * peer's `notes`, in the schema `ORDO_PEER_JOURNAL_SCHEMA` names, and
+ * `$caller` on it means the peer's member for the same person. Pass the
+ * peer to `synth` before the externals that read it.
+ */
+export class Peer {
+  readonly kind = 'peer' as const;
+  readonly name: string;
+
+  constructor(name: string) {
+    if (!/^[a-z][a-z0-9]*$/.test(name)) {
+      throw new Error(
+        `peer_name: \`peer ${name}\`: a peer name is lowercase letters and digits, ` +
+          'starting with a letter. It is upper-cased into ORDO_PEER_<NAME>_SCHEMA',
+      );
+    }
+    this.name = name;
+  }
+
+  node(): PeerNode {
+    return { kind: 'peer', name: this.name };
+  }
+}
+
+/** `peer('journal')`: see {@link Peer}. */
+export function peer(name: string): Peer {
+  return new Peer(name);
+}
+
+/** Where an external's table lives: a schema written out, or a {@link Peer}. */
+type ExternalWhere =
+  | {
+      /** The Postgres schema the foreign table lives in. Never split from `table` on a dot. */
+      readonly schema: string;
+      readonly peer?: never;
+    }
+  | {
+      /** The other Ordo deployment the table belongs to. */
+      readonly peer: Peer;
+      readonly schema?: never;
+    };
+
+export type ExternalOptions = ExternalWhere & {
   /** `external projects (key: proj)`: the typed-id prefix override. */
   readonly key?: string;
-  /** The Postgres schema the foreign table lives in. Never split from `table` on a dot. */
-  readonly schema: string;
   readonly table: string;
   /** Required, and only ever `true`: every space reads every row. */
   readonly shared: true;
-}
+};
 
 /** The fields of an external: the key line, and mapped fields. */
 export type ExternalFields = { readonly id: KeySpec } & {
@@ -825,6 +868,7 @@ export class External implements Sourceable {
   readonly name: string;
   readonly key: string | null;
   readonly schema: string;
+  readonly peer: string | null;
   readonly table: string;
   readonly keySpec: KeySpec;
   readonly fields: ExternalFieldNode[];
@@ -837,7 +881,18 @@ export class External implements Sourceable {
     }
     this.name = name;
     this.key = options.key ?? null;
-    this.schema = options.schema;
+    if (options.peer !== undefined && options.schema !== undefined) {
+      throw new Error(`external ${name}: name a \`schema\` or a \`peer\`, not both`);
+    }
+    if (options.peer instanceof Peer) {
+      this.peer = options.peer.name;
+      this.schema = options.peer.name;
+    } else if (typeof options.schema === 'string') {
+      this.peer = null;
+      this.schema = options.schema;
+    } else {
+      throw new Error(`external ${name}: name a \`schema\` or a \`peer\``);
+    }
     this.table = options.table;
     this.keySpec = fields.id;
     if (!(this.keySpec instanceof KeySpec)) {
@@ -899,6 +954,7 @@ export class External implements Sourceable {
       name: this.name,
       key: this.key,
       schema: this.schema,
+      peer: this.peer,
       table: this.table,
       keyColumn: this.keySpec.column,
       keyType: this.keySpec.type,
@@ -1050,10 +1106,14 @@ export function op<P extends Record<string, TypeSpec>>(
 // ── synth ────────────────────────────────────────────────────────────────
 
 /** Anything `synth` accepts: a declaration, or a builder that produces one. */
-export type Synthesizable = Declaration | Entity | External | Op | Routine;
+export type Synthesizable = Declaration | Peer | Entity | External | Op | Routine;
 
 function declaration(d: Synthesizable): Declaration {
-  return d instanceof Entity || d instanceof External || d instanceof Op || d instanceof Routine
+  return d instanceof Peer ||
+    d instanceof Entity ||
+    d instanceof External ||
+    d instanceof Op ||
+    d instanceof Routine
     ? d.node()
     : d;
 }
@@ -1069,8 +1129,45 @@ function declaration(d: Synthesizable): Declaration {
 export function synth(...decls: Synthesizable[]): string {
   const nodes = decls.map(declaration);
   checkExternalRefs(nodes);
+  checkPeers(nodes);
   const out = nodes.map(printDeclaration);
   return out.join('\n\n') + '\n';
+}
+
+/**
+ * Every peer an external reads is passed to `synth`, once, before that
+ * external, and every peer passed is read. Without its `peer` line,
+ * `from journal.notes` would read a plain schema named `journal`, so a
+ * missing peer is refused here rather than printed.
+ */
+function checkPeers(nodes: Declaration[]): void {
+  const declared = new Set<string>();
+  const read = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind === 'peer') {
+      if (declared.has(n.name)) {
+        throw new Error(`peer_name: \`peer ${n.name}\` is passed twice; pass it once`);
+      }
+      declared.add(n.name);
+    }
+    if (n.kind === 'external' && n.peer !== null) {
+      if (!declared.has(n.peer)) {
+        throw new Error(
+          `peer_undeclared: \`${n.name}\` reads peer \`${n.peer}\`, which is not passed to ` +
+            'synth before it. Pass the peer first: synth(journal, entries)',
+        );
+      }
+      read.add(n.peer);
+    }
+  }
+  for (const p of declared) {
+    if (!read.has(p)) {
+      throw new Error(
+        `peer_unused: \`peer ${p}\` is read by no external. Remove it, or read a table with ` +
+          `external(name, fields, { peer: ${p}, table: '…', shared: true })`,
+      );
+    }
+  }
 }
 
 /**

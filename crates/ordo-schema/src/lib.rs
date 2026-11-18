@@ -281,8 +281,19 @@ pub struct Entity {
 /// Where an external entity's rows come from, and how each field reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalSource {
-    /// The Postgres schema the foreign table lives in.
+    /// The Postgres schema the foreign table lives in, as the file writes
+    /// it. For a table of a peer this is the peer's nickname, and the real
+    /// schema is [`PeerSource::schema`].
     pub schema: String,
+    /// `Some` when `schema` names a `peer` of the program (owner, 2026-11-17,
+    /// `example-apps-notes-v2-plus-note_viewer` asks 2, 5 and 10): the table
+    /// belongs to another Ordo deployment in the same database, and
+    /// `$caller` on it means that deployment's member for the same person.
+    pub peer: Option<PeerSource>,
+    /// For a plain external: the schema the deployment owner swapped in with
+    /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA` (owner, 2026-11-17, ask 12). `None`
+    /// reads `schema` exactly as written. Never set on a peer's table.
+    pub swapped: Option<String>,
     pub table: String,
     /// The one unique, non-null key column. Every comparison, join and
     /// sort on the entity's `id` uses it raw, so the foreign index serves.
@@ -292,7 +303,38 @@ pub struct ExternalSource {
     pub columns: Vec<(String, String)>,
 }
 
+/// The peer an external reads from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerSource {
+    /// The nickname of the `peer` line.
+    pub name: String,
+    /// The peer's Postgres schema, from `ORDO_PEER_<NAME>_SCHEMA`. `None`
+    /// until the deployment resolves it (`ordo_exec::peer`): a compiled
+    /// program is the same in every environment, and the schema is not.
+    pub schema: Option<String>,
+}
+
+/// The schema an unresolved peer reads, which no deployment can create: a
+/// program that skipped resolution fails on a missing relation and never
+/// reads a plain schema that happens to share the nickname.
+pub fn unresolved_peer_schema(peer: &str) -> String {
+    format!("$unresolved peer {peer}")
+}
+
 impl ExternalSource {
+    /// The Postgres schema the table is read from: for a plain external the
+    /// written schema, or the one its setting swapped in; for a peer's table
+    /// the resolved schema.
+    pub fn pg_schema(&self) -> String {
+        match &self.peer {
+            None => self.swapped.clone().unwrap_or_else(|| self.schema.clone()),
+            Some(PeerSource {
+                schema: Some(s), ..
+            }) => s.clone(),
+            Some(PeerSource { name, schema: None }) => unresolved_peer_schema(name),
+        }
+    }
+
     /// The foreign column a field reads.
     pub fn column(&self, field: &str) -> Option<&str> {
         self.columns
@@ -393,6 +435,9 @@ pub struct Schema {
     /// The program's backend functions, checked by [`function::check`].
     /// Called through `POST /v1/fn/<name>`, never as ops.
     pub functions: Vec<ordo_syntax::FunctionDecl>,
+    /// The nicknames of the program's `peer` lines, in the order written.
+    /// Each is read by at least one external.
+    pub peers: Vec<String>,
 }
 
 impl Schema {
@@ -863,7 +908,39 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
             });
         }
         by_name.insert(decl.name.name.clone(), entities.len());
-        entities.push(lower_external(decl, keys)?);
+        let mut lowered = lower_external(decl, keys)?;
+        if program
+            .peers
+            .iter()
+            .any(|p| p.name.name == decl.schema.name)
+        {
+            if let Some(src) = lowered.external.as_mut() {
+                src.peer = Some(PeerSource {
+                    name: decl.schema.name.clone(),
+                    schema: None,
+                });
+            }
+        }
+        entities.push(lowered);
+    }
+    // A `peer` line no external reads is refused: it would still ask the
+    // deployment owner for a setting that changes nothing.
+    for peer in &program.peers {
+        if !program
+            .externals
+            .iter()
+            .any(|x| x.schema.name == peer.name.name)
+        {
+            return Err(SchemaError {
+                code: "peer_unused",
+                message: format!(
+                    "`peer {0}` is read by no external. Write `external <name> from \
+                     {0}.<table> shared {{ … }}`, or remove the line",
+                    peer.name.name
+                ),
+                span: peer.span,
+            });
+        }
     }
     check_external_refs(&entities, &by_name, program)?;
 
@@ -1025,6 +1102,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
+        peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
     };
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
@@ -1130,6 +1208,8 @@ fn lower_external(decl: &ExternalDecl, keys: &KeyTable) -> Result<Entity, Schema
         }),
         external: Some(ExternalSource {
             schema: decl.schema.name.clone(),
+            peer: None,
+            swapped: None,
             table: decl.table.name.clone(),
             key_column: decl.key_column.name.clone(),
             key_ty: decl.key_ty,
@@ -2175,6 +2255,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         secrets: Vec::new(),
         functions: Vec::new(),
         externals: Vec::new(),
+        peers: Vec::new(),
     }
 }
 
@@ -2756,6 +2837,7 @@ pub fn std_ops(schema: &Schema) -> Program {
         secrets: Vec::new(),
         functions: Vec::new(),
         externals: Vec::new(),
+        peers: Vec::new(),
     }
 }
 

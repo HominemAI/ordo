@@ -333,3 +333,59 @@ external customers from crm.customers shared {
     assert_eq!(code, "public_no_field");
     assert!(msg.contains("Add a field to the translation"), "{msg}");
 }
+
+// ── peers (owner, 2026-11-17, `example-apps-notes-v2-plus-note_viewer`) ──
+
+const VIEWER: &str = r#"
+peer journal
+external entries from journal.notes shared {
+  id: text <- id
+  title: text <- title
+  owner: text <- owner
+  access read owner == $caller
+}
+external customers from crm.customers shared {
+  id <- "customer_id"
+}
+"#;
+
+#[test]
+fn a_peer_marks_the_externals_that_read_it() {
+    let s = schema_of(VIEWER);
+    assert_eq!(s.peers, ["journal"]);
+    let entries = s.entity("entries").unwrap().external.clone().unwrap();
+    let peer = entries.peer.clone().expect("a peer's table");
+    assert_eq!(peer.name, "journal");
+    assert_eq!(
+        peer.schema, None,
+        "the schema is the environment's, never the file's"
+    );
+    assert_eq!(
+        entries.pg_schema(),
+        ordo_schema::unresolved_peer_schema("journal"),
+        "unresolved, it reads a schema nobody can create"
+    );
+    // The same prefix with no `peer` line is a plain schema, as today.
+    let customers = s.entity("customers").unwrap().external.clone().unwrap();
+    assert!(customers.peer.is_none());
+    assert_eq!(customers.pg_schema(), "crm");
+    // A peer's table is still an external: no DDL.
+    assert!(!ddl_for(&s).unwrap().contains("notes"));
+}
+
+#[test]
+fn a_peer_no_external_reads_is_refused() {
+    let (code, msg) = refused(
+        "peer journal\nexternal customers from crm.customers shared {\n  id <- \"customer_id\"\n}\n",
+    );
+    assert_eq!(code, "peer_unused", "{msg}");
+    assert!(msg.contains("journal.<table>"), "{msg}");
+}
+
+#[test]
+fn without_the_peer_line_the_nickname_is_a_plain_schema() {
+    let s = schema_of("external entries from journal.notes shared {\n  id: text <- id\n}\n");
+    let src = s.entity("entries").unwrap().external.clone().unwrap();
+    assert!(src.peer.is_none());
+    assert_eq!(src.pg_schema(), "journal");
+}

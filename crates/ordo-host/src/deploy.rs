@@ -374,6 +374,15 @@ pub enum LoadRefusal {
         version: String,
         drift: Vec<Drift>,
     },
+    /// An external's schema setting refused: a peer's
+    /// `ORDO_PEER_<NAME>_SCHEMA` unset, bad, this deployment's own, or a
+    /// schema with no Ordo deployment in it; or a plain external's
+    /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA` that is not a schema name. The boot
+    /// is refused naming the variable.
+    ExternalSchema {
+        version: String,
+        refusal: ordo_exec::peer::SchemaRefusal,
+    },
     Registry(RegistryRefusal),
     Store(ordo_exec::PoolError),
 }
@@ -402,6 +411,9 @@ impl std::fmt::Display for LoadRefusal {
                  that could shadow it would answer its own audit questions"
             ),
             LoadRefusal::Shape { version, refusal } => {
+                write!(f, "version `{version}`: {refusal}")
+            }
+            LoadRefusal::ExternalSchema { version, refusal } => {
                 write!(f, "version `{version}`: {refusal}")
             }
             LoadRefusal::SchemaDrift { version, drift } => write!(
@@ -690,6 +702,18 @@ async fn gate_fixture(
     // the ordering of the two assignments cannot silently matter.
     let mut fixture = compiled.in_space(&space.0);
     fixture.keys = keys.clone();
+    // Each external's schema, from its setting (a peer's, or a plain
+    // external's swap), before anything plans a statement: the compiled
+    // program is the same in every environment, and the schema is not.
+    // A peer schema must hold an Ordo deployment.
+    let schema_refusal = |refusal| LoadRefusal::ExternalSchema {
+        version: version.to_string(),
+        refusal,
+    };
+    ordo_exec::peer::resolve(&mut fixture.schema, pool.schema()).map_err(schema_refusal)?;
+    ordo_exec::peer::check(pool, &fixture.schema)
+        .await
+        .map_err(schema_refusal)?;
     let fixture = Arc::new(fixture);
 
     // Registration's own refusal, before a shadow build pays for finding

@@ -2064,6 +2064,14 @@ entity orders {
 - `access read <walk>` is the one guard. It reads the row's own fields and
   `$caller`.
 - `external` is contextual. A field can still be named `external`.
+- The schema can differ per environment (owner, 2026-11-17). The setting
+  `ORDO_EXTERNAL_<SCHEMA>_SCHEMA`, the schema as written and upper-cased,
+  swaps it: `ORDO_EXTERNAL_CRM_SCHEMA=crm_dev` reads `crm_dev.customers`
+  where the file says `crm.customers`. Unset, the schema is as written. A bad
+  value refuses the boot naming the variable. A schema written in quotes that
+  is not lowercase letters, digits and underscores (`"Legacy"`) has no
+  variable and is never swapped. A name that is also a `peer` is read by the
+  peer's own setting (below).
 
 How it reads:
 
@@ -2179,6 +2187,62 @@ Refusals, each naming the fix:
 | `external_no_grant` | at plan, apply or a watcher pass: Ordo's role cannot read the table |
 | `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
 | `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); `public` on the `id` line; or `whole` anchored on one |
+
+### `peer`: another Ordo deployment's tables [ruled 2026-11-17, built]
+
+Two Ordo deployments can share one database, each in its own schema
+(`ORDO_PG_SCHEMA`). A `peer` line lets one read the other's tables.
+
+```
+peer journal
+
+external entries from journal.notes shared {
+  id: text <- "id"
+  title: text <- "title"
+  owner: text <- "owner"
+  access read owner == $caller
+}
+```
+
+- `peer journal` declares a local nickname for another Ordo deployment. It
+  does not name or change that deployment.
+- In `from journal.notes`, `journal` is the nickname and `notes` is the real
+  table in the peer. Without a `peer journal` line, `journal` is a plain
+  schema, as for any external.
+- The file never holds the peer's schema. The deployment owner sets
+  `ORDO_PEER_JOURNAL_SCHEMA`, the nickname upper-cased, to the schema the other
+  deployment's `ORDO_PG_SCHEMA` names (`public` when it sets none).
+- The boot is refused, naming the variable, when it is unset, is not a schema
+  name, names this deployment's own schema, or names a schema with no Ordo
+  deployment in it. `ordo plan` and the apply say the last as
+  `peer_not_ordo`.
+- A peer name is lowercase letters and digits, starting with a letter
+  (`peer_name`), so no two names share a variable. It is declared once, and a
+  `peer` line no external reads is refused (`peer_unused`).
+- Everything else is as for an external: read-only, `shared`, no DDL.
+
+**`$caller` on a peer's table** is the peer's member for the same person.
+The guard is written exactly as on a native entity. Ordo finds the member
+through the sign-in subject both deployments hold for one person:
+
+1. The caller's member here gives their principal.
+2. The principal's sign-in links here (`$authenticator`) give its subjects.
+   Only an outside provider's subject counts (`oidc:`, `saml:`, `oauth2:`),
+   such as the shared identity service. A password name or a passkey is
+   local to one deployment and links nobody.
+3. The peer's links with the same subject give the peer's principal. A
+   retired link, or a deleted account, does not count.
+4. That principal's active members in the peer, in any of its spaces.
+
+`field == $caller` holds when the field is one of those member ids, and
+`field != $caller` when it is not. A person with no member in the peer reads
+no guarded rows. It never errors and never falls back to the local member.
+The same holds for `$caller` in an op's filter on the peer's table. Any other
+comparison of such a field with `$caller` is refused (`peer_caller_compare`).
+On a plain external, `$caller` is the local member, as before.
+
+The peer is in the same database. A deployment that keeps a tenant in a
+database of its own does not reach a peer from there.
 
 ---
 

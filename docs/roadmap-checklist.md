@@ -13100,6 +13100,11 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       - The schema is created at first start and never dropped.
       - A bad name refuses the boot naming the setting.
       - Tests: `crates/ordo-host/tests/deployment_schema.rs`.
+      **Note, 2026-11-17 (branch `peer-line`, step 2 of the example apps):**
+      the `peer <name>` line, `ORDO_PEER_<NAME>_SCHEMA`, `$caller` on a
+      peer's table, and the plain external's `ORDO_EXTERNAL_<NAME>_SCHEMA`
+      swap (ask 12) are built on this setting. Code: `ordo_exec::peer`.
+      Tests: `crates/ordo-host/tests/peer_entities.rs`. Not yet on the board.
 - [ ] **27l · Audit what the deployment's and each tenant's database hold,
       and who owns what.** §8. Board: `deploy-schema-audit`.
 - [ ] **27m · Who may delete a note's owned rows is the app developer's

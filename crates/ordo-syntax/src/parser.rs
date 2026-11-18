@@ -52,6 +52,9 @@ pub const INVALID_SECRET_HOST: &str = "invalid_secret_host";
 /// `$caller` inside a release rule. The seat being released is `$member`,
 /// and the rule is about that seat whoever asks (27aq).
 pub const RELEASE_SUBJECT: &str = "release_subject";
+/// A `peer` line that cannot be one: a name that is not lowercase letters
+/// and digits, or a second line with the same name.
+pub const PEER_NAME: &str = "peer_name";
 /// An `external` declaration without `shared` (ruled 2026-11-15,
 /// `external-entities`): who reads the rows must be written down.
 pub const EXTERNAL_NOT_SHARED: &str = "external_not_shared";

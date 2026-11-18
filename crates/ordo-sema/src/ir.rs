@@ -197,6 +197,19 @@ pub enum BCond {
         query: Box<Query>,
         negated: bool,
     },
+    /// `expr` is a member id the person behind `caller` holds in a peer
+    /// deployment (owner, 2026-11-16, `example-apps-notes-v2-plus-note_viewer`
+    /// ask 2). What `field == $caller` binds to when the field belongs to an
+    /// external from a peer: the planner finds the peer's members for the
+    /// same person through the sign-in subject both deployments hold.
+    /// Never null: a null `expr`, or a person with no member there, is false.
+    PeerCaller {
+        expr: BExpr,
+        /// The local member id (`$caller` as bound).
+        caller: BExpr,
+        /// The peer's Postgres schema.
+        peer: String,
+    },
     /// Tree containment over the stored `$path` column (ruling 5): `expr`
     /// is the node id, `anchor` the boundary id, `above` flips direction.
     TreeWalk {
@@ -434,6 +447,9 @@ pub struct Query {
 pub struct ExternalRead {
     /// The Postgres schema and table of the foreign table.
     pub schema: String,
+    /// `Some(schema)` when the table belongs to a peer: `schema` again, the
+    /// peer's Postgres schema, where its members and sign-in links live.
+    pub peer: Option<String>,
     pub table: String,
     /// The one unique, non-null key column, and its base type.
     pub key_column: String,

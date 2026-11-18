@@ -130,10 +130,16 @@ impl Program {
     /// uses (`ordo_conformance::Fixture::from_source`), so what is planned
     /// against a database is what a node would load.
     pub fn compile(source: &str) -> Result<Program, String> {
-        let fixture = crate::Fixture::from_source(source, "")?;
+        let mut fixture = crate::Fixture::from_source(source, "")?;
         let doc = ordo_plan::artifact::program_artifact(&fixture.schema, &fixture.registry)
             .map_err(|e| format!("artifact: {e}"))?;
         let ddl = ordo_schema::ddl_for(&fixture.schema).map_err(|e| format!("ddl: {e}"))?;
+        // Each external's schema from its setting, after the artifact is
+        // taken: the artifact and its identity carry what the file wrote,
+        // the same in every environment. The check and the apply then read
+        // the schema this environment names.
+        ordo_exec::peer::resolve(&mut fixture.schema, &ordo_exec::schema_from_env())
+            .map_err(|e| e.to_string())?;
         Ok(Program::assemble(
             fixture.schema,
             doc,

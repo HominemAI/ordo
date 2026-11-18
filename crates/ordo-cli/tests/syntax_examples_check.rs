@@ -27,7 +27,7 @@ use ordo_syntax::{parse_pipeline, parse_program};
 
 const SYNTAX: &str = include_str!("../../../docs/syntax-examples.md");
 
-const DECL_HEADS: &[&str] = &["domain", "entity", "op", "routine"];
+const DECL_HEADS: &[&str] = &["domain", "peer", "entity", "op", "routine"];
 
 struct Block {
     line: usize,
@@ -81,7 +81,7 @@ fn parses(text: &str) -> bool {
     match lead_word(text) {
         "" | "whole" => false,
         w if [
-            "domain", "entity", "op", "routine", "when", "every", "trigger",
+            "domain", "peer", "entity", "op", "routine", "when", "every", "trigger",
         ]
         .contains(&w) =>
         {

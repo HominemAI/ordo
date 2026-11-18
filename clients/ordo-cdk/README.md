@@ -230,6 +230,29 @@ is `sealed` or `indexed` (`external_sealed`), `owned` (`external_owned`),
 (`external_unsupported`). `synth` refuses a ref from an external to an
 entity, or to a name no external in the call declares (`external_ref_to_native`).
 
+**Covered: peers.** `peer('journal')` names another Ordo deployment in the
+same database. An external reads one of its tables with `{ peer: journal,
+table: 'notes', shared: true }` in place of `schema`. Pass the peer to `synth`
+before the externals that read it:
+
+```ts
+const journal = peer('journal');
+const entries = external('entries', {
+  id: key.text('id'),
+  title: t.text().column('title'),
+  owner: t.text().column('owner'),
+}, { peer: journal, table: 'notes', shared: true });
+
+synth(journal, entries);
+```
+
+This prints `peer journal` and `external entries from journal.notes shared
+{ … }`. The schema is never in the file: the deployment owner sets
+`ORDO_PEER_JOURNAL_SCHEMA`. `synth` refuses an external whose peer it was not
+handed first (`peer_undeclared`), a peer no external reads (`peer_unused`) and
+a peer passed twice (`peer_name`). `peer()` refuses a name that is not
+lowercase letters and digits (`peer_name`).
+
 And the routine (12a). Its body is a write op's body, built with the same
 calls. The trigger is `every('15m')`, `daily('09:00Z')` or
 `when('estate.events.created', { debounce: '30s', coalesce: true })`, and the

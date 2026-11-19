@@ -401,6 +401,42 @@ impl Registry {
     /// `caller` is deliberately NOT here: `$caller` is a guard-language
     /// keyword the parser recognises, not a parameter an op can declare,
     /// so there is nothing to refuse.
+    /// An op may not share its name with an entity, native or external
+    /// (`op_named_like_entity`).
+    ///
+    /// Ops and entities are sources in one name space: `name(conds)[fields]`
+    /// is the call form for both (`definition-language.md`, Named-query
+    /// composition). A name that is both could mean either, so the program
+    /// is refused and the author renames one. Before this check the binder
+    /// took the entity, and the door's call of the op answered the entity's
+    /// own read: every row, every field, none of the op's conditions
+    /// (reported fix, `examples/note-viewer`, 2026-11-19). The binder now
+    /// takes the op at the top of a call (`Binder::source`), so a program
+    /// compiled before this check cannot leak either.
+    pub fn check_entity_names(&self, schema: &Schema) -> Result<(), SemaError> {
+        let mut names: Vec<&String> = self.ops.keys().collect();
+        names.sort();
+        for name in names {
+            let Some(entity) = schema.entity(name) else {
+                continue;
+            };
+            let kind = if entity.external.is_some() {
+                "external entity"
+            } else {
+                "entity"
+            };
+            return Err(err(
+                "op_named_like_entity",
+                self.ops[name].name.span,
+                format!(
+                    "op `{name}` has the same name as the {kind} `{name}`. A source \
+                     `{name}(…)` could mean either one. Rename the op or the {kind}."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn check_reserved_params(&self) -> Result<(), SemaError> {
         let mut names: Vec<&String> = self.ops.keys().collect();
         names.sort();
@@ -2778,9 +2814,20 @@ impl<'a> Binder<'a> {
         if let Some(info) = self.lets.iter().find(|l| l.name == s.name.name).cloned() {
             return self.let_source(s, &info, env);
         }
-        if self.schema.entity(&s.name.name).is_some() {
+        // A name that is both an op and an entity is refused at registration
+        // (`Registry::check_entity_names`). A program compiled before that
+        // check can still hold one, so the binder settles it here, and never
+        // toward a wider read than the op. At the top of a call, with no op
+        // being bound, the name is the op: that is the door's call of it
+        // (`name(args)`), and the op's conditions and projection must hold.
+        // Inside an op's body it is the entity, which is what that body
+        // meant and what `ordo plan` printed.
+        let op_named = self.registry.get(&s.name.name).is_some();
+        if op_named && self.stack.is_empty() {
+            self.composed_source(s, env)
+        } else if self.schema.entity(&s.name.name).is_some() {
             self.entity_source(s, env)
-        } else if self.registry.get(&s.name.name).is_some() {
+        } else if op_named {
             self.composed_source(s, env)
         } else {
             Err(err(

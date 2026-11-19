@@ -49,6 +49,7 @@ Rules:
 | `public_write_not_create` | A statement in a public write that updates, converges or deletes. A create on a unique field is allowed only as a create-once (`rev: null`). |
 | `public_write_guarded` | A public write into an entity that has a guard or an `acl`. |
 | `public_write_ref` | A public write sets a ref from a visitor's value to an entity with no public field. The answer would show whether that row exists. |
+| `op_named_like_entity` | The op has the name of an entity, native or external. Every op is refused this, public or not. Name the op for what it answers: `op publicNotes` over `external notes`. |
 
 A condition on a private field would leak it a bit at a time. That is why a
 condition counts as a read.

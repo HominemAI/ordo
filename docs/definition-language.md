@@ -2936,6 +2936,13 @@ name(bindings-and-conditions)[projection]
 - **Depth unlimited, cycles never.** Queries compose to any depth. A query
   sourcing itself, directly or transitively, is a compile error at
   registration.
+- **One name space for ops and entities.** An op may not take the name of an
+  entity, native or external, `members` included. `notices(…)` would mean
+  either one, so the compiler refuses the program with
+  `op_named_like_entity`. The message names the op and the entity. Rename
+  one of them: `op shownNotices` over `entity notices`. Reported fix,
+  2026-11-19: before this refusal the door's call of such an op answered the
+  entity's own read, without the op's conditions.
 - **Everything derives through the flattening.** The field-scope manifest
   derives from base fields through any depth, so composition cannot launder
   scope. The composite's cost class is the max of everything inlined.

@@ -43,6 +43,7 @@ that R-G3 does not admit (`guards-conformance.md` §0).
 | `fan_out` | more than one independent many-path in a pipeline (composed sources included) |
 | `let_scalar_requires_reduce` | scalar reference to a let whose body does not end in `reduce` |
 | `cycle` | a query sources itself, directly or transitively (registration time) |
+| `op_named_like_entity` | an op has the name of an entity, native or external. `name(…)` is the source form of both, so it could mean either. Registration time; the message names both. Rename one (`definition-language.md` §5, Named-query composition). Reported fix, 2026-11-19 |
 | `dependency_failed` | callee failed its own registration; dependent blocked, not independently diagnosed |
 | `breaking_dependents` | a callee edit invalidates registered dependents; plan rejected listing them |
 | `unacknowledged_unbounded` | op classifies `unbounded-host` without the `unbounded` marker |

@@ -46,7 +46,7 @@ op ticketsWithCustomer =
   tickets[subject, customer.name]
   sort subject
 
-op customerByEmail($e: text) =
+op patronByEmail($e: text) =
   patrons(email == $e)[id, name]
 
 op mine =
@@ -208,7 +208,7 @@ async fn a_nineteen_digit_key_is_found_everywhere() {
     let (status, body) = call(
         &state,
         "GET",
-        "/op/customerByEmail?e=di%40example.com",
+        "/op/patronByEmail?e=di%40example.com",
         None,
     )
     .await;
@@ -267,7 +267,7 @@ async fn a_developer_op_joins_a_native_entity_to_the_external() {
     let (status, body) = call(
         &state,
         "GET",
-        "/op/customerByEmail?e=cy%40example.com",
+        "/op/patronByEmail?e=cy%40example.com",
         None,
     )
     .await;

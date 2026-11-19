@@ -144,6 +144,12 @@ export function explain(e, when = '') {
       return 'The identity service is busy. Try again in a moment.';
     case 'origin_refused':
       return `This page may not call the identity service. Tell the deployment owner: ${e.body.message || 'check ORDO_IDENTITY_CLIENT_ORIGINS'}.`;
+    case 'invite_only':
+      return 'This app takes people by invite only. Ask someone who runs it for an invite link.';
+    case 'unknown_deployment':
+      return when === 'sign-up'
+        ? 'This sign-up link names an app this service does not know. Check the link, or ask the app for a new one.'
+        : `${capital(e.body.message || 'unknown deployment')}.`;
     case 'bad_request':
       return `The service could not read that: ${e.body.message || 'bad request'}. Check what you typed and try again.`;
     default:
@@ -251,6 +257,30 @@ export function returnTo(fallback = BASE + '/account') {
     // not a URL: fall back
   }
   return fallback;
+}
+
+/**
+ * Send the browser on once signed in: to `?return=` when the service says
+ * that address is one `deployment` lists (POST /sign-in/return), else to
+ * the account page.
+ */
+export async function leave(deployment) {
+  const asked = new URLSearchParams(location.search).get('return');
+  if (asked) {
+    try {
+      const { to } = await post('/sign-in/return', deployment ? { deployment, return: asked } : { return: asked });
+      const url = new URL(to, location.href);
+      const web = url.protocol === 'https:' || url.protocol === 'http:';
+      if (web && url.origin !== 'null') {
+        // A path here keeps the page's own handling of the base path.
+        location.replace(url.origin === location.origin ? returnTo(BASE + '/account') : url.href);
+        return;
+      }
+    } catch {
+      // Refused, or no answer: the account page.
+    }
+  }
+  location.replace(BASE + '/account');
 }
 
 /**

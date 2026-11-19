@@ -630,6 +630,7 @@ Each is its own program with its own environment. The supervisor settings are in
 | `ORDO_IDENTITY_SESSION_MAX_HOURS` | Read by the identity service. How long a session lasts from sign-in, however busy. Never below the idle value. Lowering it shortens live sessions, raising it lengthens none. 1 to 2160 | 720 | built | sets | | | | identity-service/config.rs; identity-service/sessions.rs |
 | `ORDO_IDENTITY_GUESSES_PER_ADDRESS` | Read by the identity service. Tries of one kind of secret one address may make per minute. 1 to 100000 | 30 | built | sets | | | | identity-service/config.rs |
 | `ORDO_IDENTITY_GUESSES_SHARED` | Read by the identity service. Tries of one kind everyone together may make per minute. It stops a flood. Below the per-address value refuses the boot. 1 to 10000000 | 600 | built | sets | | | | identity-service/config.rs |
+| `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS` | Read by the identity service. Open sign-up calls one address may make per minute. Each new account takes 2 (begin and finish), so 10 is 5 accounts a minute. Everyone together shares `ORDO_IDENTITY_GUESSES_SHARED`. Set above that ceiling refuses the boot; unset, it fits under it. 1 to 100000 | 10 | built | sets | | | | identity-service/config.rs; identity-service/throttle.rs |
 
 ## Settings that disagree with the principle
 

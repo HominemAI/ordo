@@ -9,7 +9,9 @@
 //! - its handle, so its tokens say `aud: ordo-deployment:<handle>`;
 //! - its client origins: the pages that may ask for its tokens from a
 //!   browser (its console);
-//! - its return URLs: where sign-in may send a browser back to.
+//! - its return URLs: where sign-in may send a browser back to;
+//! - its sign-up mode ([`SignUp`]): by invite only, the default, or open,
+//!   where anyone may make an account and join it (owner, 2026-11-17).
 //!
 //! **Who may have a token for which deployment.** A person holds the
 //! home's tokens while their account has home access (`people.home`, true
@@ -17,6 +19,14 @@
 //! tokens only while they are a live member of it ([`is_member`]). So the
 //! token says who, and each deployment's people say who may: a member of
 //! `hal` cannot sign in to `ordo` with that membership.
+//!
+//! **Two kinds of member.** An invite, or `member add`, makes an admin
+//! member ([`ROLE_ADMIN`]): they hold the deployment's tokens, which are
+//! admin tokens (`role: admin` is the only role a token carries). Open
+//! sign-up makes an app member ([`ROLE_MEMBER`]): they hold an account and
+//! a membership, and no token for the deployment, so a stranger never
+//! becomes its admin. App members sign in to apps once the service is an
+//! OIDC provider (`plan-identity-service.md` 11, the next step).
 //!
 //! Tokens for a registered deployment are signed with the home's keys, so
 //! every door that trusts this service fetches one key set.
@@ -26,6 +36,7 @@
 //! `deployments` and `target` in `deployment_members` and `invites`.
 
 use ordo_exec::{sql_lit, Pool, TxConn};
+pub use ordo_identity::deployment_token::ROLE_ADMIN;
 use ordo_identity::origin::Origin;
 use serde_json::{json, Value};
 
@@ -36,6 +47,54 @@ use crate::keys::KeyRing;
 use crate::people::{Actor, Person};
 use crate::store::{cell, dep, num, text};
 
+/// A member who joined by open sign-up: an account and a membership, and
+/// no token for the deployment.
+pub const ROLE_MEMBER: &str = "member";
+
+/// How people come to be members of a registered deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SignUp {
+    /// Only by an invite, or `member add`. Every row made before open
+    /// sign-up reads as this.
+    #[default]
+    Invite,
+    /// Anyone may make an account with a passkey, or join with the one
+    /// they hold, and becomes an app member ([`ROLE_MEMBER`]).
+    Open,
+}
+
+impl SignUp {
+    /// The word stored and shown: `invite` or `open`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignUp::Invite => "invite",
+            SignUp::Open => "open",
+        }
+    }
+
+    /// `invite` or `open`.
+    pub fn parse(word: &str) -> Result<SignUp, IdentityError> {
+        match word.trim() {
+            "invite" => Ok(SignUp::Invite),
+            "open" => Ok(SignUp::Open),
+            other => Err(IdentityError::BadRequest(format!(
+                "sign-up mode `{other}` is not one there is; use `invite` or `open`"
+            ))),
+        }
+    }
+
+    /// `signUp` in a JSON body, when it is there.
+    pub fn from_body(b: &Value) -> Result<Option<SignUp>, IdentityError> {
+        match b.get("signUp") {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(w)) => SignUp::parse(w).map(Some),
+            Some(_) => Err(IdentityError::BadRequest(
+                "`signUp` is `invite` or `open`, as a string".into(),
+            )),
+        }
+    }
+}
+
 /// A deployment registered with this service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registered {
@@ -45,6 +104,8 @@ pub struct Registered {
     /// Where sign-in may send a browser back to: URL prefixes, each under
     /// one of the client origins.
     pub return_urls: Vec<String>,
+    /// How people join it.
+    pub sign_up: SignUp,
     pub created_by: String,
     pub created_at: u64,
 }
@@ -56,6 +117,7 @@ impl Registered {
             "audience": ordo_identity::deployment_token::audience(&self.handle),
             "clientOrigins": self.client_origins.iter().map(Origin::to_string).collect::<Vec<_>>(),
             "returnUrls": self.return_urls,
+            "signUp": self.sign_up.as_str(),
             "createdBy": self.created_by,
             "createdAt": self.created_at,
         })
@@ -73,10 +135,13 @@ pub struct Registration {
     pub handle: String,
     pub client_origins: Vec<String>,
     pub return_urls: Vec<String>,
+    /// `invite` unless asked.
+    pub sign_up: SignUp,
 }
 
 impl Registration {
-    /// From a JSON body: `{handle, clientOrigins: [..], returnUrls?: [..]}`.
+    /// From a JSON body: `{handle, clientOrigins: [..], returnUrls?: [..],
+    /// signUp?: "invite" | "open"}`.
     pub fn from_body(b: &Value) -> Result<Registration, IdentityError> {
         let list = |name: &str| -> Result<Vec<String>, IdentityError> {
             match b.get(name) {
@@ -104,6 +169,7 @@ impl Registration {
                 .to_string(),
             client_origins: list("clientOrigins")?,
             return_urls: list("returnUrls")?,
+            sign_up: SignUp::from_body(b)?.unwrap_or_default(),
         })
     }
 
@@ -172,6 +238,7 @@ impl Registration {
             handle: handle.to_string(),
             client_origins: origins,
             return_urls: returns,
+            sign_up: self.sign_up,
             created_by: String::new(),
             created_at: 0,
         })
@@ -258,10 +325,15 @@ fn row(r: &ordo_exec::TextRow) -> Registered {
         return_urls: words(2),
         created_by: text(r, 3),
         created_at: num(r, 4).unwrap_or(0),
+        sign_up: if text(r, 5) == SignUp::Open.as_str() {
+            SignUp::Open
+        } else {
+            SignUp::Invite
+        },
     }
 }
 
-const COLUMNS: &str = "handle, client_origins, return_urls, created_by, created_at";
+const COLUMNS: &str = "handle, client_origins, return_urls, created_by, created_at, sign_up";
 
 /// Every live deployment registered with the service, by handle.
 pub async fn list(pool: &Pool, home: &str) -> Result<Vec<Registered>, IdentityError> {
@@ -334,22 +406,27 @@ pub async fn register(
     let done = tx
         .rows(&format!(
             "INSERT INTO deployments (deployment, handle, client_origins, return_urls, \
-             created_by, created_at) VALUES ({}, {}, {}, {}, {}, {now}) \
+             created_by, created_at, sign_up) VALUES ({}, {}, {}, {}, {}, {now}, {}) \
              ON CONFLICT (deployment, handle) DO UPDATE SET client_origins = \
              EXCLUDED.client_origins, return_urls = EXCLUDED.return_urls, created_by = \
-             EXCLUDED.created_by, created_at = EXCLUDED.created_at, ended_at = NULL, \
-             ended_by = NULL WHERE deployments.ended_at IS NOT NULL RETURNING 1",
+             EXCLUDED.created_by, created_at = EXCLUDED.created_at, sign_up = \
+             EXCLUDED.sign_up, ended_at = NULL, ended_by = NULL \
+             WHERE deployments.ended_at IS NOT NULL RETURNING 1",
             sql_lit(home),
             sql_lit(&reg.handle),
             sql_lit(&origins),
             sql_lit(&returns),
             sql_lit(by.id),
+            sql_lit(reg.sign_up.as_str()),
         ))
         .await?;
     if done.is_empty() {
         return Err(IdentityError::DeploymentTaken(reg.handle));
     }
-    let detail = format!("clients={origins} returns={returns}");
+    let detail = format!(
+        "clients={origins} returns={returns} sign-up={}",
+        reg.sign_up.as_str()
+    );
     audit::append(
         &tx,
         home,
@@ -369,6 +446,53 @@ pub async fn register(
     reg.created_by = by.id.to_string();
     reg.created_at = now;
     Ok(reg)
+}
+
+/// Change how people join a registered deployment. The service's own
+/// deployment takes people by invite only, so it has no mode to change.
+/// Recorded.
+pub async fn set_sign_up(
+    pool: &Pool,
+    home: &str,
+    keys: &KeyRing,
+    handle: &str,
+    mode: SignUp,
+    by: Actor<'_>,
+    now: u64,
+) -> Result<(), IdentityError> {
+    if handle == home {
+        return Err(IdentityError::HomeInviteOnly(home.to_string()));
+    }
+    let tx = pool.begin().await?;
+    let done = tx
+        .rows(&format!(
+            "UPDATE deployments SET sign_up = {} WHERE {} AND handle = {} AND ended_at IS NULL \
+             RETURNING 1",
+            sql_lit(mode.as_str()),
+            dep(home),
+            sql_lit(handle)
+        ))
+        .await?;
+    if done.is_empty() {
+        return Err(IdentityError::UnknownDeployment(handle.to_string()));
+    }
+    audit::append(
+        &tx,
+        home,
+        keys,
+        &Entry {
+            actor: by.id,
+            action: "deployment.sign-up",
+            subject: handle,
+            outcome: "ok",
+            client: by.client,
+            detail: mode.as_str(),
+        },
+        now,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// End a registration: no new token for it from now on, and every live
@@ -426,7 +550,8 @@ pub async fn end(
 }
 
 /// Whether `person` may hold `target`'s tokens: a live account with home
-/// access for the home, a live member for any other.
+/// access for the home, a live admin member for any other. An app member
+/// ([`ROLE_MEMBER`]) holds none: see [`role_of`].
 pub async fn is_member(
     pool: &Pool,
     home: &str,
@@ -443,23 +568,50 @@ pub async fn is_member(
         format!(
             "SELECT 1 FROM deployment_members m JOIN people p ON p.id = m.person_id \
              WHERE m.{} AND m.target = {} AND m.person_id = {} AND m.ended_at IS NULL \
-             AND p.ended_at IS NULL",
+             AND p.ended_at IS NULL AND m.role = {}",
             dep(home),
             sql_lit(target),
-            sql_lit(person)
+            sql_lit(person),
+            sql_lit(ROLE_ADMIN)
         )
     };
     Ok(!pool.rows(&sql).await?.is_empty())
 }
 
-/// Make `person` a member of `target`, inside `tx`. For the home, it
-/// gives the account home access. Recorded.
+/// The role of `person`'s live membership of the registered deployment
+/// `target`: [`ROLE_ADMIN`] or [`ROLE_MEMBER`], or `None` with none.
+pub async fn role_of(
+    pool: &Pool,
+    home: &str,
+    target: &str,
+    person: &str,
+) -> Result<Option<String>, IdentityError> {
+    Ok(pool
+        .rows(&format!(
+            "SELECT m.role FROM deployment_members m JOIN people p ON p.id = m.person_id \
+             WHERE m.{} AND m.target = {} AND m.person_id = {} AND m.ended_at IS NULL \
+             AND p.ended_at IS NULL",
+            dep(home),
+            sql_lit(target),
+            sql_lit(person)
+        ))
+        .await?
+        .first()
+        .map(|r| text(r, 0)))
+}
+
+/// Make `person` a member of `target` with `role` ([`ROLE_ADMIN`] or
+/// [`ROLE_MEMBER`]), inside `tx`. For the home, it gives the account home
+/// access. An admin asked of an app member makes them an admin; a member
+/// asked of an admin changes nothing. Recorded.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_member(
     tx: &TxConn,
     home: &str,
     keys: &KeyRing,
     target: &str,
     person: &str,
+    role: &str,
     by: Actor<'_>,
     now: u64,
 ) -> Result<(), IdentityError> {
@@ -493,29 +645,50 @@ pub async fn add_member(
         if !registered {
             return Err(IdentityError::UnknownDeployment(target.to_string()));
         }
-        let already = !tx
+        let held = tx
             .rows(&format!(
-                "SELECT 1 FROM deployment_members WHERE {} AND target = {} AND person_id = {} \
-                 AND ended_at IS NULL",
+                "SELECT role FROM deployment_members WHERE {} AND target = {} AND person_id = {} \
+                 AND ended_at IS NULL FOR UPDATE",
                 dep(home),
                 sql_lit(target),
                 sql_lit(person)
             ))
             .await?
-            .is_empty();
-        if already {
-            return Ok(());
+            .first()
+            .map(|r| text(r, 0));
+        match held.as_deref() {
+            Some(r) if r == role || r == ROLE_ADMIN => return Ok(()),
+            Some(_) => {
+                tx.rows(&format!(
+                    "UPDATE deployment_members SET role = {}, granted_by = {} WHERE {} \
+                     AND target = {} AND person_id = {} AND ended_at IS NULL",
+                    sql_lit(role),
+                    sql_lit(by.id),
+                    dep(home),
+                    sql_lit(target),
+                    sql_lit(person)
+                ))
+                .await?;
+            }
+            None => {
+                tx.rows(&format!(
+                    "INSERT INTO deployment_members (deployment, target, person_id, granted_by, \
+                     created_at, role) VALUES ({}, {}, {}, {}, {now}, {})",
+                    sql_lit(home),
+                    sql_lit(target),
+                    sql_lit(person),
+                    sql_lit(by.id),
+                    sql_lit(role)
+                ))
+                .await?;
+            }
         }
-        tx.rows(&format!(
-            "INSERT INTO deployment_members (deployment, target, person_id, granted_by, \
-             created_at) VALUES ({}, {}, {}, {}, {now})",
-            sql_lit(home),
-            sql_lit(target),
-            sql_lit(person),
-            sql_lit(by.id)
-        ))
-        .await?;
     }
+    let detail = if target == home {
+        target.to_string()
+    } else {
+        format!("{target} role={role}")
+    };
     audit::append(
         tx,
         home,
@@ -526,7 +699,7 @@ pub async fn add_member(
             subject: person,
             outcome: "ok",
             client: by.client,
-            detail: target,
+            detail: &detail,
         },
         now,
     )
@@ -548,23 +721,24 @@ pub async fn end_member(
     now: u64,
 ) -> Result<(), IdentityError> {
     let tx = pool.begin().await?;
-    let live: Vec<String> = tx
+    let live: Vec<(String, String)> = tx
         .rows(&format!(
-            "SELECT m.person_id FROM deployment_members m JOIN people p ON p.id = m.person_id \
-             WHERE m.{} AND m.target = {} AND m.ended_at IS NULL AND p.ended_at IS NULL \
-             ORDER BY m.person_id FOR UPDATE OF m",
+            "SELECT m.person_id, m.role FROM deployment_members m JOIN people p \
+             ON p.id = m.person_id WHERE m.{} AND m.target = {} AND m.ended_at IS NULL \
+             AND p.ended_at IS NULL ORDER BY m.person_id FOR UPDATE OF m",
             dep(home),
             sql_lit(target)
         ))
         .await?
         .iter()
-        .map(|r| text(r, 0))
+        .map(|r| (text(r, 0), text(r, 1)))
         .collect();
-    if !live.iter().any(|p| p == person) {
+    let Some((_, role)) = live.iter().find(|(p, _)| p == person) else {
         return Err(IdentityError::UnknownPerson);
-    }
-    // The last member of a live deployment stays; an ended one may be
-    // emptied, so it can be registered again.
+    };
+    let admins = live.iter().filter(|(_, r)| r == ROLE_ADMIN).count();
+    // The last admin of a live deployment stays; an ended one may be
+    // emptied, so it can be registered again. App members come and go.
     let registered = !tx
         .rows(&format!(
             "SELECT 1 FROM deployments WHERE {} AND handle = {} AND ended_at IS NULL",
@@ -573,7 +747,7 @@ pub async fn end_member(
         ))
         .await?
         .is_empty();
-    if registered && live.len() == 1 {
+    if registered && role == ROLE_ADMIN && admins == 1 {
         return Err(IdentityError::LastAdmin);
     }
     tx.rows(&format!(
@@ -604,13 +778,13 @@ pub async fn end_member(
     Ok(())
 }
 
-/// The people who are live members of `target`, oldest first. An ended
-/// membership shows as ended.
+/// The people who are live members of `target`, oldest first, each with
+/// their membership's role. An ended membership shows as ended.
 pub async fn members(pool: &Pool, home: &str, target: &str) -> Result<Vec<Person>, IdentityError> {
     Ok(pool
         .rows(&format!(
             "SELECT id, display_name, role, since, ended FROM (\
-             SELECT DISTINCT ON (p.id) p.id, p.display_name, p.role, m.created_at AS since, \
+             SELECT DISTINCT ON (p.id) p.id, p.display_name, m.role, m.created_at AS since, \
              COALESCE(p.ended_at, m.ended_at) AS ended FROM deployment_members m JOIN people p \
              ON p.id = m.person_id WHERE m.{} AND m.target = {} \
              ORDER BY p.id, m.ended_at IS NULL DESC, m.created_at DESC) latest \
@@ -639,6 +813,7 @@ mod tests {
             handle: handle.into(),
             client_origins: origins.iter().map(|s| s.to_string()).collect(),
             return_urls: returns.iter().map(|s| s.to_string()).collect(),
+            sign_up: SignUp::Invite,
         }
     }
 

@@ -35,6 +35,7 @@ async fn two(name: &str) -> H {
                     handle: handle.into(),
                     client_origins: vec![origin.into()],
                     return_urls: vec![format!("{origin}/d/")],
+                    ..Default::default()
                 },
             )
             .await
@@ -609,6 +610,7 @@ async fn registering_an_ended_handle_again_brings_no_member_back() {
         handle: "hal".into(),
         client_origins: vec![ORDO.into()],
         return_urls: vec![],
+        ..Default::default()
     };
     h.svc.register_deployment(HOST, &again).await.unwrap();
     let (st, v) = token_at(&h, ORDO, &s.secret, AUD_HAL).await;

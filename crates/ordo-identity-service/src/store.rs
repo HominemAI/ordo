@@ -22,7 +22,17 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (2, MIGRATION_2),
     (3, MIGRATION_3),
     (4, MIGRATION_4),
+    (5, MIGRATION_5),
 ];
+
+/// Open sign-up, per deployment (owner, 2026-11-17). Every deployment
+/// registered before this takes people by invite, as it did. Every
+/// membership before this is an admin's, as it was; open sign-up makes
+/// `member` rows, which hold no token for the deployment.
+const MIGRATION_5: &str = r#"
+ALTER TABLE deployments ADD COLUMN sign_up text NOT NULL DEFAULT 'invite';
+ALTER TABLE deployment_members ADD COLUMN role text NOT NULL DEFAULT 'admin';
+"#;
 
 /// The advisory lock migrations run under, so two services booting at once
 /// do not race.

@@ -112,6 +112,16 @@ pub enum IdentityError {
     /// The person holds no membership of the deployment a token was asked
     /// for. Names the handle.
     NotAMember(String),
+    /// A person holds an app membership of this deployment, made by open
+    /// sign-up, and asked for its token, which is an admin's. Names the
+    /// handle.
+    AppMemberOnly(String),
+    /// Open sign-up was asked of a deployment that takes people by
+    /// invite. Names the handle.
+    InviteOnly(String),
+    /// The service's own deployment takes people by invite only, so its
+    /// sign-up mode cannot be set. Names the handle.
+    HomeInviteOnly(String),
     /// No live registered deployment has that handle.
     UnknownDeployment(String),
     /// A live deployment already has that handle.
@@ -219,6 +229,9 @@ impl IdentityError {
             IdentityError::MintRefused(_) => "mint_refused",
             IdentityError::GrantNeeded { .. } => "grant_needed",
             IdentityError::NotAMember(_) => "not_a_member",
+            IdentityError::AppMemberOnly(_) => "app_member_only",
+            IdentityError::InviteOnly(_) => "invite_only",
+            IdentityError::HomeInviteOnly(_) => "home_invite_only",
             IdentityError::UnknownDeployment(_) => "unknown_deployment",
             IdentityError::DeploymentTaken(_) => "deployment_taken",
             IdentityError::DeploymentHasMembers { .. } => "deployment_has_members",
@@ -253,11 +266,13 @@ impl IdentityError {
             | IdentityError::MintRefused(_)
             | IdentityError::GrantNeeded { .. }
             | IdentityError::NotAMember(_)
+            | IdentityError::AppMemberOnly(_)
+            | IdentityError::InviteOnly(_)
             | IdentityError::HomeOnly { .. }
             | IdentityError::TouchNeeded { .. } => StatusCode::FORBIDDEN,
-            IdentityError::DeploymentTaken(_) | IdentityError::DeploymentHasMembers { .. } => {
-                StatusCode::CONFLICT
-            }
+            IdentityError::DeploymentTaken(_)
+            | IdentityError::DeploymentHasMembers { .. }
+            | IdentityError::HomeInviteOnly(_) => StatusCode::CONFLICT,
             IdentityError::UnknownDeployment(_) => StatusCode::NOT_FOUND,
             IdentityError::ReturnRefused => StatusCode::BAD_REQUEST,
             IdentityError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -359,6 +374,23 @@ impl fmt::Display for IdentityError {
                 "you are not a member of deployment `{handle}`; an admin of `{handle}` invites \
                  you, or the identity service's owner runs `ordo-identity-service member add \
                  {handle} <person>`"
+            ),
+            IdentityError::AppMemberOnly(handle) => write!(
+                f,
+                "you joined deployment `{handle}` by open sign-up, which gives an account and a \
+                 membership and no token for the deployment, since its tokens are admin tokens; \
+                 an admin of `{handle}` invites you to make you one of its admins"
+            ),
+            IdentityError::InviteOnly(handle) => write!(
+                f,
+                "deployment `{handle}` takes people by invite; ask one of its admins for an \
+                 invite link, or its owner turns open sign-up on \
+                 (`ordo-identity-service deployment sign-up {handle} open`)"
+            ),
+            IdentityError::HomeInviteOnly(handle) => write!(
+                f,
+                "`{handle}` is this identity service's own deployment, and it takes people by \
+                 invite only; set open sign-up on a registered deployment instead"
             ),
             IdentityError::UnknownDeployment(handle) => write!(
                 f,

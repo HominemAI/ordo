@@ -10,6 +10,10 @@
 //! secrets are long random codes, so no address can guess one, and one
 //! stranger must not be able to shut a kind of sign-in for everyone.
 //!
+//! Open sign-up makes accounts with no secret at all, so it is counted the
+//! same way under its own kind, with its own, lower, per-address limit
+//! (`ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS`) and the same shared ceiling.
+//!
 //! The count lives in the service's database (`guess_counts`), as the
 //! door's lives in `$guesscount`, so two instances behind one address share
 //! one count. Each try is counted in one guarded statement, before the
@@ -166,6 +170,8 @@ pub enum Try {
     RecoveryCode,
     CliCode,
     MachineSignIn,
+    /// Open sign-up: begin and finish, each counted.
+    SignUp,
 }
 
 impl Try {
@@ -175,6 +181,15 @@ impl Try {
             Try::RecoveryCode => "recovery-code",
             Try::CliCode => "cli-code",
             Try::MachineSignIn => "machine-sign-in",
+            Try::SignUp => "sign-up",
+        }
+    }
+
+    /// The per-address limit for this kind.
+    fn per_address(self, limits: &Limits) -> u64 {
+        match self {
+            Try::SignUp => limits.sign_ups_per_address,
+            _ => limits.per_address,
         }
     }
 }
@@ -193,7 +208,7 @@ pub async fn attempt(
     limits: &Limits,
     now: u64,
 ) -> Result<(), IdentityError> {
-    count(pool, handle, kind, &source.0, limits.per_address, now).await?;
+    count(pool, handle, kind, &source.0, kind.per_address(limits), now).await?;
     count(pool, handle, kind, SHARED, limits.shared, now).await
 }
 

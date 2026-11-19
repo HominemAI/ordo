@@ -13114,8 +13114,11 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       e5304e02, tests `crates/ordo-host/tests/reader_grants.rs`)**; open sign-up at
       the identity service, **built 2026-11-19 (PR 26, commit dced245d)**; app users signing in
       through the identity service, **built 2026-11-19 (PR 27, commit
-      eb66ae0d)**. All 3 have landed on `bleeding`; a security review of
-      the last runs before peers go to `main`.
+      eb66ae0d)**. All 3 have landed on `bleeding`. Step 4,
+      `examples/note-viewer` and the `federation e2e` check, **built
+      2026-11-19 (PR 28, commit e7266ecd)**. Before `main`: 2 defects,
+      board `identity-app-origins-trusted-as-clients` and
+      `public-op-named-as-its-external-serves-every-row`.
       Tying a peer's spaces to the reader's is filed for later, board
       `peer-spaces-tied`.
 - [ ] **27l · Audit what the deployment's and each tenant's database hold,

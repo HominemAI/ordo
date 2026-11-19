@@ -1,6 +1,6 @@
 {
  "date": "2026-11-19",
- "text": "[[identity-app-origins-trusted-as-clients]]: a security review of the new sign-in provider found 1 high defect on bleeding: a connected app's page can call the identity service as the signed-in person, and may reach an admin token. The fix is queued and needs no answer from you. Nothing from this build goes to main before it lands. [[example-apps-notes-v2-plus-note_viewer]]: steps 1 to 3b are on bleeding; step 4, note_viewer and its e2e stack, is building. 0.5.2 waits for PR 13 (held).",
+ "text": "[[example-apps-notes-v2-plus-note_viewer]]: all steps are on bleeding. note_viewer landed (PR 28) with a new federation e2e check that runs both apps, the identity service and 2 database roles. 2 high defects must be fixed before any of it goes to main: [[identity-app-origins-trusted-as-clients]] and [[public-op-named-as-its-external-serves-every-row]]. Both are being worked and need no answer from you. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -45,12 +45,16 @@
  ],
  "look": [
   {
-   "id": "identity-app-origins-trusted-as-clients",
-   "why": "high, fix queued"
+   "id": "example-apps-notes-v2-plus-note_viewer",
+   "why": "built, on bleeding"
   },
   {
-   "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "step 4 building"
+   "id": "public-op-named-as-its-external-serves-every-row",
+   "why": "high, hunt running"
+  },
+  {
+   "id": "identity-app-origins-trusted-as-clients",
+   "why": "high, fix queued"
   }
  ]
 }

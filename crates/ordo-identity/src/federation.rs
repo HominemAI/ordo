@@ -401,13 +401,13 @@ impl ProviderClient {
         &self,
         url: &str,
         form: Vec<(&str, &str)>,
-        secret: &ClientSecret,
+        secret: Option<&ClientSecret>,
     ) -> Result<FederationResponse, ProviderError> {
         self.transport.fetch(&FederationRequest {
             method: FederationMethod::PostForm,
             url,
             form,
-            client_secret: Some(secret),
+            client_secret: secret,
             bearer: None,
             cap: TOKEN_RESPONSE_CAP,
         })

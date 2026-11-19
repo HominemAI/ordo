@@ -11,6 +11,7 @@
 //! | `POST /sign-in/begin`, `/sign-in/finish` | anyone | passkey sign-in (5.4) |
 //! | `POST /sign-in/return` | the page | `{deployment?, return}`: where sign-in may send the browser back to, or `return_refused` |
 //! | `POST /recover` | code holder | recovery code sign-in |
+//! | `GET /.well-known/openid-configuration`, `GET /oidc/authorize`, `POST /oidc/token` | an app | the service as an OIDC provider for app users ([`crate::oidc`]) |
 //! | `POST /token` | session | `{aud}`: a token for the service's own deployment or a registered one the person is a member of (5.4, 5.5) |
 //! | `POST /sessions/end` | session | sign out |
 //! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it; `aud` in the finish body names the deployment, default the service's own |
@@ -43,8 +44,11 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, ORIGIN, SET_COOKIE};
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION, ORIGIN,
+    SET_COOKIE,
+};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -56,6 +60,8 @@ use serde_json::{json, Value};
 use crate::cli::Redeemed;
 use crate::error::IdentityError;
 use crate::flows::{Caller, Registration};
+use crate::oidc::{self, Authorized};
+use crate::page::PAGE_CSP;
 use crate::server::{Service, JWKS_MAX_AGE_SECS};
 use crate::sessions::Opened;
 use crate::throttle::Source;
@@ -168,6 +174,9 @@ pub(crate) fn routes() -> Router<Service> {
         .route("/health/ready", get(ready))
         .route("/.well-known/jwks.json", get(jwks))
         .route("/.well-known/ordo-audit-keys.json", get(audit_keys))
+        .route(oidc::DISCOVERY_PATH, get(discovery))
+        .route(oidc::AUTHORIZE_PATH, get(authorize))
+        .route(oidc::TOKEN_PATH, post(oidc_token))
         .route("/join/begin", post(join_begin))
         .route("/join/finish", post(join_finish))
         .route("/sign-up/begin", post(sign_up_begin))
@@ -241,6 +250,68 @@ async fn audit_keys(State(s): State<Service>) -> Response {
     let mut res = Json(s.keys().audit_keys()).into_response();
     res.headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=600"));
+    res
+}
+
+// ─────────────────────────── OIDC provider ───────────────────────────
+
+async fn discovery(State(s): State<Service>) -> Response {
+    let mut res = Json(s.discovery()).into_response();
+    res.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=600"));
+    res
+}
+
+/// The browser's authorization request: back to the app, to the page to
+/// sign in, or a refusal shown here.
+async fn authorize(State(s): State<Service>, headers: HeaderMap, uri: Uri) -> Response {
+    let cookie = s.cookie(&headers);
+    let mut res = match s
+        .authorize(uri.query().unwrap_or(""), cookie.as_deref())
+        .await
+    {
+        Ok(Authorized::Back(to) | Authorized::Page(to)) => match HeaderValue::from_str(&to) {
+            Ok(v) => (StatusCode::SEE_OTHER, [(LOCATION, v)]).into_response(),
+            Err(_) => IdentityError::Internal("a redirect that is not a header value".into())
+                .into_response(),
+        },
+        Err(e) => {
+            let shown = if e.status().is_server_error() {
+                eprintln!("ordo-identity-service: {e}");
+                IdentityError::Internal("the identity service failed; its log has the cause".into())
+            } else {
+                e
+            };
+            let mut r = (
+                shown.status(),
+                oidc::refusal_page(&shown, &s.config().base_path),
+            )
+                .into_response();
+            let h = r.headers_mut();
+            h.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            h.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(PAGE_CSP));
+            r
+        }
+    };
+    res.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
+}
+
+/// The app's server exchanging a code: a form body, a JSON answer.
+async fn oidc_token(State(s): State<Service>, body: Bytes) -> Response {
+    let mut res = match std::str::from_utf8(&body) {
+        Ok(text) => match s.oidc_token(text).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => e.into_response(),
+        },
+        Err(_) => IdentityError::BadRequest("the body is not UTF-8".into()).into_response(),
+    };
+    res.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
 }
 

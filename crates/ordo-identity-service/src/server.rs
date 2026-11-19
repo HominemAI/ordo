@@ -487,7 +487,7 @@ impl Service {
         }
     }
 
-    fn cookie(&self, headers: &HeaderMap) -> Option<String> {
+    pub(crate) fn cookie(&self, headers: &HeaderMap) -> Option<String> {
         let name = self.cookie_name();
         headers
             .get_all(COOKIE)

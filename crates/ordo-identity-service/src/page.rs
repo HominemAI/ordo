@@ -172,7 +172,7 @@ fn return_origins(s: &Service) -> String {
 }
 
 /// Text made safe inside a double-quoted HTML attribute.
-fn attr(text: &str) -> String {
+pub(crate) fn attr(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")

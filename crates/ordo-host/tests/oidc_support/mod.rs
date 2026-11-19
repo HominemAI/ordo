@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-const CA: &[u8] = include_bytes!("../fixture/ca.der");
+pub const CA: &[u8] = include_bytes!("../fixture/ca.der");
 const LEAF: &[u8] = include_bytes!("../fixture/localhost.der");
 const LEAF_KEY: &[u8] = include_bytes!("../fixture/localhost-key.der");
 /// The RSA key the issuer signs with first, as Google does (RS256).
@@ -143,7 +143,7 @@ impl FakeIdp {
             name: name.into(),
             issuer: self.issuer(),
             client_id: CLIENT_ID.into(),
-            client_secret: ClientSecret::new(CLIENT_SECRET.into()),
+            client_secret: Some(ClientSecret::new(CLIENT_SECRET.into())),
             scope: "openid email profile".into(),
             endpoints: None,
             use_email: true,
@@ -203,7 +203,7 @@ impl FakeIdp {
     }
 }
 
-fn acceptor() -> TlsAcceptor {
+pub fn acceptor() -> TlsAcceptor {
     let cert = rustls::pki_types::CertificateDer::from(LEAF.to_vec());
     let key = rustls::pki_types::PrivateKeyDer::try_from(LEAF_KEY.to_vec()).expect("pkcs8 key");
     let cfg = rustls::ServerConfig::builder()

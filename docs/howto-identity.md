@@ -545,21 +545,92 @@ What an open member holds:
   /token` answers `app_member_only`. `member add`, or an invite, makes
   them an admin.
 
-Signing in to the app itself through the service is the next step: the
-service becomes an OIDC provider. Until then an open member has an
-account and a membership only.
+An open member signs in to the app itself through the service, as the
+next section sets up.
 
 Each sign-up and join is in the audit log (`sign-up.open`,
 `sign-up.joined`). Sign-up calls are limited per address by
 `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS`. A deployment in `invite` mode
 answers `invite_only`.
 
+### Connect an app to the identity service
+
+The service is an OIDC provider. An Ordo app signs its users in through
+it with Ordo's own OIDC client, under one connection name. Each person
+has one subject, their id at the service, in every app that connects. So
+two apps that read each other through `peer` see one person as one
+person, whatever each calls the connection.
+
+At the service, register the app. Its handle is the app's client id. Its
+return URLs must cover the app's callback,
+`<ORDO_PUBLIC_URL>/auth/callback/<name>`, and that address's origin must
+be one of its origins:
+
+```
+ordo-identity-service deployment add notes \
+  --origin https://notes.example.com --origin https://api.notes.example.com \
+  --return https://api.notes.example.com/auth/callback/accounts \
+  --sign-up open
+```
+
+`--sign-up open` lets anyone make an account from the app's sign-in. With
+`invite`, only members sign in.
+
+On the app, 4 settings, with `accounts` as the connection name:
+
+```
+ORDO_AUTH_METHODS=accounts
+ORDO_AUTH_ACCOUNTS_KIND=oidc
+ORDO_AUTH_ACCOUNTS_ISSUER=https://auth.example.com
+ORDO_AUTH_ACCOUNTS_CLIENT_ID=notes
+ORDO_AUTH_ACCOUNTS_CLIENT_AUTH=none
+```
+
+Add `accounts` to `ORDO_AUTH_METHODS` beside any other methods.
+`ORDO_AUTH_RETURN_URLS` is required, as for every outside provider. The
+issuer is the service's `ORDO_IDENTITY_ORIGIN`, exactly. There is no
+client secret: the service takes public clients, and PKCE proves each
+exchange. `ORDO_AUTH_ACCOUNTS_ALGS=EdDSA` is optional; the service signs
+with nothing else.
+
+When the service sits under a base path, such as `/identity` on the
+console's origin, its discovery document is not at
+`<origin>/.well-known/openid-configuration`. Pin the 3 endpoints on the
+app instead:
+
+```
+ORDO_AUTH_ACCOUNTS_AUTHORIZE_URL=https://console.example.com/identity/oidc/authorize
+ORDO_AUTH_ACCOUNTS_TOKEN_URL=https://console.example.com/identity/oidc/token
+ORDO_AUTH_ACCOUNTS_JWKS_URL=https://console.example.com/identity/.well-known/jwks.json
+ORDO_AUTH_ACCOUNTS_ISS_PARAMETER=required
+```
+
+What a sign-in does:
+
+1. The app sends the browser to the service's `/oidc/authorize`.
+2. A person not signed in there goes to the service's sign-in page. For
+   an open app, the page links to making an account.
+3. A member gets a code that works once, for 60 seconds. A person signed
+   in who is not a member joins an open app on the sign-up page, or is
+   sent back with `access_denied` from an invite-only one.
+4. The app's server exchanges the code with its PKCE verifier for an ID
+   token. It holds `sub`, the person's name (`profile` scope), `nonce`,
+   `auth_time` and the times. Ending a membership stops new ID tokens at
+   once.
+5. The app links the person as `oidc:accounts:<sub>`.
+
+An unknown client id, or a callback the app is not registered for, shows
+a refusal on the service's page and never sends the browser on. Each code
+issued and each exchange is in the audit log (`oidc.code`,
+`oidc.token`). An ID token is not a deployment token: the door, the
+console and the service's admin routes refuse it.
+
 ## What it does not do
 
 - Roles beyond `admin`, and `member` for open sign-up, which holds no
   token.
-- Signing app users in to apps. That waits for the service to be an OIDC
-  provider.
+- Refresh tokens, a userinfo endpoint, or signing out of every app at
+  once. An app keeps its own session after sign-in.
 - Sign-in through outside providers for deployment people.
 - Sending invite links by mail. You send the link.
 - More than one copy of the service.

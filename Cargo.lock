@@ -1544,6 +1544,7 @@ dependencies = [
  "ordo-fault",
  "ordo-fn",
  "ordo-identity",
+ "ordo-identity-service",
  "ordo-plan",
  "ordo-schema",
  "ordo-secevent",

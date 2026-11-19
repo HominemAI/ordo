@@ -509,7 +509,7 @@ impl TenantConnections {
                 .clone()
                 .ok_or("an `oidc` connection needs `issuer`")?,
             client_id: s.client_id.clone(),
-            client_secret: ClientSecret::new(secret),
+            client_secret: Some(ClientSecret::new(secret)),
             scope: s.scope.clone(),
             endpoints,
             use_email: s.use_email,

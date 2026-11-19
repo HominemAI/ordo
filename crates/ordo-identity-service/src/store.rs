@@ -23,6 +23,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (3, MIGRATION_3),
     (4, MIGRATION_4),
     (5, MIGRATION_5),
+    (6, MIGRATION_6),
 ];
 
 /// Open sign-up, per deployment (owner, 2026-11-17). Every deployment
@@ -32,6 +33,28 @@ const MIGRATIONS: &[(i32, &str)] = &[
 const MIGRATION_5: &str = r#"
 ALTER TABLE deployments ADD COLUMN sign_up text NOT NULL DEFAULT 'invite';
 ALTER TABLE deployment_members ADD COLUMN role text NOT NULL DEFAULT 'admin';
+"#;
+
+/// The service as an OIDC provider for app users ([`crate::oidc`],
+/// owner 2026-11-17 ask 3). One row per authorization code: single use,
+/// short lived, bound to the client, its redirect URI, the PKCE challenge
+/// and the nonce. Only the code's tagged hash is stored.
+const MIGRATION_6: &str = r#"
+CREATE TABLE oidc_codes (
+  code_hash      text   PRIMARY KEY,
+  deployment     text   NOT NULL,
+  client         text   NOT NULL,
+  person_id      text   NOT NULL REFERENCES people (id),
+  session_id     text   NOT NULL,
+  redirect_uri   text   NOT NULL,
+  code_challenge text   NOT NULL,
+  nonce          text   NOT NULL,
+  scope          text   NOT NULL,
+  auth_time      bigint NOT NULL,
+  expires_at     bigint NOT NULL,
+  used_at        bigint,
+  created_at     bigint NOT NULL
+);
 "#;
 
 /// The advisory lock migrations run under, so two services booting at once

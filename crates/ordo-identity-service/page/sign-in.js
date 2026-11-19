@@ -8,7 +8,7 @@
 // (ORDO_IDENTITY_CLIENT_ORIGINS), or a registered deployment's list.
 // Anything else goes to the account page.
 
-import { $, busy, explain, leave, me, needPasskeys, post, problem, showCodes, step } from './common.js';
+import { $, BASE, busy, explain, leave, me, needPasskeys, post, problem, showCodes, step } from './common.js';
 import { assert, passkeysAvailable, register, touch } from './webauthn.js';
 
 const params = new URLSearchParams(location.search);
@@ -63,10 +63,27 @@ async function enrol() {
   });
 }
 
+/**
+ * Signing in to an app through the service (its OIDC sign-in sends
+ * `deployment`, and `signUp=open` when the app takes anyone): name the app,
+ * and link to making an account. The service still decides who may join.
+ */
+function forApp() {
+  if (!deployment) return;
+  $('sign-in-intro').textContent = `Sign in to ${deployment}. Use the passkey you made when you joined.`;
+  if (params.get('signUp') !== 'open') return;
+  const q = new URLSearchParams({ deployment });
+  const back = params.get('return');
+  if (back) q.set('return', back);
+  $('sign-up-link').href = `${BASE}/sign-up?${q}`;
+  $('sign-up-line').hidden = false;
+}
+
 /** The sign-in step: a passkey, or a recovery code. */
 async function signIn() {
   step('sign-in');
   needPasskeys(passkeysAvailable());
+  forApp();
 
   const area = $('passkey-area');
   $('passkey').addEventListener('click', async () => {

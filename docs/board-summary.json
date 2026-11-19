@@ -1,6 +1,6 @@
 {
  "date": "2026-11-19",
- "text": "[[example-apps-notes-v2-plus-note_viewer]]: all steps are on bleeding. note_viewer landed (PR 28) with a new federation e2e check that runs both apps, the identity service and 2 database roles. 2 high defects must be fixed before any of it goes to main: [[identity-app-origins-trusted-as-clients]] and [[public-op-named-as-its-external-serves-every-row]]. Both are being worked and need no answer from you. 0.5.2 waits for PR 13 (held).",
+ "text": "[[public-op-named-as-its-external-serves-every-row]]: fixed on bleeding (PR 29). An op named like an entity served every row with none of its filter. Released 0.5.1 has the fault; no app in the repo, notes v2 included, has such a name. The fix ships with 0.5.2. Still open before main: [[identity-app-origins-trusted-as-clients]], being fixed now, and [[two-ops-of-one-name-replace-silently]], queued. [[example-apps-notes-v2-plus-note_viewer]] is built on bleeding. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,16 @@
  ],
  "look": [
   {
-   "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "built, on bleeding"
-  },
-  {
    "id": "public-op-named-as-its-external-serves-every-row",
-   "why": "high, hunt running"
+   "why": "fixed; 0.5.1 has it"
   },
   {
    "id": "identity-app-origins-trusted-as-clients",
-   "why": "high, fix queued"
+   "why": "high, fix building"
+  },
+  {
+   "id": "two-ops-of-one-name-replace-silently",
+   "why": "queued"
   }
  ]
 }

@@ -61,9 +61,7 @@ use ordo_identity::{
     Argon2idHasher, AuthenticatorId, CompleteRequest, MemoryCeremonyStore,
     MemorySessionRevocations, ProviderRegistry, TokenKey,
 };
-use ordo_identity_service::config::{
-    CLIENT_ORIGINS_ENV, DATABASE_URL_ENV, DATA_DIR_ENV, ORIGIN_ENV,
-};
+use ordo_identity_service::config::{DATABASE_URL_ENV, DATA_DIR_ENV, ORIGIN_ENV};
 use ordo_identity_service::deployments::{Registration, SignUp};
 use ordo_identity_service::people::Actor;
 use ordo_identity_service::{BootOptions, IdentityConfig, Service};
@@ -73,7 +71,6 @@ use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 const NOW: u64 = 1_800_000_000;
-const APP: &str = "https://app.example.com";
 const HOST: Actor<'static> = Actor {
     id: "unix:test",
     client: "host",
@@ -134,7 +131,6 @@ impl Ids {
             (DATABASE_URL_ENV, url),
             (ORIGIN_ENV, issuer.clone()),
             (DATA_DIR_ENV, dir.display().to_string()),
-            (CLIENT_ORIGINS_ENV, APP.to_string()),
         ]);
         let cfg = IdentityConfig::from_vars(&|k| vars.get(k).cloned()).expect("settings");
         let svc = Service::boot(
@@ -151,9 +147,9 @@ impl Ids {
                 HOST,
                 &Registration {
                     handle: handle.to_string(),
-                    // The callback is under the app's public URL, so that
-                    // origin is listed too, as registration requires.
-                    client_origins: vec![APP.into(), PUBLIC.into()],
+                    // An app registers its callback alone: its pages are
+                    // no client origin of the service.
+                    client_origins: Vec::new(),
                     return_urls: vec![format!("{PUBLIC}/auth/callback/{connection}")],
                     sign_up: SignUp::Open,
                 },

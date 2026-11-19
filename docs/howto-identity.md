@@ -456,10 +456,13 @@ ordo-identity-service people
 ordo-identity-service member add hal p_…
 ```
 
-`--origin` is the console's origin; give it again for each page that asks
-for tokens. `--return <url>` limits where sign-in sends the browser back
-to; by default it is anywhere under each origin. A running service picks
-up the change within a minute.
+`--origin` is the console's origin; give it again for each console page
+that asks for tokens. A client origin is trusted: its page may call the
+service with the person's session cookie, and may run the reauth. List
+consoles only, never an app's page. `--return <url>` limits where sign-in
+sends the browser back to; by default it is anywhere under each origin. A
+return URL may sit on any origin and makes that origin no caller. A
+running service picks up the change within a minute.
 
 The same over HTTP, with a token of the home (a fresh reauth) or the
 provisioner's machine key:
@@ -473,10 +476,23 @@ New people for one deployment: `ordo-identity-service invite --deployment
 hal`, or Invite in that deployment's console. They become members of
 `hal` only.
 
-To change a deployment's origins, end it and add it again, then add its
-members again. `deployment end hal` ends every membership with it, so
-nobody comes back under new origins unasked. A running service stops new
-tokens within a minute; tokens already issued work until they expire.
+To change a deployment's client origins or return URLs, keep its
+members:
+
+```
+ordo-identity-service deployment set hal --origin https://hal.hominem.ai
+ordo-identity-service deployment set notes --no-origins
+ordo-identity-service deployment set notes --return https://api.notes.example.com/auth/callback/accounts
+```
+
+Each flag given replaces that list; a list not given stays.
+`--no-origins` leaves none. Over HTTP: `POST
+/deployments/hal/addresses {"clientOrigins": [..], "returnUrls": [..]}`,
+either key alone. A running service reads it at once.
+
+`deployment end hal` ends the deployment and every membership with it. A
+running service stops new tokens within a minute; tokens already issued
+work until they expire.
 
 ### Point a deployment at it
 
@@ -512,14 +528,14 @@ example notes app uses this. Invites still work beside it.
 Set it when you register, or change it later:
 
 ```
-ordo-identity-service deployment add notes --origin https://notes.example.com --sign-up open
+ordo-identity-service deployment add notes --return https://notes.example.com/ --sign-up open
 ordo-identity-service deployment sign-up notes invite
 ```
 
 Over HTTP, with the same token as registering:
 
 ```
-POST /deployments  {"handle": "notes", "clientOrigins": ["https://notes.example.com"], "signUp": "open"}
+POST /deployments  {"handle": "notes", "returnUrls": ["https://notes.example.com/"], "signUp": "open"}
 POST /deployments/notes/sign-up  {"signUp": "open"}
 ```
 
@@ -561,20 +577,32 @@ has one subject, their id at the service, in every app that connects. So
 two apps that read each other through `peer` see one person as one
 person, whatever each calls the connection.
 
-At the service, register the app. Its handle is the app's client id. Its
-return URLs must cover the app's callback,
-`<ORDO_PUBLIC_URL>/auth/callback/<name>`, and that address's origin must
-be one of its origins:
+At the service, register the app by its callback,
+`<ORDO_PUBLIC_URL>/auth/callback/<name>`, with no `--origin`. Its handle
+is the app's client id:
 
 ```
 ordo-identity-service deployment add notes \
-  --origin https://notes.example.com --origin https://api.notes.example.com \
   --return https://api.notes.example.com/auth/callback/accounts \
   --sign-up open
 ```
 
+The app sends that address as `redirect_uri`, and the service takes it
+only when it is exactly a return URL: the same scheme, host, port and
+path, with no query. Do not list the app's pages with `--origin`. A client
+origin may spend the person's session cookie at the service, which only a
+console should.
+
 `--sign-up open` lets anyone make an account from the app's sign-in. With
 `invite`, only members sign in.
+
+An app registered before this change listed its pages with `--origin`.
+`deployment list` warns about each such origin, and so does the service's
+boot log. Drop them, keeping the callback:
+
+```
+ordo-identity-service deployment set notes --no-origins
+```
 
 On the app, 4 settings, with `accounts` as the connection name:
 
@@ -588,22 +616,23 @@ ORDO_AUTH_ACCOUNTS_CLIENT_AUTH=none
 
 Add `accounts` to `ORDO_AUTH_METHODS` beside any other methods.
 `ORDO_AUTH_RETURN_URLS` is required, as for every outside provider. The
-issuer is the service's `ORDO_IDENTITY_ORIGIN`, exactly. There is no
-client secret: the service takes public clients, and PKCE proves each
-exchange. `ORDO_AUTH_ACCOUNTS_ALGS=EdDSA` is optional; the service signs
-with nothing else.
+issuer is where the service is served: its `ORDO_IDENTITY_ORIGIN`, plus
+its `ORDO_IDENTITY_BASE_PATH` when it has one. `deployment add` prints it.
+There is no client secret: the service takes public clients, and PKCE
+proves each exchange. `ORDO_AUTH_ACCOUNTS_ALGS=EdDSA` is optional; the
+service signs with nothing else.
 
 When the service sits under a base path, such as `/identity` on the
-console's origin, its discovery document is not at
-`<origin>/.well-known/openid-configuration`. Pin the 3 endpoints on the
-app instead:
-
-```
-ORDO_AUTH_ACCOUNTS_AUTHORIZE_URL=https://console.example.com/identity/oidc/authorize
-ORDO_AUTH_ACCOUNTS_TOKEN_URL=https://console.example.com/identity/oidc/token
-ORDO_AUTH_ACCOUNTS_JWKS_URL=https://console.example.com/identity/.well-known/jwks.json
-ORDO_AUTH_ACCOUNTS_ISS_PARAMETER=required
-```
+console's origin, the issuer is
+`https://console.example.com/identity`. Discovery is at
+`<issuer>/.well-known/openid-configuration`, so the app needs no pinned
+endpoints. Deployment tokens keep the origin alone as their `iss`, so
+doors and consoles change nothing. An app set up before this change with
+the origin as its issuer and 3 pinned endpoints must set its issuer to
+the one with the path, and may drop the pinned endpoints. Its sign-ins
+then refuse the old issuer, and the app's boot refuses a changed issuer
+under the same connection name, so give the connection a new name or
+start its people again.
 
 What a sign-in does:
 
@@ -620,10 +649,12 @@ What a sign-in does:
 5. The app links the person as `oidc:accounts:<sub>`.
 
 An unknown client id, or a callback the app is not registered for, shows
-a refusal on the service's page and never sends the browser on. Each code
-issued and each exchange is in the audit log (`oidc.code`,
-`oidc.token`). An ID token is not a deployment token: the door, the
-console and the service's admin routes refuse it.
+a refusal on the service's page and never sends the browser on. Each
+exchange is in the audit log (`oidc.token`). A browser session gets at
+most `ORDO_IDENTITY_AUTHORIZE_PER_SESSION` codes a minute, 20 by default;
+past it the app is sent `temporarily_unavailable`. Spent and expired
+codes are deleted each minute. An ID token is not a deployment token: the
+door, the console and the service's admin routes refuse it.
 
 ## What it does not do
 

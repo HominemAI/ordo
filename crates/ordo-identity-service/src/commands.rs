@@ -4,7 +4,8 @@
 //! | Command | What |
 //! |---|---|
 //! | `invite [--label <text>] [--role admin] [--deployment <handle>]` | a new admin's invite link; also recovery when every passkey is lost. With `--deployment`, the joiner is a member of that registered deployment only |
-//! | `deployment add <handle> --origin <origin>... [--return <url>]... [--sign-up invite\|open]` | register a deployment that signs in here (`crate::deployments`); sign-up is by invite unless `open` |
+//! | `deployment add <handle> [--origin <origin>]... [--return <url>]... [--sign-up invite\|open]` | register a deployment that signs in here (`crate::deployments`): a console's origin with `--origin`, an app's callback with `--return` alone; sign-up is by invite unless `open` |
+//! | `deployment set <handle> [--origin <origin>]... [--no-origins] [--return <url>]...` | replace its client origins, its return URLs, or both |
 //! | `deployment sign-up <handle> invite\|open` | change how people join it |
 //! | `deployment list` | the registered deployments, with their sign-up mode |
 //! | `deployment end <handle>` | no new token for it |
@@ -38,8 +39,9 @@ pub const COMMANDS: &[&str] = &[
 const USAGE: &str = "usage: ordo-identity-service [invite [--label <text>] [--role admin] \
                      [--deployment <handle>] | break-glass-token [--minutes <1..60>] \
                      | rotate-keys [--now] | audit verify [--key <kid>:<x>]... \
-                     | deployment add <handle> --origin <origin>... [--return <url>]... \
-                     [--sign-up invite|open] | deployment sign-up <handle> invite|open \
+                     | deployment add <handle> [--origin <origin>]... [--return <url>]... \
+                     [--sign-up invite|open] | deployment set <handle> [--origin <origin>]... \
+                     [--no-origins] [--return <url>]... | deployment sign-up <handle> invite|open \
                      | deployment list | deployment end <handle> \
                      | member add|end <handle> <person> | member list <handle> | people]";
 
@@ -57,6 +59,18 @@ fn flags<'a>(args: &'a [String], name: &str) -> Result<Vec<&'a str>, String> {
         }
     }
     Ok(out)
+}
+
+/// Origins as one line, or `none`.
+fn shown(origins: &[ordo_identity::origin::Origin]) -> String {
+    if origins.is_empty() {
+        return "none".into();
+    }
+    origins
+        .iter()
+        .map(|o| o.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The `n`th word after the command, required.
@@ -116,10 +130,11 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
             Some("add") => {
                 let handle = word(args, 2, "the deployment's handle")?;
                 let origins = flags(args, "--origin")?;
-                if origins.is_empty() {
+                if origins.is_empty() && flags(args, "--return")?.is_empty() {
                     return Err(format!(
-                        "--origin is required: the console's origin, such as \
-                         https://console.example.com. {USAGE}"
+                        "--origin or --return is required: a console's origin, such as \
+                         https://console.example.com, or an app's callback, such as \
+                         https://notes.example.com/auth/callback/accounts. {USAGE}"
                     ));
                 }
                 let asked = crate::deployments::Registration {
@@ -140,24 +155,66 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                     .register_deployment(actor, &asked)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok(format!(
+                let mut out = format!(
                     "Registered `{}`. Its tokens say aud `{}`.\nClient origins: {}\nReturn URLs: \
-                     {}\nSign-up: {}\nSet on its door and console: ORDO_IDENTITY_URL={o}, \
-                     ORDO_IDENTITY_ORIGIN={o}, ORDO_IDENTITY_DEPLOYMENT={}.\nNext: `member add \
-                     {} <person>`, or `invite --deployment {}`.\n",
+                     {}\nSign-up: {}\nAs an OIDC client: ORDO_AUTH_<NAME>_ISSUER={}, \
+                     ORDO_AUTH_<NAME>_CLIENT_ID={}, ORDO_AUTH_<NAME>_CLIENT_AUTH=none.\n",
                     made.handle,
                     ordo_identity::deployment_token::audience(&made.handle),
-                    made.client_origins
-                        .iter()
-                        .map(|o| o.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" "),
+                    shown(&made.client_origins),
                     made.return_urls.join(" "),
                     made.sign_up.as_str(),
+                    svc.oidc_issuer(),
                     made.handle,
+                );
+                if !made.client_origins.is_empty() {
+                    out.push_str(&format!(
+                        "Set on its door and console: ORDO_IDENTITY_URL={o}, \
+                         ORDO_IDENTITY_ORIGIN={o}, ORDO_IDENTITY_DEPLOYMENT={}.\nNext: `member \
+                         add {} <person>`, or `invite --deployment {}`.\n",
+                        made.handle,
+                        made.handle,
+                        made.handle,
+                        o = svc.config().origin,
+                    ));
+                }
+                Ok(out)
+            }
+            Some("set") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let origins = flags(args, "--origin")?;
+                let none = args.iter().any(|a| a == "--no-origins");
+                if none && !origins.is_empty() {
+                    return Err(format!("--no-origins and --origin together. {USAGE}"));
+                }
+                let returns = flags(args, "--return")?;
+                let asked = crate::deployments::Addresses {
+                    client_origins: if none {
+                        Some(Vec::new())
+                    } else if origins.is_empty() {
+                        None
+                    } else {
+                        Some(origins.iter().map(|s| s.to_string()).collect())
+                    },
+                    return_urls: if returns.is_empty() {
+                        None
+                    } else {
+                        Some(returns.iter().map(|s| s.to_string()).collect())
+                    },
+                };
+                if asked.client_origins.is_none() && asked.return_urls.is_none() {
+                    return Err(format!("give --origin, --no-origins or --return. {USAGE}"));
+                }
+                let made = svc
+                    .set_addresses(actor, handle, &asked)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "`{}` now has client origins: {}\nReturn URLs: {}\nA running service \
+                     reads it at once.\n",
                     made.handle,
-                    made.handle,
-                    o = svc.config().origin,
+                    shown(&made.client_origins),
+                    made.return_urls.join(" "),
                 ))
             }
             Some("list") => {
@@ -169,14 +226,21 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                     out.push_str(&format!(
                         "{}  clients: {}  returns: {}  sign-up: {}\n",
                         d.handle,
-                        d.client_origins
-                            .iter()
-                            .map(|o| o.to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
+                        shown(&d.client_origins),
                         d.return_urls.join(" "),
                         d.sign_up.as_str()
                     ));
+                    let trusted = d.trusted_app_origins();
+                    if !trusted.is_empty() {
+                        out.push_str(&format!(
+                            "  warning: {} is a client origin and holds an app's callback. A \
+                             client origin may spend the session cookie. Unless it is a \
+                             console, drop it: `deployment set {} --no-origins` (or --origin \
+                             with the console's origins only).\n",
+                            shown(&trusted),
+                            d.handle
+                        ));
+                    }
                 }
                 Ok(out)
             }

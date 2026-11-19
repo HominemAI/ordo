@@ -1223,6 +1223,27 @@ impl Service {
         self.refresh_deployments().await
     }
 
+    /// Replace a registered deployment's client origins or return URLs.
+    pub async fn set_addresses(
+        &self,
+        by: Actor<'_>,
+        handle: &str,
+        asked: &deployments::Addresses,
+    ) -> Result<deployments::Registered, IdentityError> {
+        let made = deployments::set_addresses(
+            self.0.store.pool(),
+            self.handle(),
+            &self.0.keys,
+            handle,
+            asked,
+            by,
+            self.now(),
+        )
+        .await?;
+        self.refresh_deployments().await?;
+        Ok(made)
+    }
+
     /// End a registered deployment: no new token for it.
     pub async fn end_deployment(&self, by: Actor<'_>, handle: &str) -> Result<(), IdentityError> {
         deployments::end(

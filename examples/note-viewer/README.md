@@ -82,7 +82,7 @@ Both apps, besides the usual door settings (`docs/settings.md`):
 | `ORDO_PG_DB` | the same database | the same database |
 | `ORDO_AUTH_METHODS` | `accounts`, beside any other way in | `accounts` |
 | `ORDO_AUTH_ACCOUNTS_KIND` | `oidc` | `oidc` |
-| `ORDO_AUTH_ACCOUNTS_ISSUER` | the service's `ORDO_IDENTITY_ORIGIN` | the same |
+| `ORDO_AUTH_ACCOUNTS_ISSUER` | the service's `ORDO_IDENTITY_ORIGIN`, plus its `ORDO_IDENTITY_BASE_PATH` if it has one | the same |
 | `ORDO_AUTH_ACCOUNTS_CLIENT_ID` | `notes`, its handle at the service | `viewer` |
 | `ORDO_AUTH_ACCOUNTS_CLIENT_AUTH` | `none` | `none` |
 | `ORDO_PUBLIC_URL` | its https address; the callback is under it | the same |
@@ -95,13 +95,16 @@ callback (`docs/howto-identity.md`, "Connect an app to the identity
 service"):
 
 ```
-ordo-identity-service deployment add notes --origin <notes page> \
-  --origin <notes ORDO_PUBLIC_URL> \
+ordo-identity-service deployment add notes \
   --return <notes ORDO_PUBLIC_URL>/auth/callback/accounts --sign-up open
-ordo-identity-service deployment add viewer --origin <viewer page> \
-  --origin <viewer ORDO_PUBLIC_URL> \
+ordo-identity-service deployment add viewer \
   --return <viewer ORDO_PUBLIC_URL>/auth/callback/accounts --sign-up open
 ```
+
+Give no `--origin`. A client origin may spend the person's session cookie
+at the service, which an app's page must not. An app registered with
+`--origin` before 2026-11-19 drops it with `deployment set notes
+--no-origins`.
 
 Register before the service starts, or wait up to a minute for a running
 service to read it.

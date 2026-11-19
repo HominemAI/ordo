@@ -7,19 +7,19 @@
 //! | `GET /.well-known/ordo-audit-keys.json` | anyone | the audit checkpoint keys |
 //! | `POST /join/begin`, `/join/finish` | invite holder | sign up by invite link (5.3) |
 //! | `POST /sign-up/begin`, `/sign-up/finish` | anyone | `{deployment}`: open sign-up into a deployment whose mode is `open`; an app member of it only |
-//! | `POST /sign-up/join` | browser session | `{deployment}`: the signed-in person joins an open deployment as an app member |
+//! | `POST /sign-up/join` | browser session, the service's own page only | `{deployment}`: the signed-in person joins an open deployment as an app member |
 //! | `POST /sign-in/begin`, `/sign-in/finish` | anyone | passkey sign-in (5.4) |
 //! | `POST /sign-in/return` | the page | `{deployment?, return}`: where sign-in may send the browser back to, or `return_refused` |
 //! | `POST /recover` | code holder | recovery code sign-in |
 //! | `GET /.well-known/openid-configuration`, `GET /oidc/authorize`, `POST /oidc/token` | an app | the service as an OIDC provider for app users ([`crate::oidc`]) |
 //! | `POST /token` | session | `{aud}`: a token for the service's own deployment or a registered one the person is a member of (5.4, 5.5) |
 //! | `POST /sessions/end` | session | sign out |
-//! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it; `aud` in the finish body names the deployment, default the service's own |
+//! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it; `aud` in the finish body names the deployment, default the service's own; with no `aud`, from the service's page or `ORDO_IDENTITY_CLIENT_ORIGINS` only |
 //! | `POST /passkeys/begin`, `/passkeys/finish` | browser session | enrol another passkey |
 //! | `POST /recovery-codes` | browser session | a new set of recovery codes |
 //! | `POST /me` | browser session | who is signed in, their passkeys, codes left (the account page) |
 //! | `POST /passkeys/{id}/remove` | browser session | remove one passkey, never the last |
-//! | `POST /cli/approve` | browser session | a CLI code for `ordo login` (5.5) |
+//! | `POST /cli/approve` | browser session, from the service's page or `ORDO_IDENTITY_CLIENT_ORIGINS` | a CLI code for `ordo login` (5.5) |
 //! | `POST /cli/redeem` | the CLI | the code and the PKCE verifier for a CLI session |
 //! | `POST /machine/begin`, `/machine/complete` | machine | machine key sign-in (5.6) |
 //! | `GET /invites`, `POST /invites`, `POST /invites/{id}/revoke` | bearer | invites |
@@ -28,6 +28,7 @@
 //! | `GET /audit?before=&limit=` | bearer | the audit log, newest first, and whether the chain checks out now (plan 7) |
 //! | `GET /deployments`, `POST /deployments`, `POST /deployments/{handle}/end` | bearer, the service's own | the deployments registered here ([`crate::deployments`]) |
 //! | `POST /deployments/{handle}/sign-up` | bearer, the service's own | `{signUp: "invite" \| "open"}`: how people join it |
+//! | `POST /deployments/{handle}/addresses` | bearer, the service's own | `{clientOrigins?, returnUrls?}`: replace either list |
 //! | `GET /deployments/{handle}/members`, `POST /deployments/{handle}/members`, `POST /deployments/{handle}/members/{person}/end` | bearer | a deployment's members |
 //!
 //! A bearer token for a registered deployment reaches that deployment's
@@ -215,6 +216,10 @@ pub(crate) fn routes() -> Router<Service> {
         )
         .route("/deployments/{handle}/end", post(deployment_end))
         .route("/deployments/{handle}/sign-up", post(deployment_sign_up))
+        .route(
+            "/deployments/{handle}/addresses",
+            post(deployment_addresses),
+        )
         .route(
             "/deployments/{handle}/members",
             get(members_list).post(member_add),
@@ -413,6 +418,9 @@ async fn sign_up_finish(
 async fn sign_up_join(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
     respond(
         async {
+            // Joining spends the session cookie with no passkey, so only the
+            // service's own page asks it.
+            s.own_page_ok(&headers, "join an app")?;
             let b = parse(&body)?;
             let live = session(&s, &headers, &b).await?;
             let deployment = text(&b, "deployment")?;
@@ -552,7 +560,8 @@ async fn touch_finish(State(s): State<Service>, headers: HeaderMap, body: Bytes)
             // `aud` named: a token for that deployment, for its members.
             // None: the person's own account pages; the touch counts for
             // everyone, and the service's own token comes with it only for
-            // a person who holds one.
+            // a person who holds one. So none is asked only from the
+            // service's page or a client origin of its own deployment.
             if let Some(aud) = b.get("aud").and_then(Value::as_str) {
                 let issued = s
                     .touch_finish_for(&live, assertion(&b)?, aud, origin_of(&headers).as_ref())
@@ -561,6 +570,7 @@ async fn touch_finish(State(s): State<Service>, headers: HeaderMap, body: Bytes)
                 out["touchedAt"] = json!(issued.claims.touched_at);
                 return Ok(Reply::json(out));
             }
+            s.home_origin_ok(&headers, "reauth with no `aud`")?;
             let fresh = s.touch(&live, assertion(&b)?).await?;
             let mut out = match s.home_token_after_touch(&fresh).await? {
                 Some(issued) => token_json(&issued),
@@ -672,6 +682,7 @@ async fn passkey_remove(
 async fn cli_approve(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
     respond(
         async {
+            s.home_origin_ok(&headers, "approve a CLI sign-in")?;
             let b = parse(&body)?;
             let live = session(&s, &headers, &b).await?;
             let code = s.cli_approve(&live, text(&b, "codeChallenge")?).await?;
@@ -1075,6 +1086,29 @@ async fn deployment_sign_up(
             Ok(Reply::json(
                 json!({ "handle": handle, "signUp": mode.as_str() }),
             ))
+        }
+        .await,
+    )
+}
+
+/// `{clientOrigins?, returnUrls?}`: replace a registered deployment's
+/// client origins, its return URLs, or both. The same callers as
+/// registering it.
+async fn deployment_addresses(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "changing a deployment's addresses")?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let asked = deployments::Addresses::from_body(&b)?;
+            let made = s.set_addresses(c.actor(), &handle, &asked).await?;
+            Ok(Reply::json(made.json()))
         }
         .await,
     )

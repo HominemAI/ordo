@@ -71,6 +71,9 @@ pub enum IdentityError {
     WrongAudience { asked: String, serves: String },
     /// A browser call from a page this service does not serve.
     OriginRefused,
+    /// A browser call only the service's own page, or a page of its own
+    /// deployment, may make: it names what was asked.
+    OwnPageOnly(&'static str),
     /// An invite link, a recovery code or a CLI code that is unknown,
     /// expired, spent or revoked. One answer for all, so a guess learns
     /// nothing; the audit log has the reason.
@@ -231,7 +234,7 @@ impl IdentityError {
             IdentityError::SessionEnded(_) => "session_ended",
             IdentityError::TokenRefused(_) => "token_refused",
             IdentityError::WrongAudience { .. } => "wrong_audience",
-            IdentityError::OriginRefused => "origin_refused",
+            IdentityError::OriginRefused | IdentityError::OwnPageOnly(_) => "origin_refused",
             IdentityError::CodeRefused => "code_refused",
             IdentityError::MachineRefused => "machine_refused",
             IdentityError::Throttled { .. } => "too_many_attempts",
@@ -287,6 +290,7 @@ impl IdentityError {
             | IdentityError::MachineRefused => StatusCode::UNAUTHORIZED,
             IdentityError::WrongAudience { .. }
             | IdentityError::OriginRefused
+            | IdentityError::OwnPageOnly(_)
             | IdentityError::MustEnrolPasskey
             | IdentityError::MintRefused(_)
             | IdentityError::GrantNeeded { .. }
@@ -359,6 +363,10 @@ impl fmt::Display for IdentityError {
                 f,
                 "this page may not call the identity service; add its origin to \
                  {CLIENT_ORIGINS_ENV}"
+            ),
+            IdentityError::OwnPageOnly(what) => write!(
+                f,
+                "only the identity service's own page may {what}; open the service's page for it"
             ),
             IdentityError::CodeRefused => f.write_str("this link or code does not work"),
             IdentityError::MachineRefused => f.write_str("the machine key did not sign in"),
@@ -459,8 +467,9 @@ impl fmt::Display for IdentityError {
             ),
             IdentityError::RedirectRefused { client } => write!(
                 f,
-                "that redirect URI is not one deployment `{client}` lists; register \
-                 `<ORDO_PUBLIC_URL>/auth/callback/<name>` among its return URLs"
+                "that redirect URI is not exactly one of deployment `{client}`'s return URLs; \
+                 register the app's callback, `<ORDO_PUBLIC_URL>/auth/callback/<name>`, with \
+                 `--return`, exactly as the app sends it"
             ),
             IdentityError::AuthorizeRefused { why, .. } => {
                 write!(f, "the sign-in request was refused: {why}")

@@ -364,7 +364,9 @@ test('open sign-up makes an account for one app and goes back to it', async ({ b
         return (await res.json()) as Record<string, unknown>;
       };
       const { token } = await call('/token', { aud: 'ordo-deployment:main' });
-      return call('/deployments', { handle: 'notes', clientOrigins: [origin], signUp: 'open' }, token as string);
+      // An app registers where the browser may go back to, and is no
+      // client origin of the service.
+      return call('/deployments', { handle: 'notes', returnUrls: [`${origin}/`], signUp: 'open' }, token as string);
     }, app);
     expect(registered['signUp']).toBe('open');
     await hal.context.close();

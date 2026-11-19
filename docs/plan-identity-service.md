@@ -809,11 +809,12 @@ stay distinct: an ID token's `aud` is the bare handle, its `typ` is
 `JWT`, it carries none of a deployment token's claims, and every
 deployment token verifier refuses it.
 
-- Discovery at `/.well-known/openid-configuration`. The issuer is
-  `ORDO_IDENTITY_ORIGIN`, the `iss` deployment tokens carry.
+- Discovery at `<issuer>/.well-known/openid-configuration`. The issuer
+  is `ORDO_IDENTITY_ORIGIN` plus `ORDO_IDENTITY_BASE_PATH` (11.4). With
+  no base path it is the `iss` deployment tokens carry.
 - Authorization code flow, PKCE `S256` required, at `/oidc/authorize`
   and `/oidc/token`. The client id is a registered handle. The redirect
-  URI is checked by the return URL rule (11.1). An unknown client or
+  URI must be exactly a return URL (11.4). An unknown client or
   redirect is refused on the service's page and never followed.
 - Public clients only (`token_endpoint_auth_methods_supported: none`). A
   code reaches only a registered return URL, and only the app that began
@@ -831,12 +832,48 @@ deployment token verifier refuses it.
   redirect URI, PKCE challenge and nonce. It is too long to guess, so the
   token endpoint is not counted by the guessing limits, which an app's
   one server address would trip.
-- Audit rows: `oidc.code` for each code, `oidc.token` for each exchange,
-  `refused` with the reason when it fails.
+- Audit rows: `oidc.token` for each exchange, `refused` with the reason
+  when it fails. No row per code (11.4).
 - Not built: refresh tokens, userinfo, `prompt` and `max_age` (the ID
-  token's `auth_time` lets the app judge), sign-out everywhere, and
-  discovery at the origin's root when the service sits under a base path
-  (the app pins the 3 endpoints).
+  token's `auth_time` lets the app judge), and sign-out everywhere.
+
+### 11.4 Fixes from the review of 11.2 and 11.3, 2026-11-19
+
+A read-only review of PRs 26 and 27 found 4 faults. Tests:
+`tests/oidc_provider.rs`, the 5 tests under "review of PRs 26 and 27".
+
+- **An app's pages were trusted callers.** Registering a callback
+  required its origin among the client origins, and every client origin
+  was in the CORS list with credentials and in the reauth's origins. A
+  script on an app's page could spend the session cookie: `/me`,
+  `/sign-up/join`, and under the RP ID a reauth whose answer with no
+  `aud` was the home's admin token. Now a return URL may sit on any
+  origin and makes it no caller; an app registers its callback alone.
+  Rows made before keep their client origins. `deployment list` and the
+  boot log warn about a client origin that holds an `/auth/callback/`
+  return URL, and `deployment set <handle> --no-origins` (or `POST
+  /deployments/<handle>/addresses`) drops it, keeping the members.
+  Beside that, a reauth with no `aud` and `/cli/approve` answer only the
+  service's page or `ORDO_IDENTITY_CLIENT_ORIGINS`, and `/sign-up/join`
+  only the service's page.
+- **Codes and audit rows grew with no bound.** Each authorization by a
+  signed-in member wrote a code row and a signed audit row, and open
+  sign-up lets anyone be a member. Now a session gets
+  `ORDO_IDENTITY_AUTHORIZE_PER_SESSION` codes a minute (20), past which
+  the app is sent `temporarily_unavailable`; the minute tick deletes
+  spent and expired codes and closed guessing windows; the audit row is
+  written at the exchange only. A `refused` exchange row needs a live
+  code, so it is bounded by the same limit.
+- **The redirect URI matched by prefix.** The OIDC flow now takes only
+  an exact return URL: scheme, host, port and path, no query. The
+  page's `/sign-in/return` keeps the prefix rule, which consoles use for
+  their deep links.
+- **The issuer left out the base path.** Two services under different
+  base paths on one origin shared an issuer, so an app's peer could
+  read one's subjects as the other's. The OIDC issuer is now the origin
+  and the base path. Deployment tokens keep the origin as `iss`, since
+  doors check it against `ORDO_IDENTITY_ORIGIN`; so under a base path
+  the two differ. With no base path nothing changed.
 
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`

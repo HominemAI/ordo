@@ -4,9 +4,11 @@
 //!
 //! A deployment registered here ([`crate::deployments`]) is an OIDC client.
 //! Its `client_id` is its handle, and its redirect URIs are its return
-//! URLs, checked by the same rule the page's return check uses
-//! ([`crate::deployments::Registered::allows_return`]). An app connects to
-//! the service with Ordo's own OIDC client, `ORDO_AUTH_<NAME>_KIND=oidc`.
+//! URLs, each matched exactly: scheme, host, port and path, with no query
+//! ([`crate::deployments::Registered::allows_redirect`]). An app registers
+//! its callback as a return URL only, never as a client origin, so its
+//! page gets no credentialed call to the service. An app connects to the
+//! service with Ordo's own OIDC client, `ORDO_AUTH_<NAME>_KIND=oidc`.
 //!
 //! | Route | What |
 //! |---|---|
@@ -16,10 +18,17 @@
 //!
 //! The rules:
 //!
-//! - The issuer is `ORDO_IDENTITY_ORIGIN`, the `iss` deployment tokens
-//!   carry. `sub` is the person's id here, the same for every deployment,
-//!   so two apps connected under different connection names see one
-//!   person as one subject (`ordo-exec`'s `peer`).
+//! - The issuer is where the service is served: `ORDO_IDENTITY_ORIGIN`
+//!   and `ORDO_IDENTITY_BASE_PATH`, and discovery is at
+//!   `<issuer>/.well-known/openid-configuration`. With no base path it is
+//!   the origin, the `iss` deployment tokens carry. Under a base path the
+//!   two differ: deployment tokens keep the origin, which doors check
+//!   against `ORDO_IDENTITY_ORIGIN`, and two services under different
+//!   paths on one origin are two OIDC issuers, so an app's peer never
+//!   reads one's subjects as the other's. `sub` is the person's id here,
+//!   the same for every deployment, so two apps connected under different
+//!   connection names see one person as one subject (`ordo-exec`'s
+//!   `peer`).
 //! - An unknown client or a redirect URI the deployment does not list is
 //!   refused on the service's own page and never followed. Any other
 //!   refusal goes back to the app as RFC 6749's `error`.
@@ -40,8 +49,12 @@
 //! - The ID token is EdDSA under the service's token keys, `typ` `JWT`.
 //!   Its `aud` is the bare handle and it carries none of a deployment
 //!   token's claims, so a deployment token verifier refuses it.
-//! - Each code issued and each exchange is an audit row: `oidc.code`,
-//!   `oidc.token`.
+//! - A browser session gets at most `ORDO_IDENTITY_AUTHORIZE_PER_SESSION`
+//!   codes a minute; past it, the app is sent `temporarily_unavailable`.
+//!   The minute tick deletes spent and expired codes ([`sweep_codes`]).
+//! - Each exchange is an audit row, `oidc.token`, `ok` or `refused`. An
+//!   authorization writes none: a refused row needs a live code, and codes
+//!   are limited per session, so the log grows with sign-ins only.
 
 use std::collections::HashMap;
 
@@ -117,17 +130,16 @@ fn with_query(url: &str, pairs: &[(&str, &str)]) -> String {
 }
 
 impl Service {
-    /// The issuer: `ORDO_IDENTITY_ORIGIN`, as deployment tokens carry it.
-    pub fn oidc_issuer(&self) -> &str {
-        &self.config().origin
+    /// The OIDC issuer: the origin and the base path, where the service is
+    /// served. With no base path it is `ORDO_IDENTITY_ORIGIN`, the `iss`
+    /// deployment tokens carry; under one, deployment tokens keep the
+    /// origin.
+    pub fn oidc_issuer(&self) -> String {
+        self.config().public_url()
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!(
-            "{}{}{path}",
-            self.config().origin.trim_end_matches('/'),
-            self.config().base_path
-        )
+        format!("{}{path}", self.config().public_url())
     }
 
     /// The discovery document. Every value is what the service does.
@@ -167,7 +179,7 @@ impl Service {
             return Err(IdentityError::UnknownClient(client.to_string()));
         };
         let redirect = get("redirect_uri")
-            .filter(|r| plain_url_text(r) && !r.contains('#') && d.allows_return(r))
+            .filter(|r| plain_url_text(r) && d.allows_redirect(r))
             .ok_or_else(|| IdentityError::RedirectRefused {
                 client: d.handle.clone(),
             })?;
@@ -180,7 +192,8 @@ impl Service {
                 if let Some(s) = state {
                     pairs.push(("state", s));
                 }
-                pairs.push(("iss", self.oidc_issuer()));
+                let iss = self.oidc_issuer();
+                pairs.push(("iss", &iss));
                 Ok(Authorized::Back(with_query(redirect, &pairs)))
             }
             Err(e) => Err(e),
@@ -261,10 +274,32 @@ impl Service {
             ));
         }
         let now = self.now();
+        // Each code is a row: one session gets so many a minute.
+        match crate::throttle::attempt_per_session(
+            pool,
+            self.handle(),
+            crate::throttle::Try::Authorize,
+            &live.id,
+            &self.config().limits,
+            now,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(IdentityError::Throttled { retry_after_secs }) => {
+                return Err(refused(
+                    "temporarily_unavailable",
+                    format!(
+                        "this browser asked to sign in too many times in a minute; try again \
+                         in {retry_after_secs} seconds"
+                    ),
+                ))
+            }
+            Err(e) => return Err(e),
+        }
         let code = mint_secret();
         let auth_time = live.touched_at.unwrap_or(now);
-        let tx = pool.begin().await?;
-        tx.rows(&format!(
+        pool.rows(&format!(
             "INSERT INTO oidc_codes (code_hash, deployment, client, person_id, session_id, \
              redirect_uri, code_challenge, nonce, scope, auth_time, expires_at, created_at) \
              VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {auth_time}, {}, {now})",
@@ -280,27 +315,12 @@ impl Service {
             now + CODE_SECS,
         ))
         .await?;
-        audit::append(
-            &tx,
-            self.handle(),
-            self.keys(),
-            &Entry {
-                actor: &live.subject,
-                action: "oidc.code",
-                subject: &d.handle,
-                outcome: "ok",
-                client: &live.client,
-                detail: redirect,
-            },
-            now,
-        )
-        .await?;
-        tx.commit().await?;
         let mut pairs = vec![("code", code.as_str())];
         if let Some(s) = get("state") {
             pairs.push(("state", s));
         }
-        pairs.push(("iss", self.oidc_issuer()));
+        let iss = self.oidc_issuer();
+        pairs.push(("iss", &iss));
         Ok(Authorized::Back(with_query(redirect, &pairs)))
     }
 
@@ -428,7 +448,7 @@ impl Service {
             self.keys(),
             &Entry {
                 actor: &person,
-                ..entry("ok", "")
+                ..entry("ok", redirect)
             },
             now,
         )
@@ -457,6 +477,23 @@ impl Service {
         let sig = key.sign(input.as_bytes());
         Ok(format!("{input}.{}", b64url_encode(&sig.to_bytes())))
     }
+}
+
+/// Delete the codes no exchange can spend: used ones and expired ones.
+/// Run on the minute tick, so the table holds about a minute of sign-ins.
+pub async fn sweep_codes(
+    pool: &ordo_exec::Pool,
+    handle: &str,
+    now: u64,
+) -> Result<u64, IdentityError> {
+    Ok(pool
+        .rows(&format!(
+            "DELETE FROM oidc_codes WHERE {} AND (used_at IS NOT NULL OR expires_at <= {now}) \
+             RETURNING 1",
+            dep(handle)
+        ))
+        .await?
+        .len() as u64)
 }
 
 /// The service's page for an authorization request it will not follow:

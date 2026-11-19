@@ -84,7 +84,8 @@ pub(crate) struct Inner {
     pub(crate) clock: Clock,
     /// The service's own origin, `ORDO_IDENTITY_CLIENT_ORIGINS` and every
     /// registered deployment's client origins: who may call from a
-    /// browser. Rebuilt with [`Service::refresh_deployments`].
+    /// browser. A registered deployment's return URLs add nothing here.
+    /// Rebuilt with [`Service::refresh_deployments`].
     pub(crate) allowed: RwLock<Vec<Origin>>,
     /// The deployments registered here, as last read
     /// ([`Service::refresh_deployments`]): the CORS list, the return URL
@@ -364,12 +365,15 @@ impl Service {
         &self.0.cfg.deployment
     }
 
-    /// What is due each minute: a rotation, a retirement, a checkpoint.
+    /// What is due each minute: a rotation, a retirement, a checkpoint, and
+    /// deleting spent or expired OIDC codes and closed guessing windows.
     pub async fn tick(&self) -> Result<(), IdentityError> {
         let now = self.now();
         self.0.keys.tick(self.0.store.pool(), now).await?;
         self.refresh_deployments().await?;
         audit::checkpoint_if_due(self.0.store.pool(), self.handle(), &self.0.keys, now).await?;
+        crate::oidc::sweep_codes(self.0.store.pool(), self.handle(), now).await?;
+        crate::throttle::sweep(self.0.store.pool(), self.handle(), now).await?;
         Ok(())
     }
 
@@ -416,6 +420,24 @@ impl Service {
             },
             self.0.cfg.origin
         );
+        for d in self.registered() {
+            let trusted = d.trusted_app_origins();
+            if !trusted.is_empty() {
+                eprintln!(
+                    "ordo-identity-service: deployment `{}` lists {} as a client origin and an \
+                     app's callback there. A client origin may spend the session cookie. \
+                     Unless it is a console, drop it: `ordo-identity-service deployment set {} \
+                     --no-origins`, or --origin with the console's origins only.",
+                    d.handle,
+                    trusted
+                        .iter()
+                        .map(|o| o.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    d.handle
+                );
+            }
+        }
         let ticker = self.clone();
         let tick = tokio::spawn(async move {
             let mut every = tokio::time::interval(Duration::from_secs(TICK_SECS));
@@ -515,6 +537,53 @@ impl Service {
             return Err(IdentityError::OriginRefused);
         }
         Ok(())
+    }
+
+    /// The `Origin` a browser sent, parsed; `Ok(None)` when none was sent.
+    fn sent_origin(headers: &HeaderMap) -> Result<Option<Origin>, IdentityError> {
+        match headers.get(ORIGIN) {
+            None => Ok(None),
+            Some(v) => v
+                .to_str()
+                .ok()
+                .and_then(Origin::parse)
+                .map(Some)
+                .ok_or(IdentityError::OriginRefused),
+        }
+    }
+
+    fn is_own(&self, o: &Origin) -> bool {
+        Origin::parse(&self.0.cfg.origin).as_ref() == Some(o)
+    }
+
+    /// A browser call that acts for the service's own deployment, or for
+    /// the person's account as a whole: from the service's own page or a
+    /// client origin of the home (`ORDO_IDENTITY_CLIENT_ORIGINS`), never
+    /// from a registered deployment's page. A call with no `Origin` (a CLI
+    /// with its secret in the body) passes. `what` names the act.
+    pub(crate) fn home_origin_ok(
+        &self,
+        headers: &HeaderMap,
+        what: &'static str,
+    ) -> Result<(), IdentityError> {
+        match Self::sent_origin(headers)? {
+            None => Ok(()),
+            Some(o) if self.is_own(&o) || self.0.cfg.client_origins.contains(&o) => Ok(()),
+            Some(_) => Err(IdentityError::OwnPageOnly(what)),
+        }
+    }
+
+    /// A call only the service's own page makes: an `Origin` is required
+    /// and must be the service's own.
+    pub(crate) fn own_page_ok(
+        &self,
+        headers: &HeaderMap,
+        what: &'static str,
+    ) -> Result<(), IdentityError> {
+        match Self::sent_origin(headers)? {
+            Some(o) if self.is_own(&o) => Ok(()),
+            _ => Err(IdentityError::OwnPageOnly(what)),
+        }
     }
 
     /// The session secret a call carries: in the body (a CLI), or in the

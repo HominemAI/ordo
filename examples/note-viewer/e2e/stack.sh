@@ -161,10 +161,12 @@ id_env() {
     ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS=100 "$@"
 }
 # Registered before the service starts: a running service reads a new
-# registration only on its next pass, up to a minute later.
-(id_env "$idsvc" deployment add notes --origin "$notes_page" --origin "$notes_public" \
+# registration only on its next pass, up to a minute later. Each app
+# registers its callback alone: its pages are no client origin, so they
+# cannot spend the service's session cookie.
+(id_env "$idsvc" deployment add notes \
   --return "$notes_public/auth/callback/accounts" --sign-up open) >"$state/register.log" 2>&1
-(id_env "$idsvc" deployment add viewer --origin "$viewer_page" --origin "$viewer_public" \
+(id_env "$idsvc" deployment add viewer \
   --return "$viewer_public/auth/callback/accounts" --sign-up open) >>"$state/register.log" 2>&1
 id_env "$idsvc" >"$state/identity.log" 2>&1 &
 last=$!

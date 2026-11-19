@@ -53,6 +53,8 @@ pub const GUESSES_PER_ADDRESS_ENV: &str = "ORDO_IDENTITY_GUESSES_PER_ADDRESS";
 pub const GUESSES_SHARED_ENV: &str = "ORDO_IDENTITY_GUESSES_SHARED";
 /// Open sign-up calls one address may make per minute (`throttle`).
 pub const SIGN_UPS_PER_ADDRESS_ENV: &str = "ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS";
+/// OIDC codes one browser session may get per minute (`throttle`).
+pub const AUTHORIZE_PER_SESSION_ENV: &str = "ORDO_IDENTITY_AUTHORIZE_PER_SESSION";
 /// The door's proxy-mode settings, read the same way (`ordo-host` `proxy.rs`).
 pub const PROXY_HEADER_ENV: &str = "ORDO_PROXY_HEADER";
 pub const PROXY_TRUSTED_ENV: &str = "ORDO_PROXY_TRUSTED";
@@ -132,6 +134,15 @@ pub const SIGN_UPS_PER_ADDRESS: Range = Range {
     unit: "calls per minute",
 };
 
+/// OIDC authorizations one browser session may have answered with a code
+/// per minute. A real sign-in takes 1; each makes a short-lived code row.
+pub const AUTHORIZE_PER_SESSION: Range = Range {
+    default: 20,
+    min: 1,
+    max: 10_000,
+    unit: "codes per minute",
+};
+
 /// The guessing limits (`throttle`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -139,6 +150,8 @@ pub struct Limits {
     pub shared: u64,
     /// Open sign-up's own per-address limit; the ceiling is `shared`.
     pub sign_ups_per_address: u64,
+    /// OIDC codes per browser session per minute; no shared ceiling.
+    pub authorize_per_session: u64,
 }
 
 /// 0 turns scheduled rotation off; `rotate-keys` still works.
@@ -417,6 +430,11 @@ impl IdentityConfig {
                 per_address,
                 shared,
                 sign_ups_per_address,
+                authorize_per_session: whole(
+                    get,
+                    AUTHORIZE_PER_SESSION_ENV,
+                    AUTHORIZE_PER_SESSION,
+                )?,
             },
             proxy,
         })

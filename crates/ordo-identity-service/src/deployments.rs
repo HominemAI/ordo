@@ -7,9 +7,14 @@
 //! ([`register`]), each with:
 //!
 //! - its handle, so its tokens say `aud: ordo-deployment:<handle>`;
-//! - its client origins: the pages that may ask for its tokens from a
-//!   browser (its console);
-//! - its return URLs: where sign-in may send a browser back to;
+//! - its client origins: the pages that may call the service from a
+//!   browser with the session cookie and ask for its tokens (its console).
+//!   Each is trusted: CORS with credentials, and the reauth may run there;
+//! - its return URLs: where sign-in may send a browser back to, and, as an
+//!   OIDC client, its exact redirect URIs. A return URL may sit on any
+//!   origin and makes that origin no caller. An app's callback is
+//!   registered here, never as a client origin (review of PRs 26 and 27,
+//!   2026-11-19);
 //! - its sign-up mode ([`SignUp`]): by invite only, the default, or open,
 //!   where anyone may make an account and join it (owner, 2026-11-17).
 //!
@@ -99,10 +104,12 @@ impl SignUp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registered {
     pub handle: String,
-    /// The pages that may ask for this deployment's tokens from a browser.
+    /// The pages that may call the service with the session cookie and
+    /// ask for this deployment's tokens from a browser: its console.
     pub client_origins: Vec<Origin>,
-    /// Where sign-in may send a browser back to: URL prefixes, each under
-    /// one of the client origins.
+    /// Where sign-in may send a browser back to: URL prefixes on any
+    /// origin. The OIDC flow takes one only exactly
+    /// ([`Registered::allows_redirect`]).
     pub return_urls: Vec<String>,
     /// How people join it.
     pub sign_up: SignUp,
@@ -117,15 +124,41 @@ impl Registered {
             "audience": ordo_identity::deployment_token::audience(&self.handle),
             "clientOrigins": self.client_origins.iter().map(Origin::to_string).collect::<Vec<_>>(),
             "returnUrls": self.return_urls,
+            "trustedAppOrigins": self.trusted_app_origins().iter().map(Origin::to_string).collect::<Vec<_>>(),
             "signUp": self.sign_up.as_str(),
             "createdBy": self.created_by,
             "createdAt": self.created_at,
         })
     }
 
+    /// Client origins that also hold an app's OIDC callback
+    /// (`/auth/callback/`), as registrations made before 2026-11-19 did. A
+    /// client origin may spend the session cookie, which an app's page
+    /// must not; `deployment list` warns about each.
+    pub fn trusted_app_origins(&self) -> Vec<Origin> {
+        self.client_origins
+            .iter()
+            .filter(|o| {
+                self.return_urls.iter().any(|u| {
+                    split_url(u)
+                        .is_some_and(|(uo, path)| &uo == *o && path.contains("/auth/callback/"))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Whether `url` is one of this deployment's return URLs, or under one.
+    /// The page's sign-in return (`POST /sign-in/return`) uses this rule.
     pub fn allows_return(&self, url: &str) -> bool {
         return_allowed(&self.return_urls, url)
+    }
+
+    /// Whether `uri` is exactly one of this deployment's return URLs: the
+    /// same scheme, host, port and path, with no query or fragment. The
+    /// OIDC flow's `redirect_uri` uses this rule.
+    pub fn allows_redirect(&self, uri: &str) -> bool {
+        redirect_allowed(&self.return_urls, uri)
     }
 }
 
@@ -173,9 +206,9 @@ impl Registration {
         })
     }
 
-    /// Checked: a handle that is not the home's, at least 1 client origin,
-    /// https unless loopback, and every return URL under a client origin.
-    /// No return URL given means each client origin's root.
+    /// Checked: a handle that is not the home's, at least 1 client origin
+    /// or 1 return URL, each https unless loopback. A return URL may sit on
+    /// any origin. No return URL given means each client origin's root.
     pub fn check(&self, home: &str) -> Result<Registered, IdentityError> {
         let handle = self.handle.trim();
         if !valid_handle(handle) {
@@ -207,13 +240,6 @@ impl Registration {
                 origins.push(o);
             }
         }
-        if origins.is_empty() {
-            return Err(IdentityError::BadRequest(
-                "a deployment needs at least 1 client origin: its console's, such as \
-                 https://console.example.com"
-                    .into(),
-            ));
-        }
         let mut returns: Vec<String> = Vec::new();
         for url in self.return_urls.iter().map(|u| u.trim()) {
             let Some((origin, path)) = split_url(url) else {
@@ -221,9 +247,10 @@ impl Registration {
                     "return URL `{url}` is not an https:// URL with a path and no query"
                 )));
             };
-            if !origins.contains(&origin) {
+            if origin.scheme() == "http" && !origin.is_loopback() {
                 return Err(IdentityError::BadRequest(format!(
-                    "return URL `{url}` is not under one of the client origins"
+                    "return URL `{url}` is http:// on a host that is not loopback; use its \
+                     https:// address"
                 )));
             }
             let text = format!("{origin}{path}");
@@ -233,6 +260,14 @@ impl Registration {
         }
         if returns.is_empty() {
             returns = origins.iter().map(|o| format!("{o}/")).collect();
+        }
+        if returns.is_empty() {
+            return Err(IdentityError::BadRequest(
+                "a deployment needs at least 1 client origin, its console's (such as \
+                 https://console.example.com), or 1 return URL, an app's callback (such as \
+                 https://notes.example.com/auth/callback/accounts)"
+                    .into(),
+            ));
         }
         Ok(Registered {
             handle: handle.to_string(),
@@ -309,6 +344,19 @@ pub fn return_allowed(listed: &[String], asked: &str) -> bool {
             path == lp || path.starts_with(&format!("{lp}/"))
         }
     })
+}
+
+/// Whether `asked` is exactly one of `listed`, once both are read as an
+/// origin and a path: a query, a fragment or a longer path is refused.
+pub fn redirect_allowed(listed: &[String], asked: &str) -> bool {
+    if !ordo_identity::origin::plain_url_text(asked) {
+        return false;
+    }
+    let Some((origin, path)) = split_url(asked) else {
+        return false;
+    };
+    let text = format!("{origin}{path}");
+    listed.contains(&text)
 }
 
 fn row(r: &ordo_exec::TextRow) -> Registered {
@@ -493,6 +541,118 @@ pub async fn set_sign_up(
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// What [`set_addresses`] replaces: `None` keeps the list as it is.
+#[derive(Debug, Clone, Default)]
+pub struct Addresses {
+    pub client_origins: Option<Vec<String>>,
+    pub return_urls: Option<Vec<String>>,
+}
+
+impl Addresses {
+    /// From a JSON body: `{clientOrigins?: [..], returnUrls?: [..]}`.
+    pub fn from_body(b: &Value) -> Result<Addresses, IdentityError> {
+        let list = |name: &str| -> Result<Option<Vec<String>>, IdentityError> {
+            match b.get(name) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|v| {
+                        v.as_str().map(str::to_string).ok_or_else(|| {
+                            IdentityError::BadRequest(format!("`{name}` is a list of strings"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Some),
+                Some(_) => Err(IdentityError::BadRequest(format!(
+                    "`{name}` is a list of strings"
+                ))),
+            }
+        };
+        let out = Addresses {
+            client_origins: list("clientOrigins")?,
+            return_urls: list("returnUrls")?,
+        };
+        if out.client_origins.is_none() && out.return_urls.is_none() {
+            return Err(IdentityError::BadRequest(
+                "give `clientOrigins`, `returnUrls` or both".into(),
+            ));
+        }
+        Ok(out)
+    }
+}
+
+/// Replace a registered deployment's client origins, its return URLs, or
+/// both, checked as registering checks them. Members and the sign-up mode
+/// stay. This is how an app registered as a client origin before
+/// 2026-11-19 becomes a return address only. Recorded.
+pub async fn set_addresses(
+    pool: &Pool,
+    home: &str,
+    keys: &KeyRing,
+    handle: &str,
+    asked: &Addresses,
+    by: Actor<'_>,
+    now: u64,
+) -> Result<Registered, IdentityError> {
+    let Some(was) = get(pool, home, handle).await? else {
+        return Err(IdentityError::UnknownDeployment(handle.to_string()));
+    };
+    let next = Registration {
+        handle: handle.to_string(),
+        client_origins: asked
+            .client_origins
+            .clone()
+            .unwrap_or_else(|| was.client_origins.iter().map(Origin::to_string).collect()),
+        return_urls: asked
+            .return_urls
+            .clone()
+            .unwrap_or_else(|| was.return_urls.clone()),
+        sign_up: was.sign_up,
+    };
+    let mut reg = next.check(home)?;
+    let origins = reg
+        .client_origins
+        .iter()
+        .map(Origin::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let returns = reg.return_urls.join(" ");
+    let tx = pool.begin().await?;
+    let done = tx
+        .rows(&format!(
+            "UPDATE deployments SET client_origins = {}, return_urls = {} WHERE {} \
+             AND handle = {} AND ended_at IS NULL RETURNING 1",
+            sql_lit(&origins),
+            sql_lit(&returns),
+            dep(home),
+            sql_lit(handle)
+        ))
+        .await?;
+    if done.is_empty() {
+        return Err(IdentityError::UnknownDeployment(handle.to_string()));
+    }
+    let detail = format!("clients={origins} returns={returns}");
+    audit::append(
+        &tx,
+        home,
+        keys,
+        &Entry {
+            actor: by.id,
+            action: "deployment.addresses",
+            subject: handle,
+            outcome: "ok",
+            client: by.client,
+            detail: &detail,
+        },
+        now,
+    )
+    .await?;
+    tx.commit().await?;
+    reg.created_by = was.created_by;
+    reg.created_at = was.created_at;
+    Ok(reg)
 }
 
 /// End a registration: no new token for it from now on, and every live
@@ -828,12 +988,8 @@ mod tests {
             reg("hominem", &["https://hal.hominem.ai"], &[]),
             reg("hal", &[], &[]),
             reg("hal", &["http://hal.hominem.ai"], &[]),
+            reg("hal", &[], &["http://hal.hominem.ai/cb"]),
             reg("hal", &["https://hal.hominem.ai/"], &[]),
-            reg(
-                "hal",
-                &["https://hal.hominem.ai"],
-                &["https://evil.example.com/"],
-            ),
             reg(
                 "hal",
                 &["https://hal.hominem.ai"],
@@ -858,6 +1014,63 @@ mod tests {
             ),
         ] {
             assert!(bad.check("hominem").is_err(), "{bad:?}");
+        }
+    }
+
+    /// An app is an OIDC client with a return URL and no client origin. A
+    /// return URL on an origin no client origin names makes it no caller.
+    #[test]
+    fn a_return_url_needs_no_client_origin() {
+        let app = reg(
+            "notes",
+            &[],
+            &["https://api.notes.example.com/auth/callback/accounts"],
+        )
+        .check("hominem")
+        .unwrap();
+        assert!(app.client_origins.is_empty());
+        assert_eq!(
+            app.return_urls,
+            vec!["https://api.notes.example.com/auth/callback/accounts".to_string()]
+        );
+        let both = reg(
+            "hal",
+            &["https://hal.hominem.ai"],
+            &["https://app.hal.example.com/cb"],
+        )
+        .check("hominem")
+        .unwrap();
+        assert_eq!(both.client_origins.len(), 1);
+        assert_eq!(both.return_urls, vec!["https://app.hal.example.com/cb"]);
+    }
+
+    #[test]
+    fn a_redirect_uri_must_be_exactly_a_listed_one() {
+        let listed = vec![
+            "https://notes.example.com/auth/callback/accounts".to_string(),
+            "https://hal.hominem.ai/".to_string(),
+        ];
+        for ok in [
+            "https://notes.example.com/auth/callback/accounts",
+            "https://hal.hominem.ai/",
+            "https://hal.hominem.ai",
+        ] {
+            assert!(redirect_allowed(&listed, ok), "{ok}");
+        }
+        for refused in [
+            "https://notes.example.com/auth/callback/accounts/x",
+            "https://notes.example.com/auth/callback/accounts?x=1",
+            "https://notes.example.com/auth/callback/accounts?",
+            "https://notes.example.com/auth/callback/accounts#x",
+            "https://notes.example.com/auth/callback/account",
+            "https://notes.example.com/auth/callback/",
+            "https://hal.hominem.ai/d/hal",
+            "http://notes.example.com/auth/callback/accounts",
+            "https://notes.example.com:444/auth/callback/accounts",
+            "https://notes.example.com/auth/callback/x/../accounts",
+            "https://notes.example.com/auth/callback/\taccounts",
+        ] {
+            assert!(!redirect_allowed(&listed, refused), "{refused}");
         }
     }
 

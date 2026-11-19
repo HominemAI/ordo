@@ -33,7 +33,7 @@ use ordo_identity::software_authenticator::TestAuthenticator;
 use ordo_identity::webauthn::b64url_encode;
 use ordo_identity::Timestamp;
 use ordo_identity_service::audit;
-use ordo_identity_service::deployments::{Registration, SignUp};
+use ordo_identity_service::deployments::{self, Registration, SignUp};
 use ordo_identity_service::people::Actor;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -59,20 +59,30 @@ fn challenge_of(verifier: &str) -> String {
     b64url_encode(&Sha256::digest(verifier.as_bytes()))
 }
 
-/// `notes` and `note-viewer` open, `hal` by invite.
+/// `notes` and `note-viewer` open, `hal` by invite. The two apps register
+/// their callback alone, as an app does since 2026-11-19. `hal` is
+/// registered as before then: its page is also a client origin.
 async fn three(name: &str) -> H {
-    let h = boot_with(name, &[]).await;
-    for (handle, origin, sign_up) in [
-        ("notes", NOTES, SignUp::Open),
-        ("note-viewer", VIEWER, SignUp::Open),
-        ("hal", HAL, SignUp::Invite),
+    three_with(name, &[]).await
+}
+
+async fn three_with(name: &str, extra: &[(&str, &str)]) -> H {
+    let h = boot_with(name, extra).await;
+    for (handle, origin, sign_up, client) in [
+        ("notes", NOTES, SignUp::Open, false),
+        ("note-viewer", VIEWER, SignUp::Open, false),
+        ("hal", HAL, SignUp::Invite, true),
     ] {
         h.svc
             .register_deployment(
                 HOST,
                 &Registration {
                     handle: handle.into(),
-                    client_origins: vec![origin.into()],
+                    client_origins: if client {
+                        vec![origin.into()]
+                    } else {
+                        Vec::new()
+                    },
                     return_urls: vec![callback(origin)],
                     sign_up,
                 },
@@ -334,17 +344,17 @@ async fn a_member_signs_in_with_a_code_and_pkce_and_gets_one_subject_everywhere(
     assert!(claims["exp"].as_u64().unwrap() > h.now());
     assert_eq!(claims["name"], "Dana");
 
-    // Each code issued and each exchange is in the audit log.
+    // The exchange is in the audit log; the code alone is not.
     let log = actions(&h).await;
-    for action in ["oidc.code", "oidc.token"] {
-        assert!(
-            log.iter().any(|(a, actor, subject, outcome)| a == action
+    assert!(
+        log.iter()
+            .any(|(a, actor, subject, outcome)| a == "oidc.token"
                 && *actor == dana
                 && subject == "notes"
                 && outcome == "ok"),
-            "{action}: {log:?}"
-        );
-    }
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|(a, ..)| a == "oidc.code"), "{log:?}");
 
     // Signed in, not yet a member of another open app: the sign-up page
     // joins her. Once joined, the same `sub`.
@@ -553,4 +563,360 @@ async fn an_unknown_client_or_redirect_is_shown_here_and_never_followed() {
     let page = location.unwrap();
     assert!(page.starts_with("/sign-in?deployment=hal&"), "{page}");
     assert!(param(&page, "signUp").is_none());
+}
+
+// ───────────── review of PRs 26 and 27, 2026-11-19 ─────────────
+
+/// A call from `origin` carrying the session cookie: status, body, and
+/// the CORS credentials grant it got, if any.
+async fn from_page(
+    h: &H,
+    origin: &str,
+    cookie: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value, Option<String>) {
+    let (s, v, headers) = h
+        .call(
+            "POST",
+            path,
+            &[("origin", origin), ("cookie", cookie)],
+            body,
+        )
+        .await;
+    let grant = headers
+        .get("access-control-allow-credentials")
+        .map(|v| v.to_str().unwrap().to_string());
+    (s, v, grant)
+}
+
+/// An app registered by its callback is no caller: its page, with the
+/// session cookie, gets no CORS grant and no answer from any route that
+/// spends the cookie. The console, a client origin, still does.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_origin_gets_no_credentialed_answer_and_the_console_still_does() {
+    let h = three("oidc-app-origin").await;
+    let auth = authenticator(45, b"oidc-ida");
+    let (cookie, ida) = sign_up(&h, "notes", "Ida", &auth).await;
+
+    let (s, _, headers) = h
+        .call(
+            "OPTIONS",
+            "/me",
+            &[("origin", NOTES), ("access-control-request-method", "POST")],
+            Value::Null,
+        )
+        .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no preflight for an app's page");
+    assert!(headers.get("access-control-allow-origin").is_none());
+    for (path, body) in [
+        ("/me", json!({})),
+        ("/touch/begin", json!({})),
+        ("/touch/finish", json!({ "challenge": "x" })),
+        (
+            "/cli/approve",
+            json!({ "codeChallenge": challenge_of(VERIFIER) }),
+        ),
+        ("/sign-up/join", json!({ "deployment": "note-viewer" })),
+    ] {
+        let (s, v, grant) = from_page(&h, NOTES, &cookie, path, body).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path}: {v}");
+        assert_eq!(v["error"], "origin_refused", "{path}");
+        assert!(grant.is_none(), "{path}");
+    }
+    let joined = deployments::role_of(h.svc.store().pool(), h.svc.handle(), "note-viewer", &ida)
+        .await
+        .unwrap();
+    assert!(joined.is_none(), "the app's page joined nobody");
+
+    // The console, a client origin of the service's own deployment.
+    let (s, v, grant) = from_page(&h, CONSOLE, &cookie, "/me", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(grant.as_deref(), Some("true"));
+}
+
+/// Defence in depth for a deployment registered before 2026-11-19, whose
+/// app page is still a client origin: a reauth with no `aud` (the home's
+/// token) and a CLI approval answer only the service's page or a client
+/// origin of its own deployment, and joining answers the service's page
+/// alone. `deployment set` then drops the page from the client origins.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registered_client_origin_cannot_reauth_for_the_home_or_approve_or_join() {
+    let h = three("oidc-legacy-origin").await;
+    let auth = authenticator(46, b"oidc-jo");
+    let (cookie, jo) = sign_up(&h, "notes", "Jo", &auth).await;
+    // Jo is also an admin of the service's own deployment.
+    h.svc.add_member(HOST, h.svc.handle(), &jo).await.unwrap();
+
+    // hal's page is a client origin, so the cookie is spent there and the
+    // reauth ceremony may run there.
+    let (s, opts, grant) = from_page(&h, HAL, &cookie, "/touch/begin", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{opts}");
+    assert_eq!(grant.as_deref(), Some("true"));
+    let mut at_hal = authenticator(46, b"oidc-jo");
+    at_hal.origin = HAL.to_string();
+    let (s, v, _) = from_page(
+        &h,
+        HAL,
+        &cookie,
+        "/touch/finish",
+        assertion(&at_hal, &challenge(&opts)),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "no home token for hal's page: {v}"
+    );
+    assert_eq!(v["error"], "origin_refused");
+    assert!(v.get("token").is_none());
+
+    let (s, v, _) = from_page(
+        &h,
+        HAL,
+        &cookie,
+        "/cli/approve",
+        json!({ "codeChallenge": challenge_of(VERIFIER) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    for from in [HAL, CONSOLE] {
+        let (s, v, _) = from_page(
+            &h,
+            from,
+            &cookie,
+            "/sign-up/join",
+            json!({ "deployment": "note-viewer" }),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "joining is the service's page's: {v}"
+        );
+    }
+
+    // The console, the home's client, still reauths with no `aud`, and
+    // the service's own page still approves and joins.
+    let (_, opts, _) = from_page(&h, CONSOLE, &cookie, "/touch/begin", json!({})).await;
+    let mut at_console = authenticator(46, b"oidc-jo");
+    at_console.origin = CONSOLE.to_string();
+    let (s, v, _) = from_page(
+        &h,
+        CONSOLE,
+        &cookie,
+        "/touch/finish",
+        assertion(&at_console, &challenge(&opts)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["token"].is_string());
+    let (s, v, _) = h
+        .post(
+            "/cli/approve",
+            Some(&cookie),
+            json!({ "codeChallenge": challenge_of(VERIFIER) }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v, _) = h
+        .post(
+            "/sign-up/join",
+            Some(&cookie),
+            json!({ "deployment": "note-viewer" }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // `deployment set` drops hal's page from the client origins, keeping
+    // its callback; then its page gets no credentialed answer.
+    let args: Vec<String> = ["deployment", "set", "hal", "--no-origins"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    let (code, out) = ordo_identity_service::commands::run(&h.svc, &args, "test").await;
+    assert_eq!(code, 0, "{out}");
+    let (s, _, grant) = from_page(&h, HAL, &cookie, "/me", json!({})).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(grant.is_none());
+    let d = h
+        .svc
+        .registered()
+        .into_iter()
+        .find(|d| d.handle == "hal")
+        .unwrap();
+    assert!(d.client_origins.is_empty());
+    assert_eq!(d.return_urls, vec![callback(HAL)]);
+}
+
+/// The OIDC flow takes a redirect URI only when it is exactly one the
+/// deployment lists: a longer path or a query under it is refused on the
+/// service's page and never followed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inexact_redirect_uri_is_refused_here() {
+    let h = three("oidc-exact-redirect").await;
+    let auth = authenticator(47, b"oidc-kai");
+    let (cookie, _) = sign_up(&h, "notes", "Kai", &auth).await;
+    for wrong in [
+        format!("{}/more", callback(NOTES)),
+        format!("{}?next=/x", callback(NOTES)),
+        format!("{}?", callback(NOTES)),
+    ] {
+        let mut pairs = ask("notes", NOTES);
+        set(&mut pairs, "redirect_uri", Some(&wrong));
+        let (s, location, body) = authorize(&h, &pairs, Some(&cookie)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{wrong}");
+        assert!(location.is_none(), "{wrong}");
+        assert!(body.contains("redirect URI"), "{body}");
+    }
+    // The exact one works.
+    code_for(&h, &ask("notes", NOTES), &cookie).await;
+}
+
+async fn codes(h: &H) -> u64 {
+    h.svc
+        .store()
+        .pool()
+        .rows("SELECT count(*) FROM oidc_codes")
+        .await
+        .unwrap()[0][0]
+        .as_deref()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// A signed-in member who loops the authorization gets so many codes a
+/// minute and no more, writes no audit row per code, and the minute tick
+/// deletes spent and expired codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_is_limited_per_session_and_old_codes_are_deleted() {
+    let h = three_with(
+        "oidc-authorize-limit",
+        &[("ORDO_IDENTITY_AUTHORIZE_PER_SESSION", "3")],
+    )
+    .await;
+    let auth = authenticator(48, b"oidc-lee");
+    let (cookie, _) = sign_up(&h, "notes", "Lee", &auth).await;
+    let pairs = ask("notes", NOTES);
+    let rows_before = actions(&h).await.len();
+
+    let first = code_for(&h, &pairs, &cookie).await;
+    code_for(&h, &pairs, &cookie).await;
+    code_for(&h, &pairs, &cookie).await;
+    assert_eq!(
+        actions(&h).await.len(),
+        rows_before,
+        "no audit row per code"
+    );
+    let (s, location, _) = authorize(&h, &pairs, Some(&cookie)).await;
+    assert_eq!(s, StatusCode::SEE_OTHER);
+    let location = location.unwrap();
+    assert_eq!(
+        param(&location, "error").as_deref(),
+        Some("temporarily_unavailable"),
+        "{location}"
+    );
+    assert!(param(&location, "code").is_none());
+    assert_eq!(codes(&h).await, 3);
+
+    // One is spent: the tick deletes it at once, the rest once expired.
+    let (s, v) = redeem(&h, "notes", NOTES, &first, VERIFIER).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    h.svc.tick().await.unwrap();
+    assert_eq!(codes(&h).await, 2);
+    h.clock.advance(61);
+    h.svc.tick().await.unwrap();
+    assert_eq!(codes(&h).await, 0);
+    // A new minute, a new allowance.
+    code_for(&h, &pairs, &cookie).await;
+}
+
+/// Under a base path the issuer carries it, discovery is served under it,
+/// and two services under different paths on one origin are two issuers.
+/// Deployment tokens keep the origin as `iss`, as doors check it.
+#[tokio::test(flavor = "multi_thread")]
+async fn under_a_base_path_the_issuer_carries_it_and_deployment_tokens_do_not() {
+    use ordo_identity::oidc::OidcConnection;
+    use ordo_identity::origin::OriginList;
+    use ordo_identity_service::config::BASE_PATH_ENV;
+
+    let a = three_with("oidc-base-a", &[(BASE_PATH_ENV, "/identity")]).await;
+    let b = three_with("oidc-base-b", &[(BASE_PATH_ENV, "/accounts")]).await;
+    let issuer = format!("{ORIGIN}/identity");
+    let (s, v, _) = a
+        .call(
+            "GET",
+            "/identity/.well-known/openid-configuration",
+            &[],
+            Value::Null,
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["issuer"], issuer.as_str());
+    assert_eq!(
+        v["authorization_endpoint"],
+        format!("{issuer}/oidc/authorize")
+    );
+    assert_eq!(v["token_endpoint"], format!("{issuer}/oidc/token"));
+    assert_eq!(v["jwks_uri"], format!("{issuer}/.well-known/jwks.json"));
+    let (_, other, _) = b
+        .call(
+            "GET",
+            "/accounts/.well-known/openid-configuration",
+            &[],
+            Value::Null,
+        )
+        .await;
+    assert_ne!(other["issuer"], v["issuer"]);
+
+    let connection = |issuer: &str| OidcConnection {
+        name: "ids".into(),
+        issuer: issuer.into(),
+        client_id: "notes".into(),
+        client_secret: None,
+        scope: "openid".into(),
+        endpoints: None,
+        use_email: false,
+        display_claims: vec![],
+        avatar_claim: None,
+        skew_secs: 0,
+        algs: vec![Alg::EdDSA],
+        cache_secs: 0,
+        stale_grace_secs: 0,
+        redirect_uri: callback(NOTES),
+        returns: OriginList::parse(NOTES, true, false).unwrap(),
+        presence: Default::default(),
+    };
+    let (ca, cb) = (
+        connection(v["issuer"].as_str().unwrap()),
+        connection(other["issuer"].as_str().unwrap()),
+    );
+    assert_ne!(ca.fingerprint(), cb.fingerprint());
+    assert_eq!(
+        ca.discovery_url(),
+        format!("{issuer}/.well-known/openid-configuration")
+    );
+
+    // A sign-in: the `iss` sent back and the ID token's carry the path.
+    let auth = authenticator(49, b"oidc-max");
+    let (cookie, _) = sign_up(&a, "notes", "Max", &auth).await;
+    let (s, location, body) = authorize(&a, &ask("notes", NOTES), Some(&cookie)).await;
+    assert_eq!(s, StatusCode::SEE_OTHER, "{body}");
+    let location = location.unwrap();
+    assert_eq!(param(&location, "iss").as_deref(), Some(issuer.as_str()));
+    let code = param(&location, "code").unwrap();
+    let (s, answer) = redeem(&a, "notes", NOTES, &code, VERIFIER).await;
+    assert_eq!(s, StatusCode::OK, "{answer}");
+    let (_, claims) = segments(answer["id_token"].as_str().unwrap());
+    let claims: Value = serde_json::from_str(&claims).unwrap();
+    assert_eq!(claims["iss"], issuer.as_str());
+
+    // A deployment token still says the origin, and verifies as a door
+    // verifies it.
+    let (_, session) = a.person("Ned").await;
+    let token = a.svc.token(&session.secret, AUD).await.unwrap().token;
+    let jwks = a.jwks().await;
+    let verified = deployment_token::verify(&token, &jwks, &a.expect()).expect("verifies");
+    assert_eq!(verified.iss, ORIGIN);
 }

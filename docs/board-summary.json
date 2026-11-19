@@ -1,6 +1,6 @@
 {
  "date": "2026-11-19",
- "text": "[[public-op-named-as-its-external-serves-every-row]]: fixed on bleeding (PR 29). An op named like an entity served every row with none of its filter. Released 0.5.1 has the fault; no app in the repo, notes v2 included, has such a name. The fix ships with 0.5.2. Still open before main: [[identity-app-origins-trusted-as-clients]], being fixed now, and [[two-ops-of-one-name-replace-silently]], queued. [[example-apps-notes-v2-plus-note_viewer]] is built on bleeding. 0.5.2 waits for PR 13 (held).",
+ "text": "[[identity-app-origins-trusted-as-clients]]: fixed on bleeding (PR 30); it never reached main. [[public-op-named-as-its-external-serves-every-row]]: fixed on bleeding (PR 29); released 0.5.1 has it, no app in the repo is affected, and the fix ships with 0.5.2. [[example-apps-notes-v2-plus-note_viewer]] is built on bleeding with its federation e2e green. One defect is still being fixed before main: [[two-ops-of-one-name-replace-silently]]. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,20 @@
  ],
  "look": [
   {
+   "id": "example-apps-notes-v2-plus-note_viewer",
+   "why": "built, on bleeding"
+  },
+  {
+   "id": "identity-app-origins-trusted-as-clients",
+   "why": "fixed"
+  },
+  {
    "id": "public-op-named-as-its-external-serves-every-row",
    "why": "fixed; 0.5.1 has it"
   },
   {
-   "id": "identity-app-origins-trusted-as-clients",
-   "why": "high, fix building"
-  },
-  {
    "id": "two-ops-of-one-name-replace-silently",
-   "why": "queued"
+   "why": "fix building"
   }
  ]
 }

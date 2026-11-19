@@ -13107,7 +13107,8 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       Tests: `crates/ordo-host/tests/peer_entities.rs`. Board:
       `example-apps-notes-v2-plus-note_viewer`.
       **Note, 2026-11-18 (asks 13 to 16 ruled):** still to build on the
-      peer line, in order: the matching rule (provider fingerprint plus
+      peer line, in order: the matching rule, **built 2026-11-18 (PR 23,
+      commit 3d9824a5)** (provider fingerprint plus
       subject, a double match refused, start refusals); real database
       grants, a role per deployment (waits on ask 17); app users signing in
       through the identity service. Peers stay off `main` until all 3 land.

@@ -1,6 +1,6 @@
 {
  "date": "2026-11-19",
- "text": "[[example-apps-notes-v2-plus-note_viewer]]: the identity service is now a sign-in provider apps connect to (PR 27). A test signs one person in to 2 apps through it and the reader's guard matches them. Open sign-up (PR 26), real grants (PR 24) and the matching rule (PR 23) landed before it. Building now: note_viewer and its e2e stack. A security review of the sign-in step runs before peers go to main. 0.5.2 waits for PR 13 (held).",
+ "text": "[[identity-app-origins-trusted-as-clients]]: a security review of the new sign-in provider found 1 high defect on bleeding: a connected app's page can call the identity service as the signed-in person, and may reach an admin token. The fix is queued and needs no answer from you. Nothing from this build goes to main before it lands. [[example-apps-notes-v2-plus-note_viewer]]: steps 1 to 3b are on bleeding; step 4, note_viewer and its e2e stack, is building. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -45,8 +45,12 @@
  ],
  "look": [
   {
+   "id": "identity-app-origins-trusted-as-clients",
+   "why": "high, fix queued"
+  },
+  {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "3b landed, step 4 building"
+   "why": "step 4 building"
   }
  ]
 }

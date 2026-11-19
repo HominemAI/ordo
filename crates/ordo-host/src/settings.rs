@@ -807,6 +807,12 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_AUTH_<NAME>_CLIENT_AUTH",
+        "Sign-in and sessions",
+        r#"secret"#,
+        r#"`secret` or `none`"#,
+    ),
+    s(
         "ORDO_AUTH_<NAME>_ISS_PARAMETER",
         "Sign-in and sessions",
         r#"unset"#,

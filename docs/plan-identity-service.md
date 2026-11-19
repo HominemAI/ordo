@@ -76,6 +76,12 @@ and its own passkey table, in its own database. A deployment person who is
 also an app user holds 2 accounts, 2 passkeys, and that is by design: the
 realms do not meet.
 
+Amended 2026-11-19 (11.3): the realms meet where a deployment connects to
+the service as an OIDC provider. An app that does so signs its users in
+with their account at the service, and links them in its own
+`$authenticator` as `oidc:<connection>:<sub>`. The service still never
+opens the deployment's directory.
+
 ### 2.2 Its database
 
 Postgres, its own database and role, `ORDO_IDENTITY_DATABASE_URL` or
@@ -783,8 +789,55 @@ how to: `howto-identity.md` section 14.
 - Open sign-up is counted per address under its own kind,
   `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS` (10 a minute), with the shared
   ceiling of the other kinds.
-- Not built: signing app members in to the app. That is the next step,
-  the service as an OIDC provider (discovery, authorize, ID tokens).
+- Signing app members in to the app: built 2026-11-19 (11.3).
+### 11.3 The service as an OIDC provider, built 2026-11-19
+
+The owner's ruling, 2026-11-17, ask 3: "the identity service is Ordo's
+built-in credential system, and it signs in app users as well as
+deployment people ... Each deployment connects to it as an OIDC provider
+under one connection name, so one person has one subject both
+deployments recognise." Code: `src/oidc.rs`; tests:
+`tests/oidc_provider.rs`, `ordo-host/tests/identity_service_oidc.rs`;
+how to: `howto-identity.md` section 14, connect an app.
+
+**Amendment to 4.3.** The app realm and the deployment realm stay apart
+at the door: a deployment token reaches platform ops only, an app token
+app ops only. They now meet in one place, where a deployment connects to
+the service as an OIDC client. One account at the service signs a person
+in to the console as an admin and to an app as its user. The two tokens
+stay distinct: an ID token's `aud` is the bare handle, its `typ` is
+`JWT`, it carries none of a deployment token's claims, and every
+deployment token verifier refuses it.
+
+- Discovery at `/.well-known/openid-configuration`. The issuer is
+  `ORDO_IDENTITY_ORIGIN`, the `iss` deployment tokens carry.
+- Authorization code flow, PKCE `S256` required, at `/oidc/authorize`
+  and `/oidc/token`. The client id is a registered handle. The redirect
+  URI is checked by the return URL rule (11.1). An unknown client or
+  redirect is refused on the service's page and never followed.
+- Public clients only (`token_endpoint_auth_methods_supported: none`). A
+  code reaches only a registered return URL, and only the app that began
+  the sign-in holds the verifier, so a secret adds a value to manage and
+  no protection here. The app sets `ORDO_AUTH_<NAME>_CLIENT_AUTH=none`,
+  added to Ordo's OIDC client for this.
+- The ID token is EdDSA under the existing token keys and JWKS. Ordo's
+  OIDC client already verified EdDSA, so the service gained no second key
+  type.
+- `sub` is the person's id, the same for every deployment. Only a live
+  member (`admin` or `member`) gets a code, and the membership and the
+  session are checked again at the exchange.
+- Migration 6: `oidc_codes`. A code is 256 bits, hashed, 60 seconds,
+  spent by its first exchange whatever the outcome, bound to client,
+  redirect URI, PKCE challenge and nonce. It is too long to guess, so the
+  token endpoint is not counted by the guessing limits, which an app's
+  one server address would trip.
+- Audit rows: `oidc.code` for each code, `oidc.token` for each exchange,
+  `refused` with the reason when it fails.
+- Not built: refresh tokens, userinfo, `prompt` and `max_age` (the ID
+  token's `auth_time` lets the app judge), sign-out everywhere, and
+  discovery at the origin's root when the service sits under a base path
+  (the app pins the 3 endpoints).
+
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`
   origins, as the console link uses today); not in v1.

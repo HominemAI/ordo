@@ -137,6 +137,24 @@ pub enum IdentityError {
     HomeOnly { act: &'static str, home: String },
     /// The audit log or one of its checkpoints does not check out.
     AuditBroken(crate::audit::AuditBreak),
+    /// OIDC: `client_id` is not a live deployment registered here. Names
+    /// it. Shown on the service's page, never sent back to a redirect.
+    UnknownClient(String),
+    /// OIDC: `redirect_uri` is not one of that deployment's return URLs.
+    /// Shown on the service's page, never followed.
+    RedirectRefused { client: String },
+    /// OIDC: an authorization request the app's sign-in can be told about:
+    /// `error` is the RFC 6749 word sent back with the browser.
+    AuthorizeRefused { error: &'static str, why: String },
+    /// OIDC: a code that is unknown, spent, expired, for another client or
+    /// redirect, with the wrong PKCE verifier, or whose person is no
+    /// longer a member. One answer for all; the app starts sign-in again.
+    GrantRefused,
+    /// OIDC: the token request sent a client secret. This service's
+    /// clients are public (PKCE only).
+    ClientSecretRefused,
+    /// OIDC: a `grant_type` other than `authorization_code`.
+    UnsupportedGrant(String),
     /// The request body or a field in it is malformed.
     BadRequest(String),
     /// Something that should not happen; the log has the detail.
@@ -238,12 +256,19 @@ impl IdentityError {
             IdentityError::ReturnRefused => "return_refused",
             IdentityError::HomeOnly { .. } => "home_only",
             IdentityError::AuditBroken(_) => "audit_broken",
+            IdentityError::UnknownClient(_) | IdentityError::ClientSecretRefused => {
+                "invalid_client"
+            }
+            IdentityError::RedirectRefused { .. } => "invalid_redirect_uri",
+            IdentityError::AuthorizeRefused { error, .. } => error,
+            IdentityError::GrantRefused => "invalid_grant",
+            IdentityError::UnsupportedGrant(_) => "unsupported_grant_type",
             IdentityError::BadRequest(_) => "bad_request",
             IdentityError::Internal(_) => "internal",
         }
     }
 
-    fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         match self {
             IdentityError::Store(_) | IdentityError::Passkey(AuthError::StoreUnavailable(_)) => {
                 match self.class() {
@@ -283,7 +308,14 @@ impl IdentityError {
             | IdentityError::UnknownInvite
             | IdentityError::UnknownMachineKey
             | IdentityError::UnknownPasskey => StatusCode::NOT_FOUND,
-            IdentityError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            IdentityError::BadRequest(_)
+            | IdentityError::RedirectRefused { .. }
+            | IdentityError::AuthorizeRefused { .. }
+            | IdentityError::GrantRefused
+            | IdentityError::UnsupportedGrant(_) => StatusCode::BAD_REQUEST,
+            IdentityError::UnknownClient(_) | IdentityError::ClientSecretRefused => {
+                StatusCode::UNAUTHORIZED
+            }
         }
     }
 }
@@ -419,6 +451,32 @@ impl fmt::Display for IdentityError {
                  for it"
             ),
             IdentityError::AuditBroken(b) => write!(f, "the audit log does not check out: {b}"),
+            IdentityError::UnknownClient(client) => write!(
+                f,
+                "`{client}` is not a deployment registered with this identity service; set the \
+                 app's ORDO_AUTH_<NAME>_CLIENT_ID to its handle, or register it \
+                 (`ordo-identity-service deployment add`)"
+            ),
+            IdentityError::RedirectRefused { client } => write!(
+                f,
+                "that redirect URI is not one deployment `{client}` lists; register \
+                 `<ORDO_PUBLIC_URL>/auth/callback/<name>` among its return URLs"
+            ),
+            IdentityError::AuthorizeRefused { why, .. } => {
+                write!(f, "the sign-in request was refused: {why}")
+            }
+            IdentityError::GrantRefused => f.write_str(
+                "this code does not work: it is unknown, used, expired, for another app, or its \
+                 person is no longer a member; start sign-in again",
+            ),
+            IdentityError::ClientSecretRefused => f.write_str(
+                "this identity service's clients are public and prove themselves with PKCE; \
+                 set the app's ORDO_AUTH_<NAME>_CLIENT_AUTH=none and drop its client secret",
+            ),
+            IdentityError::UnsupportedGrant(g) => write!(
+                f,
+                "grant_type `{g}` is not served here; use `authorization_code`"
+            ),
             IdentityError::BadRequest(why) => write!(f, "bad request: {why}"),
             IdentityError::Internal(why) => write!(f, "internal: {why}"),
         }
@@ -486,6 +544,14 @@ impl IntoResponse for IdentityError {
             }
             IdentityError::Throttled { retry_after_secs } => {
                 body["retryAfterSecs"] = serde_json::json!(retry_after_secs);
+            }
+            // RFC 6749 5.2: an OAuth client reads `error_description`.
+            IdentityError::UnknownClient(_)
+            | IdentityError::ClientSecretRefused
+            | IdentityError::GrantRefused
+            | IdentityError::UnsupportedGrant(_)
+            | IdentityError::AuthorizeRefused { .. } => {
+                body["error_description"] = body["message"].clone();
             }
             _ => {}
         }

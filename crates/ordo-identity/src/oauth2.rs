@@ -429,7 +429,7 @@ impl OAuth2Provider {
         ];
         let got = self
             .client
-            .token_exchange(&self.conn.token_url, form, &self.conn.client_secret)
+            .token_exchange(&self.conn.token_url, form, Some(&self.conn.client_secret))
             .map_err(|f| upstream(f, "token-exchange-rejected"))?;
         let v: Value = serde_json::from_slice(got.bytes())
             .map_err(|_| AuthError::UpstreamRefused("token-response-not-json"))?;

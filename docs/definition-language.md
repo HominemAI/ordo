@@ -2222,17 +2222,24 @@ external entries from journal.notes shared {
 - Everything else is as for an external: read-only, `shared`, no DDL.
 
 **`$caller` on a peer's table** is the peer's member for the same person.
-The guard is written exactly as on a native entity. Ordo finds the member
-through the sign-in subject both deployments hold for one person:
+The guard is written exactly as on a native entity.
+
+**The matching rule** (owner, 2026-11-18). Two sign-ins are the same person
+when the provider and the subject match. The provider is the fingerprint
+each deployment records for a connection in `$authconnection`: the issuer
+for OIDC, the three endpoints and the subject claim for OAuth2. The
+connection name plays no part. One deployment may call the provider
+`corp` and the other `identity`, and their people still match.
 
 1. The caller's member here gives their principal.
 2. The principal's sign-in links here (`$authenticator`) give its subjects.
-   Only an outside provider's subject counts (`oidc:`, `saml:`, `oauth2:`),
-   such as the shared identity service. A password name or a passkey is
-   local to one deployment and links nobody.
-3. The peer's links with the same subject give the peer's principal. A
-   retired link, or a deleted account, does not count.
-4. That principal's active members in the peer, in any of its spaces.
+3. Each subject's connection is mapped to the peer's connections with the
+   same fingerprint. `oidc:corp:<sub>` here is `oidc:identity:<sub>` there.
+4. The peer's links with that subject give the peer's principal. A retired
+   link, or a deleted account, does not count.
+5. Exactly one such principal. A person whose sign-ins reach two or more
+   accounts in the peer matches nothing.
+6. That principal's active members in the peer, in any of its spaces.
 
 `field == $caller` holds when the field is one of those member ids, and
 `field != $caller` when it is not. A person with no member in the peer reads
@@ -2240,6 +2247,41 @@ no guarded rows. It never errors and never falls back to the local member.
 The same holds for `$caller` in an op's filter on the peer's table. Any other
 comparison of such a field with `$caller` is refused (`peer_caller_compare`).
 On a plain external, `$caller` is the local member, as before.
+
+The map of shared providers is built when the deployment starts and read
+again every minute. A connection added to the peer is matched on the next
+read, with no restart. Until then it matches nothing. Ordo never falls back
+to matching by name.
+
+**What never matches.** These connections link nobody, and each start lists
+them with the reason:
+
+- A connection with no connection in the peer for the same provider.
+- A connection whose subject claim can change hands: `email`, `login`,
+  `username`, `name`, `preferred_username`, `global_name`. This holds even
+  when the deployment owner acknowledged the claim for sign-in. The GitHub
+  and Discord presets use the numeric `id` and do link.
+- A tenant's own sign-in providers (`$tenantconnection`).
+- SAML, a password name and a passkey. Each is local to one deployment.
+
+A person whose sign-ins reach more than one account in the peer reads
+nothing there. The deployment owner sees one log line naming them, and
+again only when that list changes.
+
+**Start refusals.** The deployment does not start when:
+
+- The peer has no `$authconnection` table: "Start journal first, then this
+  deployment." A deployment writes it when it starts with sign-in on.
+- `$caller` is used on a peer's table and the two deployments share no
+  provider. Give both a connection to the same provider, or remove `$caller`
+  from those guards and filters. Without `$caller` the start goes on and
+  lists the connections that do not match.
+- One connection name means one provider here and another in the peer. Give
+  one of the two connections a new name. Found on a later read, the
+  connection is dropped from the map and logged, and serving goes on.
+
+**Known gap.** A peer row matches the person's member in any of the peer's
+spaces. The reader's own space plays no part.
 
 The peer is in the same database. A deployment that keeps a tenant in a
 database of its own does not reach a peer from there.

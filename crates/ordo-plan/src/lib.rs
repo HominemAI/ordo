@@ -1749,14 +1749,20 @@ impl Planner {
     ///
     /// 1. `members` here: the caller's row in this space gives the person's
     ///    principal.
-    /// 2. `$authenticator` here: the sign-in subjects linked to it. Only an
-    ///    outside provider's subject counts (`oidc:`, `saml:`, `oauth2:`),
-    ///    the one both deployments hold for one person. A password name or a
-    ///    passkey id is local to a deployment and is never matched.
-    /// 3. `$authenticator` in the peer: the same subject, and its principal
+    /// 2. `$authenticator` here: the sign-in subjects linked to it.
+    /// 3. `$peerlink` here: the map from this deployment's connections to
+    ///    the peer's with the same provider fingerprint (owner ruling
+    ///    2026-11-18), kept by `ordo_exec::peer::link`. A subject
+    ///    `oidc:<here>:<sub>` becomes `oidc:<there>:<sub>`. Only a mapped
+    ///    connection counts: a password name, a passkey, SAML, a tenant's own
+    ///    provider and a connection with no shared provider match nothing.
+    ///    The connection name plays no part.
+    /// 4. `$authenticator` in the peer: that subject, and its principal
     ///    there. A retired link on either side does not count.
-    /// 4. `$principal` in the peer: an account that is not deleted.
-    /// 5. `members` in the peer: that principal's active members, in any
+    /// 5. `$principal` in the peer: an account that is not deleted.
+    /// 6. Exactly one such principal. A person whose links reach two or more
+    ///    accounts in the peer matches nothing.
+    /// 7. `members` in the peer: that principal's active members, in any
     ///    space. The external has no `$space`, so a row in any of the peer's
     ///    spaces is matched by the person's member of that space.
     ///
@@ -1775,22 +1781,35 @@ impl Planner {
         let n = self.peer_n;
         self.peer_n += 1;
         let a = |s: &str| format!("$peer{n}_{s}");
-        let (lm, la, pa, pp, pm) = (a("lm"), a("la"), a("pa"), a("pp"), a("pm"));
+        let (lm, la, lk, pa, pp, pm) = (a("lm"), a("la"), a("lk"), a("pa"), a("pp"), a("pm"));
         self.sources.physical(&lm);
-        for e in [&la, &pa, &pp, &pm] {
+        for e in [&la, &lk, &pa, &pp, &pm] {
             self.sources.external(e);
         }
         let p = q(peer);
+        let peer_lit = format!("'{}'", peer.replace('\'', "''"));
         let c = |alias: &str, col: &str| format!("{}.{}", q(alias), q(col));
         Ok(format!(
-            "({x} IS NOT NULL AND {x} IN (SELECT {pm_id} FROM {p}.{members} AS {pm_q}              JOIN {p}.{prin} AS {pp_q} ON {pp_id} = {pm_prin} AND {pp_del} = 0              JOIN {p}.{auth} AS {pa_q} ON {pa_prin} = {pm_prin} AND {pa_ret} = ''              JOIN {auth} AS {la_q} ON {la_auth} = {pa_auth} AND {la_ret} = ''              JOIN {members} AS {lm_q} ON {lm_prin} = {la_prin}              WHERE {lm_space} = {space} AND {lm_id} = {who} AND {lm_kind} = 'principal'              AND {pm_kind} = 'principal' AND {pm_status} = 'active'              AND (left({la_auth}, 5) = 'oidc:' OR left({la_auth}, 5) = 'saml:'              OR left({la_auth}, 7) = 'oauth2:')))",
+            "({x} IS NOT NULL AND {x} IN (SELECT {pm_id} FROM {p}.{members} AS {pm_q} \
+             WHERE {pm_kind} = 'principal' AND {pm_status} = 'active' \
+             AND {pm_prin} = (SELECT min({pa_prin}) FROM {members} AS {lm_q} \
+             JOIN {auth} AS {la_q} ON {la_prin} = {lm_prin} AND {la_ret} = '' \
+             JOIN {link} AS {lk_q} ON {lk_peer} = {peer_lit} \
+             AND left({la_auth}, length({lk_local})) = {lk_local} \
+             JOIN {p}.{auth} AS {pa_q} ON {pa_auth} = {lk_remote} || \
+             substr({la_auth}, length({lk_local}) + 1) AND {pa_ret} = '' \
+             JOIN {p}.{prin} AS {pp_q} ON {pp_id} = {pa_prin} AND {pp_del} = 0 \
+             WHERE {lm_space} = {space} AND {lm_id} = {who} AND {lm_kind} = 'principal' \
+             HAVING count(DISTINCT {pa_prin}) = 1)))",
             members = q("members"),
             prin = q("$principal"),
             auth = q("$authenticator"),
+            link = q("$peerlink"),
             pm_q = q(&pm),
             pp_q = q(&pp),
             pa_q = q(&pa),
             la_q = q(&la),
+            lk_q = q(&lk),
             lm_q = q(&lm),
             pm_id = c(&pm, "id"),
             pm_prin = c(&pm, "principal"),
@@ -1804,6 +1823,9 @@ impl Planner {
             la_auth = c(&la, "authenticator"),
             la_ret = c(&la, "retired_case"),
             la_prin = c(&la, "principal"),
+            lk_peer = c(&lk, "peer"),
+            lk_local = c(&lk, "local"),
+            lk_remote = c(&lk, "remote"),
             lm_prin = c(&lm, "principal"),
             lm_space = c(&lm, SPACE_COLUMN),
             lm_id = c(&lm, "id"),

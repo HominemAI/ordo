@@ -429,3 +429,53 @@ async fn a_reader_line_needs_a_role_setting_naming_another_role() {
         .expect("allowed");
     assert!(lines[0].contains("no grants are made"), "{lines:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_the_gate_refuses_leaves_the_grants_as_they_were() {
+    let w = world("ordo_rgrant_gate").await;
+    // The gate reads the setting from the environment. Only this test in
+    // the binary uses this nickname.
+    std::env::set_var("ORDO_READER_GATED_ROLE", READER);
+    let v1 = Program::compile(&format!("reader gated reads notes\n{ALPHA}")).unwrap();
+    let (_, outcome) = sa::apply(&w.a, &v1, "t", "t").await;
+    assert!(outcome.is_ok(), "{outcome:?}");
+    w.b.rows("SELECT title FROM alpha.notes")
+        .await
+        .expect("reads");
+    assert!(denied(&w.b, "SELECT body FROM alpha.secrets").await);
+
+    // A version that adds `secrets` to the line, and an entity the live
+    // database does not have: the gate refuses it for drift.
+    let v2 = Fixture::from_source(
+        &format!("reader gated reads notes, secrets\n{ALPHA}\nentity later {{\n  what: text\n}}\n"),
+        "",
+    )
+    .expect("v2 compiles");
+    let keys: std::sync::Arc<dyn ordo_crypto::KeyProvider> =
+        std::sync::Arc::new(ordo_crypto::TestProvider::with_space("s"));
+    let r = ordo_host::deploy::verify_embedded(
+        v2,
+        &w.a,
+        &cfg(&w.pg.db, WRITER, "alpha"),
+        keys,
+        ordo_crypto::SpaceId("s".into()),
+        "v2",
+    )
+    .await;
+    std::env::remove_var("ORDO_READER_GATED_ROLE");
+    let Err(e) = r else {
+        panic!("the gate refuses a version the database does not hold")
+    };
+    assert!(
+        matches!(e, ordo_host::deploy::LoadRefusal::SchemaDrift { .. }),
+        "{e}"
+    );
+    // The grants are exactly as v1 left them.
+    assert!(
+        denied(&w.b, "SELECT body FROM alpha.secrets").await,
+        "a refused version changed the grants"
+    );
+    w.b.rows("SELECT title FROM alpha.notes")
+        .await
+        .expect("still reads");
+}

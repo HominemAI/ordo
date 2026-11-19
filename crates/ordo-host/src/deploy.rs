@@ -734,19 +734,10 @@ async fn gate_fixture(
         refusal: Box::new(refusal),
     };
     ordo_exec::peer::resolve(&mut fixture.schema, pool.schema()).map_err(schema_refusal)?;
-    // Consent is Postgres's (owner ruling 2026-11-18). As the app being
-    // read: the grants each `reader` line's role holds here are made to
-    // equal the file, on the active version only. As a reader: this role
-    // must hold the grants the peer gives, and must not read the peer
-    // without one.
-    if live == LiveCheck::Deployment {
-        for line in ordo_exec::peer::grant_readers(pool, &fixture.schema)
-            .await
-            .map_err(schema_refusal)?
-        {
-            println!("  {line}");
-        }
-    }
+    // Consent is Postgres's (owner ruling 2026-11-18). As a reader: this
+    // role must hold the grants the peer gives, and must not read the peer
+    // without one. As the app being read, the grants are made last, below,
+    // once every refusal of this gate has passed.
     let callers = ordo_exec::peer::callers(&fixture.schema, &fixture.registry);
     for line in ordo_exec::peer::check_access_env(pool, &fixture.schema, &callers)
         .await
@@ -798,6 +789,20 @@ async fn gate_fixture(
         space: space.clone(),
     };
     let verified = Verified::from_gate(version, fixture, exec, report)?;
+
+    // As the app being read: the grants each `reader` line's role holds
+    // here are made to equal the file. Only for the active version, and
+    // only now, after every refusal above, so a version the gate refuses
+    // never changes them. A grant that fails still refuses the load, and
+    // the `Verified` is dropped before anyone holds it.
+    if live == LiveCheck::Deployment {
+        for line in ordo_exec::peer::grant_readers(pool, &verified.0.fixture.schema)
+            .await
+            .map_err(schema_refusal)?
+        {
+            println!("  {line}");
+        }
+    }
 
     // The seam, guarded where it is made. A future refactor that
     // reintroduces a `Fixture::from_source` after the assignment above —

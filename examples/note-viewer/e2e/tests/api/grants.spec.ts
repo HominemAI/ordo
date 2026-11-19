@@ -34,7 +34,10 @@ test('Postgres refuses the viewer’s role every notes v2 table the reader line 
 // The public op answers only notes tagged `public`, through the real door,
 // to a visitor with no token. Guards reported fix: an op named like the
 // external it reads (`publicNotes` over `external publicNotes`) answered
-// every row of the table, unfiltered, on the public path.
+// every row of the table, unfiltered, on the public path. The compiler now
+// refuses that name (`op_named_like_entity`), and the door answers the op
+// for a program compiled before the refusal
+// (crates/ordo-host/tests/public_name_collision.rs).
 test('a visitor gets the notes tagged public and no other', async ({ request }) => {
   const open = unique('note_open');
   const closed = unique('note_closed');

@@ -571,6 +571,9 @@ pub fn effective_class(
 /// that no data can make valid must fail here for the same reason a read
 /// op that no data can bound does.
 pub fn check_registration(schema: &Schema, registry: &Registry) -> Result<(), SemaError> {
+    // First: every later check binds ops by name, and a name that is also
+    // an entity's would be checked as the wrong thing.
+    registry.check_entity_names(schema)?;
     registry.check_reserved_params()?;
     registry.check_content_params()?;
     registry.check_param_places()?;

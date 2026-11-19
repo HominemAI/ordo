@@ -8,7 +8,7 @@ name: Nightly
 #   run's commit with the commit of the last completed run of this
 #   workflow. Same commit: it stops there and every later job skips.
 # - The suites run one after another: ci, notes e2e, identity e2e, console
-#   e2e. A failing suite does not stop the next one (`always()`), so one
+#   e2e, federation e2e. A failing suite does not stop the next one (`always()`), so one
 #   red suite never hides another.
 # - A called workflow sees this run's event name (`schedule` or
 #   `workflow_dispatch`), never `pull_request` or `push`, so
@@ -35,7 +35,8 @@ permissions:
   pull-requests: read
 
 # Never cancel a nightly in flight. Each suite keeps its own concurrency
-# group (ci-, e2e-, identity-e2e-, console-e2e-), none equal to this one.
+# group (ci-, e2e-, identity-e2e-, console-e2e-, federation-e2e-), none
+# equal to this one.
 concurrency:
   group: nightly
   cancel-in-progress: false
@@ -99,4 +100,10 @@ jobs:
     needs: [decide, identity-e2e]
     if: ${{ always() && needs.decide.outputs.changed == 'true' }}
     uses: ./.github/workflows/console-e2e.yml
+    secrets: inherit
+
+  federation-e2e:
+    needs: [decide, console-e2e]
+    if: ${{ always() && needs.decide.outputs.changed == 'true' }}
+    uses: ./.github/workflows/federation-e2e.yml
     secrets: inherit

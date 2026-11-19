@@ -814,7 +814,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [notes, notes-v2, teamspace, shopfront]
+        app: [notes, notes-v2, note-viewer, teamspace, shopfront]
     name: examples (${{ matrix.app }})
     needs: changes
     env:

@@ -189,6 +189,13 @@ Deployment people live in the identity service. Invite more with
 
 The example is notes v2, in `examples/notes-v2/`.
 
+Notes v2 names a reader, `reader note_viewer reads notes, notesAccess`, for
+the second example app (`examples/note-viewer/README.md`). The apply and
+every start then need `ORDO_READER_NOTE_VIEWER_ROLE` on the door, naming a
+role the database has. With no note_viewer, any role with no rights does:
+`CREATE ROLE note_viewer NOLOGIN`, then `ORDO_READER_NOTE_VIEWER_ROLE=note_viewer`.
+Or delete the `reader` line from your copy.
+
 1. Open **Deploys** in the console.
 2. Apply the program from `examples/notes-v2/notes.ordo`.
 3. Touch your passkey when the box asks.

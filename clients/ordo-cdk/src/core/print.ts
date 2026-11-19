@@ -560,6 +560,8 @@ export function printDeclaration(d: Declaration): string {
       return d.version ? `domain ${d.name} @ ${d.version}` : `domain ${d.name}`;
     case 'peer':
       return `peer ${d.name}`;
+    case 'reader':
+      return `reader ${d.name} reads ${d.tables.join(', ')}`;
     case 'entity':
       return printEntity(d);
     case 'external':

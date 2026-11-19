@@ -65,6 +65,7 @@ const IMPORTABLE: &[&str] = &[
     "every",
     "external",
     "peer",
+    "reader",
     "f",
     "fn",
     "g",
@@ -108,6 +109,7 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut needs_external = false;
     let mut needs_key = false;
     let needs_peer = !program.peers.is_empty();
+    let needs_reader = !program.readers.is_empty();
 
     if let Some(d) = &program.domain {
         synth_args.push(match &d.version {
@@ -124,6 +126,16 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
         ));
         e.peers.insert(p.name.name.clone(), bind.clone());
         synth_args.push(bind);
+    }
+    // A reader line names this program's own tables, by name.
+    for r in &program.readers {
+        let tables = r
+            .tables
+            .iter()
+            .map(|t| ts::str_lit(&t.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        synth_args.push(format!("reader({}, [{tables}])", ts::str_lit(&r.name.name)));
     }
     for ent in &program.entities {
         let bind = e.bind(&ent.name.name);
@@ -156,7 +168,7 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
         .iter()
         .copied()
         .filter(|n| {
-            // `key`, `external` and `peer` are also option and field words, so a
+            // `key`, `external`, `peer` and `reader` are also option and field words, so a
             // whole-word mention would import them for nothing, and the
             // package compiles under `noUnusedLocals`. Their uses are calls.
             let mentioned = mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n));
@@ -166,6 +178,8 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
                 needs_external
             } else if *n == "peer" {
                 needs_peer
+            } else if *n == "reader" {
+                needs_reader
             } else {
                 mentioned
             }

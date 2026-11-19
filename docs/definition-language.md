@@ -2286,6 +2286,72 @@ spaces. The reader's own space plays no part.
 The peer is in the same database. A deployment that keeps a tenant in a
 database of its own does not reach a peer from there.
 
+### `reader`: who may read this deployment's tables [ruled 2026-11-18, built]
+
+Peers read with their database role. Give each deployment its own role. The
+reader line and its grants decide which tables another deployment can read.
+Guards decide which rows that deployment's users see. The deployment itself
+can read every row of a table it is granted.
+
+The app being read writes one line per reader:
+
+```
+reader note_viewer reads notes, notesAccess
+```
+
+- `note_viewer` is a local nickname for the reader. It does not name or
+  change that deployment. It is lowercase letters, digits and underscores,
+  starting with a letter, and is declared once (`reader_line`).
+- The list is this program's own entities. A name that is not one, or that
+  is an external, is refused at check time naming it
+  (`reader_unknown_table`).
+- The file never holds the role. The deployment owner sets
+  `ORDO_READER_NOTE_VIEWER_ROLE`, the nickname upper-cased, to the role in
+  the reader's `ORDO_PG_USER`.
+
+**What is granted.** At every apply and every start, the grants that role
+holds in this deployment's schema are made equal to the line:
+
+- `USAGE` on the schema.
+- `SELECT` on each table named.
+- `SELECT` on the sign-in columns the reader's `$caller` guard reads, and
+  no other columns: `members` (`id`, `principal`, `kind`, `status`),
+  `$principal` (`id`, `deleted_at`), `$authenticator` (`authenticator`,
+  `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
+  `fingerprint`, `subject_claim`). Naming `members` on the line grants the
+  whole table.
+
+A table taken off the line is revoked at the next apply or start. So is
+everything, when the whole line is removed: `$readergrant` remembers which
+roles were granted. A table a migration creates is granted by the same
+apply. Nothing is sent when the grants already match.
+
+**Refusals in the app being read.** The start, and the apply, are refused
+when:
+
+- `ORDO_READER_<NAME>_ROLE` is unset, or names a role the database server
+  does not have.
+- It names this deployment's own role, or a role that is a member of it.
+  Grants then decide nothing. For local work, `ORDO_PEER_SHARED_ROLE=on`
+  allows it and makes no grants.
+- The grants do not take: this deployment's role must own its schema and
+  its tables.
+
+**Refusals in the reader.** Before it reads a peer, a deployment checks
+its own role:
+
+- It must hold `SELECT` on every peer table an external reads, and on the
+  sign-in columns when it uses `$caller` on that peer. If not, the start is
+  refused with the line to add to the peer's file, for example
+  `reader <name> reads notes`, and the setting to set there,
+  `ORDO_READER_<NAME>_ROLE=<this role>`. The reader cannot know the
+  nickname the peer gives it, so `<name>` is the peer's choice.
+- It must not read the peer without a grant: the same role as the peer, the
+  owner of the peer's schema or tables, a member of that owner, a
+  superuser, or a member of `pg_read_all_data`. Such a start is refused
+  unless `ORDO_PEER_SHARED_ROLE=on`. `ordo dev` turns that on, since it runs
+  every app as one role.
+
 ---
 
 ## 4. Conditions

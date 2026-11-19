@@ -1390,6 +1390,18 @@ pub static REGISTRY: &[Setting] = &[
         r#"as written"#,
         r#""#,
     ),
+    s(
+        "ORDO_READER_<NAME>_ROLE",
+        "Databases and pools",
+        r#"none, required per reader"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_SHARED_ROLE",
+        "Databases and pools",
+        r#"off"#,
+        r#""#,
+    ),
     s("ORDO_PG_PASSWORD", "Databases and pools", r#"none"#, r#""#),
     s(
         "ORDO_PG_POOL_SIZE",

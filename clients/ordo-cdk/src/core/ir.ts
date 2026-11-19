@@ -356,10 +356,21 @@ export interface PeerNode {
   readonly name: string;
 }
 
+/**
+ * `reader note_viewer reads notes, notesAccess`: another Ordo deployment that
+ * may read these tables of this one.
+ */
+export interface ReaderNode {
+  readonly kind: 'reader';
+  readonly name: string;
+  readonly tables: readonly string[];
+}
+
 /** Anything `synth()` accepts, in written order. */
 export type Declaration =
   | DomainNode
   | PeerNode
+  | ReaderNode
   | EntityNode
   | ExternalNode
   | OpNode

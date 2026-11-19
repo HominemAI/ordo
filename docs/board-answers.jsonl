@@ -1615,3 +1615,5 @@
 {"seq": 1617, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 14, "at": "2026-11-18", "status": "decided", "text": "No, it should be now. We can nuke my deployment if necessary it houses nothing.", "source": "record", "read": true}
 {"seq": 1618, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 15, "at": "2026-11-18", "status": "decided", "text": "Okay. Document the gap. Put it on v2 roadmap", "source": "record", "read": true}
 {"seq": 1619, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 16, "at": "2026-11-18", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1620, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 17, "at": "2026-11-19T07:04:56Z", "status": "open", "text": "agreed", "source": "page", "read": true}
+{"seq": 1621, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 17, "at": "2026-11-18", "status": "decided", "text": "agreed", "source": "record", "read": true}

@@ -1,6 +1,6 @@
 {
- "date": "2026-11-18",
- "text": "[[example-apps-notes-v2-plus-note_viewer]]: asks 13 to 16 are ruled. The matching rule for who is the same person in a peer is being built. Real database grants are next and wait on ask 17, the spelling of the reader line. Tying spaces is filed for later as [[peer-spaces-tied]]. Peers stay off main until the rule, the grants and app sign-in through the identity service land. 0.5.2 waits for PR 13 (held).",
+ "date": "2026-11-19",
+ "text": "[[example-apps-notes-v2-plus-note_viewer]]: asks 1 to 17 are ruled and nothing there waits on you. The matching rule for who is the same person in a peer is being built. Real database grants, with the reader line you agreed, are built next. Peers stay off main until the rule, the grants and app sign-in through the identity service land. Tying spaces is filed for later as [[peer-spaces-tied]]. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,11 +46,7 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "ask 17 needs you"
-  },
-  {
-   "id": "peer-spaces-tied",
-   "why": "filed for later"
+   "why": "building, nothing needed"
   }
  ]
 }

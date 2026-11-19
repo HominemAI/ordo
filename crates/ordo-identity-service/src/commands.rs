@@ -4,8 +4,9 @@
 //! | Command | What |
 //! |---|---|
 //! | `invite [--label <text>] [--role admin] [--deployment <handle>]` | a new admin's invite link; also recovery when every passkey is lost. With `--deployment`, the joiner is a member of that registered deployment only |
-//! | `deployment add <handle> --origin <origin>... [--return <url>]...` | register a deployment that signs in here (`crate::deployments`) |
-//! | `deployment list` | the registered deployments |
+//! | `deployment add <handle> --origin <origin>... [--return <url>]... [--sign-up invite\|open]` | register a deployment that signs in here (`crate::deployments`); sign-up is by invite unless `open` |
+//! | `deployment sign-up <handle> invite\|open` | change how people join it |
+//! | `deployment list` | the registered deployments, with their sign-up mode |
 //! | `deployment end <handle>` | no new token for it |
 //! | `member add <handle> <person>`, `member end <handle> <person>`, `member list <handle>` | who may hold a deployment's tokens |
 //! | `people` | every account, with its id, for `member add` |
@@ -38,6 +39,7 @@ const USAGE: &str = "usage: ordo-identity-service [invite [--label <text>] [--ro
                      [--deployment <handle>] | break-glass-token [--minutes <1..60>] \
                      | rotate-keys [--now] | audit verify [--key <kid>:<x>]... \
                      | deployment add <handle> --origin <origin>... [--return <url>]... \
+                     [--sign-up invite|open] | deployment sign-up <handle> invite|open \
                      | deployment list | deployment end <handle> \
                      | member add|end <handle> <person> | member list <handle> | people]";
 
@@ -127,6 +129,12 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                         .iter()
                         .map(|s| s.to_string())
                         .collect(),
+                    sign_up: match flag(args, "--sign-up")? {
+                        None => crate::deployments::SignUp::Invite,
+                        Some(w) => {
+                            crate::deployments::SignUp::parse(w).map_err(|e| e.to_string())?
+                        }
+                    },
                 };
                 let made = svc
                     .register_deployment(actor, &asked)
@@ -134,7 +142,7 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                     .map_err(|e| e.to_string())?;
                 Ok(format!(
                     "Registered `{}`. Its tokens say aud `{}`.\nClient origins: {}\nReturn URLs: \
-                     {}\nSet on its door and console: ORDO_IDENTITY_URL={o}, \
+                     {}\nSign-up: {}\nSet on its door and console: ORDO_IDENTITY_URL={o}, \
                      ORDO_IDENTITY_ORIGIN={o}, ORDO_IDENTITY_DEPLOYMENT={}.\nNext: `member add \
                      {} <person>`, or `invite --deployment {}`.\n",
                     made.handle,
@@ -145,6 +153,7 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                         .collect::<Vec<_>>()
                         .join(" "),
                     made.return_urls.join(" "),
+                    made.sign_up.as_str(),
                     made.handle,
                     made.handle,
                     made.handle,
@@ -158,17 +167,35 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                 let mut out = format!("{} (this service's own)\n", svc.handle());
                 for d in list {
                     out.push_str(&format!(
-                        "{}  clients: {}  returns: {}\n",
+                        "{}  clients: {}  returns: {}  sign-up: {}\n",
                         d.handle,
                         d.client_origins
                             .iter()
                             .map(|o| o.to_string())
                             .collect::<Vec<_>>()
                             .join(" "),
-                        d.return_urls.join(" ")
+                        d.return_urls.join(" "),
+                        d.sign_up.as_str()
                     ));
                 }
                 Ok(out)
+            }
+            Some("sign-up") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let mode = crate::deployments::SignUp::parse(word(args, 3, "`invite` or `open`")?)
+                    .map_err(|e| e.to_string())?;
+                svc.set_sign_up(actor, handle, mode)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "`{handle}` now takes people {}. A running service reads it at once.\n",
+                    match mode {
+                        crate::deployments::SignUp::Open => {
+                            "by open sign-up, as app members, and by invite"
+                        }
+                        crate::deployments::SignUp::Invite => "by invite only",
+                    }
+                ))
             }
             Some("end") => {
                 let handle = word(args, 2, "the deployment's handle")?;

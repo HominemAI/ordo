@@ -51,6 +51,8 @@ pub const SESSION_IDLE_ENV: &str = "ORDO_IDENTITY_SESSION_IDLE_HOURS";
 pub const SESSION_MAX_ENV: &str = "ORDO_IDENTITY_SESSION_MAX_HOURS";
 pub const GUESSES_PER_ADDRESS_ENV: &str = "ORDO_IDENTITY_GUESSES_PER_ADDRESS";
 pub const GUESSES_SHARED_ENV: &str = "ORDO_IDENTITY_GUESSES_SHARED";
+/// Open sign-up calls one address may make per minute (`throttle`).
+pub const SIGN_UPS_PER_ADDRESS_ENV: &str = "ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS";
 /// The door's proxy-mode settings, read the same way (`ordo-host` `proxy.rs`).
 pub const PROXY_HEADER_ENV: &str = "ORDO_PROXY_HEADER";
 pub const PROXY_TRUSTED_ENV: &str = "ORDO_PROXY_TRUSTED";
@@ -120,11 +122,23 @@ pub const GUESSES_SHARED: Range = Range {
     unit: "tries per minute",
 };
 
+/// Open sign-up calls one address may make per minute. Each account takes
+/// 2 (begin and finish), so the default is 5 accounts a minute from one
+/// address. Everyone together shares [`GUESSES_SHARED`].
+pub const SIGN_UPS_PER_ADDRESS: Range = Range {
+    default: 10,
+    min: 1,
+    max: 100_000,
+    unit: "calls per minute",
+};
+
 /// The guessing limits (`throttle`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub per_address: u64,
     pub shared: u64,
+    /// Open sign-up's own per-address limit; the ceiling is `shared`.
+    pub sign_ups_per_address: u64,
 }
 
 /// 0 turns scheduled rotation off; `rotate-keys` still works.
@@ -358,6 +372,28 @@ impl IdentityConfig {
                 ),
             ));
         }
+        let sign_ups_per_address = whole(get, SIGN_UPS_PER_ADDRESS_ENV, SIGN_UPS_PER_ADDRESS)?;
+        // Unset, it fits under a lowered ceiling rather than refuse a boot
+        // that worked before the setting existed.
+        let sign_ups_per_address = if get(SIGN_UPS_PER_ADDRESS_ENV).is_none() {
+            sign_ups_per_address.min(shared)
+        } else {
+            sign_ups_per_address
+        };
+        if shared < sign_ups_per_address {
+            return Err(IdentityError::setting(
+                GUESSES_SHARED_ENV,
+                format!(
+                    "is {shared}, which is below {SIGN_UPS_PER_ADDRESS_ENV} \
+                     ({sign_ups_per_address}), and the ceiling over everyone would refuse an \
+                     address before its own limit"
+                ),
+                format!(
+                    "Set {GUESSES_SHARED_ENV} to {sign_ups_per_address} or more, or lower \
+                     {SIGN_UPS_PER_ADDRESS_ENV}"
+                ),
+            ));
+        }
         let proxy = proxy(get)?;
         Ok(IdentityConfig {
             database,
@@ -380,6 +416,7 @@ impl IdentityConfig {
             limits: Limits {
                 per_address,
                 shared,
+                sign_ups_per_address,
             },
             proxy,
         })

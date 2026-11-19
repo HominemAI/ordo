@@ -8,7 +8,7 @@
 // (ORDO_IDENTITY_CLIENT_ORIGINS), or a registered deployment's list.
 // Anything else goes to the account page.
 
-import { $, BASE, busy, explain, me, needPasskeys, post, problem, returnTo, showCodes, step } from './common.js';
+import { $, busy, explain, leave, me, needPasskeys, post, problem, showCodes, step } from './common.js';
 import { assert, passkeysAvailable, register, touch } from './webauthn.js';
 
 const params = new URLSearchParams(location.search);
@@ -40,23 +40,8 @@ async function confirm() {
 
 const deployment = params.get('deployment') || undefined;
 
-async function done() {
-  const asked = params.get('return');
-  if (asked) {
-    try {
-      const { to } = await post('/sign-in/return', deployment ? { deployment, return: asked } : { return: asked });
-      const url = new URL(to, location.href);
-      const web = url.protocol === 'https:' || url.protocol === 'http:';
-      if (web && url.origin !== 'null') {
-        // A path here keeps the page's own handling of the base path.
-        location.replace(url.origin === location.origin ? returnTo(BASE + '/account') : url.href);
-        return;
-      }
-    } catch {
-      // Refused, or no answer: the account page.
-    }
-  }
-  location.replace(BASE + '/account');
+function done() {
+  return leave(deployment);
 }
 
 async function enrol() {

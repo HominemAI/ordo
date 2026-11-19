@@ -399,6 +399,7 @@ naming the setting.
 | `ORDO_IDENTITY_KEY_ROTATE_DAYS` | 90 | Signing key rotation, 0 to 365; 0 turns it off |
 | `ORDO_IDENTITY_GUESSES_PER_ADDRESS` | 30 | Tries per minute of one kind of code from one address |
 | `ORDO_IDENTITY_GUESSES_SHARED` | 600 | Tries per minute of one kind from everyone together |
+| `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS` | 10 | Open sign-up calls per minute from one address; 2 per new account |
 | `ORDO_IDENTITY_PROVISIONER_KEY` | none | The provisioning service's Ed25519 public key (Ordo Cloud) |
 | `ORDO_PROXY_HEADER`, `ORDO_PROXY_TRUSTED` | none | Read the visitor's address from a trusted proxy, as the door does |
 
@@ -501,9 +502,64 @@ domain signs in, but cannot reauth yet.
 Moving a deployment that ran its own service to a shared one is a new
 relying party: each person signs up again by invite.
 
+### Open sign-up for an app
+
+Each registered deployment has a sign-up mode. `invite` is the default:
+people come in by invite or `member add`. `open` lets anyone make an
+account with a passkey and join it, with no invite. An app such as the
+example notes app uses this. Invites still work beside it.
+
+Set it when you register, or change it later:
+
+```
+ordo-identity-service deployment add notes --origin https://notes.example.com --sign-up open
+ordo-identity-service deployment sign-up notes invite
+```
+
+Over HTTP, with the same token as registering:
+
+```
+POST /deployments  {"handle": "notes", "clientOrigins": ["https://notes.example.com"], "signUp": "open"}
+POST /deployments/notes/sign-up  {"signUp": "open"}
+```
+
+`deployment list` and `GET /deployments` show each mode. A change counts
+at once. The service's own deployment always takes people by invite.
+
+Send people to the service's page:
+
+```
+https://auth.example.com/sign-up?deployment=notes&return=https://notes.example.com/
+```
+
+`return` must be one of the deployment's return URLs, as for sign-in.
+A new person types a name, makes a passkey and saves 10 recovery codes.
+A person already signed in joins with the account they hold, so one
+passkey joins several apps. Then the browser goes back to `return`.
+
+What an open member holds:
+
+- An account, with no access to the service's own deployment.
+- A membership of that deployment, shown as role `member`.
+- No token for the deployment. Its tokens are admin tokens, so `POST
+  /token` answers `app_member_only`. `member add`, or an invite, makes
+  them an admin.
+
+Signing in to the app itself through the service is the next step: the
+service becomes an OIDC provider. Until then an open member has an
+account and a membership only.
+
+Each sign-up and join is in the audit log (`sign-up.open`,
+`sign-up.joined`). Sign-up calls are limited per address by
+`ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS`. A deployment in `invite` mode
+answers `invite_only`.
+
 ## What it does not do
 
-- Roles beyond `admin`.
+- Roles beyond `admin`, and `member` for open sign-up, which holds no
+  token.
+- Signing app users in to apps. That waits for the service to be an OIDC
+  provider.
 - Sign-in through outside providers for deployment people.
 - Sending invite links by mail. You send the link.
 - More than one copy of the service.

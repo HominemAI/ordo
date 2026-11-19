@@ -77,12 +77,24 @@ export async function register(beginPath, finishPath, extra = {}) {
   const cred = await navigator.credentials.create({ publicKey });
   if (!cred) throw new DOMException('No passkey was made.', 'NotAllowedError');
   const r = cred.response;
-  return post(finishPath, {
-    ...extra,
-    challenge: begun.publicKey.challenge,
-    clientDataJSON: toB64url(r.clientDataJSON),
-    attestationObject: toB64url(r.attestationObject),
-  });
+  try {
+    return await post(finishPath, {
+      ...extra,
+      challenge: begun.publicKey.challenge,
+      clientDataJSON: toB64url(r.clientDataJSON),
+      attestationObject: toB64url(r.attestationObject),
+    });
+  } catch (e) {
+    // The service kept nothing: tell the passkey provider to drop the
+    // passkey it just made, where the browser can.
+    if (PublicKeyCredential.signalUnknownCredential) {
+      PublicKeyCredential.signalUnknownCredential({
+        rpId: begun.publicKey.rp?.id ?? location.hostname,
+        credentialId: toB64url(cred.rawId),
+      }).catch(() => {});
+    }
+    throw e;
+  }
 }
 
 /** Run an assertion: a sign-in or a fresh touch. */

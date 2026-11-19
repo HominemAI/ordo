@@ -354,6 +354,14 @@ once.
 6. The invite's row records issuer, time, expiry, who used it and when.
    `POST /invites/<id>/revoke` kills an unspent one.
 
+**Open sign-up, built 2026-11-19.** Sign-up is per app (owner,
+2026-11-17). A registered deployment in `open` mode takes people with no
+invite: `/sign-up?deployment=<handle>&return=<url>` on the service's page,
+`POST /sign-up/begin` and `/sign-up/finish` behind it. Steps 4 and 5 are
+the same code as an invite's: one passkey, 10 recovery codes, a browser
+session. A person already signed in joins with `POST /sign-up/join`. The
+person becomes an app member of that deployment only (11.2).
+
 ### 5.4 Console sign-in
 
 The console holds no owners and no passkeys of its own any more. The
@@ -691,7 +699,7 @@ the change.
 ## 11 · What this plan does not do
 
 - Roles beyond `admin` ("We'll have to get into permission breakdown
-  later").
+  later"). Open sign-up's `member` is a membership with no token (11.2).
 - Outside providers for deployment people. The client code exists
   (`ordo_identity::oidc`, `oauth2`); wiring it to the service is a later M.
 - Sending invite links by mail. Offered once mail is set up.
@@ -747,6 +755,36 @@ there. Code: `crates/ordo-identity-service/src/deployments.rs`; tests:
   deployment wraps it and no app lives beside it (owner, 2026-11-15). The
   account app, where a person manages passkeys, is a client of its contract
   like any other app.
+
+### 11.2 Open sign-up per deployment, built 2026-11-19
+
+The owner's ruling, 2026-11-17: sign-up is per app. The example notes
+apps use open sign-up with a passkey; invites stay beside it. Code:
+`deployments.rs` (`SignUp`), `flows.rs` (`open_begin`, `open_finish`,
+`open_join`); tests: `tests/open_sign_up.rs`; page: `page/sign-up.*`;
+how to: `howto-identity.md` section 14.
+
+- Migration 5: `deployments.sign_up` (`invite` by default, so every
+  earlier row keeps its behaviour) and `deployment_members.role`
+  (`admin` by default, as every earlier membership was).
+- The mode is set at registration (`signUp`, `--sign-up`) and changed by
+  `POST /deployments/<handle>/sign-up` or `deployment sign-up`, with the
+  service's own token. The home is never open (`home_invite_only`).
+- Open sign-up and the invite flow share one account path: passkey,
+  recovery codes, session. Only the way in and its audit row differ
+  (`invite.used`, `sign-up.open`, `sign-up.joined`).
+- An open member's membership has role `member`. It holds no token for
+  the deployment, because a token's only role is `admin` and a stranger
+  must not become an app's admin. `POST /token` answers
+  `app_member_only`. An invite or `member add` makes them an admin. The
+  last-admin rule counts admins only.
+- The mode is read from the database on each call, so a change counts at
+  once on every instance.
+- Open sign-up is counted per address under its own kind,
+  `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS` (10 a minute), with the shared
+  ceiling of the other kinds.
+- Not built: signing app members in to the app. That is the next step,
+  the service as an OIDC provider (discovery, authorize, ID tokens).
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`
   origins, as the console link uses today); not in v1.

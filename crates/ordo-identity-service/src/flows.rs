@@ -1,4 +1,5 @@
 //! What each call does (`plan-identity-service.md` 5): sign-up by invite,
+//! open sign-up into a deployment that allows it,
 //! sign-in, recovery, touch, passkeys, CLI grants, machine sign-in, the
 //! admin acts, and break-glass. The HTTP shape is in [`crate::routes`];
 //! these are methods on [`Service`] so a test or a host command calls them
@@ -212,13 +213,21 @@ impl Service {
         Ok(d.handle)
     }
 
-    /// Refuse a person who may not hold `target`'s tokens.
+    /// Refuse a person who may not hold `target`'s tokens. An app member
+    /// (open sign-up) is told so: they hold a membership, and no token.
     async fn member_of(&self, target: &str, person: &str) -> Result<(), IdentityError> {
-        if deployments::is_member(self.0.store.pool(), self.handle(), target, person).await? {
-            Ok(())
-        } else {
-            Err(IdentityError::NotAMember(target.to_string()))
+        let pool = self.0.store.pool();
+        if deployments::is_member(pool, self.handle(), target, person).await? {
+            return Ok(());
         }
+        if target != self.handle()
+            && deployments::role_of(pool, self.handle(), target, person)
+                .await?
+                .is_some()
+        {
+            return Err(IdentityError::AppMemberOnly(target.to_string()));
+        }
+        Err(IdentityError::NotAMember(target.to_string()))
     }
 
     /// The live session `secret` opens, marked used.
@@ -385,19 +394,102 @@ impl Service {
 
     // ───────────────────────────── sign-up ─────────────────────────────
 
+    /// The creation options for a new account's passkey, bound to how the
+    /// account comes in (`invite:<hash>` or `open:<handle>`), so a ceremony
+    /// begun one way cannot finish another.
+    async fn begin_new_passkey(&self, binding: String) -> Result<Value, IdentityError> {
+        let provider = self.0.provider.clone();
+        let now = self.now();
+        let opts = blocking(move || {
+            provider.begin_registration_bound(Timestamp(now), &[], Some(&binding))
+        })
+        .await??;
+        Ok(creation_json(&opts, RP_NAME, "Deployment person"))
+    }
+
+    /// The browser's answer to [`Service::begin_new_passkey`], verified, and
+    /// begun with `binding`.
+    async fn verify_new_passkey(
+        &self,
+        reg: Registration,
+        binding: &str,
+    ) -> Result<StoredPasskey, IdentityError> {
+        let provider = self.0.provider.clone();
+        let now = self.now();
+        let pending = blocking(move || {
+            provider.verify_registration(
+                &ChallengeId(reg.challenge),
+                &reg.client_data_json,
+                &reg.attestation_object,
+                Timestamp(now),
+            )
+        })
+        .await??;
+        if pending.binding() != Some(binding) {
+            return Err(IdentityError::CodeRefused);
+        }
+        Ok(pending.stored().clone())
+    }
+
+    /// A new account inside `tx`, the same for every way in: the person,
+    /// their passkey, their recovery codes and a browser session, touched
+    /// now. With `member`, a registered deployment and a role, the account
+    /// is that deployment's member and has no home access. The caller
+    /// records how the account came in, in the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    async fn new_account(
+        &self,
+        tx: &ordo_exec::TxConn,
+        display_name: &str,
+        by: Actor<'_>,
+        member: Option<(&str, &str)>,
+        passkey: &StoredPasskey,
+        codes: &[ordo_identity::codes::RecoveryRow],
+        now: u64,
+    ) -> Result<(String, Opened), IdentityError> {
+        let person = people::add(tx, self.handle(), &self.0.keys, display_name, by, now).await?;
+        if let Some((target, role)) = member {
+            people::set_home(tx, self.handle(), &person.id, false).await?;
+            deployments::add_member(
+                tx,
+                self.handle(),
+                &self.0.keys,
+                target,
+                &person.id,
+                role,
+                by,
+                now,
+            )
+            .await?;
+        }
+        passkeys::insert(tx, self.handle(), &person.id, passkey, now).await?;
+        recovery::replace(tx, self.handle(), &person.id, codes, now).await?;
+        let session = sessions::open(
+            tx,
+            self.handle(),
+            &self.0.keys,
+            self.lifetimes(),
+            NewSession {
+                subject: &person.id,
+                kind: SessionKind::Browser,
+                client: "console",
+                touched_at: Some(now),
+                must_enrol: false,
+            },
+            now,
+        )
+        .await?;
+        Ok((person.id, session))
+    }
+
     /// Begin sign-up with an invite secret: the passkey creation options.
     pub async fn join_begin(&self, typed: &str, from: &Source) -> Result<Value, IdentityError> {
         let now = self.now();
         self.guess(Try::Invite, from, now).await?;
         let live =
             invites::check(self.0.store.pool(), self.handle(), &self.0.keys, typed, now).await?;
-        let provider = self.0.provider.clone();
-        let binding = format!("invite:{}", live.hash);
-        let opts = blocking(move || {
-            provider.begin_registration_bound(Timestamp(now), &[], Some(&binding))
-        })
-        .await??;
-        Ok(creation_json(&opts, RP_NAME, "Deployment person"))
+        self.begin_new_passkey(format!("invite:{}", live.hash))
+            .await
     }
 
     /// Finish sign-up: the person, their passkey, ten recovery codes, the
@@ -413,52 +505,30 @@ impl Service {
         self.guess(Try::Invite, from, now).await?;
         let pool = self.0.store.pool();
         let live = invites::check(pool, self.handle(), &self.0.keys, typed, now).await?;
-        let provider = self.0.provider.clone();
-        let pending = blocking(move || {
-            provider.verify_registration(
-                &ChallengeId(reg.challenge),
-                &reg.client_data_json,
-                &reg.attestation_object,
-                Timestamp(now),
-            )
-        })
-        .await??;
-        if pending.binding() != Some(format!("invite:{}", live.hash).as_str()) {
-            return Err(IdentityError::CodeRefused);
-        }
+        let passkey = self
+            .verify_new_passkey(reg, &format!("invite:{}", live.hash))
+            .await?;
         let (codes, rows) = recovery::mint(&self.0.hasher).await?;
         let tx = pool.begin().await?;
         let by = Actor {
             id: &live.id,
             client: "",
         };
-        let person = people::add(&tx, self.handle(), &self.0.keys, display_name, by, now).await?;
-        if !invites::spend(&tx, self.handle(), &live.id, &person.id, now).await? {
+        // An invite into a registered deployment makes an admin member of
+        // it, and an account without the service's own access.
+        let member = live.target.as_deref().map(|t| (t, deployments::ROLE_ADMIN));
+        let (person, session) = self
+            .new_account(&tx, display_name, by, member, &passkey, &rows, now)
+            .await?;
+        if !invites::spend(&tx, self.handle(), &live.id, &person, now).await? {
             return Err(IdentityError::CodeRefused);
         }
-        // An invite into a registered deployment makes a member of it, and
-        // an account without the service's own access.
-        if let Some(target) = &live.target {
-            people::set_home(&tx, self.handle(), &person.id, false).await?;
-            deployments::add_member(
-                &tx,
-                self.handle(),
-                &self.0.keys,
-                target,
-                &person.id,
-                by,
-                now,
-            )
-            .await?;
-        }
-        passkeys::insert(&tx, self.handle(), &person.id, pending.stored(), now).await?;
-        recovery::replace(&tx, self.handle(), &person.id, &rows, now).await?;
         audit::append(
             &tx,
             self.handle(),
             &self.0.keys,
             &Entry {
-                actor: &person.id,
+                actor: &person,
                 action: "invite.used",
                 subject: &live.id,
                 outcome: "ok",
@@ -468,30 +538,136 @@ impl Service {
             now,
         )
         .await?;
-        let session = sessions::open(
-            &tx,
-            self.handle(),
-            &self.0.keys,
-            self.lifetimes(),
-            NewSession {
-                subject: &person.id,
-                kind: SessionKind::Browser,
-                client: "console",
-                touched_at: Some(now),
-                must_enrol: false,
-            },
-            now,
-        )
-        .await?;
         tx.commit().await?;
         if live.issued_by == FIRST_BOOT {
             let _ = std::fs::remove_file(self.first_invite_path());
         }
         Ok(Joined {
-            person: person.id,
+            person,
             recovery_codes: codes,
             session,
         })
+    }
+
+    /// Refuse open sign-up into `handle` unless it is a live registered
+    /// deployment whose mode is open. Read from the database, so a change
+    /// of mode counts at once on every instance. The service's own
+    /// deployment takes people by invite only.
+    async fn open_for_sign_up(&self, handle: &str) -> Result<(), IdentityError> {
+        if handle == self.handle() {
+            return Err(IdentityError::InviteOnly(handle.to_string()));
+        }
+        match deployments::get(self.0.store.pool(), self.handle(), handle).await? {
+            None => Err(IdentityError::UnknownDeployment(handle.to_string())),
+            Some(d) if d.sign_up == deployments::SignUp::Open => Ok(()),
+            Some(_) => Err(IdentityError::InviteOnly(handle.to_string())),
+        }
+    }
+
+    /// Begin open sign-up into `handle`, with no invite: the passkey
+    /// creation options. Counted per address ([`Try::SignUp`]).
+    pub async fn open_begin(&self, handle: &str, from: &Source) -> Result<Value, IdentityError> {
+        self.guess(Try::SignUp, from, self.now()).await?;
+        self.open_for_sign_up(handle).await?;
+        self.begin_new_passkey(format!("open:{handle}")).await
+    }
+
+    /// Finish open sign-up: a new account that is an app member of
+    /// `handle` ([`deployments::ROLE_MEMBER`]) and nothing else, its
+    /// passkey, ten recovery codes and a browser session. One transaction,
+    /// recorded as `sign-up.open`.
+    pub async fn open_finish(
+        &self,
+        handle: &str,
+        display_name: &str,
+        reg: Registration,
+        from: &Source,
+    ) -> Result<Joined, IdentityError> {
+        let now = self.now();
+        self.guess(Try::SignUp, from, now).await?;
+        self.open_for_sign_up(handle).await?;
+        let passkey = self
+            .verify_new_passkey(reg, &format!("open:{handle}"))
+            .await?;
+        let (codes, rows) = recovery::mint(&self.0.hasher).await?;
+        let tx = self.0.store.pool().begin().await?;
+        let actor = format!("open:{handle}");
+        let by = Actor {
+            id: &actor,
+            client: "",
+        };
+        let member = Some((handle, deployments::ROLE_MEMBER));
+        let (person, session) = self
+            .new_account(&tx, display_name, by, member, &passkey, &rows, now)
+            .await?;
+        audit::append(
+            &tx,
+            self.handle(),
+            &self.0.keys,
+            &Entry {
+                actor: &person,
+                action: "sign-up.open",
+                subject: handle,
+                outcome: "ok",
+                client: "",
+                detail: "",
+            },
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Joined {
+            person,
+            recovery_codes: codes,
+            session,
+        })
+    }
+
+    /// A signed-in person joins the open deployment `handle` with the
+    /// account they hold: an app member of it from now on, unless they are
+    /// already a member. Recorded as `sign-up.joined`.
+    pub async fn open_join(&self, live: &Live, handle: &str) -> Result<(), IdentityError> {
+        if live.must_enrol {
+            return Err(IdentityError::MustEnrolPasskey);
+        }
+        if live.kind != SessionKind::Browser {
+            return Err(IdentityError::NotSignedIn);
+        }
+        self.open_for_sign_up(handle).await?;
+        let now = self.now();
+        let tx = self.0.store.pool().begin().await?;
+        let by = Actor {
+            id: &live.subject,
+            client: &live.client,
+        };
+        deployments::add_member(
+            &tx,
+            self.handle(),
+            &self.0.keys,
+            handle,
+            &live.subject,
+            deployments::ROLE_MEMBER,
+            by,
+            now,
+        )
+        .await?;
+        audit::append(
+            &tx,
+            self.handle(),
+            &self.0.keys,
+            &Entry {
+                actor: &live.subject,
+                action: "sign-up.joined",
+                subject: handle,
+                outcome: "ok",
+                client: &live.client,
+                detail: "",
+            },
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     // ───────────────────────────── sign-in ─────────────────────────────
@@ -1027,6 +1203,26 @@ impl Service {
         Ok(made)
     }
 
+    /// Change how people join a registered deployment: by invite, or open.
+    pub async fn set_sign_up(
+        &self,
+        by: Actor<'_>,
+        handle: &str,
+        mode: deployments::SignUp,
+    ) -> Result<(), IdentityError> {
+        deployments::set_sign_up(
+            self.0.store.pool(),
+            self.handle(),
+            &self.0.keys,
+            handle,
+            mode,
+            by,
+            self.now(),
+        )
+        .await?;
+        self.refresh_deployments().await
+    }
+
     /// End a registered deployment: no new token for it.
     pub async fn end_deployment(&self, by: Actor<'_>, handle: &str) -> Result<(), IdentityError> {
         deployments::end(
@@ -1041,8 +1237,8 @@ impl Service {
         self.refresh_deployments().await
     }
 
-    /// Make a person a member of a deployment (the service's own: give the
-    /// account its access).
+    /// Make a person an admin member of a deployment (the service's own:
+    /// give the account its access).
     pub async fn add_member(
         &self,
         by: Actor<'_>,
@@ -1056,6 +1252,7 @@ impl Service {
             &self.0.keys,
             target,
             person,
+            deployments::ROLE_ADMIN,
             by,
             self.now(),
         )

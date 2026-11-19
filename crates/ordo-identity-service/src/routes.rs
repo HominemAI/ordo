@@ -6,6 +6,8 @@
 //! | `GET /.well-known/jwks.json` | anyone | the token keys, `max-age=600` |
 //! | `GET /.well-known/ordo-audit-keys.json` | anyone | the audit checkpoint keys |
 //! | `POST /join/begin`, `/join/finish` | invite holder | sign up by invite link (5.3) |
+//! | `POST /sign-up/begin`, `/sign-up/finish` | anyone | `{deployment}`: open sign-up into a deployment whose mode is `open`; an app member of it only |
+//! | `POST /sign-up/join` | browser session | `{deployment}`: the signed-in person joins an open deployment as an app member |
 //! | `POST /sign-in/begin`, `/sign-in/finish` | anyone | passkey sign-in (5.4) |
 //! | `POST /sign-in/return` | the page | `{deployment?, return}`: where sign-in may send the browser back to, or `return_refused` |
 //! | `POST /recover` | code holder | recovery code sign-in |
@@ -24,6 +26,7 @@
 //! | `GET /machine-keys`, `POST /machine-keys`, `POST /machine-keys/{id}/end` | bearer | machine keys |
 //! | `GET /audit?before=&limit=` | bearer | the audit log, newest first, and whether the chain checks out now (plan 7) |
 //! | `GET /deployments`, `POST /deployments`, `POST /deployments/{handle}/end` | bearer, the service's own | the deployments registered here ([`crate::deployments`]) |
+//! | `POST /deployments/{handle}/sign-up` | bearer, the service's own | `{signUp: "invite" \| "open"}`: how people join it |
 //! | `GET /deployments/{handle}/members`, `POST /deployments/{handle}/members`, `POST /deployments/{handle}/members/{person}/end` | bearer | a deployment's members |
 //!
 //! A bearer token for a registered deployment reaches that deployment's
@@ -167,6 +170,9 @@ pub(crate) fn routes() -> Router<Service> {
         .route("/.well-known/ordo-audit-keys.json", get(audit_keys))
         .route("/join/begin", post(join_begin))
         .route("/join/finish", post(join_finish))
+        .route("/sign-up/begin", post(sign_up_begin))
+        .route("/sign-up/finish", post(sign_up_finish))
+        .route("/sign-up/join", post(sign_up_join))
         .route("/sign-in/begin", post(sign_in_begin))
         .route("/sign-in/finish", post(sign_in_finish))
         .route("/sign-in/return", post(sign_in_return))
@@ -199,6 +205,7 @@ pub(crate) fn routes() -> Router<Service> {
             get(deployments_list).post(deployments_register),
         )
         .route("/deployments/{handle}/end", post(deployment_end))
+        .route("/deployments/{handle}/sign-up", post(deployment_sign_up))
         .route(
             "/deployments/{handle}/members",
             get(members_list).post(member_add),
@@ -278,6 +285,69 @@ async fn join_finish(
                 &joined.person,
                 &joined.session,
                 json!({ "recoveryCodes": joined.recovery_codes }),
+            ))
+        }
+        .await,
+    )
+}
+
+async fn sign_up_begin(
+    State(s): State<Service>,
+    from: Source,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            s.origin_ok(&headers)?;
+            let b = parse(&body)?;
+            Ok(Reply::json(
+                s.open_begin(text(&b, "deployment")?, &from).await?,
+            ))
+        }
+        .await,
+    )
+}
+
+async fn sign_up_finish(
+    State(s): State<Service>,
+    from: Source,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            s.origin_ok(&headers)?;
+            let b = parse(&body)?;
+            let deployment = text(&b, "deployment")?;
+            let joined = s
+                .open_finish(
+                    deployment,
+                    text(&b, "displayName")?,
+                    registration(&b)?,
+                    &from,
+                )
+                .await?;
+            Ok(signed_in(
+                &s,
+                &joined.person,
+                &joined.session,
+                json!({ "recoveryCodes": joined.recovery_codes, "deployment": deployment }),
+            ))
+        }
+        .await,
+    )
+}
+
+async fn sign_up_join(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
+    respond(
+        async {
+            let b = parse(&body)?;
+            let live = session(&s, &headers, &b).await?;
+            let deployment = text(&b, "deployment")?;
+            s.open_join(&live, deployment).await?;
+            Ok(Reply::json(
+                json!({ "deployment": deployment, "member": live.subject }),
             ))
         }
         .await,
@@ -873,9 +943,9 @@ async fn deployments_list(State(s): State<Service>, headers: HeaderMap) -> Respo
     )
 }
 
-/// Register a deployment: `{handle, clientOrigins, returnUrls?}`. An
-/// admin of the service's own deployment, with a fresh touch, or a machine
-/// key holding the `deployment` grant (the provisioner key made from
+/// Register a deployment: `{handle, clientOrigins, returnUrls?, signUp?}`.
+/// An admin of the service's own deployment, with a fresh touch, or a
+/// machine key holding the `deployment` grant (the provisioner key made from
 /// `ORDO_IDENTITY_PROVISIONER_KEY`).
 async fn deployments_register(
     State(s): State<Service>,
@@ -908,6 +978,32 @@ async fn deployment_end(
             c.may_admin(s.now())?;
             s.end_deployment(c.actor(), &handle).await?;
             Ok(Reply::json(json!({ "ended": handle })))
+        }
+        .await,
+    )
+}
+
+/// `{signUp: "invite" | "open"}`: how people join a registered deployment.
+/// The same callers as registering it.
+async fn deployment_sign_up(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "changing a deployment's sign-up")?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let mode = deployments::SignUp::from_body(&b)?.ok_or_else(|| {
+                IdentityError::BadRequest("`signUp` is required: `invite` or `open`".into())
+            })?;
+            s.set_sign_up(c.actor(), &handle, mode).await?;
+            Ok(Reply::json(
+                json!({ "handle": handle, "signUp": mode.as_str() }),
+            ))
         }
         .await,
     )

@@ -1,6 +1,7 @@
 /**
  * The identity service's page in a real browser with a virtual passkey:
- * sign-up by link, the account, sign-out and sign-in, a recovery code on a
+ * sign-up by link, open sign-up into one app, the account, sign-out and
+ * sign-in, a recovery code on a
  * new device, CLI approval and denial, and what a person sees when
  * something is wrong. Every page is checked for CSP refusals, page errors,
  * and sideways scrolling at phone width.
@@ -337,4 +338,58 @@ test('the page follows a dark system theme', async ({ browser }) => {
   const light = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
   expect(dark).not.toBe(light);
   await context.close();
+});
+
+test('open sign-up makes an account for one app and goes back to it', async ({ browser }) => {
+  const got: string[] = [];
+  const server = createServer((req, res) => {
+    got.push(req.url ?? '');
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('the notes app');
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const app = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    // An admin of the service registers `notes` with open sign-up.
+    const hal = await person(browser);
+    await join(hal.page, invite('Hal'), 'Hal');
+    const registered = await hal.page.evaluate(async (origin) => {
+      const call = async (path: string, body: unknown, token?: string) => {
+        const res = await fetch(path, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify(body),
+        });
+        return (await res.json()) as Record<string, unknown>;
+      };
+      const { token } = await call('/token', { aud: 'ordo-deployment:main' });
+      return call('/deployments', { handle: 'notes', clientOrigins: [origin], signUp: 'open' }, token as string);
+    }, app);
+    expect(registered['signUp']).toBe('open');
+    await hal.context.close();
+
+    // Someone with no invite makes an account from the app's link.
+    const ivy = await person(browser);
+    const { page } = ivy;
+    await page.goto(`/sign-up?deployment=notes&return=${encodeURIComponent(`${app}/back`)}`);
+    await expect(page.getByRole('heading', { name: 'Create an account' })).toBeVisible();
+    await fits(page);
+    await page.getByLabel('Your name').fill('Ivy');
+    await page.getByRole('button', { name: 'Create a passkey' }).click();
+    await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible();
+    await saveCodes(page);
+    await page.waitForURL(`${app}/back`);
+    expect(got).toEqual(['/back']);
+
+    // Signed in, the service's own deployment still takes people by invite.
+    await page.goto('/sign-up?deployment=main');
+    await expect(page.getByRole('heading', { name: 'Join this app' })).toBeVisible();
+    await page.getByRole('button', { name: 'Join' }).click();
+    await expect(page.getByRole('alert')).toHaveText(/takes people by invite only/);
+    expect(ivy.problems).toEqual([]);
+    await ivy.context.close();
+  } finally {
+    server.close();
+  }
 });

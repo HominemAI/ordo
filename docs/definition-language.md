@@ -2943,6 +2943,13 @@ name(bindings-and-conditions)[projection]
   one of them: `op shownNotices` over `entity notices`. Reported fix,
   2026-11-19: before this refusal the door's call of such an op answered the
   entity's own read, without the op's conditions.
+- **One op per name.** Two ops may not share a name, and a routine may not
+  share the name of an op. A request names one op, so the compiler refuses
+  the program with `duplicate_op_name`. The message gives the line of each
+  declaration. Rename one of them. The registry keeps the first and never
+  replaces it. Reported fix, 2026-11-19: before this refusal the later op
+  silently replaced the earlier, and a request ran the later body with the
+  later access rules.
 - **Everything derives through the flattening.** The field-scope manifest
   derives from base fields through any depth, so composition cannot launder
   scope. The composite's cost class is the max of everything inlined.

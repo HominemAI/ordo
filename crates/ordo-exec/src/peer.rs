@@ -34,6 +34,19 @@
 //! the provider fingerprint (`$authconnection`) and the subject match. The
 //! connection name plays no part. The map is kept in `$peerlink`, which the
 //! `$caller` guard joins ([`LINK_TABLE`]).
+//!
+//! **Consent is Postgres's** (owner ruling 2026-11-18, ask 17). The app being
+//! read writes `reader note_viewer reads notes, notesAccess`, and the setting
+//! `ORDO_READER_NOTE_VIEWER_ROLE` names the reader's database role.
+//! [`grant_readers`] makes the grants that role holds in this deployment's
+//! schema equal what the file says: `USAGE` on the schema, `SELECT` on the
+//! named tables, and `SELECT` on the sign-in columns a `$caller` guard reads
+//! ([`SIGN_IN_COLUMNS`]). It runs at every apply and every start, so a table
+//! taken off the line is revoked, and a table a migration creates is granted
+//! in the same apply. On the reader's side, [`check_access`] refuses a start
+//! whose role lacks a grant, quoting the line to add, and refuses a role that
+//! reads the peer without a grant at all (its owner, a superuser), unless
+//! [`SHARED_ROLE_ENV`] is on.
 
 use std::collections::BTreeSet;
 
@@ -70,6 +83,44 @@ pub fn external_schema_env(written: &str) -> Option<String> {
 /// that links a sign-in subject to a person.
 pub const PEER_TABLES: [&str; 4] = ["$commandlog", "members", "$authenticator", "$principal"];
 
+/// The setting that names a reader's database role:
+/// `ORDO_READER_<NAME>_ROLE`, the nickname upper-cased (owner, 2026-11-18).
+/// The parser admits lowercase letters, digits and underscores in a reader's
+/// nickname, so no two share a variable.
+pub fn reader_role_env(reader: &str) -> String {
+    format!("ORDO_READER_{}_ROLE", reader.to_ascii_uppercase())
+}
+
+/// The setting that lets two deployments read each other as one database
+/// role, for local work: `ORDO_PEER_SHARED_ROLE=on`. Off by default. With
+/// one role, grants decide nothing, so a reader refuses to start that way
+/// unless this is on.
+pub const SHARED_ROLE_ENV: &str = "ORDO_PEER_SHARED_ROLE";
+
+/// What a reader's `$caller` guard and [`link`] read in a peer, table by
+/// table: the only columns of the sign-in tables a reader role is granted.
+pub const SIGN_IN_COLUMNS: [(&str, &[&str]); 4] = [
+    ("members", &["id", "principal", "kind", "status"]),
+    ("$principal", &["id", "deleted_at"]),
+    (
+        "$authenticator",
+        &["authenticator", "principal", "retired_case"],
+    ),
+    (
+        CONNECTIONS,
+        &["name", "kind", "fingerprint", "subject_claim"],
+    ),
+];
+
+/// The table that remembers which roles this deployment granted to, so a
+/// reader line removed from the file is revoked on the next apply or start.
+pub const READER_TABLE: &str = "$readergrant";
+
+const READER_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$readergrant" (
+  "role"   text PRIMARY KEY,
+  "reader" text NOT NULL
+)"#;
+
 /// Why a program's external schemas cannot be resolved: a peer's setting, or
 /// a plain external's swap. Each names the setting.
 #[derive(Debug)]
@@ -105,6 +156,46 @@ pub enum SchemaRefusal {
     /// One connection name points at one provider here and another in the
     /// peer.
     NameConflict { peer: String, name: String },
+    /// A `reader` line's role setting is not set.
+    ReaderUnset { reader: String, var: String },
+    /// A `reader` line's role is not a role of this database server.
+    ReaderRoleMissing {
+        reader: String,
+        var: String,
+        role: String,
+    },
+    /// A `reader` line's role is this deployment's own role (or one that
+    /// owns it), so a grant decides nothing.
+    ReaderOwnRole {
+        reader: String,
+        var: String,
+        role: String,
+    },
+    /// The grants were sent and the catalog does not show them: this
+    /// deployment's role does not own its schema or its tables.
+    CannotGrant {
+        role: String,
+        own: String,
+        schema: String,
+    },
+    /// [`SHARED_ROLE_ENV`] holds a value that is not a switch.
+    SharedRoleValue { value: String },
+    /// This deployment's role lacks a grant on a peer table it reads.
+    NotGranted {
+        peer: String,
+        role: String,
+        schema: String,
+        missing: Vec<String>,
+        line: String,
+    },
+    /// This deployment's role reads the peer without any grant: it owns the
+    /// peer's schema or tables, is a member of that owner, or is a
+    /// superuser.
+    SharedRole {
+        peer: String,
+        role: String,
+        why: String,
+    },
     /// The database could not be asked.
     Database(PoolError),
 }
@@ -118,8 +209,17 @@ impl SchemaRefusal {
             | SchemaRefusal::Own { var, .. }
             | SchemaRefusal::NotOrdo { var, .. }
             | SchemaRefusal::NotStarted { var, .. }
-            | SchemaRefusal::NoSharedProvider { var, .. } => Some(var),
-            SchemaRefusal::NameConflict { .. } | SchemaRefusal::Database(_) => None,
+            | SchemaRefusal::NoSharedProvider { var, .. }
+            | SchemaRefusal::ReaderUnset { var, .. }
+            | SchemaRefusal::ReaderRoleMissing { var, .. }
+            | SchemaRefusal::ReaderOwnRole { var, .. } => Some(var),
+            SchemaRefusal::SharedRoleValue { .. } | SchemaRefusal::SharedRole { .. } => {
+                Some(SHARED_ROLE_ENV)
+            }
+            SchemaRefusal::NameConflict { .. }
+            | SchemaRefusal::CannotGrant { .. }
+            | SchemaRefusal::NotGranted { .. }
+            | SchemaRefusal::Database(_) => None,
         }
     }
 }
@@ -190,6 +290,65 @@ impl std::fmt::Display for SchemaRefusal {
                  does not start. Give one of the two connections a new name \
                  (ORDO_AUTH_METHODS and its ORDO_AUTH_<NAME>_ settings) in the deployment \
                  that added it last."
+            ),
+            SchemaRefusal::ReaderUnset { reader, var } => write!(
+                f,
+                "{var} is not set. The program declares `reader {reader}`, and the role \
+                 that deployment reads with comes from this setting. Set {var} to the \
+                 database role in the other deployment's ORDO_PG_USER, or remove the \
+                 `reader {reader}` line."
+            ),
+            SchemaRefusal::ReaderRoleMissing { reader, var, role } => write!(
+                f,
+                "{var} is `{role}`, which is not a role of this database server. Create the \
+                 role `{role}` and give it to the deployment `reader {reader}` names, or set \
+                 {var} to the role in that deployment's ORDO_PG_USER."
+            ),
+            SchemaRefusal::ReaderOwnRole { reader, var, role } => write!(
+                f,
+                "{var} is `{role}`, the role this deployment connects as, so `reader {reader}` \
+                 can read every table here and a grant decides nothing. Give each deployment \
+                 its own role and set {var} to the reader's. For local work only, set \
+                 {SHARED_ROLE_ENV}=on."
+            ),
+            SchemaRefusal::CannotGrant { role, own, schema } => write!(
+                f,
+                "the grants for role `{role}` in schema `{schema}` did not take. This \
+                 deployment's role `{own}` must own schema `{schema}` and its tables to \
+                 grant on them. Make `{own}` their owner (ALTER SCHEMA and ALTER TABLE \
+                 ... OWNER TO), then apply or restart."
+            ),
+            SchemaRefusal::SharedRoleValue { value } => write!(
+                f,
+                "{SHARED_ROLE_ENV} is `{value}`. Set it to `on` or `off`, or unset it."
+            ),
+            SchemaRefusal::NotGranted {
+                peer,
+                role,
+                schema,
+                missing,
+                line,
+            } => {
+                let list = missing
+                    .iter()
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "role `{role}` cannot read {list} in {peer} (schema `{schema}`). The \
+                     deployment being read decides what its readers see. Add this line to \
+                     {peer}'s definition file, with a nickname of your choice for <name>:\n  \
+                     {line}\nthen set ORDO_READER_<NAME>_ROLE={role} in {peer}'s settings, \
+                     and apply or restart {peer}."
+                )
+            }
+            SchemaRefusal::SharedRole { peer, role, why } => write!(
+                f,
+                "this deployment reads {peer} as role `{role}`, which {why}. It can read \
+                 every table of {peer} without a grant, so {peer}'s `reader` line decides \
+                 nothing. Give each deployment its own database role (ORDO_PG_USER). For \
+                 local work only, set {SHARED_ROLE_ENV}=on."
             ),
             SchemaRefusal::Database(e) => write!(f, "the peer check could not read: {e}"),
         }
@@ -735,10 +894,33 @@ async fn connections(pool: &Pool, pg: Option<&str>) -> Result<Vec<Connection>, S
         Some(s) => format!("{}.{}", quote(s), quote(CONNECTIONS)),
         None => quote(CONNECTIONS),
     };
+    // The subject claim by its column, never through the whole row: a
+    // reader is granted these four columns only (`SIGN_IN_COLUMNS`).
+    let has_claim = first_is_true(
+        &pool
+            .rows(&format!(
+                "SELECT EXISTS (SELECT 1 FROM pg_attribute a \
+                 JOIN pg_class c ON c.oid = a.attrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = {} AND c.relname = {} \
+                 AND a.attname = 'subject_claim' AND NOT a.attisdropped)",
+                match pg {
+                    Some(s) => sql_lit(s),
+                    None => "current_schema()".to_string(),
+                },
+                sql_lit(CONNECTIONS)
+            ))
+            .await
+            .map_err(SchemaRefusal::Database)?,
+    );
+    let claim = if has_claim {
+        r#"c."subject_claim""#
+    } else {
+        "''"
+    };
     let rows = pool
         .rows(&format!(
-            r#"SELECT c."name", c."kind", c."fingerprint",
-                      coalesce(to_jsonb(c) ->> 'subject_claim', '')
+            r#"SELECT c."name", c."kind", c."fingerprint", coalesce({claim}, '')
                FROM {table} AS c ORDER BY 1"#
         ))
         .await
@@ -764,6 +946,496 @@ async fn tenant_connections(pool: &Pool) -> Result<bool, SchemaRefusal> {
     }
     let rows = pool
         .rows(r#"SELECT EXISTS (SELECT 1 FROM "$tenantconnection")"#)
+        .await
+        .map_err(SchemaRefusal::Database)?;
+    Ok(first_is_true(&rows))
+}
+
+// ── consent: the reader line and its grants ─────────────────────────────
+
+/// [`SHARED_ROLE_ENV`] read: `on`, `1`, `true`, `yes` allow; unset, blank,
+/// `off`, `0`, `false`, `no` refuse. Anything else is a refusal.
+pub fn shared_role_value(v: Option<&str>) -> Result<bool, SchemaRefusal> {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("off") | Some("0") | Some("false") | Some("no") => Ok(false),
+        Some("on") | Some("1") | Some("true") | Some("yes") => Ok(true),
+        Some(_) => Err(SchemaRefusal::SharedRoleValue {
+            value: v.unwrap_or_default().to_string(),
+        }),
+    }
+}
+
+/// [`shared_role_value`] over this process's environment.
+pub fn shared_role_allowed() -> Result<bool, SchemaRefusal> {
+    shared_role_value(std::env::var(SHARED_ROLE_ENV).ok().as_deref())
+}
+
+/// One privilege a role holds in a schema: a table (`column` empty for the
+/// whole table) and the privilege's name.
+type Held = BTreeSet<(String, String, String)>;
+
+/// [`grant_readers_with`] over this process's environment.
+pub async fn grant_readers(pool: &Pool, schema: &Schema) -> Result<Vec<String>, SchemaRefusal> {
+    grant_readers_with(pool, schema, schema_setting).await
+}
+
+/// Make the grants each reader's role holds in this deployment's schema
+/// equal what the `reader` lines say, and revoke everything from a role
+/// whose line is gone. Returns one line per reader for the start log.
+///
+/// Each role gets `USAGE` on the schema, `SELECT` on its tables, and
+/// `SELECT` on the [`SIGN_IN_COLUMNS`] of each sign-in table it does not
+/// name whole. A table not created yet is granted by the apply that creates
+/// it. Nothing is sent when the catalog already agrees, so a start of an
+/// unchanged deployment writes nothing.
+pub async fn grant_readers_with(
+    pool: &Pool,
+    schema: &Schema,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, SchemaRefusal> {
+    let shared_ok = shared_role_value(lookup(SHARED_ROLE_ENV).as_deref())?;
+    let mut roles: Vec<(String, String)> = Vec::new();
+    for r in &schema.readers {
+        let var = reader_role_env(&r.name);
+        let Some(role) = lookup(&var) else {
+            return Err(SchemaRefusal::ReaderUnset {
+                reader: r.name.clone(),
+                var,
+            });
+        };
+        roles.push((r.name.clone(), role));
+    }
+    let recorded = has_table(pool, None, READER_TABLE).await?;
+    if roles.is_empty() && !recorded {
+        return Ok(Vec::new());
+    }
+    let pg = pool.schema().to_string();
+    let own = pool
+        .rows("SELECT current_user::text")
+        .await
+        .map_err(SchemaRefusal::Database)?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .unwrap_or_default();
+
+    // What each role should hold.
+    let present = tables_in(pool, &pg).await?;
+    let mut want: std::collections::BTreeMap<String, (String, Held)> = Default::default();
+    let mut out = Vec::new();
+    for (r, (reader, role)) in schema.readers.iter().zip(&roles) {
+        let var = reader_role_env(reader);
+        if !role_exists(pool, role).await? {
+            return Err(SchemaRefusal::ReaderRoleMissing {
+                reader: reader.clone(),
+                var,
+                role: role.clone(),
+            });
+        }
+        if *role == own || is_member(pool, &own, role).await? {
+            if !shared_ok {
+                return Err(SchemaRefusal::ReaderOwnRole {
+                    reader: reader.clone(),
+                    var,
+                    role: role.clone(),
+                });
+            }
+            out.push(format!(
+                "reader      {reader}: role `{role}` is this deployment's own \
+                 ({SHARED_ROLE_ENV}=on); no grants are made"
+            ));
+            continue;
+        }
+        let entry = want
+            .entry(role.clone())
+            .or_insert_with(|| (reader.clone(), Held::new()));
+        for t in r.tables.iter().filter(|t| present.contains_key(*t)) {
+            entry.1.insert((t.clone(), String::new(), "SELECT".into()));
+        }
+        out.push(format!(
+            "reader      {reader}: role `{role}` reads {}",
+            r.tables.join(", ")
+        ));
+    }
+    for (_, held) in want.values_mut() {
+        for (t, cols) in SIGN_IN_COLUMNS {
+            let whole = held.contains(&(t.to_string(), String::new(), "SELECT".into()));
+            let Some(have) = present.get(t) else {
+                continue;
+            };
+            if whole {
+                continue;
+            }
+            for c in cols.iter().filter(|c| have.contains(**c)) {
+                held.insert((t.to_string(), c.to_string(), "SELECT".into()));
+            }
+        }
+    }
+
+    // Roles granted before whose line is gone.
+    let mut gone: Vec<String> = Vec::new();
+    if recorded {
+        let rows = pool
+            .rows(r#"SELECT "role" FROM "$readergrant" ORDER BY 1"#)
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        for r in rows {
+            let Some(role) = r.into_iter().next().flatten() else {
+                continue;
+            };
+            if !want.contains_key(&role) && role != own && role_exists(pool, &role).await? {
+                gone.push(role);
+            }
+        }
+    }
+
+    let s = quote(&pg);
+    let mut sql = String::new();
+    for role in &gone {
+        let r = quote(role);
+        sql += &format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; ");
+        sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+    }
+    let mut changed: Vec<&String> = Vec::new();
+    for (role, (_, held)) in &want {
+        let now = held_by(pool, &pg, role).await?;
+        if now == *held && has_usage(pool, &pg, role).await? {
+            continue;
+        }
+        changed.push(role);
+        sql += &grant_sql(&pg, role, held);
+    }
+    let record_changed = if recorded {
+        let rows = pool
+            .rows(r#"SELECT "role", "reader" FROM "$readergrant" ORDER BY 1"#)
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        let now: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let then: Vec<(String, String)> = want
+            .iter()
+            .map(|(role, (reader, _))| (role.clone(), reader.clone()))
+            .collect();
+        now != then
+    } else {
+        true
+    };
+    if sql.is_empty() && !record_changed {
+        return Ok(out);
+    }
+    if !recorded {
+        pool.rows(READER_DDL)
+            .await
+            .map_err(SchemaRefusal::Database)?;
+    }
+    // The table by its literal name: a platform table, never an entity's.
+    sql += r#"DELETE FROM "$readergrant";"#;
+    if !want.is_empty() {
+        let values = want
+            .iter()
+            .map(|(role, (reader, _))| format!("({}, {})", sql_lit(role), sql_lit(reader)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql += &format!(r#" INSERT INTO "$readergrant" ("role", "reader") VALUES {values};"#);
+    }
+    // One implicit transaction. Two replicas starting at once may race on
+    // the catalog row; the loser checks the result below, which is what
+    // counts.
+    let sent = pool.rows(&sql).await;
+    for role in &changed {
+        let (_, held) = &want[*role];
+        let now = held_by(pool, &pg, role).await?;
+        if now != *held || !has_usage(pool, &pg, role).await? {
+            if let Err(e) = sent {
+                return Err(SchemaRefusal::Database(e));
+            }
+            return Err(SchemaRefusal::CannotGrant {
+                role: role.to_string(),
+                own: own.clone(),
+                schema: pg.clone(),
+            });
+        }
+    }
+    if let Err(e) = sent {
+        if changed.is_empty() {
+            return Err(SchemaRefusal::Database(e));
+        }
+    }
+    Ok(out)
+}
+
+/// The statements that set one role's grants in schema `pg` to `held`:
+/// everything revoked, then usage and each grant, in one batch.
+fn grant_sql(pg: &str, role: &str, held: &Held) -> String {
+    let (s, r) = (quote(pg), quote(role));
+    let mut sql = format!(
+        "REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; GRANT USAGE ON SCHEMA {s} TO {r}; "
+    );
+    let mut columns: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (t, c, _) in held {
+        if c.is_empty() {
+            sql += &format!("GRANT SELECT ON {s}.{} TO {r}; ", quote(t));
+        } else {
+            columns.entry(t).or_default().push(c);
+        }
+    }
+    for (t, cols) in columns {
+        let list = cols.iter().map(|c| quote(c)).collect::<Vec<_>>().join(", ");
+        sql += &format!("GRANT SELECT ({list}) ON {s}.{} TO {r}; ", quote(t));
+    }
+    sql
+}
+
+/// Every table in `pg`, with its column names.
+async fn tables_in(
+    pool: &Pool,
+    pg: &str,
+) -> Result<std::collections::BTreeMap<String, BTreeSet<String>>, SchemaRefusal> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT c.relname::text, a.attname::text FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+             WHERE n.nspname = {} AND c.relkind IN ('r', 'p')",
+            sql_lit(pg)
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+    let mut out: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for r in rows {
+        let at = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+        out.entry(at(0)).or_default().insert(at(1));
+    }
+    Ok(out)
+}
+
+/// What `role` holds in `pg` by a grant made to it by name: table
+/// privileges with an empty column, column privileges with theirs.
+async fn held_by(pool: &Pool, pg: &str, role: &str) -> Result<Held, SchemaRefusal> {
+    let rows = pool
+        .rows(&format!(
+            "WITH r AS (SELECT oid FROM pg_roles WHERE rolname = {role}) \
+             SELECT c.relname::text, '', g.privilege_type::text FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+               CROSS JOIN LATERAL aclexplode(c.relacl) g \
+               WHERE n.nspname = {pg} AND g.grantee = (SELECT oid FROM r) \
+             UNION \
+             SELECT c.relname::text, a.attname::text, g.privilege_type::text FROM pg_attribute a \
+               JOIN pg_class c ON c.oid = a.attrelid \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+               CROSS JOIN LATERAL aclexplode(a.attacl) g \
+               WHERE n.nspname = {pg} AND a.attacl IS NOT NULL \
+               AND g.grantee = (SELECT oid FROM r)",
+            role = sql_lit(role),
+            pg = sql_lit(pg),
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let at = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+            (at(0), at(1), at(2))
+        })
+        .collect())
+}
+
+async fn has_usage(pool: &Pool, pg: &str, role: &str) -> Result<bool, SchemaRefusal> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT has_schema_privilege({}, n.oid, 'USAGE') FROM pg_namespace n \
+             WHERE n.nspname = {}",
+            sql_lit(role),
+            sql_lit(pg)
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+    Ok(first_is_true(&rows))
+}
+
+async fn role_exists(pool: &Pool, role: &str) -> Result<bool, SchemaRefusal> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {})",
+            sql_lit(role)
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+    Ok(first_is_true(&rows))
+}
+
+/// Whether `role` holds the rights of `of` (is a member of it).
+async fn is_member(pool: &Pool, of: &str, role: &str) -> Result<bool, SchemaRefusal> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT pg_has_role({}, {}, 'MEMBER')",
+            sql_lit(role),
+            sql_lit(of)
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+    Ok(first_is_true(&rows))
+}
+
+/// [`check_access`] with [`SHARED_ROLE_ENV`] read from this process's
+/// environment.
+pub async fn check_access_env(
+    pool: &Pool,
+    schema: &Schema,
+    callers: &BTreeSet<String>,
+) -> Result<Vec<String>, SchemaRefusal> {
+    check_access(pool, schema, callers, shared_role_allowed()?).await
+}
+
+/// The reader's side, before the peer is read at all: this deployment's
+/// role must hold `USAGE` on each peer schema and `SELECT` on every peer
+/// table an external reads, and on the [`SIGN_IN_COLUMNS`] when `$caller`
+/// is used on that peer (`callers`, [`callers`]). A missing grant refuses
+/// the start and quotes the `reader` line to add to the peer's file.
+///
+/// A role that reads the peer with no grant at all (a superuser, the
+/// owner of the peer's schema or of one of its tables, a member of that
+/// owner, or a member of `pg_read_all_data`) is refused unless
+/// `shared_ok`, because the peer's `reader` line would then decide
+/// nothing. A table that is not there is left to [`check`].
+pub async fn check_access(
+    pool: &Pool,
+    schema: &Schema,
+    callers: &BTreeSet<String>,
+    shared_ok: bool,
+) -> Result<Vec<String>, SchemaRefusal> {
+    let mut out = Vec::new();
+    for peer in &schema.peers {
+        let Some(pg) = schema
+            .externals
+            .iter()
+            .filter_map(|e| e.external.as_ref()?.peer.as_ref())
+            .find(|p| &p.name == peer)
+            .and_then(|p| p.schema.clone())
+        else {
+            continue;
+        };
+        let rows = pool
+            .rows(&format!(
+                "SELECT current_user::text, r.rolsuper, \
+                   pg_has_role(current_user, n.nspowner, 'MEMBER'), \
+                   EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace = n.oid \
+                     AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                     AND pg_has_role(current_user, c.relowner, 'MEMBER')), \
+                   EXISTS (SELECT 1 FROM pg_roles a WHERE a.rolname = 'pg_read_all_data' \
+                     AND pg_has_role(current_user, a.oid, 'MEMBER')), \
+                   has_schema_privilege(current_user, n.oid, 'USAGE') \
+                 FROM pg_namespace n, pg_roles r \
+                 WHERE n.nspname = {} AND r.rolname = current_user",
+                sql_lit(&pg)
+            ))
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        let Some(row) = rows.first() else {
+            // No such schema: `check` says so.
+            continue;
+        };
+        let at = |i: usize| row.get(i).cloned().flatten().unwrap_or_default();
+        let role = at(0);
+        let why = if at(1) == "t" {
+            Some("is a superuser".to_string())
+        } else if at(2) == "t" {
+            Some(format!("owns schema `{pg}` or is a member of its owner"))
+        } else if at(3) == "t" {
+            Some(format!(
+                "owns tables in schema `{pg}` or is a member of their owner"
+            ))
+        } else if at(4) == "t" {
+            Some("is a member of `pg_read_all_data`".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            if !shared_ok {
+                return Err(SchemaRefusal::SharedRole {
+                    peer: peer.clone(),
+                    role,
+                    why,
+                });
+            }
+            out.push(format!(
+                "peer        {peer}: role `{role}` {why} ({SHARED_ROLE_ENV}=on); the \
+                 peer's `reader` line decides nothing"
+            ));
+            continue;
+        }
+        let usage = at(5) == "t";
+        let mut tables: Vec<String> = Vec::new();
+        for e in &schema.externals {
+            let Some(src) = e.external.as_ref() else {
+                continue;
+            };
+            if src.peer.as_ref().is_some_and(|p| &p.name == peer) && !tables.contains(&src.table) {
+                tables.push(src.table.clone());
+            }
+        }
+        let mut missing: Vec<String> = Vec::new();
+        let present = tables_in(pool, &pg).await?;
+        for t in &tables {
+            if present.contains_key(t) && !(usage && can_select(pool, &pg, t, &[]).await?) {
+                missing.push(t.clone());
+            }
+        }
+        if callers.contains(peer) {
+            for (t, cols) in SIGN_IN_COLUMNS {
+                let Some(have) = present.get(t) else {
+                    continue;
+                };
+                let cols: Vec<&str> = cols.iter().copied().filter(|c| have.contains(*c)).collect();
+                if !(usage && can_select(pool, &pg, t, &cols).await?) {
+                    missing.push(t.to_string());
+                }
+            }
+        }
+        if !missing.is_empty() {
+            return Err(SchemaRefusal::NotGranted {
+                peer: peer.clone(),
+                role,
+                schema: pg,
+                missing,
+                line: format!("reader <name> reads {}", tables.join(", ")),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Whether this deployment's role may `SELECT` the table, or, given
+/// columns, each of those columns. Asked of the catalog, by oid, so a
+/// schema it has no `USAGE` on is not an error.
+async fn can_select(
+    pool: &Pool,
+    pg: &str,
+    table: &str,
+    columns: &[&str],
+) -> Result<bool, SchemaRefusal> {
+    let test = if columns.is_empty() {
+        "has_table_privilege(c.oid, 'SELECT')".to_string()
+    } else {
+        columns
+            .iter()
+            .map(|col| format!("has_column_privilege(c.oid, {}, 'SELECT')", sql_lit(col)))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    };
+    let rows = pool
+        .rows(&format!(
+            "SELECT {test} FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = {} AND c.relname = {}",
+            sql_lit(pg),
+            sql_lit(table)
+        ))
         .await
         .map_err(SchemaRefusal::Database)?;
     Ok(first_is_true(&rows))

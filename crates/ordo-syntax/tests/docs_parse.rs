@@ -110,6 +110,7 @@ fn lead_word(text: &str) -> &str {
 const DECL_HEADS: &[&str] = &[
     "domain",
     "peer",
+    "reader",
     "entity",
     "op",
     "routine",

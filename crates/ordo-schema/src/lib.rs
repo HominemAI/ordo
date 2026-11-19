@@ -438,6 +438,21 @@ pub struct Schema {
     /// The nicknames of the program's `peer` lines, in the order written.
     /// Each is read by at least one external.
     pub peers: Vec<String>,
+    /// The program's `reader` lines (owner, 2026-11-18,
+    /// `example-apps-notes-v2-plus-note_viewer` ask 17): the deployments that
+    /// may read this one, and the tables each may read. Each table is one of
+    /// this program's own entities.
+    pub readers: Vec<Reader>,
+}
+
+/// One `reader <name> reads <table>, …` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reader {
+    /// The local nickname. Its role comes from `ORDO_READER_<NAME>_ROLE`.
+    pub name: String,
+    /// The tables it may read, as written: entity names, which are the
+    /// table names.
+    pub tables: Vec<String>,
 }
 
 impl Schema {
@@ -1103,7 +1118,46 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
         peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
+        readers: program
+            .readers
+            .iter()
+            .map(|r| Reader {
+                name: r.name.name.clone(),
+                tables: r.tables.iter().map(|t| t.name.clone()).collect(),
+            })
+            .collect(),
     };
+    // Every table a `reader` line names is one of this program's own
+    // entities: an external is another system's table, and Ordo grants
+    // nothing on it.
+    for r in &program.readers {
+        for t in &r.tables {
+            let own = schema
+                .entities
+                .iter()
+                .any(|e| e.name == t.name && e.external.is_none());
+            if !own {
+                let external = schema.entity(&t.name).is_some();
+                return Err(SchemaError {
+                    code: "reader_unknown_table",
+                    message: if external {
+                        format!(
+                            "`reader {}` names `{}`, an external. A reader reads this \
+                             deployment's own tables; remove `{}` from the line",
+                            r.name.name, t.name, t.name
+                        )
+                    } else {
+                        format!(
+                            "`reader {}` names `{}`, which is not an entity of this program. \
+                             Name an entity declared here, or remove `{}` from the line",
+                            r.name.name, t.name, t.name
+                        )
+                    },
+                    span: t.span,
+                });
+            }
+        }
+    }
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
     Ok(schema)
@@ -2256,6 +2310,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         functions: Vec::new(),
         externals: Vec::new(),
         peers: Vec::new(),
+        readers: Vec::new(),
     }
 }
 
@@ -2838,6 +2893,7 @@ pub fn std_ops(schema: &Schema) -> Program {
         functions: Vec::new(),
         externals: Vec::new(),
         peers: Vec::new(),
+        readers: Vec::new(),
     }
 }
 

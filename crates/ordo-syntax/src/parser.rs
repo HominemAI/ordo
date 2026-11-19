@@ -55,6 +55,10 @@ pub const RELEASE_SUBJECT: &str = "release_subject";
 /// A `peer` line that cannot be one: a name that is not lowercase letters
 /// and digits, or a second line with the same name.
 pub const PEER_NAME: &str = "peer_name";
+/// A `reader` line that cannot be one: a name that is not lowercase
+/// letters, digits and underscores, a second line with the same name, no
+/// table, or a table named twice.
+pub const READER_LINE: &str = "reader_line";
 /// An `external` declaration without `shared` (ruled 2026-11-15,
 /// `external-entities`): who reads the rows must be written down.
 pub const EXTERNAL_NOT_SHARED: &str = "external_not_shared";

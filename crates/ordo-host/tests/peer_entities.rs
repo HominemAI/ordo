@@ -618,6 +618,10 @@ async fn the_load_gate_refuses_a_peer_it_cannot_serve() {
     let pool = Pool::connect(c.clone()).await.expect("boots");
     let keys: Arc<dyn ordo_crypto::KeyProvider> =
         Arc::new(ordo_crypto::TestProvider::with_space("s"));
+    // This test runs both deployments as the cluster's one role, so it
+    // allows that explicitly (`ORDO_PEER_SHARED_ROLE`); the default refuses
+    // it, as the end of this test shows. `reader_grants.rs` runs two roles.
+    std::env::set_var("ORDO_PEER_SHARED_ROLE", "on");
     let gate = |schema: Option<&str>| {
         // The gate reads the environment. Only this test in the binary sets
         // the variable; the others resolve through `resolve_with`.
@@ -701,6 +705,24 @@ async fn the_load_gate_refuses_a_peer_it_cannot_serve() {
         "v1",
     )
     .await;
-    std::env::remove_var("ORDO_PEER_JOURNAL_SCHEMA");
     assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    // Without the setting, one role for both is refused: grants would
+    // decide nothing.
+    std::env::remove_var("ORDO_PEER_SHARED_ROLE");
+    let r = ordo_host::deploy::verify_embedded_pinned(
+        gate(Some("alpha")),
+        &pool,
+        &c,
+        keys.clone(),
+        ordo_crypto::SpaceId("s".into()),
+        "v1",
+    )
+    .await;
+    std::env::remove_var("ORDO_PEER_JOURNAL_SCHEMA");
+    let Err(e) = r else { panic!("refused") };
+    let text = e.to_string();
+    assert!(
+        text.contains("is a superuser") && text.contains("ORDO_PEER_SHARED_ROLE=on"),
+        "{text}"
+    );
 }

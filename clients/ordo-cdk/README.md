@@ -253,6 +253,14 @@ handed first (`peer_undeclared`), a peer no external reads (`peer_unused`) and
 a peer passed twice (`peer_name`). `peer()` refuses a name that is not
 lowercase letters and digits (`peer_name`).
 
+**Covered: readers.** The app being read names who may read it, and which
+tables, with `reader('note_viewer', [notes, 'notesAccess'])`. Each table is an
+entity passed to `synth`, or `members`. This prints
+`reader note_viewer reads notes, notesAccess`. The role is never in the file:
+the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
+table that is not an entity of the file (`reader_unknown_table`) and a reader
+passed twice (`reader_line`).
+
 And the routine (12a). Its body is a write op's body, built with the same
 calls. The trigger is `every('15m')`, `daily('09:00Z')` or
 `when('estate.events.created', { debounce: '30s', coalesce: true })`, and the

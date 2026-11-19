@@ -2856,7 +2856,26 @@ pub async fn apply_safe(
     }
 }
 
+/// [`apply_planned_tables`], then the grants of the program's `reader`
+/// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
+/// table this apply creates is granted in the same apply, and a table taken
+/// off a line is revoked.
 async fn apply_planned(
+    pool: &Pool,
+    plan: &Plan,
+    actor: &str,
+    op: &str,
+) -> Result<Applied, ApplyRefusal> {
+    let applied = apply_planned_tables(pool, plan, actor, op).await?;
+    if let Err(e) = ordo_exec::peer::grant_readers(pool, &plan.program.schema).await {
+        return Err(ApplyRefusal::Internal(format!(
+            "the change was applied, and the reader grants were not: {e}"
+        )));
+    }
+    Ok(applied)
+}
+
+async fn apply_planned_tables(
     pool: &Pool,
     plan: &Plan,
     actor: &str,

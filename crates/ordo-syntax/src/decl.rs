@@ -52,6 +52,22 @@ pub struct Program {
     /// setting `ORDO_PEER_JOURNAL_SCHEMA` names, and `$caller` on it means
     /// the peer's member for the same person.
     pub peers: Vec<PeerDecl>,
+    /// `reader note_viewer reads notes, notesAccess`: another Ordo
+    /// deployment that may read these tables of this one (owner ruling
+    /// 2026-11-18, `example-apps-notes-v2-plus-note_viewer` ask 17). Its
+    /// database role comes from `ORDO_READER_NOTE_VIEWER_ROLE`, and this
+    /// deployment grants that role `SELECT` on exactly these tables.
+    pub readers: Vec<ReaderDecl>,
+}
+
+/// `reader <name> reads <table>, <table>`: a local nickname for a deployment
+/// that reads this one, and the tables it may read. The role it reads with
+/// comes from the environment, never from the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderDecl {
+    pub name: Ident,
+    pub tables: Vec<Ident>,
+    pub span: Span,
 }
 
 /// `peer <name>`: a local nickname for another Ordo deployment. It does not

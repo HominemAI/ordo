@@ -255,6 +255,21 @@ async fn check_one(
         .await
         .map_err(|err| db("the grants", err))?
     {
+        if let Some(p) = src.peer.as_ref().filter(|_| !a.schema_usage || !a.select) {
+            // A peer's table: the deployment being read grants it, by its
+            // `reader` line (owner ruling 2026-11-18).
+            report.problems.push(Problem {
+                entity: e.name.clone(),
+                kind: ProblemKind::NoGrant,
+                detail: format!(
+                    "role `{}` cannot read `{table}`. Add `reader <name> reads {}` to {}'s \
+                     definition file, set ORDO_READER_<NAME>_ROLE={} in its settings, and \
+                     apply or restart it",
+                    a.role, src.table, p.name, a.role
+                ),
+            });
+            return Ok(());
+        }
         if !a.schema_usage || !a.select {
             let mut grants = Vec::new();
             if !a.schema_usage {

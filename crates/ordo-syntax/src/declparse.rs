@@ -99,6 +99,23 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                 }
                 prog.peers.push(peer);
             }
+            // `reader` is contextual the same way (owner, 2026-11-18,
+            // `example-apps-notes-v2-plus-note_viewer` ask 17).
+            TokenKind::Ident(w) if w == "reader" => {
+                let reader = reader_decl(&mut p)?;
+                if prog.readers.iter().any(|q| q.name.name == reader.name.name) {
+                    return Err(p.err_class_at(
+                        parser::READER_LINE,
+                        reader.span,
+                        format!(
+                            "`reader {}` is declared twice. Keep one line and list every \
+                             table it reads there",
+                            reader.name.name
+                        ),
+                    ));
+                }
+                prog.readers.push(reader);
+            }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -1349,6 +1366,110 @@ fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
         )));
     }
     Ok(PeerDecl { name, span })
+}
+
+/// `reader <name> reads <table>, <table>` (owner, 2026-11-18,
+/// `example-apps-notes-v2-plus-note_viewer` ask 17): another deployment that
+/// may read these tables of this one.
+///
+/// The name is lowercase letters, digits and underscores, starting with a
+/// letter, so the setting `ORDO_READER_<NAME>_ROLE` is the name upper-cased
+/// with no two names sharing one variable. The list is the whole rest of
+/// the line.
+fn reader_decl(p: &mut Parser) -> Result<ReaderDecl, ParseError> {
+    let start = p.bump().span; // `reader`
+    let name = ident(p, "a reader name")?;
+    let ok = name
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(p.err_class_at(
+            parser::READER_LINE,
+            name.span,
+            format!(
+                "`reader {}`: a reader name is lowercase letters, digits and underscores, \
+                 starting with a letter, such as `reader note_viewer`. It is upper-cased \
+                 into the setting `ORDO_READER_<NAME>_ROLE`",
+                name.name
+            ),
+        ));
+    }
+    let shape =
+        |n: &str| format!("write the tables after `reads`: `reader {n} reads notes, notesAccess`");
+    match p.peek().clone() {
+        TokenKind::Ident(w) if w == "reads" => {
+            p.bump();
+        }
+        TokenKind::Newline | TokenKind::Eof => {
+            return Err(p.err_class_at(
+                parser::READER_LINE,
+                start.to(name.span),
+                format!(
+                    "`reader {}` names no table; {}",
+                    name.name,
+                    shape(&name.name)
+                ),
+            ));
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "expected `reads` after `reader {}`, found {}; {}",
+                name.name,
+                describe(&other),
+                shape(&name.name)
+            )))
+        }
+    }
+    let mut tables: Vec<Ident> = Vec::new();
+    loop {
+        if matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+            return Err(p.err_class_at(
+                parser::READER_LINE,
+                start.to(name.span),
+                format!(
+                    "`reader {}` names no table; {}",
+                    name.name,
+                    shape(&name.name)
+                ),
+            ));
+        }
+        let t = ident(p, "a table name")?;
+        if tables.iter().any(|x| x.name == t.name) {
+            return Err(p.err_class_at(
+                parser::READER_LINE,
+                t.span,
+                format!(
+                    "`reader {}` names `{}` twice. Name each table once",
+                    name.name, t.name
+                ),
+            ));
+        }
+        tables.push(t);
+        match p.peek() {
+            TokenKind::Comma => {
+                p.bump();
+            }
+            TokenKind::Newline | TokenKind::Eof => break,
+            other => {
+                let other = other.clone();
+                return Err(p.err_here(format!(
+                    "expected `,` or the end of the line after a table of `reader {}`, \
+                     found {}. The role is set by `ORDO_READER_{}_ROLE`, never in the file",
+                    name.name,
+                    describe(&other),
+                    name.name.to_ascii_uppercase()
+                )));
+            }
+        }
+    }
+    let span = start.to(tables.last().map(|t| t.span).unwrap_or(name.span));
+    Ok(ReaderDecl { name, tables, span })
 }
 
 /// `external <name> [(key: k)] from <schema>.<table> shared { … }`

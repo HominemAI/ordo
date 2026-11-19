@@ -28,6 +28,7 @@ import type {
   ExternalKeyType,
   ExternalNode,
   PeerNode,
+  ReaderNode,
   FieldKindNode,
   FieldNode,
   GuardClauseNode,
@@ -836,6 +837,40 @@ export function peer(name: string): Peer {
   return new Peer(name);
 }
 
+/**
+ * `reader note_viewer reads notes, notesAccess`: another Ordo deployment that
+ * may read these tables of this one. Its database role is the setting
+ * `ORDO_READER_NOTE_VIEWER_ROLE`, never the file, and this deployment grants
+ * that role `SELECT` on exactly these tables. Each table is an entity passed
+ * to `synth`, or the platform's `members`.
+ */
+export function reader(name: string, tables: readonly (string | Entity)[]): ReaderNode {
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new Error(
+      `reader_line: \`reader ${name}\`: a reader name is lowercase letters, digits and ` +
+        'underscores, starting with a letter. It is upper-cased into ORDO_READER_<NAME>_ROLE',
+    );
+  }
+  const names = tables.map((t) => (typeof t === 'string' ? t : t.name));
+  if (names.length === 0) {
+    throw new Error(
+      `reader_line: \`reader ${name}\` names no table; pass the tables it reads: ` +
+        `reader('${name}', [notes])`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const n of names) {
+    if (seen.has(n)) {
+      throw new Error(`reader_line: \`reader ${name}\` names \`${n}\` twice. Name each table once`);
+    }
+    seen.add(n);
+  }
+  return { kind: 'reader', name, tables: names };
+}
+
+/** The platform's own entities, which a reader line may name without declaring. */
+const PLATFORM_ENTITIES = new Set(['members', 'groupMembers']);
+
 /** Where an external's table lives: a schema written out, or a {@link Peer}. */
 type ExternalWhere =
   | {
@@ -1130,6 +1165,7 @@ export function synth(...decls: Synthesizable[]): string {
   const nodes = decls.map(declaration);
   checkExternalRefs(nodes);
   checkPeers(nodes);
+  checkReaders(nodes);
   const out = nodes.map(printDeclaration);
   return out.join('\n\n') + '\n';
 }
@@ -1165,6 +1201,38 @@ function checkPeers(nodes: Declaration[]): void {
       throw new Error(
         `peer_unused: \`peer ${p}\` is read by no external. Remove it, or read a table with ` +
           `external(name, fields, { peer: ${p}, table: '…', shared: true })`,
+      );
+    }
+  }
+}
+
+/**
+ * Each reader is passed once, and every table it names is an entity of this
+ * file (or the platform's `members`), as the schema check requires.
+ */
+function checkReaders(nodes: Declaration[]): void {
+  const entities = new Set<string>();
+  const externals = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind === 'entity') entities.add(n.name);
+    if (n.kind === 'external') externals.add(n.name);
+  }
+  const names = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind !== 'reader') continue;
+    if (names.has(n.name)) {
+      throw new Error(
+        `reader_line: \`reader ${n.name}\` is passed twice. Pass one reader with every table`,
+      );
+    }
+    names.add(n.name);
+    for (const t of n.tables) {
+      if (entities.has(t) || PLATFORM_ENTITIES.has(t)) continue;
+      const why = externals.has(t)
+        ? 'an external. A reader reads this deployment\'s own tables'
+        : 'not an entity passed to synth';
+      throw new Error(
+        `reader_unknown_table: \`reader ${n.name}\` names \`${t}\`, ${why}. Remove it from the line`,
       );
     }
   }

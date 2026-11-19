@@ -1076,3 +1076,29 @@ op myEntries =
 # reads no rows. ORDO_EXTERNAL_CRM_SCHEMA=crm_dev reads `crm_dev.customers`
 # instead of `crm.customers`; unset, the schema is as written.
 ```
+
+---
+
+## 11. Readers: who may read this deployment's tables
+
+```
+reader note_viewer reads notes, notesAccess  # in the file of the app being read
+
+entity notes {
+  title: text
+  owner -> members?
+  access read owner == $caller
+  access write owner == $caller
+}
+
+entity notesAccess {
+  note -> notes owned
+  member -> members
+}
+# `note_viewer` is a local nickname. The deployment owner sets its database
+# role with ORDO_READER_NOTE_VIEWER_ROLE. At apply and at start this
+# deployment grants that role SELECT on `notes` and `notesAccess`, and on
+# the sign-in columns a `$caller` guard reads. Nothing else. Take a table
+# off the line and the next apply or start revokes it. A reader line with
+# no role setting refuses the start.
+```

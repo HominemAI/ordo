@@ -143,7 +143,7 @@ fn lead_word(text: &str) -> &str {
         .unwrap_or("")
 }
 
-const DECL_HEADS: &[&str] = &["domain", "peer", "entity", "op", "routine"];
+const DECL_HEADS: &[&str] = &["domain", "peer", "reader", "entity", "op", "routine"];
 
 /// Every corpus candidate: the two conformance fixtures, and every fenced
 /// block of `syntax-examples.md` that `parse_program` accepts — the same set

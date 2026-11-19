@@ -1,6 +1,6 @@
 {
  "date": "2026-11-19",
- "text": "[[example-apps-notes-v2-plus-note_viewer]]: open sign-up at the identity service landed on bleeding (PR 26), after real grants (PR 24) and the matching rule (PR 23). Someone who signs up openly is a member, not an admin. Building now: the identity service as a sign-in provider apps connect to. Then note_viewer and its e2e stack. Peers stay off main until that sign-in step lands. 0.5.2 waits for PR 13 (held).",
+ "text": "[[example-apps-notes-v2-plus-note_viewer]]: the identity service is now a sign-in provider apps connect to (PR 27). A test signs one person in to 2 apps through it and the reader's guard matches them. Open sign-up (PR 26), real grants (PR 24) and the matching rule (PR 23) landed before it. Building now: note_viewer and its e2e stack. A security review of the sign-in step runs before peers go to main. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,7 +46,7 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "step 3 landed, 3b building"
+   "why": "3b landed, step 4 building"
   }
  ]
 }

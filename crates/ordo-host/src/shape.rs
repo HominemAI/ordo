@@ -383,6 +383,8 @@ async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, S
     } else {
         let mut all = vec![ddl.to_string()];
         all.extend(crate::principal_directory::directory_ddl().map(str::to_string));
+        // And the map of shared providers it joins (`ordo_exec::peer::link`).
+        all.push(ordo_exec::peer::LINK_DDL.to_string());
         with_directory = all.join(";\n");
         &with_directory
     };

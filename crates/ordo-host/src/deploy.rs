@@ -682,6 +682,26 @@ pub async fn verify_embedded(
     .await
 }
 
+/// Match this deployment's sign-in connections with each peer's, by
+/// provider fingerprint, and write the map the `$caller` guard joins
+/// (owner ruling 2026-11-18, `ordo_exec::peer::link`). A connection whose
+/// subject claim can change hands never links.
+pub async fn link_peers(
+    pool: &Pool,
+    fixture: &Fixture,
+    pass: ordo_exec::peer::Pass,
+) -> Result<Vec<ordo_exec::peer::PeerLinks>, ordo_exec::peer::SchemaRefusal> {
+    let callers = ordo_exec::peer::callers(&fixture.schema, &fixture.registry);
+    ordo_exec::peer::link(
+        pool,
+        &fixture.schema,
+        &callers,
+        &ordo_identity::oauth2::MUTABLE_SUBJECT_CLAIMS,
+        pass,
+    )
+    .await
+}
+
 /// The shared gating logic behind [`verify_candidate`] (the registry path)
 /// and [`verify_embedded`] (`ordo dev`'s path): assign custody and tenancy,
 /// validate specs, run the shape gate, and mint a [`Verified`]. Neither
@@ -714,6 +734,16 @@ async fn gate_fixture(
     ordo_exec::peer::check(pool, &fixture.schema)
         .await
         .map_err(schema_refusal)?;
+    // Who is the same person in each peer: the map of shared providers,
+    // built here and every minute after (`runtime::refresh_peer_links`).
+    for links in link_peers(pool, &fixture, ordo_exec::peer::Pass::Start)
+        .await
+        .map_err(schema_refusal)?
+    {
+        for line in links.start_lines() {
+            println!("  {line}");
+        }
+    }
     let fixture = Arc::new(fixture);
 
     // Registration's own refusal, before a shadow build pays for finding

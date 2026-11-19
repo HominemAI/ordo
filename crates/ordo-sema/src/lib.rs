@@ -412,6 +412,19 @@ impl Registry {
         }
     }
 
+    /// Put ops in place of any of the same name. Never reached by a program.
+    ///
+    /// The one caller is the routine runner, which keeps a registry of its own
+    /// for the length of a run and swaps in a routine's per-row op as each row
+    /// is bound (`ordo-conformance`, `each_row`). That registry is never a
+    /// deployed one and no request reaches it. Everything else goes through
+    /// `extend_from`, which refuses to replace.
+    pub fn replace_from(&mut self, p: &Program) {
+        for o in &p.ops {
+            self.ops.insert(o.name.name.clone(), o.clone());
+        }
+    }
+
     /// Two ops may not share a name (`duplicate_op_name`).
     ///
     /// The registry is one flat name space, and a request names an op. Two

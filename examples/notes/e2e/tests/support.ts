@@ -226,6 +226,8 @@ export function applyProgram(dir: string): string {
       ORDO_DEV_UNSAFE_TEST_KEYS: '1',
       ORDO_TOKEN_KEY: '1'.repeat(64),
       ORDO_PAGE_KEY: '2'.repeat(64),
+      // v2's `reader note_viewer` line: the role stack.sh made.
+      ORDO_READER_NOTE_VIEWER_ROLE: 'note_viewer',
     },
     encoding: 'utf8',
   });

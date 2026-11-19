@@ -13,7 +13,7 @@ import { NotesView } from './components/NotesView.js';
 import { SearchView } from './components/SearchView.js';
 import { SharedView } from './components/SharedView.js';
 import { SignedOut } from './components/SignedOut.js';
-import { DOOR, returnUrl } from './config.js';
+import { ARRIVE, DOOR, returnUrl } from './config.js';
 import { friendly, returnedErrorText, type Way } from './errors.js';
 import { acceptTicket, linkSecret, useHash } from './hooks.js';
 import { loadOffer, type Offer } from './methods.js';
@@ -53,7 +53,7 @@ export function App() {
   const [accepted, setAccepted] = useState<readonly { space: string; name: string | null }[]>([]);
   // While a new person's tenant is made: the step it has reached.
   const [settingUp, setSettingUp] = useState<TenantStatus | null>(null);
-  const options = useMemo(() => ({ baseUrl: DOOR, onSettingUp: setSettingUp }), []);
+  const options = useMemo(() => ({ baseUrl: DOOR, onSettingUp: setSettingUp, arrive: ARRIVE }), []);
   // The ways in come from the door. Until they arrive the sign-in screen waits.
   const [offer, setOffer] = useState<Offer | null>(null);
   useEffect(() => {

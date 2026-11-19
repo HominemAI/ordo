@@ -1,0 +1,59 @@
+# note_viewer. Reads the notes notes v2 (examples/notes-v2) holds, as a
+# second deployment in the same database. Read-only: nothing here writes
+# into notes v2.
+#
+# `peer notes` is a local nickname for notes v2. Its schema is the setting
+# ORDO_PEER_NOTES_SCHEMA. notes v2 grants this deployment's role its two
+# tables with `reader note_viewer reads notes, notesAccess`; Postgres
+# refuses every other one.
+#
+# Both apps sign people in through the identity service, so one person is
+# one subject in both. On a peer's table `$caller` is notes v2's member for
+# the person signed in here.
+
+domain noteviewer @ 0.1.0
+
+peer notes
+
+# The public list. No guard, so a public op may read it, and the op below
+# answers only the notes tagged `public`. A condition reads a field, so
+# `tags` is public too.
+external published from notes.notes shared {
+  public
+  id: text <- id
+  title: text <- title
+  body: text <- body
+  tags: json <- tags
+  created: datetime <- created
+}
+
+# The same table for a signed-in person, guarded by notes v2's own acl: a
+# note is read by whoever holds a level on it there.
+external entries from notes.notes shared {
+  id: text <- id
+  title: text <- title
+  body: text <- body
+  tags: json <- tags
+  created: datetime <- created
+  access read entryAccess(member == $caller)
+}
+
+# notes v2's acl rows: who holds which level on which note.
+external entryAccess from notes.notesAccess shared {
+  id: text <- id
+  entry -> entries <- note
+  member: text <- member
+  access read member == $caller
+}
+
+# Anyone, with no token.
+op publicNotes public =
+  published(tags contains "public")[id, title, body, created]
+  sort -created
+  take 100
+
+# Every note the signed-in person may read in notes v2.
+op myNotes =
+  entries[id, title, body, tags, created]
+  sort -created
+  take 100

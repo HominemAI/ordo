@@ -130,6 +130,11 @@ export PGPASSWORD=${ORDO_PG_PASSWORD:-}
 psql_bin=${ORDO_PSQL:-$( [ -n "${ORDO_PGBIN:-}" ] && echo "$ORDO_PGBIN/psql" || command -v psql || echo /opt/homebrew/opt/postgresql@17/bin/psql)}
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "drop database if exists \"$db\" with (force)"
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"$db\""
+# Notes v2 names a reader, note_viewer (examples/note-viewer), and grants its
+# role two tables. No note_viewer runs here, so the role logs in nowhere; it
+# only has to exist. The federation stack (examples/note-viewer/e2e) runs both.
+"$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc \
+  "DO \$\$ BEGIN CREATE ROLE note_viewer NOLOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END \$\$"
 
 # ── 2. The stand-ins ───────────────────────────────────────────────────────
 client_id=notes-e2e
@@ -164,6 +169,8 @@ export ORDO_PROVISION_SIGNUPS_PER_HOUR=10000
 # access_denied (examples/notes/README.md §6 on sizing max_connections).
 export ORDO_PG_POOL_SIZE=${ORDO_PG_POOL_SIZE:-3} ORDO_PG_IDLE_SECS=${ORDO_PG_IDLE_SECS:-5}
 export ORDO_AUTH_GUEST=on
+# Notes v2's `reader note_viewer` line names this role (made above).
+export ORDO_READER_NOTE_VIEWER_ROLE=note_viewer
 # Files on notes (notes v2) go to a blob store on this machine's disk, under
 # the stack's own folder. `fs:` is for tests and development only, so the
 # door refuses to boot on it without the unsafe switch beside it. A real

@@ -158,10 +158,15 @@ export function returnedFrom(search: string, store: Store | undefined = session(
   return { kind: 'handoff', method: pending.method, handoff, binder: pending.binder, hash, ...carried };
 }
 
-/** Swap the hand-off code and the binder for a session. Good once, within 60 seconds. */
+/**
+ * Swap the hand-off code and the binder for a session. Good once, within 60
+ * seconds. `space`, when given, is the tenant this sign-in arrives at: the
+ * deployment admits the person there by its policy (`std.space.setAdmission`).
+ */
 export async function completeOutside(
   endpoint: PasskeyEndpoint,
   back: { readonly method: string; readonly handoff: string; readonly binder: string },
+  space?: string,
 ): Promise<SignInResult> {
   return result(
     await call(endpoint, '/auth/complete', {
@@ -169,6 +174,7 @@ export async function completeOutside(
       kind: 'handoff',
       handoff: back.handoff,
       binder: back.binder,
+      ...(space ? { space } : {}),
     }),
   );
 }

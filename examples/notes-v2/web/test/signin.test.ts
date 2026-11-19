@@ -146,6 +146,22 @@ describe('coming back from an outside provider', () => {
     expect(s.claimProof).toBe('outside');
     expect(s.outsideProved).toBe(false);
   });
+
+  // A deployment with no tenant of one's own (the federation stack): the
+  // sign-in names the space it arrives at, and works there once admitted.
+  it('arrives at the configured space and works there when admitted', async () => {
+    const d = door({ json: signedIn('usr_ada', null, { admission: { space: 'system', outcome: 'admitted' } }) });
+    const s = await Session.fromOutside({ ...options(d), arrive: 'system' }, { method: 'accounts', handoff: 'h', binder: 'b' });
+    expect(d.sent[0]?.body).toMatchObject({ method: 'accounts', kind: 'handoff', space: 'system' });
+    expect(s.space).toBe('system');
+  });
+
+  it('is told there is no tenant when the space refused the arrival', async () => {
+    const d = door({ json: signedIn('usr_ada', null, { admission: { space: 'system', outcome: 'refused' } }) });
+    await expect(
+      Session.fromOutside({ ...options(d), arrive: 'system' }, { method: 'accounts', handoff: 'h', binder: 'b' }),
+    ).rejects.toThrow();
+  });
 });
 
 describe('an emailed code', () => {

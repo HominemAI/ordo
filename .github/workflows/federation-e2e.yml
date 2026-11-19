@@ -1,0 +1,189 @@
+name: Federation end-to-end
+
+# Two deployments joined by shared sign-in and shared data (owner rulings
+# 2026-11-16 to 2026-11-18, `example-apps-notes-v2-plus-note_viewer`): notes
+# v2 and note_viewer, each with its own database role and schema in one
+# Postgres, both signing people in through the identity service with open
+# sign-up. note_viewer reads notes v2's tables through `peer notes`, and notes
+# v2 grants that read with `reader note_viewer`. The stack is
+# examples/note-viewer/e2e/stack.sh; docs/howto-e2e.md says how to run it.
+#
+# Its own workflow, so the Notes end-to-end run stays short and a federation
+# failure shows under its own name (owner, 2026-11-17, ask 7).
+#
+# When this runs (owner ruling, 2026-11-01), as ci.yml says in full:
+#
+# - A push to `bleeding` runs it when the change reaches it: either example,
+#   the identity service, or a crate the stack builds on
+#   (scripts/ci-affected.mjs). A run it does not reach says "Not reached by
+#   this change" and passes.
+# - A pull request to `main`, the nightly run on `main` and a manual run run
+#   everything. So does a push whose commits carry the trailer line
+#   `ci: full`.
+
+on:
+  push:
+    branches: [bleeding]
+  pull_request:
+    branches: [main, bleeding]
+  workflow_dispatch:
+  # Called by nightly.yml, one suite after another (owner ruling 2026-11-02).
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_BACKTRACE: '1'
+
+# Runs on `main` (the nightly one) are never cancelled.
+concurrency:
+  group: federation-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  # scripts/ci-affected.mjs asks whether a pull request to main is open.
+  pull-requests: read
+
+jobs:
+  changes:
+    name: changes (federation e2e)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    outputs:
+      reached: ${{ steps.affected.outputs.federation_e2e }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: github.event_name == 'push'
+      - name: What this change reaches
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: node scripts/ci-affected.mjs
+
+  throwaway:
+    name: federation e2e
+    needs: changes
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 40 || 75 }}
+
+    services:
+      postgres:
+        # An empty image skips the service when the change does not reach this.
+        image: ${{ needs.changes.outputs.reached == 'true' && 'postgres:17' || '' }}
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # The admin connection. stack.sh makes the two app roles, `notes_app` and
+    # `viewer_app`, and each door signs in as its own. ORDO_PEER_SHARED_ROLE
+    # stays unset: the two roles are what this proves.
+    env:
+      REACHED: ${{ needs.changes.outputs.reached }}
+      CI: '1'
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_PASSWORD: ordo
+      ORDO_PSQL: psql
+
+    steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
+        with:
+          shared-key: e2e-federation
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            examples/note-viewer/e2e/package-lock.json
+            examples/note-viewer/web/package-lock.json
+            examples/notes-v2/web/package-lock.json
+
+      - name: Install psql
+        if: env.REACHED == 'true'
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - name: Postgres without durable commits (CI only)
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-pg-fast-commits.sh
+
+      - name: Build ordo-host, ordo and ordo-identity-service
+        if: env.REACHED == 'true'
+        run: cargo build -p ordo-host -p ordo-cli -p ordo-identity-service
+
+      - name: Install the two pages and the tests
+        if: env.REACHED == 'true'
+        run: |
+          (cd examples/notes-v2/web && npm ci)
+          (cd examples/note-viewer/web && npm ci)
+          (cd examples/note-viewer/e2e && npm ci && npm run typecheck)
+
+      # The browsers are kept between runs, as the other suites keep theirs.
+      - name: Keep the browsers
+        if: env.REACHED == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('examples/note-viewer/e2e/package-lock.json') }}
+
+      - name: Install Chromium
+        if: env.REACHED == 'true'
+        working-directory: examples/note-viewer/e2e
+        run: npx playwright install --with-deps chromium
+
+      # Playwright starts the stack (stack.sh) and stops it at the end.
+      - name: Run the use cases
+        if: env.REACHED == 'true'
+        working-directory: examples/note-viewer/e2e
+        run: npx playwright test
+
+      - name: Upload the traces and stack logs
+        if: ${{ env.REACHED == 'true' && (failure()) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: federation-e2e-report
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true
+          path: |
+            examples/note-viewer/e2e/test-results/
+            examples/note-viewer/e2e/.stack/*.log

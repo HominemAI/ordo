@@ -65,6 +65,12 @@ export interface SessionOptions {
   readonly onSettingUp?: (status: TenantStatus) => void;
   /** For tests: how `waitForTenant` pauses between reads. */
   readonly settingUpPause?: (ms: number) => Promise<void>;
+  /**
+   * The space an outside sign-in arrives at, for a deployment that gives
+   * nobody a tenant of their own and admits people to its own space
+   * (`VITE_ORDO_SPACE`, `config.ts`). Unset, a sign-in names no space.
+   */
+  readonly arrive?: string | undefined;
 }
 
 /** The sign-in worked and the deployment gave this person no tenant. */
@@ -190,7 +196,20 @@ export class Session {
     options: SessionOptions,
     back: { readonly method: string; readonly handoff: string; readonly binder: string },
   ): Promise<Session> {
-    return Session.#ready(options, Session.#session(await completeOutside(endpointOf(options), back)));
+    const done = Session.#session(await completeOutside(endpointOf(options), back, options.arrive));
+    return Session.#ready(options, Session.#admitted(done));
+  }
+
+  /**
+   * A sign-in that arrived at a space and was let in there works in that
+   * space, when the answer names no tenant of the person's own.
+   */
+  static #admitted(done: PasskeySession): PasskeySession {
+    const space = done.raw['space'];
+    const a = done.admission;
+    if ((typeof space === 'string' && space !== '') || !a) return done;
+    if (a.outcome !== 'admitted' && a.outcome !== 'already-member') return done;
+    return { ...done, raw: { ...done.raw, space: a.space } };
   }
 
   /**

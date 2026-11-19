@@ -395,3 +395,67 @@ both stacks whichever project runs.
 It needs Rust, Node 20 or later and PostgreSQL binaries, as above. The
 artifact `console-e2e-report` holds the report, traces and
 `.stack/console.log`.
+
+## Two deployments: notes v2 and note_viewer
+
+Notes v2 and note_viewer share sign-in and data. Their end-to-end tests
+live in `examples/note-viewer/e2e/`. The workflow is
+`.github/workflows/federation-e2e.yml`, a check of its own named
+`federation e2e`, so the notes run stays short and a federation failure
+shows under its own name (owner, 2026-11-17).
+
+It runs on a push to `bleeding` when the change reaches either example,
+the identity service, ordo-host or ordo-cli. It runs in full on a pull
+request to `main` and nightly, after the console suite.
+
+The stack is `examples/note-viewer/e2e/stack.sh`. It starts, in order:
+
+1. **Postgres**: one database for both apps, plus one for the identity
+   service. It makes two login roles, `notes_app` and `viewer_app`. Each
+   owns one schema, `notes` and `viewer`, and nothing else.
+2. **HTTPS in front** (`tls-front.mjs`). An OIDC issuer and an app's
+   callback must be https. It serves the test certificate for `localhost`
+   and forwards to the plain http servers below.
+3. **The identity service** on `https://localhost:4791`. `notes` and
+   `viewer` are registered before it starts, each with open sign-up and
+   its callback as the return URL.
+4. **notes v2** on `http://localhost:4740`, as `notes_app` in schema
+   `notes`. People sign in through the service (connection `accounts`).
+   The deployment's own space admits anyone who signs in, as an editor.
+   `ORDO_READER_NOTE_VIEWER_ROLE=viewer_app` grants note_viewer its two
+   tables.
+5. **note_viewer** on `http://localhost:4750`, as `viewer_app` in schema
+   `viewer`, with `ORDO_PEER_NOTES_SCHEMA=notes`. People sign in through
+   the same service. `ORDO_PEER_SHARED_ROLE` is not set: the stack proves
+   the two-role setup.
+6. **The two pages**: notes v2 on `http://localhost:5290`, built with
+   `VITE_ORDO_SPACE=system`, and note_viewer on `http://localhost:5291`.
+
+Two Playwright projects:
+
+| Project | What it tests |
+|---|---|
+| `api` | As `viewer_app`, Postgres answers `notes.notes` and `notes."notesAccess"` and refuses `attachments`, `reminders`, `$commandlog` and the members columns it was not granted. `notes_app` cannot read the viewer's schema. The viewer's door, with no token, answers only notes tagged `public` and refuses `myNotes` |
+| `browser` | In order: Ada signs up openly from notes v2 and writes a public and a private note. Signed out, note_viewer shows the public one only. She signs in to note_viewer with the same passkey and sees both, and a reload keeps her signed in. Bo signs up from notes v2 and sees his own note and the public one, never Ada's private one. Cy signs up from note_viewer, holds nothing in notes v2, and sees no private note |
+
+Chromium refuses a passkey on a page with a certificate error. The
+`browser` project tells Chromium to trust the test leaf's key, by its SPKI
+hash, and nothing else (`playwright.config.ts`).
+
+Run it:
+
+```
+cargo build -p ordo-host -p ordo-cli -p ordo-identity-service
+(cd examples/notes-v2/web && npm ci)
+(cd examples/note-viewer/web && npm ci)
+cd examples/note-viewer/e2e && npm ci && npx playwright test
+```
+
+Without `ORDO_PG_HOST` the stack starts and destroys its own Postgres.
+With it (and `_PORT`, `_USER`, `_PASSWORD`), it uses that server, and the
+user must be able to create roles and databases. Ports in use elsewhere:
+set `E2E_IDENTITY_PORT`, `E2E_NOTES_PORT` and `E2E_VIEWER_PORT` (each
+https front is the next port up), `E2E_NOTES_PAGE_PORT` and
+`E2E_VIEWER_PAGE_PORT`. `E2E_NO_PAGES=1 bash stack.sh` starts everything
+but the pages, for poking at the doors with curl. The artifact
+`federation-e2e-report` holds the traces and `.stack/*.log`.

@@ -59,12 +59,15 @@ import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const CLIENT_JOBS = ['ordo-sdk', 'ordo-cdk', 'ordo-react'];
-export const EXAMPLE_JOBS = ['notes', 'notes-v2', 'teamspace', 'shopfront'];
+export const EXAMPLE_JOBS = ['notes', 'notes-v2', 'note-viewer', 'teamspace', 'shopfront'];
 
 // What each e2e suite builds (its `cargo build -p` line).
 const NOTES_E2E_BUILDS = ['ordo-host', 'ordo-cli'];
 const CONSOLE_E2E_BUILDS = ['ordo-console', 'ordo-cli', 'ordo-identity-service', 'ordo-supervisor'];
 const IDENTITY_E2E_BUILDS = ['ordo-identity-service'];
+// The federation e2e (examples/note-viewer/e2e): two doors, the CLI, and the
+// identity service they both sign in through.
+const FEDERATION_E2E_BUILDS = ['ordo-host', 'ordo-cli', 'ordo-identity-service'];
 // scripts/upgrade-continuity.sh builds these and runs an ordo-host test.
 const UPGRADE_BUILDS = ['ordo-host', 'ordo-cli'];
 
@@ -121,6 +124,7 @@ export function everything(reason, packages, { perf = false } = {}) {
     authz: true,
     consoleE2e: true,
     identityE2e: true,
+    federationE2e: true,
   };
 }
 
@@ -269,6 +273,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
     authz: false,
     consoleE2e: false,
     identityE2e: false,
+    federationE2e: false,
   };
 
   // A file under a crate's tests/: the test binaries it reaches (rule 6).
@@ -335,6 +340,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
         if (pkg === 'ordo-sdk' || pkg === 'ordo-react') {
           EXAMPLE_JOBS.forEach((x) => examples.add(x));
           flags.notesE2e = true;
+          flags.federationE2e = true;
           tests.add('ordo-host');
         }
       } else return everything(`${f} is in a client CI does not know`, packages);
@@ -346,6 +352,8 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
       const app = m[1];
       if (EXAMPLE_JOBS.includes(app)) examples.add(app);
       if (app === 'notes' || app === 'notes-v2') flags.notesE2e = true;
+      // The federation e2e runs notes v2 beside note_viewer.
+      if (app === 'notes-v2' || app === 'note-viewer') flags.federationE2e = true;
       reader(f);
       continue;
     }
@@ -435,6 +443,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
   if (any(built, NOTES_E2E_BUILDS)) flags.notesE2e = true;
   if (any(built, CONSOLE_E2E_BUILDS)) flags.consoleE2e = true;
   if (any(built, IDENTITY_E2E_BUILDS)) flags.identityE2e = true;
+  if (any(built, FEDERATION_E2E_BUILDS)) flags.federationE2e = true;
   // ordo-gen writes the clients' generated halves.
   if (built.has('ordo-gen')) CLIENT_JOBS.forEach((c) => clients.add(c));
 
@@ -487,6 +496,7 @@ export function outputs(r) {
     authz: b(r.authz),
     console_e2e: b(r.consoleE2e),
     identity_e2e: b(r.identityE2e),
+    federation_e2e: b(r.federationE2e),
   };
 }
 
@@ -644,7 +654,7 @@ function decide(argv, env) {
  * node at once failed timing tests that pass alone.
  */
 export function deferToPullRequest(out) {
-  const off = ['perf', 'rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e'];
+  const off = ['perf', 'rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e', 'federation_e2e'];
   const d = { ...out, reason: `a pull request to main is open and runs everything (${out.reason})` };
   for (const k of off) d[k] = 'false';
   d.clients = '';

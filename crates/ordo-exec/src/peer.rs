@@ -1075,10 +1075,7 @@ pub async fn grant_readers_with(
     let mut gone: Vec<String> = Vec::new();
     if recorded {
         let rows = pool
-            .rows(&format!(
-                r#"SELECT "role" FROM {} ORDER BY 1"#,
-                quote(READER_TABLE)
-            ))
+            .rows(r#"SELECT "role" FROM "$readergrant" ORDER BY 1"#)
             .await
             .map_err(SchemaRefusal::Database)?;
         for r in rows {
@@ -1109,10 +1106,7 @@ pub async fn grant_readers_with(
     }
     let record_changed = if recorded {
         let rows = pool
-            .rows(&format!(
-                r#"SELECT "role", "reader" FROM {} ORDER BY 1"#,
-                quote(READER_TABLE)
-            ))
+            .rows(r#"SELECT "role", "reader" FROM "$readergrant" ORDER BY 1"#)
             .await
             .map_err(SchemaRefusal::Database)?;
         let now: Vec<(String, String)> = rows
@@ -1140,17 +1134,15 @@ pub async fn grant_readers_with(
             .await
             .map_err(SchemaRefusal::Database)?;
     }
-    sql += &format!("DELETE FROM {};", quote(READER_TABLE));
+    // The table by its literal name: a platform table, never an entity's.
+    sql += r#"DELETE FROM "$readergrant";"#;
     if !want.is_empty() {
         let values = want
             .iter()
             .map(|(role, (reader, _))| format!("({}, {})", sql_lit(role), sql_lit(reader)))
             .collect::<Vec<_>>()
             .join(", ");
-        sql += &format!(
-            r#" INSERT INTO {} ("role", "reader") VALUES {values};"#,
-            quote(READER_TABLE)
-        );
+        sql += &format!(r#" INSERT INTO "$readergrant" ("role", "reader") VALUES {values};"#);
     }
     // One implicit transaction. Two replicas starting at once may race on
     // the catalog row; the loser checks the result below, which is what

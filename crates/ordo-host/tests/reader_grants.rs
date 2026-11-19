@@ -37,6 +37,8 @@ use ordo_host::schema_apply::{self as sa, Program};
 
 const WRITER: &str = "ordo_rg_writer";
 const READER: &str = "ordo_rg_reader";
+/// Both roles' password, for a cluster that asks for one.
+const PASSWORD: &str = "ordo_rg_password";
 
 /// The app being read: notes, and a table it does not share.
 const ALPHA: &str = r#"
@@ -77,6 +79,8 @@ fn cfg(db: &str, user: &str, schema: &str) -> PoolConfig {
         user: user.into(),
         size: 2,
         schema: schema.into(),
+        // CI's cluster asks for a password; the local one trusts.
+        password: Some(PASSWORD.into()),
         ..PoolConfig::from_env()
     }
 }
@@ -118,7 +122,7 @@ async fn world(db: &str) -> World {
     let pg = Pg::scoped(db);
     for role in [WRITER, READER] {
         pg.exec(&format!(
-            "DO $$ BEGIN CREATE ROLE {role} LOGIN; \
+            "DO $$ BEGIN CREATE ROLE {role} LOGIN PASSWORD '{PASSWORD}'; \
              EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;"
         ))
         .expect("role");
@@ -360,9 +364,13 @@ async fn a_shared_role_is_refused_unless_the_setting_allows_it() {
         "{text}"
     );
     // A superuser (the test cluster's own role).
-    let su = Pool::connect(cfg(&w.pg.db, &PoolConfig::from_env().user, "public"))
-        .await
-        .expect("boots");
+    let su = Pool::connect(PoolConfig {
+        db: w.pg.db.clone(),
+        size: 2,
+        ..PoolConfig::from_env()
+    })
+    .await
+    .expect("boots");
     let e = peer::check_access(&su, &schema, &callers, false)
         .await
         .expect_err("a superuser");

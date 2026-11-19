@@ -1,6 +1,6 @@
 {
  "date": "2026-11-19",
- "text": "[[example-apps-notes-v2-plus-note_viewer]]: real database grants landed on bleeding (PR 24), after the matching rule (PR 23). A reader now reads only the tables the other app grants its role, and Postgres enforces it. wasmtime 50.0.2 (PR 25) cleared 8 new advisories. Next is step 3, open sign-up at the identity service. Peers stay off main until app users sign in through the identity service. 0.5.2 waits for PR 13 (held).",
+ "text": "[[example-apps-notes-v2-plus-note_viewer]]: open sign-up at the identity service landed on bleeding (PR 26), after real grants (PR 24) and the matching rule (PR 23). Someone who signs up openly is a member, not an admin. Building now: the identity service as a sign-in provider apps connect to. Then note_viewer and its e2e stack. Peers stay off main until that sign-in step lands. 0.5.2 waits for PR 13 (held).",
  "tiles": [
   [
    "4,060",
@@ -46,7 +46,7 @@
  "look": [
   {
    "id": "example-apps-notes-v2-plus-note_viewer",
-   "why": "2c landed; roles your deployment needs are listed"
+   "why": "step 3 landed, 3b building"
   }
  ]
 }

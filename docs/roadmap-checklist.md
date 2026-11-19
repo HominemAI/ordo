@@ -13111,7 +13111,8 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       commit 3d9824a5)** (provider fingerprint plus
       subject, a double match refused, start refusals); real database
       grants, a role per deployment, **built 2026-11-19 (PR 24, commit
-      e5304e02, tests `crates/ordo-host/tests/reader_grants.rs`)**; app users signing in
+      e5304e02, tests `crates/ordo-host/tests/reader_grants.rs`)**; open sign-up at
+      the identity service, **built 2026-11-19 (PR 26, commit dced245d)**; app users signing in
       through the identity service. Peers stay off `main` until all 3 land.
       Tying a peer's spaces to the reader's is filed for later, board
       `peer-spaces-tied`.

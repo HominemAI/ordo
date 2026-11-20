@@ -722,7 +722,10 @@ impl Fixture {
         let program = ordo_syntax::parse_program(&ops_part)
             .map_err(|e| format!("{}: {} at {}", e.code, e.message, e.span))?;
         let mut registry = self.registry.clone();
-        registry.extend_from(&program);
+        // A case may redeclare a fixture op: that is how a corpus case
+        // models an edit to a callee (C098). It replaces on purpose, in a
+        // clone no request reaches, so it does not go through `extend_from`.
+        registry.replace_from(&program);
         ordo_plan::cost::check_registration(&self.schema, &registry)
             .map_err(|e| format!("register: {e}"))?;
 

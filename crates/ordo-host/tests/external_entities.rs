@@ -46,7 +46,7 @@ op ticketsWithCustomer =
   tickets[subject, customer.name]
   sort subject
 
-op customerByEmail($e: text) =
+op patronByEmail($e: text) =
   patrons(email == $e)[id, name]
 
 op mine =
@@ -205,13 +205,7 @@ async fn a_nineteen_digit_key_is_found_everywhere() {
     let (status, body) = call(&state, "GET", &format!("/op/std.patrons.get?id={id}"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["rows"][0]["name"], "Di", "{body}");
-    let (status, body) = call(
-        &state,
-        "GET",
-        "/op/customerByEmail?e=di%40example.com",
-        None,
-    )
-    .await;
+    let (status, body) = call(&state, "GET", "/op/patronByEmail?e=di%40example.com", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["rows"][0]["id"], id, "{body}");
     let (status, body) = call(
@@ -264,13 +258,7 @@ async fn a_developer_op_joins_a_native_entity_to_the_external() {
         "{body}"
     );
 
-    let (status, body) = call(
-        &state,
-        "GET",
-        "/op/customerByEmail?e=cy%40example.com",
-        None,
-    )
-    .await;
+    let (status, body) = call(&state, "GET", "/op/patronByEmail?e=cy%40example.com", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["rows"][0]["id"], "pat_42", "{body}");
 }

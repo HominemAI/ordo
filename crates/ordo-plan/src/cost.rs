@@ -573,6 +573,7 @@ pub fn effective_class(
 pub fn check_registration(schema: &Schema, registry: &Registry) -> Result<(), SemaError> {
     // First: every later check binds ops by name, and a name that is also
     // an entity's would be checked as the wrong thing.
+    registry.check_duplicate_names()?;
     registry.check_entity_names(schema)?;
     registry.check_reserved_params()?;
     registry.check_content_params()?;
@@ -615,6 +616,23 @@ pub fn check_routines(schema: &Schema, registry: &Registry) -> Result<(), SemaEr
     }
     let mut ops = Vec::new();
     for r in &schema.routines {
+        // A routine's op joins the registry under the routine's name, and the
+        // registry never replaces. A registered op of that name is refused
+        // here, naming both (`duplicate_op_name`). The schema build already
+        // refuses the pair inside one program (`invalid_routine`).
+        if let Some(op) = registry.get(&r.name.name) {
+            return Err(SemaError {
+                code: "duplicate_op_name",
+                message: format!(
+                    "routine `{n}` (line {rl}) has the same name as the op `{n}` (line {ol}). \
+                     A routine runs as an op of its name. Rename one.",
+                    n = r.name.name,
+                    rl = r.name.span.line,
+                    ol = op.name.span.line,
+                ),
+                span: r.name.span,
+            });
+        }
         match crate::each::read_op(r) {
             None => ops.push(ordo_schema::routine::routine_op(r)),
             Some(read) => {

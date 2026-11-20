@@ -50,6 +50,7 @@ Rules:
 | `public_write_guarded` | A public write into an entity that has a guard or an `acl`. |
 | `public_write_ref` | A public write sets a ref from a visitor's value to an entity with no public field. The answer would show whether that row exists. |
 | `op_named_like_entity` | The op has the name of an entity, native or external. Every op is refused this, public or not. Name the op for what it answers: `op publicNotes` over `external notes`. |
+| `duplicate_op_name` | Two ops have one name. A later private op can no longer take the place of a public one. Rename one. |
 
 A condition on a private field would leak it a bit at a time. That is why a
 condition counts as a read.

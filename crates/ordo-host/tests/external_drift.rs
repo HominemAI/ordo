@@ -46,7 +46,7 @@ entity tickets {
   subject: text
 }
 
-op customerByEmail($e: text) =
+op patronByEmail($e: text) =
   patrons(email == $e)[id, name]
 
 op mine =
@@ -341,7 +341,7 @@ async fn the_watcher_holds_an_entity_and_lifts_it_when_the_table_is_back() {
     for op in [
         "std.patrons.list",
         "std.patrons.get?id=pat_9",
-        "customerByEmail?e=x",
+        "patronByEmail?e=x",
     ] {
         let (status, body) = call(&state, "GET", &format!("/op/{op}"), None).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{op}: {body}");

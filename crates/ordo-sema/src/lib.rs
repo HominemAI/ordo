@@ -362,15 +362,25 @@ fn as_projection_miss(e: SemaError) -> SemaError {
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     ops: HashMap<String, OpDecl>,
+    /// Ops offered under a name already taken. The registry never replaces an
+    /// op: the first stays, and the later one is kept here so
+    /// `check_duplicate_names` can refuse it (`duplicate_op_name`).
+    clashes: Vec<OpClash>,
+}
+
+/// A later declaration that met an op of the same name.
+#[derive(Debug, Clone)]
+struct OpClash {
+    first: Span,
+    later: Span,
+    name: String,
 }
 
 impl Registry {
     pub fn from_program(p: &Program) -> Registry {
-        let mut ops = HashMap::new();
-        for o in &p.ops {
-            ops.insert(o.name.name.clone(), o.clone());
-        }
-        Registry { ops }
+        let mut r = Registry::default();
+        r.extend_from(p);
+        r
     }
 
     pub fn get(&self, name: &str) -> Option<&OpDecl> {
@@ -382,10 +392,57 @@ impl Registry {
     }
 
     /// Register additional ops — corpus cases may declare local ones.
+    ///
+    /// Never replaces. An op offered under a name that is taken leaves the
+    /// first in place and records the clash, which `check_duplicate_names`
+    /// (run by `check_registration`) refuses. Before this, the later op
+    /// silently won, with its own body and access rules.
     pub fn extend_from(&mut self, p: &Program) {
+        for o in &p.ops {
+            match self.ops.get(&o.name.name) {
+                Some(first) => self.clashes.push(OpClash {
+                    first: first.name.span,
+                    later: o.name.span,
+                    name: o.name.name.clone(),
+                }),
+                None => {
+                    self.ops.insert(o.name.name.clone(), o.clone());
+                }
+            }
+        }
+    }
+
+    /// Put ops in place of any of the same name. Never reached by a program.
+    ///
+    /// The one caller is the routine runner, which keeps a registry of its own
+    /// for the length of a run and swaps in a routine's per-row op as each row
+    /// is bound (`ordo-conformance`, `each_row`). That registry is never a
+    /// deployed one and no request reaches it. Everything else goes through
+    /// `extend_from`, which refuses to replace.
+    pub fn replace_from(&mut self, p: &Program) {
         for o in &p.ops {
             self.ops.insert(o.name.name.clone(), o.clone());
         }
+    }
+
+    /// Two ops may not share a name (`duplicate_op_name`).
+    ///
+    /// The registry is one flat name space, and a request names an op. Two
+    /// declarations of one name cannot both answer it, so the program is
+    /// refused and the author renames one. The message names both places.
+    pub fn check_duplicate_names(&self) -> Result<(), SemaError> {
+        let Some(c) = self.clashes.first() else {
+            return Ok(());
+        };
+        Err(err(
+            "duplicate_op_name",
+            c.later,
+            format!(
+                "op `{}` is declared twice: at line {} and at line {}. A request for \
+                 `{}` could mean either one. Rename one.",
+                c.name, c.first.line, c.later.line, c.name
+            ),
+        ))
     }
 
     /// Names the platform binds and an op may not declare.

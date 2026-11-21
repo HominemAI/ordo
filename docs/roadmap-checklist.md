@@ -13370,10 +13370,12 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       omits `space auth compliance cond`, which it does
       (`crates/ordo-syntax/src/token.rs`). Board: `syntax-additions`.
 - [ ] **27ah · Build the syntax additions.** Ruled in substance 2026-10-03
-      (`syntax-additions`); no go to build. `public` / `public*` and public
-      ops, `deployment` entities, `$tenant` and caller-side guard atoms,
-      `apikey` profiles, `prev`, orphans with `ordo plan --prune` under a
-      second confirmation, the `settings { }` block, `external` entities.
+      (`syntax-additions`). Built: `public` / `public*` and public ops, and
+      `external` entities (PR 14, 17f02c3c, 2026-11-15; tests
+      `crates/ordo-syntax/tests/external.rs`, `crates/ordo-schema/tests/external.rs`).
+      Owed, no go to build: `deployment` entities, `$tenant` and caller-side
+      guard atoms, `apikey` profiles, `prev`, orphans with `ordo plan --prune`
+      under a second confirmation, the `settings { }` block.
       New reserved words in `crates/ordo-syntax/src/token.rs`, then
       `crates/ordo-gen/src/spell.rs` and the CDK vocabulary.
       `plan-syntax-additions.md`. Board: `syntax-additions`.

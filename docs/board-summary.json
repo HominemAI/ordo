@@ -1,6 +1,6 @@
 {
  "date": "2026-11-23",
- "text": "2026-11-23 PR 13 (auth block) is reconciled with bleeding and mergeable; its 9 review fixes are pushed. PR 32 merged into main, so the nightly runs on GitHub runners again ([[nightly-cancelled-main-pins-cluster-runners]]). 0.5.2 waits on PR 13. The 2026-11-21 audit found no built task missing; 75 tasks corrected.",
+ "text": "2026-11-23 The auth block is on bleeding (PR 13, [[audit-configuration-in-the-syntax]]); nothing now holds 0.5.2. The nightly runs on GitHub runners again (PR 32, [[nightly-cancelled-main-pins-cluster-runners]]). The 2026-11-21 audit found no built task missing; 75 tasks corrected.",
  "tiles": [
   [
    "4,060",
@@ -45,12 +45,12 @@
  ],
  "look": [
   {
-   "id": "audit-configuration-in-the-syntax",
-   "why": "PR 13 mergeable"
+   "id": "live-instance",
+   "why": "0.5.2 can be cut"
   },
   {
-   "id": "nightly-cancelled-main-pins-cluster-runners",
-   "why": "fixed, PR 32"
+   "id": "audit-configuration-in-the-syntax",
+   "why": "next: the host step"
   },
   {
    "id": "sdk-usability-review-before-release-3",

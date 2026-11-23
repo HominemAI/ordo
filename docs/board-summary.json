@@ -1,6 +1,6 @@
 {
- "date": "2026-11-21",
- "text": "2026-11-21 board audit against the code: no built task is missing or regressed. 75 tasks corrected: wrong paths, prose saying not built about things since built, and remainders. 9 tasks found partly or wholly done, among them [[syntax-additions]] (external entities built). New defect: [[nightly-cancelled-main-pins-cluster-runners]]. PR 13 now conflicts with bleeding (89 commits), and 0.5.2 waits on it.",
+ "date": "2026-11-23",
+ "text": "2026-11-23 PR 13 (auth block) is reconciled with bleeding and mergeable; its 9 review fixes are pushed. PR 32 brings bleeding to main so the nightly runs on GitHub runners ([[nightly-cancelled-main-pins-cluster-runners]]). 0.5.2 waits on PR 13. The 2026-11-21 audit found no built task missing; 75 tasks corrected.",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,12 @@
  ],
  "look": [
   {
-   "id": "nightly-cancelled-main-pins-cluster-runners",
-   "why": "1 ask: run the nightly by hand?"
-  },
-  {
    "id": "audit-configuration-in-the-syntax",
-   "why": "PR 13 conflicts, 8 files"
+   "why": "PR 13 mergeable"
   },
   {
-   "id": "syntax-additions",
-   "why": "external entities built"
+   "id": "nightly-cancelled-main-pins-cluster-runners",
+   "why": "PR 32 into main"
   },
   {
    "id": "sdk-usability-review-before-release-3",

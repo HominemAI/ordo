@@ -120,8 +120,16 @@ test-group = 'seeded-once'
 # timing: a pool took 8.6 s to drop connections it drops in 1 s, and a
 # supervisor's first leadership dial missed its tick (run 41368713492).
 # Five shards share one node. Raise it only with a run that stays green.
+#
+# A stuck test must name itself. On 2026-11-15 (PR 14, run 43717449671) the
+# rest shard ran 35 minutes into the job timeout and the cancelled job kept
+# no log, so nothing said which test hung; the whole shard takes under 3
+# minutes locally. nextest now prints SLOW with the test's name every 60 s
+# and ends the test after 15 minutes, well past the longest legitimate test
+# (store_pool_stress, about 4 minutes in the perf shard).
 [profile.ci]
 test-threads = 4
 fail-fast = false
 failure-output = "immediate-final"
 success-output = "never"
+slow-timeout = { period = "60s", terminate-after = 15 }

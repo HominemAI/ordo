@@ -306,7 +306,7 @@ fn entity_descriptor(e: &Value, all: &[Value]) -> Value {
             })
         })
         .collect();
-    json!({
+    let mut doc = json!({
         "entity": e["entity"],
         "key": e["key"],
         "tree": e["tree"],
@@ -324,7 +324,16 @@ fn entity_descriptor(e: &Value, all: &[Value]) -> Value {
         // offer "related tasks" without a second index of the schema.
         "referenced_by": referenced_by(e["entity"].as_str().unwrap_or(""), all),
         "fields": fields,
-    })
+    });
+    // An external entity (ruled 2026-11-15, `external-entities`): rows
+    // another system owns. Read-only, not attested, not sealed, no history,
+    // not live, ids not permanent, and a shape that is not Ordo's promise.
+    // The SDK and the console read this to say so. Absent on a native
+    // entity, so a program without externals keeps its descriptor bytes.
+    if e["external"].as_bool().unwrap_or(false) {
+        doc["external"] = json!(true);
+    }
+    doc
 }
 
 /// `[{entity, field, owned}]` — every ref in the program that targets

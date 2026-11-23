@@ -204,6 +204,12 @@ fn usage() -> ! {
          No `--db` mode exists, because every sealed field\n      \
          is re-sealed under the destination space's key and this tool holds\n      \
          no custody.\n  \
+         ordo introspect --external <schema>.<table> [--name <entity>] [--key <column>] [--out <file>] [--db <db>]\n      \
+         read one live table and print the `external` block that translates it\n      \
+         (a table another system owns). The key is the single-column primary key,\n      \
+         or the unique, not null column `--key` names; else it refuses\n      \
+         `external_no_key`. A column with no Ordo type is a comment. Never writes\n      \
+         to the database.\n  \
          ordo identity recover --direct --principal <id> --as <who> [--evidence <class>] [--ref <r>]\n      \
          open a recovery for a person who has lost every way in, from the host,\n      \
          and print the recovery ticket once. The deployment owner's way back in,\n      \
@@ -540,6 +546,7 @@ fn main() {
             | "secret"
             | "fn"
             | "identity"
+            | "introspect"
             | "import"
             | "fleet"
             | "touches"
@@ -713,6 +720,12 @@ fn main() {
         }
     }
     print!("{out}");
+    if cmd == "plan" {
+        // On stderr, so the artifact on stdout stays byte-stable JSON.
+        for n in ordo_cli::plan_notes(&src) {
+            eprintln!("{n}");
+        }
+    }
     if cmd == "check" {
         // On stderr, beside the refusals, so the report on stdout stays the
         // program's shape. A warning never changes the exit code.

@@ -231,7 +231,7 @@ impl Fixture {
         if stmts.is_empty() {
             return Ok(None);
         }
-        view.registry.extend_from(&ordo_syntax::Program {
+        view.registry.replace_from(&ordo_syntax::Program {
             ops: vec![OpDecl {
                 name: routine.name.clone(),
                 params: routine.params.clone(),

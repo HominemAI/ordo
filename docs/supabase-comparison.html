@@ -177,7 +177,7 @@
 <tr data-v="part" data-id="g22"><td>22</td>
   <td>There is no clean way to reference data another system owns.</td>
   <td><b>Adam</b></td>
-  <td>Ruled: external entities, generated read-only projections. Not deferred.</td>
+  <td>Ruled: external entities, generated read-only translations, their own kind in the schema (2026-11-15). Not deferred.</td>
   <td><span class="v part">Partial</span></td>
   <td>Queued, 27i.</td></tr>
 <tr data-v="ok" data-id="g23"><td>23</td>
@@ -195,9 +195,9 @@
 <tr data-v="part" data-id="g25"><td>25</td>
   <td>A name another system already uses.</td>
   <td>Found</td>
-  <td>Ruled: Ordo's tables move under a prefix plus a random identifier.</td>
+  <td>Ruled: Ordo's tables move under a prefix plus a random identifier. Deferred 2026-11-15 until a real collision appears; foreign tables take their own schema.</td>
   <td><span class="v part">Partial</span></td>
-  <td>Queued, 27k.</td></tr>
+  <td>Deferred, 27k.</td></tr>
 <tr data-v="gap" data-id="g26"><td>26</td>
   <td>Your foreign key on their table breaks their operations (<code>profiles</code> to <code>auth.users</code>).</td>
   <td>Reported</td>
@@ -235,7 +235,7 @@
   <td>Reported</td>
   <td>Std entities live in the program. A clash between std and user names is unverified.</td>
   <td><span class="v part">Partial</span></td>
-  <td>Audit first (<code>deploy-schema-audit</code>), then random schema names.</td></tr>
+  <td>Audit first (<code>deploy-schema-audit</code>). Random schema names are deferred (27k, 2026-11-15).</td></tr>
 <tr data-v="ok" data-id="g31"><td>31</td>
   <td>Making a table reachable takes a dashboard setting plus grants. The default flips on 30 Oct 2026.</td>
   <td>Reported</td>

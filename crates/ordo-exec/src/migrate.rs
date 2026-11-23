@@ -115,6 +115,191 @@ pub async fn live_shape(pool: &Pool, schema: &str) -> Result<LiveShape, PoolErro
     Ok(out)
 }
 
+// ── a foreign table's keys and grants (external entities) ────────────────
+
+/// One unique, non-partial index of a table: the columns in key order, and
+/// whether it is the primary key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueKey {
+    pub primary: bool,
+    pub columns: Vec<String>,
+}
+
+/// The unique indexes of one table, primary key first. Expression and
+/// partial indexes are left out: neither names a column that is unique for
+/// every row.
+///
+/// The reader the external-entities generator is built on
+/// (`plan-external-entities.md` section 11). It reads and writes nothing.
+pub async fn unique_keys(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<UniqueKey>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT i.indisprimary, \
+                    array_to_string(ARRAY(SELECT a.attname FROM unnest(i.indkey) \
+                      WITH ORDINALITY k(attnum, ord) \
+                      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+                      ORDER BY k.ord), chr(31)) \
+             FROM pg_index i \
+             JOIN pg_class t ON t.oid = i.indrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = {} AND t.relname = {} AND i.indisunique \
+               AND i.indpred IS NULL AND i.indexprs IS NULL \
+             ORDER BY i.indisprimary DESC, 2",
+            crate::sql_lit(schema),
+            crate::sql_lit(table)
+        ))
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let primary = r.first().cloned().flatten()? == "t";
+            let cols = r.get(1).cloned().flatten()?;
+            Some(UniqueKey {
+                primary,
+                columns: cols.split('\u{1f}').map(str::to_string).collect(),
+            })
+        })
+        .collect())
+}
+
+/// What the connected role may do with one foreign table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Access {
+    /// The role the pool connects as, for the `GRANT` a refusal prints.
+    pub role: String,
+    pub schema_usage: bool,
+    pub select: bool,
+}
+
+/// Whether the connected role has `USAGE` on the schema and `SELECT` on the
+/// table, asked of the catalog and never by reading a row. `None` when the
+/// table does not exist.
+pub async fn access_to(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Option<Access>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT current_user::text, has_schema_privilege(current_user, n.oid, 'USAGE'), \
+                    has_table_privilege(current_user, t.oid, 'SELECT') \
+             FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = {} AND t.relname = {} AND t.relkind IN ('r', 'p', 'v', 'm', 'f')",
+            crate::sql_lit(schema),
+            crate::sql_lit(table)
+        ))
+        .await?;
+    Ok(rows.first().map(|r| {
+        let b = |i: usize| r.get(i).cloned().flatten().as_deref() == Some("t");
+        Access {
+            role: r.first().cloned().flatten().unwrap_or_default(),
+            schema_usage: b(1),
+            select: b(2),
+        }
+    }))
+}
+
+/// Is this relation a table (ordinary or partitioned), as opposed to a view,
+/// a materialized view or a foreign table? Only a table states its keys and
+/// its NOT NULLs in the catalog.
+pub async fn is_table(pool: &Pool, schema: &str, table: &str) -> Result<bool, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT t.relkind::text FROM pg_class t \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = {} AND t.relname = {}",
+            crate::sql_lit(schema),
+            crate::sql_lit(table)
+        ))
+        .await?;
+    Ok(matches!(
+        rows.first()
+            .and_then(|r| r.first().cloned().flatten())
+            .as_deref(),
+        Some("r" | "p")
+    ))
+}
+
+/// The columns of one table, view, materialized view or foreign table, as
+/// the catalog spells them. `None` when it does not exist. What the
+/// apply-time check of an external entity compares its translation with.
+pub async fn table_columns(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Option<std::collections::BTreeMap<String, LiveColumn>>, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), \
+                    (NOT a.attnotnull AND t.relkind IN ('r', 'p', 'f')) \
+             FROM pg_class t \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum > 0 \
+               AND NOT a.attisdropped \
+             WHERE n.nspname = {} AND t.relname = {} AND t.relkind IN ('r', 'p', 'v', 'm', 'f') \
+             ORDER BY a.attnum",
+            crate::sql_lit(schema),
+            crate::sql_lit(table)
+        ))
+        .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for r in rows {
+        let Some(Some(name)) = r.first().cloned() else {
+            continue;
+        };
+        out.insert(
+            name,
+            LiveColumn {
+                ty: r.get(1).cloned().flatten().unwrap_or_default(),
+                nullable: r.get(2).cloned().flatten().as_deref() == Some("t"),
+                has_default: false,
+            },
+        );
+    }
+    Ok(Some(out))
+}
+
+/// Every schema and every table outside the system schemas, as
+/// `(schemas, (schema, table) pairs)`. The caller decides which are Ordo's
+/// (27j, "present, not Ordo's"). Read-only. The schema list leaves out
+/// `public`, which every database has, and the deployment's own schema
+/// ([`Pool::schema`]); the table list leaves out neither.
+pub async fn schemas_and_tables(
+    pool: &Pool,
+) -> Result<(Vec<String>, Vec<(String, String)>), PoolError> {
+    let schemas = pool
+        .rows(&format!(
+            "SELECT nspname FROM pg_namespace \
+                 WHERE nspname <> 'public' AND nspname <> {} \
+                   AND nspname <> 'information_schema' \
+                   AND nspname NOT LIKE 'pg\\_%' ORDER BY 1",
+            pool.schema_lit()
+        ))
+        .await?
+        .into_iter()
+        .filter_map(|r| r.first().cloned().flatten())
+        .collect();
+    let tables = pool
+        .rows(
+            "SELECT n.nspname, t.relname FROM pg_class t \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE t.relkind IN ('r', 'p') AND n.nspname <> 'information_schema' \
+               AND n.nspname NOT LIKE 'pg\\_%' ORDER BY 1, 2",
+        )
+        .await?
+        .into_iter()
+        .filter_map(|r| Some((r.first().cloned().flatten()?, r.get(1).cloned().flatten()?)))
+        .collect();
+    Ok((schemas, tables))
+}
+
 // ── the places stored amounts are held at (25aa) ─────────────────────────
 
 /// The log of places changes applied to this database: one row per
@@ -271,11 +456,11 @@ where
 
 /// The places each recorded field's stored amounts are held at now: the
 /// latest `$places` row per `(entity, field)`. Empty when no places change
-/// was ever applied here.
+/// was ever applied here. Read from the deployment's own schema.
 pub async fn held_places(
     pool: &Pool,
 ) -> Result<std::collections::BTreeMap<(String, String), u8>, PoolError> {
-    held_places_in(pool, "public").await
+    held_places_in(pool, pool.schema()).await
 }
 
 async fn held_places_in(
@@ -309,15 +494,16 @@ pub async fn stated_places(
     pool: &Pool,
 ) -> Result<std::collections::BTreeMap<(String, String, u8), String>, PoolError> {
     let mut out = std::collections::BTreeMap::new();
-    if !places_table_exists(pool, "public.\"$places\"").await? {
+    let table = format!("{}.\"$places\"", pool.schema_ident());
+    if !places_table_exists(pool, &table).await? {
         return Ok(out);
     }
     let rows = pool
-        .rows(
+        .rows(&format!(
             "SELECT DISTINCT ON (\"entity\", \"field\", \"places\") \
                     \"entity\", \"field\", \"places\", \"choice\" \
-             FROM public.\"$places\" ORDER BY \"entity\", \"field\", \"places\", \"seq\" DESC",
-        )
+             FROM {table} ORDER BY \"entity\", \"field\", \"places\", \"seq\" DESC"
+        ))
         .await?;
     for r in rows {
         let g = |i: usize| r.get(i).cloned().flatten();

@@ -11,7 +11,7 @@
 //! admin routes with a deployment token as the bearer.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::{Request, State};
@@ -24,6 +24,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use ordo_identity::ceremony::MemoryCeremonyStore;
 use ordo_identity::clock::Clock;
 use ordo_identity::origin::Origin;
 use ordo_identity::passkey::PasskeyProvider;
@@ -33,6 +34,7 @@ use ordo_identity::Argon2idHasher;
 
 use crate::audit;
 use crate::config::{IdentityConfig, KEY_FILE_ENV, LISTEN_ENV};
+use crate::deployments::{self, Registered};
 use crate::error::IdentityError;
 use crate::import::ImportStep;
 use crate::invites::{self, Minted, FIRST_BOOT};
@@ -80,12 +82,24 @@ pub(crate) struct Inner {
     pub(crate) store: Store,
     pub(crate) keys: KeyRing,
     pub(crate) clock: Clock,
-    pub(crate) allowed: Vec<Origin>,
+    /// The service's own origin, `ORDO_IDENTITY_CLIENT_ORIGINS` and every
+    /// registered deployment's client origins: who may call from a
+    /// browser. A registered deployment's return URLs add nothing here.
+    /// Rebuilt with [`Service::refresh_deployments`].
+    pub(crate) allowed: RwLock<Vec<Origin>>,
+    /// The deployments registered here, as last read
+    /// ([`Service::refresh_deployments`]): the CORS list, the return URL
+    /// check and token issuing read it. A change this process makes is
+    /// read at once; one a host command makes, within a minute.
+    pub(crate) registered: RwLock<Vec<Registered>>,
     /// Every ceremony but the touch: the service's own origin only.
     pub(crate) provider: Arc<PasskeyProvider>,
     /// The touch: the service's origin and each client origin under the
-    /// RP ID ([`crate::passkeys::ceremony_origins`]).
-    pub(crate) touch_provider: Arc<PasskeyProvider>,
+    /// RP ID ([`crate::passkeys::ceremony_origins`]), registered
+    /// deployments' included. Rebuilt over the same ceremony store when
+    /// the registry changes.
+    pub(crate) touch_provider: RwLock<Arc<PasskeyProvider>>,
+    pub(crate) touch_ceremonies: Arc<MemoryCeremonyStore>,
     pub(crate) hasher: Arc<dyn PasswordHasher>,
     pub(crate) machines: MachineSignIn,
 }
@@ -142,25 +156,74 @@ impl Service {
             &cfg.rp_id,
             std::slice::from_ref(&cfg.origin),
         )?;
+        let touch_ceremonies = Arc::new(MemoryCeremonyStore::new());
         let touch_origins =
             crate::passkeys::ceremony_origins(&cfg.rp_id, &cfg.origin, &cfg.client_origins);
-        let touch_provider =
-            crate::passkeys::provider(store.pool(), &cfg.deployment, &cfg.rp_id, &touch_origins)?;
-        let mut allowed = cfg.client_origins.clone();
-        if let Some(own) = Origin::parse(&cfg.origin) {
-            allowed.push(own);
-        }
-        Ok(Service(Arc::new(Inner {
+        let touch_provider = crate::passkeys::provider_sharing(
+            store.pool(),
+            &cfg.deployment,
+            &cfg.rp_id,
+            &touch_origins,
+            touch_ceremonies.clone(),
+        )?;
+        let service = Service(Arc::new(Inner {
             cfg,
             store,
             keys,
             clock: opts.clock,
-            allowed,
+            allowed: RwLock::new(Vec::new()),
+            registered: RwLock::new(Vec::new()),
             provider: Arc::new(provider),
-            touch_provider: Arc::new(touch_provider),
+            touch_provider: RwLock::new(Arc::new(touch_provider)),
+            touch_ceremonies,
             hasher: opts.hasher,
             machines: MachineSignIn::default(),
-        })))
+        }));
+        service.refresh_deployments().await?;
+        Ok(service)
+    }
+
+    /// Read the registered deployments again and rebuild what depends on
+    /// them: the browser origins allowed and the touch's relying party.
+    /// Runs at boot, each minute, and after this process registers or ends
+    /// one, so a host command's change is served within a minute.
+    pub async fn refresh_deployments(&self) -> Result<(), IdentityError> {
+        let cfg = &self.0.cfg;
+        let list = deployments::list(self.0.store.pool(), &cfg.deployment).await?;
+        let mut clients = cfg.client_origins.clone();
+        for d in &list {
+            for o in &d.client_origins {
+                if !clients.contains(o) {
+                    clients.push(o.clone());
+                }
+            }
+        }
+        let touch_origins = crate::passkeys::ceremony_origins(&cfg.rp_id, &cfg.origin, &clients);
+        let touch = crate::passkeys::provider_sharing(
+            self.0.store.pool(),
+            &cfg.deployment,
+            &cfg.rp_id,
+            &touch_origins,
+            self.0.touch_ceremonies.clone(),
+        )?;
+        let mut allowed = clients;
+        if let Some(own) = Origin::parse(&cfg.origin) {
+            allowed.push(own);
+        }
+        *write(&self.0.allowed, "allowed origins") = allowed;
+        *write(&self.0.touch_provider, "touch relying party") = Arc::new(touch);
+        *write(&self.0.registered, "registered deployments") = list;
+        Ok(())
+    }
+
+    /// The registered deployments as last read.
+    pub fn registered(&self) -> Vec<Registered> {
+        read(&self.0.registered, "registered deployments").clone()
+    }
+
+    /// The touch's provider now.
+    pub(crate) fn touch_provider(&self) -> Arc<PasskeyProvider> {
+        read(&self.0.touch_provider, "touch relying party").clone()
     }
 
     /// Before serving: first the console import (6.1), then, on a
@@ -302,11 +365,15 @@ impl Service {
         &self.0.cfg.deployment
     }
 
-    /// What is due each minute: a rotation, a retirement, a checkpoint.
+    /// What is due each minute: a rotation, a retirement, a checkpoint, and
+    /// deleting spent or expired OIDC codes and closed guessing windows.
     pub async fn tick(&self) -> Result<(), IdentityError> {
         let now = self.now();
         self.0.keys.tick(self.0.store.pool(), now).await?;
+        self.refresh_deployments().await?;
         audit::checkpoint_if_due(self.0.store.pool(), self.handle(), &self.0.keys, now).await?;
+        crate::oidc::sweep_codes(self.0.store.pool(), self.handle(), now).await?;
+        crate::throttle::sweep(self.0.store.pool(), self.handle(), now).await?;
         Ok(())
     }
 
@@ -342,11 +409,35 @@ impl Service {
                 e,
             )
         })?;
+        let others: Vec<String> = self.registered().into_iter().map(|d| d.handle).collect();
         eprintln!(
-            "ordo-identity-service: listening on {addr} for deployment `{}`, issuer {}",
+            "ordo-identity-service: listening on {addr} for deployment `{}`{}, issuer {}",
             self.handle(),
+            if others.is_empty() {
+                String::new()
+            } else {
+                format!(" and registered deployments `{}`", others.join("`, `"))
+            },
             self.0.cfg.origin
         );
+        for d in self.registered() {
+            let trusted = d.trusted_app_origins();
+            if !trusted.is_empty() {
+                eprintln!(
+                    "ordo-identity-service: deployment `{}` lists {} as a client origin and an \
+                     app's callback there. A client origin may spend the session cookie. \
+                     Unless it is a console, drop it: `ordo-identity-service deployment set {} \
+                     --no-origins`, or --origin with the console's origins only.",
+                    d.handle,
+                    trusted
+                        .iter()
+                        .map(|o| o.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    d.handle
+                );
+            }
+        }
         let ticker = self.clone();
         let tick = tokio::spawn(async move {
             let mut every = tokio::time::interval(Duration::from_secs(TICK_SECS));
@@ -418,7 +509,7 @@ impl Service {
         }
     }
 
-    fn cookie(&self, headers: &HeaderMap) -> Option<String> {
+    pub(crate) fn cookie(&self, headers: &HeaderMap) -> Option<String> {
         let name = self.cookie_name();
         headers
             .get_all(COOKIE)
@@ -435,7 +526,8 @@ impl Service {
     fn allowed_origin(&self, headers: &HeaderMap) -> Option<String> {
         let sent = headers.get(ORIGIN)?.to_str().ok()?;
         let origin = Origin::parse(sent)?;
-        self.0.allowed.contains(&origin).then(|| sent.to_string())
+        let allowed = read(&self.0.allowed, "allowed origins");
+        allowed.contains(&origin).then(|| sent.to_string())
     }
 
     /// A call that may come from a browser: an `Origin`, when sent, must be
@@ -445,6 +537,53 @@ impl Service {
             return Err(IdentityError::OriginRefused);
         }
         Ok(())
+    }
+
+    /// The `Origin` a browser sent, parsed; `Ok(None)` when none was sent.
+    fn sent_origin(headers: &HeaderMap) -> Result<Option<Origin>, IdentityError> {
+        match headers.get(ORIGIN) {
+            None => Ok(None),
+            Some(v) => v
+                .to_str()
+                .ok()
+                .and_then(Origin::parse)
+                .map(Some)
+                .ok_or(IdentityError::OriginRefused),
+        }
+    }
+
+    fn is_own(&self, o: &Origin) -> bool {
+        Origin::parse(&self.0.cfg.origin).as_ref() == Some(o)
+    }
+
+    /// A browser call that acts for the service's own deployment, or for
+    /// the person's account as a whole: from the service's own page or a
+    /// client origin of the home (`ORDO_IDENTITY_CLIENT_ORIGINS`), never
+    /// from a registered deployment's page. A call with no `Origin` (a CLI
+    /// with its secret in the body) passes. `what` names the act.
+    pub(crate) fn home_origin_ok(
+        &self,
+        headers: &HeaderMap,
+        what: &'static str,
+    ) -> Result<(), IdentityError> {
+        match Self::sent_origin(headers)? {
+            None => Ok(()),
+            Some(o) if self.is_own(&o) || self.0.cfg.client_origins.contains(&o) => Ok(()),
+            Some(_) => Err(IdentityError::OwnPageOnly(what)),
+        }
+    }
+
+    /// A call only the service's own page makes: an `Origin` is required
+    /// and must be the service's own.
+    pub(crate) fn own_page_ok(
+        &self,
+        headers: &HeaderMap,
+        what: &'static str,
+    ) -> Result<(), IdentityError> {
+        match Self::sent_origin(headers)? {
+            Some(o) if self.is_own(&o) => Ok(()),
+            _ => Err(IdentityError::OwnPageOnly(what)),
+        }
     }
 
     /// The session secret a call carries: in the body (a CLI), or in the
@@ -469,6 +608,28 @@ impl Service {
             None => Err(IdentityError::NotSignedIn),
         }
     }
+}
+
+/// Read a lock even when a panic poisoned it: the value is whole (each
+/// write replaces it in one step), so serving it beats refusing every
+/// browser call until a restart. Said in the log.
+fn read<'a, T>(lock: &'a RwLock<T>, what: &str) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| {
+        eprintln!(
+            "ordo-identity-service: the lock on the {what} was poisoned by a panic; reading on"
+        );
+        poisoned.into_inner()
+    })
+}
+
+/// Write a lock even when a panic poisoned it, as [`read`] reads it.
+fn write<'a, T>(lock: &'a RwLock<T>, what: &str) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poisoned| {
+        eprintln!(
+            "ordo-identity-service: the lock on the {what} was poisoned by a panic; writing on"
+        );
+        poisoned.into_inner()
+    })
 }
 
 /// Write a file only its owner reads, replacing any older one.

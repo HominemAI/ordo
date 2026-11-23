@@ -121,6 +121,7 @@ pub fn specs() -> Vec<OpSpec> {
         params,
         output_fields: out.iter().map(|f| FieldSpec::new(*f)).collect(),
         live_capable: false,
+        reads_external: false,
         requires_idempotency_key: false,
         public: Default::default(),
         refinable: RefineTier::None,

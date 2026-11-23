@@ -186,6 +186,7 @@ fn placeholder_op() -> OpSpec {
         params: vec![],
         output_fields: vec![],
         live_capable: false,
+        reads_external: false,
         refinable: RefineTier::None,
         aggregate_only: false,
         mode_label: None,

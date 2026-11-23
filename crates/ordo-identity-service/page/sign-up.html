@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="ordo-base" content="__ORDO_BASE__">
+<meta name="ordo-return-origins" content="__ORDO_RETURN_ORIGINS__">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Create an account · Ordo</title>
+<link rel="stylesheet" href="/page/identity.css">
+<script type="module" src="/page/sign-up.js"></script>
+</head>
+<body>
+<header class="brand"><span class="mark">Ordo</span> account</header>
+<main>
+  <p id="problem" class="problem" role="alert"></p>
+
+  <section data-step="loading">
+    <h1>Create an account</h1>
+    <p>Loading.</p>
+  </section>
+
+  <section data-step="no-app" hidden>
+    <h1>This link is not complete</h1>
+    <p>Open the sign-up link from the app again. It names the app you are joining.</p>
+  </section>
+
+  <section data-step="name" hidden>
+    <h1>Create an account</h1>
+    <p>Join <strong data-app></strong>. You sign in with a passkey: your fingerprint, face, screen lock or a security key. There is no password.</p>
+    <form id="sign-up-form" novalidate>
+      <div class="field">
+        <label for="display-name">Your name</label>
+        <input id="display-name" name="name" type="text" autocomplete="name" maxlength="100" required aria-describedby="name-help" aria-errormessage="name-error">
+        <p id="name-help" class="help">The app shows this name to you and to the people who run it.</p>
+        <p id="name-error" class="field-error">Type your name.</p>
+      </div>
+      <button type="submit" data-passkey>Create a passkey</button>
+    </form>
+    <p>Already have an account? <a id="sign-in-link" href="/sign-in">Sign in</a>, then join with it.</p>
+  </section>
+
+  <section data-step="join" hidden>
+    <h1>Join this app</h1>
+    <p>You are signed in as <strong data-who></strong>. Join <strong data-app></strong> with this account and the passkey you already have.</p>
+    <div id="join-area">
+      <button type="button" id="join">Join</button>
+    </div>
+  </section>
+
+  <section data-step="codes" hidden>
+    <h1>Save your recovery codes</h1>
+    <p>Your account is ready, and your passkey works. Each code below works once. Use one if you lose every passkey.</p>
+    <p class="warn"><strong>This is the only time these codes are shown.</strong> Keep them somewhere safe, away from this device.</p>
+    <ol class="codes" data-codes aria-label="Recovery codes"></ol>
+    <div class="row">
+      <button type="button" class="secondary" data-copy>Copy codes</button>
+      <button type="button" class="secondary" data-download>Download as a file</button>
+    </div>
+    <div class="check">
+      <input type="checkbox" id="saved" data-saved>
+      <label for="saved">I saved these codes somewhere safe</label>
+    </div>
+    <button type="button" data-continue disabled>Continue</button>
+  </section>
+
+  <p id="status" class="status" role="status"></p>
+</main>
+</body>
+</html>

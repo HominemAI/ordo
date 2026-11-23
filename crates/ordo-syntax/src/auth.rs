@@ -635,15 +635,6 @@ fn domain(p: &mut Parser) -> Result<FunctionHost, ParseError> {
     function_host(p)
 }
 
-fn eat_comma(p: &mut Parser) -> bool {
-    if matches!(p.peek(), TokenKind::Comma) {
-        p.bump();
-        true
-    } else {
-        false
-    }
-}
-
 /// Refuse an option written twice in one clause.
 fn once(p: &Parser, set: bool, opt: &Ident) -> Result<(), ParseError> {
     if set {

@@ -193,7 +193,7 @@ fn invalid(span: Span, message: String) -> SchemaError {
 /// `90000` as `25h`, `604800` as `7d`: the largest whole unit.
 fn spell_secs(s: u64) -> String {
     for (per, unit) in [(7 * DAY, "w"), (DAY, "d"), (3_600, "h"), (60, "m")] {
-        if s % per == 0 && s >= per {
+        if s.is_multiple_of(per) && s >= per {
             return format!("{}{unit}", s / per);
         }
     }

@@ -2498,7 +2498,7 @@ fn refuse_unreproducible(
     have_keys: bool,
 ) -> Result<(), RevertFailure> {
     for cmd in &inverse.commands {
-        let Some(e) = schema.entity(&cmd.entity) else {
+        let Some(e) = schema.native(&cmd.entity) else {
             return Err(RevertFailure::Refused(format!(
                 "unknown_entity: this history names `{}`, which the loaded schema does not \
                  declare — the schema and the log disagree, and the revert is refused rather \
@@ -3590,7 +3590,7 @@ async fn verify_restored_objects(
     let (Some(blobs), Some(c)) = (blobs, custody) else {
         return Ok(());
     };
-    let e = schema.entity(entity).ok_or_else(|| {
+    let e = schema.native(entity).ok_or_else(|| {
         RevertFailure::Refused(format!(
             "unknown_entity: the schema does not declare `{entity}`"
         ))
@@ -3829,7 +3829,7 @@ const OBJECT_VERIFY_CORRELATION: &str = "verify-objects";
 /// gets a `FAILED` line has not lost the census of what else the run had
 /// already found.
 fn names_a_blob_column(schema: &Schema, entity: &str, image: &Image) -> bool {
-    let Some(e) = schema.entity(entity) else {
+    let Some(e) = schema.native(entity) else {
         return false;
     };
     ordo_schema::image::image_columns(e)
@@ -3926,7 +3926,7 @@ async fn row_image(
     entity: &str,
     id: &str,
 ) -> Result<Option<Image>, RevertFailure> {
-    let e = schema.entity(entity).ok_or_else(|| {
+    let e = schema.native(entity).ok_or_else(|| {
         RevertFailure::Refused(format!(
             "unknown_entity: the schema does not declare `{entity}`"
         ))
@@ -4068,7 +4068,7 @@ fn imaged_fields(
     image: &Image,
     plain: &Plaintexts,
 ) -> Result<Vec<(String, String)>, RevertFailure> {
-    let e = schema.entity(entity).ok_or_else(|| {
+    let e = schema.native(entity).ok_or_else(|| {
         RevertFailure::Refused(format!(
             "unknown_entity: the schema does not declare `{entity}`"
         ))

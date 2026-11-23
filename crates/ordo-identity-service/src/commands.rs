@@ -3,7 +3,14 @@
 //!
 //! | Command | What |
 //! |---|---|
-//! | `invite [--label <text>] [--role admin]` | a new admin's invite link; also recovery when every passkey is lost |
+//! | `invite [--label <text>] [--role admin] [--deployment <handle>]` | a new admin's invite link; also recovery when every passkey is lost. With `--deployment`, the joiner is a member of that registered deployment only |
+//! | `deployment add <handle> [--origin <origin>]... [--return <url>]... [--sign-up invite\|open]` | register a deployment that signs in here (`crate::deployments`): a console's origin with `--origin`, an app's callback with `--return` alone; sign-up is by invite unless `open` |
+//! | `deployment set <handle> [--origin <origin>]... [--no-origins] [--return <url>]...` | replace its client origins, its return URLs, or both |
+//! | `deployment sign-up <handle> invite\|open` | change how people join it |
+//! | `deployment list` | the registered deployments, with their sign-up mode |
+//! | `deployment end <handle>` | no new token for it |
+//! | `member add <handle> <person>`, `member end <handle> <person>`, `member list <handle>` | who may hold a deployment's tokens |
+//! | `people` | every account, with its id, for `member add` |
 //! | `break-glass-token [--minutes <1..60>]` | one admin token for `ordo --token`, default 15 minutes |
 //! | `rotate-keys [--now]` | a new token key; `--now` signs with it at once and retires the old |
 //! | `audit verify [--key <kid>:<x>]...` | check the audit chain and its checkpoints |
@@ -19,11 +26,60 @@ use crate::people::Actor;
 use crate::server::Service;
 
 /// The first words that name a command, so `main` knows to run one.
-pub const COMMANDS: &[&str] = &["invite", "break-glass-token", "rotate-keys", "audit"];
+pub const COMMANDS: &[&str] = &[
+    "invite",
+    "break-glass-token",
+    "rotate-keys",
+    "audit",
+    "deployment",
+    "member",
+    "people",
+];
 
 const USAGE: &str = "usage: ordo-identity-service [invite [--label <text>] [--role admin] \
-                     | break-glass-token [--minutes <1..60>] | rotate-keys [--now] \
-                     | audit verify [--key <kid>:<x>]...]";
+                     [--deployment <handle>] | break-glass-token [--minutes <1..60>] \
+                     | rotate-keys [--now] | audit verify [--key <kid>:<x>]... \
+                     | deployment add <handle> [--origin <origin>]... [--return <url>]... \
+                     [--sign-up invite|open] | deployment set <handle> [--origin <origin>]... \
+                     [--no-origins] [--return <url>]... | deployment sign-up <handle> invite|open \
+                     | deployment list | deployment end <handle> \
+                     | member add|end <handle> <person> | member list <handle> | people]";
+
+/// Every value given after `--name`, in order.
+fn flags<'a>(args: &'a [String], name: &str) -> Result<Vec<&'a str>, String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == name {
+            out.push(
+                it.next()
+                    .map(String::as_str)
+                    .ok_or_else(|| format!("{name} needs a value. {USAGE}"))?,
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Origins as one line, or `none`.
+fn shown(origins: &[ordo_identity::origin::Origin]) -> String {
+    if origins.is_empty() {
+        return "none".into();
+    }
+    origins
+        .iter()
+        .map(|o| o.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The `n`th word after the command, required.
+fn word<'a>(args: &'a [String], n: usize, what: &str) -> Result<&'a str, String> {
+    args.get(n)
+        .filter(|a| !a.starts_with("--"))
+        .map(String::as_str)
+        .ok_or_else(|| format!("{what} is required. {USAGE}"))
+}
 
 /// The value after `--name`, if given.
 fn flag<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>, String> {
@@ -59,12 +115,225 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                 }
             }
             let label = flag(args, "--label")?.unwrap_or("");
-            let m = svc.invite(actor, label).await.map_err(|e| e.to_string())?;
+            let target = flag(args, "--deployment")?;
+            let m = svc
+                .invite_into(actor, label, target)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(format!(
                 "{}\nOpen it within {} days to sign up; it works once.\n",
                 m.link,
                 svc.config().invite_days
             ))
+        }
+        Some("deployment") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let origins = flags(args, "--origin")?;
+                if origins.is_empty() && flags(args, "--return")?.is_empty() {
+                    return Err(format!(
+                        "--origin or --return is required: a console's origin, such as \
+                         https://console.example.com, or an app's callback, such as \
+                         https://notes.example.com/auth/callback/accounts. {USAGE}"
+                    ));
+                }
+                let asked = crate::deployments::Registration {
+                    handle: handle.to_string(),
+                    client_origins: origins.iter().map(|s| s.to_string()).collect(),
+                    return_urls: flags(args, "--return")?
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                    sign_up: match flag(args, "--sign-up")? {
+                        None => crate::deployments::SignUp::Invite,
+                        Some(w) => {
+                            crate::deployments::SignUp::parse(w).map_err(|e| e.to_string())?
+                        }
+                    },
+                };
+                let made = svc
+                    .register_deployment(actor, &asked)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut out = format!(
+                    "Registered `{}`. Its tokens say aud `{}`.\nClient origins: {}\nReturn URLs: \
+                     {}\nSign-up: {}\nAs an OIDC client: ORDO_AUTH_<NAME>_ISSUER={}, \
+                     ORDO_AUTH_<NAME>_CLIENT_ID={}, ORDO_AUTH_<NAME>_CLIENT_AUTH=none.\n",
+                    made.handle,
+                    ordo_identity::deployment_token::audience(&made.handle),
+                    shown(&made.client_origins),
+                    made.return_urls.join(" "),
+                    made.sign_up.as_str(),
+                    svc.oidc_issuer(),
+                    made.handle,
+                );
+                if !made.client_origins.is_empty() {
+                    out.push_str(&format!(
+                        "Set on its door and console: ORDO_IDENTITY_URL={o}, \
+                         ORDO_IDENTITY_ORIGIN={o}, ORDO_IDENTITY_DEPLOYMENT={}.\nNext: `member \
+                         add {} <person>`, or `invite --deployment {}`.\n",
+                        made.handle,
+                        made.handle,
+                        made.handle,
+                        o = svc.config().origin,
+                    ));
+                }
+                Ok(out)
+            }
+            Some("set") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let origins = flags(args, "--origin")?;
+                let none = args.iter().any(|a| a == "--no-origins");
+                if none && !origins.is_empty() {
+                    return Err(format!("--no-origins and --origin together. {USAGE}"));
+                }
+                let returns = flags(args, "--return")?;
+                let asked = crate::deployments::Addresses {
+                    client_origins: if none {
+                        Some(Vec::new())
+                    } else if origins.is_empty() {
+                        None
+                    } else {
+                        Some(origins.iter().map(|s| s.to_string()).collect())
+                    },
+                    return_urls: if returns.is_empty() {
+                        None
+                    } else {
+                        Some(returns.iter().map(|s| s.to_string()).collect())
+                    },
+                };
+                if asked.client_origins.is_none() && asked.return_urls.is_none() {
+                    return Err(format!("give --origin, --no-origins or --return. {USAGE}"));
+                }
+                let made = svc
+                    .set_addresses(actor, handle, &asked)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "`{}` now has client origins: {}\nReturn URLs: {}\nA running service \
+                     reads it at once.\n",
+                    made.handle,
+                    shown(&made.client_origins),
+                    made.return_urls.join(" "),
+                ))
+            }
+            Some("list") => {
+                let list = crate::deployments::list(svc.store().pool(), svc.handle())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut out = format!("{} (this service's own)\n", svc.handle());
+                for d in list {
+                    out.push_str(&format!(
+                        "{}  clients: {}  returns: {}  sign-up: {}\n",
+                        d.handle,
+                        shown(&d.client_origins),
+                        d.return_urls.join(" "),
+                        d.sign_up.as_str()
+                    ));
+                    let trusted = d.trusted_app_origins();
+                    if !trusted.is_empty() {
+                        out.push_str(&format!(
+                            "  warning: {} is a client origin and holds an app's callback. A \
+                             client origin may spend the session cookie. Unless it is a \
+                             console, drop it: `deployment set {} --no-origins` (or --origin \
+                             with the console's origins only).\n",
+                            shown(&trusted),
+                            d.handle
+                        ));
+                    }
+                }
+                Ok(out)
+            }
+            Some("sign-up") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let mode = crate::deployments::SignUp::parse(word(args, 3, "`invite` or `open`")?)
+                    .map_err(|e| e.to_string())?;
+                svc.set_sign_up(actor, handle, mode)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "`{handle}` now takes people {}. A running service reads it at once.\n",
+                    match mode {
+                        crate::deployments::SignUp::Open => {
+                            "by open sign-up, as app members, and by invite"
+                        }
+                        crate::deployments::SignUp::Invite => "by invite only",
+                    }
+                ))
+            }
+            Some("end") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                svc.end_deployment(actor, handle)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Ended `{handle}` and its memberships. A running service gives no new \
+                     token for it within a minute. Tokens already issued work until they \
+                     expire, within {} seconds.\n",
+                    svc.config().token_secs
+                ))
+            }
+            _ => Err(USAGE.to_string()),
+        },
+        Some("member") => match args.get(1).map(String::as_str) {
+            Some("add") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let person = word(args, 3, "the person's id (p_...)")?;
+                svc.add_member(actor, handle, person)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("{person} is a member of `{handle}`.\n"))
+            }
+            Some("end") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let person = word(args, 3, "the person's id (p_...)")?;
+                svc.end_member(actor, handle, person)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(format!("{person} is no longer a member of `{handle}`.\n"))
+            }
+            Some("list") => {
+                let handle = word(args, 2, "the deployment's handle")?;
+                let list = crate::deployments::members(svc.store().pool(), svc.handle(), handle)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(list
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}  {}{}\n",
+                            p.id,
+                            p.display_name,
+                            if p.ended_at.is_some() {
+                                "  (ended)"
+                            } else {
+                                ""
+                            }
+                        )
+                    })
+                    .collect())
+            }
+            _ => Err(USAGE.to_string()),
+        },
+        Some("people") => {
+            let list = crate::people::list(svc.store().pool(), svc.handle())
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(list
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{}  {}{}\n",
+                        p.id,
+                        p.display_name,
+                        if p.ended_at.is_some() {
+                            "  (ended)"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect())
         }
         Some("break-glass-token") => {
             let minutes = match flag(args, "--minutes")? {

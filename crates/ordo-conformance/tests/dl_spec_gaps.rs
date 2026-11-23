@@ -39,8 +39,9 @@ fn refusal(extra: &str) -> String {
 
 #[test]
 fn a_reproducible_op_may_not_use_since() {
-    let e =
-        refusal("op recentOrders reproducible =\n  orders(placed since 7d)[id, total]\n  take 5\n");
+    let e = refusal(
+        "op recentOrdersSince reproducible =\n  orders(placed since 7d)[id, total]\n  take 5\n",
+    );
     assert!(e.contains("reproducible_clock"), "{e}");
     assert!(e.contains("since"), "{e}");
 }
@@ -98,7 +99,7 @@ fn a_reproducible_op_with_a_date_parameter_registers() {
 /// blessed nondeterminism everywhere else.
 #[test]
 fn since_without_reproducible_still_registers() {
-    compiles("op recentOrders =\n  orders(placed since 7d)[id, total]\n  take 5\n");
+    compiles("op recentOrdersSince =\n  orders(placed since 7d)[id, total]\n  take 5\n");
 }
 
 // ── allocate outside each ────────────────────────────────────────────────

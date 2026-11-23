@@ -287,6 +287,36 @@ async fn a_write_needs_a_fresh_touch_and_touch_gives_a_token_that_carries_it() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
+/// The service's own page takes the touch for a console at another host
+/// (plan 5.4 step 6): `/touch/finish` carries no `aud`, and the next
+/// `POST /token` for the deployment holds the new touch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_touch_at_the_service_page_shows_in_the_next_token_for_a_deployment() {
+    let h = boot_with("touch-redirect", &[]).await;
+    let auth = authenticator(7, b"dana");
+    join(&h, &invite_link(&h).await, "Dana", &auth).await;
+    h.clock.advance(60);
+    let (s, v, cookie) = sign_in(&h, &auth).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    h.clock.advance(400);
+    let before = token(&h, &cookie).await;
+    let claims = deployment_token::verify(&before, &h.jwks().await, &h.expect()).unwrap();
+    assert_ne!(claims.touched_at, Some(h.now()));
+
+    let (_, opts, _) = h.post("/touch/begin", Some(&cookie), json!({})).await;
+    let (s, v, _) = h
+        .post(
+            "/touch/finish",
+            Some(&cookie),
+            assertion(&auth, &challenge(&opts)),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let after = token(&h, &cookie).await;
+    let claims = deployment_token::verify(&after, &h.jwks().await, &h.expect()).unwrap();
+    assert_eq!(claims.touched_at, Some(h.now()));
+}
+
 /// The console page runs the touch in its own page (plan 5.4 step 6): the
 /// browser names the console's origin in the assertion, and the service
 /// takes it because the console is a listed client under the RP ID. An

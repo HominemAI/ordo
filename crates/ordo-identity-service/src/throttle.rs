@@ -10,6 +10,10 @@
 //! secrets are long random codes, so no address can guess one, and one
 //! stranger must not be able to shut a kind of sign-in for everyone.
 //!
+//! Open sign-up makes accounts with no secret at all, so it is counted the
+//! same way under its own kind, with its own, lower, per-address limit
+//! (`ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS`) and the same shared ceiling.
+//!
 //! The count lives in the service's database (`guess_counts`), as the
 //! door's lives in `$guesscount`, so two instances behind one address share
 //! one count. Each try is counted in one guarded statement, before the
@@ -166,6 +170,11 @@ pub enum Try {
     RecoveryCode,
     CliCode,
     MachineSignIn,
+    /// Open sign-up: begin and finish, each counted.
+    SignUp,
+    /// An OIDC authorization that issues a code, counted per browser
+    /// session ([`attempt_per_session`]): each makes a code row.
+    Authorize,
 }
 
 impl Try {
@@ -175,6 +184,17 @@ impl Try {
             Try::RecoveryCode => "recovery-code",
             Try::CliCode => "cli-code",
             Try::MachineSignIn => "machine-sign-in",
+            Try::SignUp => "sign-up",
+            Try::Authorize => "authorize",
+        }
+    }
+
+    /// The per-address limit for this kind.
+    fn per_address(self, limits: &Limits) -> u64 {
+        match self {
+            Try::SignUp => limits.sign_ups_per_address,
+            Try::Authorize => limits.authorize_per_session,
+            _ => limits.per_address,
         }
     }
 }
@@ -193,8 +213,38 @@ pub async fn attempt(
     limits: &Limits,
     now: u64,
 ) -> Result<(), IdentityError> {
-    count(pool, handle, kind, &source.0, limits.per_address, now).await?;
+    count(pool, handle, kind, &source.0, kind.per_address(limits), now).await?;
     count(pool, handle, kind, SHARED, limits.shared, now).await
+}
+
+/// Count one try of `kind` for the browser session `session` (its id),
+/// with no shared ceiling: one person's loop limits only their own
+/// session. The row's `source` is `session:<id>`.
+pub async fn attempt_per_session(
+    pool: &Pool,
+    handle: &str,
+    kind: Try,
+    session: &str,
+    limits: &Limits,
+    now: u64,
+) -> Result<(), IdentityError> {
+    let source = format!("session:{session}");
+    count(pool, handle, kind, &source, kind.per_address(limits), now).await
+}
+
+/// Delete every count whose window has closed. A closed window counts as
+/// no row at all, so this changes no answer; it keeps the table to the
+/// sources seen in the last minute. Run on the minute tick.
+pub async fn sweep(pool: &Pool, handle: &str, now: u64) -> Result<u64, IdentityError> {
+    Ok(pool
+        .rows(&format!(
+            "DELETE FROM guess_counts WHERE deployment = {} AND window_start + {} <= {now} \
+             RETURNING 1",
+            sql_lit(handle),
+            ATTEMPT_WINDOW_SECS
+        ))
+        .await?
+        .len() as u64)
 }
 
 async fn count(

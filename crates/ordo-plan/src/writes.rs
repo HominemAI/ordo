@@ -626,6 +626,34 @@ fn check_platform_entities(schema: &Schema, stmts: &[WriteStmt]) -> Result<(), S
     Ok(())
 }
 
+/// A domain op may not write an external entity (ruled 2026-11-15,
+/// `external-entities`).
+///
+/// The table belongs to another system, which keeps its own rules, and a
+/// write from here would skip them and Ordo's chain alike. Writes reach that
+/// system through its own API. Refused at registration, so the op never
+/// deploys, before any other write check can mistake the table for Ordo's.
+fn check_external_entities(schema: &Schema, stmts: &[WriteStmt]) -> Result<(), SemaError> {
+    for stmt in stmts {
+        let (name, span, verb) = match stmt {
+            WriteStmt::Set { entity, span, .. } => (&entity.name, *span, "set"),
+            WriteStmt::Del { entity, span, .. } => (&entity.name, *span, "del"),
+        };
+        if schema.is_external(name) {
+            return Err(SemaError {
+                code: "external_read_only",
+                message: format!(
+                    "`{verb} {name}` writes an external entity, and an external is read-only: \
+                     its table belongs to another system. Write through that system's own API, \
+                     for example from a backend function"
+                ),
+                span,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// `subtree` cascades down a tree, so it is spellable on a tree entity only.
 /// On any other it compiled, deployed, and failed with `internal` when a
 /// caller reached it (checklist 25b). The executor still refuses it, as a
@@ -719,6 +747,7 @@ pub fn check_writes(schema: &Schema, registry: &Registry) -> Result<(), SemaErro
         let OpBody::Write(stmts) = &op.body else {
             continue;
         };
+        check_external_entities(schema, stmts)?;
         check_bindings(schema, stmts)?;
         check_platform_entities(schema, stmts)?;
         check_subtree_targets(schema, stmts)?;

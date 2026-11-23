@@ -373,6 +373,7 @@ pub fn specs() -> Vec<OpSpec> {
         // invalidate it, as for `callersOf`; it claims no live capability
         // it cannot honour.
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(NotSyncable::NoAnchor),
         requires_idempotency_key: false,
         public: Default::default(),

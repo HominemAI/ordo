@@ -60,7 +60,9 @@ jobs:
   changes:
     name: changes (ci)
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    # Cluster down 2026-11-17: GitHub-hosted runners are the default. Set the
+    # repo variable ORDO_RUNNERS=k8s to return to the cluster.
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       crates: ${{ steps.affected.outputs.crates }}
@@ -113,8 +115,8 @@ jobs:
   unit:
     name: test (unit)
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 20
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 20 || 40 }}
     needs: changes
     env:
       REACHED: ${{ needs.changes.outputs.unit }}
@@ -122,6 +124,12 @@ jobs:
       ORDO_CI_FILTER: ${{ needs.changes.outputs.test_filter }}
       NEXTEST_PROFILE: ci
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - name: The jobs this one needs
         env:
           CHANGES: ${{ needs.changes.result }}
@@ -175,10 +183,10 @@ jobs:
     # a passed required check. So this job always runs, and its first step
     # fails when `changes` did not deliver.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     # The default is six hours; the failure shape here is a wait that
     # never ends.
-    timeout-minutes: 30
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 30 || 60 }}
     # The suite runs as 5 shards at once (`scripts/ci-test-shard.sh`). Each
     # builds what it runs from the warm `rust-gates` cache, about a minute.
     # Shipping one shared build cost 4.5 min per shard to download (1.74 GB),
@@ -246,6 +254,12 @@ jobs:
       NEXTEST_PROFILE: ci
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       # Before anything else, and in every shard, so a failed `changes`
       # or `test (unit)` fails this check instead of passing it as "not
       # reached".
@@ -273,10 +287,11 @@ jobs:
       # WAL ("No space left on device"), failing every test after it. These
       # are preinstalled SDKs this job never uses.
       - name: Free disk space
-        if: env.REACHED == 'true'
+        if: ${{ env.REACHED == 'true' && vars.ORDO_RUNNERS != 'k8s' }}
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
           df -h /
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -304,6 +319,8 @@ jobs:
 
       - name: Lease a CI Postgres server
         if: env.REACHED == 'true'
+        env:
+          ORDO_CI_PG_LOCAL: ${{ vars.ORDO_RUNNERS != 'k8s' && '1' || '' }}
         run: bash scripts/ci-pg-lease.sh
 
       # `crates/ordo-host/tests/dev_loop.rs` starts its own Postgres with
@@ -537,8 +554,8 @@ jobs:
   perf:
     name: test (perf)
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 30
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 30 || 60 }}
     needs: [changes, unit]
     env:
       REACHED: ${{ needs.changes.outputs.perf }}
@@ -551,6 +568,12 @@ jobs:
       ORDO_PG_PASSWORD: ordo
       NEXTEST_PROFILE: ci
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - name: The jobs this one needs
         env:
           CHANGES: ${{ needs.changes.result }}
@@ -582,6 +605,8 @@ jobs:
         run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       - name: Lease a CI Postgres server
         if: env.REACHED == 'true'
+        env:
+          ORDO_CI_PG_LOCAL: ${{ vars.ORDO_RUNNERS != 'k8s' && '1' || '' }}
         run: bash scripts/ci-pg-lease.sh
       - name: Install cargo-nextest
         if: env.REACHED == 'true'
@@ -623,8 +648,8 @@ jobs:
   # failed `changes` or `test (unit)` from passing as a skipped check.
   upgrade:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 30
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 30 || 60 }}
     strategy:
       fail-fast: false
       matrix:
@@ -649,6 +674,12 @@ jobs:
       # The leased CI server is the database; the script starts none.
       ORDO_UPGRADE_OWN_PG: '0'
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - name: The jobs this one needs
         env:
           CHANGES: ${{ needs.changes.result }}
@@ -683,6 +714,8 @@ jobs:
         run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
       - name: Lease a CI Postgres server
         if: env.REACHED == 'true'
+        env:
+          ORDO_CI_PG_LOCAL: ${{ vars.ORDO_RUNNERS != 'k8s' && '1' || '' }}
         run: bash scripts/ci-pg-lease.sh
       - name: Upgrade continuity
         if: env.REACHED == 'true'
@@ -711,7 +744,7 @@ jobs:
   # never touch, and a Rust failure should not hide them.
   clients:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       # One package's failure should not mask another's.
@@ -776,12 +809,12 @@ jobs:
   # app against a real one.
   examples:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        app: [notes, notes-v2, teamspace, shopfront]
+        app: [notes, notes-v2, note-viewer, teamspace, shopfront]
     name: examples (${{ matrix.app }})
     needs: changes
     env:
@@ -819,7 +852,7 @@ jobs:
   # dependencies, which run in CI and on developer machines.
   audit:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     name: audit
     needs: changes
@@ -852,6 +885,12 @@ jobs:
         if: env.REACHED == 'true'
         run: node scripts/ci-affected.test.mjs
 
+      # The dev audit excepts advisories by id (owner rulings); its judgement
+      # is tested here before it is trusted below.
+      - name: The dev audit's tests
+        if: env.REACHED == 'true'
+        run: node scripts/ci-npm-audit.test.mjs
+
       - name: cargo audit
         if: env.REACHED == 'true'
         run: cargo audit
@@ -868,6 +907,8 @@ jobs:
           done
           exit $fail
 
+      # High and critical fail, except the advisories listed by id in
+      # scripts/ci-npm-audit.mjs. The runtime audit above takes no exceptions.
       - name: npm audit, dev dependencies
         if: env.REACHED == 'true'
         run: |
@@ -876,6 +917,6 @@ jobs:
           for lock in $(git ls-files '*package-lock.json'); do
             dir=$(dirname "$lock")
             echo "== $dir (all)"
-            (cd "$dir" && npm audit --audit-level=high) || fail=1
+            (cd "$dir" && node "$GITHUB_WORKSPACE/scripts/ci-npm-audit.mjs") || fail=1
           done
           exit $fail

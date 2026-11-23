@@ -112,7 +112,9 @@ pub struct OidcConnection {
     /// `iss`. One concrete issuer: a template is refused.
     pub issuer: String,
     pub client_id: String,
-    pub client_secret: ClientSecret,
+    /// `None` is a public client (`ORDO_AUTH_<NAME>_CLIENT_AUTH=none`):
+    /// PKCE alone proves the exchange, as Ordo's identity service asks.
+    pub client_secret: Option<ClientSecret>,
     /// Space-separated; holds `openid`.
     pub scope: String,
     /// `Some` pins the endpoints and skips discovery.
@@ -220,7 +222,11 @@ impl OidcConnection {
         if self.client_id.trim().is_empty() {
             return Err(OidcConnectionError::Missing("the client id"));
         }
-        if self.client_secret.is_empty() {
+        if self
+            .client_secret
+            .as_ref()
+            .is_some_and(ClientSecret::is_empty)
+        {
             return Err(OidcConnectionError::Missing("the client secret"));
         }
         if self.issuer.trim().is_empty() {
@@ -935,7 +941,7 @@ impl OidcProvider {
                     ("client_id", self.conn.client_id.as_str()),
                     ("code_verifier", verifier),
                 ],
-                &self.conn.client_secret,
+                self.conn.client_secret.as_ref(),
             )
             .map_err(|f| f.into_auth_error(Some("token-exchange-rejected")))?;
         let v = jose::strict_json(got.bytes())

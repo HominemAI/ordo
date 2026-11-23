@@ -249,6 +249,7 @@ async fn render_plan(pool: &Pool, r: &mut String, plan: &Plan, path: &str, db: &
         plan.prior.is_some(),
     );
     tenancy(r, pool, &plan.program.schema, &plan.live).await;
+    externals(r, plan);
 
     if plan.assessed.is_empty() {
         // **Not an early return.** A deploy that changes only op bodies has
@@ -407,6 +408,58 @@ async fn tenancy(r: &mut String, pool: &Pool, schema: &Schema, live: &ordo_schem
          it runs on, so the tenants whose database that is. Other tenants are not\n  \
          frozen, and each one's backfill is timed on its own rows.\n\n"
     ));
+}
+
+/// The external entities and what sits beside them (ruled 2026-11-15,
+/// `external-entities`): a note for each external with no `access read`
+/// (which `shared` chose, and every member of every space reads whole), the
+/// columns each translation does not read, and the "present, not Ordo's"
+/// list of tables and schemas the database holds that are not Ordo's. Nothing
+/// is changed. A table that is gone, changed or unreadable is a refusal in
+/// the verdict, not here.
+fn externals(r: &mut String, plan: &Plan) {
+    let mut lines = external_notes(&plan.program.schema);
+    lines.extend(plan.external.display_notes());
+    if lines.is_empty() {
+        return;
+    }
+    r.push_str("EXTERNAL\n");
+    for n in lines {
+        r.push_str(&format!("  {n}\n"));
+    }
+    r.push('\n');
+}
+
+/// One line per external entity that has no `access read`, and one more for
+/// each public external (ruled 2026-11-15, `external-entities` ask 5): the
+/// public path has no guard walk, so a public op serves every row.
+pub fn external_notes(schema: &Schema) -> Vec<String> {
+    let mut notes = Vec::new();
+    for e in &schema.externals {
+        if e.guards.is_none() {
+            notes.push(format!(
+                "note: `{}` has no `access read`: every member of every space reads every row",
+                e.name
+            ));
+        }
+        if e.has_public() {
+            let fields: Vec<String> = e
+                .declared()
+                .filter(|f| f.public)
+                .map(|f| format!("`{}`", f.name))
+                .collect();
+            notes.push(format!(
+                "note: `{}` is public: an op declared public may serve its public fields \
+                 ({}) to anonymous callers on the public path. Ordo never writes the \
+                 table, so a cached answer lives until ORDO_PUBLIC_CDN_S_MAXAGE ends \
+                 (default {} seconds)",
+                e.name,
+                fields.join(", "),
+                ordo_api::PublicSettings::default().s_maxage
+            ));
+        }
+    }
+    notes
 }
 
 fn rate_note(rate: Option<f64>) -> String {

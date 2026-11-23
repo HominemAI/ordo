@@ -109,6 +109,8 @@ fn lead_word(text: &str) -> &str {
 /// starts with one is a definition file; anything else is a fragment.
 const DECL_HEADS: &[&str] = &[
     "domain",
+    "peer",
+    "reader",
     "entity",
     "op",
     "routine",

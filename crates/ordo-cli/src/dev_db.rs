@@ -62,10 +62,6 @@ use ordo_host::schema_apply as sa;
 use ordo_schema::diff::Change;
 use ordo_schema::{LiveShape, Schema};
 
-/// The live schema this loop diffs against: dev serves one hardcoded
-/// namespace, same as every other host suite.
-const LIVE: &str = "public";
-
 /// `seed.sql`, beside the sources, by convention (§4.3).
 pub const SEED_FILE: &str = "seed.sql";
 
@@ -192,6 +188,7 @@ impl OwnedCluster {
             password: None,
             size: 4,
             acquire_timeout: Duration::from_secs(5),
+            schema: ordo_exec::schema_from_env(),
         }
     }
 }
@@ -392,7 +389,7 @@ pub async fn classify(
     prior: Option<&Schema>,
     declared: &Schema,
 ) -> Result<Delta, String> {
-    let live = migrate::live_shape(pool, LIVE)
+    let live = migrate::live_shape(pool, pool.schema())
         .await
         .map_err(|e| e.to_string())?;
     let changes = ordo_schema::diff(&live, prior, declared);
@@ -503,7 +500,7 @@ pub async fn reset(
     prior: Option<&Schema>,
     ddl: &str,
 ) -> Result<ResetReport, String> {
-    let live = migrate::live_shape(pool, LIVE)
+    let live = migrate::live_shape(pool, pool.schema())
         .await
         .map_err(|e| format!("reading the live schema: {e}"))?;
     let tables = classify_tables(&live, declared, prior);
@@ -712,7 +709,9 @@ mod tests {
             .expect("the foreign table is still there");
         assert_eq!(theirs, vec![vec![Some("theirs".to_string())]]);
 
-        let live = migrate::live_shape(&pool, LIVE).await.expect("live shape");
+        let live = migrate::live_shape(&pool, pool.schema())
+            .await
+            .expect("live shape");
         assert!(live.table("gadgets").is_none(), "the stale Ordo table went");
         assert!(
             live.table("widgets").is_some(),

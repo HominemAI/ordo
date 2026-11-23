@@ -1044,3 +1044,61 @@ routine thirstCheck in plantcare {
 # declares no guards. The moment a second person shares the data, §8's
 # authorization constructs stop being optional (see `tutorial.md` Part 2).
 ```
+
+---
+
+## 10. Peers: another Ordo deployment's tables
+
+```
+peer journal                                 # a nickname for another Ordo deployment
+
+external entries from journal.notes shared { # the peer's own `notes` table
+  id: text <- "id"
+  title: text <- "title"
+  owner: text <- "owner"
+  access read owner == $caller               # the peer's member for this person
+}
+
+external customers from crm.customers shared { # no peer line: a plain schema
+  id <- "customer_id"
+  name: text <- "full_name"
+}
+
+op myEntries =
+  entries[title]
+  sort title
+  take 50
+# `peer journal` names no schema. The deployment owner sets it with
+# ORDO_PEER_JOURNAL_SCHEMA, the schema the other deployment's ORDO_PG_SCHEMA
+# names. Unset, or a schema with no Ordo deployment in it, refuses the boot.
+# On `entries`, `$caller` is the person's member in the peer, found through
+# the sign-in subject both deployments hold. A person with no member there
+# reads no rows. ORDO_EXTERNAL_CRM_SCHEMA=crm_dev reads `crm_dev.customers`
+# instead of `crm.customers`; unset, the schema is as written.
+```
+
+---
+
+## 11. Readers: who may read this deployment's tables
+
+```
+reader note_viewer reads notes, notesAccess  # in the file of the app being read
+
+entity notes {
+  title: text
+  owner -> members?
+  access read owner == $caller
+  access write owner == $caller
+}
+
+entity notesAccess {
+  note -> notes owned
+  member -> members
+}
+# `note_viewer` is a local nickname. The deployment owner sets its database
+# role with ORDO_READER_NOTE_VIEWER_ROLE. At apply and at start this
+# deployment grants that role SELECT on `notes` and `notesAccess`, and on
+# the sign-in columns a `$caller` guard reads. Nothing else. Take a table
+# off the line and the next apply or start revokes it. A reader line with
+# no role setting refuses the start.
+```

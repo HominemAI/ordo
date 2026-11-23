@@ -74,7 +74,11 @@ them. Ordo never holds Supabase's keys: the app developer exports the files.
    same core.
 6. **What is missing:** 11 build steps, about 10 to 15 agent sessions (§7).
    Denizens and pambl cannot move until backend functions exist, because
-   their billing runs in Supabase edge functions.
+   their billing runs in Supabase edge functions. An import is one way to
+   reach another system's data. The other is to leave the tables where they
+   are and read them as external entities (`plan-external-entities.md`,
+   ruled 2026-11-15). Pambl is a non-Ordo system on native Postgres, not an
+   Ordo deployment.
 
 ---
 
@@ -573,16 +577,20 @@ would need if it were on Supabase. No Jazz reader is planned.
 A deployment is one program and one set of people (`glossary.md`). The
 hominem project serves 3 apps that share people and 4 tables.
 
-**Ruled 2026-10-12 (Q5):** the 3 hominem apps becoming 1 deployment is likely
-in the end, but not now. Nothing here builds toward it yet. The shape if it
+**Ruled 2026-10-12 (Q5), overtaken 2026-11-15:** the 3 hominem apps becoming
+1 deployment was likely in the end, but not now. On 2026-11-15 the owner
+closed several apps in one deployment: one deployment per public image, and
+separate deployments share sign-in and data. Pambl is a non-Ordo system on
+native Postgres and HAL is the only Ordo deployment today. What follows is
+the superseded 2026-10-12 shape, kept for the record. Nothing here builds toward it yet. The shape if it
 happens: one Ordo deployment for the hominem project, one program holding all 3 apps' entities. Each app is a site on its own
 subdomain, signed in through the core site with the subdomain hand-off
 (`howto-sign-in.md` §11). A person keeps one account across pambl and
 adnullius, as today.
 
-The other way, one deployment per app, would need sign-in shared across
-deployments. Ordo has no such thing today: a deployment cannot vouch for a
-person to another one. Denizens is a separate Supabase project with its own
+The other way, one deployment per app, needs sign-in shared across
+deployments. That is the identity service at auth.hominem.ai
+(`plan-identity-service.md` §11, ruled 2026-11-15), not built for the import. Denizens is a separate Supabase project with its own
 people, so it becomes its own deployment either way.
 
 ---
@@ -646,7 +654,7 @@ These are facts about the apps, not decisions.
 4. **Should importing people (mint, link sign-ins, admit to spaces) be one recorded act by the deployment owner, separate from the row bundles?**
    **Yes.** A bundle still cannot grant access, as ruled 2026-09-26; admission becomes a visible act with its own record and a dry run.
 5. **Should the 3 hominem apps become one Ordo deployment, signed in through one core site with the subdomain hand-off?**
-   **Ruled 2026-10-12: likely in the end, but not now.** They share one Supabase project and its people; one deployment per app would need sign-in across deployments, which Ordo lacks.
+   **Ruled 2026-10-12: likely in the end, but not now.** They share one Supabase project and its people; one deployment per app would need sign-in across deployments, which Ordo lacks. Overtaken 2026-11-15: several apps in one deployment is closed; see §6.1.
 6. **On move day, a short write freeze after 2 rehearsals, instead of running both systems side by side?**
    **Yes, big-bang.** The data loads in minutes; a sync bridge is a large build for a window nobody needs.
 7. **Keep Supabase up and read-only for 30 days after the move, as the way back, then pause it?**

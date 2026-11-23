@@ -39,6 +39,8 @@ import type {
   CondNode,
   Declaration,
   EntityNode,
+  ExternalFieldNode,
+  ExternalNode,
   ExprNode,
   FieldNode,
   GuardAtomNode,
@@ -273,6 +275,41 @@ function printEntity(e: EntityNode): string {
   if (e.public) lines.push(e.public === 'cascade' ? '  public*' : '  public');
   if (e.accessRead) lines.push(`  access read ${printGuardClause(e.accessRead)}`);
   if (e.accessWrite) lines.push(`  access write ${printGuardClause(e.accessWrite)}`);
+  lines.push('}');
+  return lines.join('\n');
+}
+
+/** A foreign schema or table: bare when the lexer takes it, quoted otherwise. */
+function foreignName(n: string): string {
+  return /^[a-z][A-Za-z0-9]*$/.test(n) ? n : strLit(n);
+}
+
+function printExternalField(f: ExternalFieldNode): string {
+  let s: string;
+  if (f.kind.k === 'ref') {
+    s = `${f.name} -> ${f.kind.target}${f.optional ? '?' : ''}`;
+  } else {
+    s = `${f.name}: ${printType(f.kind.ty)}${f.optional ? '?' : ''}`;
+  }
+  if (f.public) s += ' public';
+  return `${s} <- ${strLit(f.column)}`;
+}
+
+function printExternal(e: ExternalNode): string {
+  const key = e.key ? ` (key: ${e.key})` : '';
+  const lines: string[] = [
+    `external ${e.name}${key} from ${foreignName(e.schema)}.${foreignName(e.table)} shared {`,
+  ];
+  // The key line comes first whatever the record order. `int` is the default
+  // and is not written.
+  lines.push(
+    e.keyType === 'int'
+      ? `  id <- ${strLit(e.keyColumn)}`
+      : `  id: ${e.keyType} <- ${strLit(e.keyColumn)}`,
+  );
+  for (const f of e.fields) lines.push(`  ${printExternalField(f)}`);
+  if (e.public) lines.push('  public');
+  if (e.accessRead) lines.push(`  access read ${printGuardClause(e.accessRead)}`);
   lines.push('}');
   return lines.join('\n');
 }
@@ -580,8 +617,14 @@ export function printDeclaration(d: Declaration): string {
   switch (d.kind) {
     case 'domain':
       return d.version ? `domain ${d.name} @ ${d.version}` : `domain ${d.name}`;
+    case 'peer':
+      return `peer ${d.name}`;
+    case 'reader':
+      return `reader ${d.name} reads ${d.tables.join(', ')}`;
     case 'entity':
       return printEntity(d);
+    case 'external':
+      return printExternal(d);
     case 'op':
       return printOp(d);
     case 'routine':

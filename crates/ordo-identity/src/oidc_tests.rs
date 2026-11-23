@@ -107,7 +107,7 @@ fn connection(name: &str) -> OidcConnection {
         name: name.into(),
         issuer: ISSUER.into(),
         client_id: CLIENT.into(),
-        client_secret: ClientSecret::new("s3cret".into()),
+        client_secret: Some(ClientSecret::new("s3cret".into())),
         scope: "openid email profile".into(),
         endpoints: None,
         use_email: true,
@@ -802,4 +802,24 @@ fn o10_the_stale_grace_is_the_connections_setting() {
     let mut bad = connection("corp");
     bad.stale_grace_secs = MAX_STALE_GRACE_SECS + 1;
     assert_eq!(bad.check(), Err(OidcConnectionError::StaleGraceOutOfRange));
+}
+
+/// A public client (`ORDO_AUTH_<NAME>_CLIENT_AUTH=none`, how Ordo's identity
+/// service takes its apps) sends no secret, only the PKCE verifier; an
+/// empty secret is still refused at boot.
+#[test]
+fn a_public_client_exchanges_with_pkce_and_no_secret() {
+    let mut conn = connection("corp");
+    conn.client_secret = None;
+    let h = harness_on(conn);
+    let s = sign_in_with(&h, |_| {}).expect("signed in");
+    assert_eq!(s.authenticator.0, "oidc:corp:248289761001");
+    let forms = h.issuer.token_forms.lock().unwrap();
+    assert!(forms[0].contains("code_verifier=") && !forms[0].contains("client_secret"));
+    let mut empty = connection("corp");
+    empty.client_secret = Some(ClientSecret::new(String::new()));
+    assert_eq!(
+        empty.check(),
+        Err(OidcConnectionError::Missing("the client secret"))
+    );
 }

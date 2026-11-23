@@ -57,6 +57,7 @@ pub mod metrics;
 pub mod migrate;
 pub mod nfc;
 pub mod nodes;
+pub mod peer;
 mod pool_error;
 pub mod prune;
 pub mod registry;
@@ -112,6 +113,100 @@ pub struct PoolConfig {
     pub size: usize,
     /// How long a checkout may queue before failing typed.
     pub acquire_timeout: Duration,
+    /// The Postgres schema the deployment's tables live in
+    /// ([`SCHEMA_ENV`], [`DEFAULT_SCHEMA`] when unset).
+    ///
+    /// **The one place the schema is decided.** Every connection the pool
+    /// dials carries it as its `search_path` (unless it is `public`, which
+    /// dials exactly as before the setting existed), so unqualified SQL
+    /// reaches the deployment's own tables and nothing else. A reader of the
+    /// catalog asks [`Pool::schema`]; no call site reads the setting.
+    /// Checked by [`check_schema_name`] when the pool opens.
+    pub schema: String,
+}
+
+/// The schema a deployment's tables live in when the deployment owner names
+/// none. Every deployment made before the setting existed is here.
+pub const DEFAULT_SCHEMA: &str = "public";
+
+/// The deployment setting that names the schema (owner ruling 2026-11-16,
+/// `example-apps-notes-v2-plus-note_viewer` ask 1): two deployments can
+/// share one database under two schemas.
+pub const SCHEMA_ENV: &str = "ORDO_PG_SCHEMA";
+
+/// The longest schema name accepted. The export shadow is named
+/// `ordo_shadow_export_of_<schema>` ([`shape::export_shadow_for`]) and
+/// Postgres truncates a name past 63 bytes, so a longer schema could share a
+/// shadow with another.
+pub const SCHEMA_MAX_LEN: usize = 41;
+
+/// [`SCHEMA_ENV`] as this process was given it, [`DEFAULT_SCHEMA`] when
+/// unset or blank. The one reader of the variable; it does not check the
+/// name, which [`check_schema_name`] does where a refusal can be answered.
+pub fn schema_from_env() -> String {
+    schema_setting(SCHEMA_ENV).unwrap_or_else(|| DEFAULT_SCHEMA.to_string())
+}
+
+/// A setting that names a Postgres schema, as this process was given it:
+/// trimmed, and `None` when unset or blank. The one reader of every schema
+/// setting: the deployment's own ([`SCHEMA_ENV`]) and each peer's
+/// ([`peer::schema_env`]). A later kind of schema setting reads here too.
+pub fn schema_setting(var: &str) -> Option<String> {
+    match std::env::var(var) {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// Whether `name` may name a deployment's schema, and when not, a refusal
+/// that names the setting and what to set instead.
+///
+/// The alphabet is [`valid_database_name`]'s: lowercase letters, digits and
+/// underscores, starting with a letter or an underscore. Narrow because the
+/// name is interpolated into DDL and into the connection's options, and a
+/// narrow alphabet is what makes quoting it trivially safe. Refused besides:
+/// names Postgres keeps (`pg_*`, `information_schema`) and names Ordo keeps
+/// for its shadow schemas (`ordo_shadow*`).
+pub fn check_schema_name(name: &str) -> Result<(), String> {
+    check_schema_setting(
+        SCHEMA_ENV,
+        name,
+        &format!(
+            "Set {SCHEMA_ENV} to another name, such as `notes`, or unset it to use \
+             `{DEFAULT_SCHEMA}`."
+        ),
+    )
+}
+
+/// [`check_schema_name`] for any schema setting: `var` is the setting the
+/// refusal names, and `fix` the sentence that says what to set.
+pub fn check_schema_setting(var: &str, name: &str, fix: &str) -> Result<(), String> {
+    if name.len() > SCHEMA_MAX_LEN {
+        return Err(format!(
+            "{var} is `{name}`, which is {} bytes; a schema name is at most \
+             {SCHEMA_MAX_LEN}, so Ordo's shadow of it fits Postgres' 63. {fix}",
+            name.len()
+        ));
+    }
+    if name.is_empty() || !valid_database_name(name) {
+        return Err(format!(
+            "{var} is `{name}`; a schema name is lowercase letters, digits and \
+             underscores, starting with a letter or an underscore. {fix}"
+        ));
+    }
+    if name.starts_with("pg_") || name == "information_schema" {
+        return Err(format!(
+            "{var} is `{name}`, a name Postgres keeps for itself. {fix}"
+        ));
+    }
+    if name.starts_with(shape::SHADOW) {
+        return Err(format!(
+            "{var} is `{name}`; names starting `{}` are Ordo's shadow schemas, \
+             which it drops and rebuilds. {fix}",
+            shape::SHADOW
+        ));
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for PoolConfig {
@@ -126,6 +221,7 @@ impl std::fmt::Debug for PoolConfig {
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("size", &self.size)
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("schema", &self.schema)
             .finish()
     }
 }
@@ -175,6 +271,7 @@ impl PoolConfig {
                 })
                 .max(2),
             acquire_timeout: Duration::from_secs(2),
+            schema: schema_from_env(),
         }
     }
 
@@ -204,6 +301,37 @@ impl PoolConfig {
         self.pg_named(statement_timeout, None)
     }
 
+    /// `name` as this deployment spells a `NOTIFY` channel or a leadership
+    /// realm. Unchanged for [`DEFAULT_SCHEMA`]; otherwise prefixed with the
+    /// schema, because channels and advisory locks are per database and two
+    /// deployments sharing one would hear each other's signals and contend
+    /// for one leader. [`crate::jobs::listen`] hands notifications on under
+    /// the plain name.
+    pub fn channel(&self, name: &str) -> String {
+        if self.schema == DEFAULT_SCHEMA {
+            name.to_string()
+        } else {
+            format!("{}/{name}", self.schema)
+        }
+    }
+
+    /// The dial option that aims the connection at [`PoolConfig::schema`].
+    ///
+    /// Empty for [`DEFAULT_SCHEMA`], so a deployment that sets nothing dials
+    /// with the server's own `search_path`, as every deployment did before
+    /// the setting existed. Otherwise the schema alone: no `public` after
+    /// it, so a table this deployment lacks is an error and never another
+    /// deployment's table of the same name. The name is quoted; it holds no
+    /// space or backslash ([`check_schema_name`]), the two characters the
+    /// options string treats specially.
+    fn search_path_option(&self) -> String {
+        if self.schema == DEFAULT_SCHEMA {
+            String::new()
+        } else {
+            format!(" -c search_path={}", ordo_schema::ddl::q(&self.schema))
+        }
+    }
+
     /// [`PoolConfig::pg_bounded`] with an `application_name`, so the
     /// connection can be told apart in `pg_stat_activity`.
     fn pg_named(
@@ -224,27 +352,29 @@ impl PoolConfig {
             .dbname(&self.db)
             // Pinned session rendering, matching the harness: date text
             // is a property of the platform, not of server defaults.
-            .options(format!(
-                // `standard_conforming_strings` is pinned, not assumed: with
-                // it off, a backslash escapes the quote that ends a literal
-                // and our doubling of `'` stops being sufficient. Correctness
-                // of escaping must not depend on a server setting.
-                //
-                // `ordo.regex_max_len` is what the `matches` guard reads
-                // ([`REGEX_MAX_LEN_ENV`]); a session without it gets the
-                // default in the guard itself.
-                "-c datestyle=ISO,YMD -c timezone=UTC -c standard_conforming_strings=on \
+            .options(
+                format!(
+                    // `standard_conforming_strings` is pinned, not assumed: with
+                    // it off, a backslash escapes the quote that ends a literal
+                    // and our doubling of `'` stops being sufficient. Correctness
+                    // of escaping must not depend on a server setting.
+                    //
+                    // `ordo.regex_max_len` is what the `matches` guard reads
+                    // ([`REGEX_MAX_LEN_ENV`]); a session without it gets the
+                    // default in the guard itself.
+                    "-c datestyle=ISO,YMD -c timezone=UTC -c standard_conforming_strings=on \
                  -c {}={}{}",
-                ordo_plan::REGEX_MAX_LEN_GUC,
-                regex_max_len(),
-                match statement_timeout {
-                    // Milliseconds is `statement_timeout`'s own unit when it
-                    // is given a bare number, so there is no unit suffix to
-                    // get wrong.
-                    Some(d) => format!(" -c statement_timeout={}", d.as_millis()),
-                    None => String::new(),
-                }
-            ))
+                    ordo_plan::REGEX_MAX_LEN_GUC,
+                    regex_max_len(),
+                    match statement_timeout {
+                        // Milliseconds is `statement_timeout`'s own unit when it
+                        // is given a bare number, so there is no unit suffix to
+                        // get wrong.
+                        Some(d) => format!(" -c statement_timeout={}", d.as_millis()),
+                        None => String::new(),
+                    }
+                ) + &self.search_path_option(),
+            )
             // A target that drops packets has to fail a dial in bounded time,
             // not after the operating system's TCP timeout. The bound is the
             // checkout's own: a dial happens at checkout for a dead
@@ -1061,6 +1191,7 @@ impl Pool {
         // there. When something is missing, the lock is held for one entry
         // and released at its commit, so no transaction waits on a second
         // table while holding the first.
+        self.ensure_schema().await?;
         for ddl in [
             REPLAY_DDL,
             crate::jobs::JOBS_DDL,
@@ -1117,6 +1248,71 @@ impl Pool {
         Ok(())
     }
 
+    /// Create the deployment's schema ([`PoolConfig::schema`]) if it is
+    /// absent. Nothing for [`DEFAULT_SCHEMA`], which every database has.
+    ///
+    /// Asked first with a read that locks nothing, so a running deployment
+    /// takes no lock here. Two first boots racing to create it can both
+    /// pass `IF NOT EXISTS` and one then fails on the catalog's unique
+    /// index; that loser finds the schema made, which is success. Ordo never
+    /// drops the schema.
+    async fn ensure_schema(&self) -> Result<(), PoolError> {
+        let schema = self.schema();
+        if schema == DEFAULT_SCHEMA {
+            return Ok(());
+        }
+        let present = self
+            .rows(&format!(
+                "SELECT 1 FROM pg_namespace WHERE nspname = {}",
+                sql_lit(schema)
+            ))
+            .await?;
+        if !present.is_empty() {
+            return Ok(());
+        }
+        match self
+            .rows(&format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                self.schema_ident()
+            ))
+            .await
+        {
+            Ok(_) => Ok(()),
+            // 42P06 is `duplicate_schema`.
+            Err(e) if e.is_unique_violation() || e.sqlstate() == Some("42P06") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The Postgres schema this pool's deployment lives in
+    /// ([`PoolConfig::schema`]). Every catalog read about the deployment's
+    /// own tables asks this; none reads the setting.
+    pub fn schema(&self) -> &str {
+        &self.shared.cfg.schema
+    }
+
+    /// [`Pool::schema`] as a SQL string literal, for a catalog filter
+    /// (`WHERE table_schema = ...`).
+    pub fn schema_lit(&self) -> String {
+        sql_lit(self.schema())
+    }
+
+    /// [`Pool::schema`] as a quoted identifier, for a qualified name.
+    pub fn schema_ident(&self) -> String {
+        ordo_schema::ddl::q(self.schema())
+    }
+
+    /// [`PoolConfig::channel`] for this pool's deployment.
+    pub fn channel(&self, name: &str) -> String {
+        self.shared.cfg.channel(name)
+    }
+
+    /// The shadow schema the load gate builds for this deployment
+    /// ([`shape::shadow_for`]).
+    pub fn shadow(&self) -> String {
+        shape::shadow_for(self.schema())
+    }
+
     /// The statements of `ddl` that would change the database, in order.
     ///
     /// Each statement of a platform DDL list is a `CREATE TABLE`, `CREATE
@@ -1165,7 +1361,15 @@ impl Pool {
     /// of the platform's tables. The console's own database (`ordo-console`,
     /// `plan-console.md` 5.2) is the one caller: it runs its own migrations,
     /// and a deployment's tables there would be rows nothing reads.
+    ///
+    /// Such a database is not a deployment's, so the deployment's schema
+    /// ([`PoolConfig::schema`]) does not reach it: it dials with the
+    /// server's own `search_path`.
     pub async fn connect_own(cfg: PoolConfig, limits: PoolLimits) -> Result<Pool, PoolError> {
+        let cfg = PoolConfig {
+            schema: DEFAULT_SCHEMA.to_string(),
+            ..cfg
+        };
         Pool::open(cfg, limits).await
     }
 
@@ -1186,6 +1390,11 @@ impl Pool {
     }
 
     async fn open(cfg: PoolConfig, limits: PoolLimits) -> Result<Pool, PoolError> {
+        // Checked before the first dial: the name goes into the dial options
+        // and into DDL. `ordo_host::runtime` refuses the boot on the same
+        // check first, naming the setting; this is the backstop for every
+        // other caller.
+        check_schema_name(&cfg.schema).map_err(PoolError::db)?;
         // One connection now, so that an unreachable database or a wrong
         // password fails here and not on the first request. The rest dial
         // when a checkout finds none idle.

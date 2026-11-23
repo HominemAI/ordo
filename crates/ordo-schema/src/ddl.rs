@@ -322,7 +322,7 @@ pub fn ddl_for(schema: &Schema) -> Result<String, SchemaError> {
 
     for e in &schema.entities {
         for f in &e.fields {
-            if let Some(stmt) = foreign_key(e, f) {
+            if let Some(stmt) = foreign_key(schema, e, f) {
                 out.push_str(&stmt);
             }
         }
@@ -524,10 +524,19 @@ pub fn create_table(e: &Entity) -> Result<String, SchemaError> {
 /// This is why the composite primary key is worth its extra column. A
 /// single-column `REFERENCES t(id)` would happily accept another tenant's
 /// id.
-pub fn foreign_key(e: &Entity, f: &Field) -> Option<String> {
+///
+/// **A ref to an external entity has none** (ruled 2026-11-15,
+/// `external-entities`). The target is another system's table, with no
+/// `$space` and no Ordo id to reference, and a constraint onto it would give
+/// Ordo a veto over that system's deletes. The column is plain text, and a
+/// row that is gone reads as missing.
+pub fn foreign_key(schema: &Schema, e: &Entity, f: &Field) -> Option<String> {
     let FieldTy::Ref { target, .. } = &f.ty else {
         return None;
     };
+    if schema.is_external(target) {
+        return None;
+    }
     Some(format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}, {}) REFERENCES {} ({}, {});\n",
         q(&e.name),

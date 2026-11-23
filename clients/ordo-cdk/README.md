@@ -139,9 +139,10 @@ wrote it thought of; a walk that matches every AST enum exhaustively cannot
 skip one silently. A node kind with no builder spelling either fails the
 build or is reported by name.
 
-**Score: 41 of 41 corpus programs round-trip, with no builder misses.** The
-corpus is both conformance fixtures (`market`, `wide`) and every fenced block
-of `docs/syntax-examples.md` that `parse_program` accepts.
+**Score: 42 of 42 corpus programs round-trip, with no builder misses.** The
+corpus is both conformance fixtures (`market`, `wide`), an `external` fixture
+(`crates/ordo-gen/tests/fixtures/external.ordo`) and every fenced block of
+`docs/syntax-examples.md` that `parse_program` accepts.
 
 **"Canonical".** The plan says `synth` emits canonical `.ordo` *via
 `ordo fmt`*. There is no `ordo fmt` (Track A1 is unbuilt), so the property
@@ -185,6 +186,80 @@ grammar moves.
 **Covered: writes.** `set` and `del` are in the op grammar, so they are here:
 `b.set(entity, fields)`, `b.del(entity, cond)`, `.where()`, `.subtree()`, and
 `.let_()` for naming a created row.
+
+**Covered: external entities.** `external()` declares a table another system
+owns. It takes the shape of `entity()`: a name, a record of fields, options.
+Fields use the same `t.*` types, `ref()`, `.optional()` and `.public()`. Two
+things are new. `.column('name')` maps a field to the foreign column and
+comes last. `key.int(col)`, `key.text(col)` and `key.uuid(col)` write the
+`id` line.
+
+```ts
+const accounts = external('accounts', {
+  id: key.uuid('ref'),
+  label: t.text().column('label'),
+}, { schema: 'crm', table: 'accounts', key: 'acct', shared: true });
+
+const customers = external('customers', {
+  id: key.int('customer_id'),
+  name: t.text().public().column('full_name'),
+  email: t.text().optional().column('email'),
+  account: ref(accounts).optional().column('account_id'),
+}, { schema: 'crm', table: 'customers', shared: true })
+  .public()
+  .accessRead(g.OPEN);
+```
+
+`synth(accounts, customers)` prints `external customers from crm.customers
+shared { … }` with the key line first, `name: text public <- "full_name"`,
+`account -> accounts? <- "account_id"`, then `public` and `access read open`.
+Column names are always quoted, keep their case and are never inferred from
+the field name. `schema` and `table` are separate strings.
+
+What the types refuse:
+
+- A field with no `.column()`. `entity()` refuses a mapped field too.
+- `shared: false` or no `shared`. It is the literal `true`.
+- `public` or `optional` on a key helper.
+- `publicAll()`, `acl()`, `unique()`, `index()`, `check()` and `accessWrite()`
+  on an external. They do not exist on it.
+
+What runs and throws, naming the parser's class: `.column()` on a field that
+is `sealed` or `indexed` (`external_sealed`), `owned` (`external_owned`),
+`unique`, `tree`, `normalize`, has a `default` or is a `blob`
+(`external_unsupported`). `synth` refuses a ref from an external to an
+entity, or to a name no external in the call declares (`external_ref_to_native`).
+
+**Covered: peers.** `peer('journal')` names another Ordo deployment in the
+same database. An external reads one of its tables with `{ peer: journal,
+table: 'notes', shared: true }` in place of `schema`. Pass the peer to `synth`
+before the externals that read it:
+
+```ts
+const journal = peer('journal');
+const entries = external('entries', {
+  id: key.text('id'),
+  title: t.text().column('title'),
+  owner: t.text().column('owner'),
+}, { peer: journal, table: 'notes', shared: true });
+
+synth(journal, entries);
+```
+
+This prints `peer journal` and `external entries from journal.notes shared
+{ … }`. The schema is never in the file: the deployment owner sets
+`ORDO_PEER_JOURNAL_SCHEMA`. `synth` refuses an external whose peer it was not
+handed first (`peer_undeclared`), a peer no external reads (`peer_unused`) and
+a peer passed twice (`peer_name`). `peer()` refuses a name that is not
+lowercase letters and digits (`peer_name`).
+
+**Covered: readers.** The app being read names who may read it, and which
+tables, with `reader('note_viewer', [notes, 'notesAccess'])`. Each table is an
+entity passed to `synth`, or `members`. This prints
+`reader note_viewer reads notes, notesAccess`. The role is never in the file:
+the deployment owner sets `ORDO_READER_NOTE_VIEWER_ROLE`. `synth` refuses a
+table that is not an entity of the file (`reader_unknown_table`) and a reader
+passed twice (`reader_line`).
 
 And the routine (12a). Its body is a write op's body, built with the same
 calls. The trigger is `every('15m')`, `daily('09:00Z')` or

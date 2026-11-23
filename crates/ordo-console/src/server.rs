@@ -1209,6 +1209,7 @@ async fn status(State(c): State<Console>, Path(handle): Path<String>) -> Respons
             "identity": {
                 "origin": i.settings().public_url(),
                 "audience": i.settings().audience,
+                "rpId": i.settings().rp_id,
             },
         }))
         .into_response();

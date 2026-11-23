@@ -66,7 +66,9 @@
 //! # Why verification runs on its own connections
 //!
 //! `build_shadow` and `observed_shape` both issue `SET search_path TO
-//! ordo_shadow`, and `search_path` is **connection state**. A pooled
+//! ordo_shadow` (the deployment's own shadow, `Pool::shadow`, when
+//! `ORDO_PG_SCHEMA` names a schema), and `search_path` is **connection
+//! state**. A pooled
 //! connection handed back to the idle list still carrying it would aim the
 //! next caller's ordinary read at an empty schema — silently zero rows, the
 //! worst possible failure. So verification takes a short-lived pool of its
@@ -253,7 +255,7 @@ fn probe_call(spec: &OpSpec) -> Option<String> {
 /// - Each required ref's foreign key (`entity$field$fk`) must exist and be
 ///   validated: a hop through a required ref is proven present because that
 ///   key names a row. A key added `NOT VALID` has not checked the rows
-///   already there.
+///   already there. A ref to an external is exempt: it never has a key.
 ///
 /// A table or column missing outright is drift, reported and refused by the
 /// drift gate, and is not repeated here.
@@ -262,10 +264,11 @@ pub async fn never_null_gone(
     schema: &ordo_schema::Schema,
 ) -> Result<Vec<String>, ordo_exec::PoolError> {
     let nullable: std::collections::BTreeSet<(String, String)> = pool
-        .rows(
+        .rows(&format!(
             "SELECT table_name, column_name FROM information_schema.columns \
-             WHERE table_schema = 'public' AND is_nullable = 'YES'",
-        )
+             WHERE table_schema = {} AND is_nullable = 'YES'",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| match r.as_slice() {
@@ -274,17 +277,21 @@ pub async fn never_null_gone(
         })
         .collect();
     let tables: std::collections::BTreeSet<String> = pool
-        .rows("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+        .rows(&format!(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = {}",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())
         .collect();
     let keys: std::collections::BTreeSet<String> = pool
-        .rows(
+        .rows(&format!(
             "SELECT c.conname FROM pg_constraint c \
              JOIN pg_namespace n ON n.oid = c.connamespace \
-             WHERE n.nspname = 'public' AND c.contype = 'f' AND c.convalidated",
-        )
+             WHERE n.nspname = {} AND c.contype = 'f' AND c.convalidated",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())
@@ -306,7 +313,14 @@ pub async fn never_null_gone(
             continue;
         }
         for field in &e.fields {
-            if field.optional || !matches!(field.ty, ordo_schema::FieldTy::Ref { .. }) {
+            let ordo_schema::FieldTy::Ref { target, .. } = &field.ty else {
+                continue;
+            };
+            // A ref to an external has no foreign key to restore
+            // (`ordo_schema::ddl::foreign_key`, ruled 2026-11-15): the row
+            // belongs to another system and may be gone, and a read through
+            // it already yields null.
+            if field.optional || schema.is_external(target) {
                 continue;
             }
             let key = format!("{}${}$fk", e.name, field.name);
@@ -347,12 +361,33 @@ pub async fn verify_registry(
     // Best effort: the shadow is rebuilt from scratch on every verification
     // anyway, so a failure to tidy it is not a reason to refuse a boot that
     // otherwise passed.
-    let _ = pool.rows("DROP SCHEMA IF EXISTS ordo_shadow CASCADE").await;
+    let _ = pool
+        .rows(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            ordo_schema::ddl::q(&pool.shadow())
+        ))
+        .await;
     drop(pool);
     report
 }
 
 async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, ShapeRefusal> {
+    // `$caller` on a peer's table reads this deployment's own sign-in
+    // directory (`$principal`, `$authenticator`) unqualified, beside
+    // `members`. Those are platform tables, not the program's DDL, so the
+    // shadow is given them too, or every op that reads a peer would fail to
+    // describe here and run fine in production.
+    let with_directory;
+    let ddl = if f.schema.peers.is_empty() {
+        ddl
+    } else {
+        let mut all = vec![ddl.to_string()];
+        all.extend(crate::principal_directory::directory_ddl().map(str::to_string));
+        // And the map of shared providers it joins (`ordo_exec::peer::link`).
+        all.push(ordo_exec::peer::LINK_DDL.to_string());
+        with_directory = all.join(";\n");
+        &with_directory
+    };
     pool.build_shadow(ddl)
         .await
         .map_err(|e| ShapeRefusal::Unavailable(format!("the shadow schema did not build: {e}")))?;
@@ -361,7 +396,7 @@ async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, S
     // second caller building a second shadow. It does not refuse — see
     // `ShapeReport::drift`.
     let drift = pool
-        .live_drift(ordo_exec::shape::SHADOW, "public")
+        .live_drift(&pool.shadow(), pool.schema())
         .await
         .map_err(|e| {
             ShapeRefusal::Unavailable(format!("the live schema could not be read: {e}"))

@@ -131,7 +131,7 @@ use ordo_syntax::ScalarTy;
 use sha2::{Digest, Sha256};
 
 use crate::registry::Artifact;
-use crate::shape::{Drift, EXPORT_SHADOW};
+use crate::shape::{export_shadow_for, Drift};
 use crate::{sql_lit, Pool, PoolError};
 
 /// The bundle's format tag. A reader that does not recognise it should
@@ -761,7 +761,7 @@ async fn write_blobs(
         let Some(handle) = parse_blob_handle(hex) else {
             continue;
         };
-        let declared = req.schema.entity(entity).and_then(|e| e.field(field));
+        let declared = req.schema.native(entity).and_then(|e| e.field(field));
         let inline = declared.map(|f| f.inline).unwrap_or(false);
         let private = declared.map(|f| f.private).unwrap_or(false);
         // Which row holds it. The column IS the reference — that is what
@@ -1054,10 +1054,14 @@ pub async fn export_space(
 /// the DDL on every call, so leaving one behind buys nothing and leaves a
 /// schema in the operator's catalog that looks like state.
 async fn assert_no_drift(pool: &Pool, artifact: &Artifact) -> Result<(), ExportError> {
-    pool.build_shadow_in(EXPORT_SHADOW, &artifact.ddl).await?;
-    let drift = pool.live_drift(EXPORT_SHADOW, "public").await;
+    let shadow = export_shadow_for(pool.schema());
+    pool.build_shadow_in(&shadow, &artifact.ddl).await?;
+    let drift = pool.live_drift(&shadow, pool.schema()).await;
     let _ = pool
-        .rows(&format!("DROP SCHEMA IF EXISTS {EXPORT_SHADOW} CASCADE"))
+        .rows(&format!(
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            ordo_schema::ddl::q(&shadow)
+        ))
         .await;
     let drift = drift?;
     if !drift.is_empty() {
@@ -1524,6 +1528,12 @@ fn load_order(schema: &Schema) -> (Vec<String>, Vec<String>) {
         // table, never tables against each other, so it is not an edge
         // here — it would make every such entity look cyclic.
         if edge.from == edge.to {
+            continue;
+        }
+        // An external entity's rows are another system's and ride in no
+        // bundle, so nothing waits for them: a ref to one is copied as it is
+        // (ruled 2026-11-15, `external-entities`).
+        if schema.is_external(&edge.to) {
             continue;
         }
         if let Some(set) = waiting.get_mut(&edge.from) {

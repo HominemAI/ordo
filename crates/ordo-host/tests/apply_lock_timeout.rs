@@ -141,7 +141,7 @@ async fn a_held_lock_is_waited_out_retried_and_then_named() {
 
     // Nothing changed.
     holder.rollback().await.expect("release");
-    let live = migrate::live_shape(&pool, sa::LIVE)
+    let live = migrate::live_shape(&pool, pool.schema())
         .await
         .expect("live shape");
     assert!(
@@ -215,7 +215,7 @@ async fn a_lock_released_during_the_retries_lets_the_apply_through() {
         done.retries >= 1,
         "at least one attempt waited the lock out first: {done:?}"
     );
-    let live = migrate::live_shape(&pool, sa::LIVE)
+    let live = migrate::live_shape(&pool, pool.schema())
         .await
         .expect("live shape");
     assert!(
@@ -249,7 +249,7 @@ async fn a_concurrent_index_waits_out_its_lock_and_leaves_no_invalid_index() {
         other => panic!("a held lock is a LockTimeout, not {other:?}"),
     }
     assert_eq!(
-        migrate::index_valid(&pool, sa::LIVE, "widgets$name$ix")
+        migrate::index_valid(&pool, pool.schema(), "widgets$name$ix")
             .await
             .expect("read back"),
         None,
@@ -262,7 +262,7 @@ async fn a_concurrent_index_waits_out_its_lock_and_leaves_no_invalid_index() {
         .expect("the table is free");
     assert_eq!(done.indexes, 1);
     assert_eq!(
-        migrate::index_valid(&pool, sa::LIVE, "widgets$name$ix")
+        migrate::index_valid(&pool, pool.schema(), "widgets$name$ix")
             .await
             .expect("read back"),
         Some(true)

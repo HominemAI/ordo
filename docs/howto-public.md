@@ -49,6 +49,8 @@ Rules:
 | `public_write_not_create` | A statement in a public write that updates, converges or deletes. A create on a unique field is allowed only as a create-once (`rev: null`). |
 | `public_write_guarded` | A public write into an entity that has a guard or an `acl`. |
 | `public_write_ref` | A public write sets a ref from a visitor's value to an entity with no public field. The answer would show whether that row exists. |
+| `op_named_like_entity` | The op has the name of an entity, native or external. Every op is refused this, public or not. Name the op for what it answers: `op publicNotes` over `external notes`. |
+| `duplicate_op_name` | Two ops have one name. A later private op can no longer take the place of a public one. Rename one. |
 
 A condition on a private field would leak it a bit at a time. That is why a
 condition counts as a read.
@@ -287,7 +289,7 @@ and the default.
 | Variable | Default | Means |
 |---|---|---|
 | `ORDO_PUBLIC_CACHE_BYTES` | 268435456 (256 MiB) | Cache size per node, 0 to 64 GiB. 0 turns the cache off. |
-| `ORDO_PUBLIC_CDN_S_MAXAGE` | 60 | Seconds a CDN may keep an answer, 0 to 604800 (7 days). |
+| `ORDO_PUBLIC_CDN_S_MAXAGE` | 60 | Seconds a CDN may keep an answer, 0 to 604800 (7 days). 0 also turns off the origin cache for ops over external entities. |
 | `ORDO_PUBLIC_CDN_SWR` | 300 | Seconds a CDN may serve a stale answer, 0 to 604800. |
 | `ORDO_PUBLIC_MISSES_PER_MINUTE` | 600 | Misses one public op may send to the database per minute, per node, 0 to 1000000. 0 turns the cap off. |
 | `ORDO_PUBLIC_CDN_PURGE_URL` | unset | Where to post purges. Unset posts nothing. https only. |

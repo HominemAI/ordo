@@ -490,16 +490,17 @@ async fn space_scoped_tables(
     out.sort();
 
     let rows = pool
-        .rows(
+        .rows(&format!(
             "SELECT c.table_name, c.column_name \
              FROM information_schema.columns c \
              JOIN information_schema.tables t \
                ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
-             WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE' \
+             WHERE c.table_schema = {} AND t.table_type = 'BASE TABLE' \
                AND c.table_name LIKE '$%' \
                AND c.column_name IN ('$space', 'space') \
              ORDER BY c.table_name, c.column_name",
-        )
+            pool.schema_lit()
+        ))
         .await?;
     for r in &rows {
         let (Some(Some(table)), Some(Some(col))) = (r.first(), r.get(1)) else {
@@ -563,10 +564,11 @@ pub async fn rows_held(pool: &Pool, space: &SpaceId, schema: &Schema) -> Result<
     // tenant starts on may declare one the deployment's database lacks
     // (`plan-versions.md` §1.3, 2026-11-05).
     let present: std::collections::HashSet<String> = pool
-        .rows(
+        .rows(&format!(
             "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
-        )
+             WHERE table_schema = {} AND table_type = 'BASE TABLE'",
+            pool.schema_lit()
+        ))
         .await?
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())

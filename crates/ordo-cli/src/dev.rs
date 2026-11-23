@@ -982,6 +982,13 @@ pub fn run(root: &Path, opts: DevOptions) -> Result<(), String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", root.display()))?;
     println!("ordo dev  watching {}", root.display());
+    // Local work runs every deployment as one database role, so a `peer`
+    // line is allowed to read through it (owner ruling 2026-11-18). Set
+    // here, before any thread starts, and only when the developer did not
+    // set it: `ORDO_PEER_SHARED_ROLE=off` still tries the real grants.
+    if std::env::var_os(ordo_exec::peer::SHARED_ROLE_ENV).is_none() {
+        std::env::set_var(ordo_exec::peer::SHARED_ROLE_ENV, "on");
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -19,6 +19,11 @@
  * - `VITE_ORDO_RETURN_URL` is where an outside provider sends the person back.
  *   Its origin must be in the deployment's `ORDO_AUTH_RETURN_URLS`. Unset, it
  *   is this page's own address.
+ * - `VITE_ORDO_SPACE` is the space an outside sign-in arrives at, for a
+ *   deployment that gives nobody a tenant of their own and admits people to
+ *   its own space instead (`system`). note_viewer reads notes this way: a
+ *   peer reads the deployment's own database, never a tenant's. Unset, a
+ *   sign-in names no space and the person works in a tenant of their own.
  */
 const url: string | undefined = import.meta.env.VITE_ORDO_URL;
 
@@ -29,6 +34,9 @@ function door(): string {
 }
 
 export const DOOR: string = door();
+
+/** The space an outside sign-in arrives at, or undefined (`VITE_ORDO_SPACE`). */
+export const ARRIVE: string | undefined = import.meta.env.VITE_ORDO_SPACE || undefined;
 
 /** One outside connection: the name the deployment knows it by, and the button's words. */
 export interface Connection {

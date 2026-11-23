@@ -84,7 +84,8 @@ pub async fn remove(control: &Pool, person: &str) -> Result<usize, String> {
             let has = control
                 .rows(&format!(
                     "SELECT 1 FROM information_schema.columns \
-                     WHERE table_name = {} AND column_name = {}",
+                     WHERE table_schema = {} AND table_name = {} AND column_name = {}",
+                    control.schema_lit(),
                     sql_lit(table),
                     sql_lit(column)
                 ))

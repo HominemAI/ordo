@@ -1441,6 +1441,29 @@ fn entity_artifact(e: &ordo_schema::Entity) -> Value {
     if let Some(p) = &e.public {
         out["public"] = json!({ "cascade": p.cascade, "from": p.from });
     }
+    // An external entity: a translation of a table another system owns
+    // (ruled 2026-11-15, `external-entities`). The source and the column map
+    // are deploy facts a reviewer must see move, and `external: true` is
+    // what the SDK and the console read to say what such a row is not.
+    // Absent on a native entity, so its bytes do not change.
+    if let Some(x) = &e.external {
+        out["external"] = json!(true);
+        out["source"] = json!({
+            "schema": x.schema,
+            "table": x.table,
+            "key": { "column": x.key_column, "type": x.key_ty.as_str() },
+            "columns": x.columns.iter()
+                .map(|(f, c)| json!({ "field": f, "column": c }))
+                .collect::<Vec<_>>(),
+        });
+        // A peer's table: `schema` above is the nickname as written, never
+        // the schema this environment resolves, so the artifact and its
+        // identity are the same in every environment. Absent on a plain
+        // external, so its bytes do not change.
+        if let Some(p) = &x.peer {
+            out["source"]["peer"] = json!(p.name);
+        }
+    }
     out
 }
 
@@ -1534,7 +1557,14 @@ pub fn catalog_view(art: &Value) -> Value {
 /// [`program_artifact`] (which re-binds and re-plans every op) at request
 /// time. Same producer, same bytes: this IS `program_artifact`'s `entities`.
 pub fn entity_artifacts(schema: &Schema) -> Vec<Value> {
-    schema.entities.iter().map(entity_artifact).collect()
+    // External entities after the native ones, so a program without any
+    // keeps its bytes (ruled 2026-11-15, `external-entities`).
+    schema
+        .entities
+        .iter()
+        .chain(&schema.externals)
+        .map(entity_artifact)
+        .collect()
 }
 
 /// The entity a typed id of `entity.field` identifies: the entity itself for
@@ -2897,6 +2927,12 @@ impl Reads {
                 self.expr(expr);
                 self.expr(anchor);
                 self.trees.push(tree.clone());
+            }
+            // A peer's members, for the same person: a set, never the one
+            // row a `$caller` comparison pins, so it bounds nothing.
+            BCond::PeerCaller { expr, caller, .. } => {
+                self.expr(expr);
+                self.expr(caller);
             }
         }
     }

@@ -3903,6 +3903,17 @@ impl Fixture {
         caller: &str,
         write_verb: bool,
     ) -> Result<bool, String> {
+        // An external entity's row is another system's, with no `$space`
+        // and no base table of that name. The only write that reaches one
+        // is a native ref naming it, and for that the write path checks the
+        // prefix and the key's form only (`plan-external-entities.md`
+        // section 6): no foreign key, and a row that is gone reads as missing
+        // later. So nothing here reads the other system's table.
+        if let Some(r) =
+            ordo_sema::external_reads(&self.schema).and_then(|m| m.get(entity).cloned())
+        {
+            return Ok(ordo_plan::external_key_of(id, &r).is_some());
+        }
         let sql = match guard_filter_query(&self.schema, entity, write_verb, Some(caller))
             .map_err(|er| format!("bind: {er}"))?
         {

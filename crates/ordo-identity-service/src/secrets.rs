@@ -39,3 +39,8 @@ pub fn invite_hash(normalised: &str) -> String {
 pub fn cli_code_hash(code: &str) -> String {
     tagged_hash("ordo-identity/cli-code/v1", code)
 }
+
+/// What an OIDC authorization code is stored as ([`crate::oidc`]).
+pub fn oidc_code_hash(code: &str) -> String {
+    tagged_hash("ordo-identity/oidc-code/v1", code)
+}

@@ -143,6 +143,7 @@ pub fn is_oidc(name: &str, var: &dyn Fn(&str) -> Option<String>) -> bool {
 /// | `ORDO_AUTH_<NAME>_ISSUER` | required without a preset; Google's is filled |
 /// | `ORDO_AUTH_<NAME>_TENANT` | `microsoft`: the directory (tenant) id, a GUID |
 /// | `ORDO_AUTH_<NAME>_CLIENT_ID`, `_CLIENT_SECRET_FILE` | required |
+/// | `_CLIENT_AUTH` | `secret` (default) or `none`: a public client, PKCE only, and no `_CLIENT_SECRET_FILE` |
 /// | `_SCOPE`, `_DISPLAY_CLAIMS`, `_AVATAR_CLAIM`, `_USE_EMAIL` | override the preset |
 /// | `_AUTHORIZE_URL`, `_TOKEN_URL`, `_JWKS_URL` | all three pin the endpoints and skip discovery |
 /// | `_ISS_PARAMETER` | `required`: with pinned endpoints, demand RFC 9207's `iss` |
@@ -236,16 +237,41 @@ pub fn connection_from_vars(
         (None, None) => return Err(format!("{p}ISSUER is required")),
     };
     let client_id = get("CLIENT_ID").ok_or_else(|| format!("{p}CLIENT_ID is required"))?;
-    let secret_file =
-        get("CLIENT_SECRET_FILE").ok_or_else(|| format!("{p}CLIENT_SECRET_FILE is required"))?;
     if var(&format!("{p}CLIENT_SECRET")).is_some() {
         return Err(format!(
             "{p}CLIENT_SECRET is not read: a secret in a variable's value shows in a process \
              listing; put it in a file and name the file in {p}CLIENT_SECRET_FILE"
         ));
     }
-    let secret =
-        read_file(&secret_file).map_err(|_| format!("{p}CLIENT_SECRET_FILE could not be read"))?;
+    // `none`: a public client, proved by PKCE alone, as Ordo's identity
+    // service takes its apps (`docs/howto-identity.md`).
+    let client_secret = match get("CLIENT_AUTH").as_deref() {
+        None | Some("secret") => {
+            let secret_file = get("CLIENT_SECRET_FILE").ok_or_else(|| {
+                format!(
+                    "{p}CLIENT_SECRET_FILE is required; for a provider that takes public \
+                     clients, such as Ordo's identity service, set {p}CLIENT_AUTH=none instead"
+                )
+            })?;
+            let secret = read_file(&secret_file)
+                .map_err(|_| format!("{p}CLIENT_SECRET_FILE could not be read"))?;
+            Some(ClientSecret::new(secret))
+        }
+        Some("none") => {
+            if get("CLIENT_SECRET_FILE").is_some() {
+                return Err(format!(
+                    "{p}CLIENT_SECRET_FILE is set and {p}CLIENT_AUTH is `none`, which sends no \
+                     secret; unset one of them"
+                ));
+            }
+            None
+        }
+        Some(_) => {
+            return Err(format!(
+                "{p}CLIENT_AUTH is `secret` (the default) or `none`"
+            ))
+        }
+    };
     let endpoints = match (get("AUTHORIZE_URL"), get("TOKEN_URL"), get("JWKS_URL")) {
         (None, None, None) => None,
         (Some(a), Some(t), Some(j)) => Some(OidcEndpoints {
@@ -326,7 +352,7 @@ pub fn connection_from_vars(
         name: name.to_string(),
         issuer,
         client_id,
-        client_secret: ClientSecret::new(secret),
+        client_secret,
         scope: get("SCOPE")
             .unwrap_or_else(|| pr.map_or("openid email profile", |x| x.scope).to_string()),
         endpoints,
@@ -681,6 +707,30 @@ mod tests {
             .err()
             .expect("refused")
             .contains("https"));
+    }
+
+    /// Ordo's identity service takes public clients: `CLIENT_AUTH=none`
+    /// sends no secret, and a secret file beside it is refused.
+    #[test]
+    fn a_public_client_needs_no_secret_and_refuses_one() {
+        let base = [
+            ("ORDO_AUTH_IDS_KIND", "oidc"),
+            ("ORDO_AUTH_IDS_ISSUER", "https://id.example.com"),
+            ("ORDO_AUTH_IDS_CLIENT_ID", "notes"),
+        ];
+        let e = build(&base, "ids").err().expect("a secret by default");
+        assert!(e.contains("ORDO_AUTH_IDS_CLIENT_AUTH=none"), "{e}");
+        let mut v = base.to_vec();
+        v.push(("ORDO_AUTH_IDS_CLIENT_AUTH", "none"));
+        let c = build(&v, "ids").expect("a public client");
+        assert!(c.client_secret.is_none());
+        v.push(("ORDO_AUTH_IDS_CLIENT_SECRET_FILE", "/s"));
+        let e = build(&v, "ids").err().expect("refused");
+        assert!(e.contains("unset one of them"), "{e}");
+        let mut v = base.to_vec();
+        v.push(("ORDO_AUTH_IDS_CLIENT_AUTH", "basic"));
+        let e = build(&v, "ids").err().expect("refused");
+        assert!(e.contains("ORDO_AUTH_IDS_CLIENT_AUTH"), "{e}");
     }
 
     const CORP: &[(&str, &str)] = &[

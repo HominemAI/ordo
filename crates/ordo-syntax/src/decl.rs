@@ -44,6 +44,108 @@ pub struct Program {
     /// (`plan-configuration-in-the-file.md` §2). At most one per program.
     /// Absent, the deployment's settings decide, as before the block.
     pub auth: Option<crate::auth::AuthDecl>,
+    /// `external customers from crm.customers shared { … }`: a table
+    /// another system owns, read through a translation inside Ordo's SQL
+    /// (ruled 2026-11-15, `external-entities`). Never an entity: the schema
+    /// keeps these apart so DDL, diff, dev reset and erase never see one.
+    pub externals: Vec<ExternalDecl>,
+    /// `peer journal`: a local nickname for another Ordo deployment in the
+    /// same database (owner rulings 2026-11-17,
+    /// `example-apps-notes-v2-plus-note_viewer` asks 5 and 10). An external
+    /// `from journal.notes` then reads the peer's `notes`, in the schema the
+    /// setting `ORDO_PEER_JOURNAL_SCHEMA` names, and `$caller` on it means
+    /// the peer's member for the same person.
+    pub peers: Vec<PeerDecl>,
+    /// `reader note_viewer reads notes, notesAccess`: another Ordo
+    /// deployment that may read these tables of this one (owner ruling
+    /// 2026-11-18, `example-apps-notes-v2-plus-note_viewer` ask 17). Its
+    /// database role comes from `ORDO_READER_NOTE_VIEWER_ROLE`, and this
+    /// deployment grants that role `SELECT` on exactly these tables.
+    pub readers: Vec<ReaderDecl>,
+}
+
+/// `reader <name> reads <table>, <table>`: a local nickname for a deployment
+/// that reads this one, and the tables it may read. The role it reads with
+/// comes from the environment, never from the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderDecl {
+    pub name: Ident,
+    pub tables: Vec<Ident>,
+    pub span: Span,
+}
+
+/// `peer <name>`: a local nickname for another Ordo deployment. It does not
+/// name or change that deployment. The schema comes from the environment,
+/// never from the file, so one file works in every environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDecl {
+    pub name: Ident,
+    pub span: Span,
+}
+
+/// The key column's base type, as the `id` line states it:
+/// `id <- customer_id` is `int`, `id: text <- code`, `id: uuid <- ref`.
+///
+/// Not a language type. The id an external row shows is a typed id like
+/// every other (`cust_42`), and this says how to strip the prefix back to
+/// the raw key so a comparison, a join or a sort uses the foreign index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalKeyTy {
+    Int,
+    Text,
+    Uuid,
+}
+
+impl ExternalKeyTy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalKeyTy::Int => "int",
+            ExternalKeyTy::Text => "text",
+            ExternalKeyTy::Uuid => "uuid",
+        }
+    }
+}
+
+/// `external <name> [(key: k)] from <schema>.<table> shared { … }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalDecl {
+    pub name: Ident,
+    /// `(key: cust)`: the typed-id prefix, derived from the name otherwise.
+    pub key: Option<Ident>,
+    /// The Postgres schema the foreign table lives in.
+    pub schema: Ident,
+    pub table: Ident,
+    /// `shared`: every space reads every row, and the access profile decides
+    /// which tenants may call the ops. Required in this release; the parser
+    /// refuses a declaration without it, so this is always true.
+    pub shared: bool,
+    /// The entity line `public`: a public op may serve this external's public fields
+    /// to a visitor with no token (ruled 2026-11-15, `external-entities`
+    /// ask 5). Never a cascade: the parser refuses `public*`, since an
+    /// external owns nothing for the star to reach.
+    pub public: Option<PublicMark>,
+    /// `id <- customer_id`: the one unique, non-null key column.
+    pub key_column: Ident,
+    pub key_ty: ExternalKeyTy,
+    pub fields: Vec<ExternalField>,
+    /// `access read <walk>`: a read guard over the row's own fields and
+    /// `$caller`. There is no `access write`: an external is read-only.
+    pub access_read: Option<GuardClause>,
+    pub span: Span,
+}
+
+/// One line of an external's body: `name: text <- full_name` or
+/// `account -> accounts <- account_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalField {
+    pub name: Ident,
+    /// A scalar, or a ref. A ref is never `owned` or `tree`.
+    pub kind: FieldKind,
+    pub optional: bool,
+    /// The foreign column this field reads.
+    pub column: Ident,
+    /// `name: text public <- full_name`: as on a native field.
+    pub public: bool,
 }
 
 /// `secret openaiKey for api.openai.com`.

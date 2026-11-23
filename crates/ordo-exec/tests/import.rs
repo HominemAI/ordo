@@ -1605,3 +1605,75 @@ async fn two_rows_under_one_unique_key_refuse_and_nothing_is_written() {
         "the first row was not converged onto: its rev did not move"
     );
 }
+
+// ── a ref to an external entity (review finding 3) ───────────────────────
+
+/// A native entity whose ref names an external one. The external's rows are
+/// another system's, so no bundle carries them and no import mints them.
+const EXTERNAL: &str = "\
+external patrons (key: pat) from crm.customers shared {
+  id <- \"customer_id\"
+  name: text <- \"full_name\"
+}
+entity tickets (key: tick) {
+  customer -> patrons
+  subject:  text
+}
+";
+
+/// The ref is the other system's key, so it is copied verbatim. Looking it
+/// up in the import's id map, where it can never be, refused every bundle
+/// with a populated ref to an external as `unresolved_ref`.
+#[tokio::test]
+async fn a_ref_to_an_external_round_trips_verbatim() {
+    let art = artifact_of("vx", EXTERNAL);
+    let src_keys = TestProvider::with_space(SRC_SPACE);
+    let pg = scratch("ordo_imp_ext_src");
+    deploy(&pg, &art);
+    pg.exec(&format!(
+        "INSERT INTO \"tickets\" (\"$space\",\"id\",\"rev\",\"customer\",\"subject\") VALUES \
+           ('{SRC_SPACE}','tick_1',1,'pat_9','a'), \
+           ('{SRC_SPACE}','tick_2',1,'pat_77','b');"
+    ))
+    .expect("seed");
+    let pool = pool_for("ordo_imp_ext_src").await;
+    let schema = schema_of(&art.source);
+    let mut bundle = MemoryBundle::new();
+    export_space(
+        &pool,
+        &ExportRequest {
+            space: &SpaceId(SRC_SPACE.to_string()),
+            schema: &schema,
+            artifact: &art,
+            keys: &src_keys,
+            blobs: None,
+            sealed: SealedMode::Open,
+            correlation: "cg_import_test_external",
+        },
+        &mut bundle,
+    )
+    .await
+    .expect("the source exports");
+
+    let dst_keys = Arc::new(TestProvider::with_space(DST_SPACE));
+    let d = dest("ordo_imp_ext_dst", &art, EXTERNAL, dst_keys).await;
+    let report = import_space(
+        &d.exec,
+        &d.request("ext", &art, 10),
+        &MemorySource::from(&bundle),
+    )
+    .await
+    .expect("a ref to an external does not block the import");
+    assert_eq!(report.rows(), 2);
+    let refs = d
+        .all("SELECT \"subject\", \"customer\" FROM \"tickets\" ORDER BY \"subject\"")
+        .await;
+    assert_eq!(
+        refs,
+        vec![
+            vec![Some("a".to_string()), Some("pat_9".to_string())],
+            vec![Some("b".to_string()), Some("pat_77".to_string())],
+        ],
+        "the other system's key is kept as it was, a dangling one too"
+    );
+}

@@ -1618,3 +1618,14 @@
 {"seq": 1620, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 17, "at": "2026-11-19T07:04:56Z", "status": "open", "text": "agreed", "source": "page", "read": true}
 {"seq": 1621, "item": "example-apps-notes-v2-plus-note_viewer", "ask": 17, "at": "2026-11-18", "status": "decided", "text": "agreed", "source": "record", "read": true}
 {"seq": 1622, "item": "nightly-cancelled-main-pins-cluster-runners", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "As for nightly just switch it to using GH runners as well", "source": "record", "read": true}
+{"seq": 1623, "item": "close-the-coverage-gap-through-the", "ask": 1, "at": "2026-11-23T21:14:06Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1624, "item": "close-the-coverage-gap-through-the", "ask": 2, "at": "2026-11-23T21:14:34Z", "status": "open", "text": "Only to main -  can also be run manually", "source": "page", "read": true}
+{"seq": 1625, "item": "close-the-coverage-gap-through-the", "ask": 3, "at": "2026-11-23T21:14:45Z", "status": "open", "text": "yes", "source": "page", "read": true}
+{"seq": 1626, "item": "close-the-coverage-gap-through-the", "ask": 4, "at": "2026-11-23T21:14:53Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1627, "item": "close-the-coverage-gap-through-the", "ask": 5, "at": "2026-11-23T21:15:40Z", "status": "open", "text": "yes. The running for atleast one of the apps should go through all of these things . We should be ordo applying/deploying etc..", "source": "page", "read": true}
+{"seq": 1628, "item": "close-the-coverage-gap-through-the", "ask": 0, "at": "2026-11-23T21:15:42Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1629, "item": "close-the-coverage-gap-through-the", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1630, "item": "close-the-coverage-gap-through-the", "ask": 2, "at": "2026-11-23", "status": "decided", "text": "Only to main -  can also be run manually", "source": "record", "read": true}
+{"seq": 1631, "item": "close-the-coverage-gap-through-the", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "yes", "source": "record", "read": true}
+{"seq": 1632, "item": "close-the-coverage-gap-through-the", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1633, "item": "close-the-coverage-gap-through-the", "ask": 5, "at": "2026-11-23", "status": "decided", "text": "yes. The running for atleast one of the apps should go through all of these things . We should be ordo applying/deploying etc..", "source": "record", "read": true}

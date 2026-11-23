@@ -125,6 +125,7 @@
 {"file": "audit-configuration-syntax.md", "kind": "audit", "what": "Audit of the configuration a deployment owner sets outside the .ordo file, with a per-setting recommendation on what the syntax should express, 2026-11-13"}
 {"file": "audit-coverage-2026-09-07.md", "kind": "audit", "what": "The coverage audit re-run on 2026-09-07."}
 {"file": "audit-doc-contradictions.md", "kind": "audit", "what": "Where design documents contradict each other, and what the code decided."}
+{"file": "audit-feature-tests-2026-11-23.md", "kind": "audit", "what": "Every guarantee Ordo promises, as concepts not mechanisms, graded by its strongest test (example app, integration, unit, none): 413 graded, 32 through an example app, 16 untested"}
 {"file": "audit-one-way-gaps.md", "kind": "audit", "what": "Capabilities that work one way only (write without read-back, create without delete, record without a reader): 12 findings, with evidence and what tracks each"}
 {"file": "audit-security-trace.md", "kind": "audit", "what": "Which earlier security findings can be traced to an answer, and which cannot."}
 {"file": "audit-service-interfaces.md", "kind": "audit", "what": "Rule 9 audit: each service (database, mail, file storage, sign-in providers, key custody, drains, SDK door) against one client and one typed error; bugs first, fixes, sizes, order"}

@@ -46,6 +46,11 @@
    "87% lines",
    "Coverage",
    ""
+  ],
+  [
+   "32 of 413",
+   "Guarantees via examples",
+   "warn"
   ]
  ],
  "look": [

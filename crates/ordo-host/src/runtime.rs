@@ -1192,6 +1192,15 @@ impl RuntimeConfig {
             "`ordo_conformance` is a test database's name, not a default",
         )?;
         let port: u16 = parsed("ORDO_PG_PORT", 5432)?;
+        // The schema the deployment's tables live in (`ORDO_PG_SCHEMA`,
+        // `public` when unset). Read once, here, and carried by the pool's
+        // config: every connection is dialled into it and every catalog
+        // read asks the pool for it.
+        let schema = ordo_exec::schema_from_env();
+        ordo_exec::check_schema_name(&schema).map_err(|detail| BootRefusal::Invalid {
+            var: ordo_exec::SCHEMA_ENV,
+            detail,
+        })?;
         // The password, or the file that holds it (`ordo_env::secret`).
         // Read here so an unreadable file refuses before the dial;
         // `PoolConfig::from_env` reads it again for the pool.
@@ -1401,6 +1410,7 @@ impl RuntimeConfig {
             size,
             acquire_timeout: Duration::from_millis(acquire_ms),
             password: PoolConfig::from_env().password,
+            schema,
         };
 
         // ── the socket ──
@@ -3804,6 +3814,48 @@ async fn assemble_program(
         }
     }
 
+    // A connection keeps its endpoints for life under its name (§3.5): a
+    // boot that finds them changed refuses. Recorded before the program
+    // loads, with the subject claim, because a `peer` line matches people
+    // by this table at load (owner ruling 2026-11-18). The table is made
+    // with sign-in on even with no connection, since a peer waits for it.
+    if let Some(a) = cfg.auth.as_ref() {
+        crate::federation::ensure_connection_table(&pool)
+            .await
+            .map_err(BootRefusal::Database)?;
+        let fingerprints = a
+            .oauth2
+            .iter()
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    "oauth2",
+                    c.fingerprint(),
+                    c.subject_claim.clone(),
+                )
+            })
+            .chain(
+                a.oidc
+                    .iter()
+                    .map(|c| (c.name.clone(), "oidc", c.fingerprint(), "sub".to_string())),
+            );
+        for (name, kind, fingerprint, claim) in fingerprints {
+            crate::federation::ensure_fingerprint(
+                &pool,
+                &name,
+                kind,
+                &fingerprint,
+                &claim,
+                now_secs(),
+            )
+            .await
+            .map_err(|detail| BootRefusal::Invalid {
+                var: "ORDO_AUTH_METHODS",
+                detail,
+            })?;
+        }
+    }
+
     // 6/7 — load the program, and assert it seals through the provider
     // this binary built. R2a's `verify_candidate`/`verify_embedded` assert
     // the same thing; two independent mechanisms agreeing is the
@@ -4082,24 +4134,8 @@ async fn assemble_program(
                     .await
                     .map_err(|e| BootRefusal::Database(e.to_string()))?;
             }
-            // A connection keeps its endpoints for life under its name
-            // (§3.5): a boot that finds them changed refuses.
-            let fingerprints = connections
-                .values()
-                .map(|c| (c.name.clone(), "oauth2", c.fingerprint()))
-                .chain(
-                    oidc_connections
-                        .values()
-                        .map(|c| (c.name.clone(), "oidc", c.fingerprint())),
-                );
-            for (name, kind, fingerprint) in fingerprints {
-                crate::federation::ensure_fingerprint(&pool, &name, kind, &fingerprint, now_secs())
-                    .await
-                    .map_err(|detail| BootRefusal::Invalid {
-                        var: "ORDO_AUTH_METHODS",
-                        detail,
-                    })?;
-            }
+            // The connections' fingerprints were recorded before the
+            // program loaded (above, §3.5).
             let ceremonies: Arc<dyn ordo_identity::CeremonyStore> = Arc::new(
                 crate::ceremonies::PgCeremonyStore::open_on(store_pool.clone())
                     .map_err(|e| BootRefusal::Database(e.to_string()))?,
@@ -5020,6 +5056,23 @@ async fn assemble_program(
             },
         )
     };
+    // External entities (slice C, `external-entities`): a timer re-reads the
+    // tables the served program declares, and while one is down every op
+    // that reads it answers `external_changed`. The boot read refuses a bad
+    // interval by name.
+    let external_every = crate::external_check::watch_interval_from_env().map_err(|detail| {
+        BootRefusal::Invalid {
+            var: crate::external_check::WATCH_ENV,
+            detail,
+        }
+    })?;
+    let external_gate = {
+        let deployment = deployment.clone();
+        crate::external_check::ExternalGate::new(Arc::new(move || {
+            deployment.current().fixture.clone()
+        }))
+    };
+    crate::external_check::spawn_watch(external_gate.clone(), pool.clone(), external_every);
     let api = ApiState {
         registry: deployment.handle(),
         // Metered outside, platform ops inside, so a platform op's duration
@@ -5027,21 +5080,24 @@ async fn assemble_program(
         // platform executor answers `std.space.*` before the meter is
         // reached, and those ops would never appear in the histograms.
         executor: Arc::new(crate::metrics::MeteredExecutor::new(
-            Arc::new(crate::platform_ops::PlatformExecutor::new(
-                Arc::new(crate::FixtureExecutor {
-                    spaces: spaces.clone(),
-                    // The `Pg` handle `FixtureExecutor` still carries. It is
-                    // used by nothing on the dispatch path — see the note on
-                    // the field — and the door's access question goes
-                    // through `SwappableAccess`, never through
-                    // `MemberAccess`.
-                    pg: ordo_conformance::Pg {
-                        db: pg.db.clone(),
-                        ..ordo_conformance::Pg::default()
-                    },
-                    page_size: 50,
-                }),
-                platform_ops,
+            Arc::new(crate::external_check::ExternalGated::new(
+                Arc::new(crate::platform_ops::PlatformExecutor::new(
+                    Arc::new(crate::FixtureExecutor {
+                        spaces: spaces.clone(),
+                        // The `Pg` handle `FixtureExecutor` still carries. It is
+                        // used by nothing on the dispatch path — see the note on
+                        // the field — and the door's access question goes
+                        // through `SwappableAccess`, never through
+                        // `MemberAccess`.
+                        pg: ordo_conformance::Pg {
+                            db: pg.db.clone(),
+                            ..ordo_conformance::Pg::default()
+                        },
+                        page_size: 50,
+                    }),
+                    platform_ops,
+                )),
+                external_gate,
             )),
             metrics.clone(),
         )),
@@ -6240,6 +6296,43 @@ async fn rebuild_access(
 /// 6  close the pool            drop; every socket closes
 /// 7  exit 0 — or 1 if step 2 hit its bound
 /// ```
+/// Rebuild every served version's peer map each [`ordo_exec::peer::REFRESH`].
+/// A name conflict found here drops that connection and is logged; nothing
+/// stops serving.
+async fn refresh_peer_links(deployment: Arc<Deployment>, pool: ordo_exec::Pool) {
+    let mut last: std::collections::BTreeMap<String, ordo_exec::peer::PeerLinks> =
+        std::collections::BTreeMap::new();
+    let mut every = tokio::time::interval(ordo_exec::peer::REFRESH);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    every.tick().await;
+    loop {
+        every.tick().await;
+        let mut loaded = vec![deployment.current()];
+        loaded.extend(deployment.others());
+        let mut seen = std::collections::BTreeSet::new();
+        for l in loaded {
+            if l.fixture.schema.peers.is_empty() || !seen.insert(l.version.clone()) {
+                continue;
+            }
+            match deploy::link_peers(&pool, &l.fixture, ordo_exec::peer::Pass::Refresh).await {
+                Ok(all) => {
+                    for links in all {
+                        if last.get(&links.schema) != Some(&links) {
+                            for line in links.start_lines() {
+                                println!("  {line}");
+                            }
+                            last.insert(links.schema.clone(), links);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  peer        the map was not rebuilt ({e}); the last one stands")
+                }
+            }
+        }
+    }
+}
+
 pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
     // 14 — the supervisor, BEFORE the door. A write that lands before
     // `drain_listener` has a cursor is a write whose events are read from
@@ -6299,6 +6392,16 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
             println!("  boot        {}", booted.detail());
             crate::boot_record::install(booted, &recorder);
         });
+    }
+
+    // Peers: the map of shared sign-in providers is read again every
+    // minute (owner ruling 2026-11-18), so a connection added to a peer is
+    // matched without a restart. Lines are printed only when what a peer
+    // reports changes, so a person who matches two accounts is one line.
+    {
+        let deployment = rt.deployment.clone();
+        let pool = rt.pool.clone();
+        tokio::spawn(refresh_peer_links(deployment, pool));
     }
 
     // `ordo ... --direct` uses since the last boot (`crate::direct_uses`):

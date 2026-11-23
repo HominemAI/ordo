@@ -41,6 +41,7 @@ pub mod dev;
 pub mod dev_db;
 pub mod direct;
 pub mod identity;
+pub mod introspect;
 pub mod keys;
 pub mod migrate;
 pub mod operator;
@@ -229,6 +230,17 @@ pub fn uncompiled_ops(src: &Sources) -> Result<Vec<(String, String)>, String> {
 /// `money(0)`, whole units, so a program written before places existed
 /// keeps its meaning, and new code is asked to state its places (ruled
 /// 2026-10-05, `money-types` ask 1).
+/// The notes `ordo plan` prints beside the artifact, one line each. Today:
+/// an external entity with no `access read`, which every member of every
+/// space reads whole (ruled 2026-11-15, `external-entities`). The same lines
+/// open the `EXTERNAL` section of `ordo plan --against`.
+pub fn plan_notes(src: &Sources) -> Vec<String> {
+    match load_sources(src) {
+        Ok((schema, _)) => migrate::external_notes(&schema),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub fn check_warnings(src: &Sources) -> Vec<String> {
     let mut out: Vec<String> = ordo_syntax::bare_money_sites(src.text())
         .into_iter()

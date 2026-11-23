@@ -1,0 +1,1647 @@
+{
+  "digest": "893323dbcf89c4e1",
+  "domain": "noteviewer",
+  "entities": [
+    {
+      "acl_levels": null,
+      "checks": [],
+      "entity": "published",
+      "external": true,
+      "fields": [
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "title",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "body",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "tags",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "json",
+          "unique": false
+        },
+        {
+          "align": "tabular",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "created",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "datetime",
+          "unique": false
+        }
+      ],
+      "guarded": false,
+      "key": "publ",
+      "referenced_by": [],
+      "tree": false,
+      "unique_keys": []
+    },
+    {
+      "acl_levels": null,
+      "checks": [],
+      "entity": "entries",
+      "external": true,
+      "fields": [
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "title",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "body",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "tags",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "json",
+          "unique": false
+        },
+        {
+          "align": "tabular",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "created",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "datetime",
+          "unique": false
+        }
+      ],
+      "guarded": true,
+      "key": "entr",
+      "referenced_by": [
+        {
+          "entity": "entryAccess",
+          "field": "entry",
+          "owned": false
+        }
+      ],
+      "tree": false,
+      "unique_keys": []
+    },
+    {
+      "acl_levels": null,
+      "checks": [],
+      "entity": "entryAccess",
+      "external": true,
+      "fields": [
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "entry",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": "entries",
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "id",
+          "unique": false
+        },
+        {
+          "align": "left",
+          "default": null,
+          "enum_values": null,
+          "indexed": false,
+          "name": "member",
+          "normalize": null,
+          "optional": false,
+          "owned": false,
+          "places": null,
+          "ref": null,
+          "refinable": true,
+          "sealed": false,
+          "text_max": null,
+          "tree": false,
+          "type": "text",
+          "unique": false
+        }
+      ],
+      "guarded": true,
+      "key": "entr-acce",
+      "referenced_by": [],
+      "tree": false,
+      "unique_keys": []
+    }
+  ],
+  "id_types": [
+    {
+      "actions": [],
+      "detail": [
+        {
+          "kind": "read",
+          "mode": null,
+          "op": "std.entries.get",
+          "param": "id",
+          "required": true
+        }
+      ],
+      "entity": "entries",
+      "get": [
+        {
+          "op": "std.entries.get",
+          "param": "id",
+          "single_row": false
+        }
+      ],
+      "key": "entr",
+      "list": [
+        {
+          "op": "myNotes",
+          "param": null,
+          "single_row": false
+        },
+        {
+          "op": "std.entries.list",
+          "param": null,
+          "single_row": false
+        }
+      ]
+    },
+    {
+      "actions": [],
+      "detail": [
+        {
+          "kind": "read",
+          "mode": null,
+          "op": "std.entryAccess.get",
+          "param": "id",
+          "required": true
+        }
+      ],
+      "entity": "entryAccess",
+      "get": [
+        {
+          "op": "std.entryAccess.get",
+          "param": "id",
+          "single_row": false
+        }
+      ],
+      "key": "entr-acce",
+      "list": [
+        {
+          "op": "std.entryAccess.list",
+          "param": null,
+          "single_row": false
+        }
+      ]
+    },
+    {
+      "actions": [],
+      "detail": [
+        {
+          "kind": "read",
+          "mode": null,
+          "op": "std.published.get",
+          "param": "id",
+          "required": true
+        }
+      ],
+      "entity": "published",
+      "get": [
+        {
+          "op": "std.published.get",
+          "param": "id",
+          "single_row": false
+        }
+      ],
+      "key": "publ",
+      "list": [
+        {
+          "op": "publicNotes",
+          "param": null,
+          "single_row": false
+        },
+        {
+          "op": "std.published.list",
+          "param": null,
+          "single_row": false
+        }
+      ]
+    }
+  ],
+  "ops": [
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 100"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entries",
+            "read": "entryAccess(member == $caller)",
+            "source": "own",
+            "write": "entryAccess(member == $caller)"
+          },
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "myNotes",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": true,
+              "path": "created"
+            },
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "entries",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "tags",
+            "places": null,
+            "refinable": false,
+            "sealed": false,
+            "type": "json"
+          },
+          {
+            "align": "tabular",
+            "id_entity": null,
+            "name": "created",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "datetime"
+          }
+        ],
+        "row_identity": {
+          "entity": "entries",
+          "key": "entr"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "e378212ae36588dd"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": false,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 100"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "publicNotes",
+      "params": [],
+      "platform": false,
+      "public": true,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "tier": "none"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "method_mismatch",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": true,
+              "path": "created"
+            },
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "published",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "tabular",
+            "id_entity": null,
+            "name": "created",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "datetime"
+          }
+        ],
+        "row_identity": {
+          "entity": "published",
+          "key": "publ"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "256df79f92babaee"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": false,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entries",
+            "read": "entryAccess(member == $caller)",
+            "source": "own",
+            "write": "entryAccess(member == $caller)"
+          },
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.entries.count",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": false
+        },
+        "outputs": [
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "n",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          }
+        ],
+        "row_identity": null,
+        "shape": "rows",
+        "single_row": true,
+        "sync": {
+          "reason": "measure",
+          "syncable": false
+        },
+        "synthetic_rows": true
+      },
+      "statements": [],
+      "version": "60b61aef3a569c45"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entries",
+            "read": "entryAccess(member == $caller)",
+            "source": "own",
+            "write": "entryAccess(member == $caller)"
+          },
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.entries.get",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "entries",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_param",
+        "invalid_refinement",
+        "method_mismatch",
+        "missing_param",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "entries",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "tags",
+            "places": null,
+            "refinable": false,
+            "sealed": false,
+            "type": "json"
+          },
+          {
+            "align": "tabular",
+            "id_entity": null,
+            "name": "created",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "datetime"
+          }
+        ],
+        "row_identity": {
+          "entity": "entries",
+          "key": "entr"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "714f491b9f4b9489"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "unbounded (pageable)"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entries",
+            "read": "entryAccess(member == $caller)",
+            "source": "own",
+            "write": "entryAccess(member == $caller)"
+          },
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.entries.list",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": true,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "entries",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "tags",
+            "places": null,
+            "refinable": false,
+            "sealed": false,
+            "type": "json"
+          },
+          {
+            "align": "tabular",
+            "id_entity": null,
+            "name": "created",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "datetime"
+          }
+        ],
+        "row_identity": {
+          "entity": "entries",
+          "key": "entr"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "97a25094f8eceb99"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": false,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.entryAccess.count",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "entry",
+          "member"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": false
+        },
+        "outputs": [
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "n",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          }
+        ],
+        "row_identity": null,
+        "shape": "rows",
+        "single_row": true,
+        "sync": {
+          "reason": "measure",
+          "syncable": false
+        },
+        "synthetic_rows": true
+      },
+      "statements": [],
+      "version": "a985027120d1e5d1"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.entryAccess.get",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "entryAccess",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "entry",
+          "member"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_param",
+        "invalid_refinement",
+        "method_mismatch",
+        "missing_param",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "entryAccess",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": "entries",
+            "name": "entry",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "member",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          }
+        ],
+        "row_identity": {
+          "entity": "entryAccess",
+          "key": "entr-acce"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "42c7aea4752c5cda"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "unbounded (pageable)"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [
+          {
+            "entity": "entryAccess",
+            "read": "member == $caller",
+            "source": "own",
+            "write": "member == $caller"
+          }
+        ],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.entryAccess.list",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "entry",
+          "member"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": true,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "entryAccess",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": "entries",
+            "name": "entry",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "member",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          }
+        ],
+        "row_identity": {
+          "entity": "entryAccess",
+          "key": "entr-acce"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "596685d72c11472f"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": false,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.published.count",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": false
+        },
+        "outputs": [
+          {
+            "align": "right",
+            "id_entity": null,
+            "name": "n",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "int"
+          }
+        ],
+        "row_identity": null,
+        "shape": "rows",
+        "single_row": true,
+        "sync": {
+          "reason": "measure",
+          "syncable": false
+        },
+        "synthetic_rows": true
+      },
+      "statements": [],
+      "version": "a93d543d26868491"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "<= 1"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.published.get",
+      "params": [
+        {
+          "enum_values": null,
+          "field_ref": null,
+          "filled": false,
+          "id_entity": "published",
+          "max": null,
+          "min": null,
+          "name": "id",
+          "places": null,
+          "required": true,
+          "type": "id"
+        }
+      ],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_param",
+        "invalid_refinement",
+        "method_mismatch",
+        "missing_param",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": false,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "published",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "tags",
+            "places": null,
+            "refinable": false,
+            "sealed": false,
+            "type": "json"
+          },
+          {
+            "align": "tabular",
+            "id_entity": null,
+            "name": "created",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "datetime"
+          }
+        ],
+        "row_identity": {
+          "entity": "published",
+          "key": "publ"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "66d5c19055269e1f"
+    },
+    {
+      "call": {
+        "cas": false,
+        "live": true,
+        "method": "GET",
+        "paged": true,
+        "refinable": true,
+        "terminal": [
+          "fetch",
+          "live",
+          "pages"
+        ]
+      },
+      "cost": {
+        "class": "sql",
+        "rows": "unbounded (pageable)"
+      },
+      "disclosures": {
+        "bypassed_guards": [],
+        "guards": [],
+        "key_release": null,
+        "unbounded": false,
+        "unguarded": false
+      },
+      "error": null,
+      "kind": "read",
+      "mode": null,
+      "op": "std.published.list",
+      "params": [],
+      "platform": false,
+      "refine": {
+        "fields": [
+          "id",
+          "title",
+          "body",
+          "created"
+        ],
+        "limits": {
+          "conditions": 16,
+          "in_values": 200
+        },
+        "tier": "basic"
+      },
+      "refusals": [
+        "access_denied",
+        "invalid_cursor",
+        "invalid_refinement",
+        "method_mismatch",
+        "refinement_unbounded",
+        "unknown_param",
+        "version_skew"
+      ],
+      "result": {
+        "order": {
+          "keys": [
+            {
+              "desc": true,
+              "path": "id"
+            }
+          ],
+          "stated": true
+        },
+        "outputs": [
+          {
+            "align": "left",
+            "id_entity": "published",
+            "name": "id",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "id"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "title",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "body",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "text"
+          },
+          {
+            "align": "left",
+            "id_entity": null,
+            "name": "tags",
+            "places": null,
+            "refinable": false,
+            "sealed": false,
+            "type": "json"
+          },
+          {
+            "align": "tabular",
+            "id_entity": null,
+            "name": "created",
+            "places": null,
+            "refinable": true,
+            "sealed": false,
+            "type": "datetime"
+          }
+        ],
+        "row_identity": {
+          "entity": "published",
+          "key": "publ"
+        },
+        "shape": "rows",
+        "single_row": false,
+        "sync": {
+          "id": "id",
+          "syncable": true
+        },
+        "synthetic_rows": false
+      },
+      "statements": [],
+      "version": "67d17e55f822abea"
+    }
+  ],
+  "schema_version": "ordo.interface/2"
+}

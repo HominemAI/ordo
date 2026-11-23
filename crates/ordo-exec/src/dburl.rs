@@ -70,6 +70,10 @@ pub fn parse_database_url(url: &str, size: usize) -> Result<PoolConfig, Database
             .map(|p| String::from_utf8_lossy(p).into_owned()),
         size,
         acquire_timeout: Duration::from_secs(2),
+        // A connection string names a database of a service's own (the
+        // console's, the identity service's), not a deployment's, so the
+        // deployment's schema setting does not reach it.
+        schema: crate::DEFAULT_SCHEMA.to_string(),
     })
 }
 

@@ -79,6 +79,43 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `function` is contextual the same way: a declaration head
             // only here, so a field or an expression function keeps it.
             TokenKind::Ident(w) if w == "function" => prog.functions.push(function_decl(&mut p)?),
+            // `external` is contextual the same way (ruled 2026-11-15,
+            // `external-entities`): a declaration head only here.
+            TokenKind::Ident(w) if w == "external" => prog.externals.push(external_decl(&mut p)?),
+            // `peer` is contextual the same way (owner, 2026-11-17,
+            // `example-apps-notes-v2-plus-note_viewer` ask 5).
+            TokenKind::Ident(w) if w == "peer" => {
+                let peer = peer_decl(&mut p)?;
+                if prog.peers.iter().any(|q| q.name.name == peer.name.name) {
+                    return Err(p.err_class_at(
+                        parser::PEER_NAME,
+                        peer.span,
+                        format!(
+                            "`peer {}` is declared twice. Keep one line; every external \
+                             `from {}.<table>` uses it",
+                            peer.name.name, peer.name.name
+                        ),
+                    ));
+                }
+                prog.peers.push(peer);
+            }
+            // `reader` is contextual the same way (owner, 2026-11-18,
+            // `example-apps-notes-v2-plus-note_viewer` ask 17).
+            TokenKind::Ident(w) if w == "reader" => {
+                let reader = reader_decl(&mut p)?;
+                if prog.readers.iter().any(|q| q.name.name == reader.name.name) {
+                    return Err(p.err_class_at(
+                        parser::READER_LINE,
+                        reader.span,
+                        format!(
+                            "`reader {}` is declared twice. Keep one line and list every \
+                             table it reads there",
+                            reader.name.name
+                        ),
+                    ));
+                }
+                prog.readers.push(reader);
+            }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -99,8 +136,8 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                 // stops being a keyword must not silently stop being refused.
                 reject_unbuilt(&p, &w, span)?;
                 return Err(p.err_here(format!(
-                    "expected a declaration (`domain`, `entity`, `op`, `release`, `secret`), \
-                     found `{w}`"
+                    "expected a declaration (`domain`, `entity`, `external`, `op`, `release`, \
+                     `secret`), found `{w}`"
                 )));
             }
             // **Every reserved-and-unbuilt declaration arrives here**, not in
@@ -1228,6 +1265,590 @@ fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
         public,
         span: start.to(end),
     })
+}
+
+// ── external entities ────────────────────────────────────────────────────
+
+/// `<-`, read as the two tokens the lexer makes of it, written with no space
+/// between them. Read only inside an external's body, so a comparison against
+/// a negative number (`a < -1`) never reaches here.
+fn eat_from_arrow(p: &mut Parser) -> bool {
+    if let (TokenKind::Lt, TokenKind::Minus) = (p.peek(), p.peek_at(1)) {
+        let lt = p.tok().span;
+        let m = p.mark();
+        p.bump();
+        if p.tok().span.start == lt.end {
+            p.bump();
+            return true;
+        }
+        p.reset(m);
+    }
+    false
+}
+
+fn expect_from_arrow(p: &mut Parser, field: &str) -> Result<(), ParseError> {
+    if eat_from_arrow(p) {
+        return Ok(());
+    }
+    Err(p.err_here(format!(
+        "expected `<-` and the foreign column `{field}` reads, found {}",
+        describe(p.peek())
+    )))
+}
+
+/// A name in the other system's spelling: a schema, a table or a column.
+///
+/// Bare when it is a legal Ordo name (`crm`, `customers`, `email`), and in
+/// quotes when it is not: `"customer_id"`. Another system names its columns
+/// as it likes, most often with underscores, which the lexer refuses in a
+/// bare word. The quotes are the one spelling for every such name, so the
+/// translation never has to rename the table to fit Ordo's rules.
+fn foreign_name(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+    if let TokenKind::Str(name) = p.peek().clone() {
+        let t = p.bump();
+        if name.is_empty() {
+            return Err(p.err_at(t.span, format!("{what} is an empty name")));
+        }
+        return Ok(Ident { name, span: t.span });
+    }
+    segment(p, what)
+}
+
+/// A foreign name as source would write it: bare when the lexer takes it,
+/// quoted otherwise. For messages that show the line to write.
+fn spell_foreign(name: &str) -> String {
+    let bare = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_alphanumeric());
+    if bare {
+        name.to_string()
+    } else {
+        format!("\"{name}\"")
+    }
+}
+
+/// `peer <name>` (owner, 2026-11-17, `example-apps-notes-v2-plus-note_viewer`
+/// asks 5 and 10): a local nickname for another Ordo deployment.
+///
+/// The name is lowercase letters and digits, so the setting that names the
+/// peer's schema, `ORDO_PEER_<NAME>_SCHEMA`, is the name upper-cased with no
+/// two names sharing one variable.
+fn peer_decl(p: &mut Parser) -> Result<PeerDecl, ParseError> {
+    let start = p.bump().span; // `peer`
+    let name = ident(p, "a peer name")?;
+    let span = start.to(name.span);
+    let ok = name
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if !ok {
+        return Err(p.err_class_at(
+            parser::PEER_NAME,
+            name.span,
+            format!(
+                "`peer {}`: a peer name is lowercase letters and digits, starting with a \
+                 letter, such as `peer journal`. It is upper-cased into the setting \
+                 `ORDO_PEER_<NAME>_SCHEMA`, so two names must never meet there",
+                name.name
+            ),
+        ));
+    }
+    if !matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+        return Err(p.err_here(format!(
+            "`peer {}` is the whole line. The peer's schema is set by \
+             `ORDO_PEER_{}_SCHEMA`, never in the file",
+            name.name,
+            name.name.to_ascii_uppercase()
+        )));
+    }
+    Ok(PeerDecl { name, span })
+}
+
+/// `reader <name> reads <table>, <table>` (owner, 2026-11-18,
+/// `example-apps-notes-v2-plus-note_viewer` ask 17): another deployment that
+/// may read these tables of this one.
+///
+/// The name is lowercase letters, digits and underscores, starting with a
+/// letter, so the setting `ORDO_READER_<NAME>_ROLE` is the name upper-cased
+/// with no two names sharing one variable. The list is the whole rest of
+/// the line.
+fn reader_decl(p: &mut Parser) -> Result<ReaderDecl, ParseError> {
+    let start = p.bump().span; // `reader`
+    let name = ident(p, "a reader name")?;
+    let ok = name
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(p.err_class_at(
+            parser::READER_LINE,
+            name.span,
+            format!(
+                "`reader {}`: a reader name is lowercase letters, digits and underscores, \
+                 starting with a letter, such as `reader note_viewer`. It is upper-cased \
+                 into the setting `ORDO_READER_<NAME>_ROLE`",
+                name.name
+            ),
+        ));
+    }
+    let shape =
+        |n: &str| format!("write the tables after `reads`: `reader {n} reads notes, notesAccess`");
+    match p.peek().clone() {
+        TokenKind::Ident(w) if w == "reads" => {
+            p.bump();
+        }
+        TokenKind::Newline | TokenKind::Eof => {
+            return Err(p.err_class_at(
+                parser::READER_LINE,
+                start.to(name.span),
+                format!(
+                    "`reader {}` names no table; {}",
+                    name.name,
+                    shape(&name.name)
+                ),
+            ));
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "expected `reads` after `reader {}`, found {}; {}",
+                name.name,
+                describe(&other),
+                shape(&name.name)
+            )))
+        }
+    }
+    let mut tables: Vec<Ident> = Vec::new();
+    loop {
+        if matches!(p.peek(), TokenKind::Newline | TokenKind::Eof) {
+            return Err(p.err_class_at(
+                parser::READER_LINE,
+                start.to(name.span),
+                format!(
+                    "`reader {}` names no table; {}",
+                    name.name,
+                    shape(&name.name)
+                ),
+            ));
+        }
+        let t = ident(p, "a table name")?;
+        if tables.iter().any(|x| x.name == t.name) {
+            return Err(p.err_class_at(
+                parser::READER_LINE,
+                t.span,
+                format!(
+                    "`reader {}` names `{}` twice. Name each table once",
+                    name.name, t.name
+                ),
+            ));
+        }
+        tables.push(t);
+        match p.peek() {
+            TokenKind::Comma => {
+                p.bump();
+            }
+            TokenKind::Newline | TokenKind::Eof => break,
+            other => {
+                let other = other.clone();
+                return Err(p.err_here(format!(
+                    "expected `,` or the end of the line after a table of `reader {}`, \
+                     found {}. The role is set by `ORDO_READER_{}_ROLE`, never in the file",
+                    name.name,
+                    describe(&other),
+                    name.name.to_ascii_uppercase()
+                )));
+            }
+        }
+    }
+    let span = start.to(tables.last().map(|t| t.span).unwrap_or(name.span));
+    Ok(ReaderDecl { name, tables, span })
+}
+
+/// `external <name> [(key: k)] from <schema>.<table> shared { … }`
+/// (ruled 2026-11-15, `external-entities`).
+///
+/// A translation of a table another system owns, read inside Ordo's SQL as
+/// a subquery. The body maps fields to foreign columns and states their
+/// types, so the compiler needs no database:
+///
+/// ```text
+/// external customers from crm.customers shared {
+///   id <- "customer_id"
+///   name: text <- "full_name"
+///   email: text? <- email
+///   account -> accounts <- "account_id"
+///   access read open
+/// }
+/// ```
+///
+/// Everything an external cannot carry is refused here by name, with the
+/// fix: Ordo does not write the table, so no clause that describes a write,
+/// an owner or a constraint applies.
+fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
+    let start = p.bump().span; // `external`
+    let name = ident(p, "an external entity name")?;
+    let mut key = None;
+    if matches!(p.peek(), TokenKind::LParen) {
+        p.bump();
+        let kw = ident(p, "`key`")?;
+        if kw.name != "key" {
+            return Err(p.err_at(
+                kw.span,
+                "an external's parenthesis takes only `key: <prefix>`",
+            ));
+        }
+        p.expect(&TokenKind::Colon, "`:` after `key`")?;
+        key = Some(ident(p, "the id prefix")?);
+        p.expect(&TokenKind::RParen, "`)` closing the key")?;
+    }
+    match p.peek() {
+        TokenKind::Ident(w) if w == "from" => {
+            p.bump();
+        }
+        other => {
+            return Err(p.err_here(format!(
+                "expected `from <schema>.<table>` after `external {}`, found {}",
+                name.name,
+                describe(other)
+            )))
+        }
+    }
+    let schema = foreign_name(p, "the foreign table's schema")?;
+    if !matches!(p.peek(), TokenKind::Dot) {
+        return Err(p.err_here(format!(
+            "name the foreign table with its schema: `from {}.<table>`. Ordo's own tables \
+             are in `public`, so a foreign table takes a schema of its own",
+            schema.name
+        )));
+    }
+    p.bump();
+    let table = foreign_name(p, "the foreign table's name")?;
+    match p.peek() {
+        TokenKind::Ident(w) if w == "shared" => {
+            p.bump();
+        }
+        _ => {
+            return Err(p.err_class_here(
+                parser::EXTERNAL_NOT_SHARED,
+                format!(
+                    "`external {0}` must say who reads its rows: write `shared` after the \
+                     table, `external {0} from {1}.{2} shared {{ … }}`. Every space then reads \
+                     every row, and the access profile decides which tenants may call its ops",
+                    name.name,
+                    spell_foreign(&schema.name),
+                    spell_foreign(&table.name)
+                ),
+            ))
+        }
+    }
+    // `public` on a line of its own, as on an entity: a public op may serve
+    // the external's fields to a visitor with no token. `public*` has
+    // nothing to reach.
+    let mut public: Option<PublicMark> = None;
+    p.expect(&TokenKind::LBrace, "`{` to open the translation")?;
+
+    let mut key_line: Option<(Ident, ExternalKeyTy)> = None;
+    let mut fields: Vec<ExternalField> = Vec::new();
+    let mut access_read = None;
+    loop {
+        skip_newlines(p);
+        if matches!(p.peek(), TokenKind::RBrace) {
+            break;
+        }
+        if matches!(p.peek(), TokenKind::Eof) {
+            return Err(p.err_here("unterminated translation: expected `}`"));
+        }
+        let here = p.tok().span;
+        if p.eat_kw(Keyword::Access) {
+            let verb = ident(p, "`read`")?;
+            if verb.name == "write" {
+                return Err(p.err_class_at(
+                    parser::EXTERNAL_READ_ONLY,
+                    verb.span,
+                    format!(
+                        "`{}` is read-only: Ordo never writes a table another system owns, so \
+                         it takes no `access write`. Remove the line; writes go through that \
+                         system's own API",
+                        name.name
+                    ),
+                ));
+            }
+            if verb.name != "read" {
+                return Err(p.err_at(
+                    verb.span,
+                    format!(
+                        "`access {}` is not a clause: an external takes `access read`",
+                        verb.name
+                    ),
+                ));
+            }
+            let clause = guard_clause(p)?;
+            if access_read.replace(clause).is_some() {
+                return Err(p.err_at(verb.span, "duplicate `access read`"));
+            }
+            continue;
+        }
+        if p.eat_kw(Keyword::Acl) {
+            return Err(p.err_class_at(
+                parser::EXTERNAL_ACL,
+                here,
+                format!(
+                    "`{}` cannot take `acl`: grant rows would point at rows Ordo does not hold. \
+                     Guard it with `access read <walk>` over its own fields and `$caller`",
+                    name.name
+                ),
+            ));
+        }
+        if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+            let t = p.bump();
+            if matches!(p.peek(), TokenKind::Star) && !p.at_line_break() {
+                let star = p.bump();
+                return Err(public_star_refusal(p, &name.name, t.span.to(star.span)));
+            }
+            if public.is_some() {
+                return Err(p.err_at(t.span, "duplicate `public` line"));
+            }
+            public = Some(PublicMark {
+                cascade: false,
+                span: t.span,
+            });
+            continue;
+        }
+        let unsupported = match p.peek() {
+            TokenKind::Keyword(Keyword::Unique) => Some("unique"),
+            TokenKind::Keyword(Keyword::Index) => Some("index"),
+            TokenKind::Keyword(Keyword::Check) => Some("check"),
+            TokenKind::Ident(w)
+                if w == "std" && matches!(p.peek_at(1), TokenKind::Keyword(Keyword::Sealed)) =>
+            {
+                Some("std sealed")
+            }
+            _ => None,
+        };
+        if let Some(word) = unsupported {
+            return Err(p.err_class_at(
+                parser::EXTERNAL_UNSUPPORTED,
+                here,
+                format!(
+                    "`{}` cannot take `{word}`: the other system owns the table, its keys, \
+                     indexes and checks. Remove the line",
+                    name.name
+                ),
+            ));
+        }
+
+        let field = segment(p, "a field name or `id`")?;
+        if field.name == "id" {
+            if key_line.is_some() {
+                return Err(p.err_at(field.span, "duplicate `id` line"));
+            }
+            let ty = if matches!(p.peek(), TokenKind::Colon) {
+                p.bump();
+                let t = ident(p, "the key's type: `int`, `text` or `uuid`")?;
+                match t.name.as_str() {
+                    "int" => ExternalKeyTy::Int,
+                    "text" => ExternalKeyTy::Text,
+                    "uuid" => ExternalKeyTy::Uuid,
+                    other => {
+                        return Err(p.err_at(
+                            t.span,
+                            format!("an external key is `int`, `text` or `uuid`, not `{other}`"),
+                        ))
+                    }
+                }
+            } else {
+                ExternalKeyTy::Int
+            };
+            if matches!(p.peek(), TokenKind::Keyword(Keyword::Public)) {
+                return Err(p.err_class_here(
+                    parser::EXTERNAL_UNSUPPORTED,
+                    format!(
+                        "`{}.id` cannot be `public`: the key is never a public field, it \
+                         rides with every public row. Mark the other fields `public`",
+                        name.name
+                    ),
+                ));
+            }
+            expect_from_arrow(p, "id")?;
+            let col = foreign_name(p, "the key column")?;
+            if matches!(p.peek(), TokenKind::Comma) {
+                return Err(p.err_class_here(
+                    parser::EXTERNAL_COMPOSITE_KEY,
+                    format!(
+                        "`{}` names more than one key column. An external's id is one column \
+                         that is unique and never null: pick one, `id <- {}`",
+                        name.name,
+                        spell_foreign(&col.name)
+                    ),
+                ));
+            }
+            key_line = Some((col, ty));
+            continue;
+        }
+
+        let (kind, mut optional) = if matches!(p.peek(), TokenKind::Arrow) {
+            p.bump();
+            let target = ident(p, "the referenced entity")?;
+            let opt = eat_question(p);
+            (
+                FieldKind::Ref {
+                    target,
+                    owned: false,
+                    tree: false,
+                },
+                opt,
+            )
+        } else {
+            p.expect(&TokenKind::Colon, "`:` and the field's type")?;
+            let (ty, _max) = scalar_ty(p)?;
+            if ty == ScalarTy::Blob {
+                return Err(p.err_class_at(
+                    parser::EXTERNAL_UNSUPPORTED,
+                    field.span,
+                    format!(
+                        "`{}.{}` cannot be a `blob`: a blob is a handle into Ordo's own store. \
+                         Map the column as `text` or `uri`",
+                        name.name, field.name
+                    ),
+                ));
+            }
+            (FieldKind::Scalar(ty), eat_question(p))
+        };
+        // The modifiers an ordinary field takes, each refused by name.
+        let mut field_public = false;
+        loop {
+            let t = p.tok().span;
+            match p.peek().clone() {
+                TokenKind::Question => {
+                    p.bump();
+                    optional = true;
+                }
+                TokenKind::Keyword(Keyword::Owned) => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_OWNED,
+                        t,
+                        format!(
+                            "`{}.{}` cannot be `owned`: ownership deletes and guards rows \
+                             together, and Ordo holds neither side here. Drop `owned`",
+                            name.name, field.name
+                        ),
+                    ));
+                }
+                TokenKind::Keyword(Keyword::Sealed) | TokenKind::Keyword(Keyword::Indexed) => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_SEALED,
+                        t,
+                        format!(
+                            "`{}.{}` cannot be `sealed`: Ordo seals on its own write path, and \
+                             the other system writes this column in plaintext. Drop the word",
+                            name.name, field.name
+                        ),
+                    ));
+                }
+                TokenKind::Keyword(
+                    k @ (Keyword::Unique | Keyword::Index | Keyword::Tree | Keyword::Normalize),
+                ) => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_UNSUPPORTED,
+                        t,
+                        format!(
+                            "`{}.{}` cannot take `{}`: the other system owns the column. \
+                             Drop the word",
+                            name.name,
+                            field.name,
+                            k.as_str()
+                        ),
+                    ));
+                }
+                TokenKind::Keyword(Keyword::Public) => {
+                    p.bump();
+                    if matches!(p.peek(), TokenKind::Star) && !p.at_line_break() {
+                        let star = p.bump();
+                        return Err(public_star_refusal(p, &name.name, t.to(star.span)));
+                    }
+                    field_public = true;
+                }
+                TokenKind::Ident(w) if w == "prev" => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_UNSUPPORTED,
+                        t,
+                        format!(
+                            "`{}.{}`: `prev` is not a clause an external takes: a translation is \
+                             re-imported on every apply. Remove `prev`; to follow a renamed \
+                             column, change the name after `<-`",
+                            name.name, field.name
+                        ),
+                    ));
+                }
+                TokenKind::Eq => {
+                    return Err(p.err_class_at(
+                        parser::EXTERNAL_UNSUPPORTED,
+                        t,
+                        format!(
+                            "`{}.{}` cannot take a default: Ordo never writes the row. \
+                             Drop `= …`",
+                            name.name, field.name
+                        ),
+                    ));
+                }
+                _ => break,
+            }
+        }
+        expect_from_arrow(p, &field.name)?;
+        let column = foreign_name(p, "the foreign column")?;
+        fields.push(ExternalField {
+            name: field,
+            kind,
+            optional,
+            column,
+            public: field_public,
+        });
+    }
+    let end = p.bump().span; // `}`
+    let Some((key_column, key_ty)) = key_line else {
+        return Err(p.err_at(
+            start.to(end),
+            format!(
+                "`{}` names no key: write `id <- <column>`, a column that is unique and never \
+                 null",
+                name.name
+            ),
+        ));
+    };
+    Ok(ExternalDecl {
+        name,
+        key,
+        schema,
+        table,
+        shared: true,
+        public,
+        key_column,
+        key_ty,
+        fields,
+        access_read,
+        span: start.to(end),
+    })
+}
+
+/// `public*` on an external: the star reaches the entities an entity owns,
+/// and an external owns nothing (ruled 2026-11-15, `external-entities`).
+fn public_star_refusal(p: &Parser, name: &str, span: Span) -> ParseError {
+    p.err_class_at(
+        parser::EXTERNAL_UNSUPPORTED,
+        span,
+        format!(
+            "`{name}` cannot take `public*`: an external owns nothing, so the star reaches \
+             nothing. Write `public`"
+        ),
+    )
 }
 
 /// The parenthesised column list shared by `unique (a, b)` and

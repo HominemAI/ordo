@@ -83,6 +83,24 @@ pub async fn add(
     })
 }
 
+/// Give or take the service's own access from an account, inside `tx`
+/// ([`crate::deployments`]). A person who joined by an invite into a
+/// registered deployment has none.
+pub async fn set_home(
+    tx: &TxConn,
+    handle: &str,
+    id: &str,
+    home: bool,
+) -> Result<(), IdentityError> {
+    tx.rows(&format!(
+        "UPDATE people SET home = {home} WHERE {} AND id = {}",
+        dep(handle),
+        sql_lit(id)
+    ))
+    .await?;
+    Ok(())
+}
+
 /// One person, live or ended.
 pub async fn get(pool: &Pool, handle: &str, id: &str) -> Result<Option<Person>, IdentityError> {
     let rows = pool
@@ -143,21 +161,24 @@ pub async fn end(
     let tx = pool.begin().await?;
     // Every live admin row locked, so two admins ending each other at once
     // cannot leave none.
-    let live: Vec<String> = tx
+    let live: Vec<(String, bool)> = tx
         .rows(&format!(
-            "SELECT id FROM people WHERE {} AND ended_at IS NULL AND role = {} \
+            "SELECT id, home FROM people WHERE {} AND ended_at IS NULL AND role = {} \
              ORDER BY id FOR UPDATE",
             dep(handle),
             sql_lit(ROLE_ADMIN)
         ))
         .await?
         .iter()
-        .map(|r| text(r, 0))
+        .map(|r| (text(r, 0), text(r, 1) == "t"))
         .collect();
-    if !live.iter().any(|p| p == id) {
+    let Some((_, is_home)) = live.iter().find(|(p, _)| p == id) else {
         return Err(IdentityError::UnknownPerson);
-    }
-    if live.len() == 1 {
+    };
+    // The service's own admins are the people with home access: the last
+    // of them cannot be ended. A registered deployment's member is not
+    // counted here; `deployments::end_member` keeps its own last.
+    if *is_home && live.iter().filter(|(_, h)| *h).count() == 1 {
         return Err(IdentityError::LastAdmin);
     }
     let (d, p) = (dep(handle), sql_lit(id));

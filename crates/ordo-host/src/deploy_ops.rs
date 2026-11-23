@@ -146,6 +146,7 @@ pub fn specs() -> Vec<OpSpec> {
         params,
         output_fields: fields.iter().map(|f| FieldSpec::new(*f)).collect(),
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(if kind == OpKind::Read {
             NotSyncable::NoAnchor
         } else {

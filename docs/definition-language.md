@@ -2006,6 +2006,352 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `external`: a table another system owns [ruled 2026-11-15, built slices A, B and C]
+
+Another system can keep its own table in the database where Ordo's SQL runs:
+the deployment's database, or each tenant's database. An `external`
+declaration translates that table into an entity Ordo can read. The
+translation is a plain join inside Ordo's SQL. There is no door, no hop and
+no second connection.
+
+```
+external customers from crm.customers shared {
+  id <- "customer_id"
+  name: text <- "full_name"
+  email: text? <- email
+  account -> accounts? <- "account_id"
+  access read open
+}
+
+external accounts (key: acct) from crm.accounts shared {
+  public
+  id: uuid <- ref
+  label: text <- label
+}
+
+entity orders {
+  customer -> customers
+  total: int
+}
+```
+
+- `from crm.customers` names the foreign table with its schema. Ordo's own
+  tables are in `public`, so a foreign table takes a schema of its own.
+- `shared` is required. Every space reads every row, and the access profile
+  decides which tenants may call the ops. A tenant column comes later.
+  Without `access read`, every member of every space reads every row.
+  `shared` is that choice, written down. `ordo plan` says so for each such
+  external.
+- `public` on a line of its own works as on an entity (owner, 2026-11-15).
+  An authored `op ... public` may then serve the external's public fields.
+  `public` as a field mark (`name: text public <- "full_name"`) works as on a
+  native field. The key is never public, so the line needs one declared field
+  to reach (`public_no_field`). Derived `std.<name>.*` ops are never public.
+  The public path has no guard walk, so a guarded external cannot be public
+  (`public_guarded`). The public cache for an external's answers is not
+  invalidated by writes, since Ordo never writes the table, so the origin
+  holds an answer for `ORDO_PUBLIC_CDN_S_MAXAGE` seconds at most (default 60).
+  `ordo plan` says so for each public external.
+- `id <- column` names the one key column. It must be unique and never null.
+  The key is `int` unless the line says `id: text <- …` or `id: uuid <- …`.
+- Each other line is `field: type <- column`, or `field -> external <-
+  column` for a ref. Types are written out, so the compiler needs no
+  database. `?` admits null.
+- A foreign name that is not a legal Ordo name goes in quotes:
+  `"customer_id"`. Bare names work when they are lowerCamel.
+- `(key: acct)` sets the typed-id prefix, as on an entity. Otherwise it
+  derives from the name. Prefixes are one namespace with the entities.
+- `access read <walk>` is the one guard. It reads the row's own fields and
+  `$caller`.
+- `external` is contextual. A field can still be named `external`.
+- The schema can differ per environment (owner, 2026-11-17). The setting
+  `ORDO_EXTERNAL_<SCHEMA>_SCHEMA`, the schema as written and upper-cased,
+  swaps it: `ORDO_EXTERNAL_CRM_SCHEMA=crm_dev` reads `crm_dev.customers`
+  where the file says `crm.customers`. Unset, the schema is as written. A bad
+  value refuses the boot naming the variable. A schema written in quotes that
+  is not lowercase letters, digits and underscores (`"Legacy"`) has no
+  variable and is never swapped. A name that is also a `peer` is read by the
+  peer's own setting (below).
+
+How it reads:
+
+- Ids are prefixed text over the raw key: row `42` is `cust_42`. Every
+  equality, join, sort and cursor uses the raw key, so the foreign index
+  serves and `cust_10` pages after `cust_9`.
+- An id that is not this entity's (another prefix, a malformed key) matches
+  no row. It never raises a cast error.
+- The planner reads the table as a subquery, never a view. A view would let
+  Ordo block the other system's own `DROP COLUMN`.
+- Per tenant, the same SQL runs in whichever database the space maps to.
+- Derived ops are the reads: `std.<name>.get`, `std.<name>.list` and
+  `std.<name>.count`. There is no create, update or delete. Developer ops read
+  and join it like any entity.
+- A native ref to an external is a plain text column with no foreign key. A
+  row that is gone reads as missing: a hop through the ref is null, and the
+  ref's own row stays.
+- The descriptor marks the entity `external: true`. The SDK and the console
+  read the mark.
+- The DDL, the schema diff, the apply, dev reset, erase and export never see
+  an external. Removing one from the program plans no `DROP`.
+
+An external entity is **not** what an Ordo entity is:
+
+1. It is **not attested**. No chain, checkpoint or signed head covers its
+   rows, and a response's head says nothing about them.
+2. It is **not sealed and has no history**. Its columns are as plain as the
+   other system keeps them, and it cannot be undone or reverted.
+3. Its ids are **not permanent**. The other system can delete, reuse or
+   change a key, and a ref to it can dangle or come to name another row.
+4. It is **not live**. The other system's writes reach no Ordo log, so
+   `?live=1` on an op that reads one answers `not_live`, and a routine cannot
+   listen on it.
+5. Its shape is **not Ordo's promise**. When the other system changes the
+   table, ops that read it fail until the translation is updated and applied.
+
+Writes go through the other system's own API, for example from a backend
+function.
+
+**The generator** (slice B). `ordo introspect --external crm.customers` reads
+the live table and prints the block above, for a person to review.
+
+```
+ordo introspect --external <schema>.<table> [--name <entity>] [--key <column>] [--out <file>] [--db <database>]
+```
+
+- It never writes to the database. `--out` writes the block to a file.
+- The entity name is the table's name in lowerCamel. `--name` sets it.
+- The key is the primary key when it is one column. `--key` names another
+  column that is unique and never null, and wins over the primary key. A
+  composite primary key, or no key, is refused `external_no_key`, and the
+  message names `--key`.
+- Names that are not plain lowerCamel words are quoted: `"customer_id"`.
+- Types: `text`, `varchar` and `char` become `text`. `smallint`, `integer` and
+  `bigint` become `int`. `boolean` becomes `bool`. `timestamptz` becomes
+  `datetime`. `timestamp` also becomes `datetime`, with a note that the zone is
+  read as UTC. `numeric(p,s)` becomes `decimal(s)`, because an Ordo `money` is
+  whole minor units and a `numeric` column is not.
+- A column with no mapping is a comment naming the column and its Postgres
+  type, so the file still parses: `jsonb`, arrays, `bytea`, floats,
+  `interval`, enums, a `numeric` with no scale, and a `uuid` that is not the
+  key.
+- A table that is not there is refused `external_missing`.
+
+**The check at plan and apply** (slice C). Every plan and every apply compares
+each external's translation with the live table in the database the program
+applies to: the deployment's own, and each tenant's when the program is
+brought forward to it.
+
+| Found | Result |
+|---|---|
+| table or schema gone | refused `external_missing`, naming the table |
+| Ordo's role lacks `USAGE` on the schema or `SELECT` on the table | refused `external_no_grant`, naming the `GRANT` to run |
+| a mapped column gone, of another type, or nullable where the file says never | refused `external_changed`, naming each column and `ordo introspect --external` |
+| a column the translation does not read, added, changed or gone | taken, with a note |
+
+A first apply is refused too, so no schema is created for a program that
+reads a table that is not there. `ordo plan` prints the same refusals in its
+verdict. Nothing is changed in the other system's schema.
+
+**Present, not Ordo's** (27j). `ordo plan` and `std.deployment.plan` list the
+tables and schemas the database holds that are not Ordo's and not declared
+externals, under the `EXTERNAL` heading and as notes. Ordo's are the program's
+entities and the platform's `$` tables in `public`. The list is capped at 20
+lines. Nothing is changed.
+
+**The watcher** (slice C). The host re-reads the declared tables every
+`ORDO_EXTERNAL_WATCH_SECS` seconds (default 300, `docs/settings.md`). While a
+table is gone, a mapped column is gone or retyped, or the role lost `SELECT`,
+every op that reads that entity answers `external_changed` (HTTP 500) with the
+table, the column and the fix. An op that does not read it, and a write that
+only names a ref to it, keep answering. A read the generic bind cannot settle
+(one that reads `$caller` as a value) counts as reading it. The first pass
+that finds the table as the program says serves the entity again. The watcher
+reads the deployment's own database. A tenant's own database is checked when a
+program is applied to it.
+
+Refusals, each naming the fix:
+
+| Class | When |
+|---|---|
+| `external_not_shared` | the declaration has no `shared` |
+| `external_composite_key` | the `id` line names more than one column |
+| `external_read_only` | `access write` in the body, or a `set` or `del` on an external in an op or a routine |
+| `external_owned` | `owned` on an external's ref, or a native ref `owned` by an external |
+| `external_acl` | `acl (…)` on an external |
+| `external_sealed` | `sealed` or `indexed` on an external's field |
+| `external_inherited_guard` | an external would inherit a guard it does not declare |
+| `external_ref_to_native` | a ref from an external to an entity Ordo owns, `members` included |
+| `external_live` | a routine that listens for changes on an external |
+| `external_missing` | at plan, apply or a watcher pass: the table or its schema is not in the database |
+| `external_changed` | at plan, apply or a watcher pass: a mapped column is gone, retyped or nullable against the file |
+| `external_no_grant` | at plan, apply or a watcher pass: Ordo's role cannot read the table |
+| `external_no_key` | `ordo introspect --external`: no single-column unique, not null key |
+| `external_unsupported` | `unique`, `index`, `check`, `std sealed`, `tree`, `normalize`, `prev`, a default or a `blob` on an external; `public*` (an external owns nothing, write `public`); `public` on the `id` line; or `whole` anchored on one |
+
+### `peer`: another Ordo deployment's tables [ruled 2026-11-17, built]
+
+Two Ordo deployments can share one database, each in its own schema
+(`ORDO_PG_SCHEMA`). A `peer` line lets one read the other's tables.
+
+```
+peer journal
+
+external entries from journal.notes shared {
+  id: text <- "id"
+  title: text <- "title"
+  owner: text <- "owner"
+  access read owner == $caller
+}
+```
+
+- `peer journal` declares a local nickname for another Ordo deployment. It
+  does not name or change that deployment.
+- In `from journal.notes`, `journal` is the nickname and `notes` is the real
+  table in the peer. Without a `peer journal` line, `journal` is a plain
+  schema, as for any external.
+- The file never holds the peer's schema. The deployment owner sets
+  `ORDO_PEER_JOURNAL_SCHEMA`, the nickname upper-cased, to the schema the other
+  deployment's `ORDO_PG_SCHEMA` names (`public` when it sets none).
+- The boot is refused, naming the variable, when it is unset, is not a schema
+  name, names this deployment's own schema, or names a schema with no Ordo
+  deployment in it. `ordo plan` and the apply say the last as
+  `peer_not_ordo`.
+- A peer name is lowercase letters and digits, starting with a letter
+  (`peer_name`), so no two names share a variable. It is declared once, and a
+  `peer` line no external reads is refused (`peer_unused`).
+- Everything else is as for an external: read-only, `shared`, no DDL.
+
+**`$caller` on a peer's table** is the peer's member for the same person.
+The guard is written exactly as on a native entity.
+
+**The matching rule** (owner, 2026-11-18). Two sign-ins are the same person
+when the provider and the subject match. The provider is the fingerprint
+each deployment records for a connection in `$authconnection`: the issuer
+for OIDC, the three endpoints and the subject claim for OAuth2. The
+connection name plays no part. One deployment may call the provider
+`corp` and the other `identity`, and their people still match.
+
+1. The caller's member here gives their principal.
+2. The principal's sign-in links here (`$authenticator`) give its subjects.
+3. Each subject's connection is mapped to the peer's connections with the
+   same fingerprint. `oidc:corp:<sub>` here is `oidc:identity:<sub>` there.
+4. The peer's links with that subject give the peer's principal. A retired
+   link, or a deleted account, does not count.
+5. Exactly one such principal. A person whose sign-ins reach two or more
+   accounts in the peer matches nothing.
+6. That principal's active members in the peer, in any of its spaces.
+
+`field == $caller` holds when the field is one of those member ids, and
+`field != $caller` when it is not. A person with no member in the peer reads
+no guarded rows. It never errors and never falls back to the local member.
+The same holds for `$caller` in an op's filter on the peer's table. Any other
+comparison of such a field with `$caller` is refused (`peer_caller_compare`).
+On a plain external, `$caller` is the local member, as before.
+
+The map of shared providers is built when the deployment starts and read
+again every minute. A connection added to the peer is matched on the next
+read, with no restart. Until then it matches nothing. Ordo never falls back
+to matching by name.
+
+**What never matches.** These connections link nobody, and each start lists
+them with the reason:
+
+- A connection with no connection in the peer for the same provider.
+- A connection whose subject claim can change hands: `email`, `login`,
+  `username`, `name`, `preferred_username`, `global_name`. This holds even
+  when the deployment owner acknowledged the claim for sign-in. The GitHub
+  and Discord presets use the numeric `id` and do link.
+- A tenant's own sign-in providers (`$tenantconnection`).
+- SAML, a password name and a passkey. Each is local to one deployment.
+
+A person whose sign-ins reach more than one account in the peer reads
+nothing there. The deployment owner sees one log line naming them, and
+again only when that list changes.
+
+**Start refusals.** The deployment does not start when:
+
+- The peer has no `$authconnection` table: "Start journal first, then this
+  deployment." A deployment writes it when it starts with sign-in on.
+- `$caller` is used on a peer's table and the two deployments share no
+  provider. Give both a connection to the same provider, or remove `$caller`
+  from those guards and filters. Without `$caller` the start goes on and
+  lists the connections that do not match.
+- One connection name means one provider here and another in the peer. Give
+  one of the two connections a new name. Found on a later read, the
+  connection is dropped from the map and logged, and serving goes on.
+
+**Known gap.** A peer row matches the person's member in any of the peer's
+spaces. The reader's own space plays no part.
+
+The peer is in the same database. A deployment that keeps a tenant in a
+database of its own does not reach a peer from there.
+
+### `reader`: who may read this deployment's tables [ruled 2026-11-18, built]
+
+Peers read with their database role. Give each deployment its own role. The
+reader line and its grants decide which tables another deployment can read.
+Guards decide which rows that deployment's users see. The deployment itself
+can read every row of a table it is granted.
+
+The app being read writes one line per reader:
+
+```
+reader note_viewer reads notes, notesAccess
+```
+
+- `note_viewer` is a local nickname for the reader. It does not name or
+  change that deployment. It is lowercase letters, digits and underscores,
+  starting with a letter, and is declared once (`reader_line`).
+- The list is this program's own entities. A name that is not one, or that
+  is an external, is refused at check time naming it
+  (`reader_unknown_table`).
+- The file never holds the role. The deployment owner sets
+  `ORDO_READER_NOTE_VIEWER_ROLE`, the nickname upper-cased, to the role in
+  the reader's `ORDO_PG_USER`.
+
+**What is granted.** At every apply and every start, the grants that role
+holds in this deployment's schema are made equal to the line:
+
+- `USAGE` on the schema.
+- `SELECT` on each table named.
+- `SELECT` on the sign-in columns the reader's `$caller` guard reads, and
+  no other columns: `members` (`id`, `principal`, `kind`, `status`),
+  `$principal` (`id`, `deleted_at`), `$authenticator` (`authenticator`,
+  `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
+  `fingerprint`, `subject_claim`). Naming `members` on the line grants the
+  whole table.
+
+A table taken off the line is revoked at the next apply or start. So is
+everything, when the whole line is removed: `$readergrant` remembers which
+roles were granted. A table a migration creates is granted by the same
+apply. Nothing is sent when the grants already match.
+
+**Refusals in the app being read.** The start, and the apply, are refused
+when:
+
+- `ORDO_READER_<NAME>_ROLE` is unset, or names a role the database server
+  does not have.
+- It names this deployment's own role, or a role that is a member of it.
+  Grants then decide nothing. For local work, `ORDO_PEER_SHARED_ROLE=on`
+  allows it and makes no grants.
+- The grants do not take: this deployment's role must own its schema and
+  its tables.
+
+**Refusals in the reader.** Before it reads a peer, a deployment checks
+its own role:
+
+- It must hold `SELECT` on every peer table an external reads, and on the
+  sign-in columns when it uses `$caller` on that peer. If not, the start is
+  refused with the line to add to the peer's file, for example
+  `reader <name> reads notes`, and the setting to set there,
+  `ORDO_READER_<NAME>_ROLE=<this role>`. The reader cannot know the
+  nickname the peer gives it, so `<name>` is the peer's choice.
+- It must not read the peer without a grant: the same role as the peer, the
+  owner of the peer's schema or tables, a member of that owner, a
+  superuser, or a member of `pg_read_all_data`. Such a start is refused
+  unless `ORDO_PEER_SHARED_ROLE=on`. `ordo dev` turns that on, since it runs
+  every app as one role.
+
 ---
 
 ## 4. Conditions
@@ -2590,6 +2936,20 @@ name(bindings-and-conditions)[projection]
 - **Depth unlimited, cycles never.** Queries compose to any depth. A query
   sourcing itself, directly or transitively, is a compile error at
   registration.
+- **One name space for ops and entities.** An op may not take the name of an
+  entity, native or external, `members` included. `notices(…)` would mean
+  either one, so the compiler refuses the program with
+  `op_named_like_entity`. The message names the op and the entity. Rename
+  one of them: `op shownNotices` over `entity notices`. Reported fix,
+  2026-11-19: before this refusal the door's call of such an op answered the
+  entity's own read, without the op's conditions.
+- **One op per name.** Two ops may not share a name, and a routine may not
+  share the name of an op. A request names one op, so the compiler refuses
+  the program with `duplicate_op_name`. The message gives the line of each
+  declaration. Rename one of them. The registry keeps the first and never
+  replaces it. Reported fix, 2026-11-19: before this refusal the later op
+  silently replaced the earlier, and a request ran the later body with the
+  later access rules.
 - **Everything derives through the flattening.** The field-scope manifest
   derives from base fields through any depth, so composition cannot launder
   scope. The composite's cost class is the max of everything inlined.

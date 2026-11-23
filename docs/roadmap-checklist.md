@@ -13058,15 +13058,69 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       name their environment.** Ruled 2026-10-01: rolling by default (a
       batch every 5 minutes over an hour), all at once, random canary,
       blue/green, and by query. §2.4, §4. Needs 18ac. Board: `environments`.
-- [ ] **27i · External entities.** Generated, read-only translations of
-      foreign tables that Ordo serves as ordinary entities.
-      `plan-external-entities.md` §2, §3. Board: `external-entities`.
-- [ ] **27j · Each apply lists what is present but not Ordo's.** §4.
+- [x] **27i · External entities.** Built 2026-11-15, bleeding 17f02c3c (PR 14, slices A to C, 2 reviews, 19 fixes). Asks 5 to 8 answered 2026-11-15: `public` as on a native entity (PR 16, bleeding 05dfab16), access levels unchanged, `prev` refused, the CDK form to the critic's ruling (PR 17, bleeding 32df59f5). Generated, read-only translations of
+      foreign tables. Ops and the SDK see an entity; the schema keeps it as
+      its own kind, `schema.externals` (ruled 2026-11-15). Prefixed ids over
+      a raw key, `shared` required, derived reads only (get, list, count), the
+      translation re-imports on apply. `plan-external-entities.md` §2, §3.
       Board: `external-entities`.
-- [ ] **27k · Ordo's tables under a prefix plus a random identifier per
-      database.** Ruled 2026-10-01. In place of `public`;
-      `schema_apply::LIVE` becomes per database. §5. Board:
+      - Slice A built 2026-11-15 on branch external-entities: syntax, own
+        kind, subquery read, refusals, derived reads.
+      - Slices B and C built 2026-11-15 on branch external-entities-bc:
+        `ordo introspect --external`, the apply and plan check, the
+        present-not-Ordo's list, the watcher (`ORDO_EXTERNAL_WATCH_SECS`).
+      - `public` built 2026-11-15 (PR 16): a line inside the braces and
+        field marks, authored public ops over it, `public*` and `prev`
+        refused, a cache lifetime of `ORDO_PUBLIC_CDN_S_MAXAGE` for an
+        op over an external. CDK `external()` in PR 17.
+- [x] **27j · Each apply lists what is present but not Ordo's.** §4.
+      Board: `external-entities`. **Built 2026-11-15** on branch
+      external-entities-bc: `external_check::present_not_ordos`, printed by
+      `ordo plan` under `EXTERNAL` and by `std.deployment.plan` as notes.
+- [x] **27k · Ordo's tables under a prefix plus a random identifier per
+      database.** **Closed 2026-11-17 by owner ruling**
+      (`example-apps-notes-v2-plus-note_viewer` ask 11): the schema setting
+      below meets it, and no prefix or random identifier is built. Ruled 2026-10-01; deferred 2026-11-15 until a real
+      collision appears. Foreign tables take their own schema instead. An
+      external entity creates no table, so 27i does not depend on this.
+      `schema_apply::LIVE` becomes per database when built. §5. Board:
       `external-entities`.
+      **Built 2026-11-17 (PR 19, commit 7081980d)**, as the
+      collision the 2026-11-16 ruling names
+      (`example-apps-notes-v2-plus-note_viewer` ask 1). It is a setting, not a
+      random identifier:
+      - `ORDO_PG_SCHEMA` names the deployment's schema. Unset, it is `public`
+        and a pool dials as before.
+      - `PoolConfig::schema` carries it. Every connection is dialled with it
+        as `search_path`, and catalog reads ask `Pool::schema`.
+        `schema_apply::LIVE` is gone.
+      - Each deployment has its own shadow, `ordo_shadow_of_<schema>`.
+        `public` keeps `ordo_shadow`.
+      - `NOTIFY` channels and leadership locks are per deployment.
+      - The schema is created at first start and never dropped.
+      - A bad name refuses the boot naming the setting.
+      - Tests: `crates/ordo-host/tests/deployment_schema.rs`.
+      **Note, 2026-11-17 (branch `peer-line`, step 2 of the example apps):**
+      the `peer <name>` line, `ORDO_PEER_<NAME>_SCHEMA`, `$caller` on a
+      peer's table, and the plain external's `ORDO_EXTERNAL_<NAME>_SCHEMA`
+      swap (ask 12) are built on this setting. Code: `ordo_exec::peer`.
+      Tests: `crates/ordo-host/tests/peer_entities.rs`. Board:
+      `example-apps-notes-v2-plus-note_viewer`.
+      **Note, 2026-11-18 (asks 13 to 16 ruled):** still to build on the
+      peer line, in order: the matching rule, **built 2026-11-18 (PR 23,
+      commit 3d9824a5)** (provider fingerprint plus
+      subject, a double match refused, start refusals); real database
+      grants, a role per deployment, **built 2026-11-19 (PR 24, commit
+      e5304e02, tests `crates/ordo-host/tests/reader_grants.rs`)**; open sign-up at
+      the identity service, **built 2026-11-19 (PR 26, commit dced245d)**; app users signing in
+      through the identity service, **built 2026-11-19 (PR 27, commit
+      eb66ae0d)**. All 3 have landed on `bleeding`. Step 4,
+      `examples/note-viewer` and the `federation e2e` check, **built
+      2026-11-19 (PR 28, commit e7266ecd)**. Before `main`: 2 defects,
+      board `identity-app-origins-trusted-as-clients` and
+      `public-op-named-as-its-external-serves-every-row`.
+      Tying a peer's spaces to the reader's is filed for later, board
+      `peer-spaces-tied`.
 - [ ] **27l · Audit what the deployment's and each tenant's database hold,
       and who owns what.** §8. Board: `deploy-schema-audit`.
 - [ ] **27m · Who may delete a note's owned rows is the app developer's
@@ -13316,10 +13370,12 @@ answers of the same day. Three specs: `plan-evolution-plans.md`,
       omits `space auth compliance cond`, which it does
       (`crates/ordo-syntax/src/token.rs`). Board: `syntax-additions`.
 - [ ] **27ah · Build the syntax additions.** Ruled in substance 2026-10-03
-      (`syntax-additions`); no go to build. `public` / `public*` and public
-      ops, `deployment` entities, `$tenant` and caller-side guard atoms,
-      `apikey` profiles, `prev`, orphans with `ordo plan --prune` under a
-      second confirmation, the `settings { }` block, `external` entities.
+      (`syntax-additions`). Built: `public` / `public*` and public ops, and
+      `external` entities (PR 14, 17f02c3c, 2026-11-15; tests
+      `crates/ordo-syntax/tests/external.rs`, `crates/ordo-schema/tests/external.rs`).
+      Owed, no go to build: `deployment` entities, `$tenant` and caller-side
+      guard atoms, `apikey` profiles, `prev`, orphans with `ordo plan --prune`
+      under a second confirmation, the `settings { }` block.
       New reserved words in `crates/ordo-syntax/src/token.rs`, then
       `crates/ordo-gen/src/spell.rs` and the CDK vocabulary.
       `plan-syntax-additions.md`. Board: `syntax-additions`.

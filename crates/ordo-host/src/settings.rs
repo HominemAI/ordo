@@ -578,6 +578,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"/ and lower-case segments"#,
     ),
     s(
+        "ORDO_IDENTITY_RP_ID",
+        "Sign-in and sessions",
+        r#"the origin's host"#,
+        r#"a host name"#,
+    ),
+    s(
         "ORDO_IDENTITY_SHARE_CONSOLE_DB_SERVER",
         "Sign-in and sessions",
         r#"false"#,
@@ -799,6 +805,12 @@ pub static REGISTRY: &[Setting] = &[
         "Sign-in and sessions",
         r#"none: discovery"#,
         r#""#,
+    ),
+    s(
+        "ORDO_AUTH_<NAME>_CLIENT_AUTH",
+        "Sign-in and sessions",
+        r#"secret"#,
+        r#"`secret` or `none`"#,
     ),
     s(
         "ORDO_AUTH_<NAME>_ISS_PARAMETER",
@@ -1371,6 +1383,31 @@ pub static REGISTRY: &[Setting] = &[
         r#"none, required"#,
         r#""#,
     ),
+    s("ORDO_PG_SCHEMA", "Databases and pools", r#"public"#, r#""#),
+    s(
+        "ORDO_PEER_<NAME>_SCHEMA",
+        "Databases and pools",
+        r#"none, required per peer"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_EXTERNAL_<NAME>_SCHEMA",
+        "Databases and pools",
+        r#"as written"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_READER_<NAME>_ROLE",
+        "Databases and pools",
+        r#"none, required per reader"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_SHARED_ROLE",
+        "Databases and pools",
+        r#"off"#,
+        r#""#,
+    ),
     s("ORDO_PG_PASSWORD", "Databases and pools", r#"none"#, r#""#),
     s(
         "ORDO_PG_POOL_SIZE",
@@ -1473,6 +1510,12 @@ pub static REGISTRY: &[Setting] = &[
         "ORDO_PINS_RECONCILE_SECS",
         "Databases and pools",
         r#"30 s"#,
+        r#"1 or more"#,
+    ),
+    s(
+        "ORDO_EXTERNAL_WATCH_SECS",
+        "Databases and pools",
+        r#"300 s"#,
         r#"1 or more"#,
     ),
     s(
@@ -2069,6 +2112,7 @@ pub fn specs() -> Vec<OpSpec> {
         .map(|f| FieldSpec::new(*f))
         .collect(),
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(NotSyncable::NoAnchor),
         requires_idempotency_key: false,
         public: Default::default(),
@@ -2185,7 +2229,16 @@ mod tests {
     }
 
     /// The sections of `docs/settings.md` that hold no deployment setting.
-    const NOT_SETTINGS: [&str; 3] = ["Settings that disagree", "Not traced", "How to read"];
+    /// Doc sections whose rows are not host settings: the prose sections,
+    /// and section 15, the console's and the identity service's own
+    /// settings, which those services read and this registry never lists.
+    const NOT_SETTINGS: [&str; 5] = [
+        "Settings that disagree",
+        "Not traced",
+        "How to read",
+        "The rule",
+        "15 ",
+    ];
     const DEV: &str = "14 ";
 
     /// The names in a row's first cell: each backticked `ORDO_*` name, and
@@ -2302,7 +2355,7 @@ mod tests {
     fn is_deployment_row(section: &str, built: &str) -> bool {
         !NOT_SETTINGS.iter().any(|s| section.starts_with(s))
             && !section.starts_with(DEV)
-            && !["withdrawn", "planned", "not built"]
+            && !["withdrawn", "planned", "not built", "internal"]
                 .iter()
                 .any(|w| built.starts_with(w))
     }

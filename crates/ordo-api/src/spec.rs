@@ -457,6 +457,10 @@ pub struct OpSpec {
     pub params: Vec<ParamSpec>,
     pub output_fields: Vec<FieldSpec>,
     pub live_capable: bool,
+    /// The op reads an external entity, a table Ordo never writes. A public
+    /// answer over one is not dropped by a write, so the origin's cache
+    /// holds it for `ORDO_PUBLIC_CDN_S_MAXAGE` seconds at most.
+    pub reads_external: bool,
     pub refinable: RefineTier,
     /// The op reduces rows to a measure (`std.E.count` and friends) rather
     /// than returning them. Aggregate-only ops accept **no sealed refinement

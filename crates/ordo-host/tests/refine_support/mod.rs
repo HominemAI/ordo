@@ -289,7 +289,18 @@ pub async fn door_with(
     cfg: ordo_exec::PoolConfig,
     wrap: impl FnOnce(Arc<dyn ordo_crypto::KeyProvider>) -> Arc<dyn ordo_crypto::KeyProvider>,
 ) -> (ApiState, Arc<Fixture>, ordo_exec::Pool) {
-    let f = fixture();
+    door_over(fixture(), db, page_size, cfg, wrap).await
+}
+
+/// A door over a fixture of the caller's own, in its own database: what a
+/// suite with a program of its own (`external_entities.rs`) stands up.
+pub async fn door_over(
+    f: Arc<Fixture>,
+    db: &str,
+    page_size: i64,
+    cfg: ordo_exec::PoolConfig,
+    wrap: impl FnOnce(Arc<dyn ordo_crypto::KeyProvider>) -> Arc<dyn ordo_crypto::KeyProvider>,
+) -> (ApiState, Arc<Fixture>, ordo_exec::Pool) {
     let pg = Pg::named(db);
     f.reset(&pg).expect("DDL applies and the fixture seeds");
     let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {

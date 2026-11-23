@@ -330,6 +330,7 @@ pub fn specs() -> Vec<OpSpec> {
             .map(|f| FieldSpec::new(*f))
             .collect(),
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(NotSyncable::NotARead),
         requires_idempotency_key: false,
         public: Default::default(),

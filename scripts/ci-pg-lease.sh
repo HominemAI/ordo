@@ -22,6 +22,8 @@
 #   ORDO_CI_PG_SERVERS  how many servers there are (default 8)
 #   ORDO_CI_PG_SERVICE  the StatefulSet's name (default ci-postgres)
 #   ORDO_CI_PG_WAIT     seconds to keep trying before giving up (default 900)
+#   ORDO_CI_PG_LOCAL    1 on GitHub-hosted runners: no cluster, so start
+#                       postgres:17 in docker on 127.0.0.1 instead
 #   PGUSER, PGPASSWORD  as for psql (default ordo/ordo)
 set -euo pipefail
 
@@ -32,6 +34,31 @@ export PGUSER=${PGUSER:-ordo}
 export PGPASSWORD=${PGPASSWORD:-ordo}
 export PGPORT=${PGPORT:-5432}
 export PGCONNECT_TIMEOUT=5
+
+if [ "${ORDO_CI_PG_LOCAL:-}" = 1 ]; then
+  docker rm -f ci-postgres >/dev/null 2>&1 || true
+  docker run -d --name ci-postgres -p 127.0.0.1:5432:5432 \
+    --shm-size=1g \
+    -e POSTGRES_USER=ordo -e POSTGRES_PASSWORD=ordo -e POSTGRES_DB=postgres \
+    postgres:17 \
+    -c max_connections=100 -c fsync=off -c synchronous_commit=off \
+    -c full_page_writes=off -c shared_buffers=2GB >/dev/null
+  for _ in $(seq 1 60); do
+    PGHOST=127.0.0.1 pg_isready -q -U ordo && break
+    sleep 1
+  done
+  PGHOST=127.0.0.1 pg_isready -U ordo
+  psql -X -q -h 127.0.0.1 -d postgres -v ON_ERROR_STOP=1 \
+    -c 'CREATE DATABASE ordo_conformance'
+  echo "Started local postgres:17 on 127.0.0.1"
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "ORDO_PG_HOST=127.0.0.1" >>"$GITHUB_ENV"
+    echo "PGHOST=127.0.0.1" >>"$GITHUB_ENV"
+  else
+    echo "ORDO_PG_HOST=127.0.0.1"
+  fi
+  exit 0
+fi
 
 dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ci-pg-lease
 mkdir -p "$dir"

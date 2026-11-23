@@ -32,10 +32,10 @@
 use std::collections::BTreeMap;
 
 use ordo_syntax::decl::{
-    AggDecl, CheckDecl, EntityDecl, FieldDecl, FieldKind, GuardAtom, GuardClause, GuardExpr,
-    LetDecl, MatchKind, OpBody, OpDecl, ParamDecl, Pipeline, ProjItem, ReassignTarget, ReleaseDecl,
-    ReleaseEffect, ReleaseMode, RoutineDecl, RoutineTrigger, ScalarTy, Source, SourceArg, Step,
-    TakeCount, WriteStmt,
+    AggDecl, CheckDecl, EntityDecl, ExternalDecl, FieldDecl, FieldKind, GuardAtom, GuardClause,
+    GuardExpr, LetDecl, MatchKind, OpBody, OpDecl, ParamDecl, Pipeline, ProjItem, ReassignTarget,
+    ReleaseDecl, ReleaseEffect, ReleaseMode, RoutineDecl, RoutineTrigger, ScalarTy, Source,
+    SourceArg, Step, TakeCount, WriteStmt,
 };
 use ordo_syntax::{AggShape, CondArm, Condition, Expr, Program};
 use ordo_syntax::{AGGREGATE_SHAPES, ALLOCATE_MODES};
@@ -63,9 +63,13 @@ const IMPORTABLE: &[&str] = &[
     "each",
     "entity",
     "every",
+    "external",
+    "peer",
+    "reader",
     "f",
     "fn",
     "g",
+    "key",
     "lit",
     "minus",
     "named",
@@ -102,6 +106,10 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let mut e = Emitter::default();
     let mut body = String::new();
     let mut synth_args: Vec<String> = Vec::new();
+    let mut needs_external = false;
+    let mut needs_key = false;
+    let needs_peer = !program.peers.is_empty();
+    let needs_reader = !program.readers.is_empty();
 
     if let Some(d) = &program.domain {
         synth_args.push(match &d.version {
@@ -109,9 +117,37 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
             None => format!("domain({})", ts::str_lit(&d.name.name)),
         });
     }
+    // Peers print before the externals that read them, as `synth` requires.
+    for p in &program.peers {
+        let bind = e.bind(&p.name.name);
+        body.push_str(&format!(
+            "const {bind} = peer({});\n\n",
+            ts::str_lit(&p.name.name)
+        ));
+        e.peers.insert(p.name.name.clone(), bind.clone());
+        synth_args.push(bind);
+    }
+    // A reader line names this program's own tables, by name.
+    for r in &program.readers {
+        let tables = r
+            .tables
+            .iter()
+            .map(|t| ts::str_lit(&t.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        synth_args.push(format!("reader({}, [{tables}])", ts::str_lit(&r.name.name)));
+    }
     for ent in &program.entities {
         let bind = e.bind(&ent.name.name);
         body.push_str(&format!("const {bind} = {};\n\n", e.entity(ent)?));
+        synth_args.push(bind);
+    }
+    for ext in &program.externals {
+        // `external(...)` and its `key.<ty>(...)` line are written by `Emitter::external`.
+        needs_external = true;
+        needs_key = true;
+        let bind = e.bind(&ext.name.name);
+        body.push_str(&format!("const {bind} = {};\n\n", e.external(ext)?));
         synth_args.push(bind);
     }
     for op in &program.ops {
@@ -131,7 +167,23 @@ pub fn emit_program(program: &Program, import_from: &str) -> Result<String, Stri
     let used: Vec<&str> = IMPORTABLE
         .iter()
         .copied()
-        .filter(|n| mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n)))
+        .filter(|n| {
+            // `key`, `external`, `peer` and `reader` are also option and field words, so a
+            // whole-word mention would import them for nothing, and the
+            // package compiles under `noUnusedLocals`. Their uses are calls.
+            let mentioned = mentions(&body, n) || synth_args.iter().any(|a| mentions(a, n));
+            if *n == "key" {
+                needs_key
+            } else if *n == "external" {
+                needs_external
+            } else if *n == "peer" {
+                needs_peer
+            } else if *n == "reader" {
+                needs_reader
+            } else {
+                mentioned
+            }
+        })
         .chain(std::iter::once("synth"))
         .collect();
     let mut imports: Vec<&str> = used;
@@ -180,6 +232,9 @@ fn mentions(hay: &str, needle: &str) -> bool {
 #[derive(Default)]
 struct Emitter {
     used: BTreeMap<String, usize>,
+    /// Each `peer` line's nickname and the binding its `peer(...)` call got,
+    /// so an external `from journal.notes` passes `{ peer: journal }`.
+    peers: BTreeMap<String, String>,
     /// The parameters the op currently being emitted declares.
     ///
     /// `$caller` is the reason this field exists. It is an `Expr::Param` like
@@ -270,6 +325,54 @@ impl Emitter {
         }
         if let Some(gw) = &e.access_write {
             s.push_str(&format!("\n  .accessWrite({})", self.guard_clause(gw)?));
+        }
+        Ok(s)
+    }
+
+    /// An `external`: the key line, then each mapped field with its
+    /// `.column()`, then `.public()` and `.accessRead()` as `entity` does.
+    fn external(&self, x: &ExternalDecl) -> Result<String, String> {
+        let mut lines = vec![format!(
+            "  id: key.{}({}),",
+            x.key_ty.as_str(),
+            ts::str_lit(&x.key_column.name)
+        )];
+        for f in &x.fields {
+            let mut s = match &f.kind {
+                FieldKind::Ref { target, .. } => format!("t.ref({})", ts::str_lit(&target.name)),
+                FieldKind::Scalar(ty) => self.scalar_ctor(*ty)?,
+            };
+            if f.optional {
+                s.push_str(".optional()");
+            }
+            if f.public {
+                s.push_str(".public()");
+            }
+            s.push_str(&format!(".column({})", ts::str_lit(&f.column.name)));
+            lines.push(format!("  {}: {s},", ts::key(&f.name.name)));
+        }
+        let mut opts = match self.peers.get(&x.schema.name) {
+            Some(bind) => format!("peer: {bind}, table: {}", ts::str_lit(&x.table.name)),
+            None => format!(
+                "schema: {}, table: {}",
+                ts::str_lit(&x.schema.name),
+                ts::str_lit(&x.table.name)
+            ),
+        };
+        if let Some(k) = &x.key {
+            opts.push_str(&format!(", key: {}", ts::str_lit(&k.name)));
+        }
+        opts.push_str(", shared: true");
+        let mut s = format!(
+            "external({}, {{\n{}\n}}, {{ {opts} }})",
+            ts::str_lit(&x.name.name),
+            lines.join("\n"),
+        );
+        if x.public.is_some() {
+            s.push_str("\n  .public()");
+        }
+        if let Some(gr) = &x.access_read {
+            s.push_str(&format!("\n  .accessRead({})", self.guard_clause(gr)?));
         }
         Ok(s)
     }

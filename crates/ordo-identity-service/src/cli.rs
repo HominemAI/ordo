@@ -26,7 +26,7 @@ use crate::store::{dep, num, text};
 pub const GRANT_SECS: u64 = 60;
 
 /// A PKCE S256 challenge: 32 bytes of SHA-256, base64url.
-fn valid_challenge(c: &str) -> bool {
+pub(crate) fn valid_challenge(c: &str) -> bool {
     b64url_decode(c).is_ok_and(|b| b.len() == 32)
 }
 

@@ -399,6 +399,7 @@ naming the setting.
 | `ORDO_IDENTITY_KEY_ROTATE_DAYS` | 90 | Signing key rotation, 0 to 365; 0 turns it off |
 | `ORDO_IDENTITY_GUESSES_PER_ADDRESS` | 30 | Tries per minute of one kind of code from one address |
 | `ORDO_IDENTITY_GUESSES_SHARED` | 600 | Tries per minute of one kind from everyone together |
+| `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS` | 10 | Open sign-up calls per minute from one address; 2 per new account |
 | `ORDO_IDENTITY_PROVISIONER_KEY` | none | The provisioning service's Ed25519 public key (Ordo Cloud) |
 | `ORDO_PROXY_HEADER`, `ORDO_PROXY_TRUSTED` | none | Read the visitor's address from a trusted proxy, as the door does |
 
@@ -407,9 +408,262 @@ origin) and `ORDO_IDENTITY_IMPORT_CONSOLE_URL` (the console's database,
 for section 10) when you leave them unset. A value you set always wins,
 and the boot log names each value it filled.
 
+## 14. One service for many deployments
+
+One identity service can serve several deployments, so a person signs in
+once for all of them. Hominem runs one at `https://auth.hominem.ai`.
+Human Agent Link (`hal`) and the `ordo` test instance sign in there.
+
+How it works:
+
+- The service has its own handle, `ORDO_IDENTITY_DEPLOYMENT`, called its
+  home. Its people are accounts: one passkey and one session each.
+- Each other deployment is registered with a handle, its console's
+  origin, and the addresses sign-in may send a browser back to.
+- A person gets a deployment's token only while they are its member. The
+  token names the deployment in `aud`, so `hal`'s door refuses a token
+  for `ordo`.
+- A deployment's console sees and invites its own members only. Machine
+  keys, the audit log and the list of deployments stay with the home.
+
+### Run the service on its own
+
+Run the `ordo-identity-service` binary from the image as its own
+container, with no supervisor. It needs:
+
+| Setting | Example |
+|---|---|
+| `ORDO_IDENTITY_DATABASE_URL_FILE` | a file holding `postgres://ordo_identity@db:5432/ordo_identity` |
+| `ORDO_IDENTITY_ORIGIN` | `https://auth.hominem.ai` |
+| `ORDO_IDENTITY_RP_ID` | `hominem.ai`, so consoles under it can run reauth in their own page |
+| `ORDO_IDENTITY_LISTEN` | `0.0.0.0:8082` |
+| `ORDO_IDENTITY_DATA_DIR` | `/var/lib/ordo-identity`, a persistent volume |
+| `ORDO_IDENTITY_DEPLOYMENT` | `hominem`, its home handle |
+
+`ORDO_IDENTITY_CLIENT_ORIGINS` is optional: the home's own clients, if
+any. Put a TLS proxy in front and send `auth.hominem.ai` to port 8082.
+If the proxy names the visitor in a header, set `ORDO_PROXY_HEADER` and
+`ORDO_PROXY_TRUSTED`. The first start prints the first admin's invite, as
+in section 3.
+
+### Register a deployment
+
+On the service's host, once per deployment:
+
+```
+ordo-identity-service deployment add hal --origin https://hal.hominem.ai
+ordo-identity-service people
+ordo-identity-service member add hal p_…
+```
+
+`--origin` is the console's origin; give it again for each console page
+that asks for tokens. A client origin is trusted: its page may call the
+service with the person's session cookie, and may run the reauth. List
+consoles only, never an app's page. `--return <url>` limits where sign-in
+sends the browser back to; by default it is anywhere under each origin. A
+return URL may sit on any origin and makes that origin no caller. A
+running service picks up the change within a minute.
+
+The same over HTTP, with a token of the home (a fresh reauth) or the
+provisioner's machine key:
+
+```
+POST /deployments  {"handle": "hal", "clientOrigins": ["https://hal.hominem.ai"]}
+POST /deployments/hal/members  {"person": "p_…"}
+```
+
+New people for one deployment: `ordo-identity-service invite --deployment
+hal`, or Invite in that deployment's console. They become members of
+`hal` only.
+
+To change a deployment's client origins or return URLs, keep its
+members:
+
+```
+ordo-identity-service deployment set hal --origin https://hal.hominem.ai
+ordo-identity-service deployment set notes --no-origins
+ordo-identity-service deployment set notes --return https://api.notes.example.com/auth/callback/accounts
+```
+
+Each flag given replaces that list; a list not given stays.
+`--no-origins` leaves none. Over HTTP: `POST
+/deployments/hal/addresses {"clientOrigins": [..], "returnUrls": [..]}`,
+either key alone. A running service reads it at once.
+
+`deployment end hal` ends the deployment and every membership with it. A
+running service stops new tokens within a minute; tokens already issued
+work until they expire.
+
+### Point a deployment at it
+
+On the deployment's container, set:
+
+| Setting | Value |
+|---|---|
+| `ORDO_IDENTITY_URL` | `https://auth.hominem.ai` |
+| `ORDO_IDENTITY_ORIGIN` | `https://auth.hominem.ai` |
+| `ORDO_IDENTITY_DEPLOYMENT` | `hal`, the handle it was registered with |
+
+Leave the identity database settings unset. When `ORDO_IDENTITY_URL` is
+not a loopback address, the supervisor starts no identity service and
+passes these 3 to the door and the console. The boot log says so.
+`ORDO_SUPERVISOR_IDENTITY_ADDRESS=external` says the same for a service
+on a loopback address. The console keeps its own handle,
+`ORDO_CONSOLE_DEPLOYMENT`, which may differ.
+
+Reauth runs in the console's page. That works only when the console's
+host is under the service's `ORDO_IDENTITY_RP_ID`. A console on another
+domain signs in, but cannot reauth yet.
+
+Moving a deployment that ran its own service to a shared one is a new
+relying party: each person signs up again by invite.
+
+### Open sign-up for an app
+
+Each registered deployment has a sign-up mode. `invite` is the default:
+people come in by invite or `member add`. `open` lets anyone make an
+account with a passkey and join it, with no invite. An app such as the
+example notes app uses this. Invites still work beside it.
+
+Set it when you register, or change it later:
+
+```
+ordo-identity-service deployment add notes --return https://notes.example.com/ --sign-up open
+ordo-identity-service deployment sign-up notes invite
+```
+
+Over HTTP, with the same token as registering:
+
+```
+POST /deployments  {"handle": "notes", "returnUrls": ["https://notes.example.com/"], "signUp": "open"}
+POST /deployments/notes/sign-up  {"signUp": "open"}
+```
+
+`deployment list` and `GET /deployments` show each mode. A change counts
+at once. The service's own deployment always takes people by invite.
+
+Send people to the service's page:
+
+```
+https://auth.example.com/sign-up?deployment=notes&return=https://notes.example.com/
+```
+
+`return` must be one of the deployment's return URLs, as for sign-in.
+A new person types a name, makes a passkey and saves 10 recovery codes.
+A person already signed in joins with the account they hold, so one
+passkey joins several apps. Then the browser goes back to `return`.
+
+What an open member holds:
+
+- An account, with no access to the service's own deployment.
+- A membership of that deployment, shown as role `member`.
+- No token for the deployment. Its tokens are admin tokens, so `POST
+  /token` answers `app_member_only`. `member add`, or an invite, makes
+  them an admin.
+
+An open member signs in to the app itself through the service, as the
+next section sets up.
+
+Each sign-up and join is in the audit log (`sign-up.open`,
+`sign-up.joined`). Sign-up calls are limited per address by
+`ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS`. A deployment in `invite` mode
+answers `invite_only`.
+
+### Connect an app to the identity service
+
+The service is an OIDC provider. An Ordo app signs its users in through
+it with Ordo's own OIDC client, under one connection name. Each person
+has one subject, their id at the service, in every app that connects. So
+two apps that read each other through `peer` see one person as one
+person, whatever each calls the connection.
+
+At the service, register the app by its callback,
+`<ORDO_PUBLIC_URL>/auth/callback/<name>`, with no `--origin`. Its handle
+is the app's client id:
+
+```
+ordo-identity-service deployment add notes \
+  --return https://api.notes.example.com/auth/callback/accounts \
+  --sign-up open
+```
+
+The app sends that address as `redirect_uri`, and the service takes it
+only when it is exactly a return URL: the same scheme, host, port and
+path, with no query. Do not list the app's pages with `--origin`. A client
+origin may spend the person's session cookie at the service, which only a
+console should.
+
+`--sign-up open` lets anyone make an account from the app's sign-in. With
+`invite`, only members sign in.
+
+An app registered before this change listed its pages with `--origin`.
+`deployment list` warns about each such origin, and so does the service's
+boot log. Drop them, keeping the callback:
+
+```
+ordo-identity-service deployment set notes --no-origins
+```
+
+On the app, 4 settings, with `accounts` as the connection name:
+
+```
+ORDO_AUTH_METHODS=accounts
+ORDO_AUTH_ACCOUNTS_KIND=oidc
+ORDO_AUTH_ACCOUNTS_ISSUER=https://auth.example.com
+ORDO_AUTH_ACCOUNTS_CLIENT_ID=notes
+ORDO_AUTH_ACCOUNTS_CLIENT_AUTH=none
+```
+
+Add `accounts` to `ORDO_AUTH_METHODS` beside any other methods.
+`ORDO_AUTH_RETURN_URLS` is required, as for every outside provider. The
+issuer is where the service is served: its `ORDO_IDENTITY_ORIGIN`, plus
+its `ORDO_IDENTITY_BASE_PATH` when it has one. `deployment add` prints it.
+There is no client secret: the service takes public clients, and PKCE
+proves each exchange. `ORDO_AUTH_ACCOUNTS_ALGS=EdDSA` is optional; the
+service signs with nothing else.
+
+When the service sits under a base path, such as `/identity` on the
+console's origin, the issuer is
+`https://console.example.com/identity`. Discovery is at
+`<issuer>/.well-known/openid-configuration`, so the app needs no pinned
+endpoints. Deployment tokens keep the origin alone as their `iss`, so
+doors and consoles change nothing. An app set up before this change with
+the origin as its issuer and 3 pinned endpoints must set its issuer to
+the one with the path, and may drop the pinned endpoints. Its sign-ins
+then refuse the old issuer, and the app's boot refuses a changed issuer
+under the same connection name, so give the connection a new name or
+start its people again.
+
+What a sign-in does:
+
+1. The app sends the browser to the service's `/oidc/authorize`.
+2. A person not signed in there goes to the service's sign-in page. For
+   an open app, the page links to making an account.
+3. A member gets a code that works once, for 60 seconds. A person signed
+   in who is not a member joins an open app on the sign-up page, or is
+   sent back with `access_denied` from an invite-only one.
+4. The app's server exchanges the code with its PKCE verifier for an ID
+   token. It holds `sub`, the person's name (`profile` scope), `nonce`,
+   `auth_time` and the times. Ending a membership stops new ID tokens at
+   once.
+5. The app links the person as `oidc:accounts:<sub>`.
+
+An unknown client id, or a callback the app is not registered for, shows
+a refusal on the service's page and never sends the browser on. Each
+exchange is in the audit log (`oidc.token`). A browser session gets at
+most `ORDO_IDENTITY_AUTHORIZE_PER_SESSION` codes a minute, 20 by default;
+past it the app is sent `temporarily_unavailable`. Spent and expired
+codes are deleted each minute. An ID token is not a deployment token: the
+door, the console and the service's admin routes refuse it.
+
 ## What it does not do
 
-- Roles beyond `admin`.
+- Roles beyond `admin`, and `member` for open sign-up, which holds no
+  token.
+- Refresh tokens, a userinfo endpoint, or signing out of every app at
+  once. An app keeps its own session after sign-in.
 - Sign-in through outside providers for deployment people.
 - Sending invite links by mail. You send the link.
 - More than one copy of the service.
+- Machine keys for a registered deployment. Machine keys belong to the
+  service's home.

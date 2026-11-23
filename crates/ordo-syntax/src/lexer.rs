@@ -255,7 +255,26 @@ impl<'s> Lexer<'s> {
 
     fn ident(&mut self, start: usize, line: u32, col: u32) -> Result<(), LexError> {
         let word = self.take_word();
-        self.check_name(&word, start, line, col)?;
+        // The one name that may hold underscores: a reader's nickname, the
+        // word after `reader` at the start of a top-level line (owner,
+        // 2026-11-18, `reader note_viewer reads notes`). It is upper-cased
+        // into `ORDO_READER_<NAME>_ROLE` and never names a field or table.
+        let reader_name = matches!(
+            self.out.last(),
+            Some(Token { kind: TokenKind::Ident(w), span }) if w == "reader" && span.col == 1
+        );
+        if reader_name {
+            if word.len() > MAX_IDENT_LEN {
+                return Err(self.err_at(
+                    format!("name exceeds {MAX_IDENT_LEN} characters"),
+                    start,
+                    line,
+                    col,
+                ));
+            }
+        } else {
+            self.check_name(&word, start, line, col)?;
+        }
         // A digit right after a word never means anything; catch `foo1bar$`-ish
         // confusion early? No — trailing digits are legal in names. Nothing to do.
         match Keyword::parse(&word) {
@@ -268,7 +287,10 @@ impl<'s> Lexer<'s> {
     fn check_name(&self, word: &str, start: usize, line: u32, col: u32) -> Result<(), LexError> {
         if word.contains('_') {
             return Err(self.err_at(
-                format!("names use lowerCamel, no underscores: `{word}`"),
+                format!(
+                    "names use lowerCamel, no underscores: `{word}`. A foreign table or \
+                     column in an `external` is written in quotes: `\"{word}\"`"
+                ),
                 start,
                 line,
                 col,

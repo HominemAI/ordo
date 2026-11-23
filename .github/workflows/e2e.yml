@@ -20,8 +20,10 @@ name: Notes end-to-end
 on:
   push:
     branches: [bleeding]
+  # A pull request into bleeding is a feature branch about to be squashed
+  # in (owner's merge flow, 2026-11-13); into main it is a release.
   pull_request:
-    branches: [main]
+    branches: [main, bleeding]
   workflow_dispatch:
     inputs:
       target:
@@ -74,7 +76,7 @@ jobs:
   changes:
     name: changes (notes e2e)
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       notes_e2e: ${{ steps.affected.outputs.notes_e2e }}
@@ -103,10 +105,10 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.target == 'throwaway') }}
     # The same runner as ci.yml. Service containers run on its Docker sidecar
     # and share the pod's network, so Postgres is at localhost:5432.
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     # 45, not 30: a slow browser download ran past 30 on 2026-10-31, and
     # the browser cache is saved only by a job that finishes.
-    timeout-minutes: 45
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 45 || 90 }}
 
     services:
       postgres:
@@ -139,6 +141,12 @@ jobs:
       BROWSERS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && 'off' || 'on' }}
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - name: Not reached by this change
         if: env.REACHED != 'true'
         run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -289,8 +297,8 @@ jobs:
     name: authz matrix
     needs: changes
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || inputs.target == 'throwaway') }}
-    runs-on: [self-hosted, ordo-k8s]
-    timeout-minutes: 20
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 20 || 40 }}
 
     services:
       postgres:
@@ -317,6 +325,12 @@ jobs:
       ORDO_PSQL: psql
 
     steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
       - name: Not reached by this change
         if: env.REACHED != 'true'
         run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -347,7 +361,7 @@ jobs:
   staging:
     name: notes e2e staging
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'workflow_dispatch' && inputs.target == 'staging') }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - name: Staging is phase 2

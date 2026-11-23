@@ -71,6 +71,9 @@ pub enum IdentityError {
     WrongAudience { asked: String, serves: String },
     /// A browser call from a page this service does not serve.
     OriginRefused,
+    /// A browser call only the service's own page, or a page of its own
+    /// deployment, may make: it names what was asked.
+    OwnPageOnly(&'static str),
     /// An invite link, a recovery code or a CLI code that is unknown,
     /// expired, spent or revoked. One answer for all, so a guess learns
     /// nothing; the audit log has the reason.
@@ -109,8 +112,52 @@ pub enum IdentityError {
         grant: &'static str,
         holds: Vec<String>,
     },
+    /// The person holds no membership of the deployment a token was asked
+    /// for. Names the handle.
+    NotAMember(String),
+    /// A person holds an app membership of this deployment, made by open
+    /// sign-up, and asked for its token, which is an admin's. Names the
+    /// handle.
+    AppMemberOnly(String),
+    /// Open sign-up was asked of a deployment that takes people by
+    /// invite. Names the handle.
+    InviteOnly(String),
+    /// The service's own deployment takes people by invite only, so its
+    /// sign-up mode cannot be set. Names the handle.
+    HomeInviteOnly(String),
+    /// No live registered deployment has that handle.
+    UnknownDeployment(String),
+    /// A live deployment already has that handle.
+    DeploymentTaken(String),
+    /// An ended deployment still has live members, so registering it again
+    /// would bring them back under new origins.
+    DeploymentHasMembers { handle: String, live: u64 },
+    /// A sign-in asked to send the browser back somewhere the deployment
+    /// does not list.
+    ReturnRefused,
+    /// This act is the service's own: a token for a registered deployment
+    /// may not do it. Names the act and the service's handle.
+    HomeOnly { act: &'static str, home: String },
     /// The audit log or one of its checkpoints does not check out.
     AuditBroken(crate::audit::AuditBreak),
+    /// OIDC: `client_id` is not a live deployment registered here. Names
+    /// it. Shown on the service's page, never sent back to a redirect.
+    UnknownClient(String),
+    /// OIDC: `redirect_uri` is not one of that deployment's return URLs.
+    /// Shown on the service's page, never followed.
+    RedirectRefused { client: String },
+    /// OIDC: an authorization request the app's sign-in can be told about:
+    /// `error` is the RFC 6749 word sent back with the browser.
+    AuthorizeRefused { error: &'static str, why: String },
+    /// OIDC: a code that is unknown, spent, expired, for another client or
+    /// redirect, with the wrong PKCE verifier, or whose person is no
+    /// longer a member. One answer for all; the app starts sign-in again.
+    GrantRefused,
+    /// OIDC: the token request sent a client secret. This service's
+    /// clients are public (PKCE only).
+    ClientSecretRefused,
+    /// OIDC: a `grant_type` other than `authorization_code`.
+    UnsupportedGrant(String),
     /// The request body or a field in it is malformed.
     BadRequest(String),
     /// Something that should not happen; the log has the detail.
@@ -187,7 +234,7 @@ impl IdentityError {
             IdentityError::SessionEnded(_) => "session_ended",
             IdentityError::TokenRefused(_) => "token_refused",
             IdentityError::WrongAudience { .. } => "wrong_audience",
-            IdentityError::OriginRefused => "origin_refused",
+            IdentityError::OriginRefused | IdentityError::OwnPageOnly(_) => "origin_refused",
             IdentityError::CodeRefused => "code_refused",
             IdentityError::MachineRefused => "machine_refused",
             IdentityError::Throttled { .. } => "too_many_attempts",
@@ -202,13 +249,29 @@ impl IdentityError {
             IdentityError::NameTaken(_) => "name_taken",
             IdentityError::MintRefused(_) => "mint_refused",
             IdentityError::GrantNeeded { .. } => "grant_needed",
+            IdentityError::NotAMember(_) => "not_a_member",
+            IdentityError::AppMemberOnly(_) => "app_member_only",
+            IdentityError::InviteOnly(_) => "invite_only",
+            IdentityError::HomeInviteOnly(_) => "home_invite_only",
+            IdentityError::UnknownDeployment(_) => "unknown_deployment",
+            IdentityError::DeploymentTaken(_) => "deployment_taken",
+            IdentityError::DeploymentHasMembers { .. } => "deployment_has_members",
+            IdentityError::ReturnRefused => "return_refused",
+            IdentityError::HomeOnly { .. } => "home_only",
             IdentityError::AuditBroken(_) => "audit_broken",
+            IdentityError::UnknownClient(_) | IdentityError::ClientSecretRefused => {
+                "invalid_client"
+            }
+            IdentityError::RedirectRefused { .. } => "invalid_redirect_uri",
+            IdentityError::AuthorizeRefused { error, .. } => error,
+            IdentityError::GrantRefused => "invalid_grant",
+            IdentityError::UnsupportedGrant(_) => "unsupported_grant_type",
             IdentityError::BadRequest(_) => "bad_request",
             IdentityError::Internal(_) => "internal",
         }
     }
 
-    fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         match self {
             IdentityError::Store(_) | IdentityError::Passkey(AuthError::StoreUnavailable(_)) => {
                 match self.class() {
@@ -227,10 +290,20 @@ impl IdentityError {
             | IdentityError::MachineRefused => StatusCode::UNAUTHORIZED,
             IdentityError::WrongAudience { .. }
             | IdentityError::OriginRefused
+            | IdentityError::OwnPageOnly(_)
             | IdentityError::MustEnrolPasskey
             | IdentityError::MintRefused(_)
             | IdentityError::GrantNeeded { .. }
+            | IdentityError::NotAMember(_)
+            | IdentityError::AppMemberOnly(_)
+            | IdentityError::InviteOnly(_)
+            | IdentityError::HomeOnly { .. }
             | IdentityError::TouchNeeded { .. } => StatusCode::FORBIDDEN,
+            IdentityError::DeploymentTaken(_)
+            | IdentityError::DeploymentHasMembers { .. }
+            | IdentityError::HomeInviteOnly(_) => StatusCode::CONFLICT,
+            IdentityError::UnknownDeployment(_) => StatusCode::NOT_FOUND,
+            IdentityError::ReturnRefused => StatusCode::BAD_REQUEST,
             IdentityError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
             IdentityError::LastAdmin | IdentityError::NameTaken(_) | IdentityError::LastPasskey => {
                 StatusCode::CONFLICT
@@ -239,7 +312,14 @@ impl IdentityError {
             | IdentityError::UnknownInvite
             | IdentityError::UnknownMachineKey
             | IdentityError::UnknownPasskey => StatusCode::NOT_FOUND,
-            IdentityError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            IdentityError::BadRequest(_)
+            | IdentityError::RedirectRefused { .. }
+            | IdentityError::AuthorizeRefused { .. }
+            | IdentityError::GrantRefused
+            | IdentityError::UnsupportedGrant(_) => StatusCode::BAD_REQUEST,
+            IdentityError::UnknownClient(_) | IdentityError::ClientSecretRefused => {
+                StatusCode::UNAUTHORIZED
+            }
         }
     }
 }
@@ -274,13 +354,19 @@ impl fmt::Display for IdentityError {
             }
             IdentityError::WrongAudience { asked, serves } => write!(
                 f,
-                "a token was asked for `{asked}`, and this identity service serves `{serves}`; \
-                 ask for `{serves}`, or set {DEPLOYMENT_ENV} to the deployment's handle"
+                "a token was asked for `{asked}`, and this identity service serves `{serves}` \
+                 and the deployments registered with it; ask for one of those, set \
+                 {DEPLOYMENT_ENV} to the deployment's handle, or register the deployment \
+                 (`ordo-identity-service deployment add`)"
             ),
             IdentityError::OriginRefused => write!(
                 f,
                 "this page may not call the identity service; add its origin to \
                  {CLIENT_ORIGINS_ENV}"
+            ),
+            IdentityError::OwnPageOnly(what) => write!(
+                f,
+                "only the identity service's own page may {what}; open the service's page for it"
             ),
             IdentityError::CodeRefused => f.write_str("this link or code does not work"),
             IdentityError::MachineRefused => f.write_str("the machine key did not sign in"),
@@ -323,7 +409,83 @@ impl fmt::Display for IdentityError {
                 "a live machine key is already named `{name}`; choose another name, or end it \
                  first"
             ),
+            IdentityError::NotAMember(handle) => write!(
+                f,
+                "you are not a member of deployment `{handle}`; an admin of `{handle}` invites \
+                 you, or the identity service's owner runs `ordo-identity-service member add \
+                 {handle} <person>`"
+            ),
+            IdentityError::AppMemberOnly(handle) => write!(
+                f,
+                "you joined deployment `{handle}` by open sign-up, which gives an account and a \
+                 membership and no token for the deployment, since its tokens are admin tokens; \
+                 an admin of `{handle}` invites you to make you one of its admins"
+            ),
+            IdentityError::InviteOnly(handle) => write!(
+                f,
+                "deployment `{handle}` takes people by invite; ask one of its admins for an \
+                 invite link, or its owner turns open sign-up on \
+                 (`ordo-identity-service deployment sign-up {handle} open`)"
+            ),
+            IdentityError::HomeInviteOnly(handle) => write!(
+                f,
+                "`{handle}` is this identity service's own deployment, and it takes people by \
+                 invite only; set open sign-up on a registered deployment instead"
+            ),
+            IdentityError::UnknownDeployment(handle) => write!(
+                f,
+                "no deployment `{handle}` is registered with this identity service; its owner \
+                 runs `ordo-identity-service deployment add {handle} --origin <console origin>`"
+            ),
+            IdentityError::DeploymentTaken(handle) => write!(
+                f,
+                "deployment `{handle}` is already registered; end it first to change its \
+                 origins (`ordo-identity-service deployment end {handle}`, which ends its \
+                 memberships too), or choose another handle"
+            ),
+            IdentityError::DeploymentHasMembers { handle, live } => write!(
+                f,
+                "deployment `{handle}` was ended and still has {live} live members, who would \
+                 come back under the new origins; end each first \
+                 (`ordo-identity-service member end {handle} <person>`), then register it again"
+            ),
+            IdentityError::ReturnRefused => f.write_str(
+                "that return address is not one this deployment lists; sign-in goes to the \
+                 account page instead",
+            ),
+            IdentityError::HomeOnly { act, home } => write!(
+                f,
+                "{act} is done at the identity service's own deployment `{home}`, with a token \
+                 for it"
+            ),
             IdentityError::AuditBroken(b) => write!(f, "the audit log does not check out: {b}"),
+            IdentityError::UnknownClient(client) => write!(
+                f,
+                "`{client}` is not a deployment registered with this identity service; set the \
+                 app's ORDO_AUTH_<NAME>_CLIENT_ID to its handle, or register it \
+                 (`ordo-identity-service deployment add`)"
+            ),
+            IdentityError::RedirectRefused { client } => write!(
+                f,
+                "that redirect URI is not exactly one of deployment `{client}`'s return URLs; \
+                 register the app's callback, `<ORDO_PUBLIC_URL>/auth/callback/<name>`, with \
+                 `--return`, exactly as the app sends it"
+            ),
+            IdentityError::AuthorizeRefused { why, .. } => {
+                write!(f, "the sign-in request was refused: {why}")
+            }
+            IdentityError::GrantRefused => f.write_str(
+                "this code does not work: it is unknown, used, expired, for another app, or its \
+                 person is no longer a member; start sign-in again",
+            ),
+            IdentityError::ClientSecretRefused => f.write_str(
+                "this identity service's clients are public and prove themselves with PKCE; \
+                 set the app's ORDO_AUTH_<NAME>_CLIENT_AUTH=none and drop its client secret",
+            ),
+            IdentityError::UnsupportedGrant(g) => write!(
+                f,
+                "grant_type `{g}` is not served here; use `authorization_code`"
+            ),
             IdentityError::BadRequest(why) => write!(f, "bad request: {why}"),
             IdentityError::Internal(why) => write!(f, "internal: {why}"),
         }
@@ -391,6 +553,14 @@ impl IntoResponse for IdentityError {
             }
             IdentityError::Throttled { retry_after_secs } => {
                 body["retryAfterSecs"] = serde_json::json!(retry_after_secs);
+            }
+            // RFC 6749 5.2: an OAuth client reads `error_description`.
+            IdentityError::UnknownClient(_)
+            | IdentityError::ClientSecretRefused
+            | IdentityError::GrantRefused
+            | IdentityError::UnsupportedGrant(_)
+            | IdentityError::AuthorizeRefused { .. } => {
+                body["error_description"] = body["message"].clone();
             }
             _ => {}
         }

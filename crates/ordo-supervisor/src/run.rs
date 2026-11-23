@@ -298,7 +298,8 @@ impl Supervisor {
         let mut loops = Vec::new();
         for name in ChildName::ALL {
             let settings = cfg.child(name);
-            if !settings.bin.is_file() {
+            let off = name == ChildName::Identity && !identity_on;
+            if !off && !settings.bin.is_file() {
                 return Err(SupervisorError::setting(
                     name.bin_setting(),
                     format!(
@@ -314,16 +315,24 @@ impl Supervisor {
             }
             let dir = cfg.run_dir.join(name.as_str());
             // Not started at all: an upgraded deployment that names no
-            // identity database (owner, 2026-10-30). Said, and shown as
-            // stopped.
-            let off = name == ChildName::Identity && !identity_on;
+            // identity database (owner, 2026-10-30), or one that signs in
+            // at a shared service elsewhere. Said, and shown as stopped.
             let (user, privilege) = if off {
+                let lookup = |k: &str| {
+                    cfg.container_env
+                        .iter()
+                        .find(|(n, _)| n == k)
+                        .map(|(_, v)| v.clone())
+                };
                 (
                     None,
                     Privilege {
                         separate: false,
                         uid: None,
-                        note: Some(children::identity_off_note()),
+                        note: Some(match &split.external {
+                            Some(url) => children::external_note(url, &lookup),
+                            None => children::identity_off_note(),
+                        }),
                     },
                 )
             } else {

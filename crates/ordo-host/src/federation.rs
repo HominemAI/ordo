@@ -316,8 +316,28 @@ pub const CONNECTION_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$authconnection"
   PRIMARY KEY ("name")
 )"#;
 
+/// The subject claim beside the fingerprint (owner ruling 2026-11-18): a
+/// peer reads it to leave out a connection whose subject can change hands
+/// (`ordo_exec::peer::link`). A row from before it holds `''` until the
+/// connection starts again.
+pub const CONNECTION_CLAIM_DDL: &str = r#"ALTER TABLE "$authconnection"
+  ADD COLUMN IF NOT EXISTS "subject_claim" text NOT NULL DEFAULT ''"#;
+
+/// Create `$authconnection` with every column. Every start with sign-in on
+/// makes it, connections or none, because a peer refuses to start until it
+/// is there. Retry-once, as the other `ensure_table`s are.
+pub async fn ensure_connection_table(pool: &Pool) -> Result<(), String> {
+    for ddl in [CONNECTION_DDL, CONNECTION_CLAIM_DDL] {
+        if pool.rows(ddl).await.is_err() {
+            pool.rows(ddl).await.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// Record a connection's fingerprint the first time its name is served, and
-/// refuse a boot that finds a different one (§3.5).
+/// refuse a boot that finds a different one (§3.5). The subject claim is
+/// written each time, under the same fingerprint.
 ///
 /// A changed issuer or endpoint set under the same name would re-point every
 /// `oauth2:<name>:<sub>` link at another provider's subjects, where a `sub`
@@ -327,11 +347,10 @@ pub async fn ensure_fingerprint(
     name: &str,
     kind: &str,
     fingerprint: &str,
+    subject_claim: &str,
     at: u64,
 ) -> Result<(), String> {
-    if pool.rows(CONNECTION_DDL).await.is_err() {
-        pool.rows(CONNECTION_DDL).await.map_err(|e| e.to_string())?;
-    }
+    ensure_connection_table(pool).await?;
     pool.rows(&format!(
         r#"INSERT INTO "$authconnection" ("name", "kind", "fingerprint", "first_seen")
            VALUES ({}, {}, {}, {at}) ON CONFLICT ("name") DO NOTHING"#,
@@ -358,6 +377,15 @@ pub async fn ensure_fingerprint(
              it keeps its endpoints for life: give the new provider a new connection name"
         ));
     }
+    pool.rows(&format!(
+        r#"UPDATE "$authconnection" SET "subject_claim" = {}
+           WHERE "name" = {} AND "fingerprint" = {} AND "subject_claim" <> {0}"#,
+        sql_lit(subject_claim),
+        sql_lit(name),
+        sql_lit(fingerprint),
+    ))
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

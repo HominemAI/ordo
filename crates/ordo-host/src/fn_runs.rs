@@ -173,6 +173,7 @@ pub fn specs() -> Vec<OpSpec> {
         params,
         output_fields: fields.into_iter().map(FieldSpec::new).collect(),
         live_capable: false,
+        reads_external: false,
         sync: Syncability::NotSyncable(NotSyncable::NoAnchor),
         requires_idempotency_key: false,
         public: Default::default(),

@@ -277,6 +277,18 @@ fn check_trigger(schema: &Schema, r: &RoutineDecl) -> Result<(), SchemaError> {
             r.trigger_span,
             format!("routine `{name}` listens on `{e}`, which this program does not declare"),
         )),
+        // Another system writes an external's table, and nothing tells Ordo
+        // when (ruled 2026-11-15, `external-entities`). A routine on it would
+        // never wake.
+        Pos::Named(e) if schema.is_external(e) => Err(refuse(
+            "external_live",
+            r.trigger_span,
+            format!(
+                "routine `{name}` listens on `{e}`, an external entity. Another system writes \
+                 its table, so no change reaches Ordo's log. Run it on a schedule instead: \
+                 `trigger every 5m`"
+            ),
+        )),
         Pos::Named(_) => Ok(()),
     }
 }
@@ -331,6 +343,17 @@ fn check_body(schema: &Schema, r: &RoutineDecl) -> Result<(), SchemaError> {
                 ),
             ));
         };
+        if e.external.is_some() {
+            return Err(refuse(
+                "external_read_only",
+                entity.span,
+                format!(
+                    "routine `{name}` writes `{}`, an external entity, and an external is \
+                     read-only: its table belongs to another system",
+                    entity.name
+                ),
+            ));
+        }
         let mut params = Vec::new();
         match stmt {
             WriteStmt::Set { cond, fields, .. } => {

@@ -137,6 +137,26 @@ pub fn provider(
     rp_id: &str,
     origins: &[String],
 ) -> Result<PasskeyProvider, IdentityError> {
+    provider_sharing(
+        pool,
+        deployment,
+        rp_id,
+        origins,
+        Arc::new(MemoryCeremonyStore::new()),
+    )
+}
+
+/// [`provider`] over a ceremony store it shares with an earlier one, so
+/// the touch's provider can be rebuilt with new client origins (a
+/// deployment registered while running) without losing a ceremony begun
+/// under the old one.
+pub fn provider_sharing(
+    pool: &Pool,
+    deployment: &str,
+    rp_id: &str,
+    origins: &[String],
+    ceremonies: Arc<MemoryCeremonyStore>,
+) -> Result<PasskeyProvider, IdentityError> {
     let origin = origins.first().map(String::as_str).unwrap_or_default();
     let listed: Vec<&str> = origins.iter().map(String::as_str).collect();
     let rp = RelyingParty::new(rp_id, &listed)
@@ -159,7 +179,7 @@ pub fn provider(
             deployment: deployment.to_string(),
             rt: Handle::current(),
         }),
-        Arc::new(MemoryCeremonyStore::new()),
+        ceremonies,
     ))
 }
 

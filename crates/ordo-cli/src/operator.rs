@@ -382,6 +382,12 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
     // `identity` runs on the blocking stores of `ordo-host`, which own a
     // thread and a runtime each, so it builds its own for the one statement
     // it makes itself rather than nest inside this one.
+    // `introspect` reads one table and prints text; it builds its own
+    // runtime for the one pool it opens.
+    if cmd == "introspect" {
+        drop(rt);
+        return crate::introspect::run(flags);
+    }
     if cmd == "identity" {
         let Some(sub) = flags.positional.first().cloned() else {
             return Outcome::usage("ordo identity <recover>\n".into());
@@ -1969,7 +1975,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
         "operator:unattributed".to_string()
     });
 
-    let (schema, registry) = match crate::load_sources(&src) {
+    let (mut schema, registry) = match crate::load_sources(&src) {
         Ok(v) => v,
         Err(e) => return Outcome::failed(format!("{e}\n")),
     };
@@ -2002,6 +2008,13 @@ async fn apply_once(flags: &Flags) -> Outcome {
         Ok(d) => d,
         Err(e) => return Outcome::failed(format!("ddl: {e}\n")),
     };
+    // Each external's schema from its setting, after the artifact and the
+    // DDL are taken, as `Program::compile` does for the door's apply. Without
+    // it a `peer` line reads `$unresolved peer <name>` and every external
+    // from it is refused as missing (reported fix, federation e2e).
+    if let Err(e) = ordo_exec::peer::resolve(&mut schema, &ordo_exec::schema_from_env()) {
+        return Outcome::failed(format!("REFUSED  {e}\n"));
+    }
     let program =
         ordo_host::schema_apply::Program::assemble(schema, doc, ddl, src.text().to_string());
 

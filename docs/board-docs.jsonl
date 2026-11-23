@@ -35,6 +35,7 @@
 {"file": "plan-ci-images.md", "kind": "plan", "what": "CI and container images."}
 {"file": "plan-client-cache.md", "kind": "plan", "what": "The client runtime and its local replica (5g-pre)."}
 {"file": "plan-client-loading-fixes.md", "kind": "plan", "what": "How to fix the client loading findings (H1 to H4, M3 first): in-memory rows per screen, batched store writes, chunked sort, sync pacing settings; increments, budgets, invariants"}
+{"file": "plan-configuration-in-the-file.md", "kind": "plan", "what": "Plan for the auth block, the needs declaration and their SDK equivalents, under the 2026-11-14 configuration rule"}
 {"file": "plan-console.md", "kind": "plan", "what": "The plan for the Ordo console (18o): screens and the ops each calls, the gaps, stack, shipping, security, build order, and owner decisions"}
 {"file": "plan-delegation-surface.md", "kind": "plan", "what": "The delegation surface."}
 {"file": "plan-dev-loop.md", "kind": "plan", "what": "ordo dev: the sub-second local loop."}
@@ -43,7 +44,7 @@
 {"file": "plan-environments.md", "kind": "plan", "what": "Dev, staging and production as things Ordo supports: apply promotion, dev branches as tenants, staging clones, per-tenant rollout, seeding"}
 {"file": "plan-evolution-plans.md", "kind": "plan", "what": "How a schema change is made today, and the proposal to render, store, apply and undo it as a plan per step; answers the owner's grief notes on migrations"}
 {"file": "plan-export.md", "kind": "plan", "what": "Full space export and space deletion."}
-{"file": "plan-external-entities.md", "kind": "plan", "what": "Tables another system owns in the same database: external entities as generated read-only projections, random schema names, the audit owed"}
+{"file": "plan-external-entities.md", "kind": "plan", "what": "External entities: Ordo apps reading tables another system owns in the same database; ruled 2026-10-01 and 2026-11-15"}
 {"file": "plan-first-program.md", "kind": "plan", "what": "The first program: a notes app signed in to with a passkey, its program, page, deployment and measurements (17ae)."}
 {"file": "plan-idempotency.md", "kind": "plan", "what": "Durable idempotency's last window (8q)."}
 {"file": "plan-identity-service.md", "kind": "plan", "what": "Ordo's own minimal identity service: a third service in the one image for deployment people, the CLI and machines"}
@@ -121,6 +122,7 @@
 {"file": "audit-board-2026-09-29.md", "kind": "audit", "what": "Every board task checked against the code: where its work stands, where it was done, and what nothing was tracking."}
 {"file": "audit-board-coverage.md", "kind": "audit", "what": "Capabilities in the specs with no work item at all."}
 {"file": "audit-client-blocking-2026-10-10.md", "kind": "audit", "what": "Where Ordo's browser clients can freeze a page or hold a screen, measured, with the fix for each"}
+{"file": "audit-configuration-syntax.md", "kind": "audit", "what": "Audit of the configuration a deployment owner sets outside the .ordo file, with a per-setting recommendation on what the syntax should express, 2026-11-13"}
 {"file": "audit-coverage-2026-09-07.md", "kind": "audit", "what": "The coverage audit re-run on 2026-09-07."}
 {"file": "audit-doc-contradictions.md", "kind": "audit", "what": "Where design documents contradict each other, and what the code decided."}
 {"file": "audit-one-way-gaps.md", "kind": "audit", "what": "Capabilities that work one way only (write without read-back, create without delete, record without a reader): 12 findings, with evidence and what tracks each"}

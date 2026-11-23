@@ -509,7 +509,7 @@ impl TenantConnections {
                 .clone()
                 .ok_or("an `oidc` connection needs `issuer`")?,
             client_id: s.client_id.clone(),
-            client_secret: ClientSecret::new(secret),
+            client_secret: Some(ClientSecret::new(secret)),
             scope: s.scope.clone(),
             endpoints,
             use_email: s.use_email,
@@ -1347,6 +1347,7 @@ pub fn specs() -> Vec<OpSpec> {
         params,
         output_fields: out.clone(),
         live_capable: false,
+        reads_external: false,
         requires_idempotency_key: false,
         public: Default::default(),
         refinable: RefineTier::None,

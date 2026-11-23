@@ -175,6 +175,34 @@
   "mark": "done",
   "at": "2026-10-11T19:20:14+00:00"
  },
+ "audit-configuration-in-the-syntax:1": {
+  "mark": "done",
+  "at": "2026-11-14T09:23:48+00:00"
+ },
+ "audit-configuration-in-the-syntax:10": {
+  "mark": "done",
+  "at": "2026-11-14T10:33:44+00:00"
+ },
+ "audit-configuration-in-the-syntax:2": {
+  "mark": "done",
+  "at": "2026-11-14T09:23:57+00:00"
+ },
+ "audit-configuration-in-the-syntax:3": {
+  "mark": "done",
+  "at": "2026-11-14T09:24:16+00:00"
+ },
+ "audit-configuration-in-the-syntax:4": {
+  "mark": "done",
+  "at": "2026-11-14T09:24:24+00:00"
+ },
+ "audit-configuration-in-the-syntax:8": {
+  "mark": "done",
+  "at": "2026-11-14T10:39:00+00:00"
+ },
+ "audit-configuration-in-the-syntax:9": {
+  "mark": "done",
+  "at": "2026-11-14T10:39:03+00:00"
+ },
  "audit-decisions:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -751,6 +779,62 @@
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
  },
+ "example-apps-notes-v2-plus-note_viewer:1": {
+  "mark": "done",
+  "at": "2026-11-16T08:52:10+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:10": {
+  "mark": "done",
+  "at": "2026-11-18T05:00:11+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:11": {
+  "mark": "done",
+  "at": "2026-11-18T05:00:25+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:12": {
+  "mark": "done",
+  "at": "2026-11-18T05:13:31+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:13": {
+  "mark": "done",
+  "at": "2026-11-18T07:58:47+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:14": {
+  "mark": "done",
+  "at": "2026-11-18T07:58:48+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:15": {
+  "mark": "done",
+  "at": "2026-11-18T07:59:29+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:16": {
+  "mark": "done",
+  "at": "2026-11-18T08:00:34+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:17": {
+  "mark": "done",
+  "at": "2026-11-19T07:04:57+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:3": {
+  "mark": "done",
+  "at": "2026-11-17T02:37:55+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:4": {
+  "mark": "done",
+  "at": "2026-11-17T02:46:45+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:6": {
+  "mark": "done",
+  "at": "2026-11-17T10:24:01+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:7": {
+  "mark": "done",
+  "at": "2026-11-17T10:24:25+00:00"
+ },
+ "example-apps-notes-v2-plus-note_viewer:9": {
+  "mark": "done",
+  "at": "2026-11-17T10:24:42+00:00"
+ },
  "export:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
@@ -770,6 +854,22 @@
  "external-entities:4": {
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
+ },
+ "external-entities:5": {
+  "mark": "done",
+  "at": "2026-11-15T22:02:54+00:00"
+ },
+ "external-entities:6": {
+  "mark": "done",
+  "at": "2026-11-15T22:06:18+00:00"
+ },
+ "external-entities:7": {
+  "mark": "done",
+  "at": "2026-11-15T22:06:17+00:00"
+ },
+ "external-entities:8": {
+  "mark": "done",
+  "at": "2026-11-15T22:06:16+00:00"
  },
  "ez-deploy-keys:1": {
   "mark": "done",
@@ -1024,8 +1124,8 @@
   "at": "2026-11-10T00:21:08+00:00"
  },
  "image-name-the-release-does-not-build:4": {
-  "mark": "asking",
-  "at": "2026-11-12T10:46:29+00:00"
+  "mark": "done",
+  "at": "2026-11-13T19:56:15+00:00"
  },
  "isolation-suite:1": {
   "mark": "done",
@@ -1619,9 +1719,21 @@
   "mark": "done",
   "at": "2026-11-10T07:10:51+00:00"
  },
+ "rebuild-ellanor-on-ordo-now-to:17": {
+  "mark": "done",
+  "at": "2026-11-14T09:27:20+00:00"
+ },
+ "rebuild-ellanor-on-ordo-now-to:18": {
+  "mark": "done",
+  "at": "2026-11-13T19:58:13+00:00"
+ },
  "rebuild-ellanor-on-ordo-now-to:2": {
   "mark": "done",
   "at": "2026-11-09T11:03:47+00:00"
+ },
+ "rebuild-ellanor-on-ordo-now-to:21": {
+  "mark": "done",
+  "at": "2026-11-14T10:11:39+00:00"
  },
  "rebuild-ellanor-on-ordo-now-to:4": {
   "mark": "done",
@@ -1878,6 +1990,18 @@
  "serve-sealed-reads:1": {
   "mark": "done",
   "at": "2026-10-05T07:44:49+00:00"
+ },
+ "shared-identity:1": {
+  "mark": "done",
+  "at": "2026-11-15T05:48:56+00:00"
+ },
+ "shared-identity:2": {
+  "mark": "done",
+  "at": "2026-11-15T05:49:01+00:00"
+ },
+ "shared-identity:5": {
+  "mark": "done",
+  "at": "2026-11-15T05:52:51+00:00"
  },
  "sharing-under-routing:1": {
   "mark": "done",
@@ -2326,6 +2450,14 @@
  "test-in-proportion-to-the-change:7": {
   "mark": "done",
   "at": "2026-11-02T06:51:20+00:00"
+ },
+ "the-audit-check-fails-on-a:1": {
+  "mark": "done",
+  "at": "2026-11-18T05:01:35+00:00"
+ },
+ "the-audit-check-fails-on-a:2": {
+  "mark": "done",
+  "at": "2026-11-18T05:13:56+00:00"
  },
  "the-cli-s-db-mode-goes:1": {
   "mark": "done",

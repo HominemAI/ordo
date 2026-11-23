@@ -124,6 +124,7 @@ const cases = [
       notes_e2e: 'true',
       console_e2e: 'true',
       identity_e2e: 'false',
+      federation_e2e: 'true',
     },
   },
   {
@@ -147,7 +148,7 @@ const cases = [
     want: {
       crates: ' ordo-host ',
       clients: ' ordo-react ordo-sdk ',
-      examples: ' notes notes-v2 shopfront teamspace ',
+      examples: ' note-viewer notes notes-v2 shopfront teamspace ',
       notes_e2e: 'true',
       console_e2e: 'false',
       audit: 'false',
@@ -166,12 +167,22 @@ const cases = [
   {
     name: 'an example: its job and its e2e',
     files: ['examples/notes-v2/web/src/App.tsx'],
-    want: { examples: ' notes-v2 ', notes_e2e: 'true', crates: '' },
+    want: { examples: ' notes-v2 ', notes_e2e: 'true', federation_e2e: 'true', crates: '' },
+  },
+  {
+    name: 'note_viewer: its job and the federation e2e, not the notes e2e',
+    files: ['examples/note-viewer/e2e/stack.sh'],
+    want: { examples: ' note-viewer ', notes_e2e: 'false', federation_e2e: 'true', crates: '' },
+  },
+  {
+    name: 'the identity service: its e2e and the federation e2e',
+    files: ['crates/ordo-identity-service/src/oidc.rs'],
+    want: { identity_e2e: 'true', federation_e2e: 'true', notes_e2e: 'false' },
   },
   {
     name: 'teamspace: its job, no e2e',
     files: ['examples/teamspace/teamspace.ordo'],
-    want: { examples: ' teamspace ', notes_e2e: 'false' },
+    want: { examples: ' teamspace ', notes_e2e: 'false', federation_e2e: 'false' },
   },
   {
     name: 'a lockfile: the audit',
@@ -328,7 +339,8 @@ for (const f of everything) {
     host: 'true',
     console_e2e: 'true',
     identity_e2e: 'true',
-    examples: ' notes notes-v2 shopfront teamspace ',
+    federation_e2e: 'true',
+    examples: ' note-viewer notes notes-v2 shopfront teamspace ',
   });
 }
 
@@ -391,7 +403,7 @@ console.log('ok   testFilter');
 // runs the unit tier alone.
 {
   const d = deferToPullRequest(outputs(runAll('.github/ changed', packages)));
-  const want = { unit: 'true', perf: 'false', rest: 'false', host: 'false', upgrade: 'false', notes_e2e: 'false', console_e2e: 'false', identity_e2e: 'false', authz: 'false', clients: '', examples: '' };
+  const want = { unit: 'true', perf: 'false', rest: 'false', host: 'false', upgrade: 'false', notes_e2e: 'false', console_e2e: 'false', identity_e2e: 'false', federation_e2e: 'false', authz: 'false', clients: '', examples: '' };
   const bad = Object.entries(want).filter(([k, v]) => d[k] !== v);
   if (bad.length) {
     failed += 1;

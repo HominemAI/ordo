@@ -24,6 +24,15 @@
 
 domain notes @ 0.2.0
 
+# note_viewer (examples/note-viewer) is a second deployment that reads these
+# notes. This line is notes v2's consent: its database role, named by
+# ORDO_READER_NOTE_VIEWER_ROLE, gets SELECT on these two tables and the
+# sign-in columns, and nothing else. Postgres refuses it every other table.
+# Which rows a viewer's user sees is the viewer's own guard. It follows this
+# file's acl: a person sees a note they hold a level on. A note tagged
+# `public` is shown to anyone there.
+reader note_viewer reads notes, notesAccess
+
 entity notes {
   title: text
   body:  text = ""

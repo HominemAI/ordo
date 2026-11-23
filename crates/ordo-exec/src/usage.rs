@@ -631,14 +631,17 @@ async fn sum_u64(pool: &Pool, sql: &str) -> Result<u64, PoolError> {
 /// other per-entity statement in this crate reaches its own table
 /// (`sealed.rs`, `triggers.rs`).
 pub async fn table_bytes_estimate(pool: &Pool, table: &str, space: &str) -> Result<u64, PoolError> {
-    let table_lit = sql_lit(table);
+    // By the table's own oid, found through the connection's search_path,
+    // not by `relname`: two deployments in one database (`ORDO_PG_SCHEMA`)
+    // each have a table of this name.
+    let table_lit = sql_lit(&format!("\"{table}\""));
     let rows = pool
         .rows(&format!(
             "SELECT count(*)::bigint, \
                     (SELECT COALESCE(pg_relation_size(oid), 0) FROM pg_class \
-                     WHERE relname = {table_lit}), \
+                     WHERE oid = to_regclass({table_lit})), \
                     GREATEST((SELECT COALESCE(reltuples, 1) FROM pg_class \
-                     WHERE relname = {table_lit}), 1) \
+                     WHERE oid = to_regclass({table_lit})), 1) \
              FROM \"{table}\" WHERE \"$space\" = {}",
             sql_lit(space)
         ))

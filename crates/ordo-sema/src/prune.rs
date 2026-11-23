@@ -184,6 +184,10 @@ fn cond_refs(c: &BCond, used: &mut Used) {
             expr_refs(expr, used);
             expr_refs(anchor, used);
         }
+        BCond::PeerCaller { expr, caller, .. } => {
+            expr_refs(expr, used);
+            expr_refs(caller, used);
+        }
     }
 }
 

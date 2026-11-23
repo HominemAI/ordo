@@ -4,7 +4,8 @@
 //! A sibling of the console and the deployment in the one image. It holds
 //! the people and machines that run a deployment, in its own database, and
 //! signs the 10 minute tokens the door and the console verify with its
-//! published keys. The app realm's users never reach it.
+//! published keys. An app that connects to it as an OIDC provider
+//! ([`oidc`]) signs its own users in through it too.
 //!
 //! Step 1, built so far:
 //!
@@ -21,19 +22,27 @@
 //!
 //! The console import (6.1) and its RP ID warning (6.2): [`import`].
 //!
+//! Many deployments in one service, each with its own members, client
+//! origins and return URLs: [`deployments`].
+//!
 //! Step 2: the service's own page ([`page`]): sign-up by link, sign-in,
 //! CLI approval, and the account (passkeys, recovery codes).
+//!
+//! The service as an OIDC provider, so app users sign in to Ordo apps
+//! through it: [`oidc`].
 
 pub mod audit;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod deployments;
 pub mod error;
 pub mod flows;
 pub mod import;
 pub mod invites;
 pub mod keys;
 pub mod machine;
+pub mod oidc;
 pub mod page;
 pub mod passkeys;
 pub mod people;

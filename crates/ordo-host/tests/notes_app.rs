@@ -1682,6 +1682,26 @@ fn sign_in_by_email(
 /// Notes v2, with its reminders.
 const V2: &str = include_str!("../../../examples/notes-v2/notes.ordo");
 
+/// The role notes v2's `reader note_viewer` line names, made once in the
+/// cluster. A door that boots v2 grants it the two tables the line names.
+const V2_READER_ROLE: &str = "ordo_notes_viewer";
+
+/// [`V2_READER_ROLE`], made if it is not there yet, as the setting a door
+/// that boots v2 needs. No login, no rights of its own.
+fn v2_reader_role() -> (&'static str, &'static str) {
+    let admin = Pg {
+        db: "postgres".into(),
+        ..Pg::default()
+    };
+    admin
+        .exec(&format!(
+            "DO $$ BEGIN CREATE ROLE {V2_READER_ROLE} NOLOGIN; \
+             EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;"
+        ))
+        .expect("the reader's role");
+    ("ORDO_READER_NOTE_VIEWER_ROLE", V2_READER_ROLE)
+}
+
 /// Wait up to `secs` for `probe`, for what a 30 second schedule decides.
 fn within<T>(secs: u64, what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let started = std::time::Instant::now();
@@ -1736,6 +1756,7 @@ async fn a_due_reminder_fires_once_and_mails_only_the_owner_with_two_servers_run
         ("ORDO_MAIL_TLS", "none"),
         ("ORDO_MAIL_SEND_SECS", "1"),
         ("ORDO_EGRESS_PRIVATE_HOSTS", "localhost"),
+        v2_reader_role(),
     ];
     let d = Deployment::boot_program("ordo_notes_remind", V2, Some(PAGE), &settings).await;
     let second = d.replica(Some(PAGE), &settings);
@@ -2055,6 +2076,7 @@ async fn my_notes_at_five_thousand_notes_uses_the_access_index() {
         ("ORDO_BLOB_STORE", blobs.as_str()),
         ("ORDO_DEV_UNSAFE_BLOB_STORE", "1"),
         ("ORDO_SYNC_PAGE_WAIT_MS", "0"),
+        v2_reader_role(),
     ];
     let d = Deployment::boot_program("ordo_notes_guard_bench", V2, Some(PAGE), &settings).await;
     let ada = sign_up(&d, &device(51, "ada"), "Ada");

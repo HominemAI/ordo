@@ -1,0 +1,29 @@
+{
+  "name": "ordo-note-viewer-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The note_viewer page: notes v2's notes through a peer. React over @hominemai/ordo-sdk, served by Vite on http://localhost:5174.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "gen": "sh gen.sh",
+    "check": "npm run typecheck"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.4.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

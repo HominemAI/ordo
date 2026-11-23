@@ -5,6 +5,7 @@
 //! |---|---|
 //! | `GET /` | sends the browser to `/account` |
 //! | `GET /join` | sign up by invite link: a name, a passkey, recovery codes shown once (5.3) |
+//! | `GET /sign-up` | `?deployment=&return=`: open sign-up into a deployment whose mode is open, or join it with the account already signed in |
 //! | `GET /sign-in` | a passkey, or a recovery code that may only enrol a new passkey (5.4) |
 //! | `GET /cli` | approve or deny `ordo login` on this computer, with a touch (5.5) |
 //! | `GET /account` | passkeys (list, add, remove, never the last), new recovery codes |
@@ -71,6 +72,11 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("../page/sign-in.js"),
     ),
     (
+        "sign-up.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../page/sign-up.js"),
+    ),
+    (
         "cli.js",
         "text/javascript; charset=utf-8",
         include_str!("../page/cli.js"),
@@ -86,6 +92,7 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
 pub const PAGES: &[(&str, &str)] = &[
     ("/join", include_str!("../page/join.html")),
     ("/sign-in", include_str!("../page/sign-in.html")),
+    ("/sign-up", include_str!("../page/sign-up.html")),
     ("/cli", include_str!("../page/cli.html")),
     ("/account", include_str!("../page/account.html")),
 ];
@@ -165,7 +172,7 @@ fn return_origins(s: &Service) -> String {
 }
 
 /// Text made safe inside a double-quoted HTML attribute.
-fn attr(text: &str) -> String {
+pub(crate) fn attr(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")

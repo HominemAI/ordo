@@ -37,7 +37,7 @@ jobs:
     # name. Only `main` publishes (audit 2026-10-08); a dispatch from
     # anywhere else is skipped rather than failed.
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.ref == 'refs/heads/main' && github.repository_owner == 'HominemAI') }}
-    runs-on: [self-hosted, ordo-k8s]
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       # One package's failure should not stop the other from publishing.

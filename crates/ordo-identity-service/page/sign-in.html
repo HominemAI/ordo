@@ -23,10 +23,11 @@
 
   <section data-step="sign-in" hidden>
     <h1>Sign in</h1>
-    <p>Sign in to run this Ordo deployment. Use the passkey you made when you joined.</p>
+    <p id="sign-in-intro">Sign in to run this Ordo deployment. Use the passkey you made when you joined.</p>
     <div id="passkey-area">
       <button type="button" id="passkey" data-passkey>Sign in with a passkey</button>
     </div>
+    <p id="sign-up-line" hidden>New here? <a id="sign-up-link">Make an account</a></p>
     <details id="recover-area">
       <summary>Lost your passkey? Use a recovery code</summary>
       <form id="recover-form" novalidate>
@@ -40,6 +41,14 @@
         <button type="submit" class="secondary">Use this code</button>
       </form>
     </details>
+  </section>
+
+  <section data-step="touch" hidden>
+    <h1>Confirm it's you</h1>
+    <p>Use your passkey to confirm it's you. You then go back to where you were.</p>
+    <div id="touch-area">
+      <button type="button" id="touch" data-passkey>Confirm it's you</button>
+    </div>
   </section>
 
   <section data-step="enrol" hidden>

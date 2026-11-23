@@ -6,22 +6,35 @@
 //! | `GET /.well-known/jwks.json` | anyone | the token keys, `max-age=600` |
 //! | `GET /.well-known/ordo-audit-keys.json` | anyone | the audit checkpoint keys |
 //! | `POST /join/begin`, `/join/finish` | invite holder | sign up by invite link (5.3) |
+//! | `POST /sign-up/begin`, `/sign-up/finish` | anyone | `{deployment}`: open sign-up into a deployment whose mode is `open`; an app member of it only |
+//! | `POST /sign-up/join` | browser session, the service's own page only | `{deployment}`: the signed-in person joins an open deployment as an app member |
 //! | `POST /sign-in/begin`, `/sign-in/finish` | anyone | passkey sign-in (5.4) |
+//! | `POST /sign-in/return` | the page | `{deployment?, return}`: where sign-in may send the browser back to, or `return_refused` |
 //! | `POST /recover` | code holder | recovery code sign-in |
-//! | `POST /token` | session | `{aud}`: a token (5.4, 5.5) |
+//! | `GET /.well-known/openid-configuration`, `GET /oidc/authorize`, `POST /oidc/token` | an app | the service as an OIDC provider for app users ([`crate::oidc`]) |
+//! | `POST /token` | session | `{aud}`: a token for the service's own deployment or a registered one the person is a member of (5.4, 5.5) |
 //! | `POST /sessions/end` | session | sign out |
-//! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it |
+//! | `POST /touch/begin`, `/touch/finish` | browser session | a fresh touch and a token carrying it; `aud` in the finish body names the deployment, default the service's own; with no `aud`, from the service's page or `ORDO_IDENTITY_CLIENT_ORIGINS` only |
 //! | `POST /passkeys/begin`, `/passkeys/finish` | browser session | enrol another passkey |
 //! | `POST /recovery-codes` | browser session | a new set of recovery codes |
 //! | `POST /me` | browser session | who is signed in, their passkeys, codes left (the account page) |
 //! | `POST /passkeys/{id}/remove` | browser session | remove one passkey, never the last |
-//! | `POST /cli/approve` | browser session | a CLI code for `ordo login` (5.5) |
+//! | `POST /cli/approve` | browser session, from the service's page or `ORDO_IDENTITY_CLIENT_ORIGINS` | a CLI code for `ordo login` (5.5) |
 //! | `POST /cli/redeem` | the CLI | the code and the PKCE verifier for a CLI session |
 //! | `POST /machine/begin`, `/machine/complete` | machine | machine key sign-in (5.6) |
 //! | `GET /invites`, `POST /invites`, `POST /invites/{id}/revoke` | bearer | invites |
 //! | `GET /people`, `POST /people/{id}/end` | bearer | people (5.7) |
 //! | `GET /machine-keys`, `POST /machine-keys`, `POST /machine-keys/{id}/end` | bearer | machine keys |
 //! | `GET /audit?before=&limit=` | bearer | the audit log, newest first, and whether the chain checks out now (plan 7) |
+//! | `GET /deployments`, `POST /deployments`, `POST /deployments/{handle}/end` | bearer, the service's own | the deployments registered here ([`crate::deployments`]) |
+//! | `POST /deployments/{handle}/sign-up` | bearer, the service's own | `{signUp: "invite" \| "open"}`: how people join it |
+//! | `POST /deployments/{handle}/addresses` | bearer, the service's own | `{clientOrigins?, returnUrls?}`: replace either list |
+//! | `GET /deployments/{handle}/members`, `POST /deployments/{handle}/members`, `POST /deployments/{handle}/members/{person}/end` | bearer | a deployment's members |
+//!
+//! A bearer token for a registered deployment reaches that deployment's
+//! people and invites only: its members, invites into it, ending a
+//! membership. Machine keys, the audit log and the registry answer the
+//! service's own token alone (`home_only`).
 //!
 //! Bodies are JSON objects; binary fields are base64url, as the console's.
 //!
@@ -32,11 +45,15 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, SET_COOKIE};
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION, ORIGIN,
+    SET_COOKIE,
+};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ordo_identity::origin::Origin;
 use ordo_identity::webauthn::b64url_decode;
 use ordo_identity::{ChallengeId, CompleteRequest};
 use serde_json::{json, Value};
@@ -44,11 +61,13 @@ use serde_json::{json, Value};
 use crate::cli::Redeemed;
 use crate::error::IdentityError;
 use crate::flows::{Caller, Registration};
+use crate::oidc::{self, Authorized};
+use crate::page::PAGE_CSP;
 use crate::server::{Service, JWKS_MAX_AGE_SECS};
 use crate::sessions::Opened;
 use crate::throttle::Source;
 use crate::token::Issued;
-use crate::{invites, machine, people};
+use crate::{deployments, invites, machine, people};
 
 /// An answer: a JSON body, and a session cookie to set or clear.
 struct Reply {
@@ -133,6 +152,14 @@ fn signed_in(s: &Service, person: &str, opened: &Opened, mut body: Value) -> Rep
     }
 }
 
+/// The page a browser call came from, when it sent one.
+fn origin_of(headers: &HeaderMap) -> Option<Origin> {
+    headers
+        .get(ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .and_then(Origin::parse)
+}
+
 async fn caller(s: &Service, headers: &HeaderMap) -> Result<Caller, IdentityError> {
     let token = headers
         .get(AUTHORIZATION)
@@ -148,10 +175,17 @@ pub(crate) fn routes() -> Router<Service> {
         .route("/health/ready", get(ready))
         .route("/.well-known/jwks.json", get(jwks))
         .route("/.well-known/ordo-audit-keys.json", get(audit_keys))
+        .route(oidc::DISCOVERY_PATH, get(discovery))
+        .route(oidc::AUTHORIZE_PATH, get(authorize))
+        .route(oidc::TOKEN_PATH, post(oidc_token))
         .route("/join/begin", post(join_begin))
         .route("/join/finish", post(join_finish))
+        .route("/sign-up/begin", post(sign_up_begin))
+        .route("/sign-up/finish", post(sign_up_finish))
+        .route("/sign-up/join", post(sign_up_join))
         .route("/sign-in/begin", post(sign_in_begin))
         .route("/sign-in/finish", post(sign_in_finish))
+        .route("/sign-in/return", post(sign_in_return))
         .route("/recover", post(recover))
         .route("/token", post(token))
         .route("/sessions/end", post(sign_out))
@@ -176,6 +210,24 @@ pub(crate) fn routes() -> Router<Service> {
         )
         .route("/machine-keys/{id}/end", post(machine_key_end))
         .route("/audit", get(audit_page))
+        .route(
+            "/deployments",
+            get(deployments_list).post(deployments_register),
+        )
+        .route("/deployments/{handle}/end", post(deployment_end))
+        .route("/deployments/{handle}/sign-up", post(deployment_sign_up))
+        .route(
+            "/deployments/{handle}/addresses",
+            post(deployment_addresses),
+        )
+        .route(
+            "/deployments/{handle}/members",
+            get(members_list).post(member_add),
+        )
+        .route(
+            "/deployments/{handle}/members/{person}/end",
+            post(member_end),
+        )
 }
 
 async fn live() -> Json<Value> {
@@ -203,6 +255,68 @@ async fn audit_keys(State(s): State<Service>) -> Response {
     let mut res = Json(s.keys().audit_keys()).into_response();
     res.headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=600"));
+    res
+}
+
+// ─────────────────────────── OIDC provider ───────────────────────────
+
+async fn discovery(State(s): State<Service>) -> Response {
+    let mut res = Json(s.discovery()).into_response();
+    res.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=600"));
+    res
+}
+
+/// The browser's authorization request: back to the app, to the page to
+/// sign in, or a refusal shown here.
+async fn authorize(State(s): State<Service>, headers: HeaderMap, uri: Uri) -> Response {
+    let cookie = s.cookie(&headers);
+    let mut res = match s
+        .authorize(uri.query().unwrap_or(""), cookie.as_deref())
+        .await
+    {
+        Ok(Authorized::Back(to) | Authorized::Page(to)) => match HeaderValue::from_str(&to) {
+            Ok(v) => (StatusCode::SEE_OTHER, [(LOCATION, v)]).into_response(),
+            Err(_) => IdentityError::Internal("a redirect that is not a header value".into())
+                .into_response(),
+        },
+        Err(e) => {
+            let shown = if e.status().is_server_error() {
+                eprintln!("ordo-identity-service: {e}");
+                IdentityError::Internal("the identity service failed; its log has the cause".into())
+            } else {
+                e
+            };
+            let mut r = (
+                shown.status(),
+                oidc::refusal_page(&shown, &s.config().base_path),
+            )
+                .into_response();
+            let h = r.headers_mut();
+            h.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            );
+            h.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(PAGE_CSP));
+            r
+        }
+    };
+    res.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
+}
+
+/// The app's server exchanging a code: a form body, a JSON answer.
+async fn oidc_token(State(s): State<Service>, body: Bytes) -> Response {
+    let mut res = match std::str::from_utf8(&body) {
+        Ok(text) => match s.oidc_token(text).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => e.into_response(),
+        },
+        Err(_) => IdentityError::BadRequest("the body is not UTF-8".into()).into_response(),
+    };
+    res.headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
 }
 
@@ -253,6 +367,72 @@ async fn join_finish(
     )
 }
 
+async fn sign_up_begin(
+    State(s): State<Service>,
+    from: Source,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            s.origin_ok(&headers)?;
+            let b = parse(&body)?;
+            Ok(Reply::json(
+                s.open_begin(text(&b, "deployment")?, &from).await?,
+            ))
+        }
+        .await,
+    )
+}
+
+async fn sign_up_finish(
+    State(s): State<Service>,
+    from: Source,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            s.origin_ok(&headers)?;
+            let b = parse(&body)?;
+            let deployment = text(&b, "deployment")?;
+            let joined = s
+                .open_finish(
+                    deployment,
+                    text(&b, "displayName")?,
+                    registration(&b)?,
+                    &from,
+                )
+                .await?;
+            Ok(signed_in(
+                &s,
+                &joined.person,
+                &joined.session,
+                json!({ "recoveryCodes": joined.recovery_codes, "deployment": deployment }),
+            ))
+        }
+        .await,
+    )
+}
+
+async fn sign_up_join(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
+    respond(
+        async {
+            // Joining spends the session cookie with no passkey, so only the
+            // service's own page asks it.
+            s.own_page_ok(&headers, "join an app")?;
+            let b = parse(&body)?;
+            let live = session(&s, &headers, &b).await?;
+            let deployment = text(&b, "deployment")?;
+            s.open_join(&live, deployment).await?;
+            Ok(Reply::json(
+                json!({ "deployment": deployment, "member": live.subject }),
+            ))
+        }
+        .await,
+    )
+}
+
 async fn sign_in_begin(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
@@ -278,6 +458,21 @@ async fn sign_in_finish(State(s): State<Service>, headers: HeaderMap, body: Byte
             };
             let (person, opened) = s.sign_in_finish(assertion(&b)?, client).await?;
             Ok(signed_in(&s, &person, &opened, json!({})))
+        }
+        .await,
+    )
+}
+
+/// Where the page may send the browser once signed in. A refusal sends
+/// it to the account page instead.
+async fn sign_in_return(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
+    respond(
+        async {
+            s.origin_ok(&headers)?;
+            let b = parse(&body)?;
+            let deployment = b.get("deployment").and_then(Value::as_str);
+            let to = s.return_to(deployment, text(&b, "return")?)?;
+            Ok(Reply::json(json!({ "to": to })))
         }
         .await,
     )
@@ -312,7 +507,9 @@ async fn token(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Res
         async {
             let b = parse(&body)?;
             let secret = s.secret(&headers, &b)?;
-            let issued = s.token(&secret, text(&b, "aud")?).await?;
+            let issued = s
+                .token_from(&secret, text(&b, "aud")?, origin_of(&headers).as_ref())
+                .await?;
             Ok(Reply::json(token_json(&issued)))
         }
         .await,
@@ -360,9 +557,26 @@ async fn touch_finish(State(s): State<Service>, headers: HeaderMap, body: Bytes)
         async {
             let b = parse(&body)?;
             let live = session(&s, &headers, &b).await?;
-            let issued = s.touch_finish(&live, assertion(&b)?).await?;
-            let mut out = token_json(&issued);
-            out["touchedAt"] = json!(issued.claims.touched_at);
+            // `aud` named: a token for that deployment, for its members.
+            // None: the person's own account pages; the touch counts for
+            // everyone, and the service's own token comes with it only for
+            // a person who holds one. So none is asked only from the
+            // service's page or a client origin of its own deployment.
+            if let Some(aud) = b.get("aud").and_then(Value::as_str) {
+                let issued = s
+                    .touch_finish_for(&live, assertion(&b)?, aud, origin_of(&headers).as_ref())
+                    .await?;
+                let mut out = token_json(&issued);
+                out["touchedAt"] = json!(issued.claims.touched_at);
+                return Ok(Reply::json(out));
+            }
+            s.home_origin_ok(&headers, "reauth with no `aud`")?;
+            let fresh = s.touch(&live, assertion(&b)?).await?;
+            let mut out = match s.home_token_after_touch(&fresh).await? {
+                Some(issued) => token_json(&issued),
+                None => json!({}),
+            };
+            out["touchedAt"] = json!(fresh.touched_at);
             Ok(Reply::json(out))
         }
         .await,
@@ -468,6 +682,7 @@ async fn passkey_remove(
 async fn cli_approve(State(s): State<Service>, headers: HeaderMap, body: Bytes) -> Response {
     respond(
         async {
+            s.home_origin_ok(&headers, "approve a CLI sign-in")?;
             let b = parse(&body)?;
             let live = session(&s, &headers, &b).await?;
             let code = s.cli_approve(&live, text(&b, "codeChallenge")?).await?;
@@ -548,8 +763,8 @@ async fn machine_complete(State(s): State<Service>, from: Source, body: Bytes) -
 async fn invites_list(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
-            let list = invites::list(s.store().pool(), s.handle(), s.now()).await?;
+            let c = caller(&s, &headers).await?;
+            let list = invites::list(s.store().pool(), s.handle(), s.scope_of(&c), s.now()).await?;
             Ok(Reply::json(json!({ "invites": list })))
         }
         .await,
@@ -570,11 +785,21 @@ async fn invites_create(State(s): State<Service>, headers: HeaderMap, body: Byte
                 }
             }
             let label = b.get("label").and_then(Value::as_str).unwrap_or("");
-            let m = s.invite(c.actor(), label).await?;
+            // A registered deployment's token invites into it; the
+            // service's own may name any registered deployment.
+            let target = match s.scope_of(&c) {
+                Some(t) => Some(t.to_string()),
+                None => b
+                    .get("deployment")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            let m = s.invite_into(c.actor(), label, target.as_deref()).await?;
             Ok(Reply::json(json!({
                 "id": m.id,
                 "link": m.link,
                 "expiresAt": m.expires_at,
+                "deployment": target.unwrap_or_else(|| s.handle().to_string()),
             })))
         }
         .await,
@@ -590,7 +815,7 @@ async fn invite_revoke(
         async {
             let c = caller(&s, &headers).await?;
             c.may_admin(s.now())?;
-            s.revoke_invite(c.actor(), &id).await?;
+            s.revoke_invite_in(c.actor(), &id, s.scope_of(&c)).await?;
             Ok(Reply::json(json!({ "revoked": id })))
         }
         .await,
@@ -600,9 +825,12 @@ async fn invite_revoke(
 async fn people_list(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
-            let list: Vec<Value> = people::list(s.store().pool(), s.handle())
-                .await?
+            let c = caller(&s, &headers).await?;
+            let found = match s.scope_of(&c) {
+                None => people::list(s.store().pool(), s.handle()).await?,
+                Some(t) => deployments::members(s.store().pool(), s.handle(), t).await?,
+            };
+            let list: Vec<Value> = found
                 .into_iter()
                 .map(|p| {
                     json!({
@@ -629,6 +857,12 @@ async fn person_end(
         async {
             let c = caller(&s, &headers).await?;
             c.may_admin(s.now())?;
+            // A registered deployment's token ends the membership, never
+            // the account.
+            if let Some(t) = s.scope_of(&c) {
+                s.end_member(c.actor(), t, &id).await?;
+                return Ok(Reply::json(json!({ "ended": id, "deployment": t })));
+            }
             let e = s.end_person(c.actor(), &id).await?;
             Ok(Reply::json(json!({
                 "ended": id,
@@ -644,7 +878,14 @@ async fn person_end(
 async fn machine_keys_list(State(s): State<Service>, headers: HeaderMap) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
+            let c = caller(&s, &headers).await?;
+            // Machine keys are the service's own: a registered deployment's
+            // console sees none, and where they are managed.
+            if !c.home {
+                return Ok(Reply::json(
+                    json!({ "machineKeys": [], "managedAt": s.handle() }),
+                ));
+            }
             let list = machine::list(s.store().pool(), s.handle()).await?;
             Ok(Reply::json(json!({ "machineKeys": list })))
         }
@@ -660,6 +901,7 @@ async fn machine_keys_create(
     respond(
         async {
             let c = caller(&s, &headers).await?;
+            s.home_only(&c, "making a machine key")?;
             c.may_write(s.now())?;
             let b = parse(&body)?;
             let public = match b.get("publicKey").and_then(Value::as_str) {
@@ -700,6 +942,7 @@ async fn machine_key_end(
     respond(
         async {
             let c = caller(&s, &headers).await?;
+            s.home_only(&c, "ending a machine key")?;
             c.may_admin(s.now())?;
             let sessions = s.end_machine_key(c.actor(), &id).await?;
             Ok(Reply::json(json!({ "ended": id, "sessions": sessions })))
@@ -718,7 +961,8 @@ async fn audit_page(
 ) -> Response {
     respond(
         async {
-            caller(&s, &headers).await?;
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "reading the audit log")?;
             let number = |k: &str| -> Result<Option<u64>, IdentityError> {
                 q.get(k)
                     .map(|v| {
@@ -756,6 +1000,196 @@ async fn audit_page(
                 })
                 .collect();
             Ok(Reply::json(json!({ "entries": entries, "verified": verified })))
+        }
+        .await,
+    )
+}
+
+// ─────────────────────────── the registry ───────────────────────────
+
+async fn deployments_list(State(s): State<Service>, headers: HeaderMap) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "listing the registered deployments")?;
+            let list: Vec<Value> = deployments::list(s.store().pool(), s.handle())
+                .await?
+                .iter()
+                .map(deployments::Registered::json)
+                .collect();
+            Ok(Reply::json(
+                json!({ "home": s.handle(), "deployments": list }),
+            ))
+        }
+        .await,
+    )
+}
+
+/// Register a deployment: `{handle, clientOrigins, returnUrls?, signUp?}`.
+/// An admin of the service's own deployment, with a fresh touch, or a
+/// machine key holding the `deployment` grant (the provisioner key made from
+/// `ORDO_IDENTITY_PROVISIONER_KEY`).
+async fn deployments_register(
+    State(s): State<Service>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "registering a deployment")?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let asked = deployments::Registration::from_body(&b)?;
+            let made = s.register_deployment(c.actor(), &asked).await?;
+            Ok(Reply::json(made.json()))
+        }
+        .await,
+    )
+}
+
+async fn deployment_end(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "ending a deployment")?;
+            c.may_admin(s.now())?;
+            s.end_deployment(c.actor(), &handle).await?;
+            Ok(Reply::json(json!({ "ended": handle })))
+        }
+        .await,
+    )
+}
+
+/// `{signUp: "invite" | "open"}`: how people join a registered deployment.
+/// The same callers as registering it.
+async fn deployment_sign_up(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "changing a deployment's sign-up")?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let mode = deployments::SignUp::from_body(&b)?.ok_or_else(|| {
+                IdentityError::BadRequest("`signUp` is required: `invite` or `open`".into())
+            })?;
+            s.set_sign_up(c.actor(), &handle, mode).await?;
+            Ok(Reply::json(
+                json!({ "handle": handle, "signUp": mode.as_str() }),
+            ))
+        }
+        .await,
+    )
+}
+
+/// `{clientOrigins?, returnUrls?}`: replace a registered deployment's
+/// client origins, its return URLs, or both. The same callers as
+/// registering it.
+async fn deployment_addresses(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            s.home_only(&c, "changing a deployment's addresses")?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let asked = deployments::Addresses::from_body(&b)?;
+            let made = s.set_addresses(c.actor(), &handle, &asked).await?;
+            Ok(Reply::json(made.json()))
+        }
+        .await,
+    )
+}
+
+/// The service's own token reaches every deployment's members; a
+/// registered deployment's token reaches its own only.
+fn may_reach(s: &Service, c: &Caller, handle: &str) -> Result<(), IdentityError> {
+    match s.scope_of(c) {
+        Some(own) if own != handle => Err(IdentityError::UnknownDeployment(handle.to_string())),
+        _ => Ok(()),
+    }
+}
+
+async fn members_list(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            let list: Vec<Value> = deployments::members(s.store().pool(), s.handle(), &handle)
+                .await?
+                .into_iter()
+                .map(|p| {
+                    json!({
+                        "id": p.id,
+                        "displayName": p.display_name,
+                        "role": p.role,
+                        "since": p.created_at,
+                        "endedAt": p.ended_at,
+                    })
+                })
+                .collect();
+            Ok(Reply::json(
+                json!({ "deployment": handle, "members": list }),
+            ))
+        }
+        .await,
+    )
+}
+
+/// `{person}`: make an account a member of this deployment.
+async fn member_add(
+    State(s): State<Service>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            c.may_admin(s.now())?;
+            let b = parse(&body)?;
+            let person = text(&b, "person")?;
+            s.add_member(c.actor(), &handle, person).await?;
+            Ok(Reply::json(
+                json!({ "deployment": handle, "member": person }),
+            ))
+        }
+        .await,
+    )
+}
+
+async fn member_end(
+    State(s): State<Service>,
+    Path((handle, person)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    respond(
+        async {
+            let c = caller(&s, &headers).await?;
+            may_reach(&s, &c, &handle)?;
+            c.may_admin(s.now())?;
+            s.end_member(c.actor(), &handle, &person).await?;
+            Ok(Reply::json(
+                json!({ "deployment": handle, "ended": person }),
+            ))
         }
         .await,
     )

@@ -76,6 +76,12 @@ and its own passkey table, in its own database. A deployment person who is
 also an app user holds 2 accounts, 2 passkeys, and that is by design: the
 realms do not meet.
 
+Amended 2026-11-19 (11.3): the realms meet where a deployment connects to
+the service as an OIDC provider. An app that does so signs its users in
+with their account at the service, and links them in its own
+`$authenticator` as `oidc:<connection>:<sub>`. The service still never
+opens the deployment's directory.
+
 ### 2.2 Its database
 
 Postgres, its own database and role, `ORDO_IDENTITY_DATABASE_URL` or
@@ -115,7 +121,7 @@ service (`plan-console.md` 11):
 | `ORDO_IDENTITY_DATABASE_URL[_FILE]` | its database. Required |
 | `ORDO_IDENTITY_IMPORT_CONSOLE_URL[_FILE]` | the console's database, read once at first start to move its owners in (6.1). The supervisor sets it in the one image; unset means no import |
 | `ORDO_IDENTITY_KEY_FILE` | the sealing key for signing keys at rest; made at first boot on the volume |
-| `ORDO_IDENTITY_CLIENT_ORIGINS` | origins allowed to ask it for tokens from a browser, with credentials: the console's origin. One whose host is the RP ID or under it may also run the touch ceremony in its own page (5.4 step 6) |
+| `ORDO_IDENTITY_CLIENT_ORIGINS` | origins allowed to ask it for tokens from a browser, with credentials: the console's origin. One whose host is the RP ID or under it may also run the touch ceremony in its own page (5.4 step 6). Other client origins reach the ceremony by the redirect to the service's sign-in page |
 | `ORDO_IDENTITY_DEPLOYMENT` | the deployment handle tokens name in `aud`; default `main`, the console's `DEFAULT_DEPLOYMENT`. The import reads the console rows of this handle |
 | `ORDO_IDENTITY_PROVISIONER_KEY` | an Ed25519 public key of the provisioning service; at first boot it becomes machine key `provisioner`. Hosting-bound, so it lives in the container's environment (Ordo Cloud v1 ruling) |
 | `ORDO_IDENTITY_INVITE_DAYS` | invite life, default 7, 1 to 30 (Q9) |
@@ -354,6 +360,14 @@ once.
 6. The invite's row records issuer, time, expiry, who used it and when.
    `POST /invites/<id>/revoke` kills an unspent one.
 
+**Open sign-up, built 2026-11-19.** Sign-up is per app (owner,
+2026-11-17). A registered deployment in `open` mode takes people with no
+invite: `/sign-up?deployment=<handle>&return=<url>` on the service's page,
+`POST /sign-up/begin` and `/sign-up/finish` behind it. Steps 4 and 5 are
+the same code as an invite's: one passkey, 10 recovery codes, a browser
+session. A person already signed in joins with `POST /sign-up/join`. The
+person becomes an app member of that deployment only (11.2).
+
 ### 5.4 Console sign-in
 
 The console holds no owners and no passkeys of its own any more. The
@@ -374,12 +388,25 @@ in here with that same passkey (6.2); nothing is re-enrolled.
 5. For in-app management the console server calls the door with the same
    token, as that person. The console no longer holds a credential of its
    own at the door. G14 (console key) and G15 (relayed touch) go.
-6. A write the door refuses with `presence_required`: the console page asks
-   the service for a step-up (`POST /touch`, a passkey assertion inside the
-   session), gets a token with a fresh `touched_at`, and retries. One touch
-   covers 300 seconds, as today. The ceremony runs in the console page, so
-   the browser signs the console's origin into the assertion; the service
-   accepts each client origin under its RP ID for that (built in step 6).
+6. A write the door refuses with `presence_required` needs a reauth. The
+   console page asks the service for the ceremony (`POST /touch/begin`) and
+   reads the RP ID in the options. One touch covers 300 seconds, as today.
+   - **Console host is the RP ID or under it:** the ceremony runs in the
+     console page. The browser signs the console's origin into the
+     assertion, and the service accepts each client origin under its RP ID
+     for that (built in step 6). `POST /touch/finish` answers a token with
+     a fresh `touched_at`, and the page retries.
+   - **Any other host** (Human Agent Link's console, owner, 2026-11-15): a
+     passkey made under RP ID `hominem.ai` cannot be used at another
+     host, so the page goes to the service's
+     `/sign-in?client=console&deployment=<handle>&return=<url>&touch=1`.
+     A live session sees "Confirm it's you" and one passkey button; with
+     no session the normal sign-in runs, which is a fresh touch itself.
+     The browser then returns to the console. The next token the page
+     fetches carries the touch.
+   - After the return the person repeats the action. Carrying the pending
+     action across the redirect is a later improvement.
+
    The console answers the door's `presence_required` and its own stale
    reauth with the one word `step_up_required`.
 7. Sign-out ends the service session (`POST /sessions/end`); the console
@@ -614,12 +641,13 @@ newest first, and a red line when verify last failed.
 | Store, identity service | `crates/ordo-identity-service/tests/store.rs` (Postgres) | migrations; the boot refusal on the deployment's or console's database; first-invite once; provisioner key once |
 | Import, identity service | `crates/ordo-identity-service/tests/import.rs` (Postgres, a console database made by the console's own migrations) | 2 owners, 3 passkeys and live recovery codes move column for column; a removed owner arrives ended; used and voided codes stay behind; unspent setup codes are voided in the audit; a second boot imports nothing; a boot killed before the `imports` row redoes it all with no duplicate; no console URL means no import; the console tables are unchanged byte for byte; a live import means no first invite; the RP ID refusal names both settings |
 | Upgrade | `crates/ordo-identity-service/tests/upgrade.rs`, with the SDK's software authenticator | a passkey registered against the console's relying party on a copy of the live schema asserts at the service after the import, under RP ID `localhost` from port 8082 and under `console.example.com` from `console.example.com:8082`; the same passkey fails under `id.example.com`, which is the refusal, not a silent sign-in failure; an old recovery code signs in once |
+| Reauth, identity service | `crates/ordo-identity-service/tests/page.rs`, `tests/flows.rs` | `/sign-in` serves the reauth step; a touch taken at the service page with no `aud` shows in the next `POST /token` for a deployment |
 | Host integration | `crates/ordo-host/tests/identity_tokens.rs`, with an in-process fake issuer (a signer and a JWKS route) | admin token reaches platform ops; machine token applies; stale touch answers `presence_required`; tenant op denied; app op denied; app owner of the home space denied platform ops; ended `sid`; unknown `kid` refetches once; service down, cached and `$identitykeys` still verify; 2 segment token never hits the JWS path |
 | Authorization matrix | `tests/authz_support/actors.rs`, `policy.rs` | new actors: `deployment_admin` (fresh), `deployment_admin_stale`, `machine_key`, `cli_session`, `deployment_ended` (Dead), `deployment_wrong_aud` (Dead), `deployment_foreign_issuer` (Dead). Realm proofs as rows: every app actor × every platform op is `Denied`; every deployment actor × every app op in every space is `Denied`; `machine_key` × every tenant op is `Denied`. The route guard keeps every new route in the policy |
-| Console | `crates/ordo-console/tests/console.rs`, `door_link.rs` becomes `door_as_person.rs` | sign-in by redirect with a fake issuer; API refuses a token for another `aud`; door calls carry the person's token; `presence_required` surfaces as a reauth ask; no runtime routes without the socket setting |
+| Console | `crates/ordo-console/tests/console.rs`, `door_link.rs` becomes `door_as_person.rs` | sign-in by redirect with a fake issuer; API refuses a token for another `aud`; door calls carry the person's token; `presence_required` surfaces as a reauth ask; `status.identity.rpId` follows `ORDO_IDENTITY_RP_ID`, else the origin's host; no runtime routes without the socket setting |
 | Supervisor | `crates/ordo-supervisor/tests/` with the fake host | 3 children start; kill each one, the other 2 keep answering; crash loop in one; the socket refuses `apply` for any child but `deployment`; the socket is unreachable as 65533; revision 1 from the environment; a sealed spec survives a restart |
 | Images smoke | `images.yml`, the `ordo` job | 3 processes as 65531, 65532, 65533; the supervisor's caps and the console's lack of them; `/.well-known/jwks.json` answers; the first invite is printed; `docker kill` of `ordo-console` leaves the door answering; `break-glass-token` plus `ordo apply` of the notes program succeeds |
-| Console e2e | `clients/ordo-console-web/e2e` | sign-up by invite link; console sign-in; invite a second admin; end their access and see the refusal; make a machine key; the upgrade case: enrol at the old console, upgrade the image, open the console and sign in with that same passkey, no invite, no setup code |
+| Console e2e | `clients/ordo-console-web/e2e` | sign-up by invite link; console sign-in; invite a second admin; end their access and see the refusal; make a machine key; reauth in the console page, where the console's host is the RP ID (the redirect case is not in e2e: the stack lists one console origin on `localhost`, and a second origin would change it for every test; the redirect is guarded by the page and flow tests and the build); the upgrade case: enrol at the old console, upgrade the image, open the console and sign in with that same passkey, no invite, no setup code |
 | CLI | `crates/ordo-cli/tests/login.rs` | the loopback flow against the fake issuer; the session file mode; `--touch`; `ORDO_MACHINE_KEY` sign-in; `ORDO_TOKEN` still wins when given |
 
 ---
@@ -677,13 +705,176 @@ the change.
 ## 11 · What this plan does not do
 
 - Roles beyond `admin` ("We'll have to get into permission breakdown
-  later").
+  later"). Open sign-up's `member` is a membership with no token (11.2).
 - Outside providers for deployment people. The client code exists
   (`ordo_identity::oidc`, `oauth2`); wiring it to the service is a later M.
 - Sending invite links by mail. Offered once mail is set up.
 - A support window for Ordo Cloud (`support-window`, filed).
-- Many deployments in one identity service. The handle column is there;
-  the screens and routes for a list are the private provisioning service's.
+- Screens for many deployments. The routes are built (below); a web page
+  listing them is not.
+- Machine keys for a registered deployment. Machine keys stay with the
+  service's own deployment.
+- Reauth in a console page whose host is outside the service's RP ID.
+  Related Origin Requests could allow it; not built.
+- Moving people from a deployment's own service to a shared one. It is a
+  new relying party, so each person joins again by invite.
+
+### 11.1 Many deployments in one service, built 2026-11-14
+
+The owner's go: "lets build the shared auth". One service at
+`https://auth.hominem.ai`; `hal` and the `ordo` test instance sign in
+there. Code: `crates/ordo-identity-service/src/deployments.rs`; tests:
+`tests/shared.rs`; how to: `howto-identity.md` section 14.
+
+- The service's own handle is its home. Its people are accounts: one
+  passkey, one session, every deployment.
+- Migration 4: `deployments` (handle, client origins, return URLs),
+  `deployment_members`, `people.home`, `invites.target`. Every person
+  before it keeps home access.
+- `POST /token` and `/touch/finish` issue for the home or a live
+  registered deployment. The person must be a member, and a browser page
+  must be one of that deployment's client origins. The token says who;
+  the deployment's members say who may.
+- `POST /sign-in/return` checks a return address against the named
+  deployment's list. The sign-in page asks it before it sends the browser
+  on. A path refuses any whitespace, control character or second leading
+  separator, the rule `Origin::of_url` applies.
+- The touch needs no membership: every person manages their own
+  account. A token from it needs the membership of its `aud`.
+- Ending a deployment ends its memberships. Registering an ended handle
+  again starts empty, and is refused while live members are left.
+- The registry is held in memory and refreshed each minute and on every
+  change this process makes; only the membership is read per call.
+- A registered deployment's token reaches its own members and invites.
+  Ending a person from it ends the membership, never the account.
+  Machine keys, the audit log and the registry answer the home's token
+  alone.
+- Registering: `POST /deployments` (an admin with a fresh reauth, or the
+  provisioner's machine key) or `ordo-identity-service deployment add` on
+  the host.
+- The supervisor starts no identity service when `ORDO_IDENTITY_URL` is
+  not loopback, or `ORDO_SUPERVISOR_IDENTITY_ADDRESS=external`, and hands
+  the door and the console the wiring as set.
+- The console's `ORDO_IDENTITY_DEPLOYMENT` may differ from its own handle.
+- The binary runs alone as its own container; a test boots it with its
+  own settings only. The shared provider is this service by itself: no
+  deployment wraps it and no app lives beside it (owner, 2026-11-15). The
+  account app, where a person manages passkeys, is a client of its contract
+  like any other app.
+
+### 11.2 Open sign-up per deployment, built 2026-11-19
+
+The owner's ruling, 2026-11-17: sign-up is per app. The example notes
+apps use open sign-up with a passkey; invites stay beside it. Code:
+`deployments.rs` (`SignUp`), `flows.rs` (`open_begin`, `open_finish`,
+`open_join`); tests: `tests/open_sign_up.rs`; page: `page/sign-up.*`;
+how to: `howto-identity.md` section 14.
+
+- Migration 5: `deployments.sign_up` (`invite` by default, so every
+  earlier row keeps its behaviour) and `deployment_members.role`
+  (`admin` by default, as every earlier membership was).
+- The mode is set at registration (`signUp`, `--sign-up`) and changed by
+  `POST /deployments/<handle>/sign-up` or `deployment sign-up`, with the
+  service's own token. The home is never open (`home_invite_only`).
+- Open sign-up and the invite flow share one account path: passkey,
+  recovery codes, session. Only the way in and its audit row differ
+  (`invite.used`, `sign-up.open`, `sign-up.joined`).
+- An open member's membership has role `member`. It holds no token for
+  the deployment, because a token's only role is `admin` and a stranger
+  must not become an app's admin. `POST /token` answers
+  `app_member_only`. An invite or `member add` makes them an admin. The
+  last-admin rule counts admins only.
+- The mode is read from the database on each call, so a change counts at
+  once on every instance.
+- Open sign-up is counted per address under its own kind,
+  `ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS` (10 a minute), with the shared
+  ceiling of the other kinds.
+- Signing app members in to the app: built 2026-11-19 (11.3).
+### 11.3 The service as an OIDC provider, built 2026-11-19
+
+The owner's ruling, 2026-11-17, ask 3: "the identity service is Ordo's
+built-in credential system, and it signs in app users as well as
+deployment people ... Each deployment connects to it as an OIDC provider
+under one connection name, so one person has one subject both
+deployments recognise." Code: `src/oidc.rs`; tests:
+`tests/oidc_provider.rs`, `ordo-host/tests/identity_service_oidc.rs`;
+how to: `howto-identity.md` section 14, connect an app.
+
+**Amendment to 4.3.** The app realm and the deployment realm stay apart
+at the door: a deployment token reaches platform ops only, an app token
+app ops only. They now meet in one place, where a deployment connects to
+the service as an OIDC client. One account at the service signs a person
+in to the console as an admin and to an app as its user. The two tokens
+stay distinct: an ID token's `aud` is the bare handle, its `typ` is
+`JWT`, it carries none of a deployment token's claims, and every
+deployment token verifier refuses it.
+
+- Discovery at `<issuer>/.well-known/openid-configuration`. The issuer
+  is `ORDO_IDENTITY_ORIGIN` plus `ORDO_IDENTITY_BASE_PATH` (11.4). With
+  no base path it is the `iss` deployment tokens carry.
+- Authorization code flow, PKCE `S256` required, at `/oidc/authorize`
+  and `/oidc/token`. The client id is a registered handle. The redirect
+  URI must be exactly a return URL (11.4). An unknown client or
+  redirect is refused on the service's page and never followed.
+- Public clients only (`token_endpoint_auth_methods_supported: none`). A
+  code reaches only a registered return URL, and only the app that began
+  the sign-in holds the verifier, so a secret adds a value to manage and
+  no protection here. The app sets `ORDO_AUTH_<NAME>_CLIENT_AUTH=none`,
+  added to Ordo's OIDC client for this.
+- The ID token is EdDSA under the existing token keys and JWKS. Ordo's
+  OIDC client already verified EdDSA, so the service gained no second key
+  type.
+- `sub` is the person's id, the same for every deployment. Only a live
+  member (`admin` or `member`) gets a code, and the membership and the
+  session are checked again at the exchange.
+- Migration 6: `oidc_codes`. A code is 256 bits, hashed, 60 seconds,
+  spent by its first exchange whatever the outcome, bound to client,
+  redirect URI, PKCE challenge and nonce. It is too long to guess, so the
+  token endpoint is not counted by the guessing limits, which an app's
+  one server address would trip.
+- Audit rows: `oidc.token` for each exchange, `refused` with the reason
+  when it fails. No row per code (11.4).
+- Not built: refresh tokens, userinfo, `prompt` and `max_age` (the ID
+  token's `auth_time` lets the app judge), and sign-out everywhere.
+
+### 11.4 Fixes from the review of 11.2 and 11.3, 2026-11-19
+
+A read-only review of PRs 26 and 27 found 4 faults. Tests:
+`tests/oidc_provider.rs`, the 5 tests under "review of PRs 26 and 27".
+
+- **An app's pages were trusted callers.** Registering a callback
+  required its origin among the client origins, and every client origin
+  was in the CORS list with credentials and in the reauth's origins. A
+  script on an app's page could spend the session cookie: `/me`,
+  `/sign-up/join`, and under the RP ID a reauth whose answer with no
+  `aud` was the home's admin token. Now a return URL may sit on any
+  origin and makes it no caller; an app registers its callback alone.
+  Rows made before keep their client origins. `deployment list` and the
+  boot log warn about a client origin that holds an `/auth/callback/`
+  return URL, and `deployment set <handle> --no-origins` (or `POST
+  /deployments/<handle>/addresses`) drops it, keeping the members.
+  Beside that, a reauth with no `aud` and `/cli/approve` answer only the
+  service's page or `ORDO_IDENTITY_CLIENT_ORIGINS`, and `/sign-up/join`
+  only the service's page.
+- **Codes and audit rows grew with no bound.** Each authorization by a
+  signed-in member wrote a code row and a signed audit row, and open
+  sign-up lets anyone be a member. Now a session gets
+  `ORDO_IDENTITY_AUTHORIZE_PER_SESSION` codes a minute (20), past which
+  the app is sent `temporarily_unavailable`; the minute tick deletes
+  spent and expired codes and closed guessing windows; the audit row is
+  written at the exchange only. A `refused` exchange row needs a live
+  code, so it is bounded by the same limit.
+- **The redirect URI matched by prefix.** The OIDC flow now takes only
+  an exact return URL: scheme, host, port and path, no query. The
+  page's `/sign-in/return` keeps the prefix rule, which consoles use for
+  their deep links.
+- **The issuer left out the base path.** Two services under different
+  base paths on one origin shared an issuer, so an app's peer could
+  read one's subjects as the other's. The OIDC issuer is now the origin
+  and the base path. Deployment tokens keep the origin as `iss`, since
+  doors check it against `ORDO_IDENTITY_ORIGIN`; so under a base path
+  the two differ. With no base path nothing changed.
+
 - An identity origin outside the console's RP ID without re-enrolment.
   WebAuthn Related Origin Requests could allow it (the SDK's `related`
   origins, as the console link uses today); not in v1.

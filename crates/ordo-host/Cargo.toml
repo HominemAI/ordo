@@ -72,6 +72,9 @@ ordo-egress = { path = "../ordo-egress", features = ["test-pin"] }
 # cannot reach the deployment, and this is where that is exercised rather
 # than asserted.
 ordo-verify-proof = { path = "../ordo-verify-proof" }
+# `tests/identity_service_oidc.rs`: a real identity service in-process as
+# the OIDC issuer an app signs in through. It depends on nothing here.
+ordo-identity-service = { path = "../ordo-identity-service" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
 # The server half of the same TLS stack the client uses, for a real listener.

@@ -52,6 +52,30 @@ pub const INVALID_SECRET_HOST: &str = "invalid_secret_host";
 /// `$caller` inside a release rule. The seat being released is `$member`,
 /// and the rule is about that seat whoever asks (27aq).
 pub const RELEASE_SUBJECT: &str = "release_subject";
+/// A `peer` line that cannot be one: a name that is not lowercase letters
+/// and digits, or a second line with the same name.
+pub const PEER_NAME: &str = "peer_name";
+/// A `reader` line that cannot be one: a name that is not lowercase
+/// letters, digits and underscores, a second line with the same name, no
+/// table, or a table named twice.
+pub const READER_LINE: &str = "reader_line";
+/// An `external` declaration without `shared` (ruled 2026-11-15,
+/// `external-entities`): who reads the rows must be written down.
+pub const EXTERNAL_NOT_SHARED: &str = "external_not_shared";
+/// An external `id` line naming more than one key column.
+pub const EXTERNAL_COMPOSITE_KEY: &str = "external_composite_key";
+/// A write to an external entity: `access write` in its body, or a `set` or
+/// `del` that names it. The other system writes its own table.
+pub const EXTERNAL_READ_ONLY: &str = "external_read_only";
+/// `owned` on a ref that leaves or reaches an external entity.
+pub const EXTERNAL_OWNED: &str = "external_owned";
+/// `acl (…)` on an external entity.
+pub const EXTERNAL_ACL: &str = "external_acl";
+/// `sealed` on an external entity's field.
+pub const EXTERNAL_SEALED: &str = "external_sealed";
+/// Any other clause or modifier an external entity cannot carry: `unique`,
+/// `index`, `check`, `public`, `std sealed`, `tree`, a default.
+pub const EXTERNAL_UNSUPPORTED: &str = "external_unsupported";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {

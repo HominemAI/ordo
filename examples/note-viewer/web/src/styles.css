@@ -1,0 +1,46 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+}
+
+li {
+  border-block-start: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  padding-block: 0.5rem;
+}
+
+li h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+li p {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+[role='alert'] {
+  color: light-dark(#a40000, #ff8080);
+}

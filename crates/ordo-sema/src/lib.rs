@@ -362,15 +362,25 @@ fn as_projection_miss(e: SemaError) -> SemaError {
 #[derive(Debug, Clone, Default)]
 pub struct Registry {
     ops: HashMap<String, OpDecl>,
+    /// Ops offered under a name already taken. The registry never replaces an
+    /// op: the first stays, and the later one is kept here so
+    /// `check_duplicate_names` can refuse it (`duplicate_op_name`).
+    clashes: Vec<OpClash>,
+}
+
+/// A later declaration that met an op of the same name.
+#[derive(Debug, Clone)]
+struct OpClash {
+    first: Span,
+    later: Span,
+    name: String,
 }
 
 impl Registry {
     pub fn from_program(p: &Program) -> Registry {
-        let mut ops = HashMap::new();
-        for o in &p.ops {
-            ops.insert(o.name.name.clone(), o.clone());
-        }
-        Registry { ops }
+        let mut r = Registry::default();
+        r.extend_from(p);
+        r
     }
 
     pub fn get(&self, name: &str) -> Option<&OpDecl> {
@@ -382,10 +392,57 @@ impl Registry {
     }
 
     /// Register additional ops — corpus cases may declare local ones.
+    ///
+    /// Never replaces. An op offered under a name that is taken leaves the
+    /// first in place and records the clash, which `check_duplicate_names`
+    /// (run by `check_registration`) refuses. Before this, the later op
+    /// silently won, with its own body and access rules.
     pub fn extend_from(&mut self, p: &Program) {
+        for o in &p.ops {
+            match self.ops.get(&o.name.name) {
+                Some(first) => self.clashes.push(OpClash {
+                    first: first.name.span,
+                    later: o.name.span,
+                    name: o.name.name.clone(),
+                }),
+                None => {
+                    self.ops.insert(o.name.name.clone(), o.clone());
+                }
+            }
+        }
+    }
+
+    /// Put ops in place of any of the same name. Never reached by a program.
+    ///
+    /// The one caller is the routine runner, which keeps a registry of its own
+    /// for the length of a run and swaps in a routine's per-row op as each row
+    /// is bound (`ordo-conformance`, `each_row`). That registry is never a
+    /// deployed one and no request reaches it. Everything else goes through
+    /// `extend_from`, which refuses to replace.
+    pub fn replace_from(&mut self, p: &Program) {
         for o in &p.ops {
             self.ops.insert(o.name.name.clone(), o.clone());
         }
+    }
+
+    /// Two ops may not share a name (`duplicate_op_name`).
+    ///
+    /// The registry is one flat name space, and a request names an op. Two
+    /// declarations of one name cannot both answer it, so the program is
+    /// refused and the author renames one. The message names both places.
+    pub fn check_duplicate_names(&self) -> Result<(), SemaError> {
+        let Some(c) = self.clashes.first() else {
+            return Ok(());
+        };
+        Err(err(
+            "duplicate_op_name",
+            c.later,
+            format!(
+                "op `{}` is declared twice: at line {} and at line {}. A request for \
+                 `{}` could mean either one. Rename one.",
+                c.name, c.first.line, c.later.line, c.name
+            ),
+        ))
     }
 
     /// Names the platform binds and an op may not declare.
@@ -401,6 +458,42 @@ impl Registry {
     /// `caller` is deliberately NOT here: `$caller` is a guard-language
     /// keyword the parser recognises, not a parameter an op can declare,
     /// so there is nothing to refuse.
+    /// An op may not share its name with an entity, native or external
+    /// (`op_named_like_entity`).
+    ///
+    /// Ops and entities are sources in one name space: `name(conds)[fields]`
+    /// is the call form for both (`definition-language.md`, Named-query
+    /// composition). A name that is both could mean either, so the program
+    /// is refused and the author renames one. Before this check the binder
+    /// took the entity, and the door's call of the op answered the entity's
+    /// own read: every row, every field, none of the op's conditions
+    /// (reported fix, `examples/note-viewer`, 2026-11-19). The binder now
+    /// takes the op at the top of a call (`Binder::source`), so a program
+    /// compiled before this check cannot leak either.
+    pub fn check_entity_names(&self, schema: &Schema) -> Result<(), SemaError> {
+        let mut names: Vec<&String> = self.ops.keys().collect();
+        names.sort();
+        for name in names {
+            let Some(entity) = schema.entity(name) else {
+                continue;
+            };
+            let kind = if entity.external.is_some() {
+                "external entity"
+            } else {
+                "entity"
+            };
+            return Err(err(
+                "op_named_like_entity",
+                self.ops[name].name.span,
+                format!(
+                    "op `{name}` has the same name as the {kind} `{name}`. A source \
+                     `{name}(…)` could mean either one. Rename the op or the {kind}."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn check_reserved_params(&self) -> Result<(), SemaError> {
         let mut names: Vec<&String> = self.ops.keys().collect();
         names.sort();
@@ -1307,6 +1400,7 @@ pub fn write_value_expr(
     };
     let mut q = Query {
         not_null: None,
+        externals: None,
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.to_string(),
@@ -1376,6 +1470,7 @@ fn cond_reads_row(c: &BCond) -> bool {
         BCond::And(items) | BCond::Or(items) => items.iter().any(cond_reads_row),
         BCond::Not(inner) => cond_reads_row(inner),
         BCond::TreeWalk { expr, anchor, .. } => reads_row(expr) || reads_row(anchor),
+        BCond::PeerCaller { expr, caller, .. } => reads_row(expr) || reads_row(caller),
         // A semi-join is a read of other rows; the bind above has already
         // refused the shapes that could produce one here.
         BCond::Exists { .. } => true,
@@ -1456,6 +1551,7 @@ pub fn guard_filter_query(
     };
     Ok(Some(Query {
         not_null: Some(not_null_columns(schema)),
+        externals: external_reads(schema),
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.clone(),
@@ -1546,6 +1642,7 @@ pub fn release_query(
     let cond = b.guard_expr_cond(entity, &alias, inner, &env)?;
     Ok(Query {
         not_null: Some(not_null_columns(schema)),
+        externals: external_reads(schema),
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.clone(),
@@ -1883,6 +1980,7 @@ fn const_cond(v: bool) -> BCond {
 fn bare_query(entity: &str, alias: &str, filters: Vec<BCond>) -> Query {
     Query {
         not_null: None,
+        externals: None,
         from: From::Table {
             entity: entity.to_string(),
             alias: alias.to_string(),
@@ -1918,6 +2016,7 @@ fn members_query(caller: &str, cond: BCond, b: &mut Binder) -> Query {
     };
     let mut q = bare_query("members", &m, vec![pin, cond]);
     q.not_null = Some(not_null_columns(b.schema));
+    q.externals = external_reads(b.schema);
     q.outputs = vec![OutField {
         name: "id".into(),
         expr: BExpr::Col {
@@ -2487,10 +2586,12 @@ fn pruned(mut q: Query, schema: &Schema) -> Query {
 /// (`ordo_host::shape`) asks the live database for the same set and refuses
 /// to serve when one of them allows nulls.
 ///
-/// When external entities land (`docs/plan-external-entities.md`), their
-/// columns come from the database's own declaration, never from the Ordo
-/// field's `?`: a column another system owns is never null only if the
-/// catalog says `NOT NULL`.
+/// External entities are not here (ruled 2026-11-15, `external-entities`):
+/// a column another system owns is never null only if the catalog says
+/// `NOT NULL`, and the field's `?` is no evidence of that. So no comparison
+/// over an external's column is ever proven, and each keeps the null-safe
+/// form. The apply-time check (slice C) is where catalog evidence could
+/// enter.
 pub fn not_null_columns(schema: &Schema) -> ir::NotNullColumns {
     let mut out = std::collections::BTreeMap::new();
     for e in &schema.entities {
@@ -2507,10 +2608,124 @@ pub fn not_null_columns(schema: &Schema) -> ir::NotNullColumns {
 /// Attach the schema's `NOT NULL` evidence to a query the binder hands out.
 fn with_not_null(mut q: Query, schema: &Schema) -> Query {
     q.not_null = Some(not_null_columns(schema));
+    q.externals = external_reads(schema);
     q
 }
 
+/// How the planner reads each external entity, or `None` when the program
+/// declares none (ruled 2026-11-15, `external-entities`).
+pub fn external_reads(schema: &Schema) -> Option<ir::ExternalReads> {
+    if schema.externals.is_empty() {
+        return None;
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for e in &schema.externals {
+        let Some(src) = &e.external else { continue };
+        let columns = src
+            .columns
+            .iter()
+            .map(|(field, column)| ir::ExternalColumn {
+                field: field.clone(),
+                column: column.clone(),
+                ref_prefix: match e.field(field).map(|f| &f.ty) {
+                    Some(ordo_schema::FieldTy::Ref { target, .. }) => {
+                        schema.entity(target).map(|t| t.key.clone())
+                    }
+                    _ => None,
+                },
+            })
+            .collect();
+        out.insert(
+            e.name.clone(),
+            ir::ExternalRead {
+                schema: src.pg_schema(),
+                peer: src.peer.as_ref().map(|_| src.pg_schema()),
+                table: src.table.clone(),
+                key_column: src.key_column.clone(),
+                key_ty: src.key_ty,
+                prefix: e.key.clone(),
+                columns,
+            },
+        );
+    }
+    Some(std::sync::Arc::new(out))
+}
+
+/// The peer's Postgres schema when `entity` is an external from a peer.
+fn peer_of(schema: &Schema, entity: &str) -> Option<String> {
+    let src = schema.entity(entity)?.external.as_ref()?;
+    src.peer.as_ref().map(|_| src.pg_schema())
+}
+
+/// The entity a bound alias reads, found in the scope or the query's joins.
+fn entity_of_alias(scope: &Scope, q: &Query, alias: &str) -> Option<String> {
+    fn in_scope(scope: &Scope, alias: &str) -> Option<String> {
+        match scope {
+            Scope::Entity { entity, alias: a } if a == alias => Some(entity.clone()),
+            Scope::Entity { .. } | Scope::Fields(_) => None,
+            Scope::Multi(v) => v.iter().find_map(|(_, s)| in_scope(s, alias)),
+            Scope::Layered(v) => v.iter().find_map(|s| in_scope(s, alias)),
+        }
+    }
+    in_scope(scope, alias).or_else(|| {
+        q.joins
+            .iter()
+            .find(|j| j.alias == alias)
+            .map(|j| j.table.clone())
+    })
+}
+
 impl<'a> Binder<'a> {
+    /// `field == $caller` or `field != $caller` in an op's filter, where the
+    /// field belongs to an external from a peer: `$caller` means the peer's
+    /// member for the same person, as in a guard (ask 2). Any other
+    /// comparison of such a field with `$caller` is refused, since only
+    /// equality has a meaning across two deployments.
+    #[allow(clippy::too_many_arguments)]
+    fn peer_caller_cmp(
+        &self,
+        op: ordo_syntax::CmpOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        l: &BExpr,
+        r: &BExpr,
+        scope: &Scope,
+        q: &Query,
+        span: Span,
+    ) -> Result<Option<BCond>, SemaError> {
+        let is_caller = |e: &Expr| matches!(e, Expr::Param { name, .. } if name == "caller");
+        let (col, caller) = if is_caller(rhs) {
+            (l, r)
+        } else if is_caller(lhs) {
+            (r, l)
+        } else {
+            return Ok(None);
+        };
+        let BExpr::Col { alias, .. } = col else {
+            return Ok(None);
+        };
+        let Some(peer) = entity_of_alias(scope, q, alias).and_then(|e| peer_of(self.schema, &e))
+        else {
+            return Ok(None);
+        };
+        let pc = BCond::PeerCaller {
+            expr: col.clone(),
+            caller: caller.clone(),
+            peer,
+        };
+        match op {
+            ordo_syntax::CmpOp::Eq => Ok(Some(pc)),
+            ordo_syntax::CmpOp::Ne => Ok(Some(BCond::Not(Box::new(pc)))),
+            _ => Err(err(
+                "peer_caller_compare",
+                span,
+                "rule: on a table of a peer, `$caller` is the peer's member for the same \
+                 person, so it is compared with `==` or `!=` only.\n\
+                 fix: write `field == $caller`",
+            )),
+        }
+    }
+
     fn alias(&mut self) -> String {
         let a = format!("t{}", self.alias_n);
         self.alias_n += 1;
@@ -2656,9 +2871,20 @@ impl<'a> Binder<'a> {
         if let Some(info) = self.lets.iter().find(|l| l.name == s.name.name).cloned() {
             return self.let_source(s, &info, env);
         }
-        if self.schema.entity(&s.name.name).is_some() {
+        // A name that is both an op and an entity is refused at registration
+        // (`Registry::check_entity_names`). A program compiled before that
+        // check can still hold one, so the binder settles it here, and never
+        // toward a wider read than the op. At the top of a call, with no op
+        // being bound, the name is the op: that is the door's call of it
+        // (`name(args)`), and the op's conditions and projection must hold.
+        // Inside an op's body it is the entity, which is what that body
+        // meant and what `ordo plan` printed.
+        let op_named = self.registry.get(&s.name.name).is_some();
+        if op_named && self.stack.is_empty() {
+            self.composed_source(s, env)
+        } else if self.schema.entity(&s.name.name).is_some() {
             self.entity_source(s, env)
-        } else if self.registry.get(&s.name.name).is_some() {
+        } else if op_named {
             self.composed_source(s, env)
         } else {
             Err(err(
@@ -2682,6 +2908,7 @@ impl<'a> Binder<'a> {
 
         let mut q = Query {
             not_null: None,
+            externals: None,
             from: From::Table {
                 entity: entity.name.clone(),
                 alias: alias.clone(),
@@ -2900,6 +3127,7 @@ impl<'a> Binder<'a> {
             let ent = self.rebase_entity_at(entity, &rebase, hop_i)?;
             let sub = Query {
                 not_null: None,
+                externals: None,
                 from: From::Table {
                     entity: ent.clone(),
                     alias: self.rebase_alias_of(&link),
@@ -3023,6 +3251,7 @@ impl<'a> Binder<'a> {
         Ok(BCond::Exists {
             query: Box::new(Query {
                 not_null: None,
+                externals: None,
                 from: From::Table {
                     entity: target.to_string(),
                     alias: pa,
@@ -3101,6 +3330,17 @@ impl<'a> Binder<'a> {
                     column: f.column(),
                     ty: f.ty.value_ty(),
                 };
+                if *caller {
+                    // A field of an external from a peer: `$caller` is the
+                    // peer's member for the same person (ask 2).
+                    if let Some(peer) = peer_of(self.schema, &lhs) {
+                        return Ok(BCond::PeerCaller {
+                            expr: col,
+                            caller: self.caller_expr(env),
+                            peer,
+                        });
+                    }
+                }
                 let rhs = if *caller {
                     self.caller_expr(env)
                 } else {
@@ -3209,6 +3449,7 @@ impl<'a> Binder<'a> {
                         let inner_cond = self.guard_atom_cond(&target, &pa, &rest, env)?;
                         let sub = Query {
                             not_null: None,
+                            externals: None,
                             from: From::Table {
                                 entity: target.clone(),
                                 alias: pa,
@@ -3275,6 +3516,7 @@ impl<'a> Binder<'a> {
                 let inner_cond = self.guard_expr_cond(step_entity, &sa, inner, env)?;
                 let sub = Query {
                     not_null: None,
+                    externals: None,
                     from: From::Table {
                         entity: step_entity.clone(),
                         alias: sa,
@@ -3437,6 +3679,7 @@ impl<'a> Binder<'a> {
         let scope = Scope::Fields(fields.clone());
         let mut q = Query {
             not_null: None,
+            externals: None,
             from: From::CteRef {
                 name: info.name.clone(),
                 alias,
@@ -3678,6 +3921,7 @@ impl<'a> Binder<'a> {
 
         Ok(Query {
             not_null: None,
+            externals: None,
             from: From::Union { arms, alias },
             joins: Vec::new(),
             filters: Vec::new(),
@@ -4724,6 +4968,7 @@ impl<'a> Binder<'a> {
 
         let q = Query {
             not_null: None,
+            externals: None,
             from: From::Sub {
                 query: Box::new(callee),
                 alias,
@@ -6214,6 +6459,9 @@ impl<'a> Binder<'a> {
                 }
                 let l = self.operand(lhs, scope, q, env)?;
                 let r = self.operand(rhs, scope, q, env)?;
+                if let Some(pc) = self.peer_caller_cmp(*op, lhs, rhs, &l, &r, scope, q, *span)? {
+                    return Ok(pc);
+                }
                 if is_doc(&l) || is_doc(&r) {
                     let (l, r) = doc_pair(l, r, *span)?;
                     return Ok(BCond::Cmp {

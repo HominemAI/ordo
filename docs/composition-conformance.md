@@ -43,6 +43,8 @@ that R-G3 does not admit (`guards-conformance.md` §0).
 | `fan_out` | more than one independent many-path in a pipeline (composed sources included) |
 | `let_scalar_requires_reduce` | scalar reference to a let whose body does not end in `reduce` |
 | `cycle` | a query sources itself, directly or transitively (registration time) |
+| `op_named_like_entity` | an op has the name of an entity, native or external. `name(…)` is the source form of both, so it could mean either. Registration time; the message names both. Rename one (`definition-language.md` §5, Named-query composition). Reported fix, 2026-11-19 |
+| `duplicate_op_name` | two ops, or an op and a routine, have one name. A request names one op, so it could mean either. Registration time; the message gives both lines. Rename one (`definition-language.md` §5, Named-query composition). Reported fix, 2026-11-19 |
 | `dependency_failed` | callee failed its own registration; dependent blocked, not independently diagnosed |
 | `breaking_dependents` | a callee edit invalidates registered dependents; plan rejected listing them |
 | `unacknowledged_unbounded` | op classifies `unbounded-host` without the `unbounded` marker |
@@ -77,6 +79,12 @@ how a closed set stops being closed.
 | `unsupported_default` | a default outside the closed set the DDL can carry (only literals are lowered) |
 | `duplicate_secret` | two `secret` lines name one secret. Put every host on one line: `secret llmKey for a.example.com, b.example.com` (`howto-functions.md`) |
 | `invalid_function` | a `function` block the declaration alone can refuse: a duplicate name, a name an op or routine has, a domain that is not the program's, an answer other than `json`, a caller other than `member`, a code path that is absolute, climbs out with `..` or is not `.js`/`.mjs`, a host that is not a DNS name or is listed twice, a secret listed twice, or a limit outside the deployment's ceilings. The message names the line and the rule. Fix the block and apply again (`plan-backend-functions.md` §4.1) |
+| `external_ref_to_native` | a ref from an `external` entity to an entity Ordo owns, `members` included. The other system's column holds its own keys. Map it as a plain field, or point the ref from the native entity (`definition-language.md`, `external`) |
+| `external_owned` | `owned` on a ref that leaves or reaches an `external` entity. Ordo cannot delete with, or lend a guard from, a row it does not hold. Drop `owned` |
+| `external_inherited_guard` | an `external` entity would inherit a guard it does not declare. Write its own `access read` |
+| `external_read_only` | a `set` or `del` on an `external` entity, in an op or a routine. Writes go through the other system's own API |
+| `external_live` | a routine that listens for changes on an `external` entity. No change reaches Ordo's log; run it on a schedule |
+| `external_unsupported` | a clause an `external` entity cannot carry (`unique`, `index`, `check`, `prev`, `public*`, a default, a `blob`), or `whole` anchored on one. The parser raises the declaration half; `whole` raises the other |
 
 **Binding and planning.** Raised once a source has been resolved.
 

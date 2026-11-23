@@ -26,7 +26,8 @@
 use std::collections::{HashMap, HashSet};
 
 use ordo_syntax::decl::{
-    EntityDecl, FieldKind, GuardAtom, GuardClause, GuardExpr, Program, ScalarTy,
+    EntityDecl, ExternalDecl, ExternalKeyTy, FieldKind, GuardAtom, GuardClause, GuardExpr, Program,
+    ScalarTy,
 };
 use ordo_syntax::span::Span;
 use ordo_syntax::Expr;
@@ -269,7 +270,78 @@ pub struct Entity {
     /// The entity line `public` / `public*`, its own or reached through an
     /// owner's `public*`. Every declared field of a marked entity is public.
     pub public: Option<EntityPublic>,
+    /// `Some` for an external entity (ruled 2026-11-15, `external-entities`):
+    /// a translation of a table another system owns. Such an entity lives
+    /// in [`Schema::externals`], never in [`Schema::entities`], so nothing
+    /// that creates, alters, drops, erases or exports tables can reach it.
+    pub external: Option<ExternalSource>,
     pub span: Span,
+}
+
+/// Where an external entity's rows come from, and how each field reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSource {
+    /// The Postgres schema the foreign table lives in, as the file writes
+    /// it. For a table of a peer this is the peer's nickname, and the real
+    /// schema is [`PeerSource::schema`].
+    pub schema: String,
+    /// `Some` when `schema` names a `peer` of the program (owner, 2026-11-17,
+    /// `example-apps-notes-v2-plus-note_viewer` asks 2, 5 and 10): the table
+    /// belongs to another Ordo deployment in the same database, and
+    /// `$caller` on it means that deployment's member for the same person.
+    pub peer: Option<PeerSource>,
+    /// For a plain external: the schema the deployment owner swapped in with
+    /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA` (owner, 2026-11-17, ask 12). `None`
+    /// reads `schema` exactly as written. Never set on a peer's table.
+    pub swapped: Option<String>,
+    pub table: String,
+    /// The one unique, non-null key column. Every comparison, join and
+    /// sort on the entity's `id` uses it raw, so the foreign index serves.
+    pub key_column: String,
+    pub key_ty: ExternalKeyTy,
+    /// `(field, column)` for every declared field, in declaration order.
+    pub columns: Vec<(String, String)>,
+}
+
+/// The peer an external reads from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerSource {
+    /// The nickname of the `peer` line.
+    pub name: String,
+    /// The peer's Postgres schema, from `ORDO_PEER_<NAME>_SCHEMA`. `None`
+    /// until the deployment resolves it (`ordo_exec::peer`): a compiled
+    /// program is the same in every environment, and the schema is not.
+    pub schema: Option<String>,
+}
+
+/// The schema an unresolved peer reads, which no deployment can create: a
+/// program that skipped resolution fails on a missing relation and never
+/// reads a plain schema that happens to share the nickname.
+pub fn unresolved_peer_schema(peer: &str) -> String {
+    format!("$unresolved peer {peer}")
+}
+
+impl ExternalSource {
+    /// The Postgres schema the table is read from: for a plain external the
+    /// written schema, or the one its setting swapped in; for a peer's table
+    /// the resolved schema.
+    pub fn pg_schema(&self) -> String {
+        match &self.peer {
+            None => self.swapped.clone().unwrap_or_else(|| self.schema.clone()),
+            Some(PeerSource {
+                schema: Some(s), ..
+            }) => s.clone(),
+            Some(PeerSource { name, schema: None }) => unresolved_peer_schema(name),
+        }
+    }
+
+    /// The foreign column a field reads.
+    pub fn column(&self, field: &str) -> Option<&str> {
+        self.columns
+            .iter()
+            .find(|(f, _)| f == field)
+            .map(|(_, c)| c.as_str())
+    }
 }
 
 /// Where an entity's `public` line came from.
@@ -340,8 +412,16 @@ impl Entity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     pub domain: Option<String>,
+    /// The entities Ordo owns: their tables are created, altered, erased and
+    /// exported by the platform. Never an external.
     pub entities: Vec<Entity>,
+    /// External entities (ruled 2026-11-15, `external-entities`): read-only
+    /// translations of tables another system owns. Ops, guards and the SDK
+    /// read one as an entity through [`Schema::entity`]; the schema planner,
+    /// DDL, dev reset and erase walk [`Schema::entities`] and never see it.
+    pub externals: Vec<Entity>,
     by_name: HashMap<String, usize>,
+    ext_by_name: HashMap<String, usize>,
     /// The program's `release member` rule, resolved against the entities
     /// (27aq). `None` is **locked**: no member leaves on their own.
     pub release: Option<ordo_syntax::ReleaseDecl>,
@@ -355,11 +435,43 @@ pub struct Schema {
     /// The program's backend functions, checked by [`function::check`].
     /// Called through `POST /v1/fn/<name>`, never as ops.
     pub functions: Vec<ordo_syntax::FunctionDecl>,
+    /// The nicknames of the program's `peer` lines, in the order written.
+    /// Each is read by at least one external.
+    pub peers: Vec<String>,
+    /// The program's `reader` lines (owner, 2026-11-18,
+    /// `example-apps-notes-v2-plus-note_viewer` ask 17): the deployments that
+    /// may read this one, and the tables each may read. Each table is one of
+    /// this program's own entities.
+    pub readers: Vec<Reader>,
+}
+
+/// One `reader <name> reads <table>, …` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reader {
+    /// The local nickname. Its role comes from `ORDO_READER_<NAME>_ROLE`.
+    pub name: String,
+    /// The tables it may read, as written: entity names, which are the
+    /// table names.
+    pub tables: Vec<String>,
 }
 
 impl Schema {
+    /// An entity by name, native or external: what a source, a guard walk
+    /// or a ref resolves against.
     pub fn entity(&self, name: &str) -> Option<&Entity> {
+        self.native(name)
+            .or_else(|| self.ext_by_name.get(name).map(|i| &self.externals[*i]))
+    }
+
+    /// An entity Ordo owns, by name. What anything that touches tables must
+    /// use: an external entity's table belongs to another system.
+    pub fn native(&self, name: &str) -> Option<&Entity> {
         self.by_name.get(name).map(|i| &self.entities[*i])
+    }
+
+    /// Is `name` an external entity?
+    pub fn is_external(&self, name: &str) -> bool {
+        self.ext_by_name.contains_key(name)
     }
 
     /// Every ref as a multigraph edge, in declaration order (deterministic:
@@ -668,6 +780,7 @@ fn platform_members() -> Entity {
         unique_keys: Vec::new(),
         indexes: Vec::new(),
         checks: Vec::new(),
+        external: None,
         span: Span::new(0, 0, 1, 1),
     }
 }
@@ -750,6 +863,7 @@ fn platform_group_members() -> Entity {
         unique_keys: vec![vec!["group".into(), "member".into()]],
         indexes: Vec::new(),
         checks: Vec::new(),
+        external: None,
         span: Span::new(0, 0, 1, 1),
     }
 }
@@ -787,6 +901,63 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         by_name.insert(decl.name.name.clone(), entities.len());
         entities.push(lower_entity(decl, keys)?);
     }
+    // External entities join the same name set while the graph resolves,
+    // so a native ref and a guard walk can reach one, and are split off
+    // into `Schema::externals` before the schema is handed out.
+    for decl in &program.externals {
+        if decl.name.name == "members" || decl.name.name == "groupMembers" {
+            return Err(SchemaError {
+                code: "duplicate_entity",
+                message: format!(
+                    "`{}` is platform-provided and cannot be declared",
+                    decl.name.name
+                ),
+                span: decl.name.span,
+            });
+        }
+        if by_name.contains_key(&decl.name.name) {
+            return Err(SchemaError {
+                code: "duplicate_entity",
+                message: format!("entity `{}` is declared twice", decl.name.name),
+                span: decl.name.span,
+            });
+        }
+        by_name.insert(decl.name.name.clone(), entities.len());
+        let mut lowered = lower_external(decl, keys)?;
+        if program
+            .peers
+            .iter()
+            .any(|p| p.name.name == decl.schema.name)
+        {
+            if let Some(src) = lowered.external.as_mut() {
+                src.peer = Some(PeerSource {
+                    name: decl.schema.name.clone(),
+                    schema: None,
+                });
+            }
+        }
+        entities.push(lowered);
+    }
+    // A `peer` line no external reads is refused: it would still ask the
+    // deployment owner for a setting that changes nothing.
+    for peer in &program.peers {
+        if !program
+            .externals
+            .iter()
+            .any(|x| x.schema.name == peer.name.name)
+        {
+            return Err(SchemaError {
+                code: "peer_unused",
+                message: format!(
+                    "`peer {0}` is read by no external. Write `external <name> from \
+                     {0}.<table> shared {{ … }}`, or remove the line",
+                    peer.name.name
+                ),
+                span: peer.span,
+            });
+        }
+    }
+    check_external_refs(&entities, &by_name, program)?;
 
     // Ref targets resolve against the completed name set, so forward
     // references are legal and a typo is caught with the name it meant.
@@ -904,18 +1075,283 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         }
     }
 
+    // An external's guard is its own `access read` or nothing. One reached
+    // by inheritance would assume an owner Ordo holds.
+    for e in entities.iter().filter(|e| e.external.is_some()) {
+        if let Some(g) = &e.guards {
+            if g.source != GuardSource::Own {
+                return Err(SchemaError {
+                    code: "external_inherited_guard",
+                    message: format!(
+                        "`{}` is external and would inherit a guard it does not declare. \
+                         Write its own `access read <walk>`",
+                        e.name
+                    ),
+                    span: e.span,
+                });
+            }
+        }
+    }
+
+    // Split: natives keep their order, externals keep theirs.
+    let (externals, entities): (Vec<Entity>, Vec<Entity>) =
+        entities.into_iter().partition(|e| e.external.is_some());
+    let by_name: HashMap<String, usize> = entities
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.name.clone(), i))
+        .collect();
+    let ext_by_name: HashMap<String, usize> = externals
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.name.clone(), i))
+        .collect();
+
     let schema = Schema {
         domain: program.domain.as_ref().map(|d| d.name.name.clone()),
         entities,
+        externals,
         by_name,
+        ext_by_name,
         release: program.release.clone(),
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
+        peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
+        readers: program
+            .readers
+            .iter()
+            .map(|r| Reader {
+                name: r.name.name.clone(),
+                tables: r.tables.iter().map(|t| t.name.clone()).collect(),
+            })
+            .collect(),
     };
+    // Every table a `reader` line names is one of this program's own
+    // entities: an external is another system's table, and Ordo grants
+    // nothing on it.
+    for r in &program.readers {
+        for t in &r.tables {
+            let own = schema
+                .entities
+                .iter()
+                .any(|e| e.name == t.name && e.external.is_none());
+            if !own {
+                let external = schema.entity(&t.name).is_some();
+                return Err(SchemaError {
+                    code: "reader_unknown_table",
+                    message: if external {
+                        format!(
+                            "`reader {}` names `{}`, an external. A reader reads this \
+                             deployment's own tables; remove `{}` from the line",
+                            r.name.name, t.name, t.name
+                        )
+                    } else {
+                        format!(
+                            "`reader {}` names `{}`, which is not an entity of this program. \
+                             Name an entity declared here, or remove `{}` from the line",
+                            r.name.name, t.name, t.name
+                        )
+                    },
+                    span: t.span,
+                });
+            }
+        }
+    }
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
     Ok(schema)
+}
+
+/// Lower one `external` declaration into an entity carrying its source.
+///
+/// The fields are what the author wrote, with `id` the platform's: a typed id
+/// over the raw key. There is no `rev` (Ordo never writes the row, so it has
+/// no revision to check) and no `depth` (never a tree).
+fn lower_external(decl: &ExternalDecl, keys: &KeyTable) -> Result<Entity, SchemaError> {
+    let plain = |name: &str, ty: FieldTy, optional: bool, implicit: bool, span: Span| Field {
+        name: name.into(),
+        ty,
+        optional,
+        unique: name == "id",
+        sealed: false,
+        indexed: false,
+        refinable: true,
+        inline: false,
+        private: false,
+        normalize: None,
+        enum_values: None,
+        text_max: None,
+        default: None,
+        public: false,
+        implicit,
+        span,
+    };
+    let mut fields = vec![plain(
+        "id",
+        FieldTy::Scalar(ScalarTy::Id),
+        false,
+        true,
+        decl.name.span,
+    )];
+    let mut columns = Vec::new();
+    for f in &decl.fields {
+        if RESERVED.contains(&f.name.name.as_str()) {
+            return Err(SchemaError {
+                code: "reserved_field_name",
+                message: format!(
+                    "`{}` is provided by the platform on every entity and cannot be declared",
+                    f.name.name
+                ),
+                span: f.name.span,
+            });
+        }
+        if fields.iter().any(|x| x.name == f.name.name) {
+            return Err(SchemaError {
+                code: "duplicate_field",
+                message: format!("`{}.{}` is declared twice", decl.name.name, f.name.name),
+                span: f.name.span,
+            });
+        }
+        let ty = match &f.kind {
+            FieldKind::Scalar(s) => FieldTy::Scalar(*s),
+            FieldKind::Ref { target, .. } => FieldTy::Ref {
+                target: target.name.clone(),
+                owned: false,
+                tree: false,
+            },
+        };
+        let mut field = plain(&f.name.name, ty, f.optional, false, f.name.span);
+        // Only what was written; `resolve_public` adds the entity line's.
+        field.public = f.public;
+        fields.push(field);
+        columns.push((f.name.name.clone(), f.column.name.clone()));
+    }
+    let guards = decl.access_read.as_ref().map(|r| Guards {
+        read: clause_body(r),
+        // Never used: every write to an external is refused at
+        // registration. The read guard stands in so nothing that reads
+        // `write` finds it more open than the read.
+        write: clause_body(r),
+        source: GuardSource::Own,
+        rebase: Vec::new(),
+    });
+    Ok(Entity {
+        platform: false,
+        name: decl.name.name.clone(),
+        key: decl
+            .key
+            .as_ref()
+            .map(|k| k.name.clone())
+            .unwrap_or_else(|| derive_key_with(&decl.name.name, keys)),
+        fields,
+        is_tree: false,
+        guards,
+        acl_levels: None,
+        unique_keys: Vec::new(),
+        indexes: Vec::new(),
+        checks: Vec::new(),
+        std_sealed: false,
+        // The entity line `public` (ruled 2026-11-15, `external-entities` ask 5): never
+        // a cascade, the parser refuses `public*`. `resolve_public` runs over
+        // externals too, so the sealed, private and guarded refusals apply.
+        public: decl.public.map(|m| EntityPublic {
+            cascade: false,
+            from: None,
+            span: m.span,
+        }),
+        external: Some(ExternalSource {
+            schema: decl.schema.name.clone(),
+            peer: None,
+            swapped: None,
+            table: decl.table.name.clone(),
+            key_column: decl.key_column.name.clone(),
+            key_ty: decl.key_ty,
+            columns,
+        }),
+        span: decl.span,
+    })
+}
+
+/// The refs that touch an external entity, checked against the whole name
+/// set (ruled 2026-11-15, `external-entities`).
+///
+/// - A ref **from** an external must point at another external. The other
+///   system's column holds its own keys, never an Ordo id, so a ref to a
+///   native entity (or to `members`) would compare unlike things.
+/// - A ref **to** an external from a native entity is a plain text column
+///   with no foreign key, and never `owned`: an owner is deleted with its
+///   children and lends them its guard, and Ordo holds neither here.
+fn check_external_refs(
+    entities: &[Entity],
+    by_name: &HashMap<String, usize>,
+    program: &Program,
+) -> Result<(), SchemaError> {
+    let is_external = |n: &str| {
+        by_name
+            .get(n)
+            .is_some_and(|i| entities[*i].external.is_some())
+    };
+    for decl in &program.externals {
+        for f in &decl.fields {
+            let FieldKind::Ref { target, .. } = &f.kind else {
+                continue;
+            };
+            if !by_name.contains_key(&target.name) {
+                return Err(SchemaError {
+                    code: "unknown_ref_target",
+                    message: format!(
+                        "`{}.{}` points at `{}`, which is not a declared entity",
+                        decl.name.name, f.name.name, target.name
+                    ),
+                    span: target.span,
+                });
+            }
+            if !is_external(&target.name) {
+                return Err(SchemaError {
+                    code: "external_ref_to_native",
+                    message: format!(
+                        "`{}.{}` points from an external entity at `{}`, which Ordo owns. \
+                         The other system's column holds its own keys, not Ordo ids. Map it \
+                         as a plain field (`{}: text <- \"{}\"`), or point the ref the other way, \
+                         from `{}` to `{}`",
+                        decl.name.name,
+                        f.name.name,
+                        target.name,
+                        f.name.name,
+                        f.column.name,
+                        target.name,
+                        decl.name.name
+                    ),
+                    span: target.span,
+                });
+            }
+        }
+    }
+    for decl in &program.entities {
+        for f in &decl.fields {
+            if let FieldKind::Ref {
+                target,
+                owned: true,
+                ..
+            } = &f.kind
+            {
+                if is_external(&target.name) {
+                    return Err(SchemaError {
+                        code: "external_owned",
+                        message: format!(
+                            "`{}.{}` is `owned` by `{}`, an external entity. Ordo cannot \
+                             delete with or inherit a guard from a row it does not hold. Drop \
+                             `owned`",
+                            decl.name.name, f.name.name, target.name
+                        ),
+                        span: f.name.span,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Check a `release member` rule against the entities (27aq).
@@ -1379,6 +1815,7 @@ fn lower_entity(decl: &EntityDecl, keys: &KeyTable) -> Result<Entity, SchemaErro
             span: m.span,
         }),
         checks,
+        external: None,
         span: decl.span,
     })
 }
@@ -1871,6 +2308,9 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        externals: Vec::new(),
+        peers: Vec::new(),
+        readers: Vec::new(),
     }
 }
 
@@ -2344,6 +2784,105 @@ pub fn std_ops(schema: &Schema) -> Program {
             ));
         }
     }
+
+    // ── external entities: `get`, `list` and `count`, the reads ──────────
+    // Ruled 2026-11-15 (`external-entities`): an external is read-only, so
+    // it derives no `create`, `update` or `delete`. It has no `rev` either,
+    // so the row shape is `id` and the declared fields.
+    for e in &schema.externals {
+        let mut proj: Vec<ordo_syntax::decl::ProjItem> = vec![ordo_syntax::decl::ProjItem::Field {
+            path: vec![ident("id")],
+            span: sp,
+        }];
+        for f in e.declared() {
+            proj.push(ordo_syntax::decl::ProjItem::Field {
+                path: vec![ident(&f.name)],
+                span: sp,
+            });
+        }
+        let read = |verb: &str,
+                    params: Vec<ordo_syntax::decl::ParamDecl>,
+                    pipeline: ordo_syntax::decl::Pipeline| {
+            ordo_syntax::decl::OpDecl {
+                name: ident(&format!("std.{}.{verb}", e.name)),
+                params,
+                flags: ordo_syntax::decl::OpFlags::default(),
+                body: ordo_syntax::decl::OpBody::Read(pipeline),
+                span: sp,
+            }
+        };
+        ops.push(read(
+            "get",
+            vec![param("id", ScalarTy::Id, None, None)],
+            ordo_syntax::decl::Pipeline {
+                lets: Vec::new(),
+                sources: vec![ordo_syntax::decl::Source {
+                    name: ident(&e.name),
+                    args: vec![ordo_syntax::decl::SourceArg::Cond(addressed())],
+                    projection: Some(proj.clone()),
+                    span: sp,
+                }],
+                steps: Vec::new(),
+                span: sp,
+            },
+        ));
+        // `sort -id` like a native list. The planner sorts an external's
+        // `id` by its raw key, so the foreign index serves the order and the
+        // cursor stays correct for integer keys.
+        ops.push(read(
+            "list",
+            Vec::new(),
+            ordo_syntax::decl::Pipeline {
+                lets: Vec::new(),
+                sources: vec![ordo_syntax::decl::Source {
+                    name: ident(&e.name),
+                    args: Vec::new(),
+                    projection: Some(proj),
+                    span: sp,
+                }],
+                steps: vec![ordo_syntax::decl::Step::Sort {
+                    keys: vec![ordo_syntax::decl::SortKey {
+                        expr: path("id"),
+                        desc: true,
+                        span: sp,
+                    }],
+                    span: sp,
+                }],
+                span: sp,
+            },
+        ));
+        // `count` is a read, and `std-library.md` derives it for every
+        // entity: `reduce { n: count }` over the same source, one row.
+        ops.push(read(
+            "count",
+            Vec::new(),
+            ordo_syntax::decl::Pipeline {
+                lets: Vec::new(),
+                sources: vec![ordo_syntax::decl::Source {
+                    name: ident(&e.name),
+                    args: Vec::new(),
+                    projection: Some(vec![ordo_syntax::decl::ProjItem::Field {
+                        path: vec![ident("id")],
+                        span: sp,
+                    }]),
+                    span: sp,
+                }],
+                steps: vec![ordo_syntax::decl::Step::Reduce {
+                    aggs: vec![ordo_syntax::decl::AggDecl {
+                        out: ident("n"),
+                        func: ident("count"),
+                        arg: None,
+                        arg2: None,
+                        cond: None,
+                        span: sp,
+                    }],
+                    span: sp,
+                }],
+                span: sp,
+            },
+        ));
+    }
+
     Program {
         domain: None,
         entities: Vec::new(),
@@ -2352,6 +2891,9 @@ pub fn std_ops(schema: &Schema) -> Program {
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        externals: Vec::new(),
+        peers: Vec::new(),
+        readers: Vec::new(),
     }
 }
 
@@ -2453,6 +2995,19 @@ fn resolve_public(entities: &mut [Entity]) -> Result<(), SchemaError> {
             f.public = true;
         }
         if !e.has_public() {
+            // An external's `public` line with no declared field to reach
+            // would pass here and fail later at an op, "has no public
+            // field". Say it where the mark is.
+            if let (Some(l), true) = (line.as_ref(), e.external.is_some()) {
+                return Err(SchemaError {
+                    code: "public_no_field",
+                    message: format!(
+                        "`{entity}` is `public` but declares no field for it to reach: the id \
+                         is never public. Add a field to the translation, or remove `public`."
+                    ),
+                    span: l.span,
+                });
+            }
             continue;
         }
         let guarded = e
@@ -2766,6 +3321,7 @@ fn resolve_guards(
             // opt in; and it is derived, so nobody could have written one.
             std_sealed: false,
             public: None,
+            external: None,
             span: sp,
         };
         by_name.insert(link_name, entities.len());

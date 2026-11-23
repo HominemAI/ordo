@@ -1,6 +1,6 @@
 {
- "date": "2026-11-13",
- "text": "2026-11-13: the console nav is 2 groups, System and Deployment, with the open group's pages under the bar, built on bleeding with every check green ([[the-console-groups-its-pages-with]]); it reaches the test instances with the next image. The no-program 503 fix is queued for all 4 program pages ([[console-says-busy-when-no-program]]). v0.5.1 runs on both deployments ([[live-instance]]). Your Argo sync of cloudflared brings ordo-api.inf.smg.icu and the restart hook. Ask 4 on [[image-name-the-release-does-not-build]] and slice 1 wait on your go.",
+ "date": "2026-11-23",
+ "text": "2026-11-23 PR 13 (auth block) is reconciled with bleeding and mergeable; its 9 review fixes are pushed. PR 32 brings bleeding to main so the nightly runs on GitHub runners ([[nightly-cancelled-main-pins-cluster-runners]]). 0.5.2 waits on PR 13. The 2026-11-21 audit found no built task missing; 75 tasks corrected.",
  "tiles": [
   [
    "4,060",
@@ -45,16 +45,16 @@
  ],
  "look": [
   {
-   "id": "image-name-the-release-does-not-build",
-   "why": "ask 4"
+   "id": "audit-configuration-in-the-syntax",
+   "why": "PR 13 mergeable"
   },
   {
-   "id": "rebuild-ellanor-on-ordo-now-to",
-   "why": "go for slice 1"
+   "id": "nightly-cancelled-main-pins-cluster-runners",
+   "why": "PR 32 into main"
   },
   {
-   "id": "console-says-busy-when-no-program",
-   "why": "queued fix"
+   "id": "sdk-usability-review-before-release-3",
+   "why": "3 fixes left"
   }
  ]
 }

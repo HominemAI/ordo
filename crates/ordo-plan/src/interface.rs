@@ -123,7 +123,7 @@ pub const SCHEMA_VERSION: &str = "ordo.interface/2";
 /// function adds no sort of its own, so the document is byte-stable for the
 /// same reason the artifact is.
 pub fn interface_document(domain: &Value, entities: &[Value], ops: &[Value]) -> Value {
-    interface_document_with(domain, entities, ops, RefineLimits::default())
+    interface_document_with(domain, entities, ops, RefineLimits::default(), None)
 }
 
 /// How large one refinement may be, as the descriptor states it
@@ -149,12 +149,16 @@ impl Default for RefineLimits {
     }
 }
 
-/// [`interface_document`] with the deployment's refinement limits.
+/// [`interface_document`] with the deployment's refinement limits and the
+/// program's `auth` section ([`crate::artifact::auth_artifact`]). `None`
+/// for a program with no `auth` block: the document has no `auth` key, as
+/// before the block existed.
 pub fn interface_document_with(
     domain: &Value,
     entities: &[Value],
     ops: &[Value],
     limits: RefineLimits,
+    auth: Option<&Value>,
 ) -> Value {
     // Which entities this asker may be told about: the ones a visible op
     // reaches. An entity no visible op touches is not described — a
@@ -183,6 +187,9 @@ pub fn interface_document_with(
     m.insert("entities".into(), json!(entity_docs));
     m.insert("id_types".into(), id_types(&op_docs, entities));
     m.insert("ops".into(), json!(op_docs));
+    if let Some(a) = auth {
+        m.insert("auth".into(), auth_descriptor(a));
+    }
 
     // The digest is over everything above, with the key absent — the
     // identity discipline `op_object` and `program_version` already use, so
@@ -193,6 +200,44 @@ pub fn interface_document_with(
     let mut value = Value::Object(m);
     value["digest"] = json!(digest(&value));
     value
+}
+
+/// The program's sign-in facts, as the descriptor's `auth` key. An
+/// addition, so the version stays `/2` (`plan-configuration-in-the-file.md`
+/// §5.2).
+///
+/// It carries what a sign-in page needs to know: the methods, each
+/// provider's name, preset, kind and label, the provisioning **mode**, and
+/// whether guests, linking and self-serve are on, the second factor level
+/// and user verification. **Never the provisioning domains** (owner,
+/// 2026-11-14, ask 10): the app developer decides what a person sees.
+/// Lifetimes stay out too; they are the server's business.
+fn auth_descriptor(a: &Value) -> Value {
+    let providers: Vec<Value> = a["providers"]
+        .as_array()
+        .map(|ps| {
+            ps.iter()
+                .map(|p| {
+                    json!({
+                        "name": p["name"],
+                        "preset": p["preset"],
+                        "kind": p["kind"],
+                        "label": p["label"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "methods": a["methods"],
+        "providers": providers,
+        "provisioning": a["provisioning"]["mode"],
+        "self_serve": a["self_serve"],
+        "guest": a["guest"]["on"],
+        "linking": a["linking"]["on"],
+        "second_factor": a["second_factor"],
+        "user_verification": a["user_verification"],
+    })
 }
 
 /// The descriptor's digest: `sha256(to_bytes(doc))`, first 8 bytes, hex.

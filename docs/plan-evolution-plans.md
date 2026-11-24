@@ -253,6 +253,18 @@ Ruled 2026-10-01, in `corpus-rulings.md`. In short:
 
 ## 4 · What changes in the code
 
+> **Review 2026-11-23.** 3 things landed or were ruled after this table.
+>
+> - The command is `ordo evolve` (ruled 2026-10-04). It is a door op,
+>   `std.deployment.evolve` (the CLI goes through the door, ruled
+>   2026-11-05). `ordo migrate --apply --direct` is what it replaces.
+> - An external entity never appears in a plan's steps. Its check runs in
+>   `plan_with` beside the plan, per database.
+> - A plan that changes a table a `reader` line names lists the readers
+>   (`plan-evolution-federation.md` §3).
+>
+> The build order is `plan-versions.md` §4, increments 8 and 9.
+
 | Piece | Change |
 |---|---|
 | `schema_apply::plan` | Returns a `StoredPlan`, written to `$plans`. |

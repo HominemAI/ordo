@@ -289,7 +289,7 @@ async fn fn_dispatch(
     if let Some(refusal) = token_refusal(&state, &headers, &name).await {
         return refusal.into_response();
     }
-    let Some(spec) = functions.spec(&name) else {
+    let Some(spec) = functions.spec_in(named_space(&headers), &name) else {
         let token = bearer(&headers);
         let why = match token {
             None => DoorRefusal::TokenMissing,
@@ -1011,7 +1011,17 @@ pub(crate) async fn token_refusal(
 pub(crate) struct Door {
     state: ApiState,
     headers: HeaderMap,
+    /// The program version each space the feed reads was served when the
+    /// feed first read it (`OpRegistry::version_in`). A pass that finds
+    /// another ends the feed with `version_changed` (`plan-versions.md`
+    /// §1.4).
+    versions: Admitted,
 }
+
+/// Space to the version a feed was admitted under. Shared by a `/live`
+/// stream's door and its table entry, so a read added later records its
+/// version when it is added.
+pub(crate) type Admitted = Arc<std::sync::Mutex<HashMap<String, Option<String>>>>;
 
 impl Door {
     pub(crate) fn new(state: &ApiState, headers: &HeaderMap) -> Door {
@@ -1023,7 +1033,43 @@ impl Door {
         Door {
             state: state.clone(),
             headers: kept,
+            versions: Admitted::default(),
         }
+    }
+
+    /// Record the version `space` is served now, unless one is recorded.
+    pub(crate) fn note_version(&self, space: &str) {
+        note_version(&self.state, &self.versions, space);
+    }
+
+    /// The table of versions this door was admitted under.
+    pub(crate) fn admitted(&self) -> Admitted {
+        self.versions.clone()
+    }
+
+    /// `version_changed` when `space` is served another version than the
+    /// one recorded for it. The first pass for a space records it.
+    fn version_check(&self, space: &str) -> Result<(), ApiError> {
+        let now = self.state.registry.current().version_in(space);
+        let mut seen = self.versions.lock().unwrap_or_else(|p| p.into_inner());
+        match seen.get(space) {
+            Some(was) if *was != now => Err(ApiError::version_changed()),
+            Some(_) => Ok(()),
+            None => {
+                seen.insert(space.to_string(), now);
+                Ok(())
+            }
+        }
+    }
+
+    /// A re-check ticker for this door's feed: every
+    /// [`crate::LiveSettings::recheck`], and at once when the host asks
+    /// every feed to ([`crate::LiveStreams::recheck_now`]).
+    pub(crate) fn ticker(&self) -> Recheck {
+        recheck_ticker(
+            self.state.live_streams.settings().recheck,
+            self.state.live_streams.nudged(),
+        )
     }
 
     /// The token gate alone: what holds for the token whatever it reads.
@@ -1041,21 +1087,18 @@ impl Door {
     /// caller the access check admitted learns of the pause.
     pub(crate) fn access(&self, op: &OpSpec, space: &str) -> Result<(), ApiError> {
         check_access(&self.state, op, space, &self.headers)?;
-        match self.state.executor.held(op, space) {
-            Some(e) => Err(ApiError::from_exec(op, e)),
-            None => Ok(()),
+        if let Some(e) = self.state.executor.held(op, space) {
+            return Err(ApiError::from_exec(op, e));
         }
+        // Last: only a caller the door still admits learns that the
+        // tenant's version moved.
+        self.version_check(space)
     }
 
     /// The whole door for one read: the token gate, then the access check.
     pub(crate) async fn admit(&self, op: &OpSpec, space: &str) -> Result<(), ApiError> {
         self.token(&op.name).await?;
         self.access(op, space)
-    }
-
-    /// How often a quiet feed asks the door anyway.
-    pub(crate) fn recheck(&self) -> Duration {
-        self.state.live_streams.settings().recheck
     }
 }
 
@@ -1070,7 +1113,9 @@ pub(crate) fn refusal_frame(e: &ApiError, key: Option<&str>) -> Event {
     if let (Some(key), Some(obj)) = (key, body.as_object_mut()) {
         obj.insert("key".into(), Value::String(key.to_string()));
     }
-    let name = if e.code == ErrorCode::SpacePaused {
+    let name = if e.version_moved {
+        crate::error::VERSION_CHANGED_EVENT
+    } else if e.code == ErrorCode::SpacePaused {
         "space_paused"
     } else {
         "error"
@@ -1078,12 +1123,48 @@ pub(crate) fn refusal_frame(e: &ApiError, key: Option<&str>) -> Event {
     Event::default().event(name).data(body.to_string())
 }
 
-/// A ticker for [`Door::recheck`] whose first tick is one period away, not
-/// now: the feed was admitted a moment ago.
-pub(crate) fn recheck_ticker(period: Duration) -> tokio::time::Interval {
-    let mut t = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    t
+/// Record the version `space` is served now in `versions`, unless one is
+/// recorded there.
+pub(crate) fn note_version(state: &ApiState, versions: &Admitted, space: &str) {
+    let now = state.registry.current().version_in(space);
+    versions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(space.to_string())
+        .or_insert(now);
+}
+
+/// A feed's re-check: a tick every period, the first one period away (the
+/// feed was admitted a moment ago), and one at once whenever the host asks
+/// every feed to ([`crate::LiveStreams::recheck_now`]).
+pub(crate) struct Recheck {
+    every: tokio::time::Interval,
+    nudge: tokio::sync::watch::Receiver<u64>,
+}
+
+impl Recheck {
+    /// Wait for the next re-check. Cancel-safe, as `select!` needs.
+    pub(crate) async fn tick(&mut self) {
+        tokio::select! {
+            _ = self.every.tick() => {}
+            changed = self.nudge.changed() => {
+                if changed.is_err() {
+                    // The table is gone, so no nudge can come: the period
+                    // alone.
+                    self.every.tick().await;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn recheck_ticker(
+    period: Duration,
+    nudge: tokio::sync::watch::Receiver<u64>,
+) -> Recheck {
+    let mut every = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    Recheck { every, nudge }
 }
 
 fn wants_live(query: &HashMap<String, String>) -> bool {
@@ -2418,6 +2499,11 @@ async fn live_inner(
         return Ok(sse.into_response());
     }
 
+    // The version the tenant is served as the feed opens, recorded before
+    // the first read: a later pass that finds it on another ends the feed
+    // with `version_changed`.
+    let door = Door::new(state, headers);
+    door.note_version(space);
     let (subscription, initial) =
         subscribe_then_read(state, op, space, &gate.keyed_as(), bound, refinement).await?;
 
@@ -2436,8 +2522,7 @@ async fn live_inner(
     // tick ([`Door`]); a refusal is the feed's last frame. Signals that
     // queued behind one are answered by the same pass, so a burst of writes
     // costs one door check and one `invalidate`.
-    let door = Door::new(state, headers);
-    let tick = recheck_ticker(door.recheck());
+    let tick = door.ticker();
     let watched = (op.clone(), space.to_string());
     let invalidations = stream::unfold(
         Some((subscription, door, tick, watched)),
@@ -2766,12 +2851,19 @@ async fn live_add_inner(
         let mut bound = bind::bind_params(&op, &gate.params)?;
         gate.bind_caller(&mut bound);
         let refinement = live_refinement(state, &op, gate.refine_raw.clone(), false)?;
+        // The version the read's first envelope is read under, taken first.
+        let version = state.registry.current().version_in(space);
         let (subscription, initial) =
             subscribe_then_read(state, &op, space, &gate.keyed_as(), bound, refinement).await?;
-        match state
-            .live_streams
-            .add(stream_id, token, &add.key, subscription, &op, space)
-        {
+        match state.live_streams.add(
+            stream_id,
+            token,
+            &add.key,
+            subscription,
+            &op,
+            space,
+            version,
+        ) {
             Ok(()) => Ok((StatusCode::OK, Json(initial)).into_response()),
             Err(AddRefused::NoStream) => Err(no_such_stream()),
             Err(AddRefused::Full) => Err(full(&op)),

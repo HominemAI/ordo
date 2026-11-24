@@ -31,7 +31,7 @@ env:
 
 # Runs on `main` (the nightly one) are never cancelled.
 concurrency:
-  group: examples-e2e-${{ github.ref }}-${{ inputs.coverage && 'coverage' || 'tests' }}-${{ inputs.public_only && 'public' || 'all' }}
+  group: examples-e2e-${{ github.workflow }}-${{ github.ref }}-${{ inputs.coverage && 'coverage' || 'tests' }}-${{ inputs.public_only && 'public' || 'all' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:

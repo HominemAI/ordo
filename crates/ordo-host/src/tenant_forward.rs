@@ -33,6 +33,20 @@
 //! brings the database forward under the apply lock and the others find it
 //! already there, write nothing, and lift.
 //!
+//! # Seamless moves (increment 7, `plan-versions.md` §2.1)
+//!
+//! Since 2026-11-23 an activation no longer pins a tenant with a database of
+//! its own to a version that database has not taken. The tenant keeps its
+//! pin and serves its version, with a move open in `$moves`. The sweep
+//! treats such a database as behind, brings it forward (the expand), and the
+//! gate inside [`crate::schema_apply::bring_forward`] checks it holds the
+//! new version. Only then is the pin switched
+//! ([`crate::versions::Versions::finish_moves`]). A database that cannot be
+//! reached leaves the move `waiting` and is swept again; a refusal by name
+//! leaves it `refused`, the tenant serving its version, and the reason on
+//! the move for the deployment owner. The hold-closed below remains for a
+//! tenant already pinned to the serving version whose database is behind.
+//!
 //! # What it will not do
 //!
 //! It does not apply anything the deployment's own apply would refuse. A
@@ -95,6 +109,19 @@ pub struct Swept {
     pub held: Vec<(String, String)>,
     /// A database could not be reached or asked. Another sweep may find it.
     pub transient: bool,
+    /// Tenants whose move finished: their database took the serving
+    /// version and their pin switched to it (`plan-versions.md` §2.1).
+    pub moved: Vec<String>,
+}
+
+/// What one look at a database found.
+enum Checked {
+    /// It records another version than the serving one: bring it forward.
+    Behind(ordo_exec::route::Target),
+    /// It records the serving version, or none. Its label.
+    Current(String),
+    /// It records the version its own tenants are pinned to.
+    OnPin,
 }
 
 /// The catch-up, one per node, shared by the worker and the deploy listener.
@@ -323,20 +350,81 @@ impl CatchUp {
         target: ordo_exec::route::Target,
         program: &Program,
         pinned: &HashMap<String, HashSet<String>>,
-    ) -> Result<Option<ordo_exec::route::Target>, (String, String)> {
+        moving: &HashSet<String>,
+    ) -> Result<Checked, (String, String)> {
         let pool = match &target.pool {
             Ok(p) => p.clone(),
             Err(why) => return Err((target.label.clone(), format!("unreachable: {why}"))),
         };
         match ordo_exec::spacedb::recorded_version(&pool).await {
+            // A database with a tenant moving off its version is brought
+            // forward even when another tenant there stays on it: the
+            // change is additive, so the version it stays on still fits.
             Ok(TargetVersion::At(v))
-                if pinned.get(&target.label).is_some_and(|p| p.contains(&v)) =>
+                if !moving.contains(&target.label)
+                    && pinned.get(&target.label).is_some_and(|p| p.contains(&v)) =>
             {
-                Ok(None)
+                Ok(Checked::OnPin)
             }
-            Ok(TargetVersion::At(v)) if v != program.version => Ok(Some(target)),
-            Ok(_) => Ok(None),
+            Ok(TargetVersion::At(v)) if v != program.version => Ok(Checked::Behind(target)),
+            Ok(_) => Ok(Checked::Current(target.label)),
             Err(e) => Err((target.label.clone(), format!("unreachable: {e}"))),
+        }
+    }
+
+    /// **The end of each move this sweep decided** (`plan-versions.md`
+    /// §2.1). A tenant whose database now holds the serving version is
+    /// pinned to it, in one transaction with its `$pins` row, and this
+    /// node takes the pin at once. A tenant whose database did not take it
+    /// keeps its version, and its move says why: `waiting` when asking
+    /// again may help (Q10, 2026-11-23), `refused` when the change was
+    /// refused by name.
+    async fn finish_moves(
+        &self,
+        version: &str,
+        movers: &HashMap<String, Vec<String>>,
+        done: &HashSet<String>,
+        failed: &HashMap<String, (bool, String)>,
+        out: &mut Swept,
+    ) {
+        let versions = crate::versions::Versions::on(&self.control);
+        let at = crate::runtime::now_secs();
+        for (label, spaces) in movers {
+            if done.contains(label) {
+                match versions.finish_moves(spaces, version, ACTOR, at).await {
+                    Ok(moved) => {
+                        for space in &moved {
+                            self.spaces.reload_pin(space).await;
+                            println!("tenant catch-up: space {space} moved to {version}");
+                        }
+                        out.moved.extend(moved);
+                    }
+                    Err(e) => {
+                        out.transient = true;
+                        eprintln!(
+                            "tenant catch-up: the pins on {label} could not move to {version} \
+                             ({e}); they stay where they are and are tried again"
+                        );
+                    }
+                }
+            } else if let Some((transient, why)) = failed.get(label) {
+                let phase = if *transient {
+                    crate::versions::MovePhase::Waiting
+                } else {
+                    crate::versions::MovePhase::Refused
+                };
+                for space in spaces {
+                    if let Err(e) = versions.note_move(space, version, phase, why).await {
+                        eprintln!("tenant catch-up: the move of {space} was not noted ({e})");
+                    }
+                    if !*transient {
+                        eprintln!(
+                            "tenant catch-up: space {space} stays on its version and keeps \
+                             serving it: moving to {version} was refused: {why}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -353,6 +441,13 @@ impl CatchUp {
         let _one = self.sweeping.lock().await;
         let started = std::time::Instant::now();
         let mut out = Swept::default();
+        // Soaks whose time has passed close on this tick (increment 11a).
+        crate::dual_writes::close_due(&crate::dual_writes::MoveContext {
+            control: &self.control,
+            pools: self.spaces.pools().as_ref(),
+            spaces: Some(self.spaces.as_ref()),
+        })
+        .await;
         let Some(program) = self.serving_program().await else {
             return out;
         };
@@ -378,12 +473,69 @@ impl CatchUp {
                 return out;
             }
         };
+        // **Open moves to the serving version** (`plan-versions.md` §2.1):
+        // a tenant still on its old version while its database is brought
+        // forward. Its database counts as behind, not as on its pin. A move
+        // refused by name is not tried again for this version, and is said.
+        // A move with dual writes (increment 11a) is its own: its database
+        // holds both its versions, and only its own commands move it.
+        let (moves, dual): (
+            HashMap<String, crate::versions::Move>,
+            HashMap<String, crate::versions::Move>,
+        ) = match crate::versions::Versions::on(&self.control).moves().await {
+            Ok(m) => {
+                let (dual, rest): (Vec<_>, Vec<_>) = m.into_iter().partition(|m| m.is_dual());
+                (
+                    rest.into_iter()
+                        .filter(|m| m.to == program.version)
+                        .map(|m| (m.space.clone(), m))
+                        .collect(),
+                    dual.into_iter().map(|m| (m.space.clone(), m)).collect(),
+                )
+            }
+            Err(e) => {
+                eprintln!("tenant catch-up: the open moves could not be read ({e})");
+                out.transient = true;
+                (HashMap::new(), HashMap::new())
+            }
+        };
+        let mut movers: HashMap<String, Vec<String>> = HashMap::new();
+        for (space, a) in &occupants {
+            let Some(m) = moves.get(&space.0) else {
+                continue;
+            };
+            if m.phase == crate::versions::MovePhase::Refused {
+                out.held.push((space.0.clone(), m.line()));
+                continue;
+            }
+            movers
+                .entry(ordo_exec::route::target_label(&a.host, a.port, &a.db))
+                .or_default()
+                .push(space.0.clone());
+        }
+        let moving = |space: &str| {
+            moves
+                .get(space)
+                .is_some_and(|m| m.phase != crate::versions::MovePhase::Refused)
+        };
         let pinned: HashMap<String, HashSet<String>> = {
             let d = self.spaces.deployment();
             let pins = d.pins().by_space;
             let fresh = d.new_tenant();
             let mut m: HashMap<String, HashSet<String>> = HashMap::new();
             for (space, a) in occupants {
+                if moving(&space.0) {
+                    continue;
+                }
+                if let Some(mv) = dual.get(&space.0) {
+                    let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
+                    for v in [&mv.from, &mv.to] {
+                        if *v != program.version {
+                            m.entry(label.clone()).or_default().insert(v.clone());
+                        }
+                    }
+                    continue;
+                }
                 let v = match pins.get(&space.0) {
                     Some((v, _)) => Some(v.clone()),
                     None => fresh.clone(),
@@ -400,22 +552,32 @@ impl CatchUp {
             .into_iter()
             .filter(|t| t.label != ordo_exec::route::DEFAULT_LABEL)
             .collect();
+        // Databases that hold the serving version after this sweep, and
+        // those that did not take it, with whether asking again may help.
+        let moving_labels: HashSet<String> = movers.keys().cloned().collect();
+        let mut done: HashSet<String> = HashSet::new();
+        let mut failed: HashMap<String, (bool, String)> = HashMap::new();
         let mut rest = targets.into_iter().peekable();
         while rest.peek().is_some() {
             let batch: Vec<_> = rest.by_ref().take(cap).collect();
             let checks = futures::future::join_all(
                 batch
                     .into_iter()
-                    .map(|t| self.check_target(t, &program, &pinned)),
+                    .map(|t| self.check_target(t, &program, &pinned, &moving_labels)),
             )
             .await;
             let mut behind = Vec::new();
             for c in checks {
                 match c {
-                    Ok(Some(t)) => behind.push(t),
-                    Ok(None) => out.current += 1,
+                    Ok(Checked::Behind(t)) => behind.push(t),
+                    Ok(Checked::Current(label)) => {
+                        out.current += 1;
+                        done.insert(label);
+                    }
+                    Ok(Checked::OnPin) => out.current += 1,
                     Err(held) => {
                         out.transient = true;
+                        failed.insert(held.0.clone(), (true, held.1.clone()));
                         out.held.push(held);
                     }
                 }
@@ -448,7 +610,7 @@ impl CatchUp {
                 out.transient = true;
                 return out;
             }
-            let done = futures::future::join_all(behind.into_iter().map(|t| async {
+            let forwarded = futures::future::join_all(behind.into_iter().map(|t| async {
                 let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(now, Ordering::SeqCst);
                 let d = sa::forward_target(t, &self.control, &program, ACTOR, OP).await;
@@ -457,17 +619,26 @@ impl CatchUp {
             }))
             .await;
             lock.release().await;
-            for d in done {
+            for d in forwarded {
                 match d.outcome {
-                    Ok(Forward::Advanced { .. }) => out.advanced += 1,
-                    Ok(Forward::Current) => out.current += 1,
+                    Ok(Forward::Advanced { .. }) => {
+                        out.advanced += 1;
+                        done.insert(d.label);
+                    }
+                    Ok(Forward::Current) => {
+                        out.current += 1;
+                        done.insert(d.label);
+                    }
                     Err(r) => {
                         out.transient |= r.transient;
+                        failed.insert(d.label.clone(), (r.transient, r.to_string()));
                         out.held.push((d.label, r.to_string()));
                     }
                 }
             }
         }
+        self.finish_moves(&program.version, &movers, &done, &failed, &mut out)
+            .await;
         // Every hold this node keeps for a database that is now current is
         // asked again, which lifts it.
         for space in self.spaces.awaiting_schema() {
@@ -509,7 +680,7 @@ impl CatchUp {
         let mut moved = 0;
         if self.resweep.swap(false, Ordering::SeqCst) {
             let swept = self.sweep().await;
-            moved += swept.advanced as u64;
+            moved += (swept.advanced + swept.moved.len()) as u64;
             if swept.transient {
                 self.resweep.store(true, Ordering::SeqCst);
             }

@@ -1375,7 +1375,8 @@ pub async fn plan_over_the_wire(host: &Host, flags: &Flags, source: &str, path: 
         Some("held") => {
             format!(
             "held       the apply would store the program and not activate it: the changes need \
-             `ordo migrate --apply --direct` or the console, or set {}",
+             a stored plan, `ordo evolve --from <serving> --to <version> --run` after `ordo \
+             apply --no-activate`, or set {}",
             row["safeChangesSetting"].as_str().unwrap_or("the safe-change setting")
         )
         }

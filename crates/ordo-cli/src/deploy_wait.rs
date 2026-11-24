@@ -188,8 +188,8 @@ fn served(version: &str, seen: &Seen, took: Duration) -> String {
     }
     if !seen.held.is_empty() {
         out.push_str(
-            "           a held tenant stays closed until its database is brought forward; \
-             `/health/ready` gives the reason\n",
+            "           a held tenant stays on the version it was on and keeps serving it; \
+             `std.deployment.tenants` gives each one's move and its reason\n",
         );
     }
     out

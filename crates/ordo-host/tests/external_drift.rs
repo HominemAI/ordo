@@ -417,3 +417,49 @@ fn the_interval_setting_is_checked_by_name() {
         std::time::Duration::from_secs(300)
     );
 }
+
+/// **The timer reads each tenant's own database** (step F3,
+/// `plan-evolution-federation.md` §4). A foreign table kept per tenant
+/// database changes in one tenant's database: the pass over the tenants
+/// holds that tenant's ops that read it, naming the column, and no other
+/// tenant's. The deployment's own database is unchanged, so its pass holds
+/// nothing. The table restored, the next pass lifts the hold.
+///
+/// A regression looks like a tenant reading a foreign table its database no
+/// longer holds as the file says, or one tenant's drift holding another.
+#[tokio::test]
+async fn the_timer_reads_each_tenant_database_and_holds_that_tenant_only() {
+    let (f, _pg, home, _) = setup("ordo_extd_f3_home").await;
+    let (_, pg_a, tenant_a, _) = setup("ordo_extd_f3_a").await;
+    let (_, _pg_b, tenant_b, _) = setup("ordo_extd_f3_b").await;
+    let served = f.clone();
+    let gate = ExternalGate::new(Arc::new(move || served.clone()));
+    let tenants = vec![
+        ("ten_a".to_string(), tenant_a),
+        ("ten_b".to_string(), tenant_b),
+    ];
+    assert!(gate.watch_once(&home).await.expect("reads").is_empty());
+    assert!(gate.watch_tenants(&tenants).await.is_empty());
+    assert!(gate.refusal_in("patronByEmail", "ten_a").is_none());
+
+    pg_a.exec("ALTER TABLE crm.customers DROP COLUMN full_name")
+        .expect("drops in one tenant's database");
+    assert!(gate.watch_once(&home).await.expect("reads").is_empty());
+    let lines = gate.watch_tenants(&tenants).await;
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("tenant ten_a: external_changed"),
+        "{lines:?}"
+    );
+    let held = gate
+        .refusal_in("patronByEmail", "ten_a")
+        .expect("ten_a is held");
+    assert!(format!("{held:?}").contains("full_name"), "{held:?}");
+    assert!(gate.refusal_in("patronByEmail", "ten_b").is_none());
+    assert!(gate.refusal_in("patronByEmail", "system").is_none());
+
+    pg_a.exec("ALTER TABLE crm.customers ADD COLUMN full_name text NOT NULL DEFAULT 'back'")
+        .expect("restores");
+    assert!(gate.watch_tenants(&tenants).await.is_empty());
+    assert!(gate.refusal_in("patronByEmail", "ten_a").is_none());
+}

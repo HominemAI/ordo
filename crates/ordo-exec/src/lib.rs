@@ -57,6 +57,8 @@ pub mod metrics;
 pub mod migrate;
 pub mod nfc;
 pub mod nodes;
+pub mod orphans;
+pub mod overlay;
 pub mod peer;
 mod pool_error;
 pub mod prune;
@@ -66,6 +68,7 @@ pub mod route;
 pub mod sealed;
 pub mod secevent;
 pub mod shape;
+pub mod sign_in_contract;
 pub mod spacedb;
 pub mod triggers;
 pub mod undo;
@@ -870,6 +873,11 @@ pub struct Pool {
     /// ([`PIN_FENCE_DDL`]). `None` checks nothing: a boot pass, an operator
     /// command, a test with no pins.
     pin_epoch: Option<i64>,
+    /// The move overlay this handle's writes run (`plan-versions.md`
+    /// increment 11a, [`overlay`]): set by [`Pool::with_overlay`] on a
+    /// tenant's handle while it moves between versions. `None` writes as
+    /// the op says and nothing more.
+    overlay: Option<Arc<overlay::MoveOverlay>>,
 }
 
 /// **The pin fence**, in each tenant's own database (`plan-versions.md`
@@ -1218,6 +1226,9 @@ impl Pool {
             // The pin fence, in every database a write reaches
             // (`plan-versions.md` §1.3).
             PIN_FENCE_DDL,
+            // The renames this database is in the middle of (increment
+            // 11a): every write reads them first ([`overlay::RENAMES_DDL`]).
+            overlay::RENAMES_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -1425,6 +1436,7 @@ impl Pool {
             sweep_wait: route::TENANT_DIAL_WAIT_DEFAULT,
             label: None,
             pin_epoch: None,
+            overlay: None,
         })
     }
 
@@ -1444,6 +1456,7 @@ impl Pool {
             sweep_wait: self.sweep_wait,
             label: self.label.clone(),
             pin_epoch: self.pin_epoch,
+            overlay: self.overlay.clone(),
         }
     }
 
@@ -1469,8 +1482,9 @@ impl Pool {
             sweep_wait: self.sweep_wait,
             label: self.label.clone(),
             // An epoch belongs to one tenant's pin; a handle for another
-            // space carries none until it is given one.
+            // space carries none until it is given one. So does an overlay.
             pin_epoch: None,
+            overlay: None,
         }
     }
 
@@ -1487,6 +1501,20 @@ impl Pool {
     /// The pin epoch this handle writes under, if it was given one.
     pub fn pin_epoch(&self) -> Option<i64> {
         self.pin_epoch
+    }
+
+    /// The same handle, with its writes running `overlay` (increment 11a):
+    /// the extra columns and guards of a tenant moving between versions.
+    pub fn with_overlay(&self, overlay: Option<Arc<overlay::MoveOverlay>>) -> Pool {
+        Pool {
+            overlay,
+            ..self.clone()
+        }
+    }
+
+    /// The move overlay this handle's writes run, if any.
+    pub fn overlay(&self) -> Option<&Arc<overlay::MoveOverlay>> {
+        self.overlay.as_ref()
     }
 
     /// A handle onto the same pool for a walker that touches each tenant
@@ -1516,6 +1544,7 @@ impl Pool {
             sweep_wait: wait,
             label: self.label.clone(),
             pin_epoch: self.pin_epoch,
+            overlay: self.overlay.clone(),
         }
     }
 
@@ -1601,6 +1630,11 @@ impl Pool {
         Arc::ptr_eq(&self.shared, &other.shared)
             && self.space == other.space
             && self.pin_epoch == other.pin_epoch
+            && match (&self.overlay, &other.overlay) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
             && self.sweep.is_some() == other.sweep.is_some()
             && match (&self.observer, &other.observer) {
                 (None, None) => true,
@@ -2756,7 +2790,34 @@ impl Executor {
             .begin_for(OpClass::MultiStatementGroup)
             .await
             .map_err(ExecFail::Pool)?;
-        // The pin fence first: a node whose pin of this tenant is older
+        // **The renames first** (increment 11a), as this transaction's first
+        // statement: its share lock is taken before its snapshot, so a
+        // rename that commits while this write waits is read here, and one
+        // that has not started waits for this write to commit. A write
+        // can therefore never land between a rename's new column and its
+        // dual writes, whatever this node has read.
+        let renames = match overlay::renames_in(&tx).await {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => {
+                // A database no dial of this build reached yet: make the
+                // table and run the write again.
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::RENAMES_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the renames table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
+        // The pin fence next: a node whose pin of this tenant is older
         // than one another node already wrote under writes nothing.
         if let Err(e) = self.check_pin_fence(&tx).await {
             let _ = tx.rollback().await;
@@ -2813,6 +2874,36 @@ impl Executor {
         }
         match result {
             Ok(v) => {
+                // **The move overlay** (increment 11a): the other version's
+                // columns and guards on every row this write touched, in
+                // this transaction, before the chain append. A row it
+                // refuses refuses the whole write.
+                // Outside a move, the renames this database is in the
+                // middle of, as this version reads them.
+                let by_renames = match self.pool.overlay() {
+                    Some(_) => None,
+                    None => overlay::MoveOverlay::for_renames(&self.schema, &renames),
+                };
+                let run = self
+                    .pool
+                    .overlay()
+                    .map(|o| o.as_ref())
+                    .or(by_renames.as_ref());
+                if let (Some(overlay), Some(group)) = (run, scratch.pending()) {
+                    let written: Vec<(String, String)> = group
+                        .commands
+                        .iter()
+                        .filter(|c| c.kind != ordo_commandlog::CommandKind::Delete)
+                        .map(|c| (c.entity.clone(), c.row_id.clone()))
+                        .collect();
+                    if let Err(e) = overlay.apply(&tx, &self.space.0, &written).await {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
                 // The completion record joins the effect in this
                 // transaction. Commit publishes both or neither.
                 // Invalidation and deferred work ride the SAME transaction

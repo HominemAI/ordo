@@ -2310,6 +2310,7 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
     }
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
@@ -2894,6 +2895,7 @@ pub fn std_ops(schema: &Schema) -> Program {
 
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,

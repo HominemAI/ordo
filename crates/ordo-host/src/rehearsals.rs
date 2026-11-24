@@ -24,6 +24,11 @@
 //!    is refused unless an accepted attestation names that step and its
 //!    digest. `promotion.skip_staging` on turns the rule off, as it takes
 //!    staging out of the promotion path.
+//! 5. **Break-glass** ([`break_glass`], §3.2 item 6): when staging does not
+//!    answer, the deployment owner lets the stored plan of one step run
+//!    without a rehearsal, with a reason, for one hour. The stream marks
+//!    it (`break-glass`, and `break-glass-refused` for each refused try),
+//!    and `ordo rehearsals list` shows it.
 //!
 //! # The key (owner ruling 2026-11-24, Q11: no key to set up)
 //!
@@ -71,8 +76,17 @@ pub const REHEARSALS: &str = "std.deployment.rehearsals";
 /// Read staging's attestation for one step, check it, and accept it.
 pub const ACCEPT: &str = "std.deployment.acceptRehearsal";
 
+/// **Break glass** (§3.2 item 6): staging is down, so a named deployment
+/// owner lets one stored step run without its rehearsal, for
+/// [`BREAK_GLASS_SECS`], with a recorded reason.
+pub const BREAK_GLASS: &str = "std.deployment.breakGlassRehearsal";
+
 /// Every rehearsal op.
-pub const OPS: [&str; 3] = [REHEARSE, REHEARSALS, ACCEPT];
+pub const OPS: [&str; 4] = [REHEARSE, REHEARSALS, ACCEPT, BREAK_GLASS];
+
+/// How long a break-glass lets its step run: 1 hour. Fixed, and short: the
+/// plan names no length, so the conservative one (owner question).
+pub const BREAK_GLASS_SECS: u64 = 3600;
 
 /// The attestation's format.
 pub const FORMAT: &str = "ordo.rehearsal.v1";
@@ -119,6 +133,20 @@ CREATE TABLE IF NOT EXISTS \"$rehearsals_accepted\" ( \
   \"signature\" text NOT NULL, \
   \"actor\" text NOT NULL, \
   \"at\" bigint NOT NULL \
+)";
+
+const BREAK_GLASS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$rehearsal_break_glass\" ( \
+  \"seq\" bigserial PRIMARY KEY, \
+  \"from_version\" text NOT NULL, \
+  \"to_version\" text NOT NULL, \
+  \"digest\" text NOT NULL, \
+  \"env\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"staging_said\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"at\" bigint NOT NULL, \
+  \"until\" bigint NOT NULL \
 )";
 
 const KEYS_DDL: &str = "\
@@ -224,6 +252,17 @@ pub enum RehearsalRefusal {
         to: String,
         signed: String,
         here: String,
+    },
+    /// Break-glass while staging answers: staging is not down.
+    StagingAnswers {
+        env: String,
+        address: String,
+        status: u16,
+    },
+    /// Break-glass names a step this deployment stored no plan for.
+    NoPlan {
+        from: String,
+        to: String,
     },
     /// A stored plan or version could not be read, rendered or stored.
     Evolve(Box<EvolveRefusal>),
@@ -385,6 +424,25 @@ impl std::fmt::Display for RehearsalRefusal {
                  {signed}. Production runs only the plan staging rehearsed: render it on \
                  staging with the same options, rehearse it, and accept it again"
             ),
+            RehearsalRefusal::StagingAnswers {
+                env,
+                address,
+                status,
+            } => write!(
+                f,
+                "`{env}` answers at {address} ({status}), so it is not down, and break-glass \
+                 is for when staging is down. Rehearse the step there and accept it here: {}, \
+                 then `ordo rehearsals accept`. To promote with no staging at all, set \
+                 promotion.skip_staging: `ordo environments set skip-staging on --reason \
+                 \"...\"`",
+                rehearse_command("<from>", "<to>")
+            ),
+            RehearsalRefusal::NoPlan { from, to } => write!(
+                f,
+                "this deployment stored no plan for the step from `{from}` to `{to}`, and \
+                 break-glass lets one stored plan run. Store it first: `ordo evolve --from \
+                 {from} --to {to}`"
+            ),
             RehearsalRefusal::Evolve(e) => write!(f, "{e}"),
             RehearsalRefusal::Custody(why) => write!(
                 f,
@@ -422,6 +480,8 @@ impl RehearsalRefusal {
             RehearsalRefusal::TooOld { .. } => "rehearsal_too_old",
             RehearsalRefusal::Source2 { .. } => "rehearsal_version_differs",
             RehearsalRefusal::Digest { .. } => "rehearsal_digest_differs",
+            RehearsalRefusal::StagingAnswers { .. } => "break_glass_staging_answers",
+            RehearsalRefusal::NoPlan { .. } => "break_glass_no_plan",
             RehearsalRefusal::Evolve(e) => e.class(),
             RehearsalRefusal::Custody(_) => "rehearsal_key_custody",
             RehearsalRefusal::Environment(_) => "environment_refused",
@@ -1205,10 +1265,168 @@ pub async fn accepted(pool: &Pool) -> Result<Vec<Value>, PoolError> {
     }
 }
 
+// ── break-glass ──────────────────────────────────────────────────────────
+
+/// What a break-glass did.
+#[derive(Debug)]
+pub struct BrokeGlass {
+    pub env: String,
+    pub plan: StoredPlan,
+    pub reason: String,
+    /// Why staging counts as down: the probe's own words.
+    pub staging_said: String,
+    pub at: u64,
+    pub until: u64,
+}
+
+impl BrokeGlass {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "env": self.env, "from": self.plan.from, "to": self.plan.to,
+            "digest": self.plan.digest, "reason": self.reason,
+            "stagingSaid": self.staging_said, "at": self.at, "until": self.until,
+        })
+    }
+}
+
+/// **Break glass** (§3.2 item 6): staging is down, so the deployment owner
+/// lets the step's stored plan run here without a rehearsal, with a
+/// recorded reason, for [`BREAK_GLASS_SECS`].
+///
+/// - Only when staging comes before this deployment and does not answer:
+///   staging's recorded door is asked `/health/live`, and any answer below
+///   500 refuses ([`RehearsalRefusal::StagingAnswers`]). A deployment that
+///   does not know where staging answers cannot tell it is down
+///   ([`RehearsalRefusal::NoDoor`]).
+/// - One step, one digest: the plan this deployment stored for it. No plan,
+///   no break-glass ([`RehearsalRefusal::NoPlan`]).
+/// - A reason is required, and kept with the actor, what staging said and
+///   the time it ends, in `$rehearsal_break_glass`.
+///
+/// Who: the deployment owner, as for every rehearsal op. A machine key is
+/// refused at the door (`deployment_access`), and a delegated token is,
+/// as for every platform write.
+pub async fn break_glass(
+    pool: &Pool,
+    from: &str,
+    to: &str,
+    reason: &str,
+    actor: &str,
+    at: u64,
+) -> Result<BrokeGlass, RehearsalRefusal> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(RehearsalRefusal::Input(
+            "break-glass takes a reason, kept on the deployment's stream: `--reason \"...\"`"
+                .into(),
+        ));
+    }
+    let Some((_own, staging)) = staging_before(pool).await? else {
+        let own = Environments::on(pool).own().await?;
+        return Err(RehearsalRefusal::NoStaging { own: own.name });
+    };
+    let v = Versions::on(pool);
+    let from = v.resolve(from.trim()).await?;
+    let to = v.resolve(to.trim()).await?;
+    let Some(plan) = Plans::on(pool).latest(&from, &to).await? else {
+        return Err(RehearsalRefusal::NoPlan { from, to });
+    };
+    let Some(door) = &staging.door else {
+        return Err(RehearsalRefusal::NoDoor { env: staging.name });
+    };
+    let client = StepDoor::parse(&door.address, crate::step_door::plain_http_allowed()).map_err(
+        |error| RehearsalRefusal::Source {
+            env: staging.name.clone(),
+            error,
+        },
+    )?;
+    let staging_said = match client.live().await {
+        Ok(status) => {
+            return Err(RehearsalRefusal::StagingAnswers {
+                env: staging.name,
+                address: client.address().to_string(),
+                status,
+            })
+        }
+        Err(e) => e.to_string(),
+    };
+    let until = at.saturating_add(BREAK_GLASS_SECS);
+    pool.rows(BREAK_GLASS_DDL).await?;
+    pool.rows(&format!(
+        "INSERT INTO \"$rehearsal_break_glass\" (\"from_version\", \"to_version\", \"digest\", \
+         \"env\", \"reason\", \"staging_said\", \"actor\", \"at\", \"until\") VALUES \
+         ({}, {}, {}, {}, {}, {}, {}, {at}, {until})",
+        sql_lit(&plan.from),
+        sql_lit(&plan.to),
+        sql_lit(&plan.digest),
+        sql_lit(&staging.name),
+        sql_lit(reason),
+        sql_lit(&staging_said),
+        sql_lit(actor),
+    ))
+    .await?;
+    Ok(BrokeGlass {
+        env: staging.name,
+        plan,
+        reason: reason.to_string(),
+        staging_said,
+        at,
+        until,
+    })
+}
+
+/// The digests a break-glass lets run for one step at `now`.
+async fn broken_glass_digests(
+    pool: &Pool,
+    from: &str,
+    to: &str,
+    now: u64,
+) -> Result<Vec<String>, PoolError> {
+    let sql = format!(
+        "SELECT DISTINCT \"digest\" FROM \"$rehearsal_break_glass\" WHERE \"from_version\" = {} \
+         AND \"to_version\" = {} AND \"until\" >= {now}",
+        sql_lit(from),
+        sql_lit(to)
+    );
+    match pool.rows(&sql).await {
+        Ok(rows) => Ok(rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .collect()),
+        Err(e) if e.is_missing_table() => Ok(vec![]),
+        Err(e) => Err(e),
+    }
+}
+
+/// Every break-glass here, newest first, each marked active or ended.
+pub async fn broken_glass(pool: &Pool, now: u64) -> Result<Vec<Value>, PoolError> {
+    let sql = "SELECT \"from_version\", \"to_version\", \"digest\", \"env\", \"reason\", \
+               \"staging_said\", \"actor\", \"at\"::text, \"until\"::text \
+               FROM \"$rehearsal_break_glass\" ORDER BY \"seq\" DESC LIMIT 100";
+    match pool.rows(sql).await {
+        Ok(rows) => Ok(rows
+            .into_iter()
+            .map(|r| {
+                let g = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+                let until = g(8).parse::<u64>().unwrap_or(0);
+                json!({
+                    "from": g(0), "to": g(1), "digest": g(2), "env": g(3), "reason": g(4),
+                    "stagingSaid": g(5), "actor": g(6),
+                    "at": g(7).parse::<u64>().unwrap_or(0), "until": until,
+                    "active": until >= now,
+                })
+            })
+            .collect()),
+        Err(e) if e.is_missing_table() => Ok(vec![]),
+        Err(e) => Err(e),
+    }
+}
+
 /// **The gate** (§3.2, increment 12b): on a deployment with staging before
 /// it in its chain, a stored step runs only when staging rehearsed it and
-/// signed its digest, and this deployment accepted that. Called by
-/// [`evolve::run_step_with`] before a step changes anything.
+/// signed its digest, and this deployment accepted that, or a break-glass
+/// for that digest has not ended. Called by [`evolve::run_step_with`]
+/// before a step changes anything.
 pub async fn require_rehearsed(pool: &Pool, plan: &StoredPlan) -> Result<(), EvolveRefusal> {
     let required = staging_before(pool).await.map_err(|e| match e {
         RehearsalRefusal::Store(e) => EvolveRefusal::from(e),
@@ -1219,6 +1437,13 @@ pub async fn require_rehearsed(pool: &Pool, plan: &StoredPlan) -> Result<(), Evo
     }
     let signed = accepted_digests(pool, &plan.from, &plan.to).await?;
     if signed.contains(&plan.digest) {
+        return Ok(());
+    }
+    let now = crate::runtime::now_secs();
+    if broken_glass_digests(pool, &plan.from, &plan.to, now)
+        .await?
+        .contains(&plan.digest)
+    {
         return Ok(());
     }
     Err(EvolveRefusal::NotRehearsed {
@@ -1284,7 +1509,14 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
             REHEARSALS,
             OpKind::Read,
             vec![param("from", 128, false), param("to", 128, false)],
-            &["env", "key", "readBy", "rehearsals", "accepted"],
+            &[
+                "env",
+                "key",
+                "readBy",
+                "rehearsals",
+                "accepted",
+                "brokenGlass",
+            ],
         ),
         spec(
             ACCEPT,
@@ -1310,6 +1542,25 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 "release",
                 "rehearsedAt",
                 "warnings",
+            ],
+        ),
+        spec(
+            BREAK_GLASS,
+            OpKind::Write,
+            vec![
+                param("from", 128, true),
+                param("to", 128, true),
+                param("reason", 4096, true),
+            ],
+            &[
+                "env",
+                "from",
+                "to",
+                "digest",
+                "reason",
+                "stagingSaid",
+                "at",
+                "until",
             ],
         ),
     ]
@@ -1412,11 +1663,53 @@ pub async fn execute(
             let acc = accepted(pool)
                 .await
                 .map_err(|e| RehearsalRefusal::Store(e).to_exec_error(WHAT))?;
+            let glass = broken_glass(pool, now)
+                .await
+                .map_err(|e| RehearsalRefusal::Store(e).to_exec_error(WHAT))?;
             json!({
                 "env": own.name, "key": key, "readBy": caller,
                 "rehearsals": list.iter().map(Signed::to_json).collect::<Vec<_>>(),
-                "accepted": acc,
+                "accepted": acc, "brokenGlass": glass,
             })
+        }
+        BREAK_GLASS => {
+            const WHAT: &str = "the glass was not broken";
+            let from = text(bound, "from").unwrap_or_default();
+            let to = text(bound, "to").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            // Every try is on the stream, refused or not.
+            let done = break_glass(pool, from, to, reason, caller, now)
+                .await
+                .map_err(|e| {
+                    apply.record(
+                        caller,
+                        BREAK_GLASS,
+                        "break-glass-refused",
+                        format!(
+                            "from={from} to={to} class={} by={caller} reason={}",
+                            e.class(),
+                            reason.trim()
+                        ),
+                    );
+                    e.to_exec_error(WHAT)
+                })?;
+            apply.record(
+                caller,
+                BREAK_GLASS,
+                "break-glass",
+                format!(
+                    "from={} to={} digest={} env={} until={} by={caller} staging_said={} \
+                     reason={}",
+                    done.plan.from,
+                    done.plan.to,
+                    done.plan.digest,
+                    done.env,
+                    done.until,
+                    done.staging_said,
+                    done.reason
+                ),
+            );
+            done.to_json()
         }
         ACCEPT => {
             const WHAT: &str = "the rehearsal was not accepted";

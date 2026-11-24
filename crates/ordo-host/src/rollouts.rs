@@ -29,7 +29,8 @@
 //!   tenants stay on the version that was active.
 //! - **Strategies**: `rolling`, a batch every `rollout.batch_interval`,
 //!   sized to finish within `rollout.window`; `all`, every tenant in one
-//!   batch. Canary, group first, by query and health are increment 10c.
+//!   batch. Increment 10c: `canary`, `group` and `query` move a first stage,
+//!   then the rest once it is healthy (`crate::rollout_strategies`).
 //! - **Windows and holds.** A tenant a maintenance window covers moves only
 //!   while one holds; outside, it is `waiting`. A held tenant is `waiting`.
 //!   A tenant no window covers moves in its batch.
@@ -95,6 +96,10 @@ pub const DEPLOYMENT_STEP: &str = "$deployment";
 /// threshold, the finish.
 pub const ACTOR: &str = "ordo:rollout";
 
+/// How a pause by the first stage's health begins its reason: `resume`
+/// then passes the gate.
+pub const UNHEALTHY: &str = "unhealthy";
+
 /// The advisory lock the leading worker takes for each tick, at
 /// transaction scope (`ORRL`).
 pub const ROLLOUT_LOCK_NS: i32 = 0x4F52_524C;
@@ -116,13 +121,50 @@ pub const WINDOW_SETTING: &str = "rollout.window";
 pub const FAILURE_THRESHOLD_SETTING: &str = "rollout.failure_threshold";
 pub const DEPLOYMENT_SPACE_SETTING: &str = "rollout.deployment_space";
 
-pub const SETTINGS: [&str; 5] = [
+/// Increment 10c.
+pub const CANARY_COUNT_SETTING: &str = "rollout.canary_count";
+pub const CANARY_WAIT_SETTING: &str = "rollout.canary_wait";
+pub const HEALTH_ERROR_RATE_SETTING: &str = "rollout.health_error_rate";
+pub const ALERT_CHANNEL_SETTING: &str = "rollout.alert_channel";
+pub const SHARE_PARTNERS_SETTING: &str = "rollout.share_partners";
+pub const GROUP_SETTING: &str = "rollout.group";
+pub const QUERY_SETTING: &str = "rollout.query";
+pub const ORDER_SETTING: &str = "rollout.order";
+
+pub const SETTINGS: [&str; 13] = [
     STRATEGY_SETTING,
     BATCH_INTERVAL_SETTING,
     WINDOW_SETTING,
     FAILURE_THRESHOLD_SETTING,
     DEPLOYMENT_SPACE_SETTING,
+    CANARY_COUNT_SETTING,
+    CANARY_WAIT_SETTING,
+    HEALTH_ERROR_RATE_SETTING,
+    ALERT_CHANNEL_SETTING,
+    SHARE_PARTNERS_SETTING,
+    GROUP_SETTING,
+    QUERY_SETTING,
+    ORDER_SETTING,
 ];
+
+/// The key a setting answers under in [`RolloutSettings::to_json`].
+pub fn json_key(setting: &str) -> &'static str {
+    match setting {
+        STRATEGY_SETTING => "strategy",
+        BATCH_INTERVAL_SETTING => "batchInterval",
+        WINDOW_SETTING => "window",
+        FAILURE_THRESHOLD_SETTING => "failureThreshold",
+        CANARY_COUNT_SETTING => "canaryCount",
+        CANARY_WAIT_SETTING => "canaryWait",
+        HEALTH_ERROR_RATE_SETTING => "healthErrorRate",
+        ALERT_CHANNEL_SETTING => "alertChannel",
+        SHARE_PARTNERS_SETTING => "sharePartners",
+        GROUP_SETTING => "group",
+        QUERY_SETTING => "query",
+        ORDER_SETTING => "order",
+        _ => "deploymentSpace",
+    }
+}
 
 /// `rollout.batch_interval`'s default: 5 minutes (owner, 2026-09-21).
 pub const BATCH_INTERVAL_DEFAULT: i64 = 300;
@@ -130,16 +172,35 @@ pub const BATCH_INTERVAL_DEFAULT: i64 = 300;
 pub const WINDOW_DEFAULT: i64 = 3_600;
 /// `rollout.failure_threshold`'s default: 1 tenant.
 pub const FAILURE_THRESHOLD_DEFAULT: i64 = 1;
+/// `rollout.canary_count`'s default: 1 tenant.
+pub const CANARY_COUNT_DEFAULT: i64 = 1;
+/// `rollout.canary_wait`'s default: 1 hour.
+pub const CANARY_WAIT_DEFAULT: i64 = 3_600;
+/// How many tenants a group names at most.
+pub const MAX_GROUP: usize = 1_000;
+/// How long a query or an order may be, in characters.
+pub const MAX_QUERY: usize = 2_000;
 
 // ── the words ────────────────────────────────────────────────────────────
 
-/// Which pins move when (§3.5). Increment 10 builds 2.
+/// Which pins move when (§3.5). Increment 10 built `rolling` and `all`;
+/// 10c the three with a first stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strategy {
     /// A batch every `rollout.batch_interval`.
     Rolling,
     /// Every tenant in one batch.
     All,
+    /// `rollout.canary_count` tenants at random first; the rest, rolling,
+    /// once they are healthy for `rollout.canary_wait`.
+    Canary,
+    /// A named group first (`rollout.group`); the rest, rolling, once it is
+    /// healthy for `rollout.canary_wait`.
+    Group,
+    /// The tenants a query over the tenant facts selects (`rollout.query`),
+    /// in its order (`rollout.order`), a batch at a time; the rest once
+    /// they are healthy for `rollout.canary_wait`.
+    Query,
 }
 
 impl Strategy {
@@ -147,17 +208,31 @@ impl Strategy {
         match self {
             Strategy::Rolling => "rolling",
             Strategy::All => "all",
+            Strategy::Canary => "canary",
+            Strategy::Group => "group",
+            Strategy::Query => "query",
         }
     }
 
     pub fn parse(text: &str) -> Option<Strategy> {
-        match text.trim() {
+        match text.trim().replace('_', "-").as_str() {
             "rolling" => Some(Strategy::Rolling),
             "all" => Some(Strategy::All),
+            "canary" => Some(Strategy::Canary),
+            "group" | "group-first" => Some(Strategy::Group),
+            "query" | "by-query" => Some(Strategy::Query),
             _ => None,
         }
     }
+
+    /// A first stage, then a health gate, then the rest.
+    pub fn staged(self) -> bool {
+        matches!(self, Strategy::Canary | Strategy::Group | Strategy::Query)
+    }
 }
+
+/// The words a strategy is one of.
+pub const STRATEGIES: &str = "`rolling`, `all`, `canary`, `group` or `query`";
 
 /// When the deployment's own space moves (Q4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +362,19 @@ pub struct RolloutSettings {
     pub window: i64,
     pub failure_threshold: i64,
     pub deployment_space: DeploymentSpace,
+    pub canary_count: i64,
+    /// Seconds a first stage stays healthy before the rest move.
+    pub canary_wait: i64,
+    /// In hundredths of a percent.
+    pub health_error_rate: i64,
+    /// `stream`, or `mail:<address>`.
+    pub alert_channel: String,
+    pub share_partners: bool,
+    /// The tenants `group` moves first.
+    pub group: Vec<String>,
+    /// The condition `query` selects with, and its order.
+    pub query: Option<String>,
+    pub order: Option<String>,
 }
 
 impl Default for RolloutSettings {
@@ -297,8 +385,31 @@ impl Default for RolloutSettings {
             window: WINDOW_DEFAULT,
             failure_threshold: FAILURE_THRESHOLD_DEFAULT,
             deployment_space: DeploymentSpace::First,
+            canary_count: CANARY_COUNT_DEFAULT,
+            canary_wait: CANARY_WAIT_DEFAULT,
+            health_error_rate: crate::rollout_strategies::HEALTH_ERROR_RATE_DEFAULT,
+            alert_channel: crate::rollout_strategies::ALERT_STREAM.to_string(),
+            share_partners: false,
+            group: Vec::new(),
+            query: None,
+            order: None,
         }
     }
+}
+
+/// A group as typed: tenant ids, comma or space separated.
+pub fn group_list(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        if !out.iter().any(|o| o == t) {
+            out.push(t.to_string());
+        }
+    }
+    out
 }
 
 impl RolloutSettings {
@@ -310,6 +421,14 @@ impl RolloutSettings {
             "window": self.window,
             "failureThreshold": self.failure_threshold,
             "deploymentSpace": self.deployment_space.as_str(),
+            "canaryCount": self.canary_count,
+            "canaryWait": self.canary_wait,
+            "healthErrorRate": crate::rollout_strategies::format_rate(self.health_error_rate),
+            "alertChannel": self.alert_channel,
+            "sharePartners": self.share_partners,
+            "group": self.group,
+            "query": self.query,
+            "order": self.order,
         })
     }
 
@@ -331,6 +450,30 @@ impl RolloutSettings {
                     .and_then(DeploymentSpace::parse)
                     .unwrap_or(DeploymentSpace::First)
             }
+            (CANARY_COUNT_SETTING, v) => {
+                self.canary_count = v
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(CANARY_COUNT_DEFAULT)
+            }
+            (CANARY_WAIT_SETTING, v) => {
+                self.canary_wait = v.and_then(parse_secs).unwrap_or(CANARY_WAIT_DEFAULT)
+            }
+            (HEALTH_ERROR_RATE_SETTING, v) => {
+                self.health_error_rate = v
+                    .and_then(crate::rollout_strategies::parse_rate)
+                    .unwrap_or(crate::rollout_strategies::HEALTH_ERROR_RATE_DEFAULT)
+            }
+            (ALERT_CHANNEL_SETTING, v) => {
+                self.alert_channel = v
+                    .and_then(|v| crate::rollout_strategies::check_channel(v).ok())
+                    .unwrap_or_else(|| crate::rollout_strategies::ALERT_STREAM.to_string())
+            }
+            (SHARE_PARTNERS_SETTING, v) => {
+                self.share_partners = v.and_then(on_off).unwrap_or(false)
+            }
+            (GROUP_SETTING, v) => self.group = v.map(group_list).unwrap_or_default(),
+            (QUERY_SETTING, v) => self.query = v.map(str::to_string),
+            (ORDER_SETTING, v) => self.order = v.map(str::to_string),
             _ => {}
         }
     }
@@ -338,6 +481,15 @@ impl RolloutSettings {
 
 fn parse_secs(text: &str) -> Option<i64> {
     crate::windows::parse_length(text).ok()
+}
+
+/// `on`/`off` and their usual spellings.
+pub fn on_off(text: &str) -> Option<bool> {
+    match text.trim() {
+        "on" | "true" | "yes" => Some(true),
+        "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// The full name of a rollout setting from what a person typed:
@@ -364,10 +516,10 @@ pub fn check_setting(setting: &str, value: Option<&str>) -> Result<Option<String
         STRATEGY_SETTING => Strategy::parse(v)
             .map(|s| Some(s.as_str().to_string()))
             .ok_or_else(|| {
-                bad(
-                    "it is `rolling` or `all`; canary, group first and by query come later. \
-                     `--clear` makes `ordo apply` move every tenant at once, as before rollouts",
-                )
+                bad(&format!(
+                    "it is {STRATEGIES}. `--clear` makes `ordo apply` move every tenant at \
+                     once, as before rollouts"
+                ))
             }),
         BATCH_INTERVAL_SETTING | WINDOW_SETTING => match parse_secs(v) {
             Some(n) if n >= 1 => Ok(Some(n.to_string())),
@@ -382,6 +534,46 @@ pub fn check_setting(setting: &str, value: Option<&str>) -> Result<Option<String
         DEPLOYMENT_SPACE_SETTING => DeploymentSpace::parse(v)
             .map(|d| Some(d.as_str().to_string()))
             .ok_or_else(|| bad("it is `first` or `last`")),
+        CANARY_COUNT_SETTING => match v.parse::<i64>() {
+            Ok(n) if n >= 1 => Ok(Some(n.to_string())),
+            _ => Err(bad("it is a whole number of tenants, 1 or more")),
+        },
+        CANARY_WAIT_SETTING => match parse_secs(v) {
+            Some(n) if n >= 0 => Ok(Some(n.to_string())),
+            _ => Err(bad("it is a length, like `0s`, `30m` or `1h`")),
+        },
+        HEALTH_ERROR_RATE_SETTING => crate::rollout_strategies::parse_rate(v)
+            .map(|r| Some(crate::rollout_strategies::format_rate(r)))
+            .ok_or_else(|| bad("it is a percentage from 0.01% to 100%, like `1%`")),
+        ALERT_CHANNEL_SETTING => crate::rollout_strategies::check_channel(v)
+            .map(Some)
+            .map_err(|why| bad(&why)),
+        SHARE_PARTNERS_SETTING => on_off(v)
+            .map(|b| Some(if b { "on" } else { "off" }.to_string()))
+            .ok_or_else(|| bad("it is `on` or `off`")),
+        GROUP_SETTING => {
+            let list = group_list(v);
+            if list.len() > MAX_GROUP {
+                return Err(bad(&format!("a group names {MAX_GROUP} tenants at most")));
+            }
+            Ok(Some(list.join(",")))
+        }
+        QUERY_SETTING => {
+            if v.chars().count() > MAX_QUERY {
+                return Err(bad(&format!("a query is {MAX_QUERY} characters at most")));
+            }
+            crate::rollout_strategies::Query::parse(v, None)
+                .map(|_| Some(v.to_string()))
+                .map_err(|why| bad(&why))
+        }
+        ORDER_SETTING => {
+            if v.chars().count() > MAX_QUERY {
+                return Err(bad(&format!("an order is {MAX_QUERY} characters at most")));
+            }
+            crate::rollout_strategies::Query::parse("true", Some(v))
+                .map(|_| Some(v.to_string()))
+                .map_err(|why| bad(&why))
+        }
         _ => Err(bad("there is no such rollout setting")),
     }
 }
@@ -430,11 +622,59 @@ CREATE TABLE IF NOT EXISTS \"$rollout_holds\" ( \
   \"at\" bigint NOT NULL \
 )";
 
+/// Increment 10c's columns, added to a table increment 10 made. `gate` is
+/// `''` for a strategy with no first stage, `pending` until the first stage
+/// is healthy for its wait, then `passed`. A tenant's `stage` is 0 in the
+/// first stage and 1 in the rest.
+const DDL_10C: &str = "\
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"canary_count\" bigint NOT NULL DEFAULT 0; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"canary_wait\" bigint NOT NULL DEFAULT 0; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"health_error_rate\" bigint NOT NULL \
+  DEFAULT 100; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"alert_channel\" text NOT NULL \
+  DEFAULT 'stream'; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"share_partners\" boolean NOT NULL \
+  DEFAULT false; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"selection\" text NOT NULL DEFAULT ''; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"gate\" text NOT NULL DEFAULT ''; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"first_done_at\" bigint NOT NULL DEFAULT 0; \
+ALTER TABLE \"$rollout_tenants\" ADD COLUMN IF NOT EXISTS \"stage\" bigint NOT NULL DEFAULT 1";
+
 const COLUMNS: &str =
     "\"id\", \"target\", \"from\", \"strategy\", \"batch_interval\", \"window\", \
   \"batch_size\", \"failure_threshold\", \"deployment_space\", \"state\", \"reason\", \"actor\", \
   \"started_at\", \"ended_at\", \"last_batch_at\", \"batches\", \"failed_base\", \"pin_seq\", \
-  \"leader\", \"led_at\"";
+  \"leader\", \"led_at\", \"canary_count\", \"canary_wait\", \"health_error_rate\", \
+  \"alert_channel\", \"share_partners\", \"selection\", \"gate\", \"first_done_at\"";
+
+/// Where a staged rollout's first stage stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    /// No first stage: `rolling` and `all`.
+    None,
+    /// The first stage moves, or waits to be healthy for its wait.
+    Pending,
+    /// The rest move.
+    Passed,
+}
+
+impl Gate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Gate::None => "",
+            Gate::Pending => "pending",
+            Gate::Passed => "passed",
+        }
+    }
+
+    fn parse(text: &str) -> Gate {
+        match text {
+            "pending" => Gate::Pending,
+            "passed" => Gate::Passed,
+            _ => Gate::None,
+        }
+    }
+}
 
 /// One rollout as `$rollouts` holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -466,6 +706,20 @@ pub struct Rollout {
     /// The node that ran the last tick, and when.
     pub leader: Option<String>,
     pub led_at: Option<u64>,
+    /// Increment 10c: how many tenants `canary` moves first.
+    pub canary_count: i64,
+    /// Seconds the first stage stays healthy before the rest move.
+    pub canary_wait: i64,
+    /// In hundredths of a percent.
+    pub health_error_rate: i64,
+    pub alert_channel: String,
+    pub share_partners: bool,
+    /// The group or the query (and its order) the first stage was chosen
+    /// by, as given.
+    pub selection: String,
+    pub gate: Gate,
+    /// When the first stage had nothing left to move; 0 before.
+    pub first_done_at: u64,
 }
 
 fn rollout_row(r: &[Option<String>]) -> Option<Rollout> {
@@ -492,6 +746,14 @@ fn rollout_row(r: &[Option<String>]) -> Option<Rollout> {
         pin_seq: n(17).unwrap_or(0),
         leader: s(18),
         led_at: n(19).map(|v| v as u64),
+        canary_count: n(20).unwrap_or(0),
+        canary_wait: n(21).unwrap_or(0),
+        health_error_rate: n(22).unwrap_or(crate::rollout_strategies::HEALTH_ERROR_RATE_DEFAULT),
+        alert_channel: s(23).unwrap_or_else(|| crate::rollout_strategies::ALERT_STREAM.to_string()),
+        share_partners: matches!(s(24).as_deref(), Some("t" | "true")),
+        selection: s(25).unwrap_or_default(),
+        gate: Gate::parse(s(26).as_deref().unwrap_or_default()),
+        first_done_at: n(27).unwrap_or(0) as u64,
     })
 }
 
@@ -516,6 +778,14 @@ impl Rollout {
             "batches": self.batches,
             "leader": self.leader,
             "ledAt": self.led_at,
+            "canaryCount": self.canary_count,
+            "canaryWait": self.canary_wait,
+            "healthErrorRate": crate::rollout_strategies::format_rate(self.health_error_rate),
+            "alertChannel": self.alert_channel,
+            "sharePartners": self.share_partners,
+            "selection": self.selection,
+            "gate": self.gate.as_str(),
+            "firstDoneAt": (self.first_done_at > 0).then_some(self.first_done_at),
         })
     }
 }
@@ -530,6 +800,8 @@ pub struct RolloutTenant {
     /// people.
     pub reason: String,
     pub at: u64,
+    /// 0 in a staged rollout's first stage, 1 otherwise.
+    pub stage: i64,
 }
 
 impl RolloutTenant {
@@ -539,6 +811,7 @@ impl RolloutTenant {
             "state": self.state.as_str(),
             "reason": self.reason,
             "at": self.at,
+            "firstStage": self.stage == 0,
         })
     }
 }
@@ -550,6 +823,12 @@ fn tenant_row(r: &[Option<String>]) -> Option<RolloutTenant> {
         state: TenantState::parse(r.get(2)?.as_deref()?),
         reason: r.get(3).cloned().flatten().unwrap_or_default(),
         at: r.get(4)?.clone()?.parse().ok()?,
+        stage: r
+            .get(5)
+            .cloned()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
     })
 }
 
@@ -563,6 +842,9 @@ pub struct Status {
     pub tenants: Vec<RolloutTenant>,
     /// The deployment's own space's step, when the rollout has one.
     pub deployment: Option<RolloutTenant>,
+    /// The calls and server faults every node counted for the moved
+    /// tenants while the first stage's health was judged (10c).
+    pub health: (u64, u64),
 }
 
 impl Status {
@@ -579,6 +861,16 @@ impl Status {
             .iter()
             .map(RolloutTenant::to_json)
             .collect::<Vec<_>>());
+        let (calls, faults) = self.health;
+        row["health"] = json!({
+            "calls": calls,
+            "faults": faults,
+            "healthy": !crate::rollout_strategies::unhealthy(
+                calls,
+                faults,
+                self.rollout.health_error_rate
+            ),
+        });
         row
     }
 
@@ -611,6 +903,18 @@ pub struct StartOptions {
     pub deployment_space: Option<DeploymentSpace>,
     /// Tenants per batch. Default: enough to finish within the window.
     pub batch_size: Option<i64>,
+    /// Increment 10c.
+    pub canary_count: Option<i64>,
+    pub canary_wait: Option<i64>,
+    /// In hundredths of a percent.
+    pub health_error_rate: Option<i64>,
+    pub alert_channel: Option<String>,
+    pub share_partners: Option<bool>,
+    /// The tenants `group` moves first.
+    pub group: Option<Vec<String>>,
+    /// The condition `query` selects with, and its order.
+    pub query: Option<String>,
+    pub order: Option<String>,
 }
 
 /// What a retry did.
@@ -829,6 +1133,11 @@ impl<'a> Rollouts<'a> {
         if self.pool.rows(DDL).await.is_err() {
             self.pool.rows(DDL).await?;
         }
+        for ddl in [DDL_10C, crate::rollout_strategies::health_ddl()] {
+            if self.pool.rows(ddl).await.is_err() {
+                self.pool.rows(ddl).await?;
+            }
+        }
         Ok(())
     }
 
@@ -949,7 +1258,7 @@ impl<'a> Rollouts<'a> {
         let rows = match self
             .pool
             .rows(&format!(
-                "SELECT \"space\", \"ord\", \"state\", \"reason\", \"at\" FROM \"$rollout_tenants\" \
+                "SELECT \"space\", \"ord\", \"state\", \"reason\", \"at\", \"stage\" FROM \"$rollout_tenants\" \
                  WHERE \"rollout\" = {id} ORDER BY \"ord\", \"space\""
             ))
             .await
@@ -970,7 +1279,7 @@ impl<'a> Rollouts<'a> {
         let rows = self
             .pool
             .rows(&format!(
-                "SELECT \"space\", \"ord\", \"state\", \"reason\", \"at\" FROM \"$rollout_tenants\" \
+                "SELECT \"space\", \"ord\", \"state\", \"reason\", \"at\", \"stage\" FROM \"$rollout_tenants\" \
                  WHERE \"rollout\" = {id} AND \"space\" = {}",
                 sql_lit(space)
             ))
@@ -1022,11 +1331,13 @@ impl<'a> Rollouts<'a> {
             )
         });
         tenants.truncate(MAX_LISTED);
+        let health = crate::rollout_strategies::health_of(self.pool, rollout.id).await?;
         Ok(Some(Status {
             rollout,
             counts,
             tenants,
             deployment,
+            health,
         }))
     }
 
@@ -1163,14 +1474,118 @@ impl<'a> Rollouts<'a> {
         let deployment_space = opts.deployment_space.unwrap_or(settings.deployment_space);
         let batch_size = match (strategy, opts.batch_size) {
             (Strategy::All, _) => i64::MAX / 4,
-            (Strategy::Rolling, Some(n)) => n,
-            (Strategy::Rolling, None) => {
+            (_, Some(n)) => n,
+            (_, None) => {
                 // Enough per batch to finish within the window: a target,
                 // never a deadline (§1.5).
                 let batches = (window / batch_interval.max(1)).max(1);
                 let total = off_target.max(1) as i64;
                 ((total + batches - 1) / batches).max(1)
             }
+        };
+
+        // Increment 10c: the first stage, its health and the channel.
+        let bad = |setting: &str, value: &str, why: &str| RolloutRefusal::Setting {
+            setting: setting.to_string(),
+            value: value.chars().take(40).collect(),
+            why: why.to_string(),
+        };
+        let canary_count = opts.canary_count.unwrap_or(settings.canary_count);
+        if canary_count < 1 {
+            return Err(bad(
+                CANARY_COUNT_SETTING,
+                &canary_count.to_string(),
+                "it is 1 or more",
+            ));
+        }
+        let canary_wait = opts.canary_wait.unwrap_or(settings.canary_wait);
+        if canary_wait < 0 {
+            return Err(bad(
+                CANARY_WAIT_SETTING,
+                &canary_wait.to_string(),
+                "it is 0 seconds or more",
+            ));
+        }
+        let health_error_rate = opts.health_error_rate.unwrap_or(settings.health_error_rate);
+        if !(1..=10_000).contains(&health_error_rate) {
+            return Err(bad(
+                HEALTH_ERROR_RATE_SETTING,
+                &health_error_rate.to_string(),
+                "it is a percentage from 0.01% to 100%",
+            ));
+        }
+        let alert_channel = match &opts.alert_channel {
+            Some(c) => crate::rollout_strategies::check_channel(c)
+                .map_err(|why| bad(ALERT_CHANNEL_SETTING, c, &why))?,
+            None => settings.alert_channel.clone(),
+        };
+        let share_partners = opts.share_partners.unwrap_or(settings.share_partners);
+        // The first stage, in its order, before the rows are written.
+        let (first, selection): (Option<Vec<String>>, String) = match strategy {
+            Strategy::Group => {
+                let group = opts.group.clone().unwrap_or(settings.group.clone());
+                if group.is_empty() {
+                    return Err(bad(
+                        GROUP_SETTING,
+                        "",
+                        "the group strategy names the tenants that move first: `--group a,b` \
+                         or `ordo rollout set rollout.group a,b --reason \"...\"`",
+                    ));
+                }
+                if group.len() > MAX_GROUP {
+                    return Err(bad(
+                        GROUP_SETTING,
+                        &group.len().to_string(),
+                        &format!("a group names {MAX_GROUP} tenants at most"),
+                    ));
+                }
+                let known = crate::rollout_strategies::facts(self.pool, false, at).await?;
+                if let Some(t) = group
+                    .iter()
+                    .find(|t| !known.iter().any(|f| &f.tenant == *t))
+                {
+                    return Err(RolloutRefusal::Tenant {
+                        tenant: t.clone(),
+                        why: "the group names it, and it is not a tenant this deployment \
+                              serves. `std.deployment.tenants` lists them"
+                            .into(),
+                    });
+                }
+                let text = format!("group: {}", group.join(","));
+                (Some(group), text)
+            }
+            Strategy::Query => {
+                let q = opts.query.clone().or(settings.query.clone());
+                let order = opts.order.clone().or(settings.order.clone());
+                let Some(q) = q.filter(|q| !q.trim().is_empty()) else {
+                    return Err(bad(
+                        QUERY_SETTING,
+                        "",
+                        "the query strategy selects with a condition over the tenant facts: \
+                         `--query \"members < 5\"` or `ordo rollout set rollout.query ...`",
+                    ));
+                };
+                if q.chars().count() > MAX_QUERY
+                    || order.as_deref().unwrap_or_default().chars().count() > MAX_QUERY
+                {
+                    return Err(bad(
+                        QUERY_SETTING,
+                        &q,
+                        &format!("a query and its order are {MAX_QUERY} characters at most"),
+                    ));
+                }
+                let parsed = crate::rollout_strategies::Query::parse(&q, order.as_deref())
+                    .map_err(|why| bad(QUERY_SETTING, &q, &why))?;
+                let facts =
+                    crate::rollout_strategies::facts(self.pool, parsed.uses_members(), at).await?;
+                let text = match &order {
+                    Some(o) => format!("query: {q}; order: {o}"),
+                    None => format!("query: {q}"),
+                };
+                (Some(parsed.select(facts)), text)
+            }
+            Strategy::Canary => (None, format!("canary: {canary_count}")),
+            _ => (None, String::new()),
         };
 
         let tx = self.pool.begin().await?;
@@ -1190,14 +1605,25 @@ impl<'a> Rollouts<'a> {
             .rows(&format!(
                 "INSERT INTO \"$rollouts\" (\"target\", \"from\", \"strategy\", \"batch_interval\", \
                    \"window\", \"batch_size\", \"failure_threshold\", \"deployment_space\", \
-                   \"state\", \"actor\", \"started_at\", \"pin_seq\") \
+                   \"state\", \"actor\", \"started_at\", \"pin_seq\", \"canary_count\", \
+                   \"canary_wait\", \"health_error_rate\", \"alert_channel\", \"share_partners\", \
+                   \"selection\", \"gate\") \
                  VALUES ({}, {}, {}, {batch_interval}, {window}, {batch_size}, \
-                   {failure_threshold}, {}, 'running', {}, {at}, {head}) RETURNING \"id\"",
+                   {failure_threshold}, {}, 'running', {}, {at}, {head}, {canary_count}, \
+                   {canary_wait}, {health_error_rate}, {}, {share_partners}, {}, {}) \
+                 RETURNING \"id\"",
                 sql_lit(&target),
                 active.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
                 sql_lit(strategy.as_str()),
                 sql_lit(deployment_space.as_str()),
                 sql_lit(actor),
+                sql_lit(&alert_channel),
+                sql_lit(&selection),
+                sql_lit(if strategy.staged() {
+                    Gate::Pending.as_str()
+                } else {
+                    Gate::None.as_str()
+                }),
             ))
             .await?
             .first()
@@ -1221,6 +1647,46 @@ impl<'a> Rollouts<'a> {
             sql_lit(&target)
         ))
         .await?;
+        // The first stage: a random few for a canary; the group or the
+        // query's tenants, in their order, ahead of every other tenant.
+        if strategy == Strategy::Canary {
+            tx.rows(&format!(
+                "UPDATE \"$rollout_tenants\" SET \"stage\" = 0 \
+                 WHERE \"rollout\" = {id} AND \"space\" IN ( \
+                   SELECT \"space\" FROM \"$rollout_tenants\" \
+                   WHERE \"rollout\" = {id} AND \"space\" <> {step} \
+                   ORDER BY random() LIMIT {canary_count})",
+                step = sql_lit(DEPLOYMENT_STEP)
+            ))
+            .await?;
+        }
+        for (i, t) in first.iter().flatten().enumerate() {
+            tx.rows(&format!(
+                "UPDATE \"$rollout_tenants\" SET \"stage\" = 0, \"ord\" = {} \
+                 WHERE \"rollout\" = {id} AND \"space\" = {}",
+                i + 1,
+                sql_lit(t)
+            ))
+            .await?;
+        }
+        if strategy.staged() {
+            // A first stage with nothing in it has nothing to wait on.
+            let none = tx
+                .rows(&format!(
+                    "SELECT count(*) FROM \"$rollout_tenants\" WHERE \"rollout\" = {id} \
+                     AND \"stage\" = 0"
+                ))
+                .await?
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .is_some_and(|n| n == "0");
+            if none {
+                tx.rows(&format!(
+                    "UPDATE \"$rollouts\" SET \"gate\" = 'passed' WHERE \"id\" = {id}"
+                ))
+                .await?;
+            }
+        }
         tx.commit().await?;
         self.get(id).await?.ok_or(RolloutRefusal::NoSuch { id })
     }
@@ -1298,12 +1764,19 @@ impl<'a> Rollouts<'a> {
             });
         }
         let failed = self.count(r.id, TenantState::Failed).await?;
+        // A resume after an unhealthy first stage is the deployment owner
+        // moving the rest anyway: the gate is passed.
+        let gate = if r.gate == Gate::Pending && r.reason.starts_with(UNHEALTHY) {
+            ", \"gate\" = 'passed', \"last_batch_at\" = 0"
+        } else {
+            ""
+        };
         self.set_state(
             r.id,
             RolloutState::Running,
             "",
             at,
-            &format!(", \"failed_base\" = {failed}"),
+            &format!(", \"failed_base\" = {failed}{gate}"),
         )
         .await?;
         self.get(r.id)
@@ -1565,6 +2038,12 @@ pub struct Ticked {
     /// The threshold paused it in this tick.
     pub paused: bool,
     pub finished: bool,
+    /// The first stage's health paused it in this tick (10c).
+    pub unhealthy: bool,
+    /// The first stage was healthy for its wait: the rest move (10c).
+    pub gate_passed: bool,
+    /// What the alert channel could not do, when it failed.
+    pub alert_failed: Option<String>,
 }
 
 impl Ticked {
@@ -1593,10 +2072,22 @@ impl Ticked {
         for (t, why) in &self.skipped {
             out.push(format!("rollout {id}: tenant {t} skipped: {why}"));
         }
-        if self.paused {
+        if self.paused && self.unhealthy {
+            out.push(format!(
+                "rollout {id}: paused by {HEALTH_ERROR_RATE_SETTING}; `ordo rollout status`"
+            ));
+        } else if self.paused {
             out.push(format!(
                 "rollout {id}: paused by {FAILURE_THRESHOLD_SETTING}; `ordo rollout status`"
             ));
+        }
+        if self.gate_passed {
+            out.push(format!(
+                "rollout {id}: the first stage is healthy; the rest move"
+            ));
+        }
+        if let Some(why) = &self.alert_failed {
+            out.push(format!("rollout {id}: the alert was not sent: {why}"));
         }
         if self.finished {
             out.push(format!("rollout {id}: finished"));
@@ -1742,6 +2233,90 @@ async fn lead(
         out.deployment_moved = rollouts.deployment_step(&r, &ops.home, ACTOR, now).await?;
     }
 
+    // **The first stage's gate** (10c). While it is pending only the first
+    // stage moves. Its health is judged on every turn; it passes once the
+    // first stage has nothing left to move and has been healthy for
+    // `rollout.canary_wait`.
+    let mut r = r;
+    if r.gate == Gate::Pending {
+        let (calls, faults) = crate::rollout_strategies::health_of(pool, r.id).await?;
+        if crate::rollout_strategies::unhealthy(calls, faults, r.health_error_rate) {
+            let why = format!(
+                "{UNHEALTHY}: {faults} of {calls} calls to the tenants that moved failed on the \
+                 server, at or over {HEALTH_ERROR_RATE_SETTING} {}. The rest stay on {}. \
+                 `ordo rollout resume` moves them anyway; `ordo rollout abort` stops here, \
+                 and `ordo rollback` moves the moved tenants back",
+                crate::rollout_strategies::format_rate(r.health_error_rate),
+                r.from.as_deref().unwrap_or("their version"),
+            );
+            rollouts
+                .set_state(r.id, RolloutState::Paused, &why, now, "")
+                .await?;
+            ops.record(
+                ACTOR,
+                STATUS,
+                "rollout-paused",
+                format!(
+                    "rollout={} target={} unhealthy calls={calls} faults={faults}",
+                    r.id, r.target
+                ),
+            );
+            alert(
+                ops,
+                &r,
+                &format!("Rollout {} to {} paused: unhealthy", r.id, r.target),
+                &why,
+                now,
+                out,
+            )
+            .await;
+            out.paused = true;
+            out.unhealthy = true;
+            return Ok(());
+        }
+        let first_left: i64 = pool
+            .rows(&format!(
+                "SELECT count(*) FROM \"$rollout_tenants\" WHERE \"rollout\" = {} \
+                 AND \"stage\" = 0 AND \"state\" IN ('queued', 'waiting', 'moving')",
+                r.id
+            ))
+            .await?
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if first_left == 0 {
+            if r.first_done_at == 0 {
+                pool.rows(&format!(
+                    "UPDATE \"$rollouts\" SET \"first_done_at\" = {now} WHERE \"id\" = {}",
+                    r.id
+                ))
+                .await?;
+                r.first_done_at = now;
+            }
+            if now >= r.first_done_at.saturating_add(r.canary_wait.max(0) as u64) {
+                pool.rows(&format!(
+                    "UPDATE \"$rollouts\" SET \"gate\" = 'passed', \"last_batch_at\" = 0 \
+                     WHERE \"id\" = {}",
+                    r.id
+                ))
+                .await?;
+                ops.record(
+                    ACTOR,
+                    STATUS,
+                    "rollout-first-stage-healthy",
+                    format!(
+                        "rollout={} target={} calls={calls} faults={faults}",
+                        r.id, r.target
+                    ),
+                );
+                r.gate = Gate::Passed;
+                r.last_batch_at = 0;
+                out.gate_passed = true;
+            }
+        }
+    }
+
     let due = r.batches == 0
         || r.strategy == Strategy::All
         || now
@@ -1776,6 +2351,15 @@ async fn lead(
                 names.join(",")
             ),
         );
+        alert(
+            ops,
+            &r,
+            &format!("Rollout {} to {} paused: tenants failed", r.id, r.target),
+            &why,
+            now,
+            out,
+        )
+        .await;
         out.paused = true;
         return Ok(());
     }
@@ -1794,7 +2378,9 @@ async fn lead(
         .and_then(|r| r.first().cloned().flatten())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    if left == 0 {
+    // A first stage still judged keeps the rollout open, even with nothing
+    // else to move: "active" flips only once it is healthy.
+    if left == 0 && r.gate != Gate::Pending {
         if r.deployment_space == DeploymentSpace::Last {
             out.deployment_moved |= rollouts.deployment_step(&r, &ops.home, ACTOR, now).await?;
         }
@@ -1813,9 +2399,34 @@ async fn lead(
             "rollout-finished",
             format!("rollout={} target={} {why}", r.id, r.target),
         );
+        alert(
+            ops,
+            &r,
+            &format!("Rollout {} to {} finished", r.id, r.target),
+            &why,
+            now,
+            out,
+        )
+        .await;
         out.finished = true;
     }
     Ok(())
+}
+
+/// Tell the deployment owner on the rollout's channel beyond the stream
+/// entry its caller wrote (§3.5 "told").
+async fn alert(ops: &ApplyOps, r: &Rollout, subject: &str, body: &str, now: u64, out: &mut Ticked) {
+    if let Err(why) =
+        crate::rollout_strategies::tell(&ops.pool, &r.alert_channel, subject, body, now).await
+    {
+        ops.record(
+            ACTOR,
+            STATUS,
+            "rollout-alert-failed",
+            format!("rollout={} channel={} why={why}", r.id, r.alert_channel),
+        );
+        out.alert_failed = Some(why);
+    }
 }
 
 /// Move the next batch of rollout `r`.
@@ -1827,17 +2438,25 @@ async fn batch(
 ) -> Result<(), RolloutRefusal> {
     let pool = &ops.pool;
     let rollouts = Rollouts::on(pool);
+    let pending: Vec<RolloutTenant> = rollouts
+        .tenants(r.id)
+        .await?
+        .into_iter()
+        .filter(|t| t.space != DEPLOYMENT_STEP && t.state.is_pending())
+        .collect();
+    // While the first stage's gate is pending, only the first stage moves.
+    let first_only = r.gate == Gate::Pending;
     let candidates: Vec<RolloutTenant> = {
-        let mut c: Vec<RolloutTenant> = rollouts
-            .tenants(r.id)
-            .await?
-            .into_iter()
-            .filter(|t| t.space != DEPLOYMENT_STEP && t.state.is_pending())
+        let mut c: Vec<RolloutTenant> = pending
+            .iter()
+            .filter(|t| !first_only || t.stage == 0)
+            .cloned()
             .collect();
-        // A move a dead leader left half done first, then the waiting,
-        // then the queue in order.
+        // The first stage first; then a move a dead leader left half done,
+        // then the waiting, then the queue in order.
         c.sort_by_key(|t| {
             (
+                t.stage,
                 match t.state {
                     TenantState::Moving => 0,
                     TenantState::Waiting => 1,
@@ -1851,6 +2470,24 @@ async fn batch(
     if candidates.is_empty() {
         return Ok(());
     }
+    // A canary or a group moves its first stage in one batch; a query's
+    // moves a batch at a time, in its order.
+    let batch_size = if first_only && matches!(r.strategy, Strategy::Canary | Strategy::Group) {
+        i64::MAX / 4
+    } else {
+        r.batch_size
+    };
+    // Share partners move together (§1.7, §3.5): a tenant's partners still
+    // to move join its batch, whatever their stage.
+    let partners = if r.share_partners {
+        crate::rollout_strategies::partners(pool, now).await?
+    } else {
+        BTreeMap::new()
+    };
+    let by_space: BTreeMap<String, RolloutTenant> = pending
+        .iter()
+        .map(|t| (t.space.clone(), t.clone()))
+        .collect();
     let holds: BTreeMap<String, Hold> = rollouts
         .holds()
         .await?
@@ -1878,8 +2515,14 @@ async fn batch(
     let mut program: Option<Program> = None;
     let mut apply_lock: Option<Option<crate::apply_op::ApplyLock>> = None;
     let mut tried = 0i64;
-    for t in candidates {
-        if tried >= r.batch_size {
+    let mut work: std::collections::VecDeque<(RolloutTenant, bool)> =
+        candidates.into_iter().map(|t| (t, false)).collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    while let Some((t, partner)) = work.pop_front() {
+        if !seen.insert(t.space.clone()) {
+            continue;
+        }
+        if !partner && tried >= batch_size {
             break;
         }
         if let Some(h) = holds.get(&t.space) {
@@ -1954,6 +2597,13 @@ async fn batch(
         } else {
             pin(pool, r, &t.space, now).await?
         };
+        if matches!(outcome, Outcome::Moved) {
+            for p in partners.get(&t.space).into_iter().flatten().rev() {
+                if let Some(row) = by_space.get(p).filter(|_| !seen.contains(p)) {
+                    work.push_front((row.clone(), true));
+                }
+            }
+        }
         match outcome {
             Outcome::Moved => {
                 rollouts
@@ -2140,6 +2790,15 @@ pub fn specs() -> Vec<OpSpec> {
         "counts",
         "deploymentStep",
         "tenants",
+        "canaryCount",
+        "canaryWait",
+        "healthErrorRate",
+        "alertChannel",
+        "sharePartners",
+        "selection",
+        "gate",
+        "firstDoneAt",
+        "health",
     ];
     vec![
         spec(
@@ -2153,6 +2812,14 @@ pub fn specs() -> Vec<OpSpec> {
                 int("failureThreshold"),
                 text("deploymentSpace", 16, false),
                 int("batchSize"),
+                int("canaryCount"),
+                text("canaryWait", 32, false),
+                text("healthErrorRate", 16, false),
+                text("alertChannel", 320, false),
+                flag("sharePartners"),
+                text("group", 65_536, false),
+                text("query", MAX_QUERY as u32, false),
+                text("order", MAX_QUERY as u32, false),
             ],
             rollout_fields,
         ),
@@ -2253,7 +2920,7 @@ pub async fn execute(
                     RolloutRefusal::Setting {
                         setting: STRATEGY_SETTING.into(),
                         value: s.chars().take(40).collect(),
-                        why: "it is `rolling` or `all`".into(),
+                        why: format!("it is {STRATEGIES}"),
                     }
                     .to_exec_error(WHAT)
                 })?),
@@ -2276,6 +2943,34 @@ pub async fn execute(
                 failure_threshold: int("failureThreshold"),
                 deployment_space,
                 batch_size: int("batchSize"),
+                canary_count: int("canaryCount"),
+                canary_wait: match text("canaryWait") {
+                    None => None,
+                    Some(v) => Some(parse_secs(v).filter(|n| *n >= 0).ok_or_else(|| {
+                        RolloutRefusal::Setting {
+                            setting: CANARY_WAIT_SETTING.into(),
+                            value: v.chars().take(40).collect(),
+                            why: "it is a length, like `0s`, `30m` or `1h`".into(),
+                        }
+                        .to_exec_error(WHAT)
+                    })?),
+                },
+                health_error_rate: match text("healthErrorRate") {
+                    None => None,
+                    Some(v) => Some(crate::rollout_strategies::parse_rate(v).ok_or_else(|| {
+                        RolloutRefusal::Setting {
+                            setting: HEALTH_ERROR_RATE_SETTING.into(),
+                            value: v.chars().take(40).collect(),
+                            why: "it is a percentage from 0.01% to 100%, like `1%`".into(),
+                        }
+                        .to_exec_error(WHAT)
+                    })?),
+                },
+                alert_channel: text("alertChannel").map(str::to_string),
+                share_partners: bound.0.get("sharePartners").and_then(|v| v.as_bool()),
+                group: text("group").map(group_list),
+                query: text("query").map(str::to_string),
+                order: text("order").map(str::to_string),
             };
             let r = rollouts
                 .start(text("version").unwrap_or_default(), &opts, caller, now)
@@ -2451,12 +3146,13 @@ mod tests {
             setting_name("deployment_space"),
             Some(DEPLOYMENT_SPACE_SETTING)
         );
-        assert_eq!(setting_name("canary_count"), None);
+        assert_eq!(setting_name("canary-count"), Some(CANARY_COUNT_SETTING));
+        assert_eq!(setting_name("seats"), None);
         assert_eq!(
             check_setting(BATCH_INTERVAL_SETTING, Some("5m")).unwrap(),
             Some("300".into())
         );
-        let e = check_setting(STRATEGY_SETTING, Some("canary")).unwrap_err();
+        let e = check_setting(STRATEGY_SETTING, Some("blue-green")).unwrap_err();
         assert!(
             e.to_string().contains("ordo rollout set rollout.strategy"),
             "{e}"

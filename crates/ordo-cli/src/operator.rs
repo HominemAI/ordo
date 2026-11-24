@@ -144,7 +144,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
         "evolve" => &["--run", "--list", "--orphans"],
-        "rollout" => &["--clear"],
+        "rollout" => &["--clear", "--share-partners"],
         "release-check" => &["--json", "--override"],
         _ => &[],
     }

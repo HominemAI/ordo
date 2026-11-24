@@ -6682,11 +6682,21 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
             Some(rt.access.recorder.clone()),
         );
         let node = rt.node_status.node();
+        let metrics = rt.metrics.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(rollout_every);
             every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 every.tick().await;
+                // Every node adds what it counted for the moved tenants,
+                // so the leader judges a first stage's health over the
+                // whole deployment (increment 10c).
+                let totals = metrics.observed_cost().per_space_totals();
+                if let Err(e) =
+                    crate::rollout_strategies::report(&ops.pool, &node, &totals, now_secs()).await
+                {
+                    eprintln!("rollout: this node's health counts were not added ({e})");
+                }
                 match crate::rollouts::tick(&ops, &node, now_secs()).await {
                     Ok(t) => {
                         for line in t.log_lines() {

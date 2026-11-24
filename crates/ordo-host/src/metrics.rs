@@ -1220,6 +1220,7 @@ impl ordo_api::OpExecutor for MeteredExecutor {
                     micros: u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
                     rows: rows.unwrap_or(0) as u64,
                     ok: out.is_ok(),
+                    fault: matches!(&out, Err(e) if e.code.status().is_server_error()),
                     registered: op.cost.class.as_str(),
                     effective: effective.as_str(),
                 },

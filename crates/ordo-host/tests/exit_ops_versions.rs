@@ -40,12 +40,14 @@ const ADA: &str = "p_ada";
 const NOW: u64 = 1_700_000_000;
 
 const PROGRAM: &str = "domain notes @ 0.1.0\n\n\
-    entity notes {\n  title: text\n}\n\n\
+    entity notes {\n  title: text\n  legacy: text = \"\"\n}\n\n\
     op allNotes unbounded =\n  notes[title]\n";
 
 fn v2() -> String {
+    // 0.2.0 adds `starred` and stops declaring `legacy`, which stays as an
+    // orphaned column until it is pruned.
     PROGRAM.replace("@ 0.1.0", "@ 0.2.0").replace(
-        "  title: text\n",
+        "  title: text\n  legacy: text = \"\"\n",
         "  title: text\n  starred: bool = false\n",
     )
 }
@@ -350,4 +352,27 @@ async fn an_import_across_versions_is_refused_by_name_and_moves_nothing() {
         assert_eq!(h.pin(space).await, "0.2.0", "a refused import moves no pin");
     }
     assert!(h.titles(&empty).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_into_a_database_not_of_the_bundles_shape_is_refused_by_name() {
+    let h = harness("ordo_exit_versions_4").await;
+    let old = h.tenant("old", "0.1.0").await;
+    h.notes(&old, &["one"]).await;
+    let (bundle, _) = h.export(&old).await;
+    let new = h.tenant("new", "0.2.0").await;
+    // `legacy`, orphaned by 0.2.0, is pruned: the database no longer holds
+    // a column 0.1.0 writes.
+    h.pool
+        .rows("ALTER TABLE \"notes\" DROP COLUMN \"legacy\"")
+        .await
+        .unwrap();
+    h.stage(&bundle, &new, "unfit", "mem_old", "mem_new");
+    let e = h.import(&new, "unfit", "mem_new").await.unwrap_err();
+    assert!(e.contains("version_unfit"), "{e}");
+    assert!(e.contains("legacy"), "names what is missing: {e}");
+    assert!(e.contains("ordo restore --record --tenant"), "{e}");
+    assert!(e.contains("Nothing was written"), "{e}");
+    assert_eq!(h.pin(&new).await, "0.2.0", "no pin moved");
+    assert!(h.titles(&new).await.is_empty());
 }

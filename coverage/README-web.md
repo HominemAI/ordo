@@ -99,3 +99,28 @@ coverage number. Existing product refusals and failures remain unchanged.
 5. Check branch instrumentation support on the pinned toolchain, then connect
    the outcome ledger and report missing outcomes independently of line hits.
 6. Establish the reproducible baseline before W1 or W3 is credited with a gain.
+
+## Outcome ledger
+
+`web-outcomes.md` tracks the newly identified journey families independently
+of line coverage. A linked spec means implemented, not passed. CI's Playwright
+JSON and `stateful-outcomes` attachment contain observed outcomes; the source
+ledger never promotes a pending journey merely because a test exists.
+
+The first stateful journey runs 8 races across 2 real host replicas, retains
+one unaffected campaign, retries stale revisions, uploads and reads file bytes,
+then deletes the parent and checks cascade and access on both replicas. Replay
+its data/action selection with `ORDO_JOURNEY_SEED=<uint32>` and run:
+
+```sh
+cd examples/marketing-site/e2e
+npx playwright test tests/api/stateful-workspace.spec.ts --project=api
+```
+
+This starts the real stack and requires built binaries and Postgres. In this
+shared development session, run it in CI rather than building Rust alongside
+Claude. The seed reproduces action selection, not network completion order.
+The artifact records that order through response statuses, plus revisions and
+candidate values. It contains no credentials. Missing outcomes are unexecuted,
+not successes. Passing observations before a later failure do not pass the
+whole journey. This bounded sequence is not the large-data or capacity profile.

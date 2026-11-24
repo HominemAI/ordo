@@ -216,8 +216,8 @@ jobs:
           path: coverage-out/lcov-marketing-${{ inputs.public_only && 'public' || 'site' }}.info
           if-no-files-found: error
 
-      - name: Upload the traces and stack logs
-        if: ${{ env.REACHED == 'true' && (failure()) }}
+      - name: Upload journey outcomes, traces and stack logs
+        if: ${{ always() && env.REACHED == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: marketing-site-e2e-report-${{ inputs.public_only && 'public' || 'all' }}
@@ -226,6 +226,7 @@ jobs:
           include-hidden-files: true
           path: |
             examples/marketing-site/e2e/test-results/
+            examples/marketing-site/e2e/report/
             examples/marketing-site/e2e/.stack/*.log
 
   changes-teamspace:

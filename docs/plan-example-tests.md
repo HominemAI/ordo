@@ -1383,7 +1383,7 @@ after W0 rather than retaining the first draft's sizes as a complete total.
 5. W6 remaining outcomes, prioritized by impact and uncovered lines.
 
 Reuse the earlier S/U/X/V increments rather than implementing their tests twice.
-Each slice gets its own PR. Before page work, load the required modern web
+All slices stay in PR #59 (owner, 2026-11-24). Before page work, load the required modern web
 skill. Keep work in an isolated checkout, preserve Claude's active files and
 follow this plan's board/roadmap handoff. No local full Rust builds alongside
 another agent's builds. Sizes above are provisional; W0 resolves the unknowns.

@@ -1883,7 +1883,7 @@ pub async fn run_step_with(
         x,
         y,
         receipt,
-    }) = expand_step(registry, target, label, plan, actor).await?
+    }) = Box::pin(expand_step(registry, target, label, plan, actor)).await?
     else {
         return Ok(StepRun::Current);
     };
@@ -1936,7 +1936,7 @@ pub async fn run_step_with(
         };
         let bf_err =
             |e: crate::backfill::BackfillRefusal| run_err(e.class(), e.to_string(), e.transient());
-        let progress = worker.run().await.map_err(bf_err)?;
+        let progress = Box::pin(worker.run()).await.map_err(bf_err)?;
         let mut report = json!({
             "entity": bf.entity, "field": bf.field, "mapping": bf.mapping.text(),
             "audit": bf.audit.as_str(), "progress": progress.to_json(),
@@ -1954,9 +1954,9 @@ pub async fn run_step_with(
         // verify checks the mapping on every row. A fill has no overlay
         // outside a move, and verify checks the chunks too.
         let verified = if bf.code == "B4" {
-            worker.verify_live_and_close().await
+            Box::pin(worker.verify_live_and_close()).await
         } else {
-            worker.verify_and_close().await
+            Box::pin(worker.verify_and_close()).await
         }
         .map_err(bf_err)?;
         report["verified"] = json!({

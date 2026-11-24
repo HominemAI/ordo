@@ -154,6 +154,7 @@ pub mod sinks;
 pub mod spaces;
 pub mod step_door;
 pub mod supervisor;
+pub mod tenant_builds;
 pub mod tenant_forward;
 pub mod tenant_identities;
 pub mod tenant_ops;

@@ -413,6 +413,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "environments" => rt.block_on(environments_cmd(flags)),
         "clones" => rt.block_on(clones_cmd(flags)),
         "rehearsals" => rt.block_on(rehearsals_cmd(flags)),
+        "tenant-builds" => rt.block_on(crate::tenant_builds::run(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
         "rollout" => rt.block_on(crate::rollout::run(flags)),

@@ -1595,14 +1595,15 @@ round is about 35 minutes for the full suite.
   `clients/ordo-react`: `DescriptorClient` reads `x-ordo-tenant-version`
   off every answer, `onVersionChange(from, to)` fires when it moves (the
   first answer is the baseline), and every read hook refetches, with or
-  without a live feed (`test/live.test.ts`, "the version header"). Merged
-  2026-11-24 with PR 49: the header constant lives once, in
-  `clients/ordo-sdk/src/core/version.ts`. `VersionWatch` is
-  `OrdoClient.versions` and ordo-react's reader. The SDK client also keeps
-  `TenantVersions` (per tenant, shared by `withSpace`), which drives the
-  sync manager: it drops and refills the device copy on a change, as on
-  the `version_changed` frame (Q7; `manager.test.ts`, `versions.test.ts`).
-  Left: fold the two into one. No example step, the §4 table names none.
+  without a live feed (`test/live.test.ts`, "the version header"). One
+  reader since 2026-11-24 (AGENTS rule 9): `TenantVersions` in
+  `clients/ordo-sdk/src/core/versions.ts` holds the header name and the
+  last version per tenant, shared by `withSpace`. `OrdoClient`, the sync
+  manager and ordo-react's `DescriptorClient` all use it; `VersionWatch`
+  and `OrdoClient.versions` are gone. The manager subscribes once and drops
+  the device copy once per change, as on the `version_changed` frame (Q7;
+  `manager.test.ts`, "clears the device copy exactly once"). No example
+  step, the §4 table names none.
 - Session 3 built stream close on a pin switch (9acbc2cf). A feed
   (`?live=1`, a sync, a read on `/live`) records the version its tenant
   was served when it opened. When a pin moves or the active version

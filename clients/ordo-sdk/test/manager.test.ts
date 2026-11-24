@@ -1603,6 +1603,35 @@ describe('a version change an answer names (plan-versions.md §1.9)', () => {
     await manager.stop();
   });
 
+  it('one version change named by every feed clears the device copy exactly once', async () => {
+    const door = new LiveDoor();
+    door.version = '0.1.0';
+    const r = await replica();
+    const clear = vi.spyOn(r, 'clear');
+    const heard: Change[] = [];
+    const manager = managed(door, r, heard);
+    (await door.nth(0)).push(load([task(1)], 5));
+    (await door.nth(1)).push(load([task(3)], 5));
+    await when(manager, (v) => v.complete);
+    expect(clear).not.toHaveBeenCalled();
+
+    // Both feeds end and both reconnects are answered under 0.2.0: one
+    // reader of the header, one subscription, one drop.
+    door.version = '0.2.0';
+    (await door.nth(0)).close();
+    (await door.nth(1)).close();
+    await door.nth(4);
+    await settle();
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(heard).toEqual([{ from: '0.1.0', to: '0.2.0' }]);
+
+    for (const f of door.feeds.filter((f) => !f.ended)) f.push(load([task(1, 'v2')], 9));
+    await when(manager, (v) => v.complete && v.position === 9);
+    await settle();
+    expect(clear).toHaveBeenCalledTimes(1);
+    await manager.stop();
+  });
+
   it('a frame and the answers after it are one move, dropped once', async () => {
     const door = new LiveDoor();
     door.version = '0.1.0';

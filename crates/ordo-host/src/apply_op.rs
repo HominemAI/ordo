@@ -345,7 +345,7 @@ pub enum SchemaOutcome {
     Matches { pending: usize },
     /// The database was behind by safe additive changes only, and the apply
     /// made them itself (`ORDO_APPLY_SAFE_CHANGES`, on by default), the way
-    /// `ordo migrate --apply` does, with the same `$migrations` record.
+    /// `ordo evolve --run` does, with the same `$migrations` record.
     Migrated {
         changes: Vec<(String, String)>,
         migration: i64,

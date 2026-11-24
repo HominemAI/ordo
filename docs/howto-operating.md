@@ -112,13 +112,13 @@ If any check fails, the output names which ops failed and why. The node keeps se
 
 - `schema     created` on an empty database (none of the program's tables, nothing serving): the whole schema is created in one transaction, recorded in `$migrations`, and the apply goes on to store and activate. This is the first deployment.
 - `schema     matches`: the database holds everything the program declares. Store and activate.
-- `schema     behind`: the database lacks something the program declares, so no node could load it. The artifact is stored and activation is **refused**; the output names the changes and the command to run (`ordo migrate --apply`, below). Run it, then `ordo apply` again.
+- `schema     behind`: the database lacks something the program declares, so no node could load it. The artifact is stored and activation is **refused**; the output names the changes and the command to run (`ordo evolve --run`, below). Run it, then `ordo apply` again.
 - `REFUSED  serving_schema_drifted`: the registry names a serving version and none of its tables exist. Restore the database, or clear `$artifacts` and `$activations` if the registry is what is wrong. Nothing is created over a registry that disagrees with the catalog.
 
 A refusal over the door carries the same class the database path prints,
 under a wire code: `apply_refused` (the program or one of its ops does not
 compile, and nothing was stored), `not_activated` (stored, and the load gate
-would refuse it: run `ordo migrate --apply`), `apply_in_progress`,
+would refuse it: run `ordo evolve --run`), `apply_in_progress`,
 `schema_drift` (the registry names a serving version whose tables are gone).
 
 **First deployment:**
@@ -147,24 +147,34 @@ REFUSED  2 op(s) in this program do not compile, so no node could load the artif
 
 ## Changing the Schema
 
-A program whose entities changed needs the database moved before the artifact can be activated. First the plan, then one of the 2 ways to move it:
+A program whose entities changed needs the database moved before the artifact can be activated. Every step goes through the door (ruled 2026-11-05). First the plan, then the stored plan:
 
 1. `ordo plan ./myprogram.ordo --host <h>` asks the deployment what applying the program would do (`std.deployment.plan`) and prints the verdict and every change between the database and the program, classified (`A2`, `C1`, `B5`…), with what refuses it. Read-only. Exit code 1 means the apply would refuse, and the report says which. `--against <db>` is gone: the plan goes through the door.
 2. Through the door, with stored plans (increment 8): `ordo apply ./myprogram.ordo --no-activate --host <h>` stores the version, then `ordo evolve ./myprogram --from <serving> --to <version> --host <h>` renders the step between the 2 stored versions, refuses it if any change cannot be made (naming the fix, such as `--places invoice.total=rescale`), and stores it in `$plans` with its digest. The receipt is written to `./myprogram/receipts/<from>-to-<to>.json` for the repository. `--run` runs the stored plan on the deployment's own database. `--digest <d>` refuses a deployment that renders another digest, so staging can check it runs what dev rendered. `ordo evolve --tenant <id>` replays the stored path on that tenant's database, one step at a time, then pins it. `ordo evolve --list` shows the stored plans. Each step checks the version the database records first and refuses a stale one.
-3. Or, on the database from this machine (being replaced by `ordo evolve`): `ordo migrate ./myprogram.ordo --apply --direct --db prod --as my-service` runs the same plan and then applies it: class A (a new entity, an optional field, a constant-defaulted field, an index) in one transaction, then each constraint validated and each index built concurrently after it. A foreign key or a check onto a table that exists is added `NOT VALID` in the transaction (a moment's lock, no scan) and validated as its own step (the rows scanned under a lock that lets writes continue). A unique applies only where it constrains no existing data. Recorded in `$migrations` and on the deployment's security stream. Then `ordo apply` stores and activates.
+3. Before a step is stored, its pre-checks ask every database (the deployment's own and each tenant's) for rows the new shape would refuse, and list each with its fix. `--run` refuses while one is open. Fix the rows through the app, then run it again. Then `ordo apply ./myprogram.ordo --host <h>` activates the version.
 
-**Healthy result:**
+`ordo migrate --apply --direct` is removed (ruled 2026-11-05: every evolution command is a door op). Typed, it refuses and names `ordo evolve`.
+
+**Healthy result** (`ordo evolve --from 0.3.0 --to 0.3.1 --run`):
 ```
-APPLY  (5 statement(s))
-  tx  A2  ALTER TABLE "orders" ADD COLUMN "note" text;
-  tx  A3  ALTER TABLE "orders" ADD COLUMN "priority" bigint NOT NULL DEFAULT 0;
-  tx  C9  ALTER TABLE "orders" ADD CONSTRAINT "orders$priority_gte_0" CHECK ("priority" >= 0) NOT VALID;
-  vc  C9  ALTER TABLE "orders" VALIDATE CONSTRAINT "orders$priority_gte_0";
-  cc  A4  CREATE INDEX CONCURRENTLY "orders$customer$placed$ix" ON "orders" ("$space", "customer", "placed");
-  APPLIED  3 statement(s) in one transaction, 1 constraint(s) validated and 1 index(es) built concurrently after it;
-           recorded as `$migrations` #7; event recorded on the deployment stream
-  next     `ordo apply ./myprogram.ordo --direct --db prod` stores and activates abc123def456…
+plan       0.3.0 to 0.3.1
+digest     sha256:9e8afbed088559cf577d0af933a7669f26c701f1e7fdb386f52a28eac80860bd
+stored     already stored
+  C1 [C] `notes.title` becomes unique
+      reverse: ALTER TABLE "notes" DROP CONSTRAINT "notes$title$uq";
+  forward: ALTER TABLE "notes" ADD CONSTRAINT "notes$title$uq" UNIQUE NULLS NOT DISTINCT ("$space", "title");
+prechecks  2 database(s) asked, 0 issue(s)
+ran        on the deployment's database: 1 statement(s)
 ```
+
+**Bad data looks like** (the same step, before the rows were fixed):
+```
+prechecks  2 database(s) asked, 1 issue(s)
+ISSUE      database `…/spc_269rpaydr3aphwaw6xr3acrdc0`: C1 duplicates over `notes`.`title`
+             space `spc_269rpaydr3aphwaw6xr3acrdc0`  value twice  2 row(s)
+  fix      make `notes`.`title` distinct in each space listed, through the app's own ops, or leave `unique` out of `0.3.1`. Ordo does not choose which row survives
+```
+`--run` then answers `REFUSED  [apply_refused] the plan was stored and not run: precheck_failed`, with the same lines.
 
 The deployment keeps serving throughout: the serving artifact tolerates the extra column, and the new artifact reads it once activated.
 

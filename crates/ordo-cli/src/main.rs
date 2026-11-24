@@ -52,7 +52,7 @@ fn usage() -> ! {
          set, recompiles on save, brings up its own Postgres (or connects\n      \
          to ORDO_PG_* when set), classifies every save's schema delta,\n      \
          applies an additive one through the same class-A path `ordo\n      \
-         migrate --apply` runs and resets and reseeds (from `seed.sql`)\n      \
+         apply` runs and resets and reseeds (from `seed.sql`)\n      \
          on anything else (§4.3), then gates and swaps\n      \
          through the SAME assembly a server gets, serving on ORDO_DEV_ADDR\n      \
          (default 127.0.0.1:4000) with no restart between saves.\n      \
@@ -78,8 +78,11 @@ fn usage() -> ! {
          refuse it with its errors, store it, and print its receipt and\n      \
          digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
          written to <dir>/receipts/<from>-to-<to>.json. --digest refuses a\n      \
-         deployment that renders another digest. --run runs the stored\n      \
-         plan on the deployment's own database.\n  \
+         deployment that renders another digest. The pre-checks run on\n      \
+         every database and list each issue with its fix. --run runs the\n      \
+         stored plan on the deployment's own database, and refuses while an\n      \
+         issue is open. A step that removes a sign-in method some people\n      \
+         rely on stops until --approve-sign-in-removal <count>.\n  \
          ordo evolve --tenant <id> [--to <version>]\n      \
          replay the stored path on the tenant's database, one step at a\n      \
          time, then pin it (`std.deployment.replay`).\n  \
@@ -92,18 +95,10 @@ fn usage() -> ! {
          when one fails. Reads only, and records one `$release_checks` row.\n      \
          `--override` records the upgrade going ahead anyway: those tenants\n      \
          close at the boot, and every other tenant serves.\n  \
-         ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
-         being replaced by `ordo evolve` (§6 conflict 9 of plan-versions.md).\n      \
-         the plan, then the additive apply (schema-evolution increment 2):\n      \
-         a first apply against an empty database creates the whole schema;\n      \
-         over a deployed one it sends class A (new entity, optional or\n      \
-         constant-defaulted field, index) in one transaction with the index\n      \
-         concurrently after it, plus a constraint that constrains no\n      \
-         existing data. Everything else is refused by name with the\n      \
-         statement to run by hand where one exists. Recorded in\n      \
-         `$migrations` and on the deployment's security stream. Then\n      \
-         `ordo apply` stores and activates the artifact.\n      \
-         --places <entity>.<field>=rescale|keep[,...] (also on `plan`)\n      \
+         ordo migrate   removed: every schema evolution goes through the door\n      \
+         (ruled 2026-11-05). It refuses, naming `ordo apply --no-activate`\n      \
+         and `ordo evolve --run`, which replace it.\n  \
+         --places <entity>.<field>=rescale|keep[,...] (on `evolve` and `plan`)\n      \
          states what a change of places on a stored money or decimal\n      \
          field does to its amounts: rescale keeps each value (money is\n      \
          multiplied or divided by 10^n); keep leaves the stored numbers\n      \
@@ -136,7 +131,7 @@ fn usage() -> ! {
          when no server can be up open the database from this machine\n\
          instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
          `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
-         --proof), `restore`, `identity recover`, `migrate --apply`,\n         `release-check`, and\n\
+         --proof), `restore`, `identity recover`, `release-check`, and\n\
          `apply` and `rollback` when no host can boot. Without `--direct`\n\
          and without `--host` they refuse, naming both. Each `--direct` use\n\
          is recorded before it runs and written to the deployment\'s\n\
@@ -148,8 +143,8 @@ fn usage() -> ! {
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
-         refuse it stores and does not activate, naming `ordo migrate\n      \
-         --apply`. An op that does not compile refuses the whole apply.\n      \
+         refuse it stores and does not activate, naming `ordo evolve\n      \
+         --run`. An op that does not compile refuses the whole apply.\n      \
          `--no-activate` stores without re-pointing, for a staged deploy.\n      \
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \

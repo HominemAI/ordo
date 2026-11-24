@@ -464,8 +464,8 @@ Where each of the 16 goes:
    - Seed a product at price `12.34`.
    - `ordo plan shopfront-price3.ordo --host <door>`. Expect exit 1 and the output to name `products.price` and the `--places` flag.
    - `ordo apply` with the same file. Expect refused; `catalogue` still answers `12.34`.
-   - `ordo migrate ... --apply --direct --places products.price=rescale` then `ordo apply`. Expect `catalogue` to answer `12.340`.
-   - In a fresh stack, `--places products.price=keep`. Expect the stored number unchanged, read back as the README of `ordo migrate` says `keep` reads. Record the exact value in the test.
+   - `ordo apply ... --no-activate`, `ordo evolve --from ... --to ... --places products.price=rescale --run`, then `ordo apply`. Expect `catalogue` to answer `12.340`.
+   - In a fresh stack, `--places products.price=keep`. Expect the stored number unchanged, read back as `docs/howto-values.md` says `keep` reads. Record the exact value in the test.
 
 **CI.** Notes in `e2e.yml` (`api` project). Teamspace and shopfront in `examples-e2e.yml`.
 

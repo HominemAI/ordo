@@ -735,7 +735,7 @@ pub enum ErrorCode {
     /// in the message, each with its diff code.
     ///
     /// **409**: nothing is wrong with the request, and it lands unchanged
-    /// once the schema is moved (`ordo migrate --apply`). Its own class
+    /// once the schema is moved (`ordo evolve --run`). Its own class
     /// rather than `apply_refused`, because the outcomes differ in the one
     /// way an operator cares about — here the artifact *is* stored, so the
     /// next step is a migration and not a recompile.

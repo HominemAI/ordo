@@ -18,13 +18,19 @@
  * page, the page reloading itself, `ordo apply` reporting a tenant held, or
  * the image offered as a download (its media type lost in the rename).
  *
+ * After the `evolve` project, the database already holds v3's columns and
+ * v3 is stored, not active: v2 still serves, and the file and the image are
+ * attached under v2 after the rename's copy. The sync trigger the rename
+ * made carries their media type to `mediaType`, and the apply here
+ * activates v3.
+ *
  * It changes the program for the whole stack, so it runs last and alone
- * (the `v3` project depends on `v2`, playwright.config.ts). Chromium only.
+ * (the `v3` project depends on `evolve`, playwright.config.ts). Chromium only.
  */
 
 import { expect, test, type Page } from '@playwright/test';
 import { owner } from '../people.js';
-import { addNote, applyProgram, noteInList, signIn, signedIn, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, signIn, signedIn, stack, unique } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -56,8 +62,10 @@ const chip = (page: Page, tag: string) =>
 
 test('notes v3 applied with the v2 page open: every note and file stays, a new note lands, no reload and no error', async ({}, testInfo) => {
   testInfo.setTimeout(300_000);
-  // Run alone (`--project=v3 --no-deps`), v2 is not applied yet.
-  applyProgram(stack().programV2);
+  // v2 serves after the `v2` project. Run alone (`--no-deps`), it is
+  // applied here. Never applied again over v3's schema, which `evolve`
+  // leaves in place: v3 renames a column v2 requires, so that is refused.
+  ensureServing(stack().programV2, '0.2.0');
   const ada = await owner('Ada');
   try {
     const page = ada.page;

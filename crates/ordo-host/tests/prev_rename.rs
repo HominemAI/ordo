@@ -200,6 +200,149 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
     tenant_pg
         .exec("INSERT INTO note (\"$space\", id, rev, heading) VALUES ('acme', 'n2', 1, 'second')")
         .expect("a row under 1.1.0");
+    // A tenant still on 1.0.0 reads it whole: the sync trigger copied it back.
+    assert_eq!(
+        one(&tenant_pg, "SELECT title FROM note WHERE id = 'n2'"),
+        "second"
+    );
+}
+
+/// **No write is lost between the copy and the pin switch.** A writer on
+/// the old version inserts rows while the rename runs, then inserts and
+/// changes rows after it and before any pin moves. Every row has the same
+/// value under the new name. A row the new version writes is read whole by
+/// the old one. The reverse drops the trigger and gives the old column back
+/// its default.
+///
+/// A regression looks like a row whose new column is empty or holds the
+/// default where the old one holds a value: a write lost to the rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_during_the_rename_reach_the_new_column() {
+    let (_reg_pg, registry) = empty("ordo_prev_live_reg").await;
+    let (tenant_pg, tenant) = empty("ordo_prev_live_tenant").await;
+    let x = store(&registry, &notes("1.0.0", "  kind: text = \"\"\n")).await;
+    store(
+        &registry,
+        &notes("1.1.0", "  mediaType: text = \"\" prev(kind)\n"),
+    )
+    .await;
+    evolve::evolve(
+        &registry,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("stores");
+    let (_, created) = sa::apply(&tenant, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    for i in 0..50 {
+        tenant_pg
+            .exec(&format!(
+                "INSERT INTO note (\"$space\", id, rev, kind) VALUES ('acme', 'before{i}', 1, 'k{i}')"
+            ))
+            .expect("a row before");
+    }
+
+    // The old version writes while the rename runs.
+    let writer = {
+        let pool = tenant.clone();
+        tokio::spawn(async move {
+            let mut n = 0usize;
+            let mut i = 0usize;
+            while i < 400 {
+                let sql = format!(
+                    "INSERT INTO note (\"$space\", id, rev, kind) VALUES ('acme', 'during{i}', 1, 'd{i}')"
+                );
+                if pool.rows(&sql).await.is_ok() {
+                    n += 1;
+                }
+                i += 1;
+            }
+            n
+        })
+    };
+    evolve::replay(&registry, &tenant, "acme", "1.1.0", OWNER)
+        .await
+        .expect("replays the rename");
+    let written = writer.await.expect("the writer");
+    assert_eq!(written, 400, "every write by the old version landed");
+
+    // After the copy, before any pin moves: the old version writes again.
+    tenant_pg
+        .exec(
+            "INSERT INTO note (\"$space\", id, rev, kind) VALUES ('acme', 'after', 1, 'image/png')",
+        )
+        .expect("an insert after the copy");
+    tenant_pg
+        .exec("UPDATE note SET kind = 'changed' WHERE id = 'before0'")
+        .expect("an update after the copy");
+
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT count(*) FROM note WHERE \"mediaType\" IS DISTINCT FROM kind"
+        ),
+        "0",
+        "every row has its value under the new name"
+    );
+    assert_eq!(
+        one(&tenant_pg, "SELECT count(*) FROM note"),
+        (50 + 400 + 1).to_string()
+    );
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT \"mediaType\" FROM note WHERE id = 'after'"
+        ),
+        "image/png"
+    );
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT \"mediaType\" FROM note WHERE id = 'before0'"
+        ),
+        "changed"
+    );
+
+    // The new version writes only the new column; the old one reads it.
+    tenant_pg
+        .exec("INSERT INTO note (\"$space\", id, rev, \"mediaType\") VALUES ('acme', 'new1', 1, 'text/plain')")
+        .expect("an insert under 1.1.0");
+    tenant_pg
+        .exec("UPDATE note SET \"mediaType\" = 'image/gif' WHERE id = 'after'")
+        .expect("an update under 1.1.0");
+    assert_eq!(
+        one(&tenant_pg, "SELECT kind FROM note WHERE id = 'new1'"),
+        "text/plain"
+    );
+    assert_eq!(
+        one(&tenant_pg, "SELECT kind FROM note WHERE id = 'after'"),
+        "image/gif"
+    );
+
+    // The reverse removes the trigger before it copies back.
+    let r = evolve::render(&registry, "1.0.0", "1.1.0", &Choices::default(), 1)
+        .await
+        .expect("renders");
+    let lines = evolve::receipt_lines(&r.receipt).join("\n");
+    let drop = lines
+        .find("reverse: DROP TRIGGER IF EXISTS \"note$mediaType$prev\" ON \"note\";")
+        .unwrap_or_else(|| panic!("{lines}"));
+    let back = lines
+        .find("reverse: UPDATE \"note\" SET \"kind\" = \"mediaType\";")
+        .unwrap_or_else(|| panic!("{lines}"));
+    assert!(drop < back, "{lines}");
+    assert!(
+        lines.contains("reverse: ALTER TABLE \"note\" ALTER COLUMN \"kind\" SET DEFAULT '';"),
+        "{lines}"
+    );
 }
 
 /// **Each plan check refuses what the step cannot make, naming the fix.**

@@ -1046,19 +1046,33 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
             field,
         } => {
             let t = q(entity);
-            let mut out = vec![format!("UPDATE {t} SET {} = {};", q(from), q(field))];
-            if x
+            let new = y
                 .schema
                 .native(entity)
-                .and_then(|e| e.field(from))
-                .is_some_and(|f| !f.optional)
-            {
+                .and_then(|e| e.field(field))
+                .map(|f| f.column())
+                .unwrap_or_else(|| field.clone());
+            // The sync trigger goes first, so the copy back is not mirrored.
+            let sync = q(&crate::schema_apply::rename_sync_name(entity, &new));
+            let mut out = vec![
+                format!("DROP TRIGGER IF EXISTS {sync} ON {t};"),
+                format!("DROP FUNCTION IF EXISTS {sync}();"),
+                format!("UPDATE {t} SET {} = {};", q(from), q(&new)),
+            ];
+            let old = x.schema.native(entity).and_then(|e| e.field(from));
+            if old.is_some_and(|f| !f.optional) {
                 out.push(format!(
                     "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;",
                     q(from)
                 ));
             }
-            out.push(format!("ALTER TABLE {t} DROP COLUMN {};", q(field)));
+            if let Some(d) = old.and_then(|f| ordo_schema::ddl::column_default(f).ok().flatten()) {
+                out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {} SET DEFAULT {d};",
+                    q(from)
+                ));
+            }
+            out.push(format!("ALTER TABLE {t} DROP COLUMN {};", q(&new)));
             (
                 out,
                 Some("the rename read backwards: the old column was kept, and gets back what was written to the new one".into()),

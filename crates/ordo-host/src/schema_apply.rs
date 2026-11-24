@@ -2355,16 +2355,24 @@ pub fn triage_counted(
 }
 
 /// The statements of a declared rename (§5 B4, `plan-syntax-additions.md`
-/// §5): the new column, open to nulls; the old column's values copied into
-/// it; then the new column's `NOT NULL`. The old column is kept, and loses
-/// its `NOT NULL` so the new version's inserts, which no longer write it,
-/// are not refused. The serving version still reads it until its tenants
+/// §5): the new column, open to nulls; the sync trigger; the old column's
+/// values copied into the new one; then the new column's `NOT NULL`. The
+/// old column is kept, and loses its `NOT NULL` and its `DEFAULT` so the
+/// new version's inserts, which no longer write it, are not refused and
+/// leave it empty. The serving version still reads it until its tenants
 /// move. Never `ALTER … RENAME`, which would drift the serving version the
 /// instant it landed. The new column's unique, reference and value set are
 /// their own changes in the same step.
 ///
-/// Until dual writes (increment 11a), a write the serving version makes
-/// after the copy and before the pin moves reaches only the old column.
+/// **No write is lost between the copy and the pin switch.** The switch is
+/// in the control database and each tenant's data may be in a database of
+/// its own, so the copy and the switch cannot share a transaction. The
+/// trigger ([`rename_sync_function`]) is created in the copy's own
+/// transaction, before the copy, so from the copy on every write the
+/// serving version makes to the old column reaches the new one, and every
+/// write the new version makes to the new one reaches the old one. The
+/// `ADD COLUMN` holds the table's lock to the commit, so no write lands
+/// between the copy and the trigger. The reverse drops the trigger.
 pub fn rename_field_steps(
     e: &ordo_schema::Entity,
     live: &LiveShape,
@@ -2386,27 +2394,83 @@ pub fn rename_field_steps(
     let t = ordo_schema::ddl::q(&e.name);
     let new = ordo_schema::ddl::q(&f.column());
     let old = ordo_schema::ddl::q(from);
-    out.push(format!(
-        "UPDATE {t} SET {new} = {old};
-"
-    ));
-    if !f.optional {
+    let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
+    if old_live.is_some_and(|c| !c.nullable) {
         out.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {new} SET NOT NULL;
-"
+            "ALTER TABLE {t} ALTER COLUMN {old} DROP NOT NULL;\n"
         ));
     }
-    let old_required = live
-        .table(&e.name)
-        .and_then(|lt| lt.columns.get(from))
-        .is_some_and(|c| !c.nullable);
-    if old_required {
+    if old_live.is_some_and(|c| c.has_default) {
         out.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {old} DROP NOT NULL;
-"
+            "ALTER TABLE {t} ALTER COLUMN {old} DROP DEFAULT;\n"
+        ));
+    }
+    out.extend(rename_sync_steps(&e.name, from, &f.column()));
+    out.push(format!("UPDATE {t} SET {new} = {old};\n"));
+    if !f.optional {
+        out.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {new} SET NOT NULL;\n"
         ));
     }
     Ok(out)
+}
+
+/// The name of a rename's sync trigger and of its function:
+/// `<table>$<new column>$prev`, after the way [`ordo_schema::ddl`] names
+/// every object it emits.
+pub fn rename_sync_name(table: &str, new: &str) -> String {
+    format!("{table}${new}$prev")
+}
+
+/// The sync trigger of a field rename, as two statements: its function and
+/// the trigger. Until increment 11a's dual writes, this is what keeps the
+/// old column and the new one equal while both versions may write.
+///
+/// - An insert that fills the old column came from the version that still
+///   writes it (the old column has no default any more), so its value is
+///   copied into the new one. An insert that leaves it empty came from the
+///   new version, and the new column's value is copied back into it, so a
+///   tenant still on the old version reads the row whole.
+/// - An update that changes one column and not the other copies the
+///   change across.
+///
+/// Either column dropped by a later version leaves the trigger a no-op
+/// rather than an error, because it first asks the row whether both
+/// columns are still on it.
+pub fn rename_sync_steps(table: &str, old: &str, new: &str) -> Vec<String> {
+    use ordo_schema::ddl::q;
+    let name = q(&rename_sync_name(table, new));
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let (o, n) = (q(old), q(new));
+    let (ok, nk) = (lit(old), lit(new));
+    vec![
+        format!(
+            "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $ordo_prev$
+BEGIN
+  IF NOT (to_jsonb(NEW) ? {ok} AND to_jsonb(NEW) ? {nk}) THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.{o} IS NOT NULL THEN
+      NEW.{n} := NEW.{o};
+    ELSE
+      NEW.{o} := NEW.{n};
+    END IF;
+  ELSIF NEW.{o} IS DISTINCT FROM OLD.{o} AND NEW.{n} IS NOT DISTINCT FROM OLD.{n} THEN
+    NEW.{n} := NEW.{o};
+  ELSIF NEW.{n} IS DISTINCT FROM OLD.{n} AND NEW.{o} IS NOT DISTINCT FROM OLD.{o} THEN
+    NEW.{o} := NEW.{n};
+  END IF;
+  RETURN NEW;
+END
+$ordo_prev$;\n"
+        ),
+        format!("DROP TRIGGER IF EXISTS {name} ON {t};\n", t = q(table)),
+        format!(
+            "CREATE TRIGGER {name} BEFORE INSERT OR UPDATE ON {t} FOR EACH ROW EXECUTE FUNCTION {name}();\n",
+            t = q(table)
+        ),
+    ]
 }
 
 /// The two steps a foreign key, an enum pin or a check takes onto a table

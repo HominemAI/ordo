@@ -2582,7 +2582,7 @@ const CLONES_USAGE: &str = "ordo clones key  --host <h> ...\n\
      ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] \
      --reason \"<text>\"  --host <h> ...\n\
      ordo clones list  --host <h> ...\n\
-     ordo clones set mask|readers <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones set mask|readers|sinks <value> --reason \"<text>\"  --host <h> ...\n\
      ordo clones sink [<tenant>] [--limit <n>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
@@ -2722,9 +2722,9 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         "sink" => {
             let entries = row["entries"].as_array().cloned().unwrap_or_default();
             if entries.is_empty() {
-                "SINK  empty: no clone has sent anything\n".to_string()
+                "SINK  empty: nothing in staging has sent anything\n".to_string()
             } else {
-                let mut out = String::from("SINK  what the clones would have sent, newest first\n");
+                let mut out = String::from("SINK  what staging would have sent, newest first\n");
                 for e in entries {
                     out.push_str(&format!(
                         "  {}  {}  {}  to {}  \"{}\"  {} bytes\n",
@@ -2788,11 +2788,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         _ => {
             let mut out = format!(
-                "{} {}\n{} {}\nCLONES\n",
+                "{} {}\n{} {}\n{} {}\nCLONES\n",
                 c::MASK_SETTING,
                 row["mask"].as_str().unwrap_or("?"),
                 c::READERS_SETTING,
                 readers_line(&row["readers"]),
+                c::SINKS_SETTING,
+                row["sinks"].as_str().unwrap_or("on"),
             );
             for cl in row["clones"].as_array().cloned().unwrap_or_default() {
                 out.push_str(&format!(

@@ -97,6 +97,8 @@ pub const OPS: [&str; 7] = [
 pub const MASK_SETTING: &str = "clone.mask";
 /// Who besides the staging deployment's admins opens a clone.
 pub const READERS_SETTING: &str = "clone.readers";
+/// Which tenants' mail, push and egress go to the sink (`crate::sinks`).
+pub const SINKS_SETTING: &str = "clone.sinks";
 
 /// The sealed bundle's format tag, also bound into its associated data.
 pub const FORMAT: &str = "ordo.clone.v1";
@@ -399,6 +401,8 @@ pub struct CloneSettings {
     pub mask: Mask,
     /// `clone.readers`, read on the deployment a clone lands in.
     pub readers: BTreeSet<String>,
+    /// `clone.sinks`, read on the deployment a clone lands in.
+    pub sinks: crate::sinks::SinkScope,
 }
 
 fn parse_readers(value: &str) -> Result<BTreeSet<String>, CloneRefusal> {
@@ -428,9 +432,10 @@ fn parse_readers(value: &str) -> Result<BTreeSet<String>, CloneRefusal> {
 pub async fn settings(pool: &Pool) -> Result<CloneSettings, CloneRefusal> {
     let sql = format!(
         "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" FROM \"$version_settings\" \
-         WHERE \"setting\" IN ({}, {}) ORDER BY \"setting\", \"seq\" DESC",
+         WHERE \"setting\" IN ({}, {}, {}) ORDER BY \"setting\", \"seq\" DESC",
         sql_lit(MASK_SETTING),
-        sql_lit(READERS_SETTING)
+        sql_lit(READERS_SETTING),
+        sql_lit(SINKS_SETTING)
     );
     let rows = match pool.rows(&sql).await {
         Ok(rows) => rows,
@@ -445,6 +450,8 @@ pub async fn settings(pool: &Pool) -> Result<CloneSettings, CloneRefusal> {
             out.mask = Mask::parse(&value)?;
         } else if name == READERS_SETTING {
             out.readers = parse_readers(&value)?;
+        } else if name == SINKS_SETTING {
+            out.sinks = crate::sinks::SinkScope::parse(&value).map_err(CloneRefusal::Setting)?;
         }
     }
     Ok(out)
@@ -464,15 +471,21 @@ pub async fn set_setting(
     let name = match setting.trim() {
         MASK_SETTING | "mask" => MASK_SETTING,
         READERS_SETTING | "readers" => READERS_SETTING,
+        SINKS_SETTING | "sinks" => SINKS_SETTING,
         other => {
             return Err(CloneRefusal::Setting(format!(
-                "`{other}` is not a clone setting. There are {MASK_SETTING} and \
-                 {READERS_SETTING}"
+                "`{other}` is not a clone setting. There are {MASK_SETTING}, \
+                 {READERS_SETTING} and {SINKS_SETTING}"
             )))
         }
     };
     let stored = if name == MASK_SETTING {
         Mask::parse(value)?.value()
+    } else if name == SINKS_SETTING {
+        crate::sinks::SinkScope::parse(value)
+            .map_err(CloneRefusal::Setting)?
+            .word()
+            .to_string()
     } else {
         let r = parse_readers(value)?;
         if r.is_empty() {
@@ -1823,7 +1836,12 @@ pub fn specs() -> Vec<OpSpec> {
                 "ownBucket",
             ],
         ),
-        spec(CLONES, OpKind::Read, vec![], &["clones", "mask", "readers"]),
+        spec(
+            CLONES,
+            OpKind::Read,
+            vec![],
+            &["clones", "mask", "readers", "sinks"],
+        ),
         spec(
             SINKS,
             OpKind::Read,
@@ -1846,7 +1864,7 @@ pub fn specs() -> Vec<OpSpec> {
                 param("value", 4096, true),
                 param("reason", 4096, true),
             ],
-            &["setting", "mask", "readers"],
+            &["setting", "mask", "readers", "sinks"],
         ),
     ]
 }
@@ -1985,6 +2003,7 @@ impl CloneOps {
                     "clones": list.iter().map(CloneRecord::to_json).collect::<Vec<_>>(),
                     "mask": s.mask.value(),
                     "readers": s.readers.iter().collect::<Vec<_>>(),
+                    "sinks": s.sinks.word(),
                 })
             }
             SINKS => {
@@ -2034,6 +2053,7 @@ impl CloneOps {
                 json!({
                     "setting": setting.trim(), "mask": s.mask.value(),
                     "readers": s.readers.iter().collect::<Vec<_>>(),
+                    "sinks": s.sinks.word(),
                 })
             }
             other => return Err(ExecError::internal(format!("`{other}` is not a clone op"))),

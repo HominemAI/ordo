@@ -23,11 +23,22 @@
 //!
 //! # Which tenants
 //!
-//! Every tenant in `$clones`, always. It is read from the control database
-//! at the moment of sending, not from a node's memory, so a node that has
-//! not seen a clone yet still sinks it. A read that fails refuses the send.
-//! The person who opens a clone may run every op, writes included: what
-//! those writes would send lands here.
+//! `clone.sinks` ([`SinkScope`]) says, read in the control database at the
+//! moment of sending, never from a node's memory:
+//!
+//! - **`on`, the default: every tenant of a staging deployment**, clone or
+//!   not, and every clone on any deployment. D17 says "in staging"; whether
+//!   that means clones only is an open owner question, and this is the
+//!   reading that sends less.
+//! - `clones`: only the tenants in `$clones`.
+//!
+//! A deployment is staging when its own environment is named `staging`
+//! (`ordo environments`). A read that fails refuses the send. The person
+//! who opens a clone may run every op, writes included: what those writes
+//! would send lands here.
+//!
+//! The deployment's own sign-in mail (emailed codes) is not a tenant's and
+//! is not sunk: staging's own people must still sign in to staging.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
@@ -105,6 +116,88 @@ impl SinkEntry {
         })
     }
 }
+
+/// `clone.sinks`: which tenants' mail, push and egress go to the sink.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SinkScope {
+    /// Every tenant of a staging deployment, and every clone. The default.
+    #[default]
+    Staging,
+    /// Only the tenants in `$clones`.
+    Clones,
+}
+
+impl SinkScope {
+    /// The stored value.
+    pub fn word(self) -> &'static str {
+        match self {
+            SinkScope::Staging => "on",
+            SinkScope::Clones => "clones",
+        }
+    }
+
+    /// `on` or `clones`. There is no `off`: a clone never reaches a real
+    /// person or service.
+    pub fn parse(value: &str) -> Result<SinkScope, String> {
+        match value.trim() {
+            "on" | "" => Ok(SinkScope::Staging),
+            "clones" => Ok(SinkScope::Clones),
+            other => Err(format!(
+                "`{other}` is not a value of clone.sinks: it takes `on` (every tenant of a \
+                 staging deployment, and every clone) or `clones` (only the clones). A clone's \
+                 sends always go to the sink"
+            )),
+        }
+    }
+}
+
+/// **Whether what `space` sends goes to the sink here**: a clone, always;
+/// any tenant when this deployment is staging and `clone.sinks` is `on`.
+/// Read from the control database each time it is asked.
+pub async fn applies(pool: &Pool, space: &str) -> Result<bool, Unread> {
+    if is_clone(pool, space)
+        .await
+        .map_err(|e| Unread(e.to_string()))?
+    {
+        return Ok(true);
+    }
+    let scope = match crate::clones::settings(pool).await {
+        Ok(s) => s.sinks,
+        Err(crate::clones::CloneRefusal::Store(e)) => return Err(Unread(e.to_string())),
+        // A stored value that no longer parses: the wider scope.
+        Err(_) => SinkScope::Staging,
+    };
+    if scope == SinkScope::Clones {
+        return Ok(false);
+    }
+    staging_here(pool).await
+}
+
+/// Whether this deployment's own environment is staging.
+pub async fn staging_here(pool: &Pool) -> Result<bool, Unread> {
+    crate::environments::Environments::on(pool)
+        .own()
+        .await
+        .map(|own| own.name == crate::environments::STAGING)
+        .map_err(|e| Unread(e.to_string()))
+}
+
+/// Whether a send goes to the sink could not be read. Retry: nothing was
+/// sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unread(pub String);
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "whether this tenant's sends go to the staging sink could not be read: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for Unread {}
 
 /// **Whether `space` is a staging clone here**, read from `$clones`. A
 /// deployment that never cloned has no table, and nothing is a clone.
@@ -187,13 +280,14 @@ pub async fn entries(
 
 // ── egress ───────────────────────────────────────────────────────────────
 
-/// **A function's `fetch`, with a clone's calls sunk.** Every other space's
-/// calls go out through the egress kernel as before.
+/// **A function's `fetch`, with the calls [`applies`] names sunk.** Every
+/// other space's calls go out through the egress kernel as before.
 pub struct SinkFetch {
     egress: Arc<FnEgress>,
     pool: Pool,
-    /// Spaces read as clones. A clone stays one, so a yes is kept; a no is
-    /// read again on the next call.
+    /// Spaces read as clones. A clone stays one, so that yes is kept; any
+    /// other answer is read again on the next call, so a changed
+    /// `clone.sinks` takes effect at once.
     clones: RwLock<BTreeSet<String>>,
 }
 
@@ -215,18 +309,20 @@ impl SinkFetch {
         {
             return Ok(true);
         }
-        let yes = is_clone(&self.pool, space)
+        let store = |e: Unread| FetchError::Store {
+            detail: e.to_string(),
+        };
+        if is_clone(&self.pool, space)
             .await
-            .map_err(|e| FetchError::Store {
-                detail: format!("whether this tenant is a staging clone could not be read: {e}"),
-            })?;
-        if yes {
+            .map_err(|e| store(Unread(e.to_string())))?
+        {
             self.clones
                 .write()
                 .unwrap_or_else(|p| p.into_inner())
                 .insert(space.to_string());
+            return Ok(true);
         }
-        Ok(yes)
+        applies(&self.pool, space).await.map_err(store)
     }
 }
 

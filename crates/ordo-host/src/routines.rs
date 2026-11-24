@@ -1213,21 +1213,18 @@ pub async fn tell(
     now: u64,
 ) -> usize {
     // A read that fails sends nothing.
-    match crate::sinks::is_clone(control, space).await {
+    match crate::sinks::applies(control, space).await {
         Ok(false) => {}
         Ok(true) => {
             let k = sink_notices(control, space, who, text, now).await;
             eprintln!(
-                "routine {name}: {k} notices for tenant {space}, a staging clone, went to its \
-                 sink. Read them: `ordo clones sink {space}`"
+                "routine {name}: {k} notices for tenant {space}, in staging, went to the sink. \
+                 Read them: `ordo clones sink {space}`"
             );
             return k;
         }
         Err(e) => {
-            eprintln!(
-                "routine {name}: in tenant {space}, no notice was queued: whether it is a \
-                 staging clone could not be read: {e}"
-            );
+            eprintln!("routine {name}: in tenant {space}, no notice was queued: {e}");
             return 0;
         }
     }

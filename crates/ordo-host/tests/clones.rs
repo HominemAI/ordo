@@ -25,6 +25,8 @@
 //!   stored is refused on its way;
 //! - nothing a clone does reaches a person or a service: a function's call
 //!   and a routine's mail land in the sink, which the door reads back;
+//!   with `clone.sinks` on (the default) so does every staging tenant's,
+//!   `clones` narrows it, and production sinks nothing;
 //! - a tenant with a database of its own is cloned onto a database of its
 //!   own in staging, made by staging.
 //!
@@ -1131,8 +1133,54 @@ async fn nothing_a_clone_sends_leaves_staging_and_the_sink_shows_it() {
         .await
         .unwrap_err();
     assert_eq!(e.kind(), "secret_host_mismatch", "{e}");
-    // A tenant that is not a clone goes out through the kernel: it opens
+    // `clone.sinks` is `on` by default: every tenant of a staging
+    // deployment is sunk, a clone or not (D17, "in staging").
+    let answer = fetch
+        .fetch(
+            "spc_not_a_clone",
+            llm_call("https://api.example.com/v1/messages"),
+        )
+        .await
+        .expect("staging's own tenant is sunk too");
+    assert_eq!(answer.status, 200);
+    // On production a tenant's call goes out through the kernel: it opens
     // the secret, which this store refuses.
+    let prod_fetch = ordo_host::sinks::SinkFetch::new(
+        ordo_egress::FnEgress::new(
+            Arc::new(NoValues),
+            ordo_egress::TlsRoots::webpki(),
+            ordo_egress::DenyList::default(),
+        ),
+        p.prod.clone(),
+    );
+    let e = prod_fetch
+        .fetch(&p.tenant, llm_call("https://api.example.com/v1/messages"))
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), "secret_store_unavailable", "{e}");
+    // `off` is no value: a clone's sends always go to the sink. The
+    // refusal names the values it takes.
+    let staging_admin = p.issuer.token(ADA, "staging");
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.sinks", "value": "off", "reason": "try"}),
+        &staging_admin,
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body.to_string().contains("`clones`"), "{body}");
+    // `clones` narrows it to the clones: staging's own tenant goes out
+    // through the kernel, and the clone is still sunk.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.sinks", "value": "clones", "reason": "QA calls a sandbox"}),
+        &staging_admin,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["sinks"], "clones");
     let e = fetch
         .fetch(
             "spc_not_a_clone",
@@ -1164,12 +1212,45 @@ async fn nothing_a_clone_sends_leaves_staging_and_the_sink_shows_it() {
         .map(|r| r[0][0].clone().unwrap_or_default())
         .unwrap_or_else(|_| "0".into());
     assert_eq!(queued, "0", "no mail was queued");
-    // Outside a clone, nothing goes to the sink.
+    // With `clones`, staging's own tenant is not sunk: with mail off,
+    // nothing is told.
     let told = ordo_host::routines::tell(
         &p.staging,
         false,
         "fireReminders",
         "spc_not_a_clone",
+        &["p_someone".to_string()],
+        "x",
+        now,
+    )
+    .await;
+    assert_eq!(told, 0);
+    // Back to `on`: staging's own tenant's notice goes to the sink.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "sinks", "value": "on", "reason": "all of staging"}),
+        &staging_admin,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let told = ordo_host::routines::tell(
+        &p.staging,
+        false,
+        "fireReminders",
+        "spc_not_a_clone",
+        &["p_someone".to_string()],
+        "x",
+        now,
+    )
+    .await;
+    assert_eq!(told, 1);
+    // On production, nothing goes to the sink.
+    let told = ordo_host::routines::tell(
+        &p.prod,
+        false,
+        "fireReminders",
+        &p.tenant,
         &["p_someone".to_string()],
         "x",
         now,

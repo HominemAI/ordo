@@ -303,12 +303,14 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
-         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
          seals each clone to it. clone.mask names the fields that leave\n      \
          production unmasked (deny by default, `off` to opt out);\n      \
-         clone.readers names who besides staging's admins opens a clone.\n  \
+         clone.readers names who besides staging's admins opens a clone.\n      \
+         clone.sinks: `on` (default) sends every staging tenant's mail and\n      \
+         function calls to the sink, `clones` only the clones'; `sink` reads it.\n  \
          ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \

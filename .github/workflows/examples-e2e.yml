@@ -1,0 +1,211 @@
+name: Example apps end-to-end
+
+on:
+  push:
+    branches: [bleeding]
+  pull_request:
+    branches: [main, bleeding]
+  workflow_dispatch:
+    inputs:
+      coverage:
+        type: boolean
+        default: false
+  # Called by nightly.yml, one suite after another (owner ruling 2026-11-02).
+  workflow_call:
+    inputs:
+      coverage:
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  RUST_BACKTRACE: '1'
+
+# Runs on `main` (the nightly one) are never cancelled.
+concurrency:
+  group: marketing-site-e2e-${{ github.ref }}-${{ inputs.coverage && 'coverage' || 'tests' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  # scripts/ci-affected.mjs asks whether a pull request to main is open.
+  pull-requests: read
+
+jobs:
+  changes:
+    name: changes (marketing-site e2e)
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    outputs:
+      reached: ${{ steps.affected.outputs.marketing_site_e2e }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: github.event_name == 'push'
+      - name: What this change reaches
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "${{ inputs.coverage }}" = true ]; then
+            echo 'marketing_site_e2e=true' >> "$GITHUB_OUTPUT"
+          else
+            node scripts/ci-affected.mjs
+          fi
+
+  throwaway:
+    name: marketing-site e2e
+    needs: changes
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ${{ vars.ORDO_RUNNERS == 'k8s' && fromJSON('["self-hosted","ordo-k8s"]') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ vars.ORDO_RUNNERS == 'k8s' && 40 || 75 }}
+
+    services:
+      postgres:
+        # An empty image skips the service when the change does not reach this.
+        image: ${{ needs.changes.outputs.reached == 'true' && 'postgres:17' || '' }}
+        env:
+          POSTGRES_USER: ordo
+          POSTGRES_PASSWORD: ordo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ordo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      REACHED: ${{ needs.changes.outputs.reached }}
+      CI: '1'
+      ORDO_PG_HOST: localhost
+      ORDO_PG_PORT: '5432'
+      ORDO_PG_USER: ordo
+      ORDO_PG_PASSWORD: ordo
+      ORDO_PSQL: psql
+
+    steps:
+      - name: Free disk space (hosted runners)
+        if: ${{ vars.ORDO_RUNNERS != 'k8s' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af || true
+          df -h /
+      - name: Not reached by this change
+        if: env.REACHED != 'true'
+        run: echo "Not reached by this change (scripts/ci-affected.mjs). Nothing ran." | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: env.REACHED == 'true'
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.REACHED == 'true'
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.REACHED == 'true'
+        with:
+          shared-key: e2e-marketing-site
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.REACHED == 'true'
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            examples/marketing-site/e2e/package-lock.json
+            examples/marketing-site/web/package-lock.json
+
+      - name: Install psql
+        if: env.REACHED == 'true'
+        run: command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+
+      - name: Postgres without durable commits (CI only)
+        if: env.REACHED == 'true'
+        run: bash scripts/ci-pg-fast-commits.sh
+
+      - name: Install coverage tools
+        if: inputs.coverage
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
+        if: inputs.coverage
+        with:
+          tool: cargo-llvm-cov
+      - name: Prepare coverage
+        if: inputs.coverage
+        run: |
+          mkdir -p coverage-out
+          bash scripts/e2e-coverage.sh env > coverage-out/env.sh
+          source coverage-out/env.sh
+          cargo llvm-cov clean --workspace
+          # Each subsequent shell step loads the exact same environment.
+          bindir="${CARGO_LLVM_COV_TARGET_DIR:?}/debug"
+          {
+            echo "BASH_ENV=$GITHUB_WORKSPACE/coverage-out/env.sh"
+            echo "ORDO=$bindir/ordo"
+            echo "ORDO_HOST_BIN=$bindir/ordo-host"
+          } >> "$GITHUB_ENV"
+
+      - name: Build ordo-host and ordo
+        if: env.REACHED == 'true'
+        run: cargo build -p ordo-host -p ordo-cli
+
+      - name: Install the page and the tests
+        if: env.REACHED == 'true'
+        run: |
+          (cd examples/marketing-site/web && npm ci)
+          (cd examples/marketing-site/e2e && npm ci && npm run typecheck)
+
+      # The browsers are kept between runs, as the other suites keep theirs.
+      - name: Keep the browsers
+        if: env.REACHED == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('examples/marketing-site/e2e/package-lock.json') }}
+
+      - name: Install Chromium
+        if: env.REACHED == 'true'
+        working-directory: examples/marketing-site/e2e
+        run: npx playwright install --with-deps chromium
+
+      # Playwright starts the stack (stack.sh) and stops it at the end.
+      - name: Run the use cases
+        if: env.REACHED == 'true'
+        working-directory: examples/marketing-site/e2e
+        run: npx playwright test
+
+      - name: Report example coverage
+        if: ${{ always() && inputs.coverage && env.BASH_ENV != '' }}
+        run: bash scripts/e2e-coverage.sh report marketing-site
+      - name: Upload example coverage
+        if: ${{ always() && inputs.coverage }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lcov-marketing-site
+          path: coverage-out/lcov-marketing-site.info
+          if-no-files-found: error
+
+      - name: Upload the traces and stack logs
+        if: ${{ env.REACHED == 'true' && (failure()) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: marketing-site-e2e-report
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true
+          path: |
+            examples/marketing-site/e2e/test-results/
+            examples/marketing-site/e2e/.stack/*.log

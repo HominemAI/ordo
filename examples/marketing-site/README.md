@@ -97,3 +97,34 @@ its `slug`.
   account. See `docs/howto-sharing.md`.
 
 Read next: `docs/howto-public.md`.
+
+## Tests
+
+Products mark their public fields individually. `internalNote` is private and
+seeded with `INTERNAL-<slug>` so a leak is visible in a test.
+
+The Playwright suite boots a fresh PostgreSQL database, applies this example,
+seeds through the real door and serves the built page. It checks public reads,
+private-operation refusals, refinements, tokenless live, space headers, contact
+writes, the signed-in path, request counters and the page's response bodies.
+
+```sh
+# Build only when no other cargo build is running.
+cargo build -p ordo-host -p ordo-cli
+(cd examples/marketing-site/web && npm ci)
+cd examples/marketing-site/e2e
+npm ci
+npx playwright install chromium
+npx playwright test
+```
+
+PostgreSQL 15 or later is required. `ORDO_PGBIN` names its binary directory.
+`ORDO` and `ORDO_HOST_BIN` can name prebuilt binaries. The default door and
+page ports are 4850 and 5391; override them with `E2E_DOOR_PORT` and
+`E2E_PAGE_PORT`. `E2E_STATE` changes the log and state directory. A supplied
+`ORDO_PG_HOST` uses that server with a unique database; it never drops an
+existing database. These are development keys and a disabled human check.
+
+The stack caps public writes at 1000 per hour. This suite does not exercise
+the limit outcome; the separate low-quota door is still needed for that check.
+The notes isolation suite checks private-file downloads (S1).

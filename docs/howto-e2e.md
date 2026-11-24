@@ -459,3 +459,20 @@ https front is the next port up), `E2E_NOTES_PAGE_PORT` and
 `E2E_VIEWER_PAGE_PORT`. `E2E_NO_PAGES=1 bash stack.sh` starts everything
 but the pages, for poking at the doors with curl. The artifact
 `federation-e2e-report` holds the traces and `.stack/*.log`.
+
+## Marketing site
+
+`examples/marketing-site/e2e` runs the real public site against a throwaway
+database. Install the web and e2e packages with `npm ci`, then run
+`npx playwright test` from the e2e directory. It has `api` and `browser`
+projects. See the example README for ports, PostgreSQL and binary overrides.
+
+The stack applies `site.ordo`, creates an owner through guest sign-in,
+restarts with that owner and runs `dev/seed`. Its private product sentinel
+must stay out of all public responses. Shutdown sends TERM and waits for
+each host so instrumented binaries can write their profiles.
+
+`examples-e2e.yml` runs the marketing site. Its `coverage` input builds with
+LLVM instrumentation and uploads `lcov-marketing-site`. The coverage helper
+is shared with increment 0. Merging that report into the overall ratchet
+requires the increment 0 coverage workflow integration.

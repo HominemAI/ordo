@@ -94,6 +94,16 @@ const run = (...files) => outputs(affected({ files, packages, readersOf, io, hos
 
 const cases = [
   {
+    name: 'marketing site and shared stack changes run the public path suite',
+    files: ['examples/marketing-site/site.ordo', 'examples/e2e-common/stack-lib.sh'],
+    want: { marketing_site_e2e: 'true', notes_e2e: 'false' },
+  },
+  {
+    name: 'host changes run the marketing site suite',
+    files: ['crates/ordo-host/src/lib.rs'],
+    want: { marketing_site_e2e: 'true' },
+  },
+  {
     name: 'docs only: nothing runs',
     files: ['docs/howto-e2e.md', 'AGENTS.md', 'docs/board.jsonl'],
     want: { full: 'false', crates: '', rest: 'false', host: 'false', clients: '', notes_e2e: 'false' },

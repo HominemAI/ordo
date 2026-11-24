@@ -509,8 +509,10 @@ const PINNED_STATES: &str = "('provisioning', 'active', 'paused')";
 /// exist (increment 10).
 ///
 /// `$moves` holds one open move per tenant: from, to, phase and soak
-/// deadline (§2.1). Created now so the shape is settled; nothing writes it
-/// until increment 7.
+/// deadline (§2.1). Written since increment 7 ([`Versions::activate_with`]):
+/// a tenant whose own database has not yet taken the new version stays on
+/// its version, and its move says why (`reason`, added by
+/// [`ensure_revocations`] to a table made before it).
 const PIN_TABLES_DDL: &str = "\
 CREATE TABLE IF NOT EXISTS \"$pins\" ( \
   \"seq\" bigserial PRIMARY KEY, \
@@ -529,7 +531,8 @@ CREATE TABLE IF NOT EXISTS \"$moves\" ( \
   \"to\" text NOT NULL, \
   \"phase\" text NOT NULL, \
   \"soak_until\" bigint NOT NULL DEFAULT 0, \
-  \"started_at\" bigint NOT NULL \
+  \"started_at\" bigint NOT NULL, \
+  \"reason\" text NOT NULL DEFAULT '' \
 )";
 
 /// `$revocations`, beside `$artifacts`: each revoke and unrevoke of a
@@ -584,6 +587,20 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
     }
     if pool.rows(MOVE_TARGETS_DDL).await.is_err() {
         pool.rows(MOVE_TARGETS_DDL).await?;
+    }
+    // `$moves.reason` came with increment 7 (2026-11-23), on the same terms
+    // as `move_to` above.
+    match pool.rows("SELECT \"reason\" FROM \"$moves\" LIMIT 0").await {
+        Err(e) if e.is_missing_column() => {
+            pool.rows(
+                "ALTER TABLE \"$moves\" ADD COLUMN IF NOT EXISTS \"reason\" text NOT NULL \
+                 DEFAULT ''",
+            )
+            .await?;
+        }
+        Err(e) if e.is_missing_table() => ensure_pin_tables(pool).await?,
+        Err(e) => return Err(e),
+        Ok(_) => {}
     }
     if pool.rows(SETTINGS_DDL).await.is_err() {
         pool.rows(SETTINGS_DDL).await?;
@@ -788,6 +805,107 @@ pub enum PinCause {
     /// Off a revoked version, on demand by the tenant, which the app
     /// developer granted.
     Tenant,
+    /// The end of a seamless move (`plan-versions.md` §2.1, increment 7):
+    /// the tenant's own database took the active version, was gated
+    /// against it, and the pin followed.
+    Move,
+}
+
+/// Where an open move stands (`$moves.phase`, §2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovePhase {
+    /// Recorded by the activation; the catch-up has not tried it yet.
+    Expanding,
+    /// The tenant's database could not be reached or did not answer. It
+    /// is tried again; ruled 2026-11-23 (Q10) as waiting, never failed.
+    Waiting,
+    /// The change was refused by name. The tenant stays on its version
+    /// until a new version is activated.
+    Refused,
+}
+
+impl MovePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MovePhase::Expanding => "expanding",
+            MovePhase::Waiting => "waiting",
+            MovePhase::Refused => "refused",
+        }
+    }
+
+    pub fn parse(text: &str) -> MovePhase {
+        match text {
+            "waiting" => MovePhase::Waiting,
+            "refused" => MovePhase::Refused,
+            _ => MovePhase::Expanding,
+        }
+    }
+}
+
+/// One open move: a tenant still on `from` while the active version is
+/// `to`, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Move {
+    pub space: String,
+    pub from: String,
+    pub to: String,
+    pub phase: MovePhase,
+    /// Empty until a try fails. Never shown to the tenant's people.
+    pub reason: String,
+    pub started_at: u64,
+}
+
+impl Move {
+    /// One line for the deployment owner.
+    pub fn line(&self) -> String {
+        match self.phase {
+            MovePhase::Expanding => format!(
+                "{} stays on {} while its database is brought to {}",
+                self.space, self.from, self.to
+            ),
+            MovePhase::Waiting => format!(
+                "{} stays on {} and waits for its database ({}); moving to {} is tried again",
+                self.space, self.from, self.reason, self.to
+            ),
+            MovePhase::Refused => format!(
+                "{} stays on {} and keeps serving it: moving to {} was refused: {}",
+                self.space, self.from, self.to, self.reason
+            ),
+        }
+    }
+}
+
+/// What an activation knows about the tenants with a database of their
+/// own ([`Versions::activate_with`]): which databases already took the
+/// version, and why the others did not.
+#[derive(Debug, Clone, Default)]
+pub struct MovePlan {
+    /// Tenants whose database records the version: pinned at once.
+    pub ready: std::collections::BTreeSet<String>,
+    /// Tenants whose database did not take it, with the phase and reason
+    /// their move starts in.
+    pub held: BTreeMap<String, (MovePhase, String)>,
+}
+
+const MOVE_COLUMNS: &str = "\"space\", \"from\", \"to\", \"phase\", \"reason\", \"started_at\"";
+
+fn move_row(r: &[Option<String>]) -> Option<Move> {
+    Some(Move {
+        space: r.first()?.clone()?,
+        from: r.get(1)?.clone()?,
+        to: r.get(2)?.clone()?,
+        phase: MovePhase::parse(r.get(3)?.as_deref()?),
+        reason: r.get(4).cloned().flatten().unwrap_or_default(),
+        started_at: r.get(5)?.clone()?.parse().ok()?,
+    })
+}
+
+fn sql_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|s| sql_lit(s))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl PinCause {
@@ -801,6 +919,7 @@ impl PinCause {
             PinCause::Window => "window",
             PinCause::Demand => "demand",
             PinCause::Tenant => "tenant",
+            PinCause::Move => "move",
         }
     }
 }
@@ -1900,6 +2019,34 @@ impl<'a> Versions<'a> {
         actor: &str,
         at: Timestamp,
     ) -> Result<Activated, VersionRefusal> {
+        self.activate_with(version, actor, at, &MovePlan::default())
+            .await
+    }
+
+    /// [`Versions::activate`], with what the caller already knows about
+    /// the tenants that have a database of their own.
+    ///
+    /// **The seamless move** (`plan-versions.md` §2.1, increment 7). A
+    /// tenant on the deployment's own database is pinned to `version` in
+    /// this transaction: that database was gated before the activation. A
+    /// tenant with a database of its own (`$spacedb`) is pinned now only
+    /// when `plan.ready` names it. Every other one keeps its pin and gets
+    /// an open move in `$moves`, in the phase `plan.held` gives or
+    /// `expanding`. It keeps serving its version. The catch-up
+    /// ([`crate::tenant_forward`]) expands its database, gates it, and
+    /// switches the pin with [`Versions::finish_moves`]. Before 2026-11-23
+    /// every pin moved here and a tenant whose database was behind was
+    /// held closed (25i).
+    ///
+    /// An activation supersedes every open move: each names the version it
+    /// replaces.
+    pub async fn activate_with(
+        &self,
+        version: &str,
+        actor: &str,
+        at: Timestamp,
+        plan: &MovePlan,
+    ) -> Result<Activated, VersionRefusal> {
         if registry::get(self.pool, version).await?.is_none() {
             return Err(VersionRefusal::UnknownVersion(version.to_string()));
         }
@@ -1937,12 +2084,148 @@ impl<'a> Versions<'a> {
             return Err(e);
         }
         registry::record_activation(&tx, version, actor, at).await?;
-        repin(&tx, &repin_sql(version, actor, cause, at.0, None)).await?;
+        // Whether any tenant has a database of its own. A deployment that
+        // never attached one has no `$spacedb`, and every tenant moves now.
+        let attached = tx
+            .rows("SELECT to_regclass('\"$spacedb\"') IS NOT NULL")
+            .await?
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .is_some_and(|v| v == "t" || v == "true");
+        tx.rows("DELETE FROM \"$moves\"").await?;
+        if !attached {
+            repin(&tx, &repin_sql(version, actor, cause, at.0, None)).await?;
+        } else {
+            let ready: Vec<String> = plan.ready.iter().cloned().collect();
+            let ready_sql = if ready.is_empty() {
+                String::new()
+            } else {
+                format!(" OR \"$space\" IN ({})", sql_list(&ready))
+            };
+            // On the deployment's own database, never pinned before, or
+            // already brought forward: pinned now.
+            let now = format!(
+                "AND (\"version\" IS NULL \
+                  OR \"$space\" NOT IN (SELECT \"$space\" FROM \"$spacedb\"){ready_sql})"
+            );
+            repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&now))).await?;
+            // Every other tenant stays where it is, with a move open.
+            tx.rows(&format!(
+                "INSERT INTO \"$moves\" (\"space\", \"from\", \"to\", \"phase\", \"reason\", \
+                   \"soak_until\", \"started_at\") \
+                 SELECT \"$space\", \"version\", {to}, 'expanding', '', 0, {at} \
+                 FROM \"$spaces\" \
+                 WHERE \"state\" IN {PINNED_STATES} AND \"version\" IS NOT NULL \
+                   AND \"version\" <> {to} \
+                   AND \"$space\" IN (SELECT \"$space\" FROM \"$spacedb\")",
+                to = sql_lit(version),
+                at = at.0,
+            ))
+            .await?;
+            for (space, (phase, reason)) in &plan.held {
+                tx.rows(&format!(
+                    "UPDATE \"$moves\" SET \"phase\" = {}, \"reason\" = {} \
+                     WHERE \"space\" = {}",
+                    sql_lit(phase.as_str()),
+                    sql_lit(reason),
+                    sql_lit(space)
+                ))
+                .await?;
+            }
+        }
         tx.commit().await?;
         Ok(Activated::Switched {
             from,
             to: version.to_string(),
         })
+    }
+
+    /// **Every open move** (§2.1), oldest first. A database with no
+    /// `$moves` answers empty.
+    pub async fn moves(&self) -> Result<Vec<Move>, VersionRefusal> {
+        let sql =
+            format!("SELECT {MOVE_COLUMNS} FROM \"$moves\" ORDER BY \"started_at\", \"space\"");
+        let rows = match self.pool.rows(&sql).await {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => return Ok(vec![]),
+            Err(e) if e.is_missing_column() => {
+                ensure_revocations(self.pool).await?;
+                self.pool.rows(&sql).await?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(rows.iter().filter_map(|r| move_row(r)).collect())
+    }
+
+    /// Say where one open move to `to` stands, after a try. A move that is
+    /// gone (finished, or superseded by another activation) is left gone.
+    pub async fn note_move(
+        &self,
+        space: &str,
+        to: &str,
+        phase: MovePhase,
+        reason: &str,
+    ) -> Result<(), VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        self.pool
+            .rows(&format!(
+                "UPDATE \"$moves\" SET \"phase\" = {}, \"reason\" = {} \
+                 WHERE \"space\" = {} AND \"to\" = {}",
+                sql_lit(phase.as_str()),
+                sql_lit(reason),
+                sql_lit(space),
+                sql_lit(to)
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// **Switch the pins of moves that are done** (§2.1 step 5): each of
+    /// `spaces` with an open move to `to` is pinned to `to`, cause `move`,
+    /// and its move closed, in one transaction with its `$pins` row. The
+    /// caller has brought each tenant's database to `to` and gated it. A
+    /// space whose move is gone, or names another version, is left alone.
+    /// The spaces that moved.
+    pub async fn finish_moves(
+        &self,
+        spaces: &[String],
+        to: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<Vec<String>, VersionRefusal> {
+        if spaces.is_empty() {
+            return Ok(vec![]);
+        }
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, to).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let open = format!(
+            "SELECT \"space\" FROM \"$moves\" WHERE \"to\" = {} AND \"space\" IN ({})",
+            sql_lit(to),
+            sql_list(spaces)
+        );
+        let filter = format!("AND \"$space\" IN ({open})");
+        let moved: Vec<String> = repin(
+            &tx,
+            &repin_sql(to, actor, PinCause::Move, at, Some(&filter)),
+        )
+        .await?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+        // A tenant already on `to` (pinned by hand meanwhile) closes too.
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"to\" = {} AND \"space\" IN ({})",
+            sql_lit(to),
+            sql_list(spaces)
+        ))
+        .await?;
+        tx.commit().await?;
+        Ok(moved)
     }
 
     /// The version a tenant created now starts on: `versions.new_tenant`
@@ -2136,6 +2419,13 @@ impl<'a> Versions<'a> {
             &tx,
             &repin_sql(&version, actor, PinCause::Pin, at, Some(&filter)),
         )
+        .await?;
+        // A person chose this tenant's version, so an open move (§2.1) no
+        // longer applies to it.
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
         .await?;
         tx.commit().await?;
         let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);

@@ -361,6 +361,7 @@
       "environments",
       "promotion"
     ],
+    "crates/ordo-host/src/evolve.rs": "all",
     "crates/ordo-host/src/exit_ops.rs": "all",
     "crates/ordo-host/src/external_check.rs": "all",
     "crates/ordo-host/src/federation.rs": "all",

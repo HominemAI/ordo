@@ -48,6 +48,9 @@
 //!   What `ordo promote` reads from the step before.
 //! - `std.deployment.promote(...)`: the promotion gate on this deployment
 //!   ([`crate::promotion`]). What `ordo promote` does.
+//! - `std.deployment.evolve`, `std.deployment.plans` and
+//!   `std.deployment.replay`: stored plans ([`crate::evolve`]). What `ordo
+//!   evolve` does.
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -129,8 +132,18 @@ pub const RENAME_ENVIRONMENT: &str = "std.deployment.renameEnvironment";
 pub const VERSION_SOURCE: &str = "std.deployment.versionSource";
 /// **Promote a version into this deployment**, through the gate.
 pub const PROMOTE: &str = "std.deployment.promote";
+/// **Render, check and store a plan** from one stored version to another
+/// (`plan-versions.md` §2.3), and run it on the deployment's own database
+/// when asked. What `ordo evolve --from --to` does.
+pub const EVOLVE: &str = crate::evolve::EVOLVE;
+/// The stored plans, or one edge's.
+pub const PLANS: &str = crate::evolve::PLANS;
+/// Replay the stored path on one tenant's database, then pin it.
+pub const REPLAY: &str = crate::evolve::REPLAY;
+/// What a rollback to a version would find: its externals and peers now.
+pub const ROLLBACK_CHECK: &str = crate::evolve::ROLLBACK_CHECK;
 
-pub const OPS: [&str; 21] = [
+pub const OPS: [&str; 25] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -152,6 +165,10 @@ pub const OPS: [&str; 21] = [
     RENAME_ENVIRONMENT,
     VERSION_SOURCE,
     PROMOTE,
+    EVOLVE,
+    PLANS,
+    REPLAY,
+    ROLLBACK_CHECK,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -541,6 +558,9 @@ pub fn specs() -> Vec<OpSpec> {
             &["promoted", "from", "to", "sourceId", "report"],
         ),
     ]
+    .into_iter()
+    .chain(crate::evolve::specs())
+    .collect()
 }
 
 fn name_param() -> ParamSpec {
@@ -780,6 +800,9 @@ pub async fn execute(
                 o.remove("moved");
             }
             row
+        }
+        EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK => {
+            crate::evolve::execute(ops, name, bound, caller).await?
         }
         PIN => {
             let tenant = text(bound, "tenant").unwrap_or_default();

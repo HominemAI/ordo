@@ -74,6 +74,7 @@ pub mod directory;
 pub mod email_code;
 pub mod enrolment;
 pub mod environments;
+pub mod evolve;
 pub mod exit_ops;
 pub mod external_check;
 pub mod federation;

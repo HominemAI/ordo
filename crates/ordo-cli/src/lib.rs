@@ -36,6 +36,7 @@ use ordo_schema::{build_with_keys, FieldTy, KeyTable, Schema};
 use ordo_sema::Registry;
 use ordo_syntax::parse_program;
 
+pub mod branches;
 pub mod deploy_wait;
 pub mod dev;
 pub mod dev_db;

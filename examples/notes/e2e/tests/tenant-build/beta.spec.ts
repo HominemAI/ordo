@@ -17,7 +17,8 @@
  * A regression looks like Ada moved back to main by the apply, Bob served the
  * branch, or a pin by hand that moves a build's tenant.
  *
- * Every version number rises, so it runs after `rehearsal`, last. Locally,
+ * Every version number rises, and `branch` stores 0.5.x, so it runs after
+ * `branch`, last. Locally,
  * `--project=tenant-build --no-deps` applies v3 and runs alone. Chromium only.
  */
 
@@ -109,8 +110,8 @@ test('a beta tenant serves the branch while the rest serve main', async ({ brows
     applyProgram(stack().programV3);
   }
   const from = servingVersion() ?? '';
-  const beta = servedPlus(from, '0.3.6', 'betaNotes');
-  const main = servedPlus(from, '0.3.7', 'mainNotes');
+  const beta = servedPlus(from, '0.6.0', 'betaNotes');
+  const main = servedPlus(from, '0.6.1', 'mainNotes');
   const d = await developer(browser);
   dev = d;
 
@@ -128,9 +129,9 @@ test('a beta tenant serves the branch while the rest serve main', async ({ brows
     const adaTenant = adaWho().space;
 
     await test.step('the branch is stored beside main, and Ada joins build beta', () => {
-      expect(ok(d.ordo(['apply', beta, '--no-activate', ...door()]))).toContain('0.3.6');
-      const set = ok(d.ordo(['tenant-builds', 'set', 'beta', '0.3.6', '--reason', 'public beta of betaNotes', ...door()]));
-      expect(set).toMatch(/^build +beta serves #\d+ · 0\.3\.6$/m);
+      expect(ok(d.ordo(['apply', beta, '--no-activate', ...door()]))).toContain('0.6.0');
+      const set = ok(d.ordo(['tenant-builds', 'set', 'beta', '0.6.0', '--reason', 'public beta of betaNotes', ...door()]));
+      expect(set).toMatch(/^build +beta serves #\d+ · 0\.6\.0$/m);
       const joined = ok(d.ordo(['tenant-builds', 'join', 'beta', adaTenant, ...door()]));
       expect(joined).toContain(`joined     ${adaTenant} to build beta on`);
       const list = ok(d.ordo(['tenant-builds', 'list', ...door()]));
@@ -153,7 +154,7 @@ test('a beta tenant serves the branch while the rest serve main', async ({ brows
     });
 
     await test.step("main moves on: Bob's tenant follows, Ada's stays on the branch", async () => {
-      expect(ok(d.ordo(['apply', main, ...door()]))).toContain('0.3.7');
+      expect(ok(d.ordo(['apply', main, ...door()]))).toContain('0.6.1');
       await expect
         .poll(async () => (await read(request, bobWho(), 'mainNotes')).status, { timeout: 60_000 })
         .toBe(200);
@@ -161,7 +162,7 @@ test('a beta tenant serves the branch while the rest serve main', async ({ brows
       expect((await read(request, adaWho(), 'betaNotes')).status).toBe(200);
       const adaMain = await read(request, adaWho(), 'mainNotes');
       expect(adaMain.status, adaMain.text).not.toBe(200);
-      const pinned = d.ordo(['versions', 'pin', adaTenant, '0.3.7', ...door()]);
+      const pinned = d.ordo(['versions', 'pin', adaTenant, '0.6.1', ...door()]);
       expect(pinned.code).not.toBe(0);
       expect(`${pinned.out}${pinned.err}`).toContain(`ordo tenant-builds leave ${adaTenant}`);
       const bobNew = unique('Bob after ');
@@ -171,7 +172,7 @@ test('a beta tenant serves the branch while the rest serve main', async ({ brows
 
     await test.step("Ada leaves the build: her tenant serves main, with her notes", async () => {
       const left = ok(d.ordo(['tenant-builds', 'leave', adaTenant, ...door()]));
-      expect(left).toContain('0.3.7 (the active version)');
+      expect(left).toContain('0.6.1 (the active version)');
       await expect
         .poll(async () => (await read(request, adaWho(), 'mainNotes')).status, { timeout: 60_000 })
         .toBe(200);

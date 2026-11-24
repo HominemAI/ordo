@@ -173,6 +173,9 @@ fn usage() -> ! {
          characters. The git commit of the source is recorded too, with\n      \
          `-dirty` when the applied files changed since it; outside a git\n      \
          repository nothing is recorded.\n      \
+         `--branch <name> [--seed <file>]` stores the version in dev,\n      \
+         unactivated, and serves it to the branch's own tenant; `ordo\n      \
+         branches list|delete <name> --reason \"...\"` (see `ordo branches`).\n      \
          It then waits until every running node serves the new version and\n      \
          has brought the tenants' databases to it, and names any tenant\n      \
          held closed. `--wait-secs <n>` (or ORDO_APPLY_WAIT_SECS, default\n      \
@@ -620,6 +623,7 @@ fn main() {
             | "windows"
             | "environments"
             | "clones"
+            | "branches"
             | "rehearsals"
             | "tenant-builds"
             | "promote"

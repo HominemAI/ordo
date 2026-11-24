@@ -158,14 +158,25 @@ export default defineConfig({
       dependencies: ['seal'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // Dev branches as tenants on their own version (plan-versions.md
+    // increment 5): 2 branches served side by side while the stack serves
+    // its own. It applies programs, so it runs after `rehearsal`, last. Locally,
+    // `--project=branch --no-deps`.
+    {
+      name: 'branch',
+      testMatch: /branch\/.*\.spec\.ts/,
+      dependencies: ['rehearsal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Tenant builds (plan-versions.md increment 16): a beta tenant serves the
-    // branch while the rest serve main. It stores 0.3.6 and activates 0.3.7,
-    // and version numbers only rise, so it runs after `rehearsal`, last.
+    // branch while the rest serve main. It stores 0.6.0 and activates 0.6.1,
+    // above `branch`'s 0.5.x, and version numbers only rise, so it runs after
+    // `branch`, last.
     // Locally, `--project=tenant-build --no-deps`.
     {
       name: 'tenant-build',
       testMatch: /tenant-build\/.*\.spec\.ts/,
-      dependencies: ['rehearsal'],
+      dependencies: ['branch'],
       use: { ...devices['Desktop Chrome'] },
     },
     {

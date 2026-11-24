@@ -348,10 +348,18 @@ command after that goes to the door with that session:
   --prune attachments.size` prunes nothing on the first ask, is refused
   without `--confirm-deployment notes`, and removes the column when asked
   with both. The stack serves the exit ops (`ORDO_EXIT_BUNDLE_DIR`).
+- `moves` (`tests/evolve/dual-writes.spec.ts`, after `orphans`): 0.3.2 is
+  notes v3 with `notes.body` renamed to `text` with `prev`, made from notes
+  v3's file at run time. `ordo evolve --tenant <Ada> --budget 1
+  --chunk-rows 2` stops the move in `backfilling`; Ada types into a note
+  and adds one; the move switches into its soak; she types again on 0.3.2;
+  `--revert` takes her back to 0.3.0 and, after a reload, every note holds
+  what she typed. The move switches again and `--close-soak` orphans
+  `notes.body` (increment 11a).
 
 Each prints every command and its answer in the run's log. Run alone with
-`--project=evolve --no-deps`, `--project=evolve-checks --no-deps` or
-`--project=orphans --no-deps`.
+`--project=evolve --no-deps`, `--project=evolve-checks --no-deps`,
+`--project=orphans --no-deps` or `--project=moves --no-deps`.
 
 ## The console
 

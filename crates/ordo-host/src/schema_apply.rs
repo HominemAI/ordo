@@ -2498,8 +2498,11 @@ fn index_record(
     vec![
         format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
         format!("{};\n", ordo_exec::overlay::SEALS_DDL),
-        format!("{};\n", ordo_exec::overlay::SEALS_NORMALIZE_DDL),
+        // After the lock: the `ALTER` locks `$seals`, which a write reads
+        // under `"$renames"`. Taken first, a write holding `"$renames"`
+        // and reading `$seals` would deadlock with it.
         "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!("{};\n", ordo_exec::overlay::SEALS_NORMALIZE_DDL),
         format!(
             "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
              \"version\", \"normalize\") VALUES ({}, {}, {}, {}, {}, {}, {}) ON CONFLICT \

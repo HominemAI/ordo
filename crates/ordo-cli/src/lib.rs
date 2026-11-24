@@ -40,6 +40,7 @@ pub mod deploy_wait;
 pub mod dev;
 pub mod dev_db;
 pub mod direct;
+pub mod evolve;
 pub mod identity;
 pub mod introspect;
 pub mod keys;

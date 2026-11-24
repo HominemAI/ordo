@@ -141,6 +141,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
+        "evolve" => &["--run", "--list"],
         _ => &[],
     }
 }
@@ -409,6 +410,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
+        "evolve" => rt.block_on(crate::evolve::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -3360,7 +3362,7 @@ pub(crate) fn revoked_list(list: &[ordo_host::versions::RevokedVersion]) -> Stri
 }
 
 /// The door flags a `versions` subcommand takes besides its own.
-const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
+pub(crate) const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
 
 /// `ordo versions label <version> "<text>"`, or `--clear`: change a stored
 /// version's label. Locally through the `Versions` client, or over the

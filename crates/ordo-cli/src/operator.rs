@@ -1359,6 +1359,17 @@ async fn security_checkpoint(flags: Flags) -> Outcome {
 /// is worse than refusing. The manual form (no `--tenant`) is unchanged and
 /// stays as break-glass, for a host `$spacedb` cannot resolve or an
 /// operator who does not trust what is stored.
+///
+/// # `--tenant`: the pin follows the restored data (§2.9, increment 17)
+///
+/// A tenant's own database restored from a snapshot taken on another
+/// version records that version in its `$migrations`. Before the marker,
+/// the version is checked against what this deployment stores: one it does
+/// not store is refused, naming it, and nothing is recorded. After the
+/// marker, `Versions::restore_pin` moves the tenant's pin to it, cause
+/// `restore`, or leaves the pin ahead and the tenant closed when that
+/// version is revoked or below `versions.minimum` (Q13). The manual form
+/// moves no pin.
 async fn restore(flags: Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--record",
@@ -1410,9 +1421,20 @@ async fn restore(flags: Flags) -> Outcome {
         Err(e) => return Outcome::usage(e),
     };
 
-    let (pool, witness, resolved) = match restore_target(&flags, &space).await {
+    let (pool, witness, resolved, control) = match restore_target(&flags, &space).await {
         Ok(t) => t,
         Err(o) => return o,
+    };
+    // **The version the restored data is at** (§2.9, increment 17), read
+    // before the marker: a version this deployment does not store is
+    // refused here, and the tenant stays closed until it is stored and this
+    // runs again.
+    let data_version = match &control {
+        None => None,
+        Some(control) => match restored_version(control, &pool, &space).await {
+            Ok(v) => v,
+            Err(o) => return o,
+        },
     };
     let db = Db::Pool(&pool);
     let before = undo::continuity(db, &witness, &space)
@@ -1427,6 +1449,7 @@ async fn restore(flags: Flags) -> Outcome {
             Err(_) => return Outcome::usage(format!("`--restored-from` is an index, not `{v}`")),
         },
     };
+    let actor = operator.clone();
     let rec = undo::RestoreRecord {
         operator,
         source,
@@ -1481,6 +1504,18 @@ async fn restore(flags: Flags) -> Outcome {
                 }
             ));
             out.push_str(&format!("continuity after   {after}\n"));
+            if let (Some(control), Some(data)) = (&control, &data_version) {
+                match ordo_host::versions::Versions::on(control)
+                    .restore_pin(&space.0, data, &actor, now().0)
+                    .await
+                {
+                    Ok(pin) => out.push_str(&restore_pin_line(&space.0, &pin)),
+                    Err(e) => {
+                        out.push_str(&format!("version REFUSED {e}\n"));
+                        return Outcome::failed(out);
+                    }
+                }
+            }
             if r.witnessed {
                 Outcome::ok(out)
             } else {
@@ -1503,14 +1538,67 @@ async fn restore(flags: Flags) -> Outcome {
 /// Returns the database this call actually used, for the report — `None`
 /// in the manual form, which already knows what it typed and gains
 /// nothing from being told back.
+/// The version a restored tenant database records, checked against what
+/// this deployment stores (`Versions::restore_check`). `None` for a
+/// database that records none (provisioned before versions were recorded).
+async fn restored_version(
+    control: &Pool,
+    pool: &Pool,
+    space: &SpaceId,
+) -> Result<Option<String>, Outcome> {
+    let data = match ordo_exec::spacedb::recorded_version(pool).await {
+        Ok(ordo_exec::spacedb::TargetVersion::At(v)) => v,
+        Ok(ordo_exec::spacedb::TargetVersion::Unknown) => return Ok(None),
+        Err(e) => return Err(Outcome::failed(format!("database: {e}\n"))),
+    };
+    match ordo_host::versions::Versions::on(control)
+        .restore_check(&space.0, &data)
+        .await
+    {
+        Ok(_) => Ok(Some(data)),
+        Err(e) => Err(Outcome::failed(format!(
+            "space   {space}\nREFUSED {e}\nNothing was recorded, and the tenant stays closed\n"
+        ))),
+    }
+}
+
+/// One line for where a restore left the tenant's pin.
+fn restore_pin_line(space: &str, pin: &ordo_host::versions::RestorePin) -> String {
+    use ordo_host::versions::RestorePin;
+    match pin {
+        RestorePin::Unchanged { version } => {
+            format!("version {version}, the tenant's pin already\n")
+        }
+        RestorePin::Pinned { change } => format!(
+            "version PINNED {} -> {} · cause restore · epoch {}. The tenant serves {}; it \
+             moves on with a rollout or `ordo versions pin {space} <version>`\n",
+            change.from.as_deref().unwrap_or("(none)"),
+            change.to,
+            change.epoch,
+            change.to,
+        ),
+        RestorePin::Held { data, pin, why } => {
+            let pin = pin.as_deref().unwrap_or("(none)");
+            format!(
+                "version HELD the data is at {data} and the pin stays at {pin}: {why}. The \
+                 tenant is closed until its database is brought to {pin} (the catch-up does \
+                 it for the active version, or `ordo versions pin {space} <version>`)\n"
+            )
+        }
+    }
+}
+
+/// The fourth part is the control database when the tenant sits on a
+/// database of its own (`--tenant` form only): where its pin is, which a
+/// restore of that database moves to the data's version (§2.9).
 async fn restore_target(
     flags: &Flags,
     space: &SpaceId,
-) -> Result<(Pool, Witness, Option<String>), Outcome> {
+) -> Result<(Pool, Witness, Option<String>, Option<Pool>), Outcome> {
     if !flags.has("--tenant") {
         let pool = connect(flags).await?;
         let witness = witness_for(flags, &pool).await?;
-        return Ok((pool, witness, None));
+        return Ok((pool, witness, None, None));
     }
     // The control connection: `--control-db`, or `--db`'s own default —
     // the same fallback `witness_for` already uses for the single-database
@@ -1545,26 +1633,24 @@ async fn restore_target(
         // row is served from the deployment's default.
         None => {
             let witness = Witness::new(control.clone());
-            Ok((control, witness, Some("default (unattached)".to_string())))
+            Ok((
+                control,
+                witness,
+                Some("default (unattached)".to_string()),
+                None,
+            ))
         }
         Some(a) => {
-            let credentials = ordo_host::runtime::credentials_from_env()
-                .map_err(|e| Outcome::failed(format!("{e}")))?
-                .ok_or_else(|| {
-                    Outcome::failed(
-                        "this tenant is attached to its own database, and no \
-                         ORDO_TENANT_CREDENTIALS provider is configured on this node to \
-                         dial it\n"
-                            .to_string(),
-                    )
-                })?;
             let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
             let template = pool_config(flags);
             // `$deployment` is the password this command already holds for
             // the control database, so a tenant on the deployment's own
-            // cluster needs no second copy in the directory.
-            let credentials = ordo_exec::route::WithOwnCredential::wrapping(
-                credentials,
+            // cluster needs no second copy in the directory: the door dials
+            // it the same way (`runtime::tenant_credentials`). Any other
+            // label is refused naming ORDO_TENANT_CREDENTIALS.
+            let credentials = ordo_host::runtime::tenant_credentials(
+                ordo_host::runtime::credentials_from_env()
+                    .map_err(|e| Outcome::failed(format!("{e}")))?,
                 template.password.clone(),
             );
             let cfg = ordo_exec::route::target_config(&a, credentials.as_ref(), &template)
@@ -1576,8 +1662,8 @@ async fn restore_target(
             // witness is never restored, and it is what makes a restore
             // checkable), never the resolved target — a tenant on its own
             // perimeter has no witness of its own to be.
-            let witness = Witness::new(control);
-            Ok((pool, witness, Some(label)))
+            let witness = Witness::new(control.clone());
+            Ok((pool, witness, Some(label), Some(control)))
         }
     }
 }

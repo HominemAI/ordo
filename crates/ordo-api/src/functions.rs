@@ -92,9 +92,14 @@ impl CallerDoor {
         }
     }
 
-    /// The serving program's op `name`, as the door sees it.
+    /// Op `name` as the caller's tenant's version declares it
+    /// (`plan-versions.md` §1.10): a function's `uses` resolve in the same
+    /// version as the function.
     pub fn spec(&self, name: &str) -> Option<OpSpec> {
-        self.state.registry.current().get(name)
+        self.state
+            .registry
+            .current()
+            .get_in(Some(&self.space), name)
     }
 
     /// Runs `op` with `args` as the caller, recorded as `acting` on behalf
@@ -179,6 +184,16 @@ pub trait FunctionRunner: Send + Sync {
     /// `None` when the program declares no such function; the door then
     /// answers as it does for an unknown op.
     fn spec(&self, name: &str) -> Option<OpSpec>;
+
+    /// Function `name` as the program serving `space` declares it. A runner
+    /// that serves one program answers [`FunctionRunner::spec`]; a host
+    /// that serves each tenant its pinned version (`plan-versions.md`
+    /// §1.10) answers per space, and `None` when the tenant's version
+    /// declares no such function, whatever another version declares.
+    fn spec_in(&self, space: Option<&str>, name: &str) -> Option<OpSpec> {
+        let _ = space;
+        self.spec(name)
+    }
 
     /// Runs the call. The pause check, the run and its `$fnruns` row are
     /// the runner's.

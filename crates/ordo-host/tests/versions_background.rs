@@ -717,6 +717,41 @@ async fn a_version_stays_loaded_for_min_residency() {
     wait(|| node.deployment.loaded("0.1.0").is_none()).await;
 }
 
+/// **The version a node booted on keeps `versions.min_residency` too**
+/// (Reported fix, 2026-11-24). It is installed by no swap, and its load
+/// clock was left at 0, so it read as loaded since 1970: the moment no pin
+/// named it, it dropped, and a pin moved back had it compiled again while
+/// its tenants answered `space_unavailable`. Here the node boots on 0.2.0,
+/// 0.1.0 is activated again and every pin leaves 0.2.0: at the default
+/// residency, 0.2.0 stays loaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_version_a_node_booted_on_stays_loaded_for_min_residency() {
+    let node = boot_with("ordo_vbg_boot_residency", None).await;
+    assert_eq!(
+        node.deployment.current().version,
+        "0.2.0",
+        "booted on 0.2.0"
+    );
+    Versions::on(&node.pool)
+        .activate(
+            "0.1.0",
+            "deployment-owner:ada",
+            ordo_commandlog::Timestamp(70),
+        )
+        .await
+        .expect("0.1.0 active again");
+    wait(|| node.deployment.current().version == "0.1.0").await;
+    // Every pin is on 0.1.0 now; reads of the pins have run since.
+    for _ in 0..3 {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(
+        node.deployment.loaded("0.2.0").is_some(),
+        "the boot version is kept for versions.min_residency"
+    );
+}
+
 /// **`versions.idle_evict_after`**: 0.1.0 serves nothing for a second and
 /// is unloaded. Nothing loads it again by itself. The next signed-in
 /// request for its tenant wakes it, waits for the load and is answered as

@@ -1248,7 +1248,8 @@ under the v2 shape, then moves again.
   does not hold a tenant closed on a revoked version: it refuses.
 - The manual form of `ordo restore --record` moves the pin as `--tenant`
   does when `--control-db` names a database other than `--db`.
-- Tests: `ordo-host/tests/exit_ops_versions.rs`,
+- Tests: `ordo-host/tests/exit_ops_versions.rs` (the shape refusal:
+  `an_import_into_a_database_not_of_the_bundles_shape_is_refused_by_name`),
   `ordo-cli/tests/restore_versions_cli.rs`
   (`the_manual_form_with_a_control_database_moves_the_pin_too`).
 

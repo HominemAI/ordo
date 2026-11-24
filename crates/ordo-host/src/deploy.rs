@@ -365,7 +365,7 @@ impl Verified {
             .first()
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
-        Ok(Verified(Loaded {
+        let loaded = Loaded {
             version,
             fixture,
             exec,
@@ -375,7 +375,15 @@ impl Verified {
             canary_op,
             views: RwLock::new(std::collections::HashMap::new()),
             clock: LoadClock::default(),
-        }))
+        };
+        // **Loaded now**, whatever installs it. The version a node boots on
+        // is installed by no swap, and a clock left at 0 made it look
+        // loaded since 1970: past `versions.min_residency` the moment no
+        // pin named it, so a pin moved away and back dropped and compiled it
+        // again, its tenants answered `space_unavailable` meanwhile
+        // (Reported fix, 2026-11-24). Swaps and installs stamp it again.
+        loaded.clock.installed(crate::runtime::now_secs());
+        Ok(Verified(loaded))
     }
 
     /// Does this candidate seal through `keys`? See [`Loaded::custody_is`].

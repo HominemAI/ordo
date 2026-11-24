@@ -347,12 +347,41 @@ The pin this plan adds:
 
 | Cost | Size | When it is paid |
 |---|---|---|
-| Memory | one `Loaded` per served version per node, and one `SpaceView` per space per `Loaded`. **Not measured.** Increment 3 measures it at 1,000+ spaces, shares schema and registry by `Arc`, and evicts views per space. | per version in use |
+| Memory | one `Loaded` per served version per node, and one `SpaceView` per space per `Loaded`. Measured in increment 3 (below): a view is 67 to 222 KB, so 1,000 spaces cost 65 to 217 MB per version. Bounded by `versions.memory_budget` and view eviction. | per version in use |
 | Load | one compile plus one gate per version per node | at pin time, at boot, and after each Ordo release |
 | Idle versions | evicted after `versions.idle_evict_after` | only when a version has no traffic |
 | Ordo releases | every reachable version's source compiles and gates under the new release (§2.6) | every release |
 | Mixed fleets | during a rolling Ordo upgrade, nodes differ. A pin switch completes when every live node has Y loaded. | each upgrade |
 | Fixes | a fix to the app's ops reaches a tenant only when it moves | the app developer's choice (owner, 2026-10-01) |
+
+**Measured in the increment 3 remainder** (`tests/versions_memory.rs`,
+release build, macOS, 2026-11-23; resident memory by `ps`, so the
+figures are approximate):
+
+| Program | Source | One `Loaded` | One view | 1,000 views | Cutting one view |
+|---|---|---|---|---|---|
+| teamspace | 4 KB | 3.6 MB (first, so it carries the process's warm-up) | 222 KB | 217 MB | 83 µs |
+| shopfront | 5 KB | 0.3 MB | 132 KB | 129 MB | 115 µs |
+| notes-v2 | 8 KB | 0.05 MB | 67 KB | 65 MB | 107 µs |
+
+- A view clones the version's schema and registry, so it is the cost
+  that grows with spaces. The `Loaded` itself is small.
+- A view is cheap to cut again, about 0.1 ms. So views are evicted, and
+  the schema is not yet shared by `Arc`: that changes the public type of
+  `ordo_exec::Executor` and every test that builds one, and is left as a
+  separate change while 2 other increments work in the same code.
+- What was set from it:
+  - `versions.memory_budget` (`ORDO_VERSIONS_MEMORY_BUDGET`, 512MB): a
+    view counts as 256 KB, the largest rounded up. Each loaded version
+    keeps its share, the least recently used evicted first, on every pin
+    read (`PinStream::evict_views`). Views idle for
+    `versions.idle_evict_after` go too. A view a request holds is never
+    evicted.
+  - `versions.max_loaded` (`ORDO_VERSIONS_MAX_LOADED`, 8): a load past it
+    is refused, naming the setting, and that version's tenants stay closed
+    on this node.
+- Tries: 2. The first, a counting allocator, is refused by the
+  workspace's `unsafe_code = "forbid"`; the second reads resident memory.
 
 Rollout arithmetic at `backfill.concurrency` 8 and 1 second per tenant:
 
@@ -1338,7 +1367,8 @@ round is about 35 minutes for the full suite.
 - Session 2 built the revoked-version moves (§1.11): in the window, on
   demand, by the tenant when granted, each to the developer's target.
 - Memory at 1,000+ spaces, measured and recorded here; `versions.max_loaded`
-  and `versions.memory_budget` set from it; views evicted per space.
+  and `versions.memory_budget` set from it; views evicted per space. Done
+  in the remainder (§1.5). Left: sharing the schema by `Arc`.
 - Load guards: `versions.min_residency`, `versions.idle_evict_after`,
   `versions.max_concurrent_loads` as settings. Built in the remainder
   (§1.4, "Load guards").
@@ -1546,9 +1576,9 @@ refusal a setting can fix names the setting and the value.
 | `versions.new_tenant` | last version that finished a rollout (the active version until rollouts) | deployment, stored in Ordo |
 | `versions.idle_evict_after` | 30 minutes, or `off` (built in increment 3, stored in Ordo) | deployment |
 | `versions.min_residency` | 10 minutes (built in increment 3, stored in Ordo) | deployment |
-| `versions.max_loaded` | set from increment 3's memory measurement | node |
+| `versions.max_loaded` | 8 (`ORDO_VERSIONS_MAX_LOADED`, set from increment 3's measurement) | node |
 | `versions.max_concurrent_loads` | 1 (`ORDO_VERSIONS_MAX_CONCURRENT_LOADS`, built in increment 3) | node |
-| `versions.memory_budget` | set from increment 3's memory measurement | node |
+| `versions.memory_budget` | 512MB of per-space views (`ORDO_VERSIONS_MEMORY_BUDGET`, set from increment 3's measurement) | node |
 | `pins.reconcile_interval` | 30 seconds (`ORDO_PINS_RECONCILE_SECS`, built 2026-11-05) | deployment |
 | `forward.retry_interval` | 15 seconds | deployment |
 | `editions.load_window` | 12 months | Ordo release |

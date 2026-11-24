@@ -47,20 +47,112 @@ pub const MAX_LOADS_ENV: &str = "ORDO_VERSIONS_MAX_CONCURRENT_LOADS";
 /// Its default (§7).
 pub const DEFAULT_MAX_LOADS: usize = 1;
 
-/// [`MAX_LOADS_ENV`], or the default when unset. A value that is not a
-/// whole number from 1 to 16 is refused at boot, naming the variable.
-pub fn max_loads_from_env() -> Result<usize, String> {
-    match std::env::var(MAX_LOADS_ENV) {
-        Err(_) => Ok(DEFAULT_MAX_LOADS),
-        Ok(v) if v.trim().is_empty() => Ok(DEFAULT_MAX_LOADS),
-        Ok(v) => match v.trim().parse::<usize>() {
-            Ok(n) if (1..=16).contains(&n) => Ok(n),
-            _ => Err(format!(
-                "{MAX_LOADS_ENV}={v} is not a whole number from 1 to 16. Set it to how many \
-                 versions this node may load at once, or unset it for {DEFAULT_MAX_LOADS}"
-            )),
-        },
+/// `versions.max_loaded`: how many versions this node holds loaded at
+/// once, the active one included. A load past it is refused, naming the
+/// setting, and the version's tenants are closed on this node until a
+/// version drops or the setting is raised.
+pub const MAX_LOADED_ENV: &str = "ORDO_VERSIONS_MAX_LOADED";
+/// Its default. A `Loaded` measured 0.05 to 3.6 MB in
+/// `tests/versions_memory.rs`; its views are what cost, and the budget
+/// below bounds those.
+pub const DEFAULT_MAX_LOADED: usize = 8;
+
+/// `versions.memory_budget`: the memory this node gives per-space views,
+/// across every loaded version. Each version keeps at most its share of
+/// [`VIEW_BYTES`]-sized views, the least recently used evicted first.
+pub const MEMORY_BUDGET_ENV: &str = "ORDO_VERSIONS_MEMORY_BUDGET";
+/// Its default: 512 MB.
+pub const DEFAULT_MEMORY_BUDGET: u64 = 512 * 1024 * 1024;
+/// What one per-space view is counted as: the largest measured, 222 KB for
+/// teamspace, rounded up (`tests/versions_memory.rs`, 2026-11-23).
+pub const VIEW_BYTES: u64 = 256 * 1024;
+
+/// A node's limits on versions and views, read from the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeLimits {
+    pub max_loads: usize,
+    pub max_loaded: usize,
+    pub memory_budget: u64,
+}
+
+impl Default for NodeLimits {
+    fn default() -> NodeLimits {
+        NodeLimits {
+            max_loads: DEFAULT_MAX_LOADS,
+            max_loaded: DEFAULT_MAX_LOADED,
+            memory_budget: DEFAULT_MEMORY_BUDGET,
+        }
     }
+}
+
+impl NodeLimits {
+    /// From the three variables. Each one that does not parse is said,
+    /// naming it, and its default is kept.
+    pub fn from_env() -> (NodeLimits, Vec<String>) {
+        NodeLimits::from(|v| std::env::var(v).ok())
+    }
+
+    /// [`NodeLimits::from_env`], reading through `read`.
+    pub fn from(read: impl Fn(&str) -> Option<String>) -> (NodeLimits, Vec<String>) {
+        let mut out = NodeLimits::default();
+        let mut said = Vec::new();
+        match parse_count(read(MAX_LOADS_ENV), MAX_LOADS_ENV, 16) {
+            Ok(Some(n)) => out.max_loads = n,
+            Ok(None) => {}
+            Err(e) => said.push(e),
+        }
+        match parse_count(read(MAX_LOADED_ENV), MAX_LOADED_ENV, 256) {
+            Ok(Some(n)) => out.max_loaded = n.max(1),
+            Ok(None) => {}
+            Err(e) => said.push(e),
+        }
+        match read(MEMORY_BUDGET_ENV).filter(|v| !v.trim().is_empty()) {
+            None => {}
+            Some(v) => match parse_bytes(&v) {
+                Some(b) if b >= VIEW_BYTES => out.memory_budget = b,
+                _ => said.push(format!(
+                    "{MEMORY_BUDGET_ENV}={v} is not a size like `512MB` or `2GB` of at least \
+                     256KB; the default, 512MB, is kept"
+                )),
+            },
+        }
+        (out, said)
+    }
+
+    /// The views one version may keep while `loaded` versions are loaded.
+    pub fn views_per_version(&self, loaded: usize) -> u64 {
+        (self.memory_budget / VIEW_BYTES / loaded.max(1) as u64).max(1)
+    }
+}
+
+fn parse_count(v: Option<String>, name: &str, max: usize) -> Result<Option<usize>, String> {
+    let Some(v) = v.filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    match v.trim().parse::<usize>() {
+        Ok(n) if (1..=max).contains(&n) => Ok(Some(n)),
+        _ => Err(format!(
+            "{name}={v} is not a whole number from 1 to {max}; its default is kept"
+        )),
+    }
+}
+
+/// `512MB`, `2GB`, `256KB` or a number of bytes.
+pub fn parse_bytes(v: &str) -> Option<u64> {
+    let t = v.trim().to_ascii_uppercase();
+    let (n, unit) = match t.find(|c: char| !c.is_ascii_digit()) {
+        Some(i) => (&t[..i], t[i..].trim()),
+        None => (t.as_str(), ""),
+    };
+    let n: u64 = n.parse().ok()?;
+    let mul = match unit {
+        "" | "B" => 1,
+        "KB" | "K" => 1024,
+        "MB" | "M" => 1024 * 1024,
+        "GB" | "G" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    n.checked_mul(mul)
 }
 
 /// What one read of the stream did.
@@ -102,6 +194,8 @@ pub struct PinStream {
     loading: tokio::sync::Mutex<()>,
     /// `versions.max_concurrent_loads`: loads in one pass at once.
     max_loads: usize,
+    /// `versions.max_loaded` and `versions.memory_budget`.
+    limits: NodeLimits,
     /// The versions being loaded now, for per-node health.
     status: Option<Arc<crate::node_status::NodeStatus>>,
 }
@@ -122,6 +216,7 @@ impl PinStream {
             space,
             loading: tokio::sync::Mutex::new(()),
             max_loads: DEFAULT_MAX_LOADS,
+            limits: NodeLimits::default(),
             status: None,
         })
     }
@@ -134,7 +229,7 @@ impl PinStream {
         cfg: PoolConfig,
         keys: Arc<dyn ordo_crypto::KeyProvider>,
         space: ordo_crypto::SpaceId,
-        max_loads: usize,
+        limits: NodeLimits,
         status: Arc<crate::node_status::NodeStatus>,
     ) -> Arc<PinStream> {
         Arc::new(PinStream {
@@ -144,7 +239,8 @@ impl PinStream {
             keys,
             space,
             loading: tokio::sync::Mutex::new(()),
-            max_loads: max_loads.max(1),
+            max_loads: limits.max_loads.max(1),
+            limits,
             status: Some(status),
         })
     }
@@ -231,6 +327,7 @@ impl PinStream {
         read.refused = refused;
         read.dropped = self.deployment.retain_pinned();
         read.evicted = self.deployment.evict_idle(crate::runtime::now_secs());
+        self.evict_views();
     }
 
     /// Every version a pin names that this node does not serve.
@@ -295,9 +392,27 @@ impl PinStream {
         (loaded, refused)
     }
 
+    /// **Evict per-space views** (§1.5): in each loaded version, views idle
+    /// for `versions.idle_evict_after`, then the least recently used past
+    /// its share of `versions.memory_budget`. The number evicted.
+    pub fn evict_views(&self) -> usize {
+        let mut all = self.deployment.others();
+        all.push(self.deployment.current());
+        let keep = self.limits.views_per_version(all.len());
+        let idle = self.deployment.guards().idle_evict.unwrap_or(u64::MAX);
+        all.iter().map(|l| l.evict_views(idle, keep)).sum()
+    }
+
     /// Load one version and serve it: `Some(name)` when it was installed,
     /// `None` when it already was.
     async fn load_one(&self, version: &str) -> Result<Option<String>, String> {
+        let held = self.deployment.served_versions().len();
+        if held >= self.limits.max_loaded {
+            return Err(format!(
+                "this node holds {held} versions, versions.max_loaded. Raise \
+                 {MAX_LOADED_ENV}, or move tenants off a version so it drops"
+            ));
+        }
         match deploy::load_pinned(
             &self.control,
             &self.cfg,
@@ -354,4 +469,51 @@ pub fn log_lines(read: &Read) -> Vec<String> {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_node_limits_read_their_variables_and_name_a_bad_one() {
+        let (l, said) = NodeLimits::from(|_| None);
+        assert_eq!(l, NodeLimits::default());
+        assert!(said.is_empty());
+        let (l, said) = NodeLimits::from(|v| match v {
+            MAX_LOADS_ENV => Some("2".into()),
+            MAX_LOADED_ENV => Some("4".into()),
+            MEMORY_BUDGET_ENV => Some("2GB".into()),
+            _ => None,
+        });
+        assert_eq!((l.max_loads, l.max_loaded), (2, 4));
+        assert_eq!(l.memory_budget, 2 * 1024 * 1024 * 1024);
+        assert!(said.is_empty());
+        let (l, said) = NodeLimits::from(|v| match v {
+            MAX_LOADS_ENV => Some("99".into()),
+            MAX_LOADED_ENV => Some("none".into()),
+            MEMORY_BUDGET_ENV => Some("lots".into()),
+            _ => None,
+        });
+        assert_eq!(l, NodeLimits::default());
+        assert_eq!(said.len(), 3);
+        for (line, name) in said
+            .iter()
+            .zip([MAX_LOADS_ENV, MAX_LOADED_ENV, MEMORY_BUDGET_ENV])
+        {
+            assert!(line.contains(name), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_budget_is_shared_between_loaded_versions() {
+        let l = NodeLimits::default();
+        // 512 MB at 256 KB a view.
+        assert_eq!(l.views_per_version(1), 2048);
+        assert_eq!(l.views_per_version(4), 512);
+        assert_eq!(parse_bytes("256kb"), Some(256 * 1024));
+        assert_eq!(parse_bytes("1 GB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_bytes("12"), Some(12));
+        assert_eq!(parse_bytes("1TB"), None);
+    }
 }

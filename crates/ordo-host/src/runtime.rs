@@ -6746,10 +6746,13 @@ async fn spawn_deploy_listener(
         pg.clone(),
         keys.clone(),
         space.clone(),
-        crate::pin_stream::max_loads_from_env().unwrap_or_else(|why| {
-            eprintln!("versions: {why}; loading one at a time");
-            crate::pin_stream::DEFAULT_MAX_LOADS
-        }),
+        {
+            let (limits, said) = crate::pin_stream::NodeLimits::from_env();
+            for line in said {
+                eprintln!("versions: {line}");
+            }
+            limits
+        },
         node_status.clone(),
     );
     // `versions.new_tenant` is read from the control database with the

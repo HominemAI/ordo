@@ -188,6 +188,9 @@ pub struct SpaceView {
     pub fixture: Arc<Fixture>,
     /// This version's executor, rebound. Reads plan against its space.
     pub exec: ordo_exec::Executor,
+    /// When a request last took this view, in seconds: what view eviction
+    /// reads ([`Loaded::evict_views`]).
+    used_at: std::sync::atomic::AtomicU64,
 }
 
 impl Loaded {
@@ -209,6 +212,7 @@ impl Loaded {
     /// the old view and finishes on the old database) is the migration's own
     /// consistency argument, and it is not made here.
     pub fn in_space(&self, space: &str, pool: Pool) -> Arc<SpaceView> {
+        let now = crate::runtime::now_secs();
         if let Some(v) = self
             .views
             .read()
@@ -216,6 +220,7 @@ impl Loaded {
             .get(space)
             .filter(|v| v.exec.pool.same_handle(&pool))
         {
+            v.used_at.store(now, std::sync::atomic::Ordering::Relaxed);
             return v.clone();
         }
         let mut views = self
@@ -240,9 +245,49 @@ impl Loaded {
                 space: sid.clone(),
             },
             space: sid,
+            used_at: std::sync::atomic::AtomicU64::new(now),
         });
         views.insert(space.to_string(), view.clone());
         view
+    }
+
+    /// How many per-space views this version holds now.
+    pub fn view_count(&self) -> usize {
+        self.views
+            .read()
+            .expect("space view cache is not poisoned")
+            .len()
+    }
+
+    /// **Evict per-space views** (`plan-versions.md` §1.5): every view no
+    /// request holds that was last taken `idle_secs` ago or more, then the
+    /// least recently taken until at most `keep` remain. A view a request
+    /// holds is never evicted, and an evicted one is cut again on its
+    /// space's next request. The number evicted.
+    pub fn evict_views(&self, idle_secs: u64, keep: u64) -> usize {
+        use std::sync::atomic::Ordering::Relaxed;
+        let now = crate::runtime::now_secs();
+        let mut views = self
+            .views
+            .write()
+            .expect("space view cache is not poisoned");
+        let before = views.len();
+        views.retain(|_, v| {
+            Arc::strong_count(v) > 1 || now.saturating_sub(v.used_at.load(Relaxed)) < idle_secs
+        });
+        if views.len() as u64 > keep {
+            let mut free: Vec<(u64, String)> = views
+                .iter()
+                .filter(|(_, v)| Arc::strong_count(v) == 1)
+                .map(|(k, v)| (v.used_at.load(Relaxed), k.clone()))
+                .collect();
+            free.sort();
+            let over = views.len() as u64 - keep;
+            for (_, k) in free.into_iter().take(over as usize) {
+                views.remove(&k);
+            }
+        }
+        before - views.len()
     }
 }
 

@@ -922,3 +922,48 @@ async fn no_move_waits_for_a_window_yet_and_a_revoked_versions_tenant_stays() {
         "a tenant on a revoked version stays until its move lands (session 2)"
     );
 }
+
+/// **`versions.max_loaded`** (`ORDO_VERSIONS_MAX_LOADED`, a node setting):
+/// a node already holding as many versions as it may refuses the next
+/// load, naming the setting, and the tenant pinned to it stays closed
+/// rather than pushing another version out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_load_past_max_loaded_is_refused_naming_the_setting() {
+    let (pool, c) = registry_db("ordo_vserve_max_loaded").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V010).await;
+    apply(&pool, V020).await;
+    let (d, _) = node(&pool, &c).await;
+    let keys = Fixture::from_source("", "").expect("empty").keys.clone();
+    let status = ordo_host::node_status::NodeStatus::new(
+        pool.clone(),
+        "max-loaded-node".into(),
+        std::time::Duration::from_secs(5),
+    );
+    let limits = ordo_host::pin_stream::NodeLimits {
+        max_loaded: 1,
+        ..Default::default()
+    };
+    let stream = ordo_host::pin_stream::PinStream::with_loads(
+        d.clone(),
+        pool.clone(),
+        c.clone(),
+        keys,
+        ordo_conformance::fixture_space(),
+        limits,
+        status,
+    );
+    Versions::on(&pool)
+        .pin("spc_a", "0.1.0", "deployment-owner:ada", 50)
+        .await
+        .expect("pinned");
+    let read = stream.tail().await.expect("tail");
+    assert!(read.loaded.is_empty(), "{read:?}");
+    let (version, why) = read.refused.first().expect("refused");
+    assert_eq!(version, "0.1.0");
+    assert!(
+        why.contains("versions.max_loaded") && why.contains("ORDO_VERSIONS_MAX_LOADED"),
+        "{why}"
+    );
+    assert!(d.for_space("spc_a").is_err(), "closed, not served another");
+}

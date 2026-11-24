@@ -520,3 +520,39 @@ fn the_grammar_declares_the_identifiers_hosts_key_off() {
         "the repository is where every rule lives"
     );
 }
+
+/// `edition <n>` (`plan-versions.md` §2.6) is a contextual declaration head:
+/// the parser reads it only as a top-level line, so a field may still be
+/// named `edition`. The grammar must colour the word as a declaration and the
+/// number as its own token, and must keep the word out of the reserved half.
+#[test]
+fn the_edition_line_is_coloured_and_stays_contextual() {
+    let g = grammar();
+    let contextual = families(&g, "contextual");
+    assert_eq!(
+        contextual
+            .get("keyword.declaration.ordo")
+            .map(Vec::as_slice),
+        Some(["edition".to_string()].as_slice()),
+        "`edition` is a contextual declaration word"
+    );
+    assert!(
+        Keyword::parse("edition").is_none(),
+        "the lexer must not reserve `edition`"
+    );
+    assert!(
+        ordo_syntax::parse_program("edition 2\n").is_ok_and(|p| p.edition.is_some()),
+        "the parser reads `edition <n>` as the program's edition"
+    );
+
+    let mut all = Vec::new();
+    rules(&g["repository"], &mut all);
+    let rule = all
+        .iter()
+        .find(|(_, res)| res.iter().any(|r| r.contains("(edition)")))
+        .expect("a rule matches the edition line");
+    assert!(rule.0.contains(&"keyword.declaration.ordo".to_string()));
+    assert!(rule
+        .0
+        .contains(&"constant.numeric.edition.ordo".to_string()));
+}

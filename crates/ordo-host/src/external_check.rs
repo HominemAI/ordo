@@ -257,7 +257,47 @@ async fn check_one(
         .await
         .map_err(|err| db("the grants", err))?
     {
-        if let Some(p) = src.peer.as_ref().filter(|_| !a.schema_usage || !a.select) {
+        // **A column the read app stopped writing** (owner ruling
+        // 2026-11-23, Q1). A peer that left a mapped column behind grants
+        // its table by column, without it, so the table reads as not
+        // granted whole while the other mapped columns are. The reader is
+        // held, and the refusal names each column it lost.
+        let mut column_granted = false;
+        if let (Some(p), true, false) = (src.peer.as_ref(), a.schema_usage, a.select) {
+            let mut mapped: Vec<&str> = vec![src.key_column.as_str()];
+            mapped.extend(src.columns.iter().map(|(_, c)| c.as_str()));
+            let lost = migrate::columns_not_granted(pool, &pg, &src.table, &mapped)
+                .await
+                .map_err(|err| db("the column grants", err))?;
+            column_granted = lost.is_empty();
+            if !lost.is_empty() && lost.len() < mapped.len() {
+                let named = lost
+                    .iter()
+                    .map(|c| format!("column `{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (is, it) = if lost.len() == 1 {
+                    ("is", "it")
+                } else {
+                    ("are", "them")
+                };
+                report.problems.push(Problem {
+                    entity: e.name.clone(),
+                    kind: ProblemKind::Changed,
+                    detail: format!(
+                        "{named} {is} no longer written by `{}`: a version of it stopped \
+                         declaring {it}, and its grant to this deployment ended. {regenerate}",
+                        p.name
+                    ),
+                });
+                return Ok(());
+            }
+        }
+        if let Some(p) = src
+            .peer
+            .as_ref()
+            .filter(|_| !column_granted && (!a.schema_usage || !a.select))
+        {
             // A peer's table: the deployment being read grants it, by its
             // `reader` line (owner ruling 2026-11-18).
             report.problems.push(Problem {
@@ -272,7 +312,7 @@ async fn check_one(
             });
             return Ok(());
         }
-        if !a.schema_usage || !a.select {
+        if !column_granted && (!a.schema_usage || !a.select) {
             let mut grants = Vec::new();
             if !a.schema_usage {
                 grants.push(format!(

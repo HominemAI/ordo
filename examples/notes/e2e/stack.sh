@@ -224,6 +224,11 @@ export ORDO_TEST_EDITION_2_SINCE=2026-11-01
 # door refuses to boot on it without the unsafe switch beside it. A real
 # deployment sets ORDO_BLOB_STORE=s3 and the ORDO_BLOB_S3_* settings.
 export ORDO_BLOB_STORE="fs:$state/blobs" ORDO_DEV_UNSAFE_BLOB_STORE=1
+# A person may export and erase their own tenant (`std.space.export` and
+# `std.space.delete`, tests/orphans). Bundles are written under the stack's
+# own folder.
+mkdir -p "$state/bundles"
+export ORDO_EXIT_BUNDLE_DIR="$state/bundles"
 # Emailed codes go to the mail catcher, in the clear, on loopback.
 export ORDO_MAIL_KIND=smtp ORDO_MAIL_FROM=notes@example.com ORDO_MAIL_HOST=localhost
 export ORDO_MAIL_PORT="$smtp_port" ORDO_MAIL_TLS=none ORDO_MAIL_SEND_SECS=1

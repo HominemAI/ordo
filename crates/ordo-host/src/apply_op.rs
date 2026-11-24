@@ -852,6 +852,8 @@ async fn sequence(
     // The schema, before the artifact: a first apply creates it, a match
     // proceeds, and a database that is behind stores but does not activate.
     let mut behind: Vec<(String, String)> = Vec::new();
+    // The version serving before this apply: what an orphan is read against.
+    let prior = sa::active_schema(pool).await;
     let schema = match sa::schema_state(pool, &program.schema)
         .await
         .map_err(ApplyRefused::Internal)?
@@ -901,6 +903,26 @@ async fn sequence(
             }
         }
     };
+
+    // What this version leaves behind on the deployment's own database
+    // (`$orphans`, `plan-versions.md` §2.7): kept, never written, and still
+    // reached by erasure and export. A database still behind recorded
+    // nothing new, so it is read only once the schema step matched.
+    if let (Some(prior), true) = (&prior, behind.is_empty()) {
+        let from = sa::deployed_artifact(pool).await.map(|a| a.version);
+        match sa::record_orphans(pool, prior, program, from.as_deref(), actor).await {
+            Ok(names) => {
+                for n in names {
+                    notes.push(format!(
+                        "orphaned    `{n}`: kept with what was written to it, never written \
+                         again; erasure and export still reach it. `ordo evolve --prune {n}` \
+                         removes it"
+                    ));
+                }
+            }
+            Err(e) => return Err(ApplyRefused::Internal(e)),
+        }
+    }
 
     let artifact = versions::Artifact {
         version: program.version.clone(),

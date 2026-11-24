@@ -184,6 +184,8 @@ const READS: &[&str] = &[
     // The stored plans and their receipts; deployment owner only, home
     // space (versions increment 8).
     "std.deployment.plans",
+    // Whether a rollback's version still reads its externals and peers.
+    "std.deployment.rollbackCheck",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

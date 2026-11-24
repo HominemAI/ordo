@@ -140,8 +140,10 @@ pub const EVOLVE: &str = crate::evolve::EVOLVE;
 pub const PLANS: &str = crate::evolve::PLANS;
 /// Replay the stored path on one tenant's database, then pin it.
 pub const REPLAY: &str = crate::evolve::REPLAY;
+/// What a rollback to a version would find: its externals and peers now.
+pub const ROLLBACK_CHECK: &str = crate::evolve::ROLLBACK_CHECK;
 
-pub const OPS: [&str; 24] = [
+pub const OPS: [&str; 25] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -166,6 +168,7 @@ pub const OPS: [&str; 24] = [
     EVOLVE,
     PLANS,
     REPLAY,
+    ROLLBACK_CHECK,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -786,7 +789,9 @@ pub async fn execute(
             }
             row
         }
-        EVOLVE | PLANS | REPLAY => crate::evolve::execute(ops, name, bound, caller).await?,
+        EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK => {
+            crate::evolve::execute(ops, name, bound, caller).await?
+        }
         PIN => {
             let tenant = text(bound, "tenant").unwrap_or_default();
             let version = text(bound, "version").unwrap_or_default();

@@ -1273,6 +1273,51 @@ pub const PLANS: &str = "std.deployment.plans";
 /// `ordo evolve --tenant T`: replay the stored path on the tenant's
 /// database, then pin the tenant.
 pub const REPLAY: &str = "std.deployment.replay";
+/// `ordo rollback --dry-run`: whether the version a rollback would return
+/// to can still read its externals and peers here (F4).
+pub const ROLLBACK_CHECK: &str = "std.deployment.rollbackCheck";
+
+/// What [`rollback_check`] found.
+#[derive(Debug, Clone)]
+pub struct RollbackCheck {
+    pub version: String,
+    pub active: Option<String>,
+    /// One line per external or peer table the version can no longer read.
+    pub refusals: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+impl RollbackCheck {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "version": self.version, "active": self.active,
+            "refusals": self.refusals, "notes": self.notes,
+            "ok": self.refusals.is_empty(),
+        })
+    }
+}
+
+/// **F4: the check a rollback runs before it returns to `version`.** A
+/// version pin does not cover a foreign table or a peer's columns, so the
+/// version a rollback returns to is checked against them as they are now
+/// (`plan-evolution-federation.md` §3.4, §4). Reads; changes nothing.
+pub async fn rollback_check(pool: &Pool, version: &str) -> Result<RollbackCheck, EvolveRefusal> {
+    let v = Versions::on(pool);
+    let version = v.resolve(version).await?;
+    let Some(a) = v.get(&version).await? else {
+        return Err(VersionRefusal::UnknownVersion(version).into());
+    };
+    let program = compiled(&a)?;
+    let report = crate::external_check::check(pool, &program.schema)
+        .await
+        .map_err(EvolveRefusal::Store)?;
+    Ok(RollbackCheck {
+        version,
+        active: v.active_version().await?,
+        refusals: report.refusals(),
+        notes: report.notes,
+    })
+}
 
 /// The three ops' specs.
 pub fn specs() -> Vec<ordo_api::OpSpec> {
@@ -1334,6 +1379,12 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
             OpKind::Read,
             vec![text("from", 128, false), text("to", 128, false)],
             &["plans"],
+        ),
+        spec(
+            ROLLBACK_CHECK,
+            OpKind::Read,
+            vec![text("version", 128, true)],
+            &["version", "active", "refusals", "notes", "ok"],
         ),
         spec(
             REPLAY,
@@ -1537,6 +1588,10 @@ pub async fn execute(
             row["pinned"] = json!({ "from": moved.from, "to": moved.to, "epoch": moved.epoch });
             Ok(row)
         }
+        ROLLBACK_CHECK => Ok(rollback_check(pool, text("version").unwrap_or_default())
+            .await
+            .map_err(|e| e.to_exec_error("the version could not be checked"))?
+            .to_json()),
         other => Err(ExecError::internal(format!(
             "`{other}` is not an evolve op"
         ))),

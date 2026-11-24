@@ -699,3 +699,39 @@ async fn a_removed_field_lists_the_tables_readers() {
     assert_eq!(n.grant_ends_not_before, 17 * day);
     assert!(n.line().contains("reader `viewer`"), "{}", n.line());
 }
+
+/// **F4: `ordo rollback --dry-run` checks the version it would return to**
+/// against the external tables as they are now. A pin does not cover a
+/// foreign table, so a column renamed since is named, and nothing changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollback_dry_run_names_an_external_the_version_can_no_longer_read() {
+    let (pg, pool) = empty("ordo_plans_rollback_check").await;
+    pg.exec(
+        "DROP SCHEMA IF EXISTS crm CASCADE; CREATE SCHEMA crm; \
+         CREATE TABLE crm.customers (customer_id bigint PRIMARY KEY, full_name text NOT NULL)",
+    )
+    .expect("the foreign table");
+    let reads = "domain desk @ 1.0.0\n\n\
+         external patrons (key: pat) from crm.customers shared {\n  id <- \"customer_id\"\n  \
+         name: text <- \"full_name\"\n}\n\n\
+         entity ticket {\n  subject: text\n}\n\n\
+         op patronNames unbounded =\n  patrons[name]\n";
+    store(&pool, reads).await;
+    let ok = evolve::rollback_check(&pool, "1.0.0")
+        .await
+        .expect("checks");
+    assert!(ok.refusals.is_empty(), "{:?}", ok.refusals);
+
+    pg.exec("ALTER TABLE crm.customers RENAME COLUMN full_name TO display_name")
+        .expect("renamed outside Ordo");
+    let found = evolve::rollback_check(&pool, "1.0.0")
+        .await
+        .expect("checks");
+    assert_eq!(found.refusals.len(), 1, "{:?}", found.refusals);
+    assert!(
+        found.refusals[0].contains("full_name"),
+        "{:?}",
+        found.refusals
+    );
+    assert_eq!(found.active, None, "the dry run activated something");
+}

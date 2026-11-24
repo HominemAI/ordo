@@ -245,6 +245,7 @@ async fn plant(h: &Harness, id: &str, principal: &str, client: Option<&str>, op:
                 op.to_string(),
                 ordo_identity::OpPin {
                     manifest_hash: ordo_identity::ManifestHash([9; 32]),
+                    version: None,
                     unguarded: false,
                     entities: Vec::new(),
                 },

@@ -1516,8 +1516,9 @@ level. A machine key is never asked. A reauth lasts 5 minutes
 (`ordo login --touch`).
 
 **What stays on the database, and why.** `ordo keys`, `ordo verify` (except
-`--proof`), `ordo restore`, `ordo identity recover` and
-`ordo migrate --apply` open the database and need `--direct`. `ordo apply`
+`--proof`), `ordo restore` and `ordo identity recover` open the database
+and need `--direct`. `ordo migrate` is removed: `ordo evolve` moves the
+schema through the door. `ordo apply`
 and `ordo rollback` take `--host`, or `--direct` as the break-glass path
 when no host can boot. `ordo checkpoint`, `ordo prune`, `ordo revert`,
 `ordo deploys`, `ordo usage` and `ordo triggers` still take `--db` and
@@ -1562,6 +1563,60 @@ Two things end cleanly, and the SDK recovers from both:
   SDK starts that list again from page one. Moving one tenant to another
   version does the same for that tenant's cursors of an op that changed.
 
+### The release check, before the image changes
+
+Run the new image's check against the control database before you change
+the tag (`plan-versions.md` §2.8):
+
+```
+docker run --rm -e ORDO_PG_HOST=... -e ORDO_PG_USER=... -e ORDO_PG_PASSWORD=... \
+  -e ORDO_PG_DB=... <new image> release-check --direct
+```
+
+- It checks every version a tenant is pinned to or may move to: it still
+  compiles, its `auth` block is inside the new ranges, its ops register,
+  its shape gate passes, its functions' code is stored, and its stored
+  plans render to their digests.
+- It serves nothing and changes no pin. It writes one `$release_checks`
+  row, and the `--direct` use reaches the security log at the next boot.
+- Exit 0: every version passes. Exit 1: it names each failing version and
+  its tenants. Move those tenants first (`ordo versions pin`), then run it
+  again.
+- To upgrade anyway, for a security fix: add `--override --reason "<why>"`.
+  It is recorded, and it exits 0.
+- `--json` prints the report as JSON.
+
+The first boot of a new release runs the same check, logs it and records
+it. It never stops the boot. A version that fails closes only its own
+tenants: they answer `server_busy` and are listed on `/health/ready`. Every
+other tenant serves. This holds for the active version too.
+
+### Language editions and `ordo fix`
+
+A source names its language edition with one line, `edition 2`. A source
+with no edition line is edition 1, for good (`plan-versions.md` §2.6).
+
+- Today only edition 1 is released, so nothing needs fixing yet.
+- When a release makes a newer edition current, an older one still loads
+  for `editions.load_window` (12 months) after that release's date. The
+  window is measured against the date of the Ordo release that loads it,
+  never the clock, so a running deployment never stops loading a version.
+- The release check calls out each version on an old edition with the
+  date its window ends, marked `soon` within 3 months of the end.
+- Outside the window the version fails the `edition` check, and its
+  tenants close. Every other tenant serves.
+- The fix, on your machine, with no door and no database:
+
+```
+ordo fix <dir>            # dry run: prints the diff, writes nothing
+ordo fix <dir> --write    # compiles the rewrite, then writes it
+ordo apply <dir> ...      # the same program, so the same version
+```
+
+The apply reports `already present; its source moved to a newer edition`.
+The version keeps its name and its tenants. Its stored source and edition
+are the rewritten ones, so later releases load it.
+
 ### How it is tested
 
 `crates/ordo-host/tests/upgrade_continuity.rs` makes all of the above (two
@@ -1575,7 +1630,8 @@ idempotency key) and checks each item by name after the upgrade.
   (pinned in the script, `ORDO_UPGRADE_FROM` to change it) into its own
   target folder, starts its own Postgres cluster, runs both tests, then
   deletes the cluster and the extra build. About 75 s on a laptop. CI runs
-  it as the `upgrade` job.
+  it as the `upgrade` job. Between the 2 builds it runs `ordo release-check
+  --direct` from this build, and checks that the new boot ran it too.
 
 ```
 scripts/upgrade-continuity.sh            # build, run, clean up

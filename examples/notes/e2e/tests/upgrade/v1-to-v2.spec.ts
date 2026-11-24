@@ -16,7 +16,10 @@
  * Chromium only: sharing asks for a passkey touch.
  */
 
-import { readFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { acceptInvitation, invitationFor, owner, sharedList, signInByEmail } from '../people.js';
 import {
@@ -24,6 +27,7 @@ import {
   applyProgram,
   mailFor,
   noteInList,
+  ordoFix,
   signIn,
   signedIn,
   stack,
@@ -84,6 +88,49 @@ async function expectV2(page: Page): Promise<void> {
   await page.getByText('About this account').click();
   await expect(page.getByTestId('page-version')).toHaveText('Page version: v2');
 }
+
+/**
+ * Language editions (plan-versions.md §2.8 step R4, increment 6b). Notes v1
+ * has no edition line, so it is edition 1. The stack's debug build makes
+ * edition 2 current (stack.sh), so v1 is an old edition inside its load
+ * window, and the running deployment serves it. `ordo fix` shows the
+ * rewrite as a dry run, then writes it. The fixed file applies as the same
+ * version, 0.1.0, now holding edition 2, and the v1 page still works.
+ */
+test('notes v1 at an old edition: ordo fix rewrites it, it applies as the same version, and the page works', async ({}, testInfo) => {
+  testInfo.setTimeout(240_000);
+  const dir = mkdtempSync(join(tmpdir(), 'notes-v1-edition-'));
+  const file = join(dir, 'notes.ordo');
+  copyFileSync(join(stack().program, 'notes.ordo'), file);
+  const before = readFileSync(file, 'utf8');
+  expect(before).not.toMatch(/^edition /m);
+
+  const dry = ordoFix(dir, false);
+  expect(dry).toContain('edition 1 to edition 2');
+  expect(dry).toContain('+edition 2');
+  expect(dry).toContain('dry run: nothing written');
+  expect(readFileSync(file, 'utf8')).toBe(before);
+
+  const wrote = ordoFix(dir, true);
+  expect(wrote).toContain(`wrote ${file}`);
+  const after = readFileSync(file, 'utf8');
+  expect(after).toContain('domain notes @ 0.1.0\nedition 2\n');
+  expect(ordoFix(dir, false)).toContain('is at edition 2, the current edition');
+
+  const applied = applyProgram(dir);
+  expect(applied).toContain('0.1.0');
+  expect(applied).toContain('its source moved to a newer edition');
+
+  const ada = await owner('Ada');
+  try {
+    const title = unique('after-fix-');
+    await addNote(ada.page, title, 'Written after ordo fix.');
+    await expect(noteInList(ada.page, title)).toBeVisible();
+    await expect(ada.page.getByRole('alert')).toHaveCount(0);
+  } finally {
+    await ada.close();
+  }
+});
 
 test('two people with notes, tags and a share under v1 find all of it under v2, then pin, archive, attach and download', async ({}, testInfo) => {
   testInfo.setTimeout(300_000);
@@ -293,5 +340,66 @@ test('a reminder set a moment ahead fires once: a notice in the page with no rel
     await expect(noteInList(page, title)).not.toContainText('Reminder');
   } finally {
     await context.close();
+  }
+});
+
+/**
+ * The 0.2.1 program as `ordo apply` reads it: the fixture as `notes.ordo`,
+ * beside a copy of notes v2's `fn` code, in a folder of its own.
+ */
+function compatibleUpdate(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'notes-v2-1-'));
+  copyFileSync(fileURLToPath(new URL('../../fixtures/notes-v2-1.ordo.fixture', import.meta.url)), join(dir, 'notes.ordo'));
+  cpSync(join(stack().programV2, 'fn'), join(dir, 'fn'), { recursive: true });
+  return dir;
+}
+
+/**
+ * A compatible update with the page open (plan-versions.md §1.4; owner
+ * ruling Q7, 2026-11-23). Ada has notes v2 open in 2 tabs. 0.2.1, notes v2
+ * with one optional field added (`fixtures/notes-v2-1`), is applied under
+ * them. The deploy moves her tenant, so each live feed ends with
+ * `version_changed`; the page reconnects and refills its device copy. A
+ * note added in one tab then appears in the other, with no reload and no
+ * error shown. Runs last: it moves the stack to 0.2.1.
+ */
+test('a compatible update with the page open in 2 tabs: a note added in one still appears in the other', async ({}, testInfo) => {
+  testInfo.setTimeout(300_000);
+  // Run alone (`-g compatible`), v2 is not applied yet.
+  applyProgram(stack().programV2);
+  const ada = await owner('Ada');
+  try {
+    const one = ada.page;
+    await openV2(one);
+    const two = await ada.context.newPage();
+    await openV2(two);
+    const before = unique('before-update-');
+    await addNote(one, before, 'Written under 0.2.0.');
+    await expect(noteInList(two, before)).toBeVisible({ timeout: 30_000 });
+
+    // The deploy, with both tabs open. Neither is reloaded from here on.
+    const reloads: string[] = [];
+    for (const p of [one, two]) {
+      p.on('framenavigated', (f) => {
+        if (f === p.mainFrame()) reloads.push(f.url());
+      });
+    }
+    applyProgram(compatibleUpdate());
+
+    const after = unique('after-update-');
+    await addNote(one, after, 'Written under 0.2.1.');
+    await expect(noteInList(two, after)).toBeVisible({ timeout: 60_000 });
+    // What both tabs held is still there, refilled.
+    await expect(noteInList(two, before)).toBeVisible();
+    await expect(noteInList(one, before)).toBeVisible();
+    // And the other way round.
+    const back = unique('from-tab-two-');
+    await addNote(two, back, 'Written in the second tab.');
+    await expect(noteInList(one, back)).toBeVisible({ timeout: 60_000 });
+
+    expect(reloads, 'no tab reloaded').toEqual([]);
+    for (const p of [one, two]) await expect(p.getByRole('alert')).toHaveCount(0);
+  } finally {
+    await ada.close();
   }
 });

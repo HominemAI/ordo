@@ -141,6 +141,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
+        "evolve" => &["--run", "--list"],
         _ => &[],
     }
 }
@@ -409,6 +410,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
+        "evolve" => rt.block_on(crate::evolve::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -2342,18 +2344,36 @@ pub(crate) fn render_refusal(
 /// behave differently from the deploy it is undoing. What it appends is one
 /// more activation row, so the history reads forwards.
 async fn rollback(flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--db", "--as", "--version", "--host", "--token", "--space"]) {
+    if let Err(e) = flags.only(&[
+        "--db",
+        "--as",
+        "--version",
+        "--host",
+        "--token",
+        "--space",
+        "--dry-run",
+    ]) {
         return Outcome::usage(e);
     }
     let version = match flags.require("--version") {
         Ok(v) => v.to_string(),
         Err(e) => return Outcome::usage(e),
     };
+    if flags.has("--dry-run") && flags.direct {
+        return Outcome::usage(
+            "`--dry-run` asks the deployment through the door: drop `--direct` and name \
+             `--host <h>`\n"
+                .into(),
+        );
+    }
     if let Some(host) = door_unless_direct(&flags) {
         let host = match host {
             Ok(h) => h,
             Err(e) => return Outcome::usage(e),
         };
+        if flags.has("--dry-run") {
+            return rollback_dry_run(&host, &flags, &version).await;
+        }
         if flags.named_value("--as").is_some() {
             return Outcome::usage(
                 "`--as` names who acted on the database; over the door it is the token's \
@@ -3307,6 +3327,46 @@ async fn versions_target(flags: Flags) -> Outcome {
     Outcome::ok(report(row["target"].as_str(), row["ordinal"].as_u64()))
 }
 
+/// `ordo rollback --version <v> --dry-run`: what returning to `v` would
+/// find, without returning (`std.deployment.rollbackCheck`). Today: each
+/// external or peer table `v` can no longer read here
+/// (`plan-evolution-federation.md` F4). Exit 1 when there is one.
+async fn rollback_dry_run(host: &crate::wire::Host, flags: &Flags, version: &str) -> Outcome {
+    let row = match crate::wire::door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::ROLLBACK_CHECK,
+        serde_json::json!({ "version": version }),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let to = row["version"].as_str().unwrap_or(version);
+    let mut out = format!(
+        "dry run    rollback to {to} (active: {}); nothing changed\n",
+        row["active"].as_str().unwrap_or("none")
+    );
+    for n in row["notes"].as_array().into_iter().flatten() {
+        out.push_str(&format!("note       {}\n", n.as_str().unwrap_or("")));
+    }
+    let refusals = row["refusals"].as_array().cloned().unwrap_or_default();
+    if refusals.is_empty() {
+        out.push_str("externals  every external and peer table it reads checks out\n");
+        return Outcome::ok(out);
+    }
+    for r in &refusals {
+        out.push_str(&format!("REFUSED    {}\n", r.as_str().unwrap_or("")));
+    }
+    out.push_str(&format!(
+        "           {to} can no longer read the tables above; a rollback to it would hold \
+         the entities that read them\n"
+    ));
+    Outcome::failed(out)
+}
+
 /// The door, for a command that has no database path (ruled 2026-11-05:
 /// the CLI goes through the door). `direct::gate` has already refused a
 /// call with no host; this is the same answer for a caller that skipped it.
@@ -3494,7 +3554,7 @@ pub(crate) fn revoked_list(list: &[ordo_host::versions::RevokedVersion]) -> Stri
 }
 
 /// The door flags a `versions` subcommand takes besides its own.
-const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
+pub(crate) const DOOR_FLAGS: [&str; 3] = ["--host", "--token", "--space"];
 
 /// `ordo versions label <version> "<text>"`, or `--clear`: change a stored
 /// version's label. Locally through the `Versions` client, or over the

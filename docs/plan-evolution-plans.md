@@ -264,6 +264,11 @@ Ruled 2026-10-01, in `corpus-rulings.md`. In short:
 >   (`plan-evolution-federation.md` §3).
 >
 > The build order is `plan-versions.md` §4, increments 8 and 9.
+>
+> Built 2026-11-23 (increment 8): `crates/ordo-host/src/evolve.rs`. The
+> plan is not run from stored SQL. Each run renders its step again on its
+> database with the stored options, and the digest checks it renders as
+> stored (D3).
 
 | Piece | Change |
 |---|---|

@@ -415,8 +415,14 @@ Ruled 2026-11-02 (D7).
 
 As built (2026-11-03): `Versions` owns `$artifacts`, `$builds`,
 `$activations`, the pins, `$pins` and `$moves`, over `ordo_exec::registry`
-as its SQL layer. `$code` stays with `functions.rs` and `$plans` does not
-exist yet. `VersionRefusal::to_exec_error` is the one door mapping.
+as its SQL layer. `$code` stays with `functions.rs`.
+`VersionRefusal::to_exec_error` is the one door mapping.
+
+As built (2026-11-23, increment 8): `$plans` has its own client,
+`evolve::Plans`, with one typed error, `EvolveRefusal`, which wraps
+`VersionRefusal`. It sits beside `Versions` and not inside it, because
+increment 7 was changing `versions.rs` at the same time. Folding it in is
+a move of code, not of behaviour.
 
 ### 1.9 Clients across versions
 
@@ -613,7 +619,7 @@ person. It is hash-chained, so it is not a place for bulk rows.
 | Revoke, unrevoke | `$revocations` | built |
 | A version setting changed | `$version_settings` | built |
 | A `--direct` use | the security log, at the next boot | built |
-| A plan stored by `ordo evolve` | `$plans`, with its actor | increment 8 |
+| A plan stored by `ordo evolve` | `$plans`, with its actor; act `plan-stored` (and `plan-run`, `replayed`) on the deployment's stream | built (increment 8) |
 | A backfill on one tenant | that tenant's command chain, one summarised group (ruled 2026-09-08, 2026-09-20) | increment 10b |
 | A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b |
 | Rollout start, pause, resume, skip, retry, abort, finish | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | increment 10 |
@@ -726,6 +732,12 @@ Per tenant, ruled seamless (27c):
    the deployment owner is told the tenant, the step and the reason.
 
 This replaces 25i's hold-closed for every case where X is still served.
+
+**Built 2026-11-23 (increment 7)** for additive steps, on a tenant with a
+database of its own. A tenant on the deployment's own database moves with
+the activation, since that database was gated first. The hold-closed stays
+for a tenant already pinned to the active version whose database is
+behind. Step 3 (backfill) is increment 10b.
 
 Added by the review of 2026-11-23:
 
@@ -1275,10 +1287,10 @@ round is about 35 minutes for the full suite.
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
 | 6 | **Release check.** Designed in §2.8 (review 2026-11-23), steps R1 to R3: the checked set, digests, functions under the new runtime, `auth` ranges, the `ordo release-check` mode of the one image, the boot-time run, the override. | M | 3 | an upgrade with an uncompilable version names it and its tenants, and every other tenant serves; the notes upgrade test passes through it | none |
 | 6b | **Language editions and `ordo fix`.** §2.8, step R4. | M | 6 | an old edition loads within its window and `ordo fix` rewrites it | none |
-| 7 | **Seamless additive move.** Expand, gate, supported set, switch pin. | M | 3 | a refused change leaves the tenant serving X, and the deployment owner sees why | 27c (additive) |
-| 7a | **Evolution through the examples** (new, review 2026-11-23; owner, 2026-11-23). `examples/notes-v3`: one additive change, one rename with `prev`, one removed field. The harness applies it over a running notes v2 with a browser open, and note-viewer reads through it. Later increments add cases to it. | M | 7 | the notes page keeps every note across v2 to v3 with no reload error; the test is in the example's own e2e | none |
+| 7 | **Seamless additive move.** Expand, gate, supported set, switch pin. **Built 2026-11-23:** an activation pins a tenant with a database of its own only when the apply's walk brought that database to Y; every other one keeps its pin on X and gets an open move in `$moves` (`Versions::activate_with`, phase `expanding`, `waiting` or `refused`, with `reason`). The catch-up's sweep expands the database (`bring_forward`), whose gate is `schema_state` over Y; the supported set is the database's `$migrations` `version` row for Y beside X's shape, which `Spaces::fits` checks for a tenant on X. Then `Versions::finish_moves` switches the pin, cause `move`, in one transaction with its `$pins` row. Unreachable is `waiting` and swept again (Q10); a refusal by name is `refused` and not retried for Y. The owner reads each move on `std.deployment.tenants` (`move`), in the apply's report and in `ordo apply`'s wait. `Versions::pin` closes a tenant's open move. Test: `notes_app.rs`, `a_change_one_tenants_data_cannot_take_leaves_that_tenant_serving_its_version`. Not built: a command to retry a refused move (a new version retries it); the console does not show moves. | M | 3 | a refused change leaves the tenant serving X, and the deployment owner sees why | 27c (additive) |
+| 7a | **Evolution through the examples** (new, review 2026-11-23; owner, 2026-11-23). `examples/notes-v3`: one additive change, one rename with `prev`, one removed field. The harness applies it over a running notes v2 with a browser open, and note-viewer reads through it. Later increments add cases to it. **Built 2026-11-23:** `examples/notes-v3` (0.3.0) adds `notes.starred` (constant default) with `starNote` and `starredNotes`, and stops declaring `attachments.size`; `addAttachment` still takes `$size`, so the v2 page still adds a file. The rename waits for increment 15: `prev` does not parse yet outside an external. There is no v3 page: the v2 page stays open across the move. **Found and fixed by it:** an apply that added a field beside a drop the serving version still reads was refused whole (`drop_read_by_active_op` counted against the addition). The drop is now left pending and the addition applied, on the deployment's database and each tenant's (`schema_apply::without_drops`; test `tenant_forward.rs`, `an_addition_beside_a_drop_the_serving_version_reads_applies`). Tests: notes e2e project `v3` (`tests/v3/v2-to-v3.spec.ts`: notes, a pin, a tag and a file kept with no reload and no alert, a note added after, then a reload) and note-viewer e2e project `v3` (`tests/v3/notes-v3.spec.ts`: the viewer lists every note through the move). Increment 7 is d583de86. | M | 7 | the notes page keeps every note across v2 to v3 with no reload error; the test is in the example's own e2e | none |
 | 7b | **Federation under versions** (new, review 2026-11-23). `plan-evolution-federation.md`, steps F1 to F6: readers named in a plan, column grants that follow the served fields, every loaded version checked against its peers, the checks in rollback and promotion. | M, in 2 parts: F1, F3, F4 with 8; F2, F5, F6 with 11a | 7, 8, 11a | note-viewer never reads a stale column: it reads through the soak, then is refused naming the fix | none |
-| 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
+| 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. **Session 1 built 2026-11-23** (6d93397c, ef5fe610, 9856f637): `$plans` and `evolve.rs`; the step renders from the 2 stored sources against an empty database of X, so the digest is the same in every environment; `--digest` refuses another; a plan with errors is never stored; the receipt lists each change, class, option, forward and reverse, and leaves out Ordo's own tables; replay walks the stored path, each step checking the recorded version, drift and the digest; `std.deployment.evolve`, `plans`, `replay`; `ordo evolve [<dir>] --from --to [--run]`, `--tenant`, `--list`; F1 and F4's rollback check. Tests: `stored_plans.rs`. **Not built:** removing `ordo migrate --apply --direct` (asked), a test through an example (the notes harness holds no door credential), option expressions beyond `--places`, backfill functions (D16, with 10b). | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
 | 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
 | 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
 | 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
@@ -1461,7 +1473,10 @@ Still open:
    2026-11-23). The owner ruled the CLI through the door on 2026-11-05 and
    kept `--direct` for 9 commands that must work with no server. A
    transforming migration is not one of them. Increment 8's
-   `std.deployment.evolve` replaces it.
+   `std.deployment.evolve` replaces it. Built 2026-11-23: `ordo evolve
+   --run` moves the deployment's own database through the door. `ordo
+   migrate --apply --direct` still runs, marked as being replaced, until
+   the owner says to remove it (asked with increment 8).
 10. **`plan-schema-evolution.md` §9 read as open** (review 2026-11-23). The
     backfill audit question was ruled 2026-09-08 and 2026-09-20. The
     section now says so.

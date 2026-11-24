@@ -73,7 +73,20 @@ fn usage() -> ! {
          the verdict, then every change with its class and what refuses it.\n      \
          Read-only. Exits 1 when the apply would refuse. Through the door\n      \
          only; `--against <db>` is gone.\n  \
+         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--digest <d>] [--run]\n      \
+         render the step between two stored versions on the deployment,\n      \
+         refuse it with its errors, store it, and print its receipt and\n      \
+         digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
+         written to <dir>/receipts/<from>-to-<to>.json. --digest refuses a\n      \
+         deployment that renders another digest. --run runs the stored\n      \
+         plan on the deployment's own database.\n  \
+         ordo evolve --tenant <id> [--to <version>]\n      \
+         replay the stored path on the tenant's database, one step at a\n      \
+         time, then pin it (`std.deployment.replay`).\n  \
+         ordo evolve --list [--from <version>] [--to <version>]\n      \
+         the stored plans (`std.deployment.plans`).\n  \
          ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
+         being replaced by `ordo evolve` (§6 conflict 9 of plan-versions.md).\n      \
          the plan, then the additive apply (schema-evolution increment 2):\n      \
          a first apply against an empty database creates the whole schema;\n      \
          over a deployed one it sends class A (new entity, optional or\n      \
@@ -560,6 +573,7 @@ fn main() {
             | "windows"
             | "environments"
             | "promote"
+            | "evolve"
             | "prune"
             | "restore"
             | "keys"

@@ -13,8 +13,14 @@ export interface Stack {
   readonly page: string;
   readonly pageV2: string;
   readonly programV2: string;
+  /** examples/notes-v3, applied over notes v2 by tests/v3 (increment 7a). */
+  readonly programV3: string;
   readonly provider: string;
   readonly mail: string;
+  /** The identity service's address, where the deployment's people sign in. */
+  readonly identity: string;
+  /** Its data folder; its first start writes `first-invite` there. */
+  readonly identityData: string;
   readonly program: string;
   readonly pg: { readonly host: string; readonly port: string; readonly user: string; readonly db: string };
   readonly ordo: string;
@@ -228,7 +234,28 @@ export function applyProgram(dir: string): string {
       ORDO_PAGE_KEY: '2'.repeat(64),
       // v2's `reader note_viewer` line: the role stack.sh made.
       ORDO_READER_NOTE_VIEWER_ROLE: 'note_viewer',
+      // The editions the stack's server knows (stack.sh).
+      ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE,
     },
+    encoding: 'utf8',
+  });
+}
+
+/**
+ * The date edition 2 became current in the stack's debug build (stack.sh
+ * sets `ORDO_TEST_EDITION_2_SINCE` to it). Only edition 1 is released, so
+ * this is how notes v1, written with no edition line, is an old edition.
+ */
+export const EDITION_2_SINCE = '2026-11-01';
+
+/**
+ * `ordo fix <dir> [--write]` under the stack's editions: the developer's
+ * own command, on their machine, with no door and no database.
+ */
+export function ordoFix(dir: string, write: boolean): string {
+  const args = ['fix', dir, ...(write ? ['--write'] : [])];
+  return execFileSync(stack().ordo, args, {
+    env: { ...process.env, ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE },
     encoding: 'utf8',
   });
 }

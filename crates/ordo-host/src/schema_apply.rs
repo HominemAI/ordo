@@ -8,7 +8,7 @@
 //! a run from the client to the database."* So this module takes a
 //! [`Pool`] and a compiled [`Program`] and returns structured outcomes; it
 //! reads no environment, prints nothing, prompts for nothing, and shells
-//! out to nothing. `ordo migrate --apply` and `ordo apply` are thin callers
+//! out to nothing. `ordo apply` and `ordo evolve` (through the door) are callers
 //! that parse arguments, render what comes back and set an exit code, and
 //! they exist to confirm the logic and to test it. A hosted control plane
 //! (checklist 18l) calls the same functions from behind an owner-gated
@@ -172,8 +172,11 @@ impl Program {
 
     fn identify(&mut self) {
         use ordo_plan::artifact as a;
-        self.source_id =
-            a::source_identity(&self.source, a::FIRST_EDITION, &a::code_hashes(&self.doc));
+        self.source_id = a::source_identity(
+            &self.source,
+            ordo_plan::edition::of_source(&self.source),
+            &a::code_hashes(&self.doc),
+        );
         self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
         self.declared = a::declared_version(&self.source);
         self.version = match &self.declared {
@@ -427,6 +430,94 @@ pub async fn deployed_artifact(pool: &Pool) -> Option<crate::versions::Artifact>
     versions.get(&v).await.ok()?
 }
 
+/// The schema of the version the deployment is serving, or `None`.
+pub async fn active_schema(pool: &Pool) -> Option<Schema> {
+    deployed_artifact(pool).await.as_ref().and_then(recompile)
+}
+
+/// **Record what a version left behind on this database** (`$orphans`,
+/// `plan-versions.md` §2.7, increment 14).
+///
+/// `prior` is the version the database held before, `program` the one it
+/// holds now. Every field or entity `prior` declared, `program` does not,
+/// and the live database still holds is an orphan: kept, never written.
+/// Each is recorded once, with its columns, its sealed flag and a drop date.
+/// An orphan `program` declares again is removed, because it is written
+/// again. Answers the names newly recorded.
+///
+/// Called wherever a database is brought to a version: the deployment's own
+/// apply, each tenant's database brought forward, and each stored step run.
+pub async fn record_orphans(
+    pool: &Pool,
+    prior: &Schema,
+    program: &Program,
+    from: Option<&str>,
+    actor: &str,
+) -> Result<Vec<String>, String> {
+    let live = migrate::live_shape(pool, pool.schema())
+        .await
+        .map_err(|e| format!("reading the live schema: {e}"))?;
+    let mut left: Vec<ordo_exec::orphans::Left> = Vec::new();
+    for c in ordo_schema::diff(&live, Some(prior), &program.schema) {
+        match c {
+            Change::DropField { entity, field } => {
+                let Some(f) = prior.native(&entity).and_then(|e| e.field(&field)) else {
+                    continue;
+                };
+                let table = live.table(&entity);
+                let mut columns = vec![f.column()];
+                if f.indexed && table.is_some_and(|t| t.columns.contains_key(&f.index_column())) {
+                    columns.push(f.index_column());
+                }
+                left.push(ordo_exec::orphans::Left {
+                    entity,
+                    field: Some(field),
+                    columns,
+                    sealed: f.sealed || f.private,
+                });
+            }
+            Change::DropEntity { entity } => {
+                let sealed = prior
+                    .native(&entity)
+                    .is_some_and(|e| e.fields.iter().any(|f| f.sealed || f.private));
+                left.push(ordo_exec::orphans::Left {
+                    entity,
+                    field: None,
+                    columns: Vec::new(),
+                    sealed,
+                });
+            }
+            _ => {}
+        }
+    }
+    let schema = &program.schema;
+    ordo_exec::orphans::revive(pool, &|entity: &str, field: &str| {
+        schema
+            .native(entity)
+            .is_some_and(|e| field.is_empty() || e.field(field).is_some())
+    })
+    .await
+    .map_err(|e| format!("$orphans: {e}"))?;
+    let names: Vec<String> = left
+        .iter()
+        .map(|l| match &l.field {
+            Some(f) => format!("{}.{f}", l.entity),
+            None => l.entity.clone(),
+        })
+        .collect();
+    let written = ordo_exec::orphans::record(
+        pool,
+        &left,
+        from,
+        &program.version,
+        actor,
+        crate::runtime::now_secs(),
+    )
+    .await
+    .map_err(|e| format!("$orphans: {e}"))?;
+    Ok(if written == 0 { Vec::new() } else { names })
+}
+
 fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
     crate::Fixture::from_source(&a.source, "")
         .ok()
@@ -439,7 +530,7 @@ fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
 /// Today one kind: what happens to a stored money or decimal field's
 /// amounts when its places change (25aa, ruled 2026-10-05).
 ///
-/// Carried by the call (`ordo migrate --apply --places`), because the
+/// Carried by the call (`ordo evolve --places`, `ordo plan --places`), because the
 /// stored plan that should hold every choice (`plan-evolution-plans.md`
 /// §3.1 and §3.2) is not built. Once applied, each choice is written to
 /// `$places` with the change, and a tenant's database brought forward later
@@ -448,9 +539,150 @@ fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
 pub struct Choices {
     /// `(entity, field)` to the stated choice.
     pub places: BTreeMap<(String, String), PlacesChoice>,
+    /// `(entity, field)` to the backfill that fills it (`plan-versions.md`
+    /// increment 10b): a new required field with no default (B2), or an
+    /// optional field made required (B5). Only a stored plan carries these
+    /// (`crate::evolve`); the apply path never states one, so there B2 and
+    /// B5 stay refused as before.
+    pub fills: BTreeMap<(String, String), Fill>,
+}
+
+/// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
+/// §5, §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fill {
+    pub mapping: FillMapping,
+    /// Summarised by default (ruled 2026-09-08); full images on request.
+    pub audit: ordo_commandlog::BackfillAudit,
+}
+
+/// What computes the new value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FillMapping {
+    /// An Ordo expression over the row's own fields (`title`, `price * 2`).
+    Expr(String),
+    /// A backend function of the version the step goes to (D16), called
+    /// once per chunk, rows in and values out. `secrets` and `hosts` are
+    /// what it may use (ruled 2026-11-23, Q14): anything else is refused,
+    /// and the plan shows both.
+    Function {
+        name: String,
+        secrets: Vec<String>,
+        hosts: Vec<String>,
+    },
+}
+
+impl FillMapping {
+    /// The mapping as the plan stores it and the audit record names it.
+    pub fn text(&self) -> String {
+        match self {
+            FillMapping::Expr(e) => e.clone(),
+            FillMapping::Function {
+                name,
+                secrets,
+                hosts,
+            } => {
+                let mut s = format!("fn {name}");
+                if !secrets.is_empty() {
+                    s.push_str(&format!(" secrets {}", secrets.join(",")));
+                }
+                if !hosts.is_empty() {
+                    s.push_str(&format!(" hosts {}", hosts.join(",")));
+                }
+                s
+            }
+        }
+    }
+
+    /// Read a mapping back: `fn <name> [secrets a,b] [hosts h,i]`, or an
+    /// expression.
+    pub fn parse(text: &str) -> Result<FillMapping, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(
+                "the mapping is empty: write an expression, `title`, or `fn <name>`".into(),
+            );
+        }
+        if text.contains(';') || text.contains('\n') {
+            return Err(format!(
+                "`{text}`: a mapping holds no `;` and no line break; `;` separates fills"
+            ));
+        }
+        let Some(rest) = text.strip_prefix("fn ") else {
+            return Ok(FillMapping::Expr(text.to_string()));
+        };
+        let mut words = rest.split_whitespace();
+        let name = words
+            .next()
+            .ok_or("`fn` names a function: `fn <name>`")?
+            .to_string();
+        let (mut secrets, mut hosts) = (Vec::new(), Vec::new());
+        while let Some(w) = words.next() {
+            let list = words
+                .next()
+                .ok_or_else(|| format!("`{w}` needs a comma-separated list after it"))?;
+            let items: Vec<String> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            match w {
+                "secrets" => secrets = items,
+                "hosts" => hosts = items,
+                other => {
+                    return Err(format!(
+                        "`{other}`: after `fn {name}` come only `secrets <a,b>` and `hosts <h,i>`"
+                    ))
+                }
+            }
+        }
+        Ok(FillMapping::Function {
+            name,
+            secrets,
+            hosts,
+        })
+    }
 }
 
 impl Choices {
+    /// Parse `notes.heading=title;notes.words=fn count`, adding to these
+    /// choices. `images` names the fills whose audit is full per-row
+    /// images, `notes.heading,notes.words`.
+    pub fn parse_fills(&mut self, spec: &str, images: &str) -> Result<(), String> {
+        for part in spec.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let (target, mapping) = part
+                .split_once('=')
+                .ok_or_else(|| format!("`{part}`: write `<entity>.<field>=<expression>`"))?;
+            let (entity, field) = target
+                .trim()
+                .split_once('.')
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            self.fills.insert(
+                (entity.trim().to_string(), field.trim().to_string()),
+                Fill {
+                    mapping: FillMapping::parse(mapping)?,
+                    audit: ordo_commandlog::BackfillAudit::Summarised,
+                },
+            );
+        }
+        for target in images.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let key = target
+                .split_once('.')
+                .map(|(e, f)| (e.trim().to_string(), f.trim().to_string()))
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            let fill = self.fills.get_mut(&key).ok_or_else(|| {
+                format!("`{target}` has no fill; images are chosen for a field the step fills")
+            })?;
+            fill.audit = ordo_commandlog::BackfillAudit::Images;
+        }
+        Ok(())
+    }
+
+    pub fn fill_for(&self, entity: &str, field: &str) -> Option<&Fill> {
+        self.fills.get(&(entity.to_string(), field.to_string()))
+    }
+
     /// Parse `invoices.total=rescale,fees.rate=keep`.
     pub fn parse_places(spec: &str) -> Result<Choices, String> {
         let mut out = Choices::default();
@@ -688,6 +920,28 @@ pub async fn assess_with(
             }
             out.push(a);
             continue;
+        }
+        // A required field the plan fills (10b): every row gets the mapping's
+        // value, so the nulls the probe would count are what the backfill
+        // is for. The probe still runs, and its count is reported.
+        if let Change::AddRequiredField { entity, field } | Change::RequireField { entity, field } =
+            &a.change
+        {
+            if let Some(fill) = choices.fill_for(entity, field) {
+                let probed = probe(pool, schema, live, &a.change).await;
+                a.probe = Some(match probed {
+                    Ok(Probe::Dirty { what, .. }) => Ok(Probe::Clean(format!(
+                        "{what}; the backfill fills them with `{}`",
+                        fill.mapping.text()
+                    ))),
+                    other => other.map_err(|e| e.to_string()),
+                });
+                if let Some(Err(e)) = &a.probe {
+                    a.refused.push(format!("probe_unavailable — {e}"));
+                }
+                out.push(a);
+                continue;
+            }
         }
         let probed = probe(pool, schema, live, &a.change).await;
         match &probed {
@@ -1690,6 +1944,138 @@ pub struct Refused {
 pub struct Triaged {
     pub steps: Vec<Step>,
     pub refused: Vec<Refused>,
+    /// The backfills the step runs after `steps` commit (10b): only a
+    /// stored plan's fills make one. Empty on the apply path.
+    pub backfills: Vec<BackfillStep>,
+    /// What lands once every backfill has verified: the `NOT NULL` each
+    /// filled field declares. Never sent by [`execute`]; the backfill's
+    /// caller sends it ([`crate::backfill`]).
+    pub after: Vec<Step>,
+}
+
+/// One backfill a step runs, as rendered (`plan-backfill-dual-writes.md`
+/// §2). Everything in it is in the receipt, so in the plan digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillStep {
+    /// `B2` (a new required field) or `B5` (an optional field made
+    /// required).
+    pub code: &'static str,
+    pub entity: String,
+    pub field: String,
+    /// The physical column filled.
+    pub column: String,
+    /// Its Postgres type.
+    pub column_ty: String,
+    pub mapping: FillMapping,
+    /// The mapping lowered to SQL over the row's own columns. `None` for a
+    /// backfill function, which computes values outside the database.
+    pub sql: Option<String>,
+    pub audit: ordo_commandlog::BackfillAudit,
+}
+
+impl BackfillStep {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "entity": self.entity,
+            "field": self.field,
+            "column": self.column,
+            "type": self.column_ty,
+            "mapping": self.mapping.text(),
+            "sql": self.sql,
+            "audit": self.audit.as_str(),
+        })
+    }
+}
+
+/// The backfill for a B2 or B5 change the plan fills, or the refusal.
+fn backfill_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    field: &str,
+    fill: &Fill,
+) -> Result<BackfillStep, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.sealed || f.indexed {
+        return Err(refuse(
+            "sealed_backfill_not_built",
+            format!(
+                "`{}.{field}` is sealed: a sealed backfill needs a key lease per space and no \
+                 plaintext dual write (plan-versions.md increment 13). Fill it in a version \
+                 before the one that seals it",
+                e.name
+            ),
+        ));
+    }
+    if f.is_content() {
+        return Err(refuse(
+            "mapping_invalid",
+            format!(
+                "`{}.{field}` is a file: a handle is minted by an upload, never computed",
+                e.name
+            ),
+        ));
+    }
+    let sql = match &fill.mapping {
+        FillMapping::Expr(src) => {
+            let expr = ordo_syntax::parse_expr(src).map_err(|err| {
+                refuse(
+                    "mapping_invalid",
+                    format!("the mapping `{src}` does not parse: {err}"),
+                )
+            })?;
+            // The row's own fields, without the one being filled: it holds
+            // nothing yet.
+            let fields: Vec<ordo_schema::Field> = e
+                .fields
+                .iter()
+                .filter(|x| x.name != field)
+                .cloned()
+                .collect();
+            Some(
+                ordo_schema::check::render_mapping(&e.name, &fields, &expr).map_err(|err| {
+                    refuse("mapping_invalid", format!("{}: {}", err.code, err.message))
+                })?,
+            )
+        }
+        FillMapping::Function { .. } => None,
+    };
+    if fill.audit == ordo_commandlog::BackfillAudit::Images
+        && e.fields.iter().any(|x| x.sealed || x.is_content())
+    {
+        return Err(refuse(
+            "backfill_images_unsupported",
+            format!(
+                "`{}` has a sealed or file field, and full images of its rows need the custody \
+                 the write path uses. Leave `--audit-images` off for `{}.{field}`: the \
+                 summarised record is the default",
+                e.name, e.name
+            ),
+        ));
+    }
+    Ok(BackfillStep {
+        code: c.code(),
+        entity: e.name.clone(),
+        field: field.to_string(),
+        column: f.column(),
+        column_ty: ordo_schema::ddl::column_ty(f),
+        mapping: fill.mapping.clone(),
+        sql,
+        audit: fill.audit,
+    })
 }
 
 /// Decide, for every assessed change, the statements to send or the
@@ -1712,6 +2098,36 @@ pub async fn triage_with(
     assessed: &[Assessed],
     choices: &Choices,
     version: &str,
+) -> Result<Triaged, String> {
+    // Rows in each live table a change touches, read once per entity. A
+    // table this apply creates holds none.
+    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
+    for a in assessed.iter().filter(|a| a.refused.is_empty()) {
+        let Some(e) = schema.native(a.change.entity()) else {
+            continue;
+        };
+        if live.table(&e.name).is_some() && !rows.contains_key(&e.name) {
+            let n = migrate::extent(pool, &e.name)
+                .await
+                .map_err(|x| format!("counting `{}`: {x}", e.name))?
+                .rows;
+            rows.insert(e.name.clone(), n);
+        }
+    }
+    triage_counted(schema, live, assessed, choices, version, &rows)
+}
+
+/// [`triage_with`], given the rows each live table holds (`rows`; a table
+/// not named holds none). Reads nothing. A stored plan renders its step
+/// with this against an empty database of the version it starts from
+/// (`crate::evolve`), so the rendering is the same in every environment.
+pub fn triage_counted(
+    schema: &Schema,
+    live: &LiveShape,
+    assessed: &[Assessed],
+    choices: &Choices,
+    version: &str,
+    rows: &BTreeMap<String, i64>,
 ) -> Result<Triaged, String> {
     // The columns this apply brings into existence, `(entity, column)`.
     // A constraint over only these constrains no existing data.
@@ -1737,9 +2153,10 @@ pub async fn triage_with(
             _ => {}
         }
     }
-    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
     let mut steps = Vec::new();
     let mut refused = Vec::new();
+    let mut backfills = Vec::new();
+    let mut after = Vec::new();
     let ddl_err = |x: ordo_schema::SchemaError| format!("{}: {}", x.code, x.message);
 
     for a in assessed {
@@ -1759,20 +2176,9 @@ pub async fn triage_with(
             refused.push(not_built(c));
             continue;
         };
-        // Rows in the live table, read once per entity. A table this apply
-        // creates holds none.
+        // Rows in the live table. A table this apply creates holds none.
         let live_rows = if live.table(&e.name).is_some() {
-            match rows.get(&e.name) {
-                Some(n) => *n,
-                None => {
-                    let n = migrate::extent(pool, &e.name)
-                        .await
-                        .map_err(|x| format!("counting `{}`: {x}", e.name))?
-                        .rows;
-                    rows.insert(e.name.clone(), n);
-                    n
-                }
-            }
+            rows.get(&e.name).copied().unwrap_or(0)
         } else {
             0
         };
@@ -1956,11 +2362,51 @@ pub async fn triage_with(
                 );
                 steps.extend(not_valid_then_validate(c, e, object, &sql));
             }
+            // A required field a stored plan fills (10b): expand with the
+            // column nullable, backfill, then `SET NOT NULL` once verified.
+            Change::AddRequiredField { field, .. } | Change::RequireField { field, .. }
+                if choices.fill_for(&e.name, field).is_some() =>
+            {
+                let fill = choices
+                    .fill_for(&e.name, field)
+                    .expect("matched just above");
+                match backfill_step(c, e, field, fill) {
+                    Err(r) => refused.push(*r),
+                    Ok(b) => {
+                        if matches!(c, Change::AddRequiredField { .. }) {
+                            steps.push(alter(format!(
+                                "ALTER TABLE {} ADD COLUMN {} {};\n",
+                                ordo_schema::ddl::q(&e.name),
+                                ordo_schema::ddl::q(&b.column),
+                                b.column_ty
+                            )));
+                        }
+                        after.push(Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql: format!(
+                                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL;\n",
+                                ordo_schema::ddl::q(&e.name),
+                                ordo_schema::ddl::q(&b.column)
+                            ),
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        });
+                        backfills.push(b);
+                    }
+                }
+            }
             _ => refused.push(not_built(c)),
         }
     }
     steps.sort_by_key(|s| s.phase);
-    Ok(Triaged { steps, refused })
+    Ok(Triaged {
+        steps,
+        refused,
+        backfills,
+        after,
+    })
 }
 
 /// The two steps a foreign key, an enum pin or a check takes onto a table
@@ -2566,7 +3012,7 @@ pub struct Record<'a> {
     pub from: Option<&'a str>,
     pub to: &'a str,
     pub actor: &'a str,
-    /// What the caller was: `ordo apply`, `ordo migrate --apply`, or the
+    /// What the caller was: `ordo apply`, `std.deployment.evolve`, or the
     /// platform op that 18l adds.
     pub op: &'a str,
     pub changes: &'a str,
@@ -2668,6 +3114,10 @@ pub enum Applied {
         /// The `$migrations` row and the event note, or why recording
         /// failed (the DDL still landed).
         recorded: Result<(i64, String), String>,
+        /// The backfills still to run, and what lands after them (10b).
+        /// Empty unless a stored plan's fills were stated.
+        backfills: Vec<BackfillStep>,
+        after: Vec<Step>,
     },
 }
 
@@ -2793,11 +3243,47 @@ fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
 /// refused, and every change is safe. `std.deployment.plan` asks the same
 /// question [`apply_safe`] does, so a preview and an apply cannot disagree.
 pub fn all_safe(plan: &Plan) -> bool {
+    let plan = without_drops(plan);
     let all: Vec<&Change> = plan.changes().collect();
     plan.present() > 0
         && plan.refusals.is_empty()
         && !all.is_empty()
         && all.iter().all(|c| is_safe_change(c, &all))
+}
+
+/// The plan without its dropped fields and entities, and without the
+/// refusals they raised.
+///
+/// A drop is never executed by an apply: its column or table stays, and the
+/// gate tolerates it (§8.2, "A dropped field"). A program that only drops
+/// applies as `Matches { pending }`. Before 2026-11-23 a program that added
+/// a field and dropped another was refused whole, because the drop's
+/// `drop_read_by_active_op` (the serving version still reads it) counted
+/// against the addition. Found by notes v3 (`plan-versions.md`, increment
+/// 7a). The safe additions are judged and applied alone now, and the drop
+/// stays pending as a drop alone does.
+fn without_drops(plan: &Plan) -> std::borrow::Cow<'_, Plan> {
+    let is_drop = |c: &Change| matches!(c, Change::DropField { .. } | Change::DropEntity { .. });
+    if !plan.assessed.iter().any(|a| is_drop(&a.change)) {
+        return std::borrow::Cow::Borrowed(plan);
+    }
+    let mut out = plan.clone();
+    let (drops, kept): (Vec<Assessed>, Vec<Assessed>) =
+        out.assessed.into_iter().partition(|a| is_drop(&a.change));
+    out.assessed = kept;
+    for a in &drops {
+        if a.change.refusal().is_none() && a.change.class() == Class::D {
+            out.destructive = out.destructive.saturating_sub(1);
+        }
+        for r in &a.refused {
+            let class = r.split(" — ").next().unwrap_or(r);
+            let line = format!("{class} on `{}`", a.change.entity());
+            if let Some(at) = out.refusals.iter().position(|x| *x == line) {
+                out.refusals.remove(at);
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// What [`apply_safe`] did.
@@ -2817,7 +3303,7 @@ pub enum SafeApply {
 
 /// Apply the program's changes over a database that is behind, when every
 /// one of them is safe (see [`is_safe_change`]) and the setting is on.
-/// The same path as `ordo migrate --apply`: plan, triage, execute, record.
+/// The same path as `ordo evolve --run`: plan, triage, execute, record.
 pub async fn apply_safe(
     pool: &Pool,
     program: &Program,
@@ -2832,6 +3318,8 @@ pub async fn apply_safe(
     if !all_safe(&plan) {
         return Ok(SafeApply::NotSafe);
     }
+    // A drop beside the additions is left pending, as a drop alone is.
+    let plan = without_drops(&plan).into_owned();
     let all: Vec<&Change> = plan.changes().collect();
     let changes: Vec<(String, String)> = all
         .iter()
@@ -2860,7 +3348,7 @@ pub async fn apply_safe(
 /// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
 /// table this apply creates is granted in the same apply, and a table taken
 /// off a line is revoked.
-async fn apply_planned(
+pub(crate) async fn apply_planned(
     pool: &Pool,
     plan: &Plan,
     actor: &str,
@@ -2977,12 +3465,29 @@ async fn apply_planned_tables(
             (Err(failure), phase, note)
         }
     };
+    // A step with backfills (10b) has only expanded here: the database
+    // still holds the version before it until each backfill verifies and
+    // its `NOT NULL` lands, so the record names that version, and the stale
+    // check of a run again finds the step still to finish.
+    let expanded_only = !triaged.backfills.is_empty();
+    let note = if expanded_only && note.is_empty() {
+        format!(
+            "expand of {}; {} backfill(s) to run before it is recorded",
+            plan.program.version,
+            triaged.backfills.len()
+        )
+    } else {
+        note
+    };
     let recorded = record(
         pool,
         &Record {
             kind: migrate::kind::ADDITIVE,
             from,
-            to: &plan.program.version,
+            to: match (expanded_only, from) {
+                (true, Some(f)) => f,
+                _ => &plan.program.version,
+            },
             actor,
             op,
             changes: &changes,
@@ -2997,6 +3502,8 @@ async fn apply_planned_tables(
             steps: triaged.steps,
             executed,
             recorded,
+            backfills: triaged.backfills,
+            after: triaged.after,
         }),
         Err(failure) => Err(ApplyRefusal::ExecFailed(Box::new(ExecFailed {
             steps: triaged.steps,
@@ -3193,6 +3700,8 @@ pub async fn bring_forward_from(
     let plan = self::plan_with(pool, program, &choices, written.as_ref())
         .await
         .map_err(internal)?;
+    // A drop is left pending here as on the deployment's own database.
+    let plan = without_drops(&plan).into_owned();
     let statements = match apply_planned(pool, &plan, actor, op).await {
         Ok(Applied::Additive { steps, .. }) => steps.len(),
         Ok(Applied::Created(c)) => c.tables,
@@ -3236,6 +3745,13 @@ pub async fn bring_forward_from(
             .map_err(internal)?;
         }
         Err(e) => return Err(internal(e.to_string())),
+    }
+    // What the version left behind here (§2.7). Read against the version
+    // this database held, when the deployment's own database could say it.
+    if let Some(prior) = &written {
+        record_orphans(pool, prior, program, before.as_deref(), actor)
+            .await
+            .map_err(internal)?;
     }
     Ok(Forward::Advanced { statements })
 }

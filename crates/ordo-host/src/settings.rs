@@ -1519,10 +1519,40 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_ORPHANS_PERSONAL_DROP_AFTER",
+        "Databases and pools",
+        r#"30 days"#,
+        r#"a whole number of days"#,
+    ),
+    s(
         "ORDO_VERSIONS_TENANT_MOVE_ROLES",
         "Databases and pools",
         r#"none"#,
         r#""#,
+    ),
+    s(
+        "ORDO_VERSIONS_MAX_CONCURRENT_LOADS",
+        "Databases and pools",
+        r#"1"#,
+        r#"1 to 16"#,
+    ),
+    s(
+        "ORDO_VERSIONS_MAX_LOADED",
+        "Databases and pools",
+        r#"8"#,
+        r#"1 to 256"#,
+    ),
+    s(
+        "ORDO_VERSIONS_MEMORY_BUDGET",
+        "Databases and pools",
+        r#"512MB"#,
+        r#"256KB or more"#,
+    ),
+    s(
+        "ORDO_PROMOTION_PLAIN_HTTP",
+        "Databases and pools",
+        r#"off"#,
+        r#"on or off"#,
     ),
     s("ORDO_BLOB_STORE", "Storage and blobs", r#"none"#, r#""#),
     s(

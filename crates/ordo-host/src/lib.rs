@@ -54,10 +54,12 @@ pub mod attest;
 pub mod attest_ops;
 pub mod attestdrain;
 pub mod auth;
+pub mod backfill;
 pub mod blob;
 pub mod boot_record;
 pub mod bucket_ops;
 pub mod ceremonies;
+pub mod clones;
 pub mod consent;
 pub mod console_keys;
 pub mod contact_email;
@@ -73,6 +75,8 @@ pub mod direct_uses;
 pub mod directory;
 pub mod email_code;
 pub mod enrolment;
+pub mod environments;
+pub mod evolve;
 pub mod exit_ops;
 pub mod external_check;
 pub mod federation;
@@ -94,6 +98,7 @@ pub mod metrics;
 pub mod node_status;
 pub mod observed_cost;
 pub mod oidc;
+pub mod orphan_ops;
 pub mod own_download;
 pub mod passkeys;
 pub mod pause;
@@ -101,9 +106,11 @@ pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
 pub mod platform_ops;
+pub mod precheck;
 pub mod presence;
 pub mod principal_directory;
 pub mod profile_ops;
+pub mod promotion;
 pub mod provision;
 pub mod proxy;
 pub mod public;
@@ -115,6 +122,7 @@ pub mod recovery_hold;
 pub mod recovery_settings;
 mod refine_call;
 pub mod registrations;
+pub mod release_check;
 pub mod release_ops;
 pub mod renewal;
 pub mod replay;
@@ -139,6 +147,7 @@ pub mod share_accept;
 pub mod share_links;
 pub mod share_ops;
 pub mod spaces;
+pub mod step_door;
 pub mod supervisor;
 pub mod tenant_forward;
 pub mod tenant_identities;
@@ -1180,7 +1189,16 @@ impl OpExecutor for FixtureExecutor {
             // this string is the space the door *authorized*, which is the
             // check the assertion was standing next to and is the one that
             // matters.
-            let bound_space = self.spaces.resolve(space).await.map_err(space_refusal)?;
+            // A version unloaded for idleness is loaded again for a
+            // signed-in caller, who waits for it; never for an anonymous
+            // one (V-29), whose calls reach only the deployment's own
+            // space, on the active version, which is never evicted.
+            let bound_space = if caller != ordo_api::ANONYMOUS {
+                self.spaces.resolve_waking(space).await
+            } else {
+                self.spaces.resolve(space).await
+            }
+            .map_err(space_refusal)?;
             let view = &bound_space.view;
             match op.kind {
                 OpKind::Read => {
@@ -1524,6 +1542,9 @@ pub fn interface_for(
             conditions: limits.max_conditions,
             in_values: limits.max_in_values,
         },
+        // The program's sign-in facts: the same for every asker, and the
+        // file's values, which the deployment's ceilings may narrow.
+        ordo_plan::artifact::auth_artifact(&f.schema).as_ref(),
     )
 }
 
@@ -1793,9 +1814,39 @@ pub struct IdentityAccess {
     /// deployment token, 3 segments, is verified with. Unset, the door
     /// accepts no deployment token, and records each one it refuses.
     pub deployment: std::sync::OnceLock<Arc<identity_keys::IdentityKeys>>,
+    /// Which tenants are staging clones, and who opens them
+    /// (`plan-versions.md` §3.4, owner ruling 2026-11-23, Q12). Unset, no
+    /// person's deployment token reaches an app op anywhere.
+    pub clones: std::sync::OnceLock<Arc<clones::CloneAccess>>,
 }
 
 impl IdentityAccess {
+    /// Tell the door which tenants are clones. Once.
+    pub fn wire_clones(&self, access: Arc<clones::CloneAccess>) {
+        let _ = self.clones.set(access);
+    }
+
+    /// The same, for a door being built.
+    pub fn with_clones(self, access: Arc<clones::CloneAccess>) -> IdentityAccess {
+        self.wire_clones(access);
+        self
+    }
+
+    /// The cloned member a person's deployment token opens `space` as, for
+    /// an app op: `Some` only in a clone, for a staging admin or a person
+    /// `clone.readers` names.
+    fn clone_member(
+        &self,
+        claims: &ordo_identity::deployment_token::DeploymentClaims,
+        space: &str,
+        op: &str,
+    ) -> Option<String> {
+        if deployment_access::is_platform_op(op) {
+            return None;
+        }
+        let admin = claims.role == ordo_identity::deployment_token::ROLE_ADMIN;
+        self.clones.get()?.opens_as(space, &claims.sub, admin)
+    }
     /// Give the door the identity service's keys. Once.
     pub fn wire_identity_keys(&self, keys: Arc<identity_keys::IdentityKeys>) {
         let _ = self.deployment.set(keys);
@@ -1858,6 +1909,7 @@ impl IdentityAccess {
             shares: None,
             second_step: std::sync::OnceLock::new(),
             console_home: std::sync::OnceLock::new(),
+            clones: std::sync::OnceLock::new(),
             deployment: std::sync::OnceLock::new(),
         }
     }
@@ -2033,6 +2085,9 @@ impl IdentityAccess {
         op: &str,
         now: u64,
     ) -> deployment_access::Realm {
+        if self.clone_member(claims, space, op).is_some() {
+            return deployment_access::clone_realm(claims, now);
+        }
         deployment_access::decide(
             claims,
             self.console_home.get().map(String::as_str),
@@ -2100,7 +2155,15 @@ impl IdentityAccess {
                     },
                     Relationship::None,
                 );
-                AccessDecision::allow(claims.sub.clone())
+                // In a staging clone the person acts as its founding owner,
+                // and is recorded beside it as the one who acted (Q12).
+                match self.clone_member(&claims, space, op) {
+                    Some(member) => AccessDecision::Allow {
+                        principal: member,
+                        agent: Some(claims.sub.clone()),
+                    },
+                    None => AccessDecision::allow(claims.sub.clone()),
+                }
             }
             Realm::PresenceRequired => refused(RecordedDecision::StepUpStale),
             Realm::Deny => refused(RecordedDecision::OutsideDeploymentRealm),
@@ -2566,6 +2629,26 @@ impl AccessChecker for IdentityAccess {
             self.metrics.deny(space, &claims.principal.0, "member", op);
             return AccessDecision::Deny;
         }
+        // **A person the staging deployment allows opens a clone**
+        // (`plan-versions.md` §3.4, Q12): named in `clone.readers`, signed in
+        // to staging as themselves. They act as the clone's founding owner
+        // and are recorded beside it. A cloned member's own sign-in never
+        // reaches here as one: its link was not carried.
+        if claims.capability.is_none()
+            && claims.delegation.is_none()
+            && !deployment_access::is_platform_op(op)
+        {
+            if let Some(member) = self
+                .clones
+                .get()
+                .and_then(|c| c.opens_as(space, &claims.principal.0, false))
+            {
+                return AccessDecision::Allow {
+                    principal: member,
+                    agent: Some(claims.principal.0.clone()),
+                };
+            }
+        }
         let ispace = SpaceId(space.to_string());
         match self.engine.check(&claims, &ispace, op, now) {
             // **`$caller` is the member in this space** (E1): the row id the
@@ -2979,6 +3062,17 @@ pub fn engine_from_directory_served(
             .and_then(|s| s.as_deref())
             .is_some_and(crate::release_ops::is_gone)
         {
+            continue;
+        }
+        // **A member of a staging clone is no membership anyone signs in
+        // as** (`plan-versions.md` §3.4, Q12). Its sign-in link was never
+        // carried; the row stays so the clone's rows keep their authors,
+        // and a staging admin opens the clone through `clones::CloneAccess`.
+        if r.get(4)
+            .and_then(|p| p.as_deref())
+            .is_some_and(|p| p.starts_with(clones::CLONE_PRINCIPAL_PREFIX))
+        {
+            spaces.insert(space);
             continue;
         }
         let principal = PrincipalId(

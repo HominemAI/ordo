@@ -173,6 +173,9 @@ fn usage() -> ! {
          characters. The git commit of the source is recorded too, with\n      \
          `-dirty` when the applied files changed since it; outside a git\n      \
          repository nothing is recorded.\n      \
+         `--branch <name> [--seed <file>]` stores the version in dev,\n      \
+         unactivated, and serves it to the branch's own tenant; `ordo\n      \
+         branches list|delete <name> --reason \"...\"` (see `ordo branches`).\n      \
          It then waits until every running node serves the new version and\n      \
          has brought the tenants' databases to it, and names any tenant\n      \
          held closed. `--wait-secs <n>` (or ORDO_APPLY_WAIT_SECS, default\n      \
@@ -334,6 +337,10 @@ fn usage() -> ! {
          on production: read staging's signed rehearsal as you, check it,\n      \
          and render the plan to the same digest. Production runs only an\n      \
          accepted digest while staging is in its chain.\n  \
+         ordo tenant-builds list | set <name> <version> --reason \"<text>\" | join <name> <tenant>\n      \
+         | leave <tenant> | remove <name> --reason \"<text>\"\n      \
+         a named build serves one version to the tenants named while the rest\n      \
+         follow the active version. Activations and rollouts leave them there.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \
@@ -616,7 +623,9 @@ fn main() {
             | "windows"
             | "environments"
             | "clones"
+            | "branches"
             | "rehearsals"
+            | "tenant-builds"
             | "promote"
             | "evolve"
             | "rollout"

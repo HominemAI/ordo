@@ -354,6 +354,10 @@ pub enum SchemaOutcome {
     /// The live schema lacks something the program asserts. The artifact is
     /// stored; nothing is activated over it.
     Behind { changes: Vec<(String, String)> },
+    /// A dev branch's apply (`crate::branches`): the deployment's own
+    /// database was not read or changed. The branch's tables are in its
+    /// tenant's own database.
+    Untouched,
 }
 
 /// What the activation half did.
@@ -833,7 +837,13 @@ async fn sequence(
     // tenant would read as behind it.
     // A version that arrives with a staging clone keeps the number it was
     // applied under, lower than this deployment's highest or not.
-    let naming = if op == crate::promotion::CLONE_OP_LABEL {
+    // A dev branch's version is named the same way, with one difference:
+    // a number lower than the highest stored is taken, so 2 branches that
+    // number their versions apart do not refuse each other
+    // (`crate::branches`). A used number with other content is still
+    // refused.
+    let branch = op == crate::branches::BRANCH_OP_LABEL;
+    let naming = if op == crate::promotion::CLONE_OP_LABEL || branch {
         sa::name_arrival(pool, program).await
     } else {
         sa::name_version(pool, program).await
@@ -854,6 +864,9 @@ async fn sequence(
     }
     let mut notes = notes;
     notes.extend(naming.note.clone());
+    // **A dev branch's apply leaves the deployment's own database alone**
+    // (`crate::branches`): no schema step, no orphans. The branch's
+    // tables are made in its tenant's own database.
     let renamed;
     let program = if naming.version != program.version {
         let mut p = program.clone();
@@ -882,80 +895,97 @@ async fn sequence(
     // proceeds, and a database that is behind stores but does not activate.
     let mut behind: Vec<(String, String)> = Vec::new();
     // The version serving before this apply: what an orphan is read against.
-    let prior = sa::active_schema(pool).await;
-    let schema = match sa::schema_state(pool, &program.schema)
-        .await
-        .map_err(ApplyRefused::Internal)?
-    {
-        SchemaState::Ghost { serving } => return Err(ApplyRefused::Ghost { serving }),
-        SchemaState::Empty => {
-            let c = sa::create_schema(pool, program, actor, op)
+    let prior = if branch {
+        None
+    } else {
+        sa::active_schema(pool).await
+    };
+    let state = if branch {
+        None
+    } else {
+        Some(
+            sa::schema_state(pool, &program.schema)
                 .await
-                .map_err(ApplyRefused::Internal)?;
-            SchemaOutcome::Created {
-                tables: c.tables,
-                migration: c.migration,
-                event: c.event,
-            }
-        }
-        SchemaState::Matches { pending } => {
-            // A program that only stops declaring a field applies no DDL,
-            // so no `$migrations` row says this database is at the new
-            // version. Recorded here, on the same terms a tenant's
-            // database gets it, or a space routed to this database would
-            // read as behind the version it is serving.
-            if let Err(e) = sa::record_version_if_behind(pool, program, actor, op).await {
-                eprintln!("apply: the deployment's own database could not record its version: {e}");
-            }
-            SchemaOutcome::Matches { pending }
-        }
-        SchemaState::Behind(changes) => {
-            // **Past staging, an apply makes no rename** (§3.2, 12b): the
-            // one change the safe apply makes that a stored step makes too.
-            // It is stored and left behind, and an activation is refused,
-            // naming the rehearsal.
-            let renames: Vec<String> = changes
-                .iter()
-                .filter(|c| matches!(c, Change::RenameField { .. } | Change::RenameEntity { .. }))
-                .map(|c| c.to_string())
-                .collect();
-            let unrehearsed = !renames.is_empty()
-                && crate::rehearsals::required(pool)
-                    .await
-                    .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
-            if unrehearsed && activate {
-                return Err(ApplyRefused::NotRehearsed(format!(
-                    "staging comes before this deployment, and {} renames {}: a change this \
-                     deployment makes only through a stored plan staging rehearsed. Store it \
-                     without activating (`--no-activate`), render the step (`ordo evolve \
-                     --from <serving> --to {}`), rehearse it on staging (`ordo rehearsals \
-                     rehearse`), accept it here (`ordo rehearsals accept`), then run it",
-                    program.version,
-                    renames.join(", "),
-                    program.version
-                )));
-            }
-            let safe = if unrehearsed {
-                sa::SafeApply::NotSafe
-            } else {
-                sa::apply_safe(pool, program, actor, op, Some(external.clone()))
-                    .await
-                    .map_err(ApplyRefused::Internal)?
-            };
-            match safe {
-                sa::SafeApply::Applied {
-                    changes,
-                    migration,
-                    event,
-                } => SchemaOutcome::Migrated {
-                    changes,
-                    migration,
-                    event,
-                },
-                sa::SafeApply::NotSafe => {
-                    behind = changes.iter().map(named).collect();
-                    SchemaOutcome::Behind {
-                        changes: behind.clone(),
+                .map_err(ApplyRefused::Internal)?,
+        )
+    };
+    let schema = match state {
+        None => SchemaOutcome::Untouched,
+        Some(state) => {
+            match state {
+                SchemaState::Ghost { serving } => return Err(ApplyRefused::Ghost { serving }),
+                SchemaState::Empty => {
+                    let c = sa::create_schema(pool, program, actor, op)
+                        .await
+                        .map_err(ApplyRefused::Internal)?;
+                    SchemaOutcome::Created {
+                        tables: c.tables,
+                        migration: c.migration,
+                        event: c.event,
+                    }
+                }
+                SchemaState::Matches { pending } => {
+                    // A program that only stops declaring a field applies no DDL,
+                    // so no `$migrations` row says this database is at the new
+                    // version. Recorded here, on the same terms a tenant's
+                    // database gets it, or a space routed to this database would
+                    // read as behind the version it is serving.
+                    if let Err(e) = sa::record_version_if_behind(pool, program, actor, op).await {
+                        eprintln!("apply: the deployment's own database could not record its version: {e}");
+                    }
+                    SchemaOutcome::Matches { pending }
+                }
+                SchemaState::Behind(changes) => {
+                    // **Past staging, an apply makes no rename** (§3.2, 12b): the
+                    // one change the safe apply makes that a stored step makes too.
+                    // It is stored and left behind, and an activation is refused,
+                    // naming the rehearsal.
+                    let renames: Vec<String> = changes
+                        .iter()
+                        .filter(|c| {
+                            matches!(c, Change::RenameField { .. } | Change::RenameEntity { .. })
+                        })
+                        .map(|c| c.to_string())
+                        .collect();
+                    let unrehearsed = !renames.is_empty()
+                        && crate::rehearsals::required(pool)
+                            .await
+                            .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
+                    if unrehearsed && activate {
+                        return Err(ApplyRefused::NotRehearsed(format!(
+                        "staging comes before this deployment, and {} renames {}: a change this \
+                         deployment makes only through a stored plan staging rehearsed. Store it \
+                         without activating (`--no-activate`), render the step (`ordo evolve \
+                         --from <serving> --to {}`), rehearse it on staging (`ordo rehearsals \
+                         rehearse`), accept it here (`ordo rehearsals accept`), then run it",
+                        program.version,
+                        renames.join(", "),
+                        program.version
+                    )));
+                    }
+                    let safe = if unrehearsed {
+                        sa::SafeApply::NotSafe
+                    } else {
+                        sa::apply_safe(pool, program, actor, op, Some(external.clone()))
+                            .await
+                            .map_err(ApplyRefused::Internal)?
+                    };
+                    match safe {
+                        sa::SafeApply::Applied {
+                            changes,
+                            migration,
+                            event,
+                        } => SchemaOutcome::Migrated {
+                            changes,
+                            migration,
+                            event,
+                        },
+                        sa::SafeApply::NotSafe => {
+                            behind = changes.iter().map(named).collect();
+                            SchemaOutcome::Behind {
+                                changes: behind.clone(),
+                            }
+                        }
                     }
                 }
             }
@@ -1788,6 +1818,7 @@ impl Report {
                     .map(|(c, t)| json!({ "code": c, "change": t }))
                     .collect::<Vec<_>>(),
             }),
+            SchemaOutcome::Untouched => json!({ "state": "untouched" }),
         };
         let activation = match &self.activation {
             Activation::Switched { from, to } => json!({
@@ -1870,6 +1901,7 @@ impl Report {
                     })
                     .collect(),
             },
+            Some("untouched") => SchemaOutcome::Untouched,
             Some("behind") => SchemaOutcome::Behind {
                 changes: schema["changes"]
                     .as_array()

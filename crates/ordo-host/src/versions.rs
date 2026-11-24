@@ -537,6 +537,32 @@ CREATE TABLE IF NOT EXISTS \"$moves\" ( \
   \"overlay\" text NOT NULL DEFAULT '' \
 )";
 
+/// `$tenant_builds` and `$tenant_build_members` (`plan-versions.md` §3.8,
+/// increment 16): each named build and its version, and which tenants
+/// each holds, one build per tenant. A member's row names a tenant and
+/// holds none of its data.
+const TENANT_BUILDS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$tenant_builds\" ( \
+  \"name\" text PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+); \
+CREATE TABLE IF NOT EXISTS \"$tenant_build_members\" ( \
+  \"space\" text PRIMARY KEY, \
+  \"build\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+)";
+
+/// **Not in a tenant build** (`plan-versions.md` §3.8, increment 16): an
+/// `AND` on `"$space"` that leaves out every tenant a build holds. An
+/// activation, a rollout and the revoked-version sweep move none of them;
+/// only the build does (`crate::tenant_builds`).
+pub const NOT_IN_A_BUILD: &str =
+    "AND \"$space\" NOT IN (SELECT \"space\" FROM \"$tenant_build_members\")";
+
 /// `$revocations`, beside `$artifacts`: each revoke and unrevoke of a
 /// version, append-only. A version is revoked when its newest row says
 /// `revoke`.
@@ -735,7 +761,35 @@ pub async fn ensure_pin_tables(pool: &Pool) -> Result<(), PoolError> {
     if pool.rows(PIN_TABLES_DDL).await.is_err() {
         pool.rows(PIN_TABLES_DDL).await?;
     }
+    ensure_build_tables(pool).await
+}
+
+/// Create the tenant builds' tables. Every act that moves many pins reads
+/// them (an activation, a rollout, the revoked-version sweep), so each
+/// makes sure of them first. Retried once, for [`ensure_pin_tables`]'
+/// reason.
+pub async fn ensure_build_tables(pool: &Pool) -> Result<(), PoolError> {
+    if pool.rows(TENANT_BUILDS_DDL).await.is_err() {
+        pool.rows(TENANT_BUILDS_DDL).await?;
+    }
     Ok(())
+}
+
+/// The build that holds `space`, and its version, read in `tx`.
+pub(crate) async fn build_of_in(
+    tx: &ordo_exec::TxConn,
+    space: &str,
+) -> Result<Option<(String, String)>, PoolError> {
+    let rows = tx
+        .rows(&format!(
+            "SELECT m.\"build\", b.\"version\" FROM \"$tenant_build_members\" m \
+             JOIN \"$tenant_builds\" b ON b.\"name\" = m.\"build\" WHERE m.\"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?))))
 }
 
 /// The advisory lock every pin change takes first, in its own
@@ -939,6 +993,9 @@ pub enum PinCause {
     /// A rollout's batch moved it (`plan-versions.md` §3.7, increment
     /// 10). Its `$pins` row names the rollout.
     Rollout,
+    /// A tenant build moved it: it joined or left one, or its build was set
+    /// to another version (`plan-versions.md` §3.8, increment 16).
+    Build,
 }
 
 /// Where an open move stands (`$moves.phase`, §2.1).
@@ -1154,6 +1211,7 @@ impl PinCause {
             PinCause::Tenant => "tenant",
             PinCause::Move => "move",
             PinCause::Rollout => "rollout",
+            PinCause::Build => "build",
         }
     }
 }
@@ -1439,6 +1497,13 @@ pub enum VersionRefusal {
     /// A revert or a soak's close for a tenant with no move with dual
     /// writes open. Fix the input.
     NoMove { space: String },
+    /// **A tenant a build holds** (increment 16): only the build moves it.
+    /// The text names `ordo tenant-builds leave`.
+    InBuild {
+        space: String,
+        build: String,
+        version: String,
+    },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -1472,7 +1537,8 @@ impl VersionRefusal {
             | VersionRefusal::NotOnRevoked { .. }
             | VersionRefusal::NotRevoked { .. }
             | VersionRefusal::Moving { .. }
-            | VersionRefusal::RolloutOpen { .. } => Remedy::Refuse,
+            | VersionRefusal::RolloutOpen { .. }
+            | VersionRefusal::InBuild { .. } => Remedy::Refuse,
             VersionRefusal::NoMove { .. } => Remedy::FixInput,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
@@ -1530,6 +1596,7 @@ impl VersionRefusal {
             | VersionRefusal::BelowMinimum { .. }
             | VersionRefusal::NotPromoted(_)
             | VersionRefusal::RolloutOpen { .. }
+            | VersionRefusal::InBuild { .. }
             | VersionRefusal::NamedBySetting { .. }
             | VersionRefusal::Moving { .. } => ExecError::new(ErrorCode::ApplyRefused, message),
             VersionRefusal::NotRevoked { .. }
@@ -1727,6 +1794,17 @@ impl std::fmt::Display for VersionRefusal {
                 list.join(",")
             ),
             VersionRefusal::NotPromoted(why) => write!(f, "not_promoted: {why}"),
+            VersionRefusal::InBuild {
+                space,
+                build,
+                version,
+            } => write!(
+                f,
+                "in_tenant_build: tenant {space} is in tenant build `{build}` on {version}, and \
+                 only the build moves it. `ordo tenant-builds set {build} <version>` moves the \
+                 whole build; `ordo tenant-builds leave {space}` returns it to the active \
+                 version"
+            ),
             VersionRefusal::RolloutOpen { id, target } => write!(
                 f,
                 "rollout_open: rollout {id} to {target} is open, and one deployment-wide \
@@ -2360,6 +2438,7 @@ impl<'a> Versions<'a> {
             None => PinCause::Activate,
         };
         ensure_revocations(self.pool).await?;
+        ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         if let Some(mark) = mark_in(&tx, version).await? {
@@ -2398,7 +2477,9 @@ impl<'a> Versions<'a> {
             .await?;
         let moving = "AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\")";
         if !attached {
-            repin(&tx, &repin_sql(version, actor, cause, at.0, Some(moving))).await?;
+            // A tenant in a tenant build keeps the build's version.
+            let keep = format!("{moving} {NOT_IN_A_BUILD}");
+            repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&keep))).await?;
         } else {
             let ready: Vec<String> = plan.ready.iter().cloned().collect();
             let ready_sql = if ready.is_empty() {
@@ -2411,7 +2492,7 @@ impl<'a> Versions<'a> {
             let now = format!(
                 "AND (\"version\" IS NULL \
                   OR \"$space\" NOT IN (SELECT \"$space\" FROM \"$spacedb\"){ready_sql}) \
-                 {moving}"
+                 {moving} {NOT_IN_A_BUILD}"
             );
             repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&now))).await?;
             // Every other tenant stays where it is, with a move open.
@@ -2423,7 +2504,8 @@ impl<'a> Versions<'a> {
                  WHERE \"state\" IN {PINNED_STATES} AND \"version\" IS NOT NULL \
                    AND \"version\" <> {to} \
                    AND \"$space\" IN (SELECT \"$space\" FROM \"$spacedb\") \
-                   AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\")",
+                   AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\") \
+                   {NOT_IN_A_BUILD}",
                 to = sql_lit(version),
                 at = at.0,
             ))
@@ -3160,6 +3242,9 @@ impl<'a> Versions<'a> {
     /// Refused: a version not stored or revoked, a tenant that is not
     /// `provisioning`, `active` or `paused`. A tenant already there moves
     /// nothing and answers its pin. The pin the tenant has after.
+    ///
+    /// A tenant a tenant build holds is refused ([`VersionRefusal::InBuild`]):
+    /// only its build moves it (increment 16).
     pub async fn pin(
         &self,
         space: &str,
@@ -3167,9 +3252,24 @@ impl<'a> Versions<'a> {
         actor: &str,
         at: u64,
     ) -> Result<PinChange, VersionRefusal> {
+        self.pin_as(space, name, actor, at, PinCause::Pin).await
+    }
+
+    /// [`Versions::pin`], with the cause written to `$pins`. Only
+    /// [`PinCause::Build`] moves a tenant a build holds: the tenant builds'
+    /// client (`crate::tenant_builds`) calls it so.
+    pub async fn pin_as(
+        &self,
+        space: &str,
+        name: &str,
+        actor: &str,
+        at: u64,
+        cause: PinCause,
+    ) -> Result<PinChange, VersionRefusal> {
         let version = self.resolve(name).await?;
         self.require_arrival(&version).await?;
         ensure_revocations(self.pool).await?;
+        ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         if let Some(mark) = mark_in(&tx, &version).await? {
@@ -3206,12 +3306,18 @@ impl<'a> Versions<'a> {
                 phase: m.phase.as_str().to_string(),
             });
         }
+        if cause != PinCause::Build {
+            if let Some((build, on)) = build_of_in(&tx, space).await? {
+                tx.rollback().await?;
+                return Err(VersionRefusal::InBuild {
+                    space: space.to_string(),
+                    build,
+                    version: on,
+                });
+            }
+        }
         let filter = format!("AND \"$space\" = {}", sql_lit(space));
-        repin(
-            &tx,
-            &repin_sql(&version, actor, PinCause::Pin, at, Some(&filter)),
-        )
-        .await?;
+        repin(&tx, &repin_sql(&version, actor, cause, at, Some(&filter))).await?;
         // A person chose this tenant's version, so an open move (§2.1) no
         // longer applies to it.
         tx.rows(&format!(
@@ -3228,7 +3334,7 @@ impl<'a> Versions<'a> {
             to: version,
             epoch,
             actor: actor.to_string(),
-            cause: PinCause::Pin.as_str().to_string(),
+            cause: cause.as_str().to_string(),
             at,
         })
     }
@@ -3779,8 +3885,18 @@ impl<'a> Versions<'a> {
         at: u64,
     ) -> Result<MovedOff, VersionRefusal> {
         ensure_revocations(self.pool).await?;
+        ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
+        // A tenant build moves its own tenants (increment 16).
+        if let Some((build, on)) = build_of_in(&tx, space).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::InBuild {
+                space: space.to_string(),
+                build,
+                version: on,
+            });
+        }
         // Under the lock, as a pin reads it (audit L4).
         let policy = self.policy_in(&tx).await?;
         let below = match self.with_policy(&policy).below_minimum().await {

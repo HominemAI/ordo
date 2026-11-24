@@ -178,7 +178,13 @@ pub async fn sweep_paged(
     if open.is_empty() {
         return Ok(out);
     }
-    let only = window_filter(open.iter().map(|(w, _, _)| &w.target));
+    // A tenant a tenant build holds moves with its build (increment 16).
+    crate::versions::ensure_build_tables(pool).await?;
+    let only = format!(
+        "{} {}",
+        window_filter(open.iter().map(|(w, _, _)| &w.target)),
+        crate::versions::NOT_IN_A_BUILD
+    );
     let mut after: Option<String> = None;
     while out.moved.len() < batch {
         let page = v.on_revoked(batch, after.as_deref(), Some(&only)).await?;

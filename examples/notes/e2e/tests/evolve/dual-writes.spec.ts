@@ -25,8 +25,8 @@
  * step, a move that does not stop at its budget, or a revert that loses
  * what was typed on the new version.
  *
- * It stores a version above every other, so it runs after `rehearsal`,
- * last. Chromium only.
+ * It stores 0.3.6, so it runs after `rehearsal` and before `branch`
+ * (0.5.x). Chromium only.
  */
 
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

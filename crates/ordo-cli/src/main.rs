@@ -73,7 +73,20 @@ fn usage() -> ! {
          the verdict, then every change with its class and what refuses it.\n      \
          Read-only. Exits 1 when the apply would refuse. Through the door\n      \
          only; `--against <db>` is gone.\n  \
+         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--digest <d>] [--run]\n      \
+         render the step between two stored versions on the deployment,\n      \
+         refuse it with its errors, store it, and print its receipt and\n      \
+         digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
+         written to <dir>/receipts/<from>-to-<to>.json. --digest refuses a\n      \
+         deployment that renders another digest. --run runs the stored\n      \
+         plan on the deployment's own database.\n  \
+         ordo evolve --tenant <id> [--to <version>]\n      \
+         replay the stored path on the tenant's database, one step at a\n      \
+         time, then pin it (`std.deployment.replay`).\n  \
+         ordo evolve --list [--from <version>] [--to <version>]\n      \
+         the stored plans (`std.deployment.plans`).\n  \
          ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
+         being replaced by `ordo evolve` (§6 conflict 9 of plan-versions.md).\n      \
          the plan, then the additive apply (schema-evolution increment 2):\n      \
          a first apply against an empty database creates the whole schema;\n      \
          over a deployed one it sends class A (new entity, optional or\n      \
@@ -264,6 +277,21 @@ fn usage() -> ! {
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
+         ordo environments list [<name>] | register <name> [--position <n>] --reason \"<text>\"\n      \
+         the chain of environments this deployment declares (dev, staging,\n      \
+         production), and which one it is. A deployment that registered\n      \
+         none is production. A name not registered is refused, naming the\n      \
+         `register` command. Through the door only (`--host ...`).\n  \
+         ordo environments set-own <name> | remove <name> | rename <name> <new> --reason \"<text>\"\n      \
+         say which environment this deployment is, or remove or rename one.\n      \
+         The deployment's own cannot be removed, and neither can one a stored\n      \
+         promotion names be removed or renamed.\n  \
+         ordo promote <version> --from <host> --reason \"<text>\" [--no-activate] --host <h>\n      \
+         the promotion gate: the target takes the version from the step before\n      \
+         (read as you), refuses what that step has not activated or what was\n      \
+         edited (naming the file), and runs its own secret and external checks\n      \
+         before storing. `ordo apply --env <name>` checks the name is registered\n      \
+         and is this deployment. Production pins only what came through the gate.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \
@@ -535,6 +563,9 @@ fn main() {
             | "deploys"
             | "versions"
             | "windows"
+            | "environments"
+            | "promote"
+            | "evolve"
             | "prune"
             | "restore"
             | "keys"

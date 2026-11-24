@@ -40,8 +40,13 @@ pub enum Route {
 pub fn policy(cmd: &str, sub: Option<&str>, flags: &Flags) -> Route {
     match cmd {
         // No subcommand prints the usage and touches nothing.
-        "versions" | "windows" | "quota" | "keys" | "identity" if sub.is_none() => Route::Open,
-        "versions" | "windows" | "fleet" | "quota" | "touches" => Route::Door,
+        "versions" | "windows" | "environments" | "quota" | "keys" | "identity"
+            if sub.is_none() =>
+        {
+            Route::Open
+        }
+        "versions" | "windows" | "environments" | "promote" | "evolve" | "fleet" | "quota"
+        | "touches" => Route::Door,
         // `plan <dir>` alone only compiles. With `--against` or `--host` it
         // is the deployment's plan, which is the door's.
         "plan" => Route::Door,
@@ -71,7 +76,12 @@ pub enum Via {
 
 fn display(cmd: &str, sub: Option<&str>) -> String {
     match sub {
-        Some(s) if matches!(cmd, "versions" | "windows" | "quota" | "keys" | "identity") => {
+        Some(s)
+            if matches!(
+                cmd,
+                "versions" | "windows" | "environments" | "quota" | "keys" | "identity"
+            ) =>
+        {
             format!("ordo {cmd} {s}")
         }
         _ => format!("ordo {cmd}"),

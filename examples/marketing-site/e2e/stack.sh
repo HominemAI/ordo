@@ -13,6 +13,8 @@ door_b_port=${E2E_DOOR_B_PORT:-4851}
 door_b="http://localhost:$door_b_port"
 door="http://localhost:$door_port"
 page="http://localhost:$page_port"
+bootstrap_port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
+bootstrap_page="http://localhost:$bootstrap_port"
 for bin in "$ordo" "$host"; do
   [ -x "$bin" ] || { echo "Missing binary $bin" >&2; exit 1; }
 done
@@ -34,7 +36,7 @@ export ORDO_PAGE_KEY=22222222222222222222222222222222222222222222222222222222222
 export ORDO_REPLICA_ID=marketing-a
 export ORDO_HOST_ADDR="127.0.0.1:$door_port"
 export ORDO_AUTH_METHODS=passkey ORDO_AUTH_GUEST=on ORDO_APEX_DOMAIN=localhost
-export ORDO_AUTH_ORIGINS="$page" ORDO_CORS_ORIGINS="$page" ORDO_PUBLIC_URL="$door"
+export ORDO_AUTH_ORIGINS="$page,$bootstrap_page" ORDO_CORS_ORIGINS="$page,$bootstrap_page" ORDO_PUBLIC_URL="$door"
 export ORDO_AUTH_PROVISIONING=auto-onboard ORDO_PROVISION_SELF_SERVE=on-signup
 export ORDO_PUBLIC_HUMAN_CHECK=off ORDO_PUBLIC_WRITES_PER_HOUR=1000
 export ORDO_PG_POOL_SIZE=3 ORDO_PG_IDLE_SECS=5
@@ -44,12 +46,20 @@ bootstrap_pid=$last
 "$ordo" apply "$repo/examples/marketing-site" --as marketing-e2e --direct >"$state/apply.log" 2>&1 || { cat "$state/apply.log" >&2; exit 1; }
 # Sign up through the real door, then restart with this principal as the site
 # owner. The seed script resumes this same account. No tokens go in logs.
-node "$here/bootstrap-owner.mjs" "$door" "$page" "$state"
+(cd "$web" && VITE_ORDO_URL="$door" npm run build -- --outDir "$state/web") >"$state/build.log" 2>&1 || { cat "$state/build.log" >&2; exit 1; }
+(cd "$web" && exec node node_modules/vite/bin/vite.js preview --outDir "$state/web" --host localhost --port "$bootstrap_port" --strictPort) >"$state/bootstrap-page.log" 2>&1 &
+last=$!
+pids="$pids $last"
+page_pid=$last
+wait_for bootstrap-page "$bootstrap_page/" "$last"
+node "$here/bootstrap-owner.mjs" "$door" "$bootstrap_page" "$state"
+kill -TERM "$page_pid"
+wait "$page_pid" || true
 kill -TERM "$bootstrap_pid"
 wait "$bootstrap_pid"
 pids=''
 mv "$state/door.log" "$state/bootstrap.log"
-ORDO_DEPLOYMENT_OWNERS="$(cat "$state/owner-principal"),$(cat "$state/cache-owner-principal")"
+ORDO_DEPLOYMENT_OWNERS="$(cat "$state/owner-principal"),$(cat "$state/cache-owner-principal"),$(cat "$state/browser-owner-principal")"
 export ORDO_DEPLOYMENT_OWNERS
 start_door
 ORDO_URL="$door" SITE_DEV_PAGE="$page" SITE_DEV_DIR="$state" \
@@ -61,16 +71,15 @@ pids="$pids $last"
 printf '%s\n' "$last" >> "$state/host-pids"
 wait_for replica "$door_b/health/live" "$last"
 wait_for catalogue "$door_b/op/catalogue" "$last"
-(cd "$web" && VITE_ORDO_URL="$door" npm run build -- --outDir "$state/web") >"$state/build.log" 2>&1 || { cat "$state/build.log" >&2; exit 1; }
-(cd "$web" && exec node node_modules/vite/bin/vite.js preview --outDir "$state/web" --host localhost --port "$page_port" --strictPort) >"$state/page.log" 2>&1 &
-last=$!
-pids="$pids $last"
 node - "$door" "$door_b" "$page" "$ordo" "$psql_bin" "$repo/examples/marketing-site/site.ordo" "$state" <<'JS'
 const fs = require('node:fs');
 const [door, doorB, page, ordo, psql, program, state] = process.argv.slice(2);
 const pg = Object.fromEntries(['host', 'port', 'user', 'db'].map(key => [key, process.env[`ORDO_PG_${key.toUpperCase()}`]]));
 fs.writeFileSync(`${state}/stack.json`, JSON.stringify({ door, doorB, page, ordo, psql, program, pg }));
 JS
+(cd "$web" && exec node node_modules/vite/bin/vite.js preview --outDir "$state/web" --host localhost --port "$page_port" --strictPort) >"$state/page.log" 2>&1 &
+last=$!
+pids="$pids $last"
 wait_for page "$page/" "$last"
 echo "stack: marketing site at $page; door $door"
 # shellcheck disable=SC2086 # Wait for every child pid in the list.

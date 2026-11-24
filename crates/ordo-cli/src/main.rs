@@ -85,6 +85,13 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
+         run from the new image before its tag changes: every version a\n      \
+         tenant is pinned to or may move to must compile and load under\n      \
+         this release. Names each failing version and its tenants; exits 1\n      \
+         when one fails. Reads only, and records one `$release_checks` row.\n      \
+         `--override` records the upgrade going ahead anyway: those tenants\n      \
+         close at the boot, and every other tenant serves.\n  \
          ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
          being replaced by `ordo evolve` (§6 conflict 9 of plan-versions.md).\n      \
          the plan, then the additive apply (schema-evolution increment 2):\n      \
@@ -129,7 +136,7 @@ fn usage() -> ! {
          when no server can be up open the database from this machine\n\
          instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
          `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
-         --proof), `restore`, `identity recover`, `migrate --apply`, and\n\
+         --proof), `restore`, `identity recover`, `migrate --apply`,\n         `release-check`, and\n\
          `apply` and `rollback` when no host can boot. Without `--direct`\n\
          and without `--host` they refuse, naming both. Each `--direct` use\n\
          is recorded before it runs and written to the deployment\'s\n\
@@ -578,6 +585,7 @@ fn main() {
             | "restore"
             | "keys"
             | "migrate"
+            | "release-check"
             | "quota"
             | "usage"
             | "space"

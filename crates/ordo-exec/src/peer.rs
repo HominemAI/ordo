@@ -1116,7 +1116,14 @@ async fn rename_comments_sql(
         let have = crate::migrate::column_comments(pool, pg, t)
             .await
             .map_err(SchemaRefusal::Database)?;
-        let on = |c: &str| format!("COMMENT ON COLUMN {}.{}.{} IS ", quote(pg), quote(t), quote(c));
+        let on = |c: &str| {
+            format!(
+                "COMMENT ON COLUMN {}.{}.{} IS ",
+                quote(pg),
+                quote(t),
+                quote(c)
+            )
+        };
         for (c, text) in &want {
             if have.get(c) != Some(text) {
                 sql += &format!("{}{}; ", on(c), sql_lit(text));

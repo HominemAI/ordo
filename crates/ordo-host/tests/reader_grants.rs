@@ -570,7 +570,9 @@ async fn a_reader_loses_an_orphaned_column_with_a_named_error() {
 /// `title` is changing, naming `heading`. The version that drops the mark
 /// stops writing `title`: it is recorded as an orphan, the reader keeps
 /// `heading` alone, and its check holds the entity, naming `title` and its
-/// new name. A version that declares `title` again clears the comment.
+/// new name, and so does `ordo rollback --dry-run` for the reader's version
+/// that maps `title` (§7, test 6). A version that declares `title` again
+/// clears the comment.
 ///
 /// A regression looks like a reader still reading `title` once nothing
 /// writes it, a refusal that does not name `heading`, or a hold while the
@@ -595,10 +597,43 @@ async fn a_renamed_column_is_read_until_the_rename_lands_then_refused_naming_its
     )
     .expect("the expand");
 
+    // The reader's version that maps `title`, stored as an apply stores it.
+    // A program compiles with its peer's schema from the environment, as a
+    // node and `ordo rollback --dry-run` compile it. Only this test's
+    // reader declares `peer journal`, so no other test reads the setting.
+    std::env::set_var("ORDO_PEER_JOURNAL_SCHEMA", "alpha");
+    let mapping_title = Program::compile(
+        "domain viewer @ 1.0.0\n\npeer journal\n\n\
+         external entries from journal.notes shared {\n  id: text <- id\n  \
+         title: text <- title\n  access read open\n}\n",
+    )
+    .expect("the reader compiles");
+    ordo_host::versions::Versions::on(&w.b)
+        .ensure()
+        .await
+        .expect("registry");
+    ordo_exec::registry::store(
+        &w.b,
+        &ordo_exec::registry::Artifact {
+            version: mapping_title.version.clone(),
+            artifact: ordo_plan::artifact::to_bytes(&mapping_title.doc),
+            source: mapping_title.source.clone(),
+            ddl: mapping_title.ddl.clone(),
+            applied_at: ordo_commandlog::Timestamp(0),
+            actor: "dev:ada".into(),
+        },
+    )
+    .await
+    .expect("stored");
+
     // While the rename is declared: the union, and the reader is told.
     peer::grant_readers_with(&w.a, &renaming.schema, lookup)
         .await
         .expect("granted");
+    let dry = ordo_host::evolve::rollback_check(&w.b, "1.0.0")
+        .await
+        .expect("checks");
+    assert!(dry.refusals.is_empty(), "{:?}", dry.refusals);
     w.b.rows("SELECT title, heading FROM alpha.notes")
         .await
         .expect("both columns read while both are written");
@@ -637,11 +672,20 @@ async fn a_renamed_column_is_read_until_the_rename_lands_then_refused_naming_its
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
         lines[0].starts_with("external_changed on `entries`")
-            && lines[0].contains(
-                "column `title` (it is now `heading`) is no longer written by `journal`"
-            )
+            && lines[0]
+                .contains("column `title` (it is now `heading`) is no longer written by `journal`")
             && lines[0].contains("ordo introspect --external"),
         "{lines:?}"
+    );
+    // A rollback to the version that maps `title` is told before it runs.
+    let dry = ordo_host::evolve::rollback_check(&w.b, "1.0.0")
+        .await
+        .expect("checks");
+    assert_eq!(dry.refusals.len(), 1, "{:?}", dry.refusals);
+    assert!(
+        dry.refusals[0].contains("column `title` (it is now `heading`)"),
+        "{:?}",
+        dry.refusals
     );
 
     // `title` declared again: written again, granted again, no comment.

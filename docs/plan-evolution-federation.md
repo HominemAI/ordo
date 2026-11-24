@@ -1,6 +1,6 @@
 # Evolution across deployments: externals, peers and readers under versions
 
-Status: **plan started 2026-11-23; Q1, Q2 and Q16 ruled 2026-11-23; F1 and F6 built, F2 to F5 in part; see §6.** Written
+Status: **plan started 2026-11-23; Q1, Q2 and Q16 ruled 2026-11-23; F1, F3 and F6 built, F2, F4 and F5 in part; see §6.** Written
 by the review of the evolution plans (`review-evolution-plans-2026-11-23.md`).
 It is increment 7b of `plan-versions.md` §4. Its open questions are Q1, Q2
 and Q16 of that review.
@@ -114,6 +114,13 @@ In a shared database, tenants move one at a time and share the table.
 - The reader's watcher reports a peer column that is in the grant's union
   state as "changing", with the new name, on `/health/ready` and in the
   log. It holds nothing yet.
+- **Built 2026-11-24 (part 3):** the read app writes the comment
+  `ordo: renamed to <new column>` on the old column of each rename on a
+  read table (`ordo_exec::peer::Renamed`). Every role reads
+  `pg_description`, so the reader reads it. Its check notes the column as
+  `changing:` in the plan and the log while it is written, and names the
+  new column in `external_changed` once it is not. Not on `/health/ready`
+  yet.
 - The fix on the reader's side is the built one: `ordo introspect
   --external` again, then apply. The reader's own version changes.
 
@@ -150,8 +157,9 @@ In a shared database, tenants move one at a time and share the table.
   gate run the external check for the version they are about to serve.
   All 3 use `plan_with`, where the check already is.
 - A foreign table kept per tenant database is checked when a program is
-  applied to that database, and never by the timer (as built). Step F3
-  adds the timer for tenant databases that have one.
+  applied to that database, and by the timer: **built 2026-11-24 (F3)**,
+  each tick reads every tenant with a database of its own, in its own
+  database, and a hold found there holds that tenant only.
 - A staging clone carries no foreign table (`plan-versions.md` §3.4).
 
 ---
@@ -183,10 +191,10 @@ In a shared database, tenants move one at a time and share the table.
 | Step | Size | What | Needs |
 |---|---|---|---|
 | F1 | S | `ordo evolve` lists readers per changed field, with the date the grant ends. **Built 2026-11-23** (6d93397c): the date is the render's plus the 7-day soak default until soaks exist (11a) | increment 8 |
-| F2 | M | Grants by column; the union while 2 versions serve; the revoke at soak close; `$readergrant` by column; soaks on a read table close together. **Part built 2026-11-23** (increment 14): a table holding an orphaned column is granted by column, without it, and the reader's check names the column it lost (`external_changed`). With no soaks yet, the revoke comes when the column is orphaned. **More built 2026-11-24** (increment 11a): a renamed field's old column is orphaned at the soak's close, not at the step, and the grants are made again there, so the whole-table grant holds both columns (the union) through the soak and loses the old one at the close (Q1). A tenant with a database of its own has no reader there (a peer is in the same database), so on it the revoke grants nothing new; the same close serves a shared database once 11b moves one. **Not built:** `$readergrant` by column, soaks on a read table closing together (11b), the "changing" notice | increment 11a |
-| F3 | S | The reader checks every loaded version against its peers and externals; a mismatch holds that version's tenants only; the timer covers tenant databases | increment 3 |
-| F4 | S | The check in `ordo rollback --dry-run` and in the promotion gate; the "changing" notice on `/health/ready`. **Built 2026-11-23** (9856f637): `std.deployment.rollbackCheck` and `ordo rollback --dry-run`; the gate's check was built in 4b. **Not built:** the "changing" notice, which needs F2's grant union | increments 4b, 8 |
-| F5 | M | The example test in §7. **Part built 2026-11-24** (branch `evo-7b-part2`): note-viewer e2e project `rename` (`tests/rename/title-to-heading.spec.ts`, fixture `notes-heading`, 0.3.1) is test 1: notes renames `title` to `heading` with `prev`, and the viewer shows a note from before and one written after, each with its title. **Not built:** tests 3 and 4 wait for the soak's close (11a; test 3 is `fixme`); test 2 needs the deployment owner's sign-in in this harness for `ordo evolve` (the notes e2e has it); tests 5 and 6 are not written | F2 |
+| F2 | M | Grants by column; the union while 2 versions serve; the revoke at soak close; `$readergrant` by column; soaks on a read table close together. **Part built 2026-11-23** (increment 14): a table holding an orphaned column is granted by column, without it, and the reader's check names the column it lost (`external_changed`). With no soaks yet, the revoke comes when the column is orphaned. **More built 2026-11-24** (increment 11a): a renamed field's old column is orphaned at the soak's close, not at the step, and the grants are made again there, so the whole-table grant holds both columns (the union) through the soak and loses the old one at the close (Q1). A tenant with a database of its own has no reader there (a peer is in the same database), so on it the revoke grants nothing new; the same close serves a shared database once 11b moves one. **Part 3, 2026-11-24** (branch `evo-7b-part3`): on the apply path, a shared database's rename has no soak (11b), so it ends when a version drops the `prev` mark. That version stops writing the old column, so the apply records it in `$orphans` (`schema_apply::record_orphans`) and the reader loses it by a column grant. The read app comments each renamed old column on a read table, and the reader's check names the new column (§3.3). **Not built:** `$readergrant` by column (a removed line still revokes every column, since a table revoke takes its column grants), soaks on a read table closing together (11b) | increment 11a |
+| F3 | S | The reader checks every loaded version against its peers and externals; a mismatch holds that version's tenants only; the timer covers tenant databases. **Built:** every loaded version (with 3); **2026-11-24** (branch `evo-7b-part3`) the timer reads each tenant with a database of its own, in its own database (`ExternalGate::watch_tenants`), and holds that tenant only. Test: `external_drift.rs` (`the_timer_reads_each_tenant_database_and_holds_that_tenant_only`) | increment 3 |
+| F4 | S | The check in `ordo rollback --dry-run` and in the promotion gate; the "changing" notice on `/health/ready`. **Built 2026-11-23** (9856f637): `std.deployment.rollbackCheck` and `ordo rollback --dry-run`; the gate's check was built in 4b. **Part 3, 2026-11-24:** the "changing" notice in the plan and the watcher's log (§3.3). **Not built:** the notice on `/health/ready` | increments 4b, 8 |
+| F5 | M | The example test in §7. **Part built 2026-11-24** (branch `evo-7b-part2`): note-viewer e2e project `rename` (`tests/rename/title-to-heading.spec.ts`, fixture `notes-heading`, 0.3.1) is test 1: notes renames `title` to `heading` with `prev`, and the viewer shows a note from before and one written after, each with its title. **Part 3, 2026-11-24** (branch `evo-7b-part3`): tests 3 and 4 in project `rename`: notes lands the rename (0.3.2 drops the mark), Postgres refuses the viewer `title`, and the page names `title (it is now heading)` and the fix; the viewer maps `heading` (0.1.1) and shows every note. Test 1 also checks the viewer's log says the column is changing. Test 5 in project `reader-line` (`tests/reader-line/line-narrowed.spec.ts`): notes takes `notesAccess` off its line, Postgres refuses it at once, and a viewer node started then is refused quoting the line. Test 6 as a host test (`reader_grants.rs`): `rollback_check` on the reader's version that maps `title` names it after the rename lands. **Not built:** tests 2 and 6 through the example need the deployment owner's sign-in in this harness (`ordo evolve`, `ordo rollback --dry-run --host`); the notes e2e has it | F2 |
 | F6 | S | The sign-in column contract and the release check's peer list. **Built 2026-11-24** (branch `evo-7b-part2`): `ordo_exec::sign_in_contract`. `CONTRACT` lists the 13 columns a reader is granted in the 4 tables; a release that changes one marks it `Retired` with its date, and it stays granted until that date plus `editions.load_window`, measured against the build's release date. Each start records the release in `$ordorelease`, whose `release` column every reader is granted. `ordo release-check` lists each peer with its release (`ANOTHER RELEASE` when it differs) and each reader by its role, and names a column this release retires with its end date. Neither fails the check. Tests: the contract's unit tests; `reader_grants.rs` (`the_sign_in_contract_is_granted_and_the_release_check_names_the_peer_on_another_release`); note-viewer e2e `tests/api/release.spec.ts`. **Not built:** a reader's release, which the read app cannot see (asked) | increment 6 |
 
 What sets the pace:

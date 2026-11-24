@@ -1192,6 +1192,47 @@ under the v2 shape, then moves again.
 **Ruled 2026-11-23 (Q13):** a restore may pin a tenant below
 `versions.minimum`. The tenant waits closed for its move.
 
+**Built 2026-11-24, V1 for a tenant's own database** (branch
+`evo-17-restore-versions`):
+
+- `ordo restore --record --tenant` reads the version the restored
+  database records (`$migrations`). Before the marker, a version this
+  deployment does not store is refused, naming it and `ordo promote` or
+  `ordo apply`. Nothing is recorded, so the tenant stays closed.
+- After the marker, `Versions::restore_pin` moves the pin to that version,
+  cause `restore`, a new epoch. The answer names how it moves on: a
+  rollout, or `ordo versions pin <tenant> <version>`.
+- Already on that version: nothing moves.
+- Revoked, left out of `versions.served`, or below `versions.minimum`: the
+  restore stands, the pin stays ahead of the data, and the tenant is held
+  closed (`SchemaBehind`) until its database is brought to its pin. The
+  answer names the fix. This is the closed wait of Q13 without a pin to a
+  version that would serve.
+- A restore in the middle of a move: the open `$moves` row goes on from
+  the restored version, phase `expanding`, so the backfill resumes from the
+  database's own `$backfills` cursor. A move to the restored version
+  itself is dropped.
+- The tenant's database is dialled with the deployment's own credential
+  when no credentials directory is configured, as the door dials it.
+- Tests: `ordo-host/tests/restore_versions.rs` (one per case),
+  `ordo-cli/tests/restore_versions_cli.rs` (the pin follows; a version not
+  stored refused before the marker); notes e2e project `restore`
+  (`tests/restore/restore.spec.ts`).
+
+**Not built:**
+
+- No automatic move after a restore. A restored tenant behind the active
+  version stays on its version until a rollout or a pin moves it.
+- The manual form (`--db`, no `--tenant`) moves no pin.
+- A running node caches a non-active version's fit per tenant
+  (`Spaces::fits`). A tenant held behind a non-active pin may need its
+  node restarted to close.
+- V2: `ordo import` of an exit bundle across versions. `import.rs` still
+  refuses any version difference (`ArtifactMismatch`). Found while
+  building it: `std.space.export` and `std.space.import` read the active
+  version's schema, not the tenant's pin, so a tenant pinned off the active
+  version cannot export or import (`exit_ops.rs`, `ExitOps::deployed`).
+
 ---
 
 ## 3 · Environments on the core
@@ -1861,7 +1902,7 @@ round is about 35 minutes for the full suite.
 | 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). **Built 2026-11-23** (239afd67, 525a781d, aefe7a8a): `$orphans` in each database (`ordo_exec::orphans`), written wherever a database is brought to a version that stops declaring a field or an entity: the deployment's own apply, each tenant's database brought forward, each stored step run (`schema_apply::record_orphans`). Each row has its columns, a sealed flag, a drop date and, once pruned, a tombstone. A version that declares the field again removes its row. Erasure deletes a space's rows from an orphaned table too, and names the orphans it reached (`std.space.delete`, `orphans`). Export writes each orphan under `orphans/` with the row's id. `std.deployment.orphans` and `ordo evolve --orphans` list them. `std.deployment.prune` and `ordo evolve --prune <entity.field>`: the first ask prunes nothing and says what would go; `--confirm <name>` prunes; in production `--confirm-deployment <domain>` too. Refused when `prune.enabled` is off (off in production; `ordo environments set prune on`), for a name no database records, and for a field the active version or a pinned one still declares. The reader rule (Q1): a table on a `reader` line that holds an orphaned column is granted by column, without it. The reader's check holds the entity with `external_changed`, naming the column, the read app and the fix. Tests: `orphans.rs`, `reader_grants.rs` (`a_reader_loses_an_orphaned_column_with_a_named_error`); notes e2e project `orphans` (`tests/orphans/orphans.spec.ts`); note-viewer e2e project `orphans` (`tests/orphans/orphaned-column.spec.ts`, fixture `notes-no-tags`). **Found by it:** `std.space.delete` failed on a tenant with a database of its own, which had no `$logconsumers`; erasure now makes it. **Not built:** soaks (11a), so an orphan is recorded when the database moves, not at a soak's close; nothing drops at the drop date by itself; the language cannot mark a field personal, so every orphan gets a drop date; restorable versions (17) are not yet checked by pruning; an orphaned `public` field (§1.14) is not handled apart. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
 | 15 | **`prev` in the language.** The syntax is ruled (2026-10-04) and written in `plan-syntax-additions.md` §5 (review 2026-11-23). Parser, the 3 compile checks, the 3 plan checks, the CDK's `prev()`, and the offer to remove landed `prev` lines. Refused on an external. **Built 2026-11-23 (branch `evo-15-prev`):** `prev(old)` on a field and `prev: old` in an entity's header; `prev_self`, `prev_still_declared`, `prev_duplicate` in the parser; `external_unsupported` on an external's field and header; `ordo_schema::prev` checks `prev_unresolved`, `prev_type`, `prev_mapping_required`, `prev_sealed` (added: a sealed copy cannot be read), and `prev_stale` as a warning; the diff renders `RenameField` and `RenameEntity` (B4) in place of a drop and an add. A field rename adds the column, copies the values, keeps the old column with its `NOT NULL` (the version before still loads over it); the receipt carries the reverse. No write is lost between the copy and the pin switch (review fix; test `writes_during_the_rename_reach_the_new_column`). Built first as a sync trigger, a stopgap; increment 11a replaced it with dual writes before any release (owner rule, no stopgaps shipped), and the trigger is gone. `ordo apply` makes a field rename itself. An entity rename renders and is refused as `rename_entity_not_built` until 10b. The apply answer carries `landedPrev` (last environment of the chain, every tenant on a version with the new name), and `ordo apply --remove-landed-prev` cuts those marks. CDK: `TypeSpec.prev()`, `EntityOptions.prev`. Tests: `crates/ordo-syntax/tests/prev.rs`, `crates/ordo-host/tests/prev_rename.rs`, `clients/ordo-cdk/test/prev.test.ts`; notes v3 renames `attachments.kind` to `mediaType`, and its e2e `v3` keeps every image drawn across the move. **Not built:** merges, splits and moves (refused, no mapping option yet); type casts on a rename. | M | 8 | a declared rename renders as a rename; notes v3 uses it | 27x |
 | 16 | **Tenant builds.** After first deployment. **Built 2026-11-24** (branch `evo-16-tenant-builds`, e91651a5, §3.8): `tenant_builds.rs`; a named build pins named tenants to its version; activations, rollbacks, rollouts and the revoked sweep leave them; only set, join and leave move them, cause `build`; a pin by hand is refused naming `ordo tenant-builds leave`; a tenant's own database is brought to the version first. Door ops `std.deployment.tenantBuilds\|setTenantBuild\|joinTenantBuild\|leaveTenantBuild\|removeTenantBuild`; `ordo tenant-builds`. Tests: `tenant_builds.rs`, notes e2e project `tenant-build`. **Not built:** groups or a percentage (`settings-layers` ask 1), a console screen. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
-| 17 | **Restore and import across versions** (new, review 2026-11-23; design in §2.9). | M | 3, 8 | a snapshot taken on X restores beside tenants on Y and serves X | 11-10b (`snapshot-restore`) |
+| 17 | **Restore and import across versions** (new, review 2026-11-23; design in §2.9). **V1 built 2026-11-24** (branch `evo-17-restore-versions`, 69960088, §2.9 "Built"): `ordo restore --record --tenant` reads the restored database's version, refuses one not stored before the marker, and moves the pin to it after (`Versions::restore_pin`, cause `restore`); revoked or below the minimum holds the tenant closed with the pin ahead; a move open at the restore goes on from the restored version. Tests: `restore_versions.rs`, `restore_versions_cli.rs`, notes e2e project `restore`. **Not built:** V2 (`ordo import` across versions), the manual form, an automatic move after a restore. | M | 3, 8 | a snapshot taken on X restores beside tenants on Y and serves X | 11-10b (`snapshot-restore`) |
 
 **Increment 3, what remains after session 3** (session 3: 2026-11-23):
 
@@ -1984,7 +2025,7 @@ to an example's own e2e, beside its host tests:
 | 12b | notes, 2 deployments | after `seal`, staging rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses the step on a tenant (`ordo evolve --tenant`) until it accepts the rehearsal, with the same digest; break-glass is refused while staging answers, and with staging's door dead it is broken with a reason, listed, and the step replays the tenant's database (project `rehearsal`) |
 | 13 | notes-v3 | seal a field on live data; the page reads it and the table holds no plaintext |
 | 16 | notes, 2 people | Ada's tenant joins build `beta` (0.6.0) and answers its op; Bob's does not; `ordo apply` of 0.6.1 moves Bob and leaves Ada; a pin by hand is refused; Ada leaves and serves main with her notes (project `tenant-build`) |
-| 17 | notes-v3 | snapshot on v2, move, restore, read the v2 notes |
+| 17 | notes-v3 | snapshot on v2, move, restore, read the v2 notes (built, project `restore`: a database copy on v2, moved to v3, restored; the record pins it to v2, the page shows the 3 notes, then it moves again) |
 | CLI | one example, start to end | `ordo dev`, `apply`, `evolve`, `rollout status`, `rollback`, each through the door (owner, 2026-11-23, ask 5) |
 
 ---

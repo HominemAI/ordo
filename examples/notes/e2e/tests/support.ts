@@ -250,7 +250,7 @@ export function servingVersion(): string | undefined {
 }
 
 /** What a harness `ordo` command run against the stack's database needs. */
-function ordoEnv(): NodeJS.ProcessEnv {
+export function ordoEnv(): NodeJS.ProcessEnv {
   const s = stack();
   return {
     ...process.env,

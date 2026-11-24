@@ -13,6 +13,8 @@ export interface Stack {
   readonly page: string;
   readonly pageV2: string;
   readonly programV2: string;
+  /** examples/notes-v3, applied over notes v2 by tests/v3 (increment 7a). */
+  readonly programV3: string;
   readonly provider: string;
   readonly mail: string;
   readonly program: string;

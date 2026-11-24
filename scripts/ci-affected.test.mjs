@@ -170,6 +170,11 @@ const cases = [
     want: { examples: ' notes-v2 ', notes_e2e: 'true', federation_e2e: 'true', crates: '' },
   },
   {
+    name: 'notes v3: no job of its own, both e2e suites apply it',
+    files: ['examples/notes-v3/notes.ordo'],
+    want: { examples: '', notes_e2e: 'true', federation_e2e: 'true', crates: '' },
+  },
+  {
     name: 'note_viewer: its job and the federation e2e, not the notes e2e',
     files: ['examples/note-viewer/e2e/stack.sh'],
     want: { examples: ' note-viewer ', notes_e2e: 'false', federation_e2e: 'true', crates: '' },

@@ -2899,11 +2899,47 @@ fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
 /// refused, and every change is safe. `std.deployment.plan` asks the same
 /// question [`apply_safe`] does, so a preview and an apply cannot disagree.
 pub fn all_safe(plan: &Plan) -> bool {
+    let plan = without_drops(plan);
     let all: Vec<&Change> = plan.changes().collect();
     plan.present() > 0
         && plan.refusals.is_empty()
         && !all.is_empty()
         && all.iter().all(|c| is_safe_change(c, &all))
+}
+
+/// The plan without its dropped fields and entities, and without the
+/// refusals they raised.
+///
+/// A drop is never executed by an apply: its column or table stays, and the
+/// gate tolerates it (§8.2, "A dropped field"). A program that only drops
+/// applies as `Matches { pending }`. Before 2026-11-23 a program that added
+/// a field and dropped another was refused whole, because the drop's
+/// `drop_read_by_active_op` (the serving version still reads it) counted
+/// against the addition. Found by notes v3 (`plan-versions.md`, increment
+/// 7a). The safe additions are judged and applied alone now, and the drop
+/// stays pending as a drop alone does.
+fn without_drops(plan: &Plan) -> std::borrow::Cow<'_, Plan> {
+    let is_drop = |c: &Change| matches!(c, Change::DropField { .. } | Change::DropEntity { .. });
+    if !plan.assessed.iter().any(|a| is_drop(&a.change)) {
+        return std::borrow::Cow::Borrowed(plan);
+    }
+    let mut out = plan.clone();
+    let (drops, kept): (Vec<Assessed>, Vec<Assessed>) =
+        out.assessed.into_iter().partition(|a| is_drop(&a.change));
+    out.assessed = kept;
+    for a in &drops {
+        if a.change.refusal().is_none() && a.change.class() == Class::D {
+            out.destructive = out.destructive.saturating_sub(1);
+        }
+        for r in &a.refused {
+            let class = r.split(" — ").next().unwrap_or(r);
+            let line = format!("{class} on `{}`", a.change.entity());
+            if let Some(at) = out.refusals.iter().position(|x| *x == line) {
+                out.refusals.remove(at);
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// What [`apply_safe`] did.
@@ -2938,6 +2974,8 @@ pub async fn apply_safe(
     if !all_safe(&plan) {
         return Ok(SafeApply::NotSafe);
     }
+    // A drop beside the additions is left pending, as a drop alone is.
+    let plan = without_drops(&plan).into_owned();
     let all: Vec<&Change> = plan.changes().collect();
     let changes: Vec<(String, String)> = all
         .iter()
@@ -3299,6 +3337,8 @@ pub async fn bring_forward_from(
     let plan = self::plan_with(pool, program, &choices, written.as_ref())
         .await
         .map_err(internal)?;
+    // A drop is left pending here as on the deployment's own database.
+    let plan = without_drops(&plan).into_owned();
     let statements = match apply_planned(pool, &plan, actor, op).await {
         Ok(Applied::Additive { steps, .. }) => steps.len(),
         Ok(Applied::Created(c)) => c.tables,

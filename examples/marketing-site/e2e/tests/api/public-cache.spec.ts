@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test as base, expect, type APIRequestContext, type APIResponse, type TestInfo } from '@playwright/test';
 import { owner, rows, stack } from '../support.js';
 import { tableReads } from '../reads.js';
+import { withDeployment } from '../deployment.js';
 const exec = promisify(execFile);
 type Plans = { headers: Record<string, string>; add: () => Promise<{ name: string; id: string }> };
 const test = base.extend<{ plans: Plans }>({
@@ -27,7 +28,7 @@ const test = base.extend<{ plans: Plans }>({
       } });
     } finally {
       for (const id of ids) await rows(await request.delete(`${stack().door}/op/std.plans.delete`, {
-        headers: { ...headers, 'Idempotency-Key': randomUUID() }, data: { id },
+        headers: { ...headers, 'Idempotency-Key': randomUUID() }, params: { id },
       }));
     }
   },
@@ -87,9 +88,8 @@ test('a write on one node drops the cached answer on the other node', async ({ r
   }
 });
 
-async function checkApply(request: APIRequestContext, testInfo: TestInfo, source: string) {
-  for (const door of [stack().door, stack().doorB]) await warm(request, door);
-  const s = stack();
+async function checkApply(request: APIRequestContext, testInfo: TestInfo, source: string, s = stack()) {
+  for (const door of [s.door, s.doorB]) await warm(request, door);
   const folder = await mkdtemp(join(tmpdir(), 'ordo-marketing-deploy-'));
   try {
     await writeFile(join(folder, 'site.ordo'), source);
@@ -116,10 +116,10 @@ test('a comment-only apply drops every cached answer as the plan requires', asyn
 });
 
 test('a new version drops every cached answer on both nodes', async ({ request }, testInfo) => {
-  test.setTimeout(300_000);
+  test.setTimeout(420_000);
   const source = await readFile(stack().program, 'utf8');
   expect(source).toContain('domain marketing @ 0.2.1');
-  await checkApply(request, testInfo, source.replace('domain marketing @ 0.2.1', 'domain marketing @ 0.2.2'));
+  await withDeployment(request, testInfo, s => checkApply(request, testInfo, source.replace('domain marketing @ 0.2.1', 'domain marketing @ 0.2.2'), s));
 });
 
 test('two members never share one cached answer', async ({ request }) => {

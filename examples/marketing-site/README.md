@@ -144,3 +144,8 @@ Each test removes the plans it created through the ordinary delete op.
 
 Run just these checks with `npx playwright test public-cache.spec.ts`.
 The full suite also retains S2's strict refusal comparisons.
+
+The real version-bump test boots a second throwaway deployment on free ports
+and its own database. It keeps failed migrations from disrupting the other
+checks. Its logs are test attachments, and its host pids join the coverage
+shutdown check. No shared fixture is reset to hide a failed deployment.

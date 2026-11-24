@@ -433,7 +433,8 @@ switch.
 - **Device copies** (review 2026-11-23). The SDK's local replica
   (`clients/ordo-sdk/src/replica`) orders rows by log position. It records
   no program version, so a row of X's shape can outlive a move to Y.
-  **Proposed (Q7):** on the "version changed" event the SDK drops the
+  **Ruled (Q7, owner, 2026-11-23), built in increment 3, session 3:** on
+  the feed's `version_changed` frame the sync manager drops the
   device copy of that tenant and fills it again. One rule, the same one
   the public cache uses on a deploy.
 - Offline writes (`plan-offline.md`) are filed for after the first
@@ -1299,7 +1300,10 @@ round is about 35 minutes for the full suite.
   swaps, the node asks every feed's door at once
   (`LiveStreams::recheck_now`). A moved tenant's feed ends with
   `event: version_changed`, class `space_unavailable`, naming no version.
-  Left: the SDK does not read that frame yet (client contract, Q7).
+  The SDK's sync manager and ordo-react's live hub know the frame by its
+  name and reconnect at once on the normal backoff. The sync manager
+  drops the tenant's device copy and fills it again (Q7, ruled
+  2026-11-23).
 - **Added by the review of 2026-11-23:** one function table per loaded
   version (§1.10, built in session 3); loading a version beside the active
   one drops no public cache (§1.14, checked in session 3); the SDK drops

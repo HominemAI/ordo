@@ -1444,3 +1444,53 @@ describe('a paused tenant (plan-tenant-pause.md §5)', () => {
     await manager.stop();
   });
 });
+
+describe('a version change under the feeds (plan-versions.md §1.4, owner ruling Q7)', () => {
+  const moved = () =>
+    frame('version_changed', {
+      error: { code: 'space_unavailable', message: 'the version changed while the feed was open; open it again' },
+    });
+
+  it('drops the device copy, reopens every feed at once, and fills the copy again', async () => {
+    const door = new LiveDoor();
+    const r = await replica();
+    const manager = start(door, r, [{ spec: tasks }, { spec: mine }]);
+    (await door.nth(0)).push(load([task(1), task(2)], 5, true, 'h-old'));
+    (await door.nth(1)).push(load([task(3)], 5, true, 'h-old'));
+    await when(manager, (v) => v.complete);
+    const shown: string[][] = [];
+    const obs = manager.observe('std.tasks.list', (s) => shown.push(s.rows.map((x) => x.id)));
+    expect(await rows(r)).toHaveLength(3);
+    expect(await r.resultHash('std.tasks.list', tasks.version)).toBe('h-old');
+
+    // One feed hears it. Its class is `space_unavailable`, which stops a
+    // feed for good anywhere else.
+    const first = await door.nth(0);
+    first.push(moved());
+    first.close();
+
+    // Both feeds reopen, on the backoff's first step, with no resume hash.
+    const a = await door.nth(2);
+    const b = await door.nth(3);
+    expect(door.feeds[1]!.ended).toBe(true);
+    expect(door.resumes.slice(2)).toEqual([null, null]);
+    expect(door.waits.every((ms) => ms === 0)).toBe(true);
+    // The device copy went, on disk and in memory.
+    expect(await rows(r)).toEqual([]);
+    expect(await r.resultHash('std.tasks.list', tasks.version)).toBeUndefined();
+    expect(obs.snapshot().rows).toEqual([]);
+
+    // Filled again in the new version's shape.
+    a.push(load([{ ...task(1), due: 3 }], 9));
+    b.push(load([{ ...task(3), due: 4 }], 9));
+    const view = await when(manager, (v) => v.complete && v.position === 9);
+    expect(view.ops.every((o) => o.stopped === null)).toBe(true);
+    expect((await r.scan('tasks')).map((x) => [x.id, (x.row as { due?: number }).due])).toEqual([
+      ['task_1', 3],
+      ['task_3', 4],
+    ]);
+    expect(shown.length).toBeGreaterThan(0);
+    obs.stop();
+    await manager.stop();
+  });
+});

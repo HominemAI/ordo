@@ -25,7 +25,7 @@
  */
 
 import type { OrdoClient, Params } from '../core/client.js';
-import { RECONNECT_CLASSES, reconnectDelayMs } from '../core/busy.js';
+import { OrdoVersionChanged, RECONNECT_CLASSES, reconnectDelayMs } from '../core/busy.js';
 import { OrdoNetworkError } from '../core/network.js';
 import { OrdoRefusal } from '../core/refusal.js';
 import type { RefusalClass } from '../core/refusal.js';
@@ -301,6 +301,8 @@ export class SyncManager {
   #reconnecting: Promise<void> | null = null;
   /** The refusal that paused the tenant, while it is paused. */
   #paused: OrdoRefusal | null = null;
+  /** The drop of the device copy under way after a version change. */
+  #dropping: Promise<void> | null = null;
   /** Resolved by `resumed()`, so every held feed reopens together. */
   #resume: (() => void) | null = null;
   #whenResumed: Promise<void> = Promise.resolve();
@@ -691,6 +693,14 @@ export class SyncManager {
           nudged = true;
           entry.attempts = 0;
           if (renewal === 'renewed') entry.renewed = true;
+        } else if (error instanceof OrdoVersionChanged) {
+          // The tenant moved to another program version (`plan-versions.md`
+          // §1.4). The device copy is the old version's shape, so it goes
+          // and every feed fills it again (owner ruling Q7, 2026-11-23).
+          // This feed reconnects at once, on the normal backoff.
+          await this.#versionChanged(entry);
+          if (!this.#running || entry.controller.signal.aborted) return;
+          entry.attempts = 0;
         } else if (error instanceof OrdoRefusal && error.detail.class === 'space_paused') {
           // The tenant is paused (`plan-tenant-pause.md` §5). Not a standing
           // refusal of this op and not a fault to retry: the op holds where
@@ -751,6 +761,34 @@ export class SyncManager {
       entry.retryAfterMs = null;
       if (!nudged) await this.#pause(entry, Math.max(this.#backoff(entry.attempts), asked));
     }
+  }
+
+  /**
+   * The tenant's program version changed: drop the device copy, in memory
+   * and on disk, and reopen every other feed so each fills it again. Feeds
+   * hear it together, so the first one drops and the rest wait for it.
+   */
+  #versionChanged(heard: Entry): Promise<void> {
+    if (this.#dropping) return this.#dropping;
+    const drop = (async () => {
+      this.#poisoned();
+      try {
+        await this.#replica.clear();
+      } catch {
+        // A copy that could not be cleared is refilled over: every row the
+        // new load sends replaces the old one, by position.
+      }
+      for (const entry of this.#entries.values()) {
+        if (entry === heard || entry.stopped !== null) continue;
+        if (entry.wake) entry.wake();
+        else entry.attempt.abort(new DOMException('version changed', 'AbortError'));
+      }
+    })();
+    this.#dropping = drop.finally(() => {
+      if (this.#dropping === guarded) this.#dropping = null;
+    });
+    const guarded = this.#dropping;
+    return guarded;
   }
 
   /** Hold every feed: the tenant is paused. The first to hear it tells the app. */

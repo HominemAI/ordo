@@ -46,7 +46,7 @@ import type { Refine } from './refine.js';
 import { OrdoRefusal, decodeRefusal, type Refusal } from './refusal.js';
 import { OrdoNetworkError } from '@hominemai/ordo-sdk/core/network.js';
 import { frames } from './sse.js';
-import { RECONNECT_CLASSES, reconnectDelayMs } from '@hominemai/ordo-sdk/core/busy.js';
+import { RECONNECT_CLASSES, VERSION_CHANGED_EVENT, reconnectDelayMs } from '@hominemai/ordo-sdk/core/busy.js';
 
 export type LiveStatus =
   | { readonly state: 'connecting' }
@@ -342,6 +342,7 @@ export class LiveHub {
       try {
         const response = await this.#client.openLiveStream({ signal: attempt.signal });
         let ready = false;
+        let moved = false;
         let last: OrdoRefusal | null = null;
         let lastKey: string | undefined;
         for await (const frame of frames(response)) {
@@ -357,6 +358,14 @@ export class LiveHub {
               if (!entry.settled) void this.#add(entry, conn, id, 0);
             }
             continue;
+          }
+          if (frame.event === VERSION_CHANGED_EVENT) {
+            // The tenant moved to another program version
+            // (`plan-versions.md` §1.4). Not a refusal: the stream is
+            // opened again at once and every read added again, which
+            // invalidates each so its hook reads the new version.
+            moved = true;
+            break;
           }
           if (frame.event === 'error' || frame.event === 'space_paused') {
             // The door re-checked the feed, refused, and closes it. The
@@ -379,7 +388,7 @@ export class LiveHub {
         // The door closed the stream. One that never said `ready` counts as
         // a failure, or a door that closes every stream at once would be
         // reopened in a tight loop.
-        attempts = ready ? 0 : attempts + 1;
+        attempts = ready || moved ? 0 : attempts + 1;
         if (last) {
           // Same handling as a refusal at the door.
           const verdict = await this.#refused(conn, last, lastKey);

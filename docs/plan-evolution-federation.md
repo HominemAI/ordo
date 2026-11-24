@@ -178,10 +178,10 @@ In a shared database, tenants move one at a time and share the table.
 
 | Step | Size | What | Needs |
 |---|---|---|---|
-| F1 | S | `ordo evolve` lists readers per changed field, with the date the grant ends | increment 8 |
+| F1 | S | `ordo evolve` lists readers per changed field, with the date the grant ends. **Built 2026-11-23** (6d93397c): the date is the render's plus the 7-day soak default until soaks exist (11a) | increment 8 |
 | F2 | M | Grants by column; the union while 2 versions serve; the revoke at soak close; `$readergrant` by column; soaks on a read table close together | increment 11a |
 | F3 | S | The reader checks every loaded version against its peers and externals; a mismatch holds that version's tenants only; the timer covers tenant databases | increment 3 |
-| F4 | S | The check in `ordo rollback --dry-run` and in the promotion gate; the "changing" notice on `/health/ready` | increments 4b, 8 |
+| F4 | S | The check in `ordo rollback --dry-run` and in the promotion gate; the "changing" notice on `/health/ready`. **Built 2026-11-23** (9856f637): `std.deployment.rollbackCheck` and `ordo rollback --dry-run`; the gate's check was built in 4b. **Not built:** the "changing" notice, which needs F2's grant union | increments 4b, 8 |
 | F5 | M | The example test in §7 | F2 |
 | F6 | S | The sign-in column contract and the release check's peer list | increment 6 |
 

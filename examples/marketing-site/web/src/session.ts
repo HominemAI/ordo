@@ -1,12 +1,7 @@
 /**
- * The signed-in person on one of the three pages: a token kept in this
- * origin's `sessionStorage`, renewed before it ends, and the client bound to
- * the shop's tenant.
- *
- * Each page keeps its own session under its own origin, so the shop's token
- * is never readable from the sign-in page or the console, and the reverse.
- * `sessionStorage` lives as long as the tab: a reload keeps the person
- * signed in, closing the tab does not.
+ * A studio session, kept in sessionStorage and renewed before it expires.
+ * Reloading the tab preserves it; closing the tab discards it. Server logout
+ * invalidates the session, including copies held in another tab.
  */
 
 import { stepUp, type PasskeyEndpoint, type PasskeySession } from '@hominemai/ordo-sdk/auth/passkey.js';
@@ -35,7 +30,7 @@ export interface SessionOptions {
   /** Where this session is kept: a key in `store`. */
   readonly key: string;
   readonly baseUrl: string;
-  /** The shop's tenant. */
+  /** The studio space. */
   readonly space: string;
   readonly store?: Store | undefined;
   readonly fetch?: typeof globalThis.fetch;
@@ -57,7 +52,7 @@ const RENEW_BEFORE_SECS = 60;
 export class Session {
   readonly space: string;
   readonly endpoint: PasskeyEndpoint;
-  /** What the door did about the person's arrival in the shop's tenant, if the sign-in named it. */
+  /** What the door did about the person's arrival in the studio space, if the sign-in named it. */
   readonly admission: { readonly space: string; readonly outcome: string } | undefined;
 
   readonly #options: SessionOptions;
@@ -147,7 +142,7 @@ export class Session {
     return this.#token;
   }
 
-  /** A client bound to the shop's tenant. */
+  /** A client bound to the studio space. */
   client(): OrdoClient {
     return new OrdoClient({
       baseUrl: this.endpoint.baseUrl,

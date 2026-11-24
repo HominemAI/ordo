@@ -2,7 +2,7 @@
   "name": "ordo-marketing-site-web",
   "version": "0.1.0",
   "private": true,
-  "description": "A landing page that reads its content from Ordo with no token, and takes enquiries through a public write. No sign-in.",
+  "description": "A public marketing site and passkey-protected staff workspace backed by Ordo.",
   "type": "module",
   "scripts": {
     "dev": "vite",

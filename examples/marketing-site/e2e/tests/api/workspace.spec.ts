@@ -115,7 +115,7 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
     tags: [tag, 'launch'],
     budget: '1500.25',
     due: '2027-01-15',
-    created: new Date().toISOString(),
+    created: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
   };
   const created = await rows(
     await request.post(`${stack().door}/op/createCampaign`, {
@@ -168,8 +168,9 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
       data: Buffer.from('Launch brief'),
     });
     expect(upload.ok(), await upload.text()).toBe(true);
-    handle = (await rows(await request.get(`${stack().door}/op/campaignFiles`, { headers, params: { campaign: id } })))[0]
-      .file;
+    handle = (
+      await rows(await request.get(`${stack().door}/op/campaignFiles`, { headers, params: { campaign: id } }))
+    )[0].file;
     const download = await request.get(`${stack().door}/blob/${handle}`, { headers });
     expect(download.status()).toBe(200);
     expect(await download.text()).toBe('Launch brief');
@@ -177,14 +178,15 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
     await rows(
       await request.post(`${stack().door}/op/setReminder`, {
         headers,
-        data: { campaign: id, due: new Date(Date.now() - 60_000).toISOString() },
+        data: { campaign: id, due: new Date(Date.now() - 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z') },
       }),
     );
     await expect
       .poll(
         async () =>
-          (await rows(await request.get(`${stack().door}/op/campaignReminders`, { headers }))).find((r) => r.campaign === id)
-            ?.fired,
+          (await rows(await request.get(`${stack().door}/op/campaignReminders`, { headers }))).find(
+            (r) => r.campaign === id,
+          )?.fired,
         { timeout: 90_000 },
       )
       .toBeTruthy();
@@ -198,7 +200,9 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
   } finally {
     await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } }));
   }
-  expect(await rows(await request.get(`${stack().door}/op/campaignFiles`, { headers, params: { campaign: id } }))).toEqual([]);
+  expect(
+    await rows(await request.get(`${stack().door}/op/campaignFiles`, { headers, params: { campaign: id } })),
+  ).toEqual([]);
   expect(
     (await rows(await request.get(`${stack().door}/op/campaignReminders`, { headers }))).some((r) => r.campaign === id),
   ).toBe(false);
@@ -243,7 +247,7 @@ test('editorial review runs as the caller and a stale approval leaves no history
     tags: [],
     budget: '0.00',
     due: null,
-    created: new Date().toISOString(),
+    created: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
   };
   const id = (await rows(await request.post(`${stack().door}/op/createCampaign`, { headers, data: original })))[0]
     .created;
@@ -259,11 +263,24 @@ test('editorial review runs as the caller and a stale approval leaves no history
     const before = (await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find(
       (r) => r.id === id,
     )!;
-    const data = { id, rev: before.rev, note: 'Editorial approval', at: new Date().toISOString() };
+    const data = {
+      id,
+      rev: before.rev,
+      note: 'Editorial approval',
+      at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    };
     // The second write fails after the campaign update: neither may land.
-    await refused(await request.post(`${stack().door}/op/approveCampaign`, { headers, data: { ...data, note: '' } }), 409, 'check_violation');
-    expect((await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find(r => r.id === id)).toEqual(before);
-    expect(await rows(await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } }))).toEqual([]);
+    await refused(
+      await request.post(`${stack().door}/op/approveCampaign`, { headers, data: { ...data, note: '' } }),
+      409,
+      'check_violation',
+    );
+    expect(
+      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find((r) => r.id === id),
+    ).toEqual(before);
+    expect(
+      await rows(await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } })),
+    ).toEqual([]);
     await rows(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }));
     await refused(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }), 409, 'cas_miss');
     const history = await rows(
@@ -297,7 +314,7 @@ test('editorial review runs as the caller and a stale approval leaves no history
   } finally {
     await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } }));
   }
-  expect(await rows(await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } }))).toEqual(
-    [],
-  );
+  expect(
+    await rows(await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } })),
+  ).toEqual([]);
 });

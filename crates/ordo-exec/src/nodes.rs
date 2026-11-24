@@ -32,6 +32,10 @@
 //!   with why, as a JSON array of `[version, reason]` pairs. Their tenants
 //!   are closed on this node until a load passes (increment 3, session 2).
 //!
+//! - `loading`: the versions this node is loading now, comma-separated.
+//!   A version is in `loading` until it lands in `also_serving` or in
+//!   `not_loaded` (increment 3).
+//!
 //! `seen_at` is the database's clock, both when written and when read, so
 //! two machines with different clocks still agree on which rows are live.
 //!
@@ -56,7 +60,8 @@ CREATE TABLE IF NOT EXISTS \"$nodes\" ( \
 ); \
 ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"also_serving\" text NOT NULL DEFAULT ''; \
 ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"new_tenant\" text NOT NULL DEFAULT ''; \
-ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"not_loaded\" text NOT NULL DEFAULT '[]'";
+ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"not_loaded\" text NOT NULL DEFAULT '[]'; \
+ALTER TABLE \"$nodes\" ADD COLUMN IF NOT EXISTS \"loading\" text NOT NULL DEFAULT ''";
 
 /// What one node last said about itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -74,6 +79,8 @@ pub struct Node {
     pub new_tenant: String,
     /// Versions a pin names that this node could not load, with why.
     pub not_loaded: Vec<(String, String)>,
+    /// Versions this node is loading now, by name.
+    pub loading: Vec<String>,
     pub beat_secs: u64,
     /// Seconds since this node last wrote its row, by the database's clock.
     pub age_secs: u64,
@@ -100,8 +107,8 @@ pub async fn beat(pool: &Pool, n: &Node) -> Result<(), PoolError> {
     pool.rows(&format!(
         "INSERT INTO \"{NODES_TABLE}\" (\"node\", \"serving\", \"caught_up\", \"held\", \
            \"retrying\", \"sweep_ms\", \"beat_secs\", \"also_serving\", \"new_tenant\", \
-           \"not_loaded\", \"seen_at\") \
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, \
+           \"not_loaded\", \"loading\", \"seen_at\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, \
            extract(epoch from clock_timestamp())::bigint) \
          ON CONFLICT (\"node\") DO UPDATE SET \
            \"serving\" = EXCLUDED.\"serving\", \"caught_up\" = EXCLUDED.\"caught_up\", \
@@ -109,7 +116,8 @@ pub async fn beat(pool: &Pool, n: &Node) -> Result<(), PoolError> {
            \"sweep_ms\" = EXCLUDED.\"sweep_ms\", \"beat_secs\" = EXCLUDED.\"beat_secs\", \
            \"also_serving\" = EXCLUDED.\"also_serving\", \
            \"new_tenant\" = EXCLUDED.\"new_tenant\", \
-           \"not_loaded\" = EXCLUDED.\"not_loaded\", \"seen_at\" = EXCLUDED.\"seen_at\"",
+           \"not_loaded\" = EXCLUDED.\"not_loaded\", \"loading\" = EXCLUDED.\"loading\", \
+           \"seen_at\" = EXCLUDED.\"seen_at\"",
         sql_lit(&n.node),
         sql_lit(&n.serving),
         sql_lit(&n.caught_up),
@@ -120,6 +128,7 @@ pub async fn beat(pool: &Pool, n: &Node) -> Result<(), PoolError> {
         sql_lit(&n.also_serving.join(",")),
         sql_lit(&n.new_tenant),
         sql_lit(&serde_json::to_string(&n.not_loaded).unwrap_or_else(|_| "[]".into())),
+        sql_lit(&n.loading.join(",")),
     ))
     .await?;
     Ok(())
@@ -144,7 +153,7 @@ pub async fn live(pool: &Pool) -> Result<Vec<Node>, PoolError> {
             "SELECT \"node\", \"serving\", \"caught_up\", \"held\", \"retrying\"::text, \
                \"sweep_ms\", \"beat_secs\", \
                extract(epoch from clock_timestamp())::bigint - \"seen_at\", \
-               \"also_serving\", \"new_tenant\", \"not_loaded\" \
+               \"also_serving\", \"new_tenant\", \"not_loaded\", \"loading\" \
              FROM \"{NODES_TABLE}\" ORDER BY \"node\""
         ))
         .await
@@ -174,6 +183,11 @@ pub async fn live(pool: &Pool) -> Result<Vec<Node>, PoolError> {
                     .collect(),
                 new_tenant: cell(9).to_string(),
                 not_loaded: serde_json::from_str(cell(10)).unwrap_or_default(),
+                loading: cell(11)
+                    .split(',')
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .collect(),
             }
         })
         .filter(|n| n.age_secs <= stale_after(n.beat_secs))

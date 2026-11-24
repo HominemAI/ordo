@@ -272,6 +272,35 @@ impl World {
         said
     }
 
+    /// `ordo release-check --direct` with this build, in this process, as
+    /// the new image runs it before its tag changes (`plan-versions.md`
+    /// §2.8): `(exit code, report)`.
+    async fn release_check(&self) -> (i32, String) {
+        let args = vec!["--db".to_string(), self.db.clone(), "--direct".into()];
+        let out =
+            tokio::task::spawn_blocking(move || ordo_cli::operator::run("release-check", &args))
+                .await
+                .expect("release-check ran");
+        (out.code, out.report)
+    }
+
+    /// The `$release_checks` rows, `(act, result)`, oldest first.
+    async fn release_checks(&self) -> Vec<(String, String)> {
+        let pool = ordo_exec::Pool::connect(PoolConfig {
+            db: self.db.clone(),
+            size: 1,
+            ..PoolConfig::from_env()
+        })
+        .await
+        .expect("control pool");
+        ordo_host::release_check::history(&pool, ordo_host::release_check::release())
+            .await
+            .expect("release checks")
+            .into_iter()
+            .map(|r| (r.act, r.result))
+            .collect()
+    }
+
     /// `ordo verify` with this build, in this process: `(exit code, report)`.
     async fn verify(&self, args: &[&str]) -> (i32, String) {
         let mut args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -2064,23 +2093,61 @@ async fn binary_upgrade(known: &[(&str, &str)]) {
     let old_log = old.log();
     drop(old);
 
+    // The release check, from this build, between the 2 images
+    // (`plan-versions.md` §2.8, increment 6): it reads the control
+    // database the previous Ordo left, and version 1 compiles and loads.
+    let (code, said) = w.release_check().await;
+    let release_check = check(
+        "the release check from this build passes over the previous Ordo's database",
+        if code == 0 && said.contains("passed") {
+            Ok(String::new())
+        } else {
+            Err(format!("exit {code}: {said}"))
+        },
+    );
+
     // This build starts on the same databases with the same keys.
     let h = w.boot(Path::new(env!("CARGO_BIN_EXE_ordo-host")), "new");
     within(60, "the new server serves Ada's tenant", || {
         let (status, _) = h.op(&s.ada.space, &s.ada.token, "GET", "myJournal", json!({}));
         (status == 200).then_some(())
     });
-    let mut checks = vec![check(
-        "the open feed ended when the old server stopped",
-        if feed.ended() {
+    let mut checks = vec![
+        release_check,
+        check(
+            "the open feed ended when the old server stopped",
+            if feed.ended() {
+                Ok(String::new())
+            } else {
+                Err(format!(
+                    "still open after the old server exited: {}",
+                    old_log.len()
+                ))
+            },
+        ),
+    ];
+    // The boot of the new release ran the check too, once, and recorded it.
+    let mut boot_checked = Vec::new();
+    for _ in 0..300 {
+        boot_checked = w.release_checks().await;
+        if boot_checked.iter().any(|(act, _)| act == "boot") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    checks.push(check(
+        "the new release's boot ran the release check and it passed",
+        if boot_checked
+            == vec![
+                ("check".to_string(), "pass".to_string()),
+                ("boot".to_string(), "pass".to_string()),
+            ]
+        {
             Ok(String::new())
         } else {
-            Err(format!(
-                "still open after the old server exited: {}",
-                old_log.len()
-            ))
+            Err(format!("recorded: {boot_checked:?}"))
         },
-    )];
+    ));
     drop(feed);
     checks.push(feed_after_reopen(&h, &s));
     let mut s = s;

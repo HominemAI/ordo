@@ -218,6 +218,8 @@ const READS: &[&str] = &[
     "std.space.profile",
     "std.space.sessionPolicy",
     "std.space.shares",
+    // The tenant admin's own version and its label (versions §1.9).
+    "std.space.version",
     // What a tenant may choose about its touches, and what it chose.
     "std.space.touches",
 ];

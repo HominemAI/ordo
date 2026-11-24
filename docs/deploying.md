@@ -1563,6 +1563,34 @@ Two things end cleanly, and the SDK recovers from both:
   SDK starts that list again from page one. Moving one tenant to another
   version does the same for that tenant's cursors of an op that changed.
 
+### The release check, before the image changes
+
+Run the new image's check against the control database before you change
+the tag (`plan-versions.md` §2.8):
+
+```
+docker run --rm -e ORDO_PG_HOST=... -e ORDO_PG_USER=... -e ORDO_PG_PASSWORD=... \
+  -e ORDO_PG_DB=... <new image> release-check --direct
+```
+
+- It checks every version a tenant is pinned to or may move to: it still
+  compiles, its `auth` block is inside the new ranges, its ops register,
+  its shape gate passes, its functions' code is stored, and its stored
+  plans render to their digests.
+- It serves nothing and changes no pin. It writes one `$release_checks`
+  row, and the `--direct` use reaches the security log at the next boot.
+- Exit 0: every version passes. Exit 1: it names each failing version and
+  its tenants. Move those tenants first (`ordo versions pin`), then run it
+  again.
+- To upgrade anyway, for a security fix: add `--override --reason "<why>"`.
+  It is recorded, and it exits 0.
+- `--json` prints the report as JSON.
+
+The first boot of a new release runs the same check, logs it and records
+it. It never stops the boot. A version that fails closes only its own
+tenants: they answer `server_busy` and are listed on `/health/ready`. Every
+other tenant serves. This holds for the active version too.
+
 ### How it is tested
 
 `crates/ordo-host/tests/upgrade_continuity.rs` makes all of the above (two
@@ -1576,7 +1604,8 @@ idempotency key) and checks each item by name after the upgrade.
   (pinned in the script, `ORDO_UPGRADE_FROM` to change it) into its own
   target folder, starts its own Postgres cluster, runs both tests, then
   deletes the cluster and the extra build. About 75 s on a laptop. CI runs
-  it as the `upgrade` job.
+  it as the `upgrade` job. Between the 2 builds it runs `ordo release-check
+  --direct` from this build, and checks that the new boot ran it too.
 
 ```
 scripts/upgrade-continuity.sh            # build, run, clean up

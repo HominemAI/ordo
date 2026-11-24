@@ -884,6 +884,10 @@ fn versions_list_and_show_name_the_tenants_pinned() {
     ] {
         assert!(show.report.contains(&want), "`{want}` in:\n{}", show.report);
     }
+    // Times print in UTC, never as raw seconds (audit leftover, increment 3).
+    for want in ["applied    ", " UTC by "] {
+        assert!(show.report.contains(want), "`{want}` in:\n{}", show.report);
+    }
 
     let unknown = operator::run("versions", &with_door(&["show", "nope"]));
     assert_ne!(unknown.code, 0);

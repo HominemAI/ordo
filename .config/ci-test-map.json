@@ -305,6 +305,7 @@
     ],
     "crates/ordo-host/src/directory.rs": "all",
     "crates/ordo-host/src/dual_writes.rs": "all",
+    "crates/ordo-host/src/every_tenant.rs": "all",
     "crates/ordo-host/src/email_code.rs": [
       "attest",
       "attest_webhook",

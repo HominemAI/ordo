@@ -458,6 +458,7 @@
     "crates/ordo-host/src/presence.rs": "all",
     "crates/ordo-host/src/principal_directory.rs": "all",
     "crates/ordo-host/src/profile_ops.rs": "all",
+    "crates/ordo-host/src/precheck.rs": "all",
     "crates/ordo-host/src/promotion.rs": "all",
     "crates/ordo-host/src/provision.rs": "all",
     "crates/ordo-host/src/proxy.rs": "all",
@@ -520,6 +521,7 @@
     "crates/ordo-host/src/share_links.rs": "all",
     "crates/ordo-host/src/share_ops.rs": "all",
     "crates/ordo-host/src/spaces.rs": "all",
+    "crates/ordo-host/src/step_door.rs": "all",
     "crates/ordo-host/src/supervisor.rs": "all",
     "crates/ordo-host/src/tenant_forward.rs": [
       "marketing_site_app",

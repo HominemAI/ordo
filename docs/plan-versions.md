@@ -722,6 +722,7 @@ person. It is hash-chained, so it is not a place for bulk rows.
 | A version setting changed | `$version_settings` | built |
 | A `--direct` use | the security log, at the next boot | built |
 | A plan stored by `ordo evolve` | `$plans`, with its actor; act `plan-stored` (and `plan-run`, `replayed`) on the deployment's stream | built (increment 8) |
+| The deployment owner's approval of a sign-in method removal (Q6) | the deployment's stream, act `sign-in-removal-approved`, with the methods and the count | built (increment 9) |
 | A backfill on one tenant | that tenant's command chain, one summarised group (ruled 2026-09-08, 2026-09-20) | increment 10b |
 | A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b |
 | Rollout start, pause, resume, skip, retry, abort, finish | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | increment 10 |
@@ -761,6 +762,9 @@ it yet (step 1b).
   explicit approval (a confirmation, recorded on the stream). The warning
   gives the migration steps: ask those people to add another method first,
   or keep the method one more version and tell them.
+  **Built in increment 9:** the approval is `ordo evolve
+  --approve-sign-in-removal <count>`. It must name the count the check
+  finds now, so it never covers more people than it named.
 - Ceilings and provider credentials are the instance's (owner, 2026-11-14).
   They are bound at the target like every per-environment value (§1.1, D6).
   A value the target's ceiling cuts is held at the ceiling, and the report
@@ -913,6 +917,10 @@ Ruled 2026-11-02: D3, D5, D16, plan ask 3.
 - **`prev` cleanup** (ask 3) waits for every environment to pass the rename.
   A lagging tenant replays the stored rename without the `prev` line.
 - Pre-checks run on every tenant and report every issue at once (27w).
+  **Built in increment 9** (`precheck.rs`): every database the deployment
+  serves from is asked, shared or per tenant, and each issue names the
+  database, the space and the fix. A database at another version is listed
+  as not asked; its own step checks it when its path reaches it.
 
 Added by the review of 2026-11-23:
 
@@ -1125,7 +1133,11 @@ secrets. Ruled 2026-10-08: each is served at a real address. Ruled
 - Environments are registered in config. Today's live deployment is marked
   production. A missing environment is refused with the command that
   creates it.
-- `ordo apply` targets dev by default.
+- `ordo apply` targets dev by default. **Built 2026-11-24 (owner, ask 5):**
+  dev is the first step of the chain. A deployment that registered nothing
+  is its own first step, so a single deployment applies as before. A later
+  step refuses an apply with no `--env`, naming the first step's address
+  and `ordo promote`.
 - **The target enforces the gate.** It fetches the source from the step
   before, never from the caller's tree. It recompiles, recomputes the
   source identity, and refuses on a difference, naming the differing file.
@@ -1138,7 +1150,14 @@ secrets. Ruled 2026-10-08: each is served at a real address. Ruled
 Added by the review of 2026-11-23:
 
 - **`ordo promote` goes through the target's door** (§1.8). The target
-  fetches the source through the door of the step before.
+  fetches the source through the door of the step before. **Built
+  2026-11-24:** each environment records its door (address, its own space,
+  its handle at the identity service) on the next step. The CLI asks the
+  person's sign-in for a token for the step before's handle, or takes
+  `--from-token`, and hands it to the target, which reads `versionSource`
+  there with it. The step before answers who it read; the target refuses a
+  different person. A staging deployment is gated as production is (owner,
+  2026-11-24, ask 4).
 - **Ruled 2026-11-24 (Q11):** no key to set up. The owner
   found a machine key a nuisance (*"Having to provide a key sounds like
   work"*), with GitHub-driven promotion coming. So staging reads dev's
@@ -1373,8 +1392,8 @@ round is about 35 minutes for the full suite.
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
 | 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). The remainder, 2026-11-23 (PR 40): schedules and listeners per version and the cursor hand-over (bf5e6b16), the client contract (3f7171dc), load guards and `loading` health (f40bed05), UTC times and fixed window caps (d8f1fc01), the console's revoke target (d46f2e48), memory measured with view eviction, `max_loaded` and `memory_budget` (95fb3cfb). Left: the sharing rule (§1.7), the SDK's version-changed event, the schema shared by `Arc`. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. **Built 2026-11-23, commit 0c62ff1a:** `$environments`, `std.deployment.environments` and `registerEnvironment`, `ordo environments list\|register`. Changing which environment a deployment is, removing and renaming one (owner, 2026-11-23) built in fbc3b4c6: `set-own`, `remove`, `rename`, each with a reason and on the stream; the deployment's own and one a stored promotion names are refused. | S | 1 | a missing environment is refused with the command that creates it | none |
-| | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waits on Q11.* | | | | |
-| 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. Built: the step before, activated there, the edited file named, the target's secret and external checks before storing, the record and stream act, production pins only through the gate (history stored before the first registration still counts). **Not built:** the `requires` and reader checks (the host does not read `requires` yet), `promotion.skip_staging`, and the target's own read of the source (Q11): the source arrives as input behind `promotion::fetch_source`, and the caller's claim of what the step before activated is trusted until that read exists. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
+| | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waited on Q11, ruled 2026-11-24 and built in the finish below.* | | | | |
+| 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. **Finished 2026-11-24, c3ac5754 (owner rulings 2026-11-24):** the target reads the version from the step before's door itself, as the person promoting, with their own token for it from the same sign-in (Q11, no machine key; `step_door.rs`, the one client to another deployment's door). The gate no longer takes a source or an "activated" claim from the caller. The step before must answer as the environment the target expects and must have read the same person. `SourceCredential` is the one seam a GitHub workflow's token joins later. Each environment records its door (`ordo environments door`, `std.deployment.setEnvironmentDoor`: address, own space, identity handle). Staging is gated as production is: every step after the first pins only what arrived through the gate. `ordo apply` with no `--env` goes to the first step of the chain (dev; a deployment that registered nothing is its own first step, so it applies as before); a later step is refused naming dev's address and `ordo promote`. The reader check runs on the target (`ordo_exec::peer::check_readers`). `promotion.skip_staging` built (`ordo environments set skip-staging on`, `$promotion_settings`), named in a refusal about a staging step before. `ORDO_PROMOTION_PLAIN_HTTP` allows a plain address to another host. Tests: `crates/ordo-host/tests/promotion.rs` (real doors for dev and staging and one fake identity service; each refusal), `crates/ordo-cli/tests/promote.rs`. **Not built:** the `requires` check. The language has no `requires` yet: the parser refuses it (`ordo_syntax::auth`) and the host derives no needs (`plan-configuration-in-the-file.md` §3, step 2). The gate calls it once that step lands. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
 | 6 | **Release check.** Designed in §2.8 (review 2026-11-23), steps R1 to R3: the checked set, digests, functions under the new runtime, `auth` ranges, the `ordo release-check` mode of the one image, the boot-time run, the override. | M | 3 | an upgrade with an uncompilable version names it and its tenants, and every other tenant serves; the notes upgrade test passes through it | none |
 | 6b | **Language editions and `ordo fix`.** §2.8, step R4. | M | 6 | an old edition loads within its window and `ordo fix` rewrites it | none |
@@ -1382,7 +1401,7 @@ round is about 35 minutes for the full suite.
 | 7a | **Evolution through the examples** (new, review 2026-11-23; owner, 2026-11-23). `examples/notes-v3`: one additive change, one rename with `prev`, one removed field. The harness applies it over a running notes v2 with a browser open, and note-viewer reads through it. Later increments add cases to it. **Built 2026-11-23:** `examples/notes-v3` (0.3.0) adds `notes.starred` (constant default) with `starNote` and `starredNotes`, and stops declaring `attachments.size`; `addAttachment` still takes `$size`, so the v2 page still adds a file. The rename waits for increment 15: `prev` does not parse yet outside an external. There is no v3 page: the v2 page stays open across the move. **Found and fixed by it:** an apply that added a field beside a drop the serving version still reads was refused whole (`drop_read_by_active_op` counted against the addition). The drop is now left pending and the addition applied, on the deployment's database and each tenant's (`schema_apply::without_drops`; test `tenant_forward.rs`, `an_addition_beside_a_drop_the_serving_version_reads_applies`). Tests: notes e2e project `v3` (`tests/v3/v2-to-v3.spec.ts`: notes, a pin, a tag and a file kept with no reload and no alert, a note added after, then a reload) and note-viewer e2e project `v3` (`tests/v3/notes-v3.spec.ts`: the viewer lists every note through the move). Increment 7 is d583de86. | M | 7 | the notes page keeps every note across v2 to v3 with no reload error; the test is in the example's own e2e | none |
 | 7b | **Federation under versions** (new, review 2026-11-23). `plan-evolution-federation.md`, steps F1 to F6: readers named in a plan, column grants that follow the served fields, every loaded version checked against its peers, the checks in rollback and promotion. | M, in 2 parts: F1, F3, F4 with 8; F2, F5, F6 with 11a | 7, 8, 11a | note-viewer never reads a stale column: it reads through the soak, then is refused naming the fix | none |
 | 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. **Session 1 built 2026-11-23** (6d93397c, ef5fe610, 9856f637): `$plans` and `evolve.rs`; the step renders from the 2 stored sources against an empty database of X, so the digest is the same in every environment; `--digest` refuses another; a plan with errors is never stored; the receipt lists each change, class, option, forward and reverse, and leaves out Ordo's own tables; replay walks the stored path, each step checking the recorded version, drift and the digest; `std.deployment.evolve`, `plans`, `replay`; `ordo evolve [<dir>] --from --to [--run]`, `--tenant`, `--list`; F1 and F4's rollback check. Tests: `stored_plans.rs`. **Not built:** removing `ordo migrate --apply --direct` (asked), a test through an example (the notes harness holds no door credential), option expressions beyond `--places`, backfill functions (D16, with 10b). | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
-| 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
+| 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). **Built 2026-11-23** (f8828906): `precheck.rs`. `ordo evolve` stores the plan, then asks every database (shared or per tenant) the data probes and the external check, and lists every issue with its database, spaces and fix. `--run` refuses while one is open, and `run_step` refuses a tenant's step the same way. A database at another version is listed as not asked. Readers are listed from the render (F1). The sign-in removal check (Q6): a version whose `auth` block drops a method counts the people left with none, and is not stored until `--approve-sign-in-removal <count>` names that count; the approval is act `sign-in-removal-approved` on the stream. Tests: `prechecks.rs`. **Not built:** the `requires` check (the declaration is not in the language; the answer says so), the peer note on a removed shared provider (`plan-evolution-federation.md`), a test through an example (no door credential in the notes harness). | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
 | 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
 | 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
@@ -1530,7 +1549,8 @@ task `program-versions-the-core-under-schema`:
 **After the review of 2026-11-23:** 16 questions, Q1 to Q16, in
 `review-evolution-plans-2026-11-23.md`. 13 were ruled 2026-11-23 on the
 board. Q3 (tenant hotfixes beside a rollout), Q11 (how promotion reads the
-step before) and Q14 (backfill functions calling out) are asked again.
+step before) and Q14 (backfill functions calling out) were asked again; all
+three are ruled (Q11 on 2026-11-24).
 Nothing marked **Proposed** is built before its question is answered.
 
 ---

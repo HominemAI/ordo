@@ -113,6 +113,8 @@ export class DescriptorClient {
   readonly #newKey: () => string;
   readonly #busyRetry: ResolvedBusyRetry;
   readonly #conflictRetry: ResolvedConflictRetry;
+  #tenantVersion: string | null = null;
+  readonly #versionListeners = new Set<(from: string, to: string) => void>();
 
   constructor(options: DescriptorClientOptions) {
     this.iface = options.iface;
@@ -385,9 +387,35 @@ export class DescriptorClient {
     return t === undefined ? undefined : typeof t === 'function' ? await t() : t;
   }
 
-  /** One call through the SDK's request helper. */
-  #send(url: string, init: RequestInit, retry: RetryPolicy, onRetry?: OnRetry): Promise<Response> {
-    return doorRequest(this.#site, url, init, { retry, onRetry });
+  /**
+   * The program version the door last said it serves this tenant
+   * (`x-ordo-tenant-version`, `plan-versions.md` §1.4), or `null` before any
+   * answer carried one.
+   */
+  get tenantVersion(): string | null {
+    return this.#tenantVersion;
+  }
+
+  /**
+   * Call `listener(from, to)` when an answer names another version than the
+   * last one seen. The first answer sets the baseline and fires nothing.
+   * Returns the stop function.
+   */
+  onVersionChange(listener: (from: string, to: string) => void): () => void {
+    this.#versionListeners.add(listener);
+    return () => this.#versionListeners.delete(listener);
+  }
+
+  /** One call through the SDK's request helper; reads the version header off the answer. */
+  async #send(url: string, init: RequestInit, retry: RetryPolicy, onRetry?: OnRetry): Promise<Response> {
+    const response = await doorRequest(this.#site, url, init, { retry, onRetry });
+    const seen = response.headers.get('x-ordo-tenant-version');
+    if (seen !== null && seen !== this.#tenantVersion) {
+      const from = this.#tenantVersion;
+      this.#tenantVersion = seen;
+      if (from !== null) for (const l of [...this.#versionListeners]) l(from, seen);
+    }
+    return response;
   }
 
   async #call<R>(op: OpDescriptor, options: DescriptorCallOptions): Promise<OpResponse<R>> {

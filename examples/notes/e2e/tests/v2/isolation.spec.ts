@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test as base, type APIResponse, type Page } from '@playwright/test';
-import { owner, signInByEmail } from '../people.js';
+import { invitationFor, owner, signInByEmail } from '../people.js';
 import { addNote, applyProgram, idbRows, liveEvents, noteInList, signIn, signedIn, signOut, stack, unique } from '../support.js';
 
 type Actor = Awaited<ReturnType<typeof owner>> & { headers: Record<string, string>; events: () => Promise<string[]> };
@@ -109,7 +109,7 @@ test('a private file is never served without a token', async ({ ada, request }) 
   const file = await attachment(ada, await note(ada));
   const fetch = (handle: string) => request.get(`${stack().door}/blob/${handle}`);
   const foreign = await fetch(file.handle);
-  await refused(foreign, 403, 'access_denied');
+  await refused(foreign, 404, 'not_found');
   await sameAnswer(foreign, await fetch('0'.repeat(file.handle.length)));
 });
 
@@ -146,6 +146,10 @@ test("a person's own download holds only their tenant's rows", async ({ ada, bo 
 });
 
 test("only the owner exports a tenant, and another tenant's export is refused", async ({ ada, bo }) => {
+  // Sharing asks the real page for a fresh passkey touch. Its new token
+  // also authorizes the owner's export; a sign-in alone has no presence.
+  const n = await note(ada);
+  await invitationFor(ada.page, n.title);
   const own = await write(ada, 'std.space.export', {});
   expect(own.status(), await own.text()).toBe(200);
   const foreign = await write(bo, 'std.space.export', {}, ada.headers['X-Ordo-Space']);

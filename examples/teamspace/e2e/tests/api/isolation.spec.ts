@@ -64,7 +64,7 @@ async function identicalRefusal(a: APIResponse, b: APIResponse) {
   expect((await a.json()).error.code).toBe('access_denied');
   expect((await b.json()).error.code).toBe('access_denied');
   const normalize = (text: string) => text.replace(/("(?:request_id|requestId)"\s*:\s*)"[^"]*"/g, '$1"<request>"');
-  expect(normalize(await a.text())).toBe(normalize(await b.text()));
+  expect.soft(normalize(await a.text())).toBe(normalize(await b.text()));
 }
 
 test("a founder cannot read another team's board, team or report", async ({ request }) => {

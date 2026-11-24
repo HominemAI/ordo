@@ -407,6 +407,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "deploys" => rt.block_on(deploys(flags)),
         "versions" => rt.block_on(versions_cmd(flags)),
         "windows" => rt.block_on(crate::windows::run(flags)),
+        "environments" => rt.block_on(environments_cmd(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -2460,6 +2461,103 @@ pub(crate) fn numbered(ordinal: Option<u64>, version: &str) -> String {
         Some(n) => format!("#{n} · {version}"),
         None => version.to_string(),
     }
+}
+
+// ── environments ─────────────────────────────────────────────────────────
+
+const ENVIRONMENTS_USAGE: &str = "ordo environments list [<name>]  --host <h> ...\n\
+     ordo environments register <name> [--position <n>] --reason \"<text>\"  --host <h> ...\n\
+     both go through the door (`--host <h>` or ORDO_HOST)";
+
+/// `ordo environments list|register`: the chain of environments this
+/// deployment declares (`plan-versions.md` §3.1, increment 4a), through the
+/// door (`std.deployment.environments`, `std.deployment.registerEnvironment`).
+async fn environments_cmd(flags: Flags) -> Outcome {
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n"));
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    let own: &[&str] = match sub.as_str() {
+        "list" => &[],
+        "register" => &["--position", "--reason"],
+        other => {
+            return Outcome::usage(format!(
+                "unknown `ordo environments` subcommand `{other}`; there are `list` and \
+                 `register`\n{ENVIRONMENTS_USAGE}\n"
+            ))
+        }
+    };
+    let mut allowed = own.to_vec();
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = if sub == "list" {
+        let name = match flags.positional.as_slice() {
+            [] => None,
+            [n] => Some(n.clone()),
+            _ => return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n")),
+        };
+        crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::ENVIRONMENTS,
+            serde_json::json!({ "name": name }),
+            false,
+        )
+        .await
+    } else {
+        let [name] = flags.positional.as_slice() else {
+            return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n"));
+        };
+        let Some(reason) = flags.named_value("--reason") else {
+            return Outcome::usage(
+                "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
+            );
+        };
+        let position = match flags.named_value("--position").map(str::parse::<u32>) {
+            None => None,
+            Some(Ok(n)) if n >= 1 => Some(n),
+            Some(_) => return Outcome::usage("`--position` is a whole number from 1\n".into()),
+        };
+        crate::wire::door_op(
+            &host,
+            &flags,
+            ordo_host::deploy_ops::REGISTER_ENVIRONMENT,
+            serde_json::json!({ "name": name, "position": position, "reason": reason }),
+            true,
+        )
+        .await
+    };
+    let row = match row {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let head = match row["registered"].as_str() {
+        Some(n) => format!("registered  {n}\n"),
+        None => String::new(),
+    };
+    let mut out = format!("{head}CHAIN\n");
+    for e in row["chain"].as_array().cloned().unwrap_or_default() {
+        out.push_str(&format!(
+            "  {}.  {}{}  by {}  \"{}\"\n",
+            e["position"].as_u64().unwrap_or(0),
+            e["name"].as_str().unwrap_or("?"),
+            if e["own"].as_bool() == Some(true) {
+                "  (this deployment)"
+            } else {
+                ""
+            },
+            e["actor"].as_str().unwrap_or("?"),
+            e["reason"].as_str().unwrap_or("")
+        ));
+    }
+    Outcome::ok(out)
 }
 
 // ── versions ─────────────────────────────────────────────────────────────

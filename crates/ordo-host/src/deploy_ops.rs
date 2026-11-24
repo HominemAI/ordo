@@ -33,6 +33,13 @@
 //! - `std.deployment.setVersionSetting($setting, $value?, $reason)`:
 //!   change one, or clear it (owner, 2026-11-05: they live in Ordo, not
 //!   the environment). What `ordo versions set` does.
+//! - `std.deployment.environments($name?)`: the declared chain of
+//!   environments and which one this deployment is; with `$name`, that one
+//!   or a refusal naming the command that registers it. What `ordo
+//!   environments list` prints.
+//! - `std.deployment.registerEnvironment($name, $position?, $reason)`: add
+//!   one to the chain (`plan-versions.md` §4 row 4a). What `ordo
+//!   environments register` does.
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -97,7 +104,14 @@ pub const VERSION_SETTINGS: &str = "std.deployment.versionSettings";
 /// `deployment` grant may call it.
 pub const SET_VERSION_SETTING: &str = "std.deployment.setVersionSetting";
 
-pub const OPS: [&str; 14] = [
+/// **The chain of environments** and which one this deployment is
+/// (`plan-versions.md` §3.1). With a name, a command that names an
+/// environment: refused when it is not registered.
+pub const ENVIRONMENTS: &str = "std.deployment.environments";
+/// **Register an environment** in the chain, with a reason.
+pub const REGISTER_ENVIRONMENT: &str = "std.deployment.registerEnvironment";
+
+pub const OPS: [&str; 16] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -112,6 +126,8 @@ pub const OPS: [&str; 14] = [
     SET_MOVE_TARGET,
     VERSION_SETTINGS,
     SET_VERSION_SETTING,
+    ENVIRONMENTS,
+    REGISTER_ENVIRONMENT,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -364,7 +380,51 @@ pub fn specs() -> Vec<OpSpec> {
                 "waiting",
             ],
         ),
+        spec(
+            ENVIRONMENTS,
+            OpKind::Read,
+            vec![ParamSpec {
+                name: "name".to_string(),
+                ty: ParamTy::Text { max_len: Some(128) },
+                required: false,
+                bounds: None,
+            }],
+            &["own", "chain", "environment"],
+        ),
+        spec(
+            REGISTER_ENVIRONMENT,
+            OpKind::Write,
+            vec![
+                ParamSpec {
+                    name: "name".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: true,
+                    bounds: None,
+                },
+                ParamSpec {
+                    // 1 is the first step. Absent puts it before this
+                    // deployment's own.
+                    name: "position".to_string(),
+                    ty: ParamTy::Int,
+                    required: false,
+                    bounds: Some(Bounds {
+                        min: Some("1".to_string()),
+                        max: Some("64".to_string()),
+                    }),
+                },
+                reason_param(),
+            ],
+            &["registered", "own", "chain"],
+        ),
     ]
+}
+
+/// One environment as the ops answer it.
+fn environment_json(e: &crate::environments::Environment) -> serde_json::Value {
+    json!({
+        "name": e.name, "position": e.position, "own": e.own,
+        "actor": e.actor, "reason": e.reason, "at": e.at,
+    })
 }
 
 /// The three settings, as both ops answer them. Unset reads as `null`.
@@ -774,6 +834,46 @@ pub async fn execute(
             row["changed"] = json!(changed);
             row["waiting"] = waiting_json(&ops.pool).await;
             row
+        }
+        ENVIRONMENTS => {
+            let read = |e: crate::environments::EnvironmentRefusal| {
+                e.to_exec_error("the environments could not be read")
+            };
+            let envs = crate::environments::Environments::on(&ops.pool);
+            let chain = envs.chain().await.map_err(read)?;
+            let named = match text(bound, "name").filter(|n| !n.is_empty()) {
+                Some(n) => Some(envs.require(n).await.map_err(read)?),
+                None => None,
+            };
+            json!({
+                "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
+                "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+                "environment": named.as_ref().map(environment_json),
+            })
+        }
+        REGISTER_ENVIRONMENT => {
+            let name = text(bound, "name").unwrap_or_default();
+            let position = bound
+                .0
+                .get("position")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok());
+            let reason = text(bound, "reason").unwrap_or_default();
+            let chain = crate::environments::Environments::on(&ops.pool)
+                .register(name, position, caller, reason, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the environment was not registered"))?;
+            ops.record(
+                caller,
+                REGISTER_ENVIRONMENT,
+                "environment-registered",
+                format!("environment={name} by={caller}"),
+            );
+            json!({
+                "registered": name,
+                "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
+                "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),
     };

@@ -104,6 +104,16 @@ const CALLS: &[(&str, Rule)] = &[
             test: "versions_settings.rs",
         },
     ),
+    // The chain of environments (versions increment 4a).
+    ("std.deployment.environments", Read),
+    (
+        "std.deployment.registerEnvironment",
+        Write {
+            act: "environment-registered",
+            src: "deploy_ops.rs",
+            test: "environments.rs",
+        },
+    ),
     // A tenant's version, moved from the Tenants screen.
     (
         "std.deployment.pin",

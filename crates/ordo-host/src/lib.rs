@@ -73,6 +73,7 @@ pub mod direct_uses;
 pub mod directory;
 pub mod email_code;
 pub mod enrolment;
+pub mod environments;
 pub mod exit_ops;
 pub mod external_check;
 pub mod federation;

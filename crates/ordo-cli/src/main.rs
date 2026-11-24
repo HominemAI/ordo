@@ -264,6 +264,11 @@ fn usage() -> ! {
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
+         ordo environments list [<name>] | register <name> [--position <n>] --reason \"<text>\"\n      \
+         the chain of environments this deployment declares (dev, staging,\n      \
+         production), and which one it is. A deployment that registered\n      \
+         none is production. A name not registered is refused, naming the\n      \
+         `register` command. Through the door only (`--host ...`).\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \
@@ -535,6 +540,7 @@ fn main() {
             | "deploys"
             | "versions"
             | "windows"
+            | "environments"
             | "prune"
             | "restore"
             | "keys"

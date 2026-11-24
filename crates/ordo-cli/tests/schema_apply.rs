@@ -1,12 +1,14 @@
-//! `ordo apply` against an empty target, and `ordo migrate --apply` after it:
+//! `ordo apply` against an empty target, and `ordo evolve --run` after it:
 //! `plan-schema-evolution.md` increment 2, plus the initial-create gap found
 //! on 2026-09-20 (nothing in the tree created a deployment's schema; a first
 //! deployment meant pasting DDL out of `$artifacts` into psql).
 //!
 //! Every case here goes through `ordo_cli::operator::run`, argv and all,
 //! because the two commands' whole contract is what an operator types and
-//! what the shell gets back, and because the dispatch (`migrate` did not
-//! exist as a verb) is part of what is being proved.
+//! what the shell gets back. `ordo migrate --apply` was removed on
+//! 2026-11-23 (every evolution command is a door op, ruled 2026-11-05): the
+//! cases that ran it run `ordo evolve` through a door over the same
+//! database now, and one case proves the old verb refuses naming it.
 //!
 //! The load-bearing case is the one with **rows in it**: empty database,
 //! apply, insert rows, add a field, apply again, rows still present and
@@ -149,18 +151,50 @@ fn apply(path: &str, db: &str) -> operator::Outcome {
     )
 }
 
-fn migrate(path: &str, db: &str) -> operator::Outcome {
-    operator::run(
-        "migrate",
+/// What replaced `ordo migrate --apply`: store the program without
+/// activating it, then render the step from the serving version and run it
+/// through the deployment's door (`ordo evolve --run`), as the deployment
+/// owner. The report is both commands' output, the exit code the first
+/// that failed.
+fn evolve(path: &str, db: &str, pg: &Pg) -> operator::Outcome {
+    let from = one(
+        pg,
+        "SELECT version FROM \"$activations\" ORDER BY seq DESC LIMIT 1",
+    );
+    let staged = operator::run(
+        "apply",
         &[
             path.into(),
-            "--apply".into(),
             "--db".into(),
             db.into(),
             "--as".into(),
             "test".into(),
+            "--no-activate".into(),
         ],
-    )
+    );
+    if staged.code != 0 {
+        return staged;
+    }
+    let to = staged
+        .report
+        .lines()
+        .find_map(|l| l.strip_prefix("stored     "))
+        .map(|r| r.split(" · ").last().unwrap_or(r))
+        .and_then(|r| r.split_whitespace().next())
+        .expect("the apply names the version it stored")
+        .to_string();
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let mut args: Vec<String> = ["--from", &from, "--to", &to, "--run"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    args.extend(door(addr, &token(DEP_OWNER)));
+    let ran = operator::run("evolve", &args);
+    operator::Outcome {
+        report: format!("{}{}", staged.report, ran.report),
+        code: ran.code,
+    }
 }
 
 fn one(pg: &Pg, sql: &str) -> String {
@@ -227,7 +261,7 @@ fn first_apply_creates_and_a_later_apply_keeps_the_rows() {
 
     // `ordo apply` of the changed program: the three changes are class A,
     // so the apply makes them itself (owner ruling 2026-10-22), then
-    // activates. Same path as `ordo migrate --apply`.
+    // activates. Same path as `ordo evolve --run`.
     let out = apply(&v2, db);
     assert_eq!(
         out.code, 0,
@@ -305,14 +339,6 @@ fn first_apply_creates_and_a_later_apply_keeps_the_rows() {
         out.report
     );
 
-    // Nothing left to do is a success, not a refusal.
-    let out = migrate(&v2, db);
-    assert_eq!(
-        out.code, 0,
-        "an up-to-date schema has nothing to apply:\n{}",
-        out.report
-    );
-    assert!(out.report.contains("nothing to apply"), "{}", out.report);
     assert_eq!(one(&pg, "SELECT count(*) FROM a"), "3");
 }
 
@@ -349,7 +375,7 @@ fn a_field_modifier_index_is_added_to_an_existing_table() {
     )
     .expect("rows");
 
-    let out = migrate(&v2, db);
+    let out = evolve(&v2, db, &pg);
     assert_eq!(out.code, 0, "the index is class A:\n{}", out.report);
     assert!(out.report.contains("A4 "), "{}", out.report);
     assert!(out.report.contains("a$n$ix"), "{}", out.report);
@@ -369,8 +395,6 @@ fn a_field_modifier_index_is_added_to_an_existing_table() {
         "the migrated database serves v2:\n{}",
         out.report
     );
-    let out = migrate(&v2, db);
-    assert!(out.report.contains("nothing to apply"), "{}", out.report);
 }
 
 // ── a new entity, with its reference ─────────────────────────────────────
@@ -388,7 +412,7 @@ fn a_new_entity_arrives_with_its_foreign_key() {
     pg.exec("INSERT INTO a (\"$space\", id, rev, n) VALUES ('s1','a_1',1,1);")
         .expect("rows");
 
-    let out = migrate(&v3, db);
+    let out = evolve(&v3, db, &pg);
     assert_eq!(out.code, 0, "a new entity is class A:\n{}", out.report);
     assert!(out.report.contains("A1 "), "{}", out.report);
     assert_eq!(tables(&pg), vec!["a", "b", "c", "groupMembers", "members"]);
@@ -432,7 +456,7 @@ fn a_ref_added_to_an_existing_table_gets_its_index() {
     )
     .expect("rows");
 
-    let out = migrate(&v4, db);
+    let out = evolve(&v4, db, &pg);
     assert_eq!(
         out.code, 0,
         "the field and its index are class A:\n{}",
@@ -451,8 +475,6 @@ fn a_ref_added_to_an_existing_table_gets_its_index() {
     );
     assert_eq!(one(&pg, "SELECT count(*) FROM c"), "1");
     assert_eq!(apply(&v4, db).code, 0, "the migrated database serves v4");
-    let out = migrate(&v4, db);
-    assert!(out.report.contains("nothing to apply"), "{}", out.report);
 }
 
 // ── refusals ─────────────────────────────────────────────────────────────
@@ -474,7 +496,7 @@ fn a_transforming_change_is_refused_by_name_and_writes_nothing() {
         .query("SELECT attname, attnotnull FROM pg_attribute WHERE attrelid = 'a'::regclass ORDER BY attnum")
         .expect("catalog");
 
-    let out = migrate(&req, db);
+    let out = evolve(&req, db, &pg);
     assert_eq!(out.code, 1, "B5 over nulls refuses:\n{}", out.report);
     assert!(out.report.contains("B5 "), "{}", out.report);
     assert!(
@@ -510,17 +532,17 @@ fn a_check_refuses_over_violating_rows_and_applies_over_an_empty_table() {
     pg.exec("INSERT INTO a (\"$space\", id, rev, n) VALUES ('s1','a_1',1,-5);")
         .expect("rows");
 
-    let out = migrate(&chk, db);
+    let out = evolve(&chk, db, &pg);
     assert_eq!(
         out.code, 1,
         "C9 over a violating row refuses:\n{}",
         out.report
     );
     assert!(out.report.contains("C9 "), "{}", out.report);
-    assert!(out.report.contains("probe_not_empty"), "{}", out.report);
+    assert!(out.report.contains("precheck_failed"), "{}", out.report);
 
     pg.exec("DELETE FROM a").expect("clear");
-    let out = migrate(&chk, db);
+    let out = evolve(&chk, db, &pg);
     assert_eq!(
         out.code, 0,
         "C9 over an empty table applies:\n{}",
@@ -555,14 +577,14 @@ fn a_target_that_matches_neither_version_is_refused() {
     pg.exec("ALTER TABLE a DROP COLUMN memo")
         .expect("hand alter");
 
-    let out = migrate(&v2, db);
+    let out = evolve(&v2, db, &pg);
     assert_eq!(
         out.code, 1,
         "drift under the serving version refuses:\n{}",
         out.report
     );
     assert!(
-        out.report.contains("serving_schema_drifted") && out.report.contains("a.memo"),
+        out.report.contains("database_drifted") && out.report.contains("a.memo"),
         "the refusal names the class and the missing column:\n{}",
         out.report
     );
@@ -649,9 +671,9 @@ fn apply_adds_a_constant_default_field_over_rows_and_records_it() {
 }
 
 /// A data-risk change is still refused by `ordo apply`, and the command it
-/// suggests carries this deployment's real database name.
+/// suggests is `ordo evolve --run` through the door, never a database name.
 #[test]
-fn apply_still_refuses_a_data_risk_change_and_names_the_database() {
+fn apply_still_refuses_a_data_risk_change_and_names_ordo_evolve() {
     let _g = SETTING.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("ORDO_APPLY_SAFE_CHANGES");
     let db = "ordo_sapply_selfrisk";
@@ -664,11 +686,49 @@ fn apply_still_refuses_a_data_risk_change_and_names_the_database() {
     let out = apply(&req, db);
     assert_eq!(out.code, 1, "{}", out.report);
     assert!(
-        out.report.contains(&format!("--db {db}")),
-        "the command names the real database:\n{}",
+        out.report.contains("ordo evolve --from") && out.report.contains("--run --host"),
+        "the command named is `ordo evolve`:\n{}",
         out.report
     );
-    assert!(!out.report.contains("--db …"), "{}", out.report);
+    assert!(!out.report.contains("ordo migrate"), "{}", out.report);
+}
+
+/// `ordo migrate` is removed (ruled 2026-11-05; increment 8). Whatever is
+/// typed after it, it refuses with the usage code, names `ordo evolve` and
+/// `ordo apply --no-activate`, and touches nothing.
+#[test]
+fn ordo_migrate_refuses_naming_ordo_evolve() {
+    let db = "ordo_sapply_migrate_gone";
+    let pg = empty(db);
+    let v1 = program(db, "v1", V1);
+    let v2 = program(db, "v2", V2);
+    assert_eq!(apply(&v1, db).code, 0);
+    for args in [
+        vec![
+            v2.clone(),
+            "--apply".into(),
+            "--direct".into(),
+            "--db".into(),
+            db.into(),
+        ],
+        vec![v2.clone(), "--apply".into(), "--db".into(), db.into()],
+        vec![],
+    ] {
+        let out = operator::run("migrate", &args);
+        assert_eq!(out.code, 2, "{}", out.report);
+        assert!(
+            out.report.contains("`ordo migrate` is removed"),
+            "{}",
+            out.report
+        );
+        assert!(out.report.contains("ordo evolve --from"), "{}", out.report);
+        assert!(out.report.contains("--no-activate"), "{}", out.report);
+    }
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM information_schema.columns WHERE table_name = 'a' AND column_name = 'tag'"),
+        "0",
+        "nothing was applied"
+    );
 }
 
 /// The setting off restores the refusal for a safe change.
@@ -685,12 +745,10 @@ fn the_setting_off_restores_the_refusal() {
     std::env::remove_var("ORDO_APPLY_SAFE_CHANGES");
     assert_eq!(out.code, 1, "{}", out.report);
     assert!(
-        out.report.contains("ordo migrate --apply")
-            && out.report.contains("ORDO_APPLY_SAFE_CHANGES"),
+        out.report.contains("ordo evolve --from") && out.report.contains("ORDO_APPLY_SAFE_CHANGES"),
         "the refusal names the command and the setting:\n{}",
         out.report
     );
-    assert!(out.report.contains(&format!("--db {db}")), "{}", out.report);
     assert_eq!(
         one(
             &pg,
@@ -825,6 +883,10 @@ fn versions_list_and_show_name_the_tenants_pinned() {
         "ACTIVATIONS (1, newest first)".to_string(),
     ] {
         assert!(show.report.contains(&want), "`{want}` in:\n{}", show.report);
+    }
+    // Times print in UTC, never as raw seconds (audit leftover, increment 3).
+    for want in ["applied    ", " UTC by "] {
+        assert!(show.report.contains(want), "`{want}` in:\n{}", show.report);
     }
 
     let unknown = operator::run("versions", &with_door(&["show", "nope"]));

@@ -21,6 +21,7 @@
 
 import type { OrdoClient, Params, Pin, Row } from '../core/client.js';
 import { OrdoLocalRefusal, OrdoRefusal, decodeRefusal } from '../core/refusal.js';
+import { OrdoVersionChanged, VERSION_CHANGED_EVENT } from '../core/busy.js';
 import type { Refine } from '../core/refine.js';
 import type { OpSpec } from '../core/spec.js';
 import type { FrameDelta, LocalReplica } from './replica.js';
@@ -175,6 +176,12 @@ export async function syncOp(
     // the refusal it is; the sync manager holds the op until the resume.
     if (event === 'space_paused') {
       throw new OrdoRefusal(decodeRefusal(data, 423, spec.op, spec.refusals));
+    }
+    // The tenant moved to another program version (`plan-versions.md`
+    // §1.4): the feed's last frame. The sync manager drops the device copy
+    // and reconnects; known by the event's name, not its class.
+    if (event === VERSION_CHANGED_EVENT) {
+      throw new OrdoVersionChanged(spec.op);
     }
     let delta: FrameDelta;
     let reset = false;

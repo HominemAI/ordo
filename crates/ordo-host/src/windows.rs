@@ -744,6 +744,13 @@ impl<'a> Windows<'a> {
         })
     }
 
+    /// Every window stored, oldest first. A deployment with none answers
+    /// empty. Read by a rollout to tell a tenant no window covers from one
+    /// outside its window (`crate::rollouts`).
+    pub async fn all(&self) -> Result<Vec<Window>, WindowRefusal> {
+        self.read(None).await
+    }
+
     /// **The windows in force at `now`**: each whose range, or one of
     /// whose cron times, holds `now`, and that no skip suppresses. Each with
     /// the time it is in force, `(start, end)`. Read by the moves off a

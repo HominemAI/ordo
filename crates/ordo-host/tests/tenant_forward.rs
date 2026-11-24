@@ -206,8 +206,8 @@ async fn version_of(pool: &Pool) -> String {
     }
 }
 
-/// The deployment's own database takes a change the way `ordo migrate
-/// --apply` does before an `ordo apply`.
+/// The deployment's own database takes a change the way `ordo evolve
+/// --run` does before an `ordo apply`.
 async fn migrate(control: &Pool, program: &Program) {
     let (_, applied) = ordo_host::schema_apply::apply(control, program, "test", "migrate").await;
     applied.expect("the deployment's own database takes the change");
@@ -695,6 +695,64 @@ async fn a_dropped_field_leaves_the_column_and_moves_the_version() {
         .expect("kind");
     assert_eq!(kind[0][0].as_deref(), Some("version"));
     assert!(w.serves("spc_t").await);
+}
+
+/// A program that reads `extra`, and the next one that drops it and adds
+/// `note`: notes v3's shape (an addition beside a drop the serving version
+/// still reads).
+const READS_EXTRA: &str = "entity task {\n  title: text\n  done:  bool\n  extra: text?\n}\n\n\
+                           op openTasks unbounded =\n  task[title, done, extra]\n";
+const ADDS_NOTE_DROPS_EXTRA: &str = "entity task {\n  title: text\n  done:  bool\n  \
+                                     note:  text?\n}\n\n\
+                                     op openTasks unbounded =\n  task[title, done]\n";
+
+/// **An addition beside a drop applies** (increment 7a, found by notes v3).
+/// Until 2026-11-23 the drop's `drop_read_by_active_op` refused the whole
+/// apply, addition included, as `not activated`. Now the addition lands on
+/// the deployment's own database and the tenant's, and the dropped column
+/// stays with its data, as a drop alone does.
+///
+/// A regression looks like the apply refused naming the new field, or the
+/// `extra` column gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_addition_beside_a_drop_the_serving_version_reads_applies() {
+    let _serial = SERIAL.lock().await;
+    let before = Program::compile(READS_EXTRA).expect("reads extra");
+    let after = Program::compile(ADDS_NOTE_DROPS_EXTRA).expect("adds note");
+    let w = World::new("adddrop", &before, &after, ADDS_NOTE_DROPS_EXTRA).await;
+    let t = tenant_db_at("ordo_tf_adddrop_t", &before).await;
+    w.attach("spc_t", "ordo_tf_adddrop_t").await;
+
+    let report = ordo_host::apply_op::run_program(
+        &w.control,
+        w.pools.as_ref(),
+        &after,
+        vec![],
+        "test",
+        "test.apply",
+        true,
+    )
+    .await
+    .expect("the addition applies beside the drop");
+    assert!(
+        matches!(
+            report.schema,
+            ordo_host::apply_op::SchemaOutcome::Migrated { .. }
+        ),
+        "{report:?}"
+    );
+    assert_eq!(report.tenants.advanced, 1, "{report:?}");
+    for db in [&w.control, &t] {
+        assert!(
+            column_exists(db, "task", "note").await,
+            "the addition landed"
+        );
+        assert!(
+            column_exists(db, "task", "extra").await,
+            "the drop is pending"
+        );
+        assert_eq!(version_of(db).await, after.version);
+    }
 }
 
 // ── a database on its own tenant's pin ──────────────────────────────────

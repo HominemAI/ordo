@@ -1677,3 +1677,68 @@ async fn a_ref_to_an_external_round_trips_verbatim() {
         "the other system's key is kept as it was, a dangling one too"
     );
 }
+
+// ── two imports, one database ────────────────────────────────────────────
+
+/// **Two imports into two spaces of one database do not touch each other**
+/// (staging clones, session 2). A batch's idempotency key lives in
+/// `$replay`, one table for the whole database. Keyed by the import's name
+/// alone, the second space's batches found the first space's keys and were
+/// skipped as resumed, or waited on them: that space got no rows, and
+/// nothing refused. The key names the space now.
+///
+/// A regression looks like the second space holding fewer rows than the
+/// bundle, or `batches_skipped` above 0 on a first run.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_imports_into_two_spaces_of_one_database_each_land_every_row() {
+    const OTHER: &str = "spc_imp_other";
+    let art = artifact_of("v1", PROGRAM);
+    let src_keys = TestProvider::with_space(SRC_SPACE);
+    let bundle = bundle_of("ordo_imp_two_src", &art, &src_keys).await;
+
+    let keys = Arc::new(TestProvider::with_space(DST_SPACE));
+    keys.create_space(&SpaceId(OTHER.to_string()))
+        .expect("the second space's custody");
+    let d = dest("ordo_imp_two_dst", &art, PROGRAM, keys.clone()).await;
+    let mut other = Fixture::from_source(PROGRAM, "")
+        .expect("the fixture compiles")
+        .in_space(OTHER);
+    other.keys = keys.clone();
+    let other = Arc::new(other);
+    let other_exec = Executor {
+        pool: d.pool.clone(),
+        schema: other.schema.clone(),
+        registry: other.registry.clone(),
+        keys: keys.clone(),
+        space: SpaceId(OTHER.to_string()),
+    };
+    let source = MemorySource::from(&bundle);
+
+    // The same import name in both, at once: what two clones of one tenant,
+    // or two restores of one bundle, do.
+    let first = d.request("restore", &art, 2);
+    let second = ImportRequest {
+        fixture: other.clone(),
+        ..d.request("restore", &art, 2)
+    };
+    let (a, b) = tokio::join!(
+        import_space(&d.exec, &first, &source),
+        import_space(&other_exec, &second, &source),
+    );
+    let a = a.expect("the first space imports");
+    let b = b.expect("the second space imports");
+    for (space, report) in [(DST_SPACE, &a), (OTHER, &b)] {
+        assert_eq!(report.rows(), 8, "{space}: every row landed");
+        assert_eq!(report.batches_skipped, 0, "{space}: nothing was a resume");
+        for (table, n) in [("vendors", "2"), ("folders", "3"), ("orders", "3")] {
+            assert_eq!(
+                d.one(&format!(
+                    "SELECT count(*) FROM \"{table}\" WHERE \"$space\" = '{space}'"
+                ))
+                .await,
+                n,
+                "{space}: {table}"
+            );
+        }
+    }
+}

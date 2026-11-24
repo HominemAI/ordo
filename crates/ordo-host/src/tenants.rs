@@ -532,6 +532,24 @@ pub async fn fail(pool: &Pool, id: &str, note: &str, at: u64) -> Result<(), Pool
     .map(|_| ())
 }
 
+/// **A built tenant given up by an explicit command** (a dev branch's
+/// delete, `crate::branches`): `active` or `paused` to `failed`, with why,
+/// so `std.space.reap` releases what it holds. Answers whether a row moved.
+/// Never called for a tenant a person was given: deleting one of those is
+/// `std.space.delete`, the owner's erasure.
+pub async fn retire(pool: &Pool, id: &str, note: &str, at: u64) -> Result<bool, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "UPDATE \"{SPACES_TABLE}\" SET \"state\" = 'failed', \"note\" = {}, \
+             \"state_at\" = {at} WHERE \"$space\" = {} AND \"state\" IN ('active', 'paused') \
+             RETURNING \"$space\"",
+            sql_lit(note),
+            sql_lit(id),
+        ))
+        .await?;
+    Ok(!rows.is_empty())
+}
+
 /// Every resource released. Terminal.
 pub async fn reaped(pool: &Pool, id: &str, at: u64) -> Result<(), PoolError> {
     pool.rows(&format!(

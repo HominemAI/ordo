@@ -6,10 +6,10 @@
 #
 #   ordo plan  examples/concepts/05-version-2.ordo --host <h>
 #       what changes between the live database and version 2, classified
-#   ordo migrate examples/concepts/05-version-2.ordo --apply --direct --db prod
-#       sends the additive part
 #   ordo apply examples/concepts/05-version-2.ordo --host <h>
-#       stores and activates version 2; nodes swap with no restart
+#       sends the additive part, then stores and activates version 2;
+#       nodes swap with no restart. A change that is not additive runs
+#       through `ordo evolve --from <v1> --to <v2> --run --host <h>` first
 #   ordo deploys
 #       what is stored, what is serving, every re-point in order
 #   ordo rollback --version <hash> --host <h>

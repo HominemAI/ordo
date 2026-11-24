@@ -240,6 +240,10 @@ pub enum Purpose {
     /// A re-seal worker moving rows from one epoch to the next. Needs two
     /// epochs live at once, which is why it is named separately.
     Reseal,
+    /// A sealed backfill (`plan-versions.md` increment 13): a stored step
+    /// sealing a field that held plaintext, one lease per space. Named
+    /// apart so the key-release counts attribute the burst to the step.
+    Migration,
 }
 
 impl Purpose {
@@ -248,6 +252,7 @@ impl Purpose {
             Purpose::Read => "read",
             Purpose::Write => "write",
             Purpose::Reseal => "reseal",
+            Purpose::Migration => "migration",
         }
     }
 }

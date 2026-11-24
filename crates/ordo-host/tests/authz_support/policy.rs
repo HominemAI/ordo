@@ -374,6 +374,7 @@ pub fn op_class(name: &str) -> Option<OpClass> {
         | "std.space.setLinkPassword"
         | "std.space.setLinkMaxOpens"
         | "std.space.sessionPolicy"
+        | "std.space.version"
         | "std.space.touches"
         | "std.space.approveMemberRecovery"
         | "std.space.recoverMember"
@@ -472,6 +473,11 @@ fn deployment_op(name: &str, kind: ordo_api::OpKind, who: Kind, home: bool) -> E
         _ => (false, false),
     };
     let presence = Expect::Code(403, "presence_required");
+    // Break-glass is a named person's act (§3.2 item 6): no machine key
+    // reaches it, whatever its grants (`deployment_access::machine`).
+    if !person && name == ordo_host::rehearsals::BREAK_GLASS {
+        return Expect::Denied;
+    }
     if home {
         // A write the touch gate names asks a stale person for a touch.
         // At the default level (`security_level.rs`) only some do.

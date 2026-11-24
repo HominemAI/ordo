@@ -1290,7 +1290,7 @@ What may change:
 `crates/ordo-host/src/rehearsals.rs`:
 
 1. **Staging rehearses** (`ordo rehearsals rehearse --from X --to Y
-   --tenant <clone> --reason "..."`, `std.deployment.rehearse`). Refused
+   --clone <clone> --reason "..."`, `std.deployment.rehearse`). Refused
    unless this deployment is staging, each tenant is a clone, and each
    clone is pinned to X. The stored plan runs on each clone's database,
    and the clone is pinned to Y.

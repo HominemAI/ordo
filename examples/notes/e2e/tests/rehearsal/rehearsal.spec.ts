@@ -147,7 +147,7 @@ test('production refuses a plan digest staging did not sign, and accepts the one
     ok(d.other(['evolve', '--from', '0.3.0', '--to', '0.3.3', ...staging()]));
     const out = ok(
       d.other([
-        'rehearsals', 'rehearse', '--from', '0.3.0', '--to', '0.3.3', '--tenant', space,
+        'rehearsals', 'rehearse', '--from', '0.3.0', '--to', '0.3.3', '--clone', space,
         '--reason', 'the reader line on a real shape', ...staging(),
       ]),
     );

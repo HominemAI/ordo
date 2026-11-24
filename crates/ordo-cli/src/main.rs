@@ -327,7 +327,7 @@ fn usage() -> ! {
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \
          Members come without their sign-in; a staging admin opens it.\n  \
-         ordo rehearsals rehearse --from <v> --to <v> --tenant <clone>[,<clone>] --reason \"<text>\"\n      \
+         ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] --reason \"<text>\"\n      \
          on staging: run the stored plan on clones and sign it when green.\n      \
          Staging makes its own signing key; nothing to set up.\n  \
          ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>] | list\n      \

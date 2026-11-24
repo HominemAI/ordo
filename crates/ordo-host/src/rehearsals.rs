@@ -260,7 +260,7 @@ impl From<crate::versions::VersionRefusal> for RehearsalRefusal {
 
 fn rehearse_command(from: &str, to: &str) -> String {
     format!(
-        "`ordo rehearsals rehearse --from {from} --to {to} --tenant <clone> --reason \"...\" \
+        "`ordo rehearsals rehearse --from {from} --to {to} --clone <clone> --reason \"...\" \
          --host <staging>`"
     )
 }
@@ -283,7 +283,7 @@ impl std::fmt::Display for RehearsalRefusal {
             ),
             RehearsalRefusal::NoTenants => write!(
                 f,
-                "name at least one clone to rehearse on: `--tenant <clone>`. `ordo clones list` \
+                "name at least one clone to rehearse on: `--clone <clone>`. `ordo clones list` \
                  names them"
             ),
             RehearsalRefusal::NotAClone { tenant } => write!(

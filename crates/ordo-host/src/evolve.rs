@@ -430,7 +430,7 @@ impl std::fmt::Display for EvolveRefusal {
                 "plan_not_rehearsed: staging comes before this deployment, and it runs only a \
                  plan staging rehearsed on a clone and signed. No rehearsal of the step from \
                  `{from}` to `{to}` with digest {digest} was accepted here{}. Rehearse it on \
-                 staging: `ordo rehearsals rehearse --from {from} --to {to} --tenant <clone> \
+                 staging: `ordo rehearsals rehearse --from {from} --to {to} --clone <clone> \
                  --reason \"...\" --host <staging>`; then accept it here: `ordo rehearsals \
                  accept --from {from} --to {to}`. To promote from dev with no staging, set \
                  promotion.skip_staging: `ordo environments set skip-staging on --reason \

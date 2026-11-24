@@ -2880,7 +2880,7 @@ async fn clones_cmd(flags: Flags) -> Outcome {
 // ── rehearsals ───────────────────────────────────────────────────────────
 
 const REHEARSALS_USAGE: &str =
-    "ordo rehearsals rehearse --from <v> --to <v> --tenant <clone>[,<clone>] \
+    "ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] \
      --reason \"<text>\"  --host <staging> ...\n\
      ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>]  \
      --host <production> ...\n\
@@ -2899,7 +2899,7 @@ async fn rehearsals_cmd(flags: Flags) -> Outcome {
     flags.positional.remove(0);
     let own: &[&str] = match sub.as_str() {
         "list" => &["--from", "--to"],
-        "rehearse" => &["--from", "--to", "--tenant", "--reason"],
+        "rehearse" => &["--from", "--to", "--clone", "--reason"],
         "accept" => &["--from", "--to", "--from-token", "--trust-key"],
         other => {
             return Outcome::usage(format!(
@@ -2944,9 +2944,9 @@ async fn rehearsals_cmd(flags: Flags) -> Outcome {
                 Ok(s) => s,
                 Err(o) => return o,
             };
-            let Some(tenants) = named("--tenant") else {
+            let Some(tenants) = named("--clone") else {
                 return Outcome::usage(
-                    "`--tenant <clone>` names the clones to rehearse on; `ordo clones list` \
+                    "`--clone <clone>` names the clones to rehearse on; `ordo clones list` \
                      names them\n"
                         .into(),
                 );

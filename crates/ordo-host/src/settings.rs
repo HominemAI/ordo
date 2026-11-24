@@ -1531,6 +1531,24 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_VERSIONS_MAX_CONCURRENT_LOADS",
+        "Databases and pools",
+        r#"1"#,
+        r#"1 to 16"#,
+    ),
+    s(
+        "ORDO_VERSIONS_MAX_LOADED",
+        "Databases and pools",
+        r#"8"#,
+        r#"1 to 256"#,
+    ),
+    s(
+        "ORDO_VERSIONS_MEMORY_BUDGET",
+        "Databases and pools",
+        r#"512MB"#,
+        r#"256KB or more"#,
+    ),
+    s(
         "ORDO_PROMOTION_PLAIN_HTTP",
         "Databases and pools",
         r#"off"#,

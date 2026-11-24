@@ -180,9 +180,9 @@ const cases = [
     want: { examples: ' note-viewer ', notes_e2e: 'false', federation_e2e: 'true', crates: '' },
   },
   {
-    name: 'the identity service: its e2e and the federation e2e',
+    name: 'the identity service: its e2e, the federation e2e and the notes e2e',
     files: ['crates/ordo-identity-service/src/oidc.rs'],
-    want: { identity_e2e: 'true', federation_e2e: 'true', notes_e2e: 'false' },
+    want: { identity_e2e: 'true', federation_e2e: 'true', notes_e2e: 'true' },
   },
   {
     name: 'teamspace: its job, no e2e',

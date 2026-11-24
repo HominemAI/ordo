@@ -75,7 +75,7 @@ pub mod operator {
         let wants = match cmd {
             "verify" => !has("--proof"),
             "keys" => args.first().map(String::as_str) != Some("seal-master"),
-            "restore" | "migrate" | "identity" => true,
+            "restore" | "identity" => true,
             "apply" | "rollback" => has("--db") && !has("--host"),
             _ => false,
         };

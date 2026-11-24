@@ -206,8 +206,8 @@ async fn version_of(pool: &Pool) -> String {
     }
 }
 
-/// The deployment's own database takes a change the way `ordo migrate
-/// --apply` does before an `ordo apply`.
+/// The deployment's own database takes a change the way `ordo evolve
+/// --run` does before an `ordo apply`.
 async fn migrate(control: &Pool, program: &Program) {
     let (_, applied) = ordo_host::schema_apply::apply(control, program, "test", "migrate").await;
     applied.expect("the deployment's own database takes the change");

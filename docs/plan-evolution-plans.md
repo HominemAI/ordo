@@ -130,7 +130,7 @@ waits for a choice:
 | New required field, no default (B2) | constant · expression · refuse |
 | Add a unique (C1) with duplicates | refuse (default) · show me the duplicates |
 | Drop a field (D1) | drop now · keep the column, stop serving it (contract later) |
-| Change a money or decimal field's places (B11) | rescale · keep. **Built** (25aa) as `--places` on `ordo plan` and `ordo migrate --apply`, until the stored plan holds it |
+| Change a money or decimal field's places (B11) | rescale · keep. **Built** (25aa) as `--places` on `ordo plan` and `ordo evolve`, which stores it with the plan |
 
 A choice is recorded in the plan and travels to every tenant that runs it,
 so every tenant gets the same answer.

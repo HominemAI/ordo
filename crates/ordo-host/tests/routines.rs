@@ -1045,6 +1045,12 @@ async fn a_routine_runs_under_the_tenants_pinned_version() {
     rt.deployment.install(pinned);
     rt.deployment.note_pin(SPACE, &art.version, 1, 0);
     assert_ne!(active, art.version);
+    // What the pin stream does when the served versions change: the
+    // routines become the union over them (§1.10).
+    rt.routines
+        .switch_served(&rt.pool, &rt.deployment)
+        .await
+        .expect("switched");
 
     let sup = rt.start_workers().await.expect("starts");
     call(&rt, "placeOrder($placed: \"2026-01-02T00:00:00Z\")").await;

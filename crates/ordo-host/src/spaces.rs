@@ -173,6 +173,9 @@ pub enum SpaceRefusal {
     /// (`plan-versions.md` §1.4). Retryable: a node loads every pinned
     /// version at boot and when the pin stream names one.
     Unserved { space: String, version: String },
+    /// The tenant's version was unloaded for idleness and is loading again,
+    /// and did not land within [`WAKE_WAIT`]. Retryable, as `server_busy`.
+    Waking { space: String, version: String },
     /// **The tenant's database is not the shape of the version it is
     /// pinned to** (§1.4 step 6, the shape fingerprint). Only asked of a
     /// tenant pinned to a version other than the active one: the active
@@ -211,6 +214,11 @@ impl std::fmt::Display for SpaceRefusal {
             SpaceRefusal::Unfit { space, reason, .. } => {
                 write!(f, "space `{space}` is not served: {reason}")
             }
+            SpaceRefusal::Waking { space, version } => write!(
+                f,
+                "space `{space}`'s version `{version}` is loading again after it was idle; \
+                 the same request lands once it has"
+            ),
         }
     }
 }
@@ -225,6 +233,9 @@ impl SpaceRefusal {
         match self {
             SpaceRefusal::Unroutable { class, .. } => *class,
             SpaceRefusal::Unserved { .. } => ordo_exec::FaultClass::Retryable,
+            // Answered `server_busy` with `Retry-After`, which the SDK
+            // retries by itself.
+            SpaceRefusal::Waking { .. } => ordo_exec::FaultClass::Busy,
             _ => ordo_exec::FaultClass::Broken,
         }
     }
@@ -343,6 +354,11 @@ impl Reconciled {
     }
 }
 
+/// How long a signed-in request waits for its tenant's version to load
+/// again after an idle eviction ([`Spaces::resolve_waking`]). A load
+/// measured well under a second in `tests/versions_background.rs`.
+pub const WAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The resolver: one deployment, N spaces.
 pub struct Spaces {
     deployment: Arc<Deployment>,
@@ -406,6 +422,9 @@ pub struct Spaces {
     /// fingerprint on this node (§1.4 step 6). Asked once per pair per
     /// process, like continuity.
     fits: Mutex<HashSet<(String, String)>>,
+    /// Told the name of an evicted version a signed-in request woke
+    /// ([`Spaces::wake`]); the node's pin stream loads it.
+    waker: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl Spaces {
@@ -437,7 +456,53 @@ impl Spaces {
             paused: Mutex::new(BTreeMap::new()),
             pause_answers: Mutex::new(crate::pause::PauseAnswers::default()),
             fits: Mutex::new(HashSet::new()),
+            waker: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Set what [`Spaces::wake`] tells. Once; a second call is ignored.
+    pub fn set_waker(&self, waker: Arc<dyn Fn(String) + Send + Sync>) {
+        let _ = self.waker.set(waker);
+    }
+
+    /// **A signed-in request met a tenant whose version was unloaded for
+    /// idleness** (`versions.idle_evict_after`): mark it wanted and tell
+    /// the pin stream, which loads it under `versions.max_concurrent_loads`.
+    /// The request waits for it in [`Spaces::resolve_waking`]. Never
+    /// called for an anonymous caller (V-29).
+    pub fn wake(&self, version: &str) {
+        if self.deployment.wake(version) {
+            if let Some(w) = self.waker.get() {
+                w(version.to_string());
+            }
+        }
+    }
+
+    /// **[`Spaces::resolve`] for a signed-in caller, waiting for a woken
+    /// version** (`versions.idle_evict_after`, `plan-versions.md` §1.5).
+    /// A tenant whose version was unloaded for idleness wakes it, and the
+    /// request waits up to [`WAKE_WAIT`] for the load, so the person sees
+    /// an ordinary answer. Past it, [`SpaceRefusal::Waking`], which the
+    /// door answers `server_busy` with `Retry-After`, a class the SDK
+    /// retries. A version that is not loading (refused, or never named)
+    /// answers at once, as [`Spaces::resolve`] does.
+    pub async fn resolve_waking(&self, space: &str) -> Result<Bound, SpaceRefusal> {
+        let deadline = std::time::Instant::now() + WAKE_WAIT;
+        loop {
+            match self.resolve(space).await {
+                Err(SpaceRefusal::Unserved { space, version }) => {
+                    self.wake(&version);
+                    if !self.deployment.waking(&version) {
+                        return Err(SpaceRefusal::Unserved { space, version });
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(SpaceRefusal::Waking { space, version });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Whether this tenant is paused, and how. `None` serves.
@@ -795,7 +860,7 @@ impl Spaces {
             SpaceRefusal::Rewound { space, .. } => space.clone(),
             SpaceRefusal::Unfit { space, .. } => space.clone(),
             // Passing: the node is loading the version.
-            SpaceRefusal::Unserved { .. } => return refusal,
+            SpaceRefusal::Unserved { .. } | SpaceRefusal::Waking { .. } => return refusal,
             // Written by the site that made it, which knows the reason and
             // that it belongs in the catch-up's list as well.
             SpaceRefusal::SchemaBehind { .. } => return refusal,

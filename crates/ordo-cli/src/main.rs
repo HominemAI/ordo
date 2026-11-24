@@ -52,7 +52,7 @@ fn usage() -> ! {
          set, recompiles on save, brings up its own Postgres (or connects\n      \
          to ORDO_PG_* when set), classifies every save's schema delta,\n      \
          applies an additive one through the same class-A path `ordo\n      \
-         migrate --apply` runs and resets and reseeds (from `seed.sql`)\n      \
+         apply` runs and resets and reseeds (from `seed.sql`)\n      \
          on anything else (§4.3), then gates and swaps\n      \
          through the SAME assembly a server gets, serving on ORDO_DEV_ADDR\n      \
          (default 127.0.0.1:4000) with no restart between saves.\n      \
@@ -92,18 +92,10 @@ fn usage() -> ! {
          rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
          stored version, follow it, and control it. `ordo rollout` alone\n      \
          prints each subcommand.\n  \
-         ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
-         being replaced by `ordo evolve` (§6 conflict 9 of plan-versions.md).\n      \
-         the plan, then the additive apply (schema-evolution increment 2):\n      \
-         a first apply against an empty database creates the whole schema;\n      \
-         over a deployed one it sends class A (new entity, optional or\n      \
-         constant-defaulted field, index) in one transaction with the index\n      \
-         concurrently after it, plus a constraint that constrains no\n      \
-         existing data. Everything else is refused by name with the\n      \
-         statement to run by hand where one exists. Recorded in\n      \
-         `$migrations` and on the deployment's security stream. Then\n      \
-         `ordo apply` stores and activates the artifact.\n      \
-         --places <entity>.<field>=rescale|keep[,...] (also on `plan`)\n      \
+         ordo migrate   removed: every schema evolution goes through the door\n      \
+         (ruled 2026-11-05). It refuses, naming `ordo apply --no-activate`\n      \
+         and `ordo evolve --run`, which replace it.\n  \
+         --places <entity>.<field>=rescale|keep[,...] (on `evolve` and `plan`)\n      \
          states what a change of places on a stored money or decimal\n      \
          field does to its amounts: rescale keeps each value (money is\n      \
          multiplied or divided by 10^n); keep leaves the stored numbers\n      \
@@ -136,7 +128,7 @@ fn usage() -> ! {
          when no server can be up open the database from this machine\n\
          instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
          `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
-         --proof), `restore`, `identity recover`, `migrate --apply`, and\n\
+         --proof), `restore`, `identity recover`, and\n\
          `apply` and `rollback` when no host can boot. Without `--direct`\n\
          and without `--host` they refuse, naming both. Each `--direct` use\n\
          is recorded before it runs and written to the deployment\'s\n\
@@ -148,8 +140,8 @@ fn usage() -> ! {
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
-         refuse it stores and does not activate, naming `ordo migrate\n      \
-         --apply`. An op that does not compile refuses the whole apply.\n      \
+         refuse it stores and does not activate, naming `ordo evolve\n      \
+         --run`. An op that does not compile refuses the whole apply.\n      \
          `--no-activate` stores without re-pointing, for a staged deploy.\n      \
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \
@@ -280,7 +272,7 @@ fn usage() -> ! {
          and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \

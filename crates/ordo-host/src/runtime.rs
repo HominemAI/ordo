@@ -2422,6 +2422,17 @@ pub struct SwappableAccess {
     /// ([`AccessChecker::behind`]) until a rebuild installs. Emptied by
     /// every rebuild that installs: its build took in every newer read.
     failed: RwLock<std::collections::BTreeSet<String>>,
+    /// Of [`Self::unread`], the spaces whose database could not be read.
+    read_failed: RwLock<std::collections::BTreeSet<String>>,
+    /// Of [`Self::unread`], the spaces closed because their pinned version
+    /// was not loaded when the door was built. A version that loads after
+    /// that serves them at once, and [`AccessChecker::behind`] asks
+    /// [`Self::deployment`] again rather than this list (reported fix
+    /// versions-background-busy-flake: a stranger was answered
+    /// `server_busy` while the tenant's members were served).
+    unserved: RwLock<std::collections::BTreeSet<String>>,
+    /// The deployment, asked whether a closed tenant is served now. Set once.
+    deployment: std::sync::OnceLock<Arc<Deployment>>,
     /// The one recorder, held so a rebuild can reinstall it.
     pub recorder: Arc<ordo_secevent::Recorder>,
     /// The one session deny list, held for the same reason and a sharper
@@ -2512,6 +2523,9 @@ impl SwappableAccess {
             unread: RwLock::new(Vec::new()),
             kept_stale: RwLock::new(Vec::new()),
             failed: RwLock::new(Default::default()),
+            read_failed: RwLock::new(Default::default()),
+            unserved: RwLock::new(Default::default()),
+            deployment: std::sync::OnceLock::new(),
             directory: tokio::sync::Mutex::new(crate::directory::Cache::default()),
             not_ready: std::sync::OnceLock::new(),
             contact: std::sync::OnceLock::new(),
@@ -2554,8 +2568,20 @@ impl SwappableAccess {
     /// from a single pool and have nothing to say here, and a parameter
     /// they all had to pass as empty would be a parameter somebody
     /// eventually passes wrongly.
-    fn note_unread(&self, unread: Vec<(String, String)>) {
-        *self.unread.write().expect("door lock") = unread;
+    fn note_unread(&self, unread: Vec<(String, String)>, unserved: Vec<(String, String)>) {
+        *self.read_failed.write().expect("door lock") =
+            unread.iter().map(|(s, _)| s.clone()).collect();
+        *self.unserved.write().expect("door lock") =
+            unserved.iter().map(|(s, _)| s.clone()).collect();
+        let mut all = unread;
+        all.extend(unserved);
+        *self.unread.write().expect("door lock") = all;
+    }
+
+    /// Give the door the deployment, asked whether a tenant closed when
+    /// the door was built is served now. Once.
+    pub fn wire_deployment(&self, deployment: Arc<Deployment>) {
+        let _ = self.deployment.set(deployment);
     }
 
     pub fn current(&self) -> Arc<crate::IdentityAccess> {
@@ -2629,12 +2655,13 @@ impl AccessChecker for SwappableAccess {
     /// ([`Self::failed`]). Answered for a verified, live token only, so a
     /// caller with no valid token keeps the uniform denial.
     fn behind(&self, token: &str, space: &str) -> bool {
-        let listed = self
-            .unread
-            .read()
-            .expect("door lock")
-            .iter()
-            .any(|(s, _)| s == space)
+        // A tenant closed for a version not loaded then is asked about
+        // again: once its version loads, its members are served, and a
+        // stranger gets the uniform denial too.
+        let closed = self.unserved.read().expect("door lock").contains(space)
+            && !self.deployment.get().is_some_and(|d| d.serves(space));
+        let listed = closed
+            || self.read_failed.read().expect("door lock").contains(space)
             || self.failed.read().expect("door lock").contains(space);
         if !listed {
             return false;
@@ -4623,7 +4650,8 @@ async fn assemble_program(
     if let Some(c) = auth.as_ref().and_then(|(a, _)| a.contact().cloned()) {
         access.wire_contact(c);
     }
-    access.note_unread(unread);
+    access.note_unread(unread, Vec::new());
+    access.wire_deployment(deployment.clone());
     let grace = crate::directory::stale_grace_from(
         std::env::var(crate::directory::STALE_GRACE_SETTING)
             .ok()
@@ -6408,11 +6436,11 @@ async fn rebuild_access(
     // A tenant pinned to a version this node does not serve (one a release
     // no longer loads, §2.8) is closed: its verified callers are answered
     // `server_busy`, never `access_denied`, and `/health/ready` names it.
-    let mut unread = unread;
-    unread.extend(unserved_spaces(w.deployment));
+    // Until its version loads: the door asks again then
+    // ([`SwappableAccess::unserved`]).
     // Together with the door they describe, so the two can never be one
     // rebuild apart.
-    w.access.note_unread(unread);
+    w.access.note_unread(unread, unserved_spaces(w.deployment));
     *w.access.kept_stale.write().expect("door lock") = kept;
     w.access.failed.write().expect("door lock").clear();
     drop(cache);

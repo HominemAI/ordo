@@ -419,8 +419,18 @@ async fn name_version_with(
             next,
         });
     }
+    // **Numbers rise on main's line alone.** A version stored only for a dev
+    // branch and never activated does not count, so a branch at 0.5.x never
+    // refuses main's 0.4.0 (`crate::branches`, owner 2026-11-24).
+    let mains = if rising {
+        crate::branches::main_declared_versions(pool)
+            .await
+            .map_err(|e| NameRefusal::Registry(e.to_string()))?
+    } else {
+        Vec::new()
+    };
     if let Some(highest) =
-        ordo_plan::artifact::highest_above(d, numbers.iter().map(String::as_str)).filter(|_| rising)
+        ordo_plan::artifact::highest_above(d, mains.iter().map(String::as_str)).filter(|_| rising)
     {
         return Err(NameRefusal::Behind {
             version: d.to_string(),

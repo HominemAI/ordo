@@ -92,6 +92,13 @@ fn usage() -> ! {
          rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
          stored version, follow it, and control it. `ordo rollout` alone\n      \
          prints each subcommand.\n  \
+         ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
+         run from the new image before its tag changes: every version a\n      \
+         tenant is pinned to or may move to must compile and load under\n      \
+         this release. Names each failing version and its tenants; exits 1\n      \
+         when one fails. Reads only, and records one `$release_checks` row.\n      \
+         `--override` records the upgrade going ahead anyway: those tenants\n      \
+         close at the boot, and every other tenant serves.\n  \
          ordo migrate   removed: every schema evolution goes through the door\n      \
          (ruled 2026-11-05). It refuses, naming `ordo apply --no-activate`\n      \
          and `ordo evolve --run`, which replace it.\n  \
@@ -128,7 +135,7 @@ fn usage() -> ! {
          when no server can be up open the database from this machine\n\
          instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
          `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
-         --proof), `restore`, `identity recover`, and\n\
+         --proof), `restore`, `identity recover`, `release-check`, and\n\
          `apply` and `rollback` when no host can boot. Without `--direct`\n\
          and without `--host` they refuse, naming both. Each `--direct` use\n\
          is recorded before it runs and written to the deployment\'s\n\
@@ -578,6 +585,7 @@ fn main() {
             | "restore"
             | "keys"
             | "migrate"
+            | "release-check"
             | "quota"
             | "usage"
             | "space"

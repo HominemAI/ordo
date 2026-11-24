@@ -48,6 +48,7 @@ pub mod migrate;
 pub mod operator;
 pub mod ops;
 pub mod people;
+pub mod release_check;
 pub mod rollout;
 pub mod signin;
 pub mod skill;

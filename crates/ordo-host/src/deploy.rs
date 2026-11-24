@@ -625,10 +625,11 @@ pub async fn verify_candidate(
     keys: Arc<dyn ordo_crypto::KeyProvider>,
     space: ordo_crypto::SpaceId,
 ) -> Result<Verified, LoadRefusal> {
-    let compiled = Fixture::from_source(&stored.source, "").map_err(|e| LoadRefusal::Compile {
-        version: stored.version.clone(),
-        error: e,
-    })?;
+    let compiled =
+        crate::release_check::compile_stored(stored).map_err(|e| LoadRefusal::Compile {
+            version: stored.version.clone(),
+            error: e,
+        })?;
     // **The places the stored amounts are held at** (25aa). A `money(p)`
     // column is `bigint` minor units whatever `p` is, so the shadow below
     // cannot see that the amounts were rescaled for another version. Once a
@@ -683,10 +684,11 @@ pub async fn load_pinned(
         )));
     };
     check_digest(pool, &stored).await?;
-    let compiled = Fixture::from_source(&stored.source, "").map_err(|e| LoadRefusal::Compile {
-        version: stored.version.clone(),
-        error: e,
-    })?;
+    let compiled =
+        crate::release_check::compile_stored(&stored).map_err(|e| LoadRefusal::Compile {
+            version: stored.version.clone(),
+            error: e,
+        })?;
     gate_fixture(
         compiled,
         pool,
@@ -1834,7 +1836,17 @@ impl OpRegistry for Deployment {
         }
         match space.map(|s| self.for_space(s)) {
             Some(Ok((loaded, _))) => loaded.specs.get(name),
-            _ => self.current().specs.get(name),
+            // A tenant this node does not serve: its version is not loaded
+            // (a release that no longer loads it, §2.8). Any served
+            // version's spec lets the request reach the space's resolve,
+            // which answers that the tenant is closed, rather than calling
+            // the op unknown.
+            Some(Err(_)) => self
+                .current()
+                .specs
+                .get(name)
+                .or_else(|| self.others().iter().find_map(|l| l.specs.get(name))),
+            None => self.current().specs.get(name),
         }
     }
 

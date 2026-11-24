@@ -491,6 +491,7 @@
     ],
     "crates/ordo-host/src/refine_call.rs": "all",
     "crates/ordo-host/src/registrations.rs": "all",
+    "crates/ordo-host/src/release_check.rs": "all",
     "crates/ordo-host/src/release_ops.rs": "all",
     "crates/ordo-host/src/renewal.rs": "all",
     "crates/ordo-host/src/replay.rs": "all",

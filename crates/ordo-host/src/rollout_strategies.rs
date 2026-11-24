@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ordo_exec::route::PoolResolver;
 use ordo_exec::{sql_lit, Pool, PoolError};
 use ordo_syntax::ast::{CmpOp, Condition, Expr, TextOp};
 
@@ -281,26 +282,39 @@ pub enum FactTy {
 }
 
 /// **The tenant-facts view**: what a query may read, each from Ordo's own
-/// registry. A tenant edits none of them.
-pub const FACTS: [(&str, FactTy, &str); 9] = [
+/// records. A tenant edits none of them. `rows.<entity>` is one more, per
+/// entity: [`ROWS_PREFIX`].
+pub const FACTS: [(&str, FactTy, &str); 11] = [
     ("tenant", FactTy::Text, "the tenant's id"),
     ("name", FactTy::Text, "the tenant's name"),
     ("version", FactTy::Text, "the version it is on"),
     (
-        "created_at",
+        "createdAt",
         FactTy::Int,
         "when it was made, in seconds since 1970",
     ),
-    ("age_days", FactTy::Int, "whole days since it was made"),
+    ("ageDays", FactTy::Int, "whole days since it was made"),
+    ("members", FactTy::Int, "its members"),
     (
-        "members",
+        "requests30d",
         FactTy::Int,
-        "its members; none for a tenant with its own database",
+        "requests served in the last 30 days, from the usage ledger",
+    ),
+    (
+        "writes30d",
+        FactTy::Int,
+        "writes in the last 30 days, from the usage rollup",
     ),
     ("personal", FactTy::Bool, "a person's own tenant"),
-    ("own_database", FactTy::Bool, "it has a database of its own"),
+    ("ownDatabase", FactTy::Bool, "it has a database of its own"),
     ("paused", FactTy::Bool, "it is paused"),
 ];
+
+/// `rows.<entity>`: how many rows of that entity the tenant holds.
+pub const ROWS_PREFIX: &str = "rows";
+
+/// The window the usage facts cover.
+pub const USAGE_WINDOW_SECS: u64 = 30 * 86_400;
 
 fn fact_ty(name: &str) -> Option<(&'static str, FactTy)> {
     FACTS
@@ -310,11 +324,34 @@ fn fact_ty(name: &str) -> Option<(&'static str, FactTy)> {
 }
 
 fn fact_names() -> String {
-    FACTS
-        .iter()
-        .map(|(n, _, _)| *n)
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut names: Vec<&str> = FACTS.iter().map(|(n, _, _)| *n).collect();
+    names.push("rows.<entity>");
+    names.join(", ")
+}
+
+/// An entity name as a table name may carry it.
+fn entity_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && text.len() <= 63
+}
+
+/// A fact named in a query: one of [`FACTS`], or `rows.<entity>`.
+fn named_fact(segments: &[&str]) -> Result<(String, FactTy), String> {
+    match segments {
+        [one] => fact_ty(one)
+            .map(|(n, t)| (n.to_string(), t))
+            .ok_or_else(|| format!("`{one}` is not a tenant fact; there are {}", fact_names())),
+        [ROWS_PREFIX, entity] if entity_name(entity) => {
+            Ok((format!("{ROWS_PREFIX}.{entity}"), FactTy::Int))
+        }
+        _ => Err(format!(
+            "`{}` is not a tenant fact; there are {}",
+            segments.join("."),
+            fact_names()
+        )),
+    }
 }
 
 /// One fact's value.
@@ -330,7 +367,7 @@ pub enum Fact {
 #[derive(Debug, Clone)]
 pub struct Facts {
     pub tenant: String,
-    values: BTreeMap<&'static str, Fact>,
+    values: BTreeMap<String, Fact>,
 }
 
 impl Facts {
@@ -339,17 +376,41 @@ impl Facts {
     }
 }
 
-/// A query as checked: which tenants, in which order.
+/// What a query reads beyond the registry, so nothing else is counted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Needs {
+    pub members: bool,
+    pub usage: bool,
+    /// The entities `rows.<entity>` names.
+    pub rows: BTreeSet<String>,
+}
+
+impl Needs {
+    fn note(&mut self, fact: &str) {
+        match fact {
+            "members" => self.members = true,
+            "requests30d" | "writes30d" => self.usage = true,
+            f => {
+                if let Some(e) = f.strip_prefix("rows.") {
+                    self.rows.insert(e.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// A query as checked: which tenants, in which order, how many.
 #[derive(Debug, Clone)]
 pub struct Query {
     cond: Condition,
-    order: Vec<(&'static str, bool)>,
-    uses_members: bool,
+    order: Vec<(String, bool)>,
+    limit: Option<usize>,
+    needs: Needs,
 }
 
 /// One side of a comparison, checked.
 enum Side {
-    Fact(&'static str, FactTy),
+    Fact(String, FactTy),
     Lit(Fact),
 }
 
@@ -374,21 +435,10 @@ impl Side {
 
 fn side(e: &Expr) -> Result<Side, String> {
     match e {
-        Expr::Path { segments, .. } if segments.len() == 1 => {
-            let name = segments[0].name.as_str();
-            fact_ty(name)
-                .map(|(n, t)| Side::Fact(n, t))
-                .ok_or_else(|| format!("`{name}` is not a tenant fact; there are {}", fact_names()))
+        Expr::Path { segments, .. } => {
+            let names: Vec<&str> = segments.iter().map(|s| s.name.as_str()).collect();
+            named_fact(&names).map(|(n, t)| Side::Fact(n, t))
         }
-        Expr::Path { segments, .. } => Err(format!(
-            "`{}` is a path; a query reads one tenant fact by name: {}",
-            segments
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join("."),
-            fact_names()
-        )),
         Expr::IntLit { value, .. } => i64::try_from(*value)
             .map(|v| Side::Lit(Fact::Int(v)))
             .map_err(|_| "a number past 64 bits".into()),
@@ -409,17 +459,17 @@ fn side(e: &Expr) -> Result<Side, String> {
     }
 }
 
-fn check(c: &Condition, members: &mut bool) -> Result<(), String> {
-    let note = |s: &Side, members: &mut bool| {
-        if matches!(s, Side::Fact("members", _)) {
-            *members = true;
+fn check(c: &Condition, needs: &mut Needs) -> Result<(), String> {
+    let note = |s: &Side, needs: &mut Needs| {
+        if let Side::Fact(n, _) = s {
+            needs.note(n);
         }
     };
     match c {
         Condition::Compare { op, lhs, rhs, .. } => {
             let (l, r) = (side(lhs)?, side(rhs)?);
-            note(&l, members);
-            note(&r, members);
+            note(&l, needs);
+            note(&r, needs);
             match (l.ty(), r.ty()) {
                 (Some(a), Some(b)) if a == b => {
                     if a == FactTy::Bool && !matches!(op, CmpOp::Eq | CmpOp::Ne) {
@@ -440,7 +490,7 @@ fn check(c: &Condition, members: &mut bool) -> Result<(), String> {
         }
         Condition::In { expr, list, .. } => {
             let s = side(expr)?;
-            note(&s, members);
+            note(&s, needs);
             for e in list {
                 let v = side(e)?;
                 if v.ty() != s.ty() || matches!(v, Side::Fact(..)) {
@@ -452,9 +502,7 @@ fn check(c: &Condition, members: &mut bool) -> Result<(), String> {
         Condition::Text { op, lhs, rhs, .. } => {
             if *op == TextOp::Matches {
                 return Err(
-                    "`matches` is not offered over tenant facts; use `contains` or \
-                            `starts`"
-                        .into(),
+                    "`matches` is not offered over tenant facts; use `contains` or `starts`".into(),
                 );
             }
             let (l, r) = (side(lhs)?, side(rhs)?);
@@ -465,7 +513,7 @@ fn check(c: &Condition, members: &mut bool) -> Result<(), String> {
         }
         Condition::IsNull { expr, .. } => {
             let s = side(expr)?;
-            note(&s, members);
+            note(&s, needs);
             Ok(())
         }
         Condition::BareBool(e) => match side(e)? {
@@ -473,12 +521,12 @@ fn check(c: &Condition, members: &mut bool) -> Result<(), String> {
             _ => Err("a condition on its own is a true or false fact, like `personal`".into()),
         },
         Condition::And { items, .. } | Condition::Or { items, .. } => {
-            items.iter().try_for_each(|i| check(i, members))
+            items.iter().try_for_each(|i| check(i, needs))
         }
-        Condition::Not { inner, .. } => check(inner, members),
+        Condition::Not { inner, .. } => check(inner, needs),
         Condition::Since { .. } | Condition::Under { .. } | Condition::Above { .. } => Err(
             "`since`, `under` and `above` are not offered over tenant facts; compare \
-             `age_days` or `created_at`"
+             `ageDays` or `createdAt`"
                 .into(),
         ),
     }
@@ -490,8 +538,7 @@ fn eval(c: &Condition, f: &Facts) -> bool {
             let (Ok(l), Ok(r)) = (side(lhs), side(rhs)) else {
                 return false;
             };
-            let (a, b) = (l.value(f), r.value(f));
-            let ord = match (a, b) {
+            let ord = match (l.value(f), r.value(f)) {
                 (Fact::Int(x), Fact::Int(y)) => x.cmp(y),
                 (Fact::Text(x), Fact::Text(y)) => x.cmp(y),
                 (Fact::Bool(x), Fact::Bool(y)) => x.cmp(y),
@@ -540,14 +587,15 @@ fn eval(c: &Condition, f: &Facts) -> bool {
 }
 
 impl Query {
-    /// **Check a query**: an Ordo condition over [`FACTS`], and an order,
-    /// `<fact> [asc|desc]`, comma separated. Refused naming what is wrong
-    /// and the facts there are.
+    /// **Check a query**: an Ordo condition over [`FACTS`] and
+    /// `rows.<entity>`, an order (`<fact> [asc|desc]`, comma separated),
+    /// and how many of them at most (`rollout.limit`, "the 5 least used").
+    /// Refused naming what is wrong and the facts there are.
     pub fn parse(select: &str, order: Option<&str>) -> Result<Query, String> {
         let cond = ordo_syntax::parser::parse_condition(select.trim())
             .map_err(|e| format!("it does not parse: {}", e.message))?;
-        let mut uses_members = false;
-        check(&cond, &mut uses_members)?;
+        let mut needs = Needs::default();
+        check(&cond, &mut needs)?;
         let mut by = Vec::new();
         for part in order
             .unwrap_or_default()
@@ -557,12 +605,8 @@ impl Query {
         {
             let mut words = part.split_whitespace();
             let name = words.next().unwrap_or_default();
-            let (name, _) = fact_ty(name).ok_or_else(|| {
-                format!(
-                    "the order names `{name}`, which is not a tenant fact; there are {}",
-                    fact_names()
-                )
-            })?;
+            let (name, _) = named_fact(&name.split('.').collect::<Vec<_>>())
+                .map_err(|why| format!("the order names a fact there is not: {why}"))?;
             let desc = match words.next() {
                 None | Some("asc") => false,
                 Some("desc") => true,
@@ -571,28 +615,37 @@ impl Query {
             if words.next().is_some() {
                 return Err("the order is `<fact> [asc|desc]`, comma separated".into());
             }
-            if name == "members" {
-                uses_members = true;
-            }
+            needs.note(&name);
             by.push((name, desc));
         }
         Ok(Query {
             cond,
             order: by,
-            uses_members,
+            limit: None,
+            needs,
         })
     }
 
+    /// At most `n` of the tenants it selects, the first in its order.
+    pub fn limited(mut self, n: Option<usize>) -> Query {
+        self.limit = n;
+        self
+    }
+
+    pub fn needs(&self) -> &Needs {
+        &self.needs
+    }
+
     pub fn uses_members(&self) -> bool {
-        self.uses_members
+        self.needs.members
     }
 
     pub fn selects(&self, f: &Facts) -> bool {
         eval(&self.cond, f)
     }
 
-    /// The tenants it selects, in its order, then by id. A null sorts
-    /// last either way.
+    /// The tenants it selects, in its order, then by id, cut at its limit.
+    /// A null sorts last either way.
     pub fn select(&self, facts: Vec<Facts>) -> Vec<String> {
         let mut chosen: Vec<Facts> = facts.into_iter().filter(|f| self.selects(f)).collect();
         chosen.sort_by(|a, b| {
@@ -613,14 +666,68 @@ impl Query {
             }
             a.tenant.cmp(&b.tenant)
         });
+        if let Some(n) = self.limit {
+            chosen.truncate(n);
+        }
         chosen.into_iter().map(|f| f.tenant).collect()
     }
 }
 
-/// **The facts of every serving tenant**, read from the control database
-/// only. `members` is read when the query uses it; a tenant with its own
-/// database has none here.
-pub async fn facts(pool: &Pool, with_members: bool, now: u64) -> Result<Vec<Facts>, PoolError> {
+/// A count per tenant, or `None` when the table is not there.
+async fn counts_by_space(
+    pool: &Pool,
+    sql: &str,
+) -> Result<Option<BTreeMap<String, i64>>, PoolError> {
+    match pool.rows(sql).await {
+        Ok(r) => Ok(Some(
+            r.into_iter()
+                .filter_map(|r| {
+                    Some((r.first()?.clone()?, r.get(1)?.clone()?.parse::<i64>().ok()?))
+                })
+                .collect(),
+        )),
+        Err(e) if e.is_missing_table() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// One tenant's count in its own database. `None` when it cannot be
+/// reached or the table is not there: a fact unknown, never a zero.
+async fn own_count(pools: &dyn PoolResolver, tenant: &str, sql: &str) -> Option<i64> {
+    let pool = pools
+        .resolve(&ordo_crypto::SpaceId(tenant.to_string()))
+        .await
+        .ok()?;
+    pool.rows(sql)
+        .await
+        .ok()?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .and_then(|v| v.parse().ok())
+}
+
+fn members_sql(filter: &str) -> String {
+    format!(
+        "SELECT \"$space\", count(*) FROM \"members\" WHERE \"kind\" = 'principal'{filter} \
+         GROUP BY 1"
+    )
+}
+
+fn rows_sql(entity: &str, filter: &str) -> String {
+    format!("SELECT \"$space\", count(*) FROM \"{entity}\" WHERE true{filter} GROUP BY 1")
+}
+
+/// **The facts of every serving tenant.** The registry is read from the
+/// control database. What `needs` names beyond it is counted only then:
+/// members and `rows.<entity>` on the deployment's database, and in a
+/// tenant's own database through `pools` (unreachable reads as no value);
+/// usage from the usage tables, none when the ledger was never on.
+pub async fn facts(
+    pool: &Pool,
+    pools: Option<&dyn PoolResolver>,
+    needs: &Needs,
+    now: u64,
+) -> Result<Vec<Facts>, PoolError> {
     let rows = pool
         .rows(
             "SELECT \"$space\", \"name\", \"version\", \"created_at\", \"own_of\" IS NOT NULL, \
@@ -633,90 +740,153 @@ pub async fn facts(pool: &Pool, with_members: bool, now: u64) -> Result<Vec<Fact
         Err(e) if e.is_missing_table() => BTreeSet::new(),
         Err(e) => return Err(e),
     };
-    let mut members: Option<BTreeMap<String, i64>> = None;
-    if with_members {
-        members = match pool
-            .rows(
-                "SELECT \"$space\", count(*) FROM \"members\" WHERE \"kind\" = 'principal' \
-                 GROUP BY 1",
-            )
-            .await
-        {
-            Ok(r) => Some(
-                r.into_iter()
-                    .filter_map(|r| {
-                        Some((r.first()?.clone()?, r.get(1)?.clone()?.parse::<i64>().ok()?))
-                    })
-                    .collect(),
-            ),
-            Err(e) if e.is_missing_table() => None,
-            Err(e) => return Err(e),
-        };
+    // Counts on the deployment's database, by tenant.
+    let mut shared: BTreeMap<String, Option<BTreeMap<String, i64>>> = BTreeMap::new();
+    if needs.members {
+        shared.insert(
+            "members".into(),
+            counts_by_space(pool, &members_sql("")).await?,
+        );
     }
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| {
-            let s = |i: usize| r.get(i).cloned().flatten();
-            let tenant = s(0)?;
-            let created = s(3).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-            let own_db = own.contains(&tenant);
-            let mut values = BTreeMap::new();
-            values.insert("tenant", Fact::Text(tenant.clone()));
-            values.insert("name", Fact::Text(s(1).unwrap_or_default()));
-            values.insert("version", s(2).map(Fact::Text).unwrap_or(Fact::Null));
-            values.insert("created_at", Fact::Int(created));
-            values.insert(
-                "age_days",
-                Fact::Int((now as i64).saturating_sub(created).max(0) / 86_400),
-            );
-            values.insert(
-                "members",
-                match (&members, own_db) {
-                    (Some(m), false) => Fact::Int(m.get(&tenant).copied().unwrap_or(0)),
-                    _ => Fact::Null,
-                },
-            );
-            values.insert(
-                "personal",
-                Fact::Bool(matches!(s(4).as_deref(), Some("t" | "true"))),
-            );
-            values.insert("own_database", Fact::Bool(own_db));
-            values.insert("paused", Fact::Bool(s(5).as_deref() == Some("paused")));
-            Some(Facts { tenant, values })
-        })
-        .collect())
+    for e in &needs.rows {
+        shared.insert(
+            format!("{ROWS_PREFIX}.{e}"),
+            counts_by_space(pool, &rows_sql(e, "")).await?,
+        );
+    }
+    if needs.usage {
+        let since = now.saturating_sub(USAGE_WINDOW_SECS);
+        shared.insert(
+            "requests30d".into(),
+            counts_by_space(
+                pool,
+                &format!(
+                    "SELECT \"space\", coalesce(sum((SELECT coalesce(sum(j.v::bigint), 0) \
+                       FROM jsonb_each_text(\"requests\") AS j(k, v))), 0)::bigint \
+                     FROM \"$usage_replica\" WHERE \"period_start\" >= {since} GROUP BY 1"
+                ),
+            )
+            .await?,
+        );
+        shared.insert(
+            "writes30d".into(),
+            counts_by_space(
+                pool,
+                &format!(
+                    "SELECT \"space\", coalesce(sum(\"writes\"), 0)::bigint FROM \"$usage\" \
+                     WHERE \"period_start\" >= {since} GROUP BY 1"
+                ),
+            )
+            .await?,
+        );
+    }
+    let mut out = Vec::new();
+    for r in rows {
+        let s = |i: usize| r.get(i).cloned().flatten();
+        let Some(tenant) = s(0) else { continue };
+        let created = s(3).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let own_db = own.contains(&tenant);
+        let mut values = BTreeMap::new();
+        values.insert("tenant".to_string(), Fact::Text(tenant.clone()));
+        values.insert("name".into(), Fact::Text(s(1).unwrap_or_default()));
+        values.insert("version".into(), s(2).map(Fact::Text).unwrap_or(Fact::Null));
+        values.insert("createdAt".into(), Fact::Int(created));
+        values.insert(
+            "ageDays".into(),
+            Fact::Int((now as i64).saturating_sub(created).max(0) / 86_400),
+        );
+        values.insert(
+            "personal".into(),
+            Fact::Bool(matches!(s(4).as_deref(), Some("t" | "true"))),
+        );
+        values.insert("ownDatabase".into(), Fact::Bool(own_db));
+        values.insert(
+            "paused".into(),
+            Fact::Bool(s(5).as_deref() == Some("paused")),
+        );
+        for (name, counts) in &shared {
+            let usage = name.ends_with("30d");
+            let v = if own_db && !usage {
+                // Counted in the tenant's own database.
+                let filter = format!(" AND \"$space\" = {}", sql_lit(&tenant));
+                let sql = match name.strip_prefix("rows.") {
+                    Some(e) => rows_sql(e, &filter),
+                    None => members_sql(&filter),
+                };
+                let sql = format!("SELECT coalesce(sum(n), 0) FROM ({}) c(s, n)", sql);
+                match pools {
+                    Some(p) => own_count(p, &tenant, &sql).await.map(Fact::Int),
+                    None => None,
+                }
+            } else {
+                counts
+                    .as_ref()
+                    .map(|m| Fact::Int(m.get(&tenant).copied().unwrap_or(0)))
+            };
+            values.insert(name.clone(), v.unwrap_or(Fact::Null));
+        }
+        out.push(Facts { tenant, values });
+    }
+    Ok(out)
 }
 
 // ── share partners ──────────────────────────────────────────────────────
 
+const GRANTS_SQL: &str = "SELECT \"$space\", \"principal\" FROM \"$capabilitygrant\" \
+                          WHERE \"revoked_at\" IS NULL AND \"expires\" > ";
+
+/// `(tenant, principal)` pairs from one database; nothing when the table
+/// is not there or the database cannot be read.
+async fn pairs(pool: &Pool, sql: &str) -> Vec<(String, String)> {
+    pool.rows(sql)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?)))
+        .collect()
+}
+
 /// **Every tenant's share partners**, both ways: a tenant that holds an
 /// open capability grant to a person, and each tenant that person is a
-/// member of. Read from the control database; nothing when the tables are
-/// not there.
+/// member of. Grants and members are read on the deployment's database and
+/// in each tenant's own database through `pools`; one that cannot be read
+/// adds nothing.
 pub async fn partners(
     pool: &Pool,
+    pools: Option<&dyn PoolResolver>,
     now: u64,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, PoolError> {
-    let rows = match pool
-        .rows(&format!(
-            "SELECT DISTINCT g.\"$space\", m.\"$space\" FROM \"$capabilitygrant\" g \
-             JOIN \"members\" m ON m.\"principal\" = g.\"principal\" AND m.\"kind\" = 'principal' \
-             WHERE g.\"revoked_at\" IS NULL AND g.\"expires\" > {now} \
-               AND m.\"$space\" <> g.\"$space\""
-        ))
-        .await
-    {
-        Ok(r) => r,
-        Err(e) if e.is_missing_table() => return Ok(BTreeMap::new()),
-        Err(e) => return Err(e),
-    };
-    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for r in rows {
-        let (Some(Some(a)), Some(Some(b))) = (r.first().cloned(), r.get(1).cloned()) else {
-            continue;
+    let members_of = "SELECT \"$space\", \"principal\" FROM \"members\" \
+                      WHERE \"kind\" = 'principal'";
+    let mut grants = pairs(pool, &format!("{GRANTS_SQL}{now}")).await;
+    let mut members = pairs(pool, members_of).await;
+    if let Some(pools) = pools {
+        let own = match ordo_exec::spacedb::all(pool).await {
+            Ok(a) => a.into_iter().map(|(s, _)| s).collect::<Vec<_>>(),
+            Err(e) if e.is_missing_table() => Vec::new(),
+            Err(e) => return Err(e),
         };
-        out.entry(a.clone()).or_default().insert(b.clone());
-        out.entry(b).or_default().insert(a);
+        for space in own {
+            let Ok(p) = pools.resolve(&space).await else {
+                continue;
+            };
+            let only = format!(" AND \"$space\" = {}", sql_lit(&space.0));
+            grants.extend(pairs(&p, &format!("{GRANTS_SQL}{now}{only}")).await);
+            members.extend(pairs(&p, &format!("{members_of}{only}")).await);
+        }
+    }
+    let mut by_person: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (space, person) in members {
+        by_person.entry(person).or_default().insert(space);
+    }
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (a, person) in grants {
+        for b in by_person.get(&person).into_iter().flatten() {
+            if *b != a {
+                out.entry(a.clone()).or_default().insert(b.clone());
+                out.entry(b.clone()).or_default().insert(a.clone());
+            }
+        }
     }
     Ok(out)
 }
@@ -727,11 +897,26 @@ mod tests {
 
     fn tenant(id: &str, name: &str, members: Option<i64>, personal: bool) -> Facts {
         let mut values = BTreeMap::new();
-        values.insert("tenant", Fact::Text(id.into()));
-        values.insert("name", Fact::Text(name.into()));
-        values.insert("version", Fact::Text("0.1.0".into()));
-        values.insert("members", members.map(Fact::Int).unwrap_or(Fact::Null));
-        values.insert("personal", Fact::Bool(personal));
+        values.insert("tenant".to_string(), Fact::Text(id.into()));
+        values.insert("name".into(), Fact::Text(name.into()));
+        values.insert("version".into(), Fact::Text("0.1.0".into()));
+        values.insert(
+            "members".into(),
+            members.map(Fact::Int).unwrap_or(Fact::Null),
+        );
+        values.insert("personal".into(), Fact::Bool(personal));
+        // Usage: a's the busiest, c's never counted.
+        let used = match id {
+            "a" => Some(900),
+            "b" => Some(10),
+            "d" => Some(40),
+            _ => None,
+        };
+        values.insert(
+            "requests30d".into(),
+            used.map(Fact::Int).unwrap_or(Fact::Null),
+        );
+        values.insert("rows.task".into(), Fact::Int(id.len() as i64 * 7));
         Facts {
             tenant: id.into(),
             values,
@@ -754,6 +939,16 @@ mod tests {
         let q = Query::parse("not personal and members is not null", Some("members desc")).unwrap();
         assert_eq!(q.select(all.clone()), ["a", "d", "b"]);
         let q = Query::parse("version != \"0.2.0\"", None).unwrap();
+        assert_eq!(q.select(all.clone()), ["a", "b", "c", "d"]);
+        // "The 2 least used": an order and a limit. Never counted sorts last.
+        let q = Query::parse("true", Some("requests30d asc"))
+            .unwrap()
+            .limited(Some(2));
+        assert!(q.needs().usage);
+        assert_eq!(q.select(all.clone()), ["b", "d"]);
+        // "Most rows of an entity".
+        let q = Query::parse("rows.task > 0", Some("rows.task desc, tenant asc")).unwrap();
+        assert_eq!(q.needs().rows.iter().collect::<Vec<_>>(), ["task"]);
         assert_eq!(q.select(all), ["a", "b", "c", "d"]);
     }
 
@@ -771,6 +966,18 @@ mod tests {
         let e = Query::parse("members > 1", Some("size desc")).unwrap_err();
         assert!(e.contains("not a tenant fact"), "{e}");
         assert!(Query::parse("members >", None).is_err());
+        assert!(Query::parse("rows.task.x > 1", None).is_err());
+        assert!(Query::parse("rows.\"x\" > 1", None).is_err());
+        assert!(Query::parse("usage.task > 1", None).is_err());
+        // Every fact parses: Ordo names are lowerCamel.
+        for (name, ty, _) in FACTS {
+            let cond = match ty {
+                FactTy::Bool => format!("{name} or not {name}"),
+                FactTy::Int => format!("{name} >= 0"),
+                FactTy::Text => format!("{name} != \"x\""),
+            };
+            assert!(Query::parse(&cond, Some(name)).is_ok(), "{cond}");
+        }
     }
 
     #[test]

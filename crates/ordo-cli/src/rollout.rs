@@ -10,13 +10,14 @@ pub(crate) const USAGE: &str = "\
 ordo rollout start <version> [--strategy rolling|all|canary|group|query] [--batch-interval <5m>]
                    [--window <1h>] [--failure-threshold <n>] [--deployment-space first|last]
                    [--batch-size <n>] [--canary-count <n>] [--canary-wait <1h>]
-                   [--group <tenant,tenant>] [--query \"members < 5\"] [--order \"members asc\"]
+                   [--group <tenant,tenant>] [--query \"members < 5\"] [--order \"members asc\"] [--limit <n>]
                    [--health-error-rate <1%>] [--alert-channel stream|mail:<address>]
                    [--share-partners]
     start a rollout of a stored version. One runs at a time. canary, group and query move
     a first stage, then the rest once it has been healthy for --canary-wait. A query reads
-    the tenant facts: tenant, name, version, created_at, age_days, members, personal,
-    own_database, paused.
+    the tenant facts: tenant, name, version, createdAt, ageDays, members, requests30d,
+    writes30d, personal, ownDatabase, paused, and rows.<entity>. --limit keeps the first n:
+    --query true --order \"requests_30d asc\" --limit 5 moves the 5 least used first.
 ordo rollout status [--id <n>]
     the open rollout, or the newest, and where each tenant stands.
 ordo rollout resume
@@ -37,7 +38,7 @@ ordo rollout set <setting> <value> --reason \"...\" | ordo rollout set <setting>
     change one: rollout.strategy, rollout.batch_interval, rollout.window,
     rollout.failure_threshold, rollout.deployment_space, rollout.canary_count,
     rollout.canary_wait, rollout.health_error_rate, rollout.alert_channel,
-    rollout.share_partners, rollout.group, rollout.query, rollout.order.
+    rollout.share_partners, rollout.group, rollout.query, rollout.order, rollout.limit.
 Every subcommand takes --host <h> (or ORDO_HOST), and --token or a signed-in session.";
 
 /// `ordo rollout`.
@@ -57,6 +58,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--group",
         "--query",
         "--order",
+        "--limit",
         "--id",
         "--reason",
         "--clear",
@@ -97,6 +99,10 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 Ok(n) => n,
                 Err(o) => return o,
             };
+            let limit = match int("--limit") {
+                Ok(n) => n,
+                Err(o) => return o,
+            };
             (
                 ordo_host::rollouts::START,
                 serde_json::json!({
@@ -115,6 +121,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                     "group": flags.named_value("--group"),
                     "query": flags.named_value("--query"),
                     "order": flags.named_value("--order"),
+                    "limit": limit,
                 }),
             )
         }
@@ -281,7 +288,8 @@ fn settings(r: &serde_json::Value) -> String {
          rollout.share_partners     {}\n\
          rollout.group              {}\n\
          rollout.query              {}\n\
-         rollout.order              {}\n",
+         rollout.order              {}\n\
+         rollout.limit              {}\n",
         r["strategy"]
             .as_str()
             .unwrap_or("unset: `ordo apply` moves every tenant at once"),
@@ -305,6 +313,10 @@ fn settings(r: &serde_json::Value) -> String {
         },
         r["query"].as_str().unwrap_or("none"),
         r["order"].as_str().unwrap_or("by tenant id"),
+        r["limit"]
+            .as_i64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "none: every tenant the query selects".into()),
     )
 }
 

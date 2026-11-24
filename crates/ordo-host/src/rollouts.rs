@@ -130,8 +130,9 @@ pub const SHARE_PARTNERS_SETTING: &str = "rollout.share_partners";
 pub const GROUP_SETTING: &str = "rollout.group";
 pub const QUERY_SETTING: &str = "rollout.query";
 pub const ORDER_SETTING: &str = "rollout.order";
+pub const LIMIT_SETTING: &str = "rollout.limit";
 
-pub const SETTINGS: [&str; 13] = [
+pub const SETTINGS: [&str; 14] = [
     STRATEGY_SETTING,
     BATCH_INTERVAL_SETTING,
     WINDOW_SETTING,
@@ -145,6 +146,7 @@ pub const SETTINGS: [&str; 13] = [
     GROUP_SETTING,
     QUERY_SETTING,
     ORDER_SETTING,
+    LIMIT_SETTING,
 ];
 
 /// The key a setting answers under in [`RolloutSettings::to_json`].
@@ -162,6 +164,7 @@ pub fn json_key(setting: &str) -> &'static str {
         GROUP_SETTING => "group",
         QUERY_SETTING => "query",
         ORDER_SETTING => "order",
+        LIMIT_SETTING => "limit",
         _ => "deploymentSpace",
     }
 }
@@ -375,6 +378,9 @@ pub struct RolloutSettings {
     /// The condition `query` selects with, and its order.
     pub query: Option<String>,
     pub order: Option<String>,
+    /// At most this many of the tenants the query selects: "the 5 least
+    /// used". `None`: every one.
+    pub limit: Option<i64>,
 }
 
 impl Default for RolloutSettings {
@@ -393,6 +399,7 @@ impl Default for RolloutSettings {
             group: Vec::new(),
             query: None,
             order: None,
+            limit: None,
         }
     }
 }
@@ -429,6 +436,7 @@ impl RolloutSettings {
             "group": self.group,
             "query": self.query,
             "order": self.order,
+            "limit": self.limit,
         })
     }
 
@@ -474,6 +482,7 @@ impl RolloutSettings {
             (GROUP_SETTING, v) => self.group = v.map(group_list).unwrap_or_default(),
             (QUERY_SETTING, v) => self.query = v.map(str::to_string),
             (ORDER_SETTING, v) => self.order = v.map(str::to_string),
+            (LIMIT_SETTING, v) => self.limit = v.and_then(|v| v.trim().parse().ok()),
             _ => {}
         }
     }
@@ -574,6 +583,10 @@ pub fn check_setting(setting: &str, value: Option<&str>) -> Result<Option<String
                 .map(|_| Some(v.to_string()))
                 .map_err(|why| bad(&why))
         }
+        LIMIT_SETTING => match v.parse::<i64>() {
+            Ok(n) if n >= 1 => Ok(Some(n.to_string())),
+            _ => Err(bad("it is a whole number of tenants, 1 or more")),
+        },
         _ => Err(bad("there is no such rollout setting")),
     }
 }
@@ -915,6 +928,8 @@ pub struct StartOptions {
     /// The condition `query` selects with, and its order.
     pub query: Option<String>,
     pub order: Option<String>,
+    /// At most this many of the tenants the query selects.
+    pub limit: Option<i64>,
 }
 
 /// What a retry did.
@@ -1103,6 +1118,9 @@ impl std::error::Error for RolloutRefusal {}
 #[derive(Clone, Copy)]
 pub struct Rollouts<'a> {
     pool: &'a Pool,
+    /// Where tenants with their own database are reached, for the facts a
+    /// query reads there. `None` reads the deployment's database only.
+    pools: Option<&'a dyn ordo_exec::route::PoolResolver>,
 }
 
 fn pin_lock_sql() -> String {
@@ -1123,7 +1141,16 @@ fn reason_of(text: Option<&str>) -> Result<Option<String>, RolloutRefusal> {
 
 impl<'a> Rollouts<'a> {
     pub fn on(pool: &'a Pool) -> Rollouts<'a> {
-        Rollouts { pool }
+        Rollouts { pool, pools: None }
+    }
+
+    /// The same client, reaching tenants with their own database through
+    /// `pools`: a query's facts are then counted there too.
+    pub fn reaching(self, pools: &'a dyn ordo_exec::route::PoolResolver) -> Rollouts<'a> {
+        Rollouts {
+            pools: Some(pools),
+            ..self
+        }
     }
 
     /// Create the three tables. Idempotent; retried once, as `$pins` is,
@@ -1539,7 +1566,13 @@ impl<'a> Rollouts<'a> {
                         &format!("a group names {MAX_GROUP} tenants at most"),
                     ));
                 }
-                let known = crate::rollout_strategies::facts(self.pool, false, at).await?;
+                let known = crate::rollout_strategies::facts(
+                    self.pool,
+                    None,
+                    &crate::rollout_strategies::Needs::default(),
+                    at,
+                )
+                .await?;
                 if let Some(t) = group
                     .iter()
                     .find(|t| !known.iter().any(|f| &f.tenant == *t))
@@ -1574,14 +1607,45 @@ impl<'a> Rollouts<'a> {
                         &format!("a query and its order are {MAX_QUERY} characters at most"),
                     ));
                 }
+                let limit = opts.limit.or(settings.limit);
+                if let Some(n) = limit.filter(|n| *n < 1) {
+                    return Err(bad(LIMIT_SETTING, &n.to_string(), "it is 1 or more"));
+                }
                 let parsed = crate::rollout_strategies::Query::parse(&q, order.as_deref())
-                    .map_err(|why| bad(QUERY_SETTING, &q, &why))?;
+                    .map_err(|why| bad(QUERY_SETTING, &q, &why))?
+                    .limited(limit.map(|n| n as usize));
+                // `rows.<entity>` names an entity of the version rolled out.
+                if let Some(e) = parsed
+                    .needs()
+                    .rows
+                    .iter()
+                    .find(|e| !program.schema.entities.iter().any(|x| &x.name == *e))
+                {
+                    return Err(bad(
+                        QUERY_SETTING,
+                        &q,
+                        &format!(
+                            "`rows.{e}` names no entity of {target}; it has {}",
+                            program
+                                .schema
+                                .entities
+                                .iter()
+                                .map(|x| x.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
                 let facts =
-                    crate::rollout_strategies::facts(self.pool, parsed.uses_members(), at).await?;
-                let text = match &order {
+                    crate::rollout_strategies::facts(self.pool, self.pools, parsed.needs(), at)
+                        .await?;
+                let mut text = match &order {
                     Some(o) => format!("query: {q}; order: {o}"),
                     None => format!("query: {q}"),
                 };
+                if let Some(n) = limit {
+                    text.push_str(&format!("; limit: {n}"));
+                }
                 (Some(parsed.select(facts)), text)
             }
             Strategy::Canary => (None, format!("canary: {canary_count}")),
@@ -2480,7 +2544,7 @@ async fn batch(
     // Share partners move together (§1.7, §3.5): a tenant's partners still
     // to move join its batch, whatever their stage.
     let partners = if r.share_partners {
-        crate::rollout_strategies::partners(pool, now).await?
+        crate::rollout_strategies::partners(pool, Some(ops.pools.as_ref()), now).await?
     } else {
         BTreeMap::new()
     };
@@ -2820,6 +2884,7 @@ pub fn specs() -> Vec<OpSpec> {
                 text("group", 65_536, false),
                 text("query", MAX_QUERY as u32, false),
                 text("order", MAX_QUERY as u32, false),
+                int("limit"),
             ],
             rollout_fields,
         ),
@@ -2903,7 +2968,7 @@ pub async fn execute(
     };
     let int = |k: &str| bound.0.get(k).and_then(|v| v.as_i64());
     let pool = &ops.pool;
-    let rollouts = Rollouts::on(pool);
+    let rollouts = Rollouts::on(pool).reaching(ops.pools.as_ref());
     let now = crate::runtime::now_secs();
     let status_of = |id: i64| async move {
         Rollouts::on(pool)
@@ -2971,6 +3036,7 @@ pub async fn execute(
                 group: text("group").map(group_list),
                 query: text("query").map(str::to_string),
                 order: text("order").map(str::to_string),
+                limit: int("limit"),
             };
             let r = rollouts
                 .start(text("version").unwrap_or_default(), &opts, caller, now)

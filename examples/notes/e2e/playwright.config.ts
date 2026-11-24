@@ -168,6 +168,17 @@ export default defineConfig({
       dependencies: ['rehearsal'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // Tenant builds (plan-versions.md increment 16): a beta tenant serves the
+    // branch while the rest serve main. It stores 0.6.0 and activates 0.6.1,
+    // above `branch`'s 0.5.x, and version numbers only rise, so it runs after
+    // `branch`, last.
+    // Locally, `--project=tenant-build --no-deps`.
+    {
+      name: 'tenant-build',
+      testMatch: /tenant-build\/.*\.spec\.ts/,
+      dependencies: ['branch'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

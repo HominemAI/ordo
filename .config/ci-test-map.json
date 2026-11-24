@@ -466,6 +466,7 @@
     "crates/ordo-host/src/precheck.rs": "all",
     "crates/ordo-host/src/promotion.rs": "all",
     "crates/ordo-host/src/rehearsals.rs": "all",
+    "crates/ordo-host/src/tenant_builds.rs": "all",
     "crates/ordo-host/src/provision.rs": "all",
     "crates/ordo-host/src/proxy.rs": "all",
     "crates/ordo-host/src/public.rs": "all",

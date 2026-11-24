@@ -1784,6 +1784,45 @@ partners, health by error rate, the alert channel.
   `the_least_used_and_the_most_rows_move_first` and
   `a_tenant_with_its_own_database_is_counted_there`.
 
+### 3.8 Tenant builds (increment 16)
+
+Owner, 2026-10-01: *"it may make sense to have custom builds / branches
+for 'special' tenants, public tests of beta builds etc. so maybe a branch
+could be promoted."* Board `tenant-builds` (27t).
+
+**Built 2026-11-24** (branch `evo-16-tenant-builds`, `tenant_builds.rs`):
+
+- **A build** is a name and a stored version (`$tenant_builds`). **A
+  member** is one tenant in one build (`$tenant_build_members`).
+- **Joining** pins the tenant to the build's version. **Setting** the
+  build to another version moves every tenant it holds. **Leaving** pins
+  the tenant to the active version. Each is a `$pins` row, cause `build`.
+- **Only the build moves its tenants.** An activation, a rollback, a
+  rollout and the revoked-version sweep leave them where they are. `ordo
+  versions pin` and a move off a revoked version are refused
+  (`in_tenant_build`), naming `ordo tenant-builds leave`.
+- **The same checks as any pin**: stored, not revoked, in
+  `versions.served`, and past the first step of a chain only a version
+  that came through the gate (V-13, `not_promoted`).
+- **The database holds the version first.** A tenant's own database is
+  brought forward and gated, as a rollout moves one. A tenant on the
+  deployment's own database needs it there (`deployment_behind`, naming
+  `ordo apply --no-activate`). Setting a build checks every member before
+  it moves any.
+- A build on a revoked version stays until it is set to another version.
+- A build that holds tenants is not removed (`build_has_tenants`).
+- Door ops: `std.deployment.tenantBuilds` (read),
+  `setTenantBuild`, `joinTenantBuild`, `leaveTenantBuild`,
+  `removeTenantBuild`. CLI: `ordo tenant-builds list|set|join|leave|remove`.
+  Each change is a `deploy` act on the security record.
+- **Who is chosen is named tenants only.** Groups or a percentage wait on
+  `settings-layers` ask 1 (one targeting model with feature flags).
+- **Not built:** a dev branch (increment 5) straight to a build; a branch
+  version reaches production through `ordo promote --no-activate`, then
+  `tenant-builds set`. The console has no screen for builds yet.
+- Tests: `ordo-host/tests/tenant_builds.rs` (6), notes e2e project
+  `tenant-build`.
+
 ---
 
 ## 4 · Build order
@@ -1819,7 +1858,7 @@ round is about 35 minutes for the full suite.
 | 13 | **Sealed backfills.** No plaintext dual write, plaintext dropped on verify, `Purpose::Migration`. **First part built 2026-11-24** (cce76e88, 7f231dd5): a stored step that makes a `text` field `sealed` (B7) adds `<field>$seal` beside it; `backfill.rs` seals each row under its space's key at its row, one `Purpose::Migration` lease per space per chunk; verify opens every value against its plaintext, then each space's count and hash; then the plaintext column is dropped and the sealed one takes its name. A verify failure starts the seal over. `ordo apply` refuses B7 (`seal_needs_stored_plan`); `sealed indexed` in one step is refused (`sealed_index_backfill_not_built`), and so is a seal of a field a reader app reads (`seal_read_by_reader`, naming the reader and the fix: 7b, or the table off the `reader` line in a version before). Details in `plan-backfill-dual-writes.md` §7. Tests: `sealed_backfill.rs` (3 spaces, resume, verify, no custody, refusals); notes e2e project `seal` (`tests/seal/seal.spec.ts`, its versions written by the spec, the reader refusal first). **Not built:** live writes during the seal and the pin switch at its end (11a); each tenant is run with `ordo evolve --tenant`, which pins it as its seal ends, since an activation holds a tenant closed on B7 instead of running its stored step (11b); the deployment's own space serves the version before between `--run` and the activation; `seal.keep_plaintext`; B8 and B10 over sealed fields; note-viewer reading a field sealed under it (7b). | L | 11b | sealing on 3 tenants under live writes verifies by count and hash, and no plaintext column remains | 13d |
 | 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). **Built 2026-11-23** (239afd67, 525a781d, aefe7a8a): `$orphans` in each database (`ordo_exec::orphans`), written wherever a database is brought to a version that stops declaring a field or an entity: the deployment's own apply, each tenant's database brought forward, each stored step run (`schema_apply::record_orphans`). Each row has its columns, a sealed flag, a drop date and, once pruned, a tombstone. A version that declares the field again removes its row. Erasure deletes a space's rows from an orphaned table too, and names the orphans it reached (`std.space.delete`, `orphans`). Export writes each orphan under `orphans/` with the row's id. `std.deployment.orphans` and `ordo evolve --orphans` list them. `std.deployment.prune` and `ordo evolve --prune <entity.field>`: the first ask prunes nothing and says what would go; `--confirm <name>` prunes; in production `--confirm-deployment <domain>` too. Refused when `prune.enabled` is off (off in production; `ordo environments set prune on`), for a name no database records, and for a field the active version or a pinned one still declares. The reader rule (Q1): a table on a `reader` line that holds an orphaned column is granted by column, without it. The reader's check holds the entity with `external_changed`, naming the column, the read app and the fix. Tests: `orphans.rs`, `reader_grants.rs` (`a_reader_loses_an_orphaned_column_with_a_named_error`); notes e2e project `orphans` (`tests/orphans/orphans.spec.ts`); note-viewer e2e project `orphans` (`tests/orphans/orphaned-column.spec.ts`, fixture `notes-no-tags`). **Found by it:** `std.space.delete` failed on a tenant with a database of its own, which had no `$logconsumers`; erasure now makes it. **Not built:** soaks (11a), so an orphan is recorded when the database moves, not at a soak's close; nothing drops at the drop date by itself; the language cannot mark a field personal, so every orphan gets a drop date; restorable versions (17) are not yet checked by pruning; an orphaned `public` field (§1.14) is not handled apart. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
 | 15 | **`prev` in the language.** The syntax is ruled (2026-10-04) and written in `plan-syntax-additions.md` §5 (review 2026-11-23). Parser, the 3 compile checks, the 3 plan checks, the CDK's `prev()`, and the offer to remove landed `prev` lines. Refused on an external. **Built 2026-11-23 (branch `evo-15-prev`):** `prev(old)` on a field and `prev: old` in an entity's header; `prev_self`, `prev_still_declared`, `prev_duplicate` in the parser; `external_unsupported` on an external's field and header; `ordo_schema::prev` checks `prev_unresolved`, `prev_type`, `prev_mapping_required`, `prev_sealed` (added: a sealed copy cannot be read), and `prev_stale` as a warning; the diff renders `RenameField` and `RenameEntity` (B4) in place of a drop and an add. A field rename adds the column, copies the values, keeps the old column with its `NOT NULL` (the version before still loads over it) and drops its default; the receipt carries the reverse. A sync trigger made in the copy's transaction copies each write to either column into the other, so no write is lost between the copy and the pin switch (review fix; test `writes_during_the_rename_reach_the_new_column`). The trigger is a stopgap and does not ship: increment 11a (the next PR) replaces it with dual writes before any release (owner rule, no stopgaps shipped). `ordo apply` makes a field rename itself. An entity rename renders and is refused as `rename_entity_not_built` until 10b. The apply answer carries `landedPrev` (last environment of the chain, every tenant on a version with the new name), and `ordo apply --remove-landed-prev` cuts those marks. CDK: `TypeSpec.prev()`, `EntityOptions.prev`. Tests: `crates/ordo-syntax/tests/prev.rs`, `crates/ordo-host/tests/prev_rename.rs`, `clients/ordo-cdk/test/prev.test.ts`; notes v3 renames `attachments.kind` to `mediaType`, and its e2e `v3` keeps every image drawn across the move. **Not built:** merges, splits and moves (refused, no mapping option yet); type casts on a rename. | M | 8 | a declared rename renders as a rename; notes v3 uses it | 27x |
-| 16 | **Tenant builds.** After first deployment. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
+| 16 | **Tenant builds.** After first deployment. **Built 2026-11-24** (branch `evo-16-tenant-builds`, e91651a5, §3.8): `tenant_builds.rs`; a named build pins named tenants to its version; activations, rollbacks, rollouts and the revoked sweep leave them; only set, join and leave move them, cause `build`; a pin by hand is refused naming `ordo tenant-builds leave`; a tenant's own database is brought to the version first. Door ops `std.deployment.tenantBuilds\|setTenantBuild\|joinTenantBuild\|leaveTenantBuild\|removeTenantBuild`; `ordo tenant-builds`. Tests: `tenant_builds.rs`, notes e2e project `tenant-build`. **Not built:** groups or a percentage (`settings-layers` ask 1), a console screen. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
 | 17 | **Restore and import across versions** (new, review 2026-11-23; design in §2.9). | M | 3, 8 | a snapshot taken on X restores beside tenants on Y and serves X | 11-10b (`snapshot-restore`) |
 
 **Increment 3, what remains after session 3** (session 3: 2026-11-23):
@@ -1942,6 +1981,7 @@ to an example's own e2e, beside its host tests:
 | 12 | notes, 2 deployments | staging clones a production tenant through the doors; its version comes down with it; staging's door serves it, 3 notes masked, under a neutral name (project `clone`) |
 | 12b | notes, 2 deployments | after `seal`, staging rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses the step on a tenant (`ordo evolve --tenant`) until it accepts the rehearsal, with the same digest; break-glass is refused while staging answers, and with staging's door dead it is broken with a reason, listed, and the step replays the tenant's database (project `rehearsal`) |
 | 13 | notes-v3 | seal a field on live data; the page reads it and the table holds no plaintext |
+| 16 | notes, 2 people | Ada's tenant joins build `beta` (0.6.0) and answers its op; Bob's does not; `ordo apply` of 0.6.1 moves Bob and leaves Ada; a pin by hand is refused; Ada leaves and serves main with her notes (project `tenant-build`) |
 | 17 | notes-v3 | snapshot on v2, move, restore, read the v2 notes |
 | CLI | one example, start to end | `ordo dev`, `apply`, `evolve`, `rollout status`, `rollback`, each through the door (owner, 2026-11-23, ask 5) |
 

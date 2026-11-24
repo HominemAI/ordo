@@ -548,7 +548,10 @@ fn access_refusal(state: &ApiState, token: &str, space: &str, op: &str) -> ApiEr
         Some(wait) => ApiError::tenant_not_ready(op, wait),
         None if state.access.behind(token, space) => ApiError::server_busy().with_op(op),
         None if state.access.presence_required(token, space, op) => ApiError::presence_required(op),
-        None => denied_after_check(op, Some(token)),
+        None => match state.access.versions_disagree(token, space, op) {
+            Some(why) => ApiError::new(ErrorCode::VersionsDisagree, why).with_op(op),
+            None => denied_after_check(op, Some(token)),
+        },
     }
 }
 
@@ -1688,7 +1691,14 @@ pub(crate) fn check_access(
                 None if state.access.presence_required(token, space, &op.name) => {
                     Err(ApiError::presence_required(&op.name))
                 }
-                None => Err(denied_after_check(&op.name, Some(token))),
+                // A grant pinned under another program version that
+                // disagrees with the tenant's (`plan-versions.md` §1.7).
+                None => match state.access.versions_disagree(token, space, &op.name) {
+                    Some(why) => {
+                        Err(ApiError::new(ErrorCode::VersionsDisagree, why).with_op(&op.name))
+                    }
+                    None => Err(denied_after_check(&op.name, Some(token))),
+                },
             },
         },
     }

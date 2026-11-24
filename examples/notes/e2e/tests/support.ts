@@ -220,25 +220,49 @@ export function applyProgram(dir: string): string {
   // first. Each use is recorded in `ORDO_PG_DB` (the database this command
   // acts on) and the next boot writes it to the security log.
   return execFileSync(s.ordo, ['apply', dir, '--direct', '--as', 'notes-e2e', '--wait-secs', '240'], {
-    env: {
-      ...process.env,
-      ORDO_PG_HOST: s.pg.host,
-      ORDO_PG_PORT: s.pg.port,
-      ORDO_PG_USER: s.pg.user,
-      ORDO_PG_DB: s.pg.db,
-      ORDO_SPACE: 'system',
-      ORDO_KEY_PROVIDER: 'local',
-      ORDO_MASTER_KEY: 'notes-e2e-master',
-      ORDO_DEV_UNSAFE_TEST_KEYS: '1',
-      ORDO_TOKEN_KEY: '1'.repeat(64),
-      ORDO_PAGE_KEY: '2'.repeat(64),
-      // v2's `reader note_viewer` line: the role stack.sh made.
-      ORDO_READER_NOTE_VIEWER_ROLE: 'note_viewer',
-      // The editions the stack's server knows (stack.sh).
-      ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE,
-    },
+    env: ordoEnv(),
     encoding: 'utf8',
   });
+}
+
+/**
+ * Apply `dir` unless the stack already serves `version`. A flow that sets
+ * up the version it starts from calls this, so it runs alone and after the
+ * flows before it alike. Applying v2 again after `ordo evolve` has taken the
+ * database to v3 is refused, because v3 renames a column v2 requires (the
+ * old column is kept, open to nulls).
+ */
+export function ensureServing(dir: string, version: string): void {
+  if (servingVersion() === version) return;
+  applyProgram(dir);
+}
+
+/** The version the stack activates, from `ordo deploys`; none before the first apply. */
+export function servingVersion(): string | undefined {
+  const out = execFileSync(stack().ordo, ['deploys', '--limit', '1'], { env: ordoEnv(), encoding: 'utf8' });
+  return /^active +(?:#\d+ · )?(\S+)/m.exec(out)?.[1];
+}
+
+/** What a harness `ordo` command run against the stack's database needs. */
+function ordoEnv(): NodeJS.ProcessEnv {
+  const s = stack();
+  return {
+    ...process.env,
+    ORDO_PG_HOST: s.pg.host,
+    ORDO_PG_PORT: s.pg.port,
+    ORDO_PG_USER: s.pg.user,
+    ORDO_PG_DB: s.pg.db,
+    ORDO_SPACE: 'system',
+    ORDO_KEY_PROVIDER: 'local',
+    ORDO_MASTER_KEY: 'notes-e2e-master',
+    ORDO_DEV_UNSAFE_TEST_KEYS: '1',
+    ORDO_TOKEN_KEY: '1'.repeat(64),
+    ORDO_PAGE_KEY: '2'.repeat(64),
+    // v2's `reader note_viewer` line: the role stack.sh made.
+    ORDO_READER_NOTE_VIEWER_ROLE: 'note_viewer',
+    // The editions the stack's server knows (stack.sh).
+    ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE,
+  };
 }
 
 /**

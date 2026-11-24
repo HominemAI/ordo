@@ -2461,9 +2461,21 @@ pub struct SwappableAccess {
     /// requires one for ([`crate::contact_email`]). Set once; unset,
     /// nothing is required.
     contact: std::sync::OnceLock<Arc<crate::contact_email::ContactEmails>>,
+    /// Which program version serves each tenant (`plan-versions.md` §1.7),
+    /// given to the engine of every door installed, so a share made in a
+    /// tenant is pinned to, and judged by, that tenant's version.
+    tenant_versions: std::sync::OnceLock<ordo_identity::access::TenantVersions>,
 }
 
 impl SwappableAccess {
+    /// Give the door that is serving, and every door installed after it,
+    /// the tenants' versions. Once.
+    pub fn wire_tenant_versions(&self, versions: ordo_identity::access::TenantVersions) {
+        if self.tenant_versions.set(versions.clone()).is_ok() {
+            self.current().engine.set_tenant_versions(versions);
+        }
+    }
+
     /// Give the door the email requirement. Once.
     pub fn wire_contact(&self, contact: Arc<crate::contact_email::ContactEmails>) {
         let _ = self.contact.set(contact);
@@ -2529,6 +2541,7 @@ impl SwappableAccess {
             directory: tokio::sync::Mutex::new(crate::directory::Cache::default()),
             not_ready: std::sync::OnceLock::new(),
             contact: std::sync::OnceLock::new(),
+            tenant_versions: std::sync::OnceLock::new(),
         }
     }
 
@@ -2598,6 +2611,9 @@ impl SwappableAccess {
         if let Some(keys) = self.identity_keys.get() {
             door.wire_identity_keys(keys.clone());
         }
+        if let Some(versions) = self.tenant_versions.get() {
+            door.engine.set_tenant_versions(versions.clone());
+        }
         if let Some(clones) = self.clones.get() {
             door.wire_clones(clones.clone());
         }
@@ -2645,6 +2661,10 @@ impl AccessChecker for SwappableAccess {
 
     fn presence_required(&self, token: &str, space: &str, op: &str) -> bool {
         self.current().presence_required(token, space, op)
+    }
+
+    fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        self.current().versions_disagree(token, space, op)
     }
 
     /// A tenant still being set up answers its own person `tenant_not_ready`
@@ -4639,6 +4659,14 @@ async fn assemble_program(
     .await?;
     let access = Arc::new(SwappableAccess::new(door));
     access.wire_second_step(second_levels.clone());
+    {
+        // Shares and grants pin, and are judged by, the tenant's own
+        // version (`plan-versions.md` §1.7).
+        let versions = deployment.clone();
+        access.wire_tenant_versions(Arc::new(move |space| {
+            ordo_api::OpRegistry::version_in(versions.as_ref(), &space.0)
+        }));
+    }
     access.wire_console_home(&cfg.space.0);
     // Staging clones (`plan-versions.md` §3.4): who opens one. A deployment
     // that never cloned reads an empty register.
@@ -6388,17 +6416,22 @@ async fn rebuild_access(
     let reads = crate::directory::prefetch(w.pool, w.credentials.as_ref(), &template, scope).await;
     let mut cache = w.access.directory.lock().await;
     let live = w.deployment.current();
-    let others: Vec<Arc<Fixture>> = w
-        .deployment
-        .others()
-        .iter()
-        .map(|l| l.fixture.clone())
-        .collect();
+    // Named, so the engine holds each version's ops as it declares them
+    // (`plan-versions.md` §1.7).
+    let served = crate::Served {
+        active: Some(live.version.clone()),
+        others: w
+            .deployment
+            .others()
+            .iter()
+            .map(|l| (l.version.clone(), l.fixture.clone()))
+            .collect(),
+    };
     let built = cache
         .build_served(
             reads,
             &live.fixture,
-            &others,
+            &served,
             w.pool,
             w.credentials.as_ref(),
             &template,

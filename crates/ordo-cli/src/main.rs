@@ -153,7 +153,7 @@ fn usage() -> ! {
          `deploys`, `usage`, `triggers`, `prune`, `revert` and `checkpoint`\n\
          still open the database (`--db <name>`, no `--direct`);\n         they move to the door next.\n  \
          ordo apply     <dir|file.ordo> --host <h> | --direct [--as <actor>] [--no-activate]\n                \
-         [--bump] [--label \"<text>\"]\n      \
+         [--bump] [--remove-landed-prev] [--label \"<text>\"]\n      \
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
@@ -163,6 +163,8 @@ fn usage() -> ! {
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \
          `--bump` writes that number into the source and applies again.\n      \
+         A clean apply names each `prev` mark whose rename has landed in\n      \
+         every environment; `--remove-landed-prev` cuts them from the source.\n      \
          `--label` stores a label with the version: one line, at most 80\n      \
          characters. The git commit of the source is recorded too, with\n      \
          `-dirty` when the applied files changed since it; outside a git\n      \

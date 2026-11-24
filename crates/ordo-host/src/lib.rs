@@ -108,6 +108,7 @@ pub mod pin_stream;
 pub mod platform_ops;
 pub mod precheck;
 pub mod presence;
+pub mod prev_offer;
 pub mod principal_directory;
 pub mod profile_ops;
 pub mod promotion;
@@ -2511,6 +2512,41 @@ impl AccessChecker for IdentityAccess {
         })
     }
 
+    /// A grant pinned under one program version, called in a tenant now on
+    /// another that disagrees (`plan-versions.md` §1.7): the refusal names
+    /// both versions, the op and the entity, and what fixes it. Only for a
+    /// verified capability token, whose holder already holds the grant; the
+    /// engine reached this reason only after the grant's space, expiry and
+    /// the token gate passed.
+    fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        use ordo_identity::access::{Decision, DenyReason};
+        let now = ordo_identity::principal::Timestamp((self.now)());
+        let claims = ordo_identity::verify(&self.key, token, now).ok()?;
+        claims.capability.as_ref()?;
+        let ispace = ordo_identity::principal::SpaceId(space.to_string());
+        let Decision::Deny {
+            reason:
+                DenyReason::VersionsDisagree {
+                    pinned,
+                    serving,
+                    op: listed,
+                    entity,
+                    detail,
+                },
+            ..
+        } = self.engine.check(&claims, &ispace, op, now)
+        else {
+            return None;
+        };
+        let on = entity.map(|e| format!(" on `{e}`")).unwrap_or_default();
+        Some(format!(
+            "`{op}`: this share or grant was made under version {pinned} of the program and \
+             the space is now on {serving}; the two disagree{on} for `{listed}` ({detail}). Ask \
+             the person who shared it to share it again (std.space.share), or pin the space back \
+             to {pinned} (ordo versions pin)"
+        ))
+    }
+
     fn check(&self, token: &str, space: &str, op: &str) -> AccessDecision {
         use ordo_identity::access::Decision;
         use ordo_identity::principal::{SpaceId, Timestamp};
@@ -2993,11 +3029,31 @@ pub fn engine_from_directory(
     delegating: &delegable::DelegablePolicy,
     template: &access_template::AccessTemplate,
 ) -> Result<ordo_identity::AccessEngine, String> {
-    engine_from_directory_served(f, &[], rows, tenant, policy, pausing, delegating, template)
+    engine_from_directory_served(
+        f,
+        &Served::default(),
+        rows,
+        tenant,
+        policy,
+        pausing,
+        delegating,
+        template,
+    )
 }
 
-/// [`engine_from_directory`] for a node serving `others` beside `f`, the
-/// active version (`plan-versions.md` §1.4, increment 3).
+/// The program versions a node serves beside the active one, by name
+/// (`plan-versions.md` §1.4, §1.7).
+#[derive(Default, Clone)]
+pub struct Served {
+    /// The active version's name. `None` for an engine that knows no
+    /// versions: it then holds no per-version manifests.
+    pub active: Option<String>,
+    /// Every other served version, by name.
+    pub others: Vec<(String, Arc<Fixture>)>,
+}
+
+/// [`engine_from_directory`] for a node serving `served.others` beside `f`,
+/// the active version (`plan-versions.md` §1.4, increment 3).
 ///
 /// The profile grants every op and function any served version declares,
 /// by name, so a tenant pinned to another version may call its own ops.
@@ -3005,10 +3061,14 @@ pub fn engine_from_directory(
 /// looks an op up in the caller's tenant's version
 /// (`OpRegistry::get_in`), so an op only another version declares is
 /// unregistered to the active version's tenants all the same.
+///
+/// When the versions are named, the engine also holds each version's ops
+/// as that version declares them (§1.7), so a share or grant made in a
+/// tenant pins its own version's manifests and is judged by them.
 #[allow(clippy::too_many_arguments)]
 pub fn engine_from_directory_served(
     f: &Fixture,
-    others: &[Arc<Fixture>],
+    served: &Served,
     rows: &[Vec<Option<String>>],
     tenant: &profile_ops::TenantAccess,
     policy: &presence::PresencePolicy,
@@ -3101,10 +3161,23 @@ pub fn engine_from_directory_served(
     // Each op once, from the first served version that declares it: the
     // active one first.
     let mut specs: Vec<(OpSpec, &Fixture)> = build_specs(f).into_iter().map(|s| (s, f)).collect();
-    for o in others {
+    for (_, o) in &served.others {
         for s in build_specs(o) {
             if !specs.iter().any(|(have, _)| have.name == s.name) {
                 specs.push((s, o.as_ref()));
+            }
+        }
+    }
+    // Each served version's ops as it declares them (§1.7): what a share or
+    // grant made in a tenant on that version pins, and is judged by.
+    if let Some(active) = &served.active {
+        let named =
+            std::iter::once((active, f)).chain(served.others.iter().map(|(v, o)| (v, o.as_ref())));
+        for (version, fx) in named {
+            for s in build_specs(fx) {
+                if let Some(pin) = op_pin(fx, &s.name) {
+                    engine.deploy_op_in(version, &s.name, pin);
+                }
             }
         }
     }
@@ -3142,7 +3215,7 @@ pub fn engine_from_directory_served(
     // ran a checker of their own. `tests/upgrade_continuity.rs` calls them
     // through the binary.
     let mut funcs: Vec<&String> = Vec::new();
-    for fx in std::iter::once(f).chain(others.iter().map(|o| o.as_ref())) {
+    for fx in std::iter::once(f).chain(served.others.iter().map(|(_, o)| o.as_ref())) {
         for func in &fx.schema.functions {
             if !funcs.contains(&&func.name.name) {
                 funcs.push(&func.name.name);
@@ -3203,6 +3276,7 @@ pub fn engine_from_directory_served(
             op,
             ordo_identity::OpPin {
                 manifest_hash: ordo_identity::principal::ManifestHash::of(op.as_bytes()),
+                version: None,
                 unguarded: false,
                 entities: Vec::new(),
             },
@@ -3266,6 +3340,7 @@ pub fn engine_from_directory_served(
             op,
             ordo_identity::OpPin {
                 manifest_hash: ordo_identity::principal::ManifestHash::of(op.as_bytes()),
+                version: None,
                 unguarded: false,
                 entities: Vec::new(),
             },
@@ -3312,6 +3387,7 @@ pub fn engine_from_directory_served(
                     ),
                     unguarded: false,
                     entities: Vec::new(),
+                    version: None,
                 },
             );
             continue;
@@ -3412,6 +3488,7 @@ pub fn engine_from_directory_served(
                 ),
                 unguarded: false,
                 entities: Vec::new(),
+                version: None,
             },
         );
     }
@@ -3435,6 +3512,8 @@ pub fn engine_from_directory_served(
     // did not open, and every platform write (`delegable`'s module doc).
     let specs: Vec<OpSpec> = specs.into_iter().map(|(s, _)| s).collect();
     delegable::close(&mut engine, &specs, &platform_ops::specs(), delegating);
+    // Platform ops and functions mean the same in every version.
+    engine.share_unversioned(&program);
     Ok(engine)
 }
 
@@ -3494,6 +3573,7 @@ pub fn op_pin(f: &Fixture, op: &str) -> Option<ordo_identity::OpPin> {
         .collect();
     Some(OpPin {
         manifest_hash,
+        version: None,
         unguarded: rows.unguarded,
         entities,
     })

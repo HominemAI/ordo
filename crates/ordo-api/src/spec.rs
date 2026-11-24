@@ -1007,6 +1007,18 @@ pub trait AccessChecker: Send + Sync {
         false
     }
 
+    /// Asked only after [`Self::check`] denied: was this a grant pinned
+    /// under one program version, called in a tenant now on another, where
+    /// the two disagree (`plan-versions.md` §1.7)? The answer is the
+    /// refusal's message, naming both versions and the entity, and the door
+    /// then answers [`crate::ErrorCode::VersionsDisagree`] in place of its
+    /// uniform denial. Only for a verified token whose grant is otherwise
+    /// good in this space: its holder already knows the grant. The default
+    /// is `None`.
+    fn versions_disagree(&self, _token: &str, _space: &str, _op: &str) -> Option<String> {
+        None
+    }
+
     /// Asked only after [`Self::check`] allowed `principal` to call `op`:
     /// does the app developer require a verified email address for this
     /// op, and does this person lack one? The answer is the refusal's

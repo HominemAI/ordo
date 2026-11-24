@@ -90,6 +90,8 @@ export interface FieldNode {
   /** `blob private` — client-sealed; the platform holds no key. */
   readonly private: boolean;
   readonly normalize: string | null;
+  /** `prev(…)`: the field's name(s) in the previous version. */
+  readonly prev: readonly string[] | null;
 }
 
 /**
@@ -124,6 +126,8 @@ export interface EntityNode {
   readonly kind: 'entity';
   readonly name: string;
   readonly key: string | null;
+  /** `(prev: old)`: the entity's name in the previous version. */
+  readonly prev: string | null;
   readonly fields: readonly FieldNode[];
   readonly accessRead: GuardClauseNode | null;
   readonly accessWrite: GuardClauseNode | null;

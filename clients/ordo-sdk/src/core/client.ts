@@ -17,6 +17,7 @@ import { checkRefine, encodeRefine, type Refine } from './refine.js';
 import { OrdoLocalRefusal, type RefusalClass } from './refusal.js';
 import type { OpSpec, ParamSpec } from './spec.js';
 import { busyRetryOf, conflictRetryOf } from './busy.js';
+import { VersionWatch } from './version.js';
 import { NO_RETRY, busyOnly, doorRequest, fetchOf, readBody, refusalOf } from './door.js';
 import type {
   BusyRetryOptions,
@@ -26,6 +27,7 @@ import type {
   ResolvedConflictRetry,
 } from './busy.js';
 import { isJsonValue, type JsonValue } from './json.js';
+import { TenantVersions, type VersionChange } from './versions.js';
 import { callFunction, type FunctionCallOptions, type FunctionResponse } from './function.js';
 import type { FileDoor } from './files.js';
 import {
@@ -175,6 +177,12 @@ export interface OrdoClientOptions {
   readonly conflictRetry?: ConflictRetryOptions;
   /** Shorthand for `conflictRetry.retries`. */
   readonly conflictRetries?: number;
+  /**
+   * Where the last version each tenant's answers named is kept
+   * (`plan-versions.md` §1.9). A client and every client
+   * {@link OrdoClient.withSpace} makes from it share one. Default a new one.
+   */
+  readonly tenantVersions?: TenantVersions;
 }
 
 export interface RequestOptions {
@@ -212,12 +220,16 @@ export class OrdoClient {
   readonly #renew: (() => Promise<boolean>) | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #site: NetworkSite;
+  /** The program version the door names on its answers; see {@link VersionWatch}. */
+  readonly versions = new VersionWatch();
   readonly #callTimeoutMs: number | undefined;
   readonly #newKey: () => string;
   readonly #busyRetry: ResolvedBusyRetry;
   readonly #conflictRetry: ResolvedConflictRetry;
+  readonly #versions: TenantVersions;
 
   constructor(options: OrdoClientOptions) {
+    this.#versions = options.tenantVersions ?? new TenantVersions();
     this.space = options.space;
     this.#baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.#token = options.token;
@@ -289,6 +301,34 @@ export class OrdoClient {
       newIdempotencyKey: this.#newKey,
       busyRetry: this.#busyRetry,
       conflictRetry: this.#conflictRetry,
+      tenantVersions: this.#versions,
+    });
+  }
+
+  /**
+   * The program version the last answer for this client's tenant named
+   * (`x-ordo-tenant-version`), or `null` before one has.
+   */
+  tenantVersion(): string | null {
+    return this.#versions.last(this.space);
+  }
+
+  /**
+   * Call `listener` when an answer for a tenant names another program
+   * version than the last answer did: the tenant moved
+   * (`plan-versions.md` §1.9). Shared with every client
+   * {@link withSpace} makes, so `change.space` says which tenant. A sync
+   * manager over this client drops that tenant's device copy on it. Answers
+   * the function that stops it.
+   */
+  onVersionChanged(listener: (change: VersionChange) => void): () => void {
+    return this.#versions.onChange(listener);
+  }
+
+  /** Every version an answer for this client's tenant names. @internal */
+  _onTenantVersion(listener: (version: string) => void): () => void {
+    return this.#versions.onEvery((space, version) => {
+      if (space === this.space) listener(version);
     });
   }
 
@@ -321,8 +361,8 @@ export class OrdoClient {
    *   reconnects on the same classes with the door's `Retry-After`, so a
    *   retry here would be a second loop over the first.
    */
-  #send(url: string, init: RequestInit, retry: 'op' | 'busy' | 'feed', onRetry?: OnRetry): Promise<Response> {
-    return doorRequest(this.#site, url, init, {
+  async #send(url: string, init: RequestInit, retry: 'op' | 'busy' | 'feed', onRetry?: OnRetry): Promise<Response> {
+    const response = await doorRequest(this.#site, url, init, {
       retry:
         retry === 'op'
           ? { busy: this.#busyRetry, conflict: this.#conflictRetry }
@@ -331,6 +371,9 @@ export class OrdoClient {
             : NO_RETRY,
       onRetry,
     });
+    // Every answer past the door names the tenant's version (§1.9).
+    this.#versions.sawResponse(this.space, response);
+    return this.versions.observe(response);
   }
 
   /**

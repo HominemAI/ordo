@@ -127,6 +127,19 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                 }
                 prog.readers.push(reader);
             }
+            // `edition` is contextual the same way (`plan-versions.md`
+            // §2.6): a declaration head only here.
+            TokenKind::Ident(w) if w == "edition" => {
+                let e = edition_decl(&mut p)?;
+                if prog.edition.is_some() {
+                    return Err(p.err_class_at(
+                        parser::DUPLICATE_EDITION,
+                        e.span,
+                        "a program has one `edition` line; this is a second",
+                    ));
+                }
+                prog.edition = Some(e);
+            }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
                 if prog.release.is_some() {
@@ -2188,6 +2201,24 @@ fn guard_atom(p: &mut Parser) -> Result<GuardAtom, ParseError> {
 /// The block, when present, opens on the same line. Inside braces the lexer
 /// emits no line breaks, so each effect is found by its leading word. A rule
 /// longer than one line is written inside parentheses for the same reason.
+fn edition_decl(p: &mut Parser) -> Result<EditionDecl, ParseError> {
+    let start = p.bump().span; // `edition`
+    match p.peek().clone() {
+        TokenKind::Int(n) if n >= 1 && n <= i128::from(u32::MAX) => {
+            let end = p.bump().span;
+            Ok(EditionDecl {
+                number: n as u32,
+                span: start.to(end),
+            })
+        }
+        other => Err(p.err_here(format!(
+            "expected an edition number after `edition`, found {}; write `edition 1`, \
+             `edition 2`, ... (a source with no edition line is edition 1)",
+            describe(&other)
+        ))),
+    }
+}
+
 fn release_decl(p: &mut Parser) -> Result<ReleaseDecl, ParseError> {
     let start = p.bump().span; // `release`
     match p.peek() {

@@ -410,6 +410,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "versions" => rt.block_on(versions_cmd(flags)),
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
+        "clones" => rt.block_on(clones_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
         "rollout" => rt.block_on(crate::rollout::run(flags)),
@@ -2223,6 +2224,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
         Stored::Rebuilt => {
             format!("stored     {version}  (already present; this Ordo release built it anew)\n")
         }
+        Stored::EditionMoved => format!(
+            "stored     {version}  (already present; its source moved to a newer edition, \
+             the same program)\n"
+        ),
     });
     out.push_str(&provenance_lines(&report.provenance));
     if !behind.is_empty() {
@@ -2585,6 +2590,251 @@ pub(crate) async fn check_first_step(
     let chain = ordo_host::deploy_ops::chain_from_json(&row);
     ordo_host::environments::check_apply_target(&chain)
         .map_err(|e| Outcome::failed(format!("REFUSED  {e}\n")))
+}
+
+// ── clones ───────────────────────────────────────────────────────────────
+
+const CLONES_USAGE: &str = "ordo clones key  --host <h> ...\n\
+     ordo clones set-key <env> <key> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] \
+     --reason \"<text>\"  --host <h> ...\n\
+     ordo clones list  --host <h> ...\n\
+     ordo clones set mask|readers <value> --reason \"<text>\"  --host <h> ...\n\
+     each goes through the door (`--host <h>` or ORDO_HOST)";
+
+/// `ordo clones key|set-key|clone|list|set`: staging clones named
+/// production tenants (`plan-versions.md` §3.4, increment 12), through the
+/// door. `clone` runs on staging: staging asks production for the tenant as
+/// you, with your own token for production, and production masks it before
+/// it leaves.
+async fn clones_cmd(flags: Flags) -> Outcome {
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(format!("{CLONES_USAGE}\n"));
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    let own: &[&str] = match sub.as_str() {
+        "key" | "list" => &[],
+        "set-key" | "set" => &["--reason"],
+        "clone" => &["--from", "--name", "--from-token", "--reason"],
+        other => {
+            return Outcome::usage(format!(
+                "unknown `ordo clones` subcommand `{other}`; there are `key`, `set-key`, \
+                 `clone`, `list` and `set`\n{CLONES_USAGE}\n"
+            ))
+        }
+    };
+    let mut allowed = own.to_vec();
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let reason = flags.named_value("--reason").map(str::to_string);
+    let need_reason =
+        || Outcome::usage("`--reason \"<text>\"` says why, and is kept with the change\n".into());
+    use ordo_host::clones as c;
+    let row = match (sub.as_str(), flags.positional.as_slice()) {
+        ("key", []) => {
+            crate::wire::door_op(&host, &flags, c::CLONE_KEY, serde_json::json!({}), false).await
+        }
+        ("list", []) => {
+            crate::wire::door_op(&host, &flags, c::CLONES, serde_json::json!({}), false).await
+        }
+        ("set-key", [env, key]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::SET_CLONE_KEY,
+                serde_json::json!({ "env": env, "key": key, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        ("set", [setting, value]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            let setting = match setting.as_str() {
+                "mask" => c::MASK_SETTING,
+                "readers" => c::READERS_SETTING,
+                other => other,
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::SET_CLONE_SETTING,
+                serde_json::json!({ "setting": setting, "value": value, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        ("clone", [tenant]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            let from = flags
+                .named_value("--from")
+                .unwrap_or(ordo_host::environments::DEFAULT_OWN)
+                .to_string();
+            let from_token = match flags.named_value("--from-token") {
+                Some(t) => t.to_string(),
+                None => match clone_source_token(&host, &flags, &from).await {
+                    Ok(t) => t,
+                    Err(o) => return o,
+                },
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::CLONE_IN,
+                serde_json::json!({
+                    "tenant": tenant, "from": from, "fromToken": from_token,
+                    "name": flags.named_value("--name"), "reason": reason,
+                }),
+                true,
+            )
+            .await
+        }
+        _ => return Outcome::usage(format!("{CLONES_USAGE}\n")),
+    };
+    let row = match row {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let out = match sub.as_str() {
+        "key" => format!(
+            "clone key   {}\nenvironment {}\nRecord it on the deployment clones come from: `ordo \
+             clones set-key {} {} --reason \"...\"`\n",
+            row["key"].as_str().unwrap_or("?"),
+            row["env"].as_str().unwrap_or("?"),
+            row["env"].as_str().unwrap_or("?"),
+            row["key"].as_str().unwrap_or("?"),
+        ),
+        "set-key" => format!(
+            "recorded    the clone key of {}\n",
+            row["env"].as_str().unwrap_or("?")
+        ),
+        "set" => format!(
+            "{} {}\n{} {}\n",
+            c::MASK_SETTING,
+            row["mask"].as_str().unwrap_or("?"),
+            c::READERS_SETTING,
+            readers_line(&row["readers"]),
+        ),
+        "clone" => {
+            let cl = &row["clone"];
+            let masked = row["report"]["masked"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let mut out = format!(
+                "cloned      {} from {} on {} into {} ({})\nversion     {}\nrows        {}, \
+                 {} field(s) masked\nopens as    {} for a staging admin\n",
+                cl["fromName"].as_str().unwrap_or("?"),
+                cl["fromEnv"].as_str().unwrap_or("?"),
+                cl["fromTenant"].as_str().unwrap_or("?"),
+                cl["name"].as_str().unwrap_or("?"),
+                cl["space"].as_str().unwrap_or("?"),
+                cl["version"].as_str().unwrap_or("?"),
+                cl["rows"].as_u64().unwrap_or(0),
+                masked,
+                cl["opensAs"].as_str().unwrap_or("?"),
+            );
+            if let Some(n) = row["notCloned"].as_array().filter(|a| !a.is_empty()) {
+                out.push_str(&format!(
+                    "not cloned  {} (foreign tables: staging needs its own copy and peer)\n",
+                    n.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            out
+        }
+        _ => {
+            let mut out = format!(
+                "{} {}\n{} {}\nCLONES\n",
+                c::MASK_SETTING,
+                row["mask"].as_str().unwrap_or("?"),
+                c::READERS_SETTING,
+                readers_line(&row["readers"]),
+            );
+            for cl in row["clones"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {}  {}  from {} {} on {}  by {}  \"{}\"\n",
+                    cl["space"].as_str().unwrap_or("?"),
+                    cl["name"].as_str().unwrap_or("?"),
+                    cl["fromEnv"].as_str().unwrap_or("?"),
+                    cl["fromTenant"].as_str().unwrap_or("?"),
+                    cl["version"].as_str().unwrap_or("?"),
+                    cl["actor"].as_str().unwrap_or("?"),
+                    cl["reason"].as_str().unwrap_or(""),
+                ));
+            }
+            out
+        }
+    };
+    Outcome::ok(out)
+}
+
+fn readers_line(v: &serde_json::Value) -> String {
+    let names: Vec<&str> = v
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// The person's own token for `from`, from their `ordo login` sign-in, for
+/// the identity handle this deployment records for it.
+async fn clone_source_token(
+    host: &crate::wire::Host,
+    flags: &Flags,
+    from: &str,
+) -> Result<String, Outcome> {
+    let envs = crate::wire::door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::ENVIRONMENTS,
+        serde_json::json!({}),
+        false,
+    )
+    .await?;
+    let chain = ordo_host::deploy_ops::chain_from_json(&envs);
+    let handle = chain
+        .iter()
+        .find(|e| e.name == from)
+        .and_then(|e| e.door.as_ref())
+        .and_then(|d| d.handle.clone());
+    let Some(handle) = handle else {
+        return Err(Outcome::failed(format!(
+            "REFUSED  the clone is read from `{from}` as you, and this deployment records no \
+             identity handle for `{from}`, so no token for it can be asked of your sign-in. \
+             Record it: `{}`. Or pass your token for `{from}`: `--from-token <t>`\n",
+            ordo_host::environments::door_command(from)
+        )));
+    };
+    let ctx = crate::signin::Ctx::from_process();
+    crate::signin::token_for_deployment(&ctx, &handle)
+        .await
+        .map_err(|e| {
+            Outcome::failed(format!(
+                "REFUSED  no token for `{from}` (handle `{handle}`) from your sign-in: {}\nOr \
+                 pass one: `--from-token <t>`\n",
+                e.render()
+            ))
+        })
 }
 
 // ── environments ─────────────────────────────────────────────────────────

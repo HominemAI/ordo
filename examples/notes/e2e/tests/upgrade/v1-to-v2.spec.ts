@@ -27,6 +27,7 @@ import {
   applyProgram,
   mailFor,
   noteInList,
+  ordoFix,
   signIn,
   signedIn,
   stack,
@@ -87,6 +88,49 @@ async function expectV2(page: Page): Promise<void> {
   await page.getByText('About this account').click();
   await expect(page.getByTestId('page-version')).toHaveText('Page version: v2');
 }
+
+/**
+ * Language editions (plan-versions.md §2.8 step R4, increment 6b). Notes v1
+ * has no edition line, so it is edition 1. The stack's debug build makes
+ * edition 2 current (stack.sh), so v1 is an old edition inside its load
+ * window, and the running deployment serves it. `ordo fix` shows the
+ * rewrite as a dry run, then writes it. The fixed file applies as the same
+ * version, 0.1.0, now holding edition 2, and the v1 page still works.
+ */
+test('notes v1 at an old edition: ordo fix rewrites it, it applies as the same version, and the page works', async ({}, testInfo) => {
+  testInfo.setTimeout(240_000);
+  const dir = mkdtempSync(join(tmpdir(), 'notes-v1-edition-'));
+  const file = join(dir, 'notes.ordo');
+  copyFileSync(join(stack().program, 'notes.ordo'), file);
+  const before = readFileSync(file, 'utf8');
+  expect(before).not.toMatch(/^edition /m);
+
+  const dry = ordoFix(dir, false);
+  expect(dry).toContain('edition 1 to edition 2');
+  expect(dry).toContain('+edition 2');
+  expect(dry).toContain('dry run: nothing written');
+  expect(readFileSync(file, 'utf8')).toBe(before);
+
+  const wrote = ordoFix(dir, true);
+  expect(wrote).toContain(`wrote ${file}`);
+  const after = readFileSync(file, 'utf8');
+  expect(after).toContain('domain notes @ 0.1.0\nedition 2\n');
+  expect(ordoFix(dir, false)).toContain('is at edition 2, the current edition');
+
+  const applied = applyProgram(dir);
+  expect(applied).toContain('0.1.0');
+  expect(applied).toContain('its source moved to a newer edition');
+
+  const ada = await owner('Ada');
+  try {
+    const title = unique('after-fix-');
+    await addNote(ada.page, title, 'Written after ordo fix.');
+    await expect(noteInList(ada.page, title)).toBeVisible();
+    await expect(ada.page.getByRole('alert')).toHaveCount(0);
+  } finally {
+    await ada.close();
+  }
+});
 
 test('two people with notes, tags and a share under v1 find all of it under v2, then pin, archive, attach and download', async ({}, testInfo) => {
   testInfo.setTimeout(300_000);

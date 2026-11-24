@@ -1833,6 +1833,7 @@ pub async fn record_restore(
         actor: Actor::System("restore".into()),
         commands: vec![],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: Some(RestoreMarker {
             space: space.clone(),
@@ -2874,6 +2875,7 @@ async fn apply(
             owner_administration: false,
             restored_unverified,
             restore: None,
+            backfill: None,
         },
         unverified,
     ))

@@ -981,7 +981,11 @@ pub async fn check_digest(pool: &Pool, stored: &artifacts::Artifact) -> Result<(
         .map(|(_, source_id)| source_id)
         .unwrap_or_default();
     let doc: serde_json::Value = serde_json::from_str(&stored.artifact).unwrap_or_default();
-    let computed = a::source_identity(&stored.source, a::FIRST_EDITION, &a::code_hashes(&doc));
+    let computed = a::source_identity(
+        &stored.source,
+        ordo_plan::edition::of_source(&stored.source),
+        &a::code_hashes(&doc),
+    );
     if recorded == computed {
         return Ok(());
     }

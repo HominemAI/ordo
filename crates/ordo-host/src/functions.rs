@@ -41,7 +41,7 @@
 //! they may not see is `not_found`. The door already checked
 //! `std.$blob.get` before the call reached here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -723,7 +723,15 @@ pub struct HostFunctions {
     /// engine cache (`ORDO_FN_CACHE_DIR`) a later start loads it instead.
     host: tokio::sync::OnceCell<FnHost>,
     config: HostConfig,
-    table: RwLock<Arc<FnTable>>,
+    /// The active version's functions, and the version they are.
+    table: RwLock<(String, Arc<FnTable>)>,
+    /// **One table per version served beside the active one**
+    /// (`plan-versions.md` §1.10, increment 3 session 3), by version. Kept
+    /// to the deployment's served versions by [`HostFunctions::sync`].
+    others: RwLock<HashMap<String, Arc<FnTable>>>,
+    /// Which version serves each tenant. Unset (tests, a single-program
+    /// embedding): every tenant is served the active table.
+    versions: std::sync::OnceLock<Arc<crate::deploy::Deployment>>,
     spaces: Arc<Spaces>,
     control: Pool,
     fetch: Arc<dyn FnFetch>,
@@ -745,7 +753,9 @@ impl HostFunctions {
         HostFunctions {
             host: tokio::sync::OnceCell::new(),
             config,
-            table: RwLock::new(Arc::new(table)),
+            table: RwLock::new((String::new(), Arc::new(table))),
+            others: RwLock::new(HashMap::new()),
+            versions: std::sync::OnceLock::new(),
             spaces,
             control,
             fetch,
@@ -771,7 +781,16 @@ impl HostFunctions {
     /// Serve another version's functions. Calls in flight finish on the
     /// entry they started with.
     pub fn replace(&self, table: FnTable) {
-        *self.table.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(table);
+        let mut slot = self.table.write().unwrap_or_else(|p| p.into_inner());
+        slot.1 = Arc::new(table);
+    }
+
+    /// Answer each tenant from its own version's table: the version
+    /// `deployment` serves it ([`crate::deploy::Deployment::for_space`]).
+    /// Set once, by the runtime.
+    pub fn with_versions(self, deployment: Arc<crate::deploy::Deployment>) -> HostFunctions {
+        let _ = self.versions.set(deployment);
+        self
     }
 
     /// Serve `version`'s functions: its manifest from the registry, its code
@@ -783,47 +802,146 @@ impl HostFunctions {
         version: &str,
         schema: &Schema,
     ) -> Result<usize, String> {
-        if schema.functions.is_empty() {
-            self.replace(FnTable::default());
-            return Ok(0);
-        }
-        let loaded = async {
-            let stored = crate::versions::Versions::on(pool)
-                .get(version)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("version {version} is not in the registry"))?;
-            let doc: Value = serde_json::from_str(&stored.artifact).map_err(|e| e.to_string())?;
-            FnTable::load(pool, schema, &doc, version).await
-        }
-        .await;
-        match loaded {
+        let (table, outcome) = match Self::read_table(pool, version, schema).await {
             Ok(t) => {
                 let n = t.by_name.len();
-                self.replace(t);
-                Ok(n)
+                (t, Ok(n))
             }
-            Err(e) => {
-                self.replace(FnTable::default());
-                Err(e)
-            }
+            Err(e) => (FnTable::default(), Err(e)),
+        };
+        let mut slot = self.table.write().unwrap_or_else(|p| p.into_inner());
+        let was = std::mem::replace(&mut *slot, (version.to_string(), Arc::new(table)));
+        drop(slot);
+        // The version replaced may still serve tenants pinned to it: its
+        // table is kept until `sync` finds it no longer served.
+        let mut others = self.others.write().unwrap_or_else(|p| p.into_inner());
+        others.remove(version);
+        if !was.0.is_empty() && was.0 != version {
+            others.insert(was.0, was.1);
         }
+        outcome
     }
 
-    fn entry(&self, name: &str) -> Option<FnEntry> {
-        self.table
+    /// One version's table, read from the registry and `$fncode`.
+    async fn read_table(pool: &Pool, version: &str, schema: &Schema) -> Result<FnTable, String> {
+        if schema.functions.is_empty() {
+            return Ok(FnTable::default());
+        }
+        let stored = crate::versions::Versions::on(pool)
+            .get(version)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("version {version} is not in the registry"))?;
+        let doc: Value = serde_json::from_str(&stored.artifact).map_err(|e| e.to_string())?;
+        FnTable::load(pool, schema, &doc, version).await
+    }
+
+    /// **One table per served version** (`plan-versions.md` §1.10): read
+    /// the table of every version `deployment` serves beside the active one
+    /// that this runner does not hold, and drop the tables of versions it
+    /// no longer serves. Called after each change to the served versions.
+    /// A version whose table cannot be read gets an empty one, so none of
+    /// another version's functions answers for its tenants. Answers one
+    /// line per version read or refused.
+    pub async fn sync(&self, pool: &Pool, deployment: &crate::deploy::Deployment) -> Vec<String> {
+        let served = deployment.others();
+        let mut lines = Vec::new();
+        for loaded in &served {
+            let held = self
+                .others
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains_key(&loaded.version);
+            if held {
+                continue;
+            }
+            let table = match Self::read_table(pool, &loaded.version, &loaded.fixture.schema).await
+            {
+                Ok(t) => {
+                    if !t.by_name.is_empty() {
+                        lines.push(format!(
+                            "functions: {} loaded for version {}",
+                            t.by_name.len(),
+                            loaded.version
+                        ));
+                    }
+                    t
+                }
+                Err(e) => {
+                    lines.push(format!(
+                        "functions: none served for version {}: {e}",
+                        loaded.version
+                    ));
+                    FnTable::default()
+                }
+            };
+            self.others
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(loaded.version.clone(), Arc::new(table));
+        }
+        let keep: std::collections::HashSet<&str> =
+            served.iter().map(|l| l.version.as_str()).collect();
+        self.others
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|v, _| keep.contains(v.as_str()));
+        lines
+    }
+
+    /// The versions whose tables this runner holds: the active one first,
+    /// then the others by name.
+    pub fn table_versions(&self) -> Vec<String> {
+        let mut out = vec![self
+            .table
             .read()
             .unwrap_or_else(|p| p.into_inner())
-            .by_name
-            .get(name)
+            .0
+            .clone()];
+        let mut others: Vec<String> = self
+            .others
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
             .cloned()
+            .collect();
+        others.sort();
+        out.extend(others);
+        out
+    }
+
+    /// The table that serves `space`. With no tenant named, or no
+    /// deployment to ask, the active one. `Err` when the tenant is pinned
+    /// to a version this node does not serve.
+    fn table_for(&self, space: Option<&str>) -> Result<Arc<FnTable>, crate::deploy::Unserved> {
+        let active = self.table.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let (Some(space), Some(deployment)) = (space, self.versions.get()) else {
+            return Ok(active.1);
+        };
+        let (loaded, _) = deployment.for_space(space)?;
+        if loaded.version == active.0 {
+            return Ok(active.1);
+        }
+        Ok(self
+            .others
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&loaded.version)
+            .cloned()
+            // Served, and its table not read yet: none of its functions
+            // answers until `sync` reads it, and no other version's does.
+            .unwrap_or_default())
+    }
+
+    fn entry_in(&self, space: Option<&str>, name: &str) -> Option<FnEntry> {
+        self.table_for(space).ok()?.by_name.get(name).cloned()
     }
 
     /// The one-call delegation for `call`: its function's `uses`, its
     /// caller, its tenant. `None` when the serving program has no such
     /// function. The runner ends it as the run finishes.
     pub fn delegation(&self, call: &FnInvocation) -> Option<Arc<CallerOps>> {
-        let entry = self.entry(&call.name)?;
+        let entry = self.entry_in(Some(&call.space), &call.name)?;
         let mut acting = format!("function:{}@{}", entry.decl.name.name, entry.version);
         if let Some(agent) = &call.agent {
             acting.push_str(&format!(" via {agent}"));
@@ -841,7 +959,11 @@ impl HostFunctions {
 
 impl FunctionRunner for HostFunctions {
     fn spec(&self, name: &str) -> Option<OpSpec> {
-        self.entry(name).map(|e| e.spec)
+        self.entry_in(None, name).map(|e| e.spec)
+    }
+
+    fn spec_in(&self, space: Option<&str>, name: &str) -> Option<OpSpec> {
+        self.entry_in(space, name).map(|e| e.spec)
     }
 
     fn body_limit(&self) -> usize {
@@ -850,9 +972,23 @@ impl FunctionRunner for HostFunctions {
 
     fn call<'a>(&'a self, call: FnInvocation) -> BoxFuture<'a, Result<Value, ExecError>> {
         Box::pin(async move {
-            let entry = self
-                .entry(&call.name)
-                .ok_or_else(|| ExecError::internal("the function left the program mid-call"))?;
+            // The function the tenant's own version declares, as
+            // `function:<name>@<that version>` (§1.10). A tenant pinned to
+            // a version this node does not serve is closed for a moment,
+            // as for an op; one whose version lacks the function never
+            // reaches another version's.
+            let table = self.table_for(Some(&call.space)).map_err(|_| {
+                ExecError::new(
+                    ErrorCode::SpaceUnavailable,
+                    "this tenant is not served on this node right now; try again",
+                )
+            })?;
+            let entry = table.by_name.get(&call.name).cloned().ok_or_else(|| {
+                ExecError::new(
+                    ErrorCode::AccessDenied,
+                    format!("no function `{}` in this tenant's program", call.name),
+                )
+            })?;
             // §9: a paused tenant refuses with its pause answer, unless the
             // function says `nopause`. Below the door, as for an op.
             if !entry.decl.nopause {

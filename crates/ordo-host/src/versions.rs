@@ -979,6 +979,10 @@ pub enum VersionRefusal {
     /// every tenant on the active version would count as below it and no
     /// move could land: the change is refused, naming the active version.
     MinimumAboveActive { minimum: String, active: String },
+    /// A production deployment pins only a version that arrived through the
+    /// promotion gate (`crate::promotion`). The text says which, and the
+    /// command that promotes it.
+    NotPromoted(String),
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -999,6 +1003,7 @@ impl VersionRefusal {
             | VersionRefusal::TargetRevoked { .. }
             | VersionRefusal::NotServed { .. }
             | VersionRefusal::BelowMinimum { .. }
+            | VersionRefusal::NotPromoted(_)
             | VersionRefusal::Stranded { .. }
             | VersionRefusal::MinimumAboveActive { .. }
             | VersionRefusal::Revoked {
@@ -1062,6 +1067,7 @@ impl VersionRefusal {
             | VersionRefusal::TargetRevoked { .. }
             | VersionRefusal::NotServed { .. }
             | VersionRefusal::BelowMinimum { .. }
+            | VersionRefusal::NotPromoted(_)
             | VersionRefusal::NamedBySetting { .. } => {
                 ExecError::new(ErrorCode::ApplyRefused, message)
             }
@@ -1228,6 +1234,7 @@ impl std::fmt::Display for VersionRefusal {
                 list.join(","),
                 list.join(",")
             ),
+            VersionRefusal::NotPromoted(why) => write!(f, "not_promoted: {why}"),
             VersionRefusal::BelowMinimum { named, minimum } => write!(
                 f,
                 "below_minimum: {named} is older than {MINIMUM_SETTING}, {minimum}. Name a \
@@ -1777,6 +1784,17 @@ impl<'a> Versions<'a> {
     ///
     /// Every tenant moves, a tenant `versions.new_tenant` started elsewhere
     /// included, because rollouts do not exist yet (increment 10).
+    /// **A production deployment pins only what arrived through the
+    /// promotion gate** ([`crate::promotion::require_arrival`]).
+    pub async fn require_arrival(&self, version: &str) -> Result<(), VersionRefusal> {
+        crate::promotion::require_arrival(self.pool, version)
+            .await
+            .map_err(|e| match e {
+                crate::promotion::PromotionRefusal::Store(p) => VersionRefusal::Store(p),
+                other => VersionRefusal::NotPromoted(other.to_string()),
+            })
+    }
+
     pub async fn activate(
         &self,
         version: &str,
@@ -1790,6 +1808,7 @@ impl<'a> Versions<'a> {
         if from.as_deref() == Some(version) {
             return Ok(Activated::AlreadyActive(version.to_string()));
         }
+        self.require_arrival(version).await?;
         let cause = match &from {
             Some(f) => {
                 let ordinals = registry::ordinals(self.pool).await?;
@@ -1984,6 +2003,7 @@ impl<'a> Versions<'a> {
         at: u64,
     ) -> Result<PinChange, VersionRefusal> {
         let version = self.resolve(name).await?;
+        self.require_arrival(&version).await?;
         ensure_revocations(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;

@@ -1887,7 +1887,7 @@ day:
 | `soak.length` | 7 days, 0 allowed | plan |
 | `backfill.concurrency` | 8 | environment |
 | `backfill.chunk_rows` | 1,000 (stored in Ordo, built with 10: `ordo versions set backfill.chunk_rows`) | plan |
-| `backfill.chunk_timeout` | 20 seconds (as built: 30 seconds; stored in Ordo, built with 10) | plan |
+| `backfill.chunk_timeout` | 20 seconds (stored in Ordo, built with 10) | plan |
 | `backfill.budget` | none (stored in Ordo, built with 10) | environment |
 | `backfill.audit_images` | off | plan |
 | `seal.keep_plaintext` | off | plan |

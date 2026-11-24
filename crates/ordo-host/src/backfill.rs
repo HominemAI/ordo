@@ -213,7 +213,7 @@ impl Default for BackfillSettings {
     fn default() -> Self {
         BackfillSettings {
             chunk_rows: 1000,
-            chunk_timeout: Duration::from_secs(30),
+            chunk_timeout: Duration::from_secs(20),
             max_attempts: 5,
             budget: None,
         }

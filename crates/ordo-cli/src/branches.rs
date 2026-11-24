@@ -123,12 +123,17 @@ pub(crate) async fn apply(
     for (i, (op, params)) in lines.iter().enumerate() {
         // A new tenant, and its move to the branch's version, reach the door
         // within its rebuild and pin reading times; until then it refuses at
-        // the door, before anything runs. So a door refusal is asked again,
-        // for at most `SEED_WAIT`; any other answer is final.
+        // the door, before anything runs, or answers that the space is
+        // closed while its data reaches the version (nothing written). Both
+        // are asked again, for at most `SEED_WAIT`; any other answer is final.
         let started = std::time::Instant::now();
         let done = loop {
             match crate::wire::door_op_in(host, flags, &space, op, params.clone(), true).await {
-                Err(o) if o.report.contains("[access_denied]") && started.elapsed() < SEED_WAIT => {
+                Err(o)
+                    if (o.report.contains("[access_denied]")
+                        || o.report.contains("[space_unavailable]"))
+                        && started.elapsed() < SEED_WAIT =>
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
                 other => break other,

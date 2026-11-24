@@ -83,3 +83,27 @@ test('a visitor cannot read or mutate any workspace surface', async ({ request }
     await refused(await request.post(`${stack().door}/op/${op}`, { data: {} }), 403, 'access_denied');
   }
 });
+
+test('editorial review runs as the caller and a stale approval leaves no history row', async ({ request }) => {
+  const headers = await owner(request);
+  const original = { title: unique(), brief: 'A short brief.', tags: [], budget: '0.00', due: null, created: new Date().toISOString() };
+  const id = (await rows(await request.post(`${stack().door}/op/createCampaign`, { headers, data: original })))[0].created;
+  try {
+    const review = await request.post(`${stack().door}/fn/reviewBrief`, { headers, data: { campaign: id } });
+    expect(review.status(), await review.text()).toBe(200);
+    expect((await review.json()).result).toMatchObject({ words: 3, ready: false });
+    await refused(await request.post(`${stack().door}/fn/reviewBrief`, { data: { campaign: id } }), 403, 'access_denied');
+    const before = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers }))).find(r => r.id === id)!;
+    const data = { id, rev: before.rev, note: 'Editorial approval', at: new Date().toISOString() };
+    await rows(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }));
+    await refused(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }), 409, 'cas_miss');
+    const history = await rows(await request.get(`${stack().door}/op/approvals`, { headers, params: { campaign: id } }));
+    expect(history).toHaveLength(1); expect(history[0].note).toBe('Editorial approval');
+    const after = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers }))).find(r => r.id === id)!;
+    expect(after.status).toBe('published');
+    await refused(await request.post(`${stack().door}/op/editCampaign`, { headers, data: { ...original, created: undefined, id, rev: after.rev, status: 'impossible' } }), 409, 'check_violation');
+    await refused(await request.post(`${stack().door}/op/editCampaign`, { headers, data: { ...original, created: undefined, id, rev: after.rev, status: 'draft', budget: '-1.00' } }), 409, 'check_violation');
+    expect((await rows(await request.get(`${stack().door}/op/campaigns`, { headers }))).find(r => r.id === id)).toEqual(after);
+  } finally { await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } })); }
+  expect(await rows(await request.get(`${stack().door}/op/approvals`, { headers, params: { campaign: id } }))).toEqual([]);
+});

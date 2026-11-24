@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test as base, expect, type APIRequestContext, type APIResponse, type TestInfo } from '@playwright/test';
@@ -93,6 +93,7 @@ async function checkApply(request: APIRequestContext, testInfo: TestInfo, source
   const folder = await mkdtemp(join(tmpdir(), 'ordo-marketing-deploy-'));
   try {
     await writeFile(join(folder, 'site.ordo'), source);
+    await cp(join(s.program, '..', 'fn'), join(folder, 'fn'), { recursive: true });
     const result = await exec(s.ordo, ['apply', folder, '--direct', '--as', 'marketing-cache-e2e', '--wait-secs', '240'], {
       timeout: 260_000,
       env: { ...process.env, ORDO_PG_HOST: s.pg.host, ORDO_PG_PORT: s.pg.port, ORDO_PG_USER: s.pg.user, ORDO_PG_DB: s.pg.db,

@@ -501,3 +501,10 @@ The marketing stack now starts 2 host replicas, A on 4850 and B on 4851.
 and database settings to read `pg_stat_user_tables`. They wait for statistics
 to settle and never reset shared PostgreSQL counters. All 3 host processes
 (the bootstrap host and the 2 serving replicas) must flush coverage profiles.
+
+The marketing suite also exercises `/studio`. Its throwaway stack enables the
+local blob store and registers a virtual passkey owner before the owner-configured
+restart. The browser tests use real passkey sign-in, live enquiries, campaign
+assets and reminders, editorial approval, and invitations. Test credentials
+are kept only under the ignored stack directory. The bootstrap origin is
+separate so Playwright cannot mistake early startup for a ready test stack.

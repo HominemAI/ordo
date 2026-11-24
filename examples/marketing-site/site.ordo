@@ -190,3 +190,28 @@ op people unbounded =
 op me = members(id == $caller)[id, displayName, role]
 
 op allAssets unbounded download = assets[id, campaign, name, kind, size, file]
+
+# A brief review runs beside the data as the caller, with no external service.
+op oneCampaign($id: id) =
+  campaigns(id == $id)[id, title, brief, budget, due, status]
+function reviewBrief in campaigns {
+  call($campaign: id) -> json by member
+  code "fn/review-brief.js"
+  uses oneCampaign
+  limit wall 5s, memory 32 mb
+}
+
+# Record approval and change state in one command group. A stale revision
+# refuses the whole group, including the approval record.
+entity approvals {
+  campaign -> campaigns owned
+  reviewer -> members
+  at: datetime
+  note: text
+}
+op approveCampaign($id: id, $rev: int, $note: text, $at: datetime filled) =
+  set campaigns { id: $id, rev: $rev, status: "published" }
+  set approvals { campaign: $id, reviewer: $caller, at: $at, note: $note }
+op approvals($campaign: id) unbounded =
+  approvals(campaign == $campaign)[id, reviewer, at, note]
+  sort -at

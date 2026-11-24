@@ -149,3 +149,63 @@ The real version-bump test boots a second throwaway deployment on free ports
 and its own database. It keeps failed migrations from disrupting the other
 checks. Its logs are test attachments, and its host pids join the coverage
 shutdown check. No shared fixture is reset to hide a failed deployment.
+
+## Studio workspace
+
+Open `/studio` to manage the site with a passkey. The deployment owner grants
+access to the `system` space. Creating an account alone grants no studio access.
+A colleague can paste an invitation ticket before signing in or creating a
+passkey. Invitations are issued from Team and expire after 7 days.
+
+- Products, Plans and Reviews: create, edit with revision checks, and delete.
+  Saved content appears on the public page. Product staff notes stay private.
+- Inbox: search enquiries, keep private notes, track outcomes, and read totals.
+  Another editor's changes arrive through the live feed.
+- Campaigns: private briefs, JSON tags, exact money budgets, due dates, and
+  draft, review, published and archived states. Campaign publication records
+  approval; it does not automatically publish a product or testimonial.
+- Editorial review: a sandboxed function checks brief completeness without an
+  external service or API key. Approval changes state and records its history
+  atomically. A stale revision saves neither change.
+- Files: upload and download campaign assets. Campaign access controls the
+  files too. Deleting a campaign also deletes its assets and reminders.
+- Campaign access: grant read, write or admin access to individual members,
+  and revoke it. A read grant cannot edit the campaign.
+- Reminders: set, move or clear a reminder. The scheduled routine records when
+  it fires. Email delivery needs the deployment's mail service configured.
+- Team: invitations, roles, suspension and reinstatement. Sensitive actions
+  ask for a fresh passkey touch when the door requires it.
+- Download studio data: requests the server's own ZIP export, including the
+  operations marked `download` and their files, under the caller's access.
+
+The development stack enables an unsafe local file store beside its database.
+Use the normal production blob store and authentication settings outside this
+throwaway stack. The guest seed identity is not a browser login. Configure the
+principal of a real passkey account as a deployment owner to administer a
+local site through `/studio`.
+
+## Workspace tests
+
+The real-stack suite adds API and browser workflows for content revision
+conflicts, public-field isolation, enquiry reporting and refinement, JSON tag
+queries, idempotent creation, file round trips, scheduled reminders, atomic
+approval, validation rollback, invitation acceptance, campaign ACL revocation,
+role changes, suspension and reinstatement. Browser workflows sign in using a
+real WebAuthn ceremony and test live updates without a page reload.
+
+The stack creates a virtual passkey owner before restarting the door with its
+principal in `ORDO_DEPLOYMENT_OWNERS`. Its test credentials remain in the
+private `.stack` directory and are never uploaded as artifacts. The bootstrap
+page uses a temporary origin; the test page starts only after seeding and both
+replicas are ready.
+
+```sh
+cd examples/marketing-site/e2e
+npm ci
+npx playwright test -g 'staff|campaign|colleague|workspace|editorial'
+```
+
+Run `.github/workflows/examples-e2e.yml` with `coverage=true` to collect Rust
+lines executed by this application. The result is measured coverage, not a
+promise that a larger feature list reaches 100%. Compare reports built from
+the same Rust revision before attributing a percentage change to these flows.

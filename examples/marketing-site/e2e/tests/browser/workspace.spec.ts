@@ -53,6 +53,11 @@ test('staff create a campaign, upload a brief and schedule a reminder', async ({
   const row = page.getByRole('row').filter({ hasText: title });
   await expect(row).toBeVisible();
   await row.getByRole('button', { name: 'Files and access' }).click();
+  await page.getByRole('button', { name: 'Check brief' }).click();
+  await expect(page.getByText('5 words in this brief.')).toBeVisible();
+  await page.getByLabel('Approval note (required)').fill('Reviewed for launch');
+  await page.getByRole('button', { name: 'Approve campaign' }).click();
+  await expect(page.getByRole('row').filter({ hasText: 'Reviewed for launch' })).toBeVisible();
   await page.getByLabel('Choose a file (required)').setInputFiles({ name: 'brief.txt', mimeType: 'text/plain', buffer: Buffer.from('A campaign brief') });
   await page.getByRole('button', { name: 'Upload file' }).click();
   await expect(page.getByRole('row').filter({ hasText: 'brief.txt' })).toBeVisible();
@@ -84,4 +89,35 @@ test('staff create and revoke an invitation with a real passkey session', async 
   await expect(page.getByRole('heading', { name: 'Team access' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath('studio-mobile.png'), fullPage: true });
+});
+
+test('a colleague accepts an invitation, receives read access, and loses it on revocation', async ({ page, request }) => {
+  await signIn(page);
+  const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('lumen.studio')!));
+  const headers = { Origin: stack().page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' };
+  const invitation = (await rows(await request.post(`${stack().door}/op/std.space.invite`, { headers, data: { role: 'editor', expires: '1h', label: `Campaign reviewer ${randomUUID()}` } })))[0];
+  const accepted = await request.post(`${stack().door}/auth/complete`, { headers: { Origin: stack().page }, data: { method: 'guest', kind: 'new', display: `Reviewer ${randomUUID()}`, space: 'system', invitation: invitation.ticket } });
+  expect(accepted.status(), await accepted.text()).toBe(200);
+  const colleague = { Origin: stack().page, Authorization: `Bearer ${(await accepted.json()).token}`, 'X-Ordo-Space': 'system' };
+  const me = (await rows(await request.get(`${stack().door}/op/me`, { headers: colleague })))[0];
+  const created = (await rows(await request.post(`${stack().door}/op/createCampaign`, { headers, data: { title: `Private ${randomUUID()}`, brief: 'Private launch plan', tags: [], budget: '75.00', due: null, created: new Date().toISOString() } })))[0];
+  const id = created.created;
+  try {
+    expect((await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some(r => r.id === id)).toBe(false);
+    await rows(await request.post(`${stack().door}/op/grantCampaignsAccess`, { headers, data: { campaign: id, member: me.id, level: 'read' } }));
+    const visible = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).find(r => r.id === id)!;
+    expect(visible.brief).toBe('Private launch plan');
+    const denied = await request.post(`${stack().door}/op/editCampaign`, { headers: colleague, data: { id, rev: visible.rev, title: 'Taken over', brief: '', tags: [], budget: '0.00', due: null, status: 'draft' } });
+    expect(denied.status()).toBe(403); expect((await denied.json()).error.code).toBe('access_guard');
+    await rows(await request.delete(`${stack().door}/op/unshareCampaign`, { headers, params: { campaign: id, member: me.id } }));
+    expect((await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some(r => r.id === id)).toBe(false);
+    await rows(await request.post(`${stack().door}/op/std.space.setRole`, { headers, data: { member: me.id, role: 'viewer' } }));
+    const blocked = await request.post(`${stack().door}/op/createCampaign`, { headers: colleague, data: {} });
+    expect(blocked.status()).toBe(403); expect((await blocked.json()).error.code).toBe('access_denied');
+    await rows(await request.post(`${stack().door}/op/std.space.suspend`, { headers, data: { member: me.id } }));
+    const suspended = await request.get(`${stack().door}/op/people`, { headers: colleague });
+    expect(suspended.status()).toBe(403); expect((await suspended.json()).error.code).toBe('access_denied');
+    await rows(await request.post(`${stack().door}/op/std.space.reinstate`, { headers, data: { member: me.id } }));
+    await rows(await request.get(`${stack().door}/op/people`, { headers: colleague }));
+  } finally { await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } })); }
 });

@@ -179,14 +179,24 @@ export default defineConfig({
       dependencies: ['rehearsal'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A rename on 3 tenants moved by a rollout, and a rollback in the soak
+    // (plan-versions.md, increment 11b). It stores 0.3.7, above `moves`'
+    // 0.3.6 and below `branch`'s 0.5.x, so it runs between them. Locally,
+    // `--project=rollout-moves --no-deps`.
+    {
+      name: 'rollout-moves',
+      testMatch: /evolve\/every-tenant\.spec\.ts/,
+      dependencies: ['moves'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Dev branches as tenants on their own version (plan-versions.md
     // increment 5): 2 branches served side by side while the stack serves
-    // its own. It applies programs, so it runs after `moves`. Locally,
-    // `--project=branch --no-deps`.
+    // its own. It applies programs, so it runs after `rollout-moves`.
+    // Locally, `--project=branch --no-deps`.
     {
       name: 'branch',
       testMatch: /branch\/.*\.spec\.ts/,
-      dependencies: ['moves'],
+      dependencies: ['rollout-moves'],
       use: { ...devices['Desktop Chrome'] },
     },
     // Tenant builds (plan-versions.md increment 16): a beta tenant serves the

@@ -1,0 +1,151 @@
+/**
+ * A rename on 3 tenants under live writes, moved by a rollout, and a
+ * rollback in the soak (plan-versions.md increment 11b; §2.5;
+ * plan-backfill-dual-writes.md step B5).
+ *
+ * Ann, Ben and Cat each sign up, so each has a tenant with a database of
+ * its own, and write notes on the v2 page. The new version renames
+ * `notes.title` to `heading` with `prev(title)`, its ops still answering
+ * `title`. After `moves`, production serves 0.3.4 and the new version is
+ * 0.3.7; run alone, v3 is applied and it is 0.3.3. The developer, signed
+ * in with `ordo login`:
+ *
+ * 1. Stores it and its step, and runs the step on the deployment's own
+ *    database (`ordo evolve --run`), so a rollout may start.
+ * 2. Sets `backfill.chunk_rows` 1 and `backfill.budget` 1, so each
+ *    tenant's copy takes one row per turn of the rollout.
+ * 3. `ordo rollout start <to> --strategy group --group <the 3>`, a turn
+ *    a second: the rollout moves each through its stored step, a move
+ *    with dual writes. The rest wait behind the group's day-long gate.
+ *    While `ordo rollout status` says they are backfilling, each person
+ *    retitles a note and adds one.
+ * 4. The 3 move and soak. After a reload each reads what they typed, and
+ *    retitles another note on the new version.
+ * 5. `ordo rollout abort`, then `ordo rollback --version <from> --dry-run`
+ *    names each as kept, and `ordo rollback --version <from>` puts the 3
+ *    back. After a reload, every title each person typed is there.
+ *
+ * A regression looks like a typed title missing after a reload, a tenant
+ * the rollout moves without a copy (never `backfilling`), a failed tenant,
+ * or a rollback that leaves a tenant on the new version.
+ *
+ * It stores 0.3.7, above `moves`' 0.3.6 and below `branch`'s 0.5.x, so it
+ * runs between them. Chromium only.
+ */
+
+import { expect, test } from '@playwright/test';
+import { door, developer } from '../developer.js';
+import { owner } from '../people.js';
+import { addNote, applyProgram, ensureServing, servingVersion, signedIn, stack, unique } from '../support.js';
+import { holds, openV2, renamedTitle, retitle, watchTenant } from './moves.js';
+
+test.describe.configure({ mode: 'serial' });
+
+test('a rollout moves 3 tenants through a rename under live writes, and a rollback in the soak keeps every write', async ({
+  browser,
+}, testInfo) => {
+  testInfo.setTimeout(600_000);
+  // After `moves`, production serves 0.3.4. Run alone, v3 is applied.
+  if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
+    ensureServing(stack().programV2, '0.2.0');
+    applyProgram(stack().programV3);
+  }
+  const from = servingVersion() ?? '';
+  const sealed = from === '0.3.4';
+  const to = sealed ? '0.3.7' : '0.3.3';
+  const people = await Promise.all(['Ann', 'Ben', 'Cat'].map((name) => owner(name)));
+  const dev = await developer(browser);
+  const ordo = (args: string[]) => {
+    const r = dev.ordo([...args, ...door()]);
+    expect(r.code, `ordo ${args.join(' ')}\n${r.out}\n${r.err}`).toBe(0);
+    return r.out;
+  };
+  try {
+    const tenants: string[] = [];
+    const titles: string[][] = [];
+    for (const p of people) {
+      const tenant = watchTenant(p.page);
+      await openV2(p.page);
+      const mine = [0, 1, 2, 3, 4, 5].map((i) => unique(`rolled-${i}-`));
+      for (const t of mine) await addNote(p.page, t, `Written before the rollout: ${t}.`);
+      tenants.push(tenant());
+      titles.push(mine);
+    }
+
+    await test.step(`${to} is stored, and its step runs on the deployment's own database`, () => {
+      expect(ordo(['apply', renamedTitle(to, sealed), '--no-activate'])).toContain(to);
+      expect(ordo(['evolve', '--from', from, '--to', to])).toContain('B4');
+      ordo(['evolve', '--from', from, '--to', to, '--run']);
+      ordo(['versions', 'set', 'backfill.chunk_rows', '1', '--reason', 'one row per turn, to type during it']);
+      ordo(['versions', 'set', 'backfill.budget', '1', '--reason', 'one chunk per turn, to type during it']);
+    });
+
+    await test.step('the rollout starts each tenant on its stored step', async () => {
+      const started = ordo(['rollout', 'start', to, '--strategy', 'group', '--group', tenants.join(','), '--canary-wait', '1d', '--batch-interval', '1s']);
+      expect(started).toContain(`to ${to}`);
+      // Each is in a move with dual writes, copying one row per turn.
+      await expect
+        .poll(() => ordo(['rollout', 'status']), { timeout: 60_000, intervals: [1_000] })
+        .toMatch(new RegExp(`moving +${tenants[0]}: backfilling`));
+    });
+
+    const during = people.map(() => unique('retitled-during-'));
+    const added = people.map(() => unique('added-during-'));
+    await test.step('each person retitles a note and adds one during the copy', async () => {
+      for (const [i, p] of people.entries()) {
+        await retitle(p.page, titles[i]![5]!, during[i]!);
+        await addNote(p.page, added[i]!, 'Added while the rollout copied.');
+      }
+    });
+
+    const soaked = people.map(() => unique('retitled-in-soak-'));
+    await test.step(`the 3 move to ${to} and soak; each reads what they typed`, async () => {
+      await expect
+        .poll(() => ordo(['rollout', 'status']), { timeout: 240_000, intervals: [2_000] })
+        .toMatch(/tenants +3 moved, \d+ queued, 0 waiting, 0 moving, 0 failed/);
+      for (const [i, p] of people.entries()) {
+        await p.page.reload();
+        await signedIn(p.page);
+        for (const t of titles[i]!.slice(0, 5)) await holds(p.page, t);
+        await holds(p.page, during[i]!);
+        await holds(p.page, added[i]!);
+        await retitle(p.page, titles[i]![0]!, soaked[i]!);
+      }
+    });
+
+    await test.step(`the rollout stops; the dry run names each as kept`, () => {
+      expect(ordo(['rollout', 'abort', '--reason', 'roll back inside the soak'])).toContain('aborted');
+      const dry = ordo(['rollback', '--version', from, '--dry-run']);
+      for (const t of tenants) {
+        expect(dry).toMatch(new RegExp(`tenant +${t} on ${to.replace(/\./g, '\\.')}: in its soak`));
+      }
+      // The rollout was aborted, so `from` is still active and no other
+      // tenant moves: none loses a write.
+      expect(dry).not.toContain('LOSES');
+    });
+
+    await test.step(`ordo rollback puts the 3 back on ${from}`, () => {
+      const back = ordo(['rollback', '--version', from]);
+      for (const t of tenants) expect(back).toContain(`reverted   ${t} back on ${from} in its soak`);
+    });
+
+    await test.step(`after a reload on ${from}, every title each person typed is there`, async () => {
+      for (const [i, p] of people.entries()) {
+        await p.page.reload();
+        await signedIn(p.page);
+        await holds(p.page, added[i]!);
+        await holds(p.page, during[i]!);
+        await holds(p.page, soaked[i]!);
+        await expect(p.page.getByRole('alert')).toHaveCount(0);
+      }
+    });
+  } finally {
+    // The settings are the deployment's; the projects after this one run
+    // with the defaults.
+    for (const s of ['backfill.chunk_rows', 'backfill.budget']) {
+      dev.ordo(['versions', 'set', s, '--clear', '--reason', 'back to the default', ...door()]);
+    }
+    await dev.close();
+    for (const p of people) await p.close();
+  }
+});

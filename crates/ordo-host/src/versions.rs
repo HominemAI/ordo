@@ -2781,6 +2781,20 @@ impl<'a> Versions<'a> {
         }))
     }
 
+    /// Name rollout `rollout` on the tenant's newest `$pins` row: a move
+    /// with dual writes a rollout drove pinned it at its switch (increment
+    /// 11b).
+    pub async fn tag_rollout(&self, space: &str, rollout: i64) -> Result<(), VersionRefusal> {
+        self.pool
+            .rows(&format!(
+                "UPDATE \"$pins\" SET \"rollout\" = {rollout} \
+                 WHERE \"seq\" = (SELECT max(\"seq\") FROM \"$pins\" WHERE \"space\" = {})",
+                sql_lit(space)
+            ))
+            .await?;
+        Ok(())
+    }
+
     /// Reopen one tenant's refused move (§2.1, increment 7), so the
     /// catch-up tries it again: phase `expanding`, reason cleared. The
     /// move it reopened; `None` when the tenant has no refused move.

@@ -144,6 +144,11 @@ pub struct CatchUp {
     /// Where a finished sweep is reported, so `ordo apply` can wait for it
     /// (`$nodes`). Unset in tests and embeddings that run no door.
     status: std::sync::OnceLock<Arc<crate::node_status::NodeStatus>>,
+    /// The deploy ops, for what a stored step runs its backfills with: the
+    /// backfill functions and key custody (increment 11b). Unset, a step
+    /// runs with the stored settings and refuses a function or a seal,
+    /// naming why.
+    apply: std::sync::OnceLock<Arc<crate::apply_op::ApplyOps>>,
 }
 
 impl CatchUp {
@@ -157,7 +162,66 @@ impl CatchUp {
             in_flight: std::sync::atomic::AtomicUsize::new(0),
             peak: std::sync::atomic::AtomicUsize::new(0),
             status: std::sync::OnceLock::new(),
+            apply: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Run stored steps with the deploy ops' backfill functions and key
+    /// custody (increment 11b).
+    pub fn steps_with(&self, apply: Arc<crate::apply_op::ApplyOps>) {
+        let _ = self.apply.set(apply);
+    }
+
+    /// What a stored step runs its backfills with on this node.
+    async fn step_context(&self) -> crate::evolve::StepContext {
+        if let Some(apply) = self.apply.get() {
+            if let Ok(ctx) = apply.step_context().await {
+                return ctx;
+            }
+        }
+        crate::evolve::StepContext {
+            settings: crate::backfill::stored_settings(&self.control)
+                .await
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    /// **One database to `program`**: by its stored path when one leads
+    /// there from the version it records (increment 11b: a seal, a fill or
+    /// a rename runs as its stored step does, which the apply path
+    /// refuses), by the apply path otherwise.
+    async fn forward_target(
+        &self,
+        t: ordo_exec::route::Target,
+        tenants: &[String],
+        program: &Program,
+        ctx: &crate::evolve::StepContext,
+    ) -> sa::TenantApply {
+        if let Ok(pool) = &t.pool {
+            if let Some(outcome) = crate::every_tenant::forward_database(
+                &self.control,
+                pool,
+                &t.label,
+                tenants,
+                program,
+                ACTOR,
+                ctx,
+            )
+            .await
+            {
+                let confirmed = match (&outcome, ordo_exec::spacedb::recorded_version(pool).await) {
+                    (Ok(_), Ok(TargetVersion::At(v))) => Some(v),
+                    _ => None,
+                };
+                return sa::TenantApply {
+                    label: t.label,
+                    outcome,
+                    confirmed,
+                };
+            }
+        }
+        sa::forward_target(t, &self.control, program, ACTOR, OP).await
     }
 
     /// Report each finished sweep in this node's `$nodes` row.
@@ -270,11 +334,29 @@ impl CatchUp {
             lock.release().await;
             return Caught::Busy;
         }
-        let out = tokio::time::timeout(
-            sa::FORWARD_TIMEOUT,
-            sa::bring_forward_from(&pool, Some(&self.control), &program, ACTOR, OP),
+        let ctx = self.step_context().await;
+        let out = match crate::every_tenant::forward_database(
+            &self.control,
+            &pool,
+            space,
+            // Already pinned to the serving version: no pin follows, so a
+            // seal raises no fence.
+            &[],
+            &program,
+            ACTOR,
+            &ctx,
         )
-        .await;
+        .await
+        {
+            Some(by_path) => Ok(by_path),
+            None => {
+                tokio::time::timeout(
+                    sa::FORWARD_TIMEOUT,
+                    sa::bring_forward_from(&pool, Some(&self.control), &program, ACTOR, OP),
+                )
+                .await
+            }
+        };
         lock.release().await;
         match out {
             Ok(Ok(forward)) => {
@@ -610,10 +692,12 @@ impl CatchUp {
                 out.transient = true;
                 return out;
             }
+            let ctx = self.step_context().await;
             let forwarded = futures::future::join_all(behind.into_iter().map(|t| async {
                 let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(now, Ordering::SeqCst);
-                let d = sa::forward_target(t, &self.control, &program, ACTOR, OP).await;
+                let tenants = movers.get(&t.label).cloned().unwrap_or_default();
+                let d = self.forward_target(t, &tenants, &program, &ctx).await;
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 d
             }))

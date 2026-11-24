@@ -1453,6 +1453,308 @@ async fn a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keep
     d.stop();
 }
 
+/// Increment 11b, part 1 (`plan-versions.md` §2.5 and §4;
+/// `plan-backfill-dual-writes.md` B5): **a rename on 3 tenants under live
+/// writes loses no write, and a rollback in the soak keeps every write.**
+/// Ada, Bob and Cy each have a database of their own. The next version
+/// renames `notes.body` to `text` with `prev`; its stored step runs on the
+/// deployment's own database (`ordo evolve --run`), and a rollout to it
+/// starts with `backfill.budget` 1 and `backfill.chunk_rows` 2, so each
+/// tenant's move copies 2 rows per turn. The rollout moves each tenant
+/// through its stored step: a move with dual writes, not the apply path.
+/// While the moves copy, each person edits a note and adds one; each write
+/// is in both columns. The rollout finishes with every tenant in its soak,
+/// and each edits again on the new version. `ordo rollback --dry-run`
+/// names each tenant as kept. `ordo rollback` puts all 3 back on the
+/// version before, and every note holds what was typed.
+///
+/// A regression looks like a tenant moved by the apply path (no `$moves`
+/// row in `backfilling`), a write missing from either column, a rollback
+/// that leaves a tenant on the new version, or a typed text missing after
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollout_moves_3_tenants_through_a_rename_under_live_writes_and_a_rollback_in_the_soak_keeps_every_write(
+) {
+    let _shared = shared().await;
+    let d = Deployment::boot_with(
+        "ordo_notes_every_tenant",
+        Some(PAGE),
+        &[("ORDO_ROLLOUT_TICK_SECS", "1")],
+    )
+    .await;
+    let people: Vec<Session> = [(33, "ada", "Ada"), (34, "bob", "Bob"), (35, "cy", "Cy")]
+        .into_iter()
+        .map(|(seed, name, display)| sign_up(&d, &device(seed, name), display))
+        .collect();
+    for p in &people {
+        for i in 0..20 {
+            create_note(&d, p, &format!("Note {i:02}"), &format!("body {i:02}"));
+        }
+    }
+    let from = d.pin_of(&people[0].space).await.expect("Ada is pinned");
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let program = ordo_host::schema_apply::Program::compile(&renamed_body()).expect("compiles");
+    let to = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored")
+    .version;
+    let owner = deployment_owner_token();
+    let door = |op: &str, params: Value| {
+        let (status, body) = d.op(HOME, &owner, "POST", op, params);
+        assert_eq!(status, 200, "{op}: {body}");
+        body["rows"][0].clone()
+    };
+    // `ordo evolve --from --to --run`: stored, and run on the deployment's
+    // own database, so the rollout may start.
+    let plan = door(
+        "std.deployment.evolve",
+        json!({"from": from, "to": to, "run": true}),
+    );
+    assert_eq!(plan["receipt"]["backfills"][0]["code"], "B4", "{plan}");
+    for (setting, value) in [("backfill.chunk_rows", "2"), ("backfill.budget", "1")] {
+        door(
+            "std.deployment.setVersionSetting",
+            json!({"setting": setting, "value": value, "reason": "slow, to type during it"}),
+        );
+    }
+    let started = door(
+        "std.deployment.rollout.start",
+        json!({"version": to, "strategy": "all"}),
+    );
+    assert!(started.to_string().contains(&to), "{started}");
+
+    // Every tenant is in a move with dual writes, copying under its budget.
+    let backfilling = |c: &Pool| {
+        let c = c.clone();
+        let rt = tokio::runtime::Handle::current();
+        tokio::task::block_in_place(move || {
+            rt.block_on(async move {
+                c.rows(
+                    "SELECT count(*) FROM \"$moves\" WHERE \"step\" <> '' \
+                     AND \"phase\" = 'backfilling'",
+                )
+                .await
+                .ok()
+                .and_then(|r| r[0][0].clone())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0)
+            })
+        })
+    };
+    within(30, "the rollout starts each tenant's move", || {
+        (backfilling(&control) == 3).then_some(())
+    });
+
+    // Each person writes while the copy runs: an edit and a new note, in
+    // both columns at once.
+    let mut typed: Vec<(String, String, String)> = Vec::new();
+    for p in &people {
+        let theirs = Pool::connect(cfg(&p.space)).await.expect("their database");
+        let id = theirs
+            .rows("SELECT id::text FROM notes ORDER BY id DESC LIMIT 1")
+            .await
+            .expect("a note")[0][0]
+            .clone()
+            .expect("an id");
+        edit_body(&d, p, &id, "typed during the rollout");
+        let fresh = create_note(&d, p, "During", "written during the rollout");
+        for (id, want) in [
+            (&id, "typed during the rollout"),
+            (&fresh, "written during the rollout"),
+        ] {
+            let (b, t) = both_shapes(&theirs, id).await;
+            assert_eq!(b.as_deref(), Some(want), "body of {id}");
+            assert_eq!(t.as_deref(), Some(want), "text of {id}: the dual write");
+        }
+        typed.push((p.space.clone(), id, fresh));
+    }
+
+    // The rollout finishes: each tenant switched, in its soak.
+    within(120, "the rollout finishes", || {
+        let (status, body) = d.op(
+            HOME,
+            &owner,
+            "GET",
+            "std.deployment.rollout.status",
+            json!({}),
+        );
+        (status == 200 && body.to_string().contains("\"finished\"")).then_some(())
+    });
+    let soaking = control
+        .rows("SELECT count(*) FROM \"$moves\" WHERE \"phase\" = 'soaking'")
+        .await
+        .expect("$moves");
+    assert_eq!(soaking[0][0].as_deref(), Some("3"));
+    for (p, (_, id, _)) in people.iter().zip(&typed) {
+        assert_eq!(d.pin_of(&p.space).await.as_deref(), Some(to.as_str()));
+        eventually("served the new version", || {
+            let (status, _) = d.op(&p.space, &p.token, "GET", "texts", json!({}));
+            (status == 200).then_some(())
+        });
+        edit_body(&d, p, id, "typed in the soak");
+        let theirs = Pool::connect(cfg(&p.space)).await.expect("their database");
+        let (b, t) = both_shapes(&theirs, id).await;
+        assert_eq!(t.as_deref(), Some("typed in the soak"));
+        assert_eq!(b.as_deref(), Some("typed in the soak"), "the reverse write");
+    }
+
+    // `ordo rollback --dry-run`: each tenant goes back with every write.
+    let (status, check) = d.op(
+        HOME,
+        &owner,
+        "GET",
+        "std.deployment.rollbackCheck",
+        json!({"version": from}),
+    );
+    assert_eq!(status, 200, "{check}");
+    let listed = check["rows"][0]["tenants"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for p in &people {
+        let t = listed
+            .iter()
+            .find(|t| t["tenant"] == json!(p.space))
+            .unwrap_or_else(|| panic!("{} is listed: {check}", p.space));
+        assert_eq!(t["kept"], true, "{t}");
+        assert!(
+            t["note"].as_str().unwrap_or("").contains("in its soak"),
+            "{t}"
+        );
+    }
+
+    // `ordo rollback`: every tenant back on the version before, every
+    // write kept.
+    let back = door("std.deployment.activate", json!({"version": from}));
+    let reverted = back["reverted"].as_array().cloned().unwrap_or_default();
+    assert_eq!(reverted.len(), 3, "{back}");
+    for (p, (_, id, fresh)) in people.iter().zip(&typed) {
+        assert_eq!(d.pin_of(&p.space).await.as_deref(), Some(from.as_str()));
+        eventually("served the version before", || {
+            let (status, _) = d.op(&p.space, &p.token, "GET", "texts", json!({}));
+            (status != 200).then_some(())
+        });
+        let bodies: std::collections::BTreeMap<String, Value> = d
+            .rows(&p.space, &p.token, "myNotes")
+            .iter()
+            .map(|n| {
+                (
+                    n["id"].as_str().unwrap_or("").to_string(),
+                    n["body"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(bodies.len(), 21, "{}", p.space);
+        assert_eq!(bodies[id], "typed in the soak");
+        assert_eq!(bodies[fresh], "written during the rollout");
+    }
+    d.stop();
+}
+
+/// Increment 11b, part 1 (row 13's remainder): **an activation runs each
+/// tenant's stored step, a seal included.** The next version makes
+/// `notes.body` sealed, which only a stored plan does (B7; the apply path
+/// refuses it as `seal_needs_stored_plan`). Its step runs on the
+/// deployment's own database (`ordo evolve --run`), then the version is
+/// activated. The catch-up replays the stored step on Ada's and Bob's own
+/// databases, then pins each. Each reads every note, and neither database
+/// holds a plaintext `body`.
+///
+/// A regression looks like a tenant left on the version before with its
+/// move refused, or a `body` column still holding text.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_activation_runs_each_tenant_stored_step_a_seal_included() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_activation_seal", Some(PAGE)).await;
+    let people: Vec<Session> = [(36, "ada", "Ada"), (37, "bob", "Bob")]
+        .into_iter()
+        .map(|(seed, name, display)| sign_up(&d, &device(seed, name), display))
+        .collect();
+    for p in &people {
+        for i in 0..5 {
+            create_note(&d, p, &format!("Note {i}"), &format!("secret {i}"));
+        }
+    }
+    let from = d.pin_of(&people[0].space).await.expect("Ada is pinned");
+    let sealed = raised(&SOURCE.replace("  body:  text = \"\"\n", "  body:  text sealed\n"));
+    assert!(sealed.contains("text sealed"), "the body line moved");
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    // The fixture stores notes through the registry with no `$migrations`
+    // row; `ordo apply` writes one, and a stored step checks it.
+    ordo_host::schema_apply::record(
+        &control,
+        &ordo_host::schema_apply::Record {
+            kind: ordo_exec::migrate::kind::VERSION,
+            from: None,
+            to: &from,
+            actor: "notes-test",
+            op: "ordo apply",
+            changes: "",
+            ddl: "",
+            phase: ordo_exec::migrate::phase::APPLIED,
+            note: "",
+        },
+    )
+    .await
+    .expect("recorded");
+    let program = ordo_host::schema_apply::Program::compile(&sealed).expect("compiles");
+    let to = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored")
+    .version;
+    let owner = deployment_owner_token();
+    let door = |op: &str, params: Value| {
+        let (status, body) = d.op(HOME, &owner, "POST", op, params);
+        assert_eq!(status, 200, "{op}: {body}");
+        body["rows"][0].clone()
+    };
+    let plan = door(
+        "std.deployment.evolve",
+        json!({"from": from, "to": to, "run": true}),
+    );
+    assert!(plan["receipt"].to_string().contains("seal"), "{plan}");
+    door("std.deployment.activate", json!({"version": to}));
+    for p in &people {
+        within(60, "the catch-up moves the tenant", || {
+            let rt = tokio::runtime::Handle::current();
+            let pinned = tokio::task::block_in_place(|| rt.block_on(d.pin_of(&p.space)));
+            (pinned.as_deref() == Some(to.as_str())).then_some(())
+        });
+        let (rows, _) = eventually("served the sealed version", || {
+            let (status, out) = d.op(&p.space, &p.token, "GET", "myNotes", json!({}));
+            (status == 200).then(|| out["rows"].as_array().cloned().unwrap_or_default())
+        });
+        assert_eq!(rows.len(), 5, "{}", p.space);
+        assert!(rows.iter().any(|n| n["body"] == "secret 3"), "{rows:?}");
+        let theirs = Pool::connect(cfg(&p.space)).await.expect("their database");
+        let kind = theirs
+            .rows(
+                "SELECT data_type FROM information_schema.columns \
+                 WHERE table_name = 'notes' AND column_name = 'body'",
+            )
+            .await
+            .expect("columns");
+        assert_eq!(kind[0][0].as_deref(), Some("bytea"), "no plaintext body");
+    }
+    d.stop();
+}
+
 /// Increment 11a: **what a move with dual writes refuses, each naming its
 /// fix.** A path whose rewriting step is not the only one left names the
 /// version to replay to first. (A shared database and a function fill are

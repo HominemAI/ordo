@@ -71,6 +71,116 @@ pub fn gate_shadow_for(schema: &str, nonce: &str) -> String {
     }
 }
 
+/// The advisory-lock namespace a live load gate holds its shadow under
+/// ("ORSH"), keyed by `hashtext(<shadow name>)`. Apart from every other
+/// namespace Ordo locks in.
+pub const GATE_SHADOW_LOCK_NS: i32 = 0x4F52_5348;
+
+/// A load gate's claim on its shadow ([`gate_shadow_for`]): a session
+/// advisory lock on a connection of its own, held while the gate lives.
+/// A shadow whose lock nobody holds was left by a gate that died, and the
+/// next gate drops it ([`ShadowHold::sweep`]). Dropping the hold closes
+/// the connection, which releases the lock.
+pub struct ShadowHold {
+    client: tokio_postgres::Client,
+    shadow: String,
+}
+
+impl ShadowHold {
+    /// Take the lock on `shadow` before it is built, so a sweeping gate
+    /// never sees it unheld while it exists.
+    pub async fn take(cfg: &crate::PoolConfig, shadow: &str) -> Result<ShadowHold, String> {
+        let (client, conn) = cfg
+            .connect_config()
+            .connect(tokio_postgres::NoTls)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        client
+            .execute(
+                "SELECT pg_advisory_lock($1, hashtext($2))",
+                &[&GATE_SHADOW_LOCK_NS, &shadow],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(ShadowHold {
+            client,
+            shadow: shadow.to_string(),
+        })
+    }
+
+    /// Drop every gate shadow of the deployment in `schema` that no live
+    /// gate holds: one a crashed or killed gate left. A shadow whose lock
+    /// is held is a gate running now and is kept. The names dropped.
+    pub async fn sweep(&self, schema: &str) -> Result<Vec<String>, String> {
+        // `_` is a LIKE wildcard, so the shape is checked again below.
+        let rows = self
+            .client
+            .query(
+                "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'ordo\\_shadow\\_%'",
+                &[],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut dropped = Vec::new();
+        for row in rows {
+            let name: String = row.get(0);
+            if name == self.shadow || !is_gate_shadow_of(&name, schema) {
+                continue;
+            }
+            let free: bool = self
+                .client
+                .query_one(
+                    "SELECT pg_try_advisory_lock($1, hashtext($2))",
+                    &[&GATE_SHADOW_LOCK_NS, &name],
+                )
+                .await
+                .map_err(|e| e.to_string())?
+                .get(0);
+            if !free {
+                continue;
+            }
+            let gone = self
+                .client
+                .batch_execute(&format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    ordo_schema::ddl::q(&name)
+                ))
+                .await;
+            let _ = self
+                .client
+                .execute(
+                    "SELECT pg_advisory_unlock($1, hashtext($2))",
+                    &[&GATE_SHADOW_LOCK_NS, &name],
+                )
+                .await;
+            gone.map_err(|e| e.to_string())?;
+            dropped.push(name);
+        }
+        Ok(dropped)
+    }
+}
+
+/// Is `name` a [`gate_shadow_for`] name of the deployment in `schema`?
+fn is_gate_shadow_of(name: &str, schema: &str) -> bool {
+    let Some(rest) = name.strip_prefix(&format!("{SHADOW}_")) else {
+        return false;
+    };
+    let (Some(nonce), Some(tail)) = (rest.get(..6), rest.get(6..)) else {
+        return false;
+    };
+    let hex = nonce
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    hex && if schema == crate::DEFAULT_SCHEMA {
+        tail.is_empty()
+    } else {
+        tail.strip_prefix("_of_") == Some(schema)
+    }
+}
+
 /// The prefix of the shadow `ordo versions diff` builds a stored version's
 /// schema in, to read its shape back (`ordo_host::versions_diff`). Each
 /// diff adds a random hex suffix and drops the namespace after, so two

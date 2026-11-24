@@ -368,10 +368,19 @@ pub async fn verify_registry(
         pool.schema(),
         &nonce.iter().map(|b| format!("{b:02x}")).collect::<String>(),
     );
+    // Held while this gate lives, so no other gate's sweep drops the
+    // shadow under it; then the shadows dead gates left are dropped.
+    let hold = ordo_exec::shape::ShadowHold::take(cfg, &shadow)
+        .await
+        .map_err(|e| ShapeRefusal::Unavailable(format!("the shadow's lock was not taken: {e}")))?;
+    // Best effort: a leftover that stays is retried by the next gate.
+    if let Err(e) = hold.sweep(pool.schema()).await {
+        eprintln!("shape gate: shadows left by earlier gates were not dropped ({e})");
+    }
     let report = verify_on(f, &pool, &shadow, ddl).await;
     // Best effort: a failure to tidy the shadow is not a reason to refuse a
-    // boot that otherwise passed. One a crash leaves is an empty namespace
-    // `ordo_exec::shape::is_ordo_schema` still names as Ordo's.
+    // boot that otherwise passed. One left behind, by this or a crash, is
+    // dropped by the next gate's sweep once this hold is gone.
     let _ = pool
         .rows(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -379,6 +388,7 @@ pub async fn verify_registry(
         ))
         .await;
     drop(pool);
+    drop(hold);
     report
 }
 

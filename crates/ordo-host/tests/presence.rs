@@ -181,6 +181,9 @@ const READS: &[&str] = &[
     // A stored version as a promotion's source, with whether it was
     // activated: what `ordo promote` reads as the person promoting.
     "std.deployment.versionSource",
+    // The stored plans and their receipts; deployment owner only, home
+    // space (versions increment 8).
+    "std.deployment.plans",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

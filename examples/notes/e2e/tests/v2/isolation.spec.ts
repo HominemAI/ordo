@@ -109,7 +109,7 @@ test('a private file is never served without a token', async ({ ada, request }) 
   const file = await attachment(ada, await note(ada));
   const fetch = (handle: string) => request.get(`${stack().door}/blob/${handle}`);
   const foreign = await fetch(file.handle);
-  await refused(foreign, 404, 'not_found');
+  await refused(foreign, 403, 'access_denied');
   await sameAnswer(foreign, await fetch('0'.repeat(file.handle.length)));
 });
 
@@ -146,6 +146,8 @@ test("a person's own download holds only their tenant's rows", async ({ ada, bo 
 });
 
 test("only the owner exports a tenant, and another tenant's export is refused", async ({ ada, bo }) => {
+  const own = await write(ada, 'std.space.export', {});
+  expect(own.status(), await own.text()).toBe(200);
   const foreign = await write(bo, 'std.space.export', {}, ada.headers['X-Ordo-Space']);
   await refused(foreign, 403, 'access_denied');
   await sameAnswer(foreign, await write(bo, 'std.space.export', {}, unique('space-')));

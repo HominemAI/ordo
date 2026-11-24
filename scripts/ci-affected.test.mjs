@@ -182,7 +182,7 @@ const cases = [
   {
     name: 'teamspace: its job and its own e2e',
     files: ['examples/teamspace/teamspace.ordo'],
-    want: { examples: ' teamspace ', notes_e2e: 'false', federation_e2e: 'false' },
+    want: { examples: ' teamspace ', notes_e2e: 'false', federation_e2e: 'false', teamspace_e2e: 'true' },
   },
   {
     name: 'a lockfile: the audit',

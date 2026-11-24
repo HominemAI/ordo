@@ -286,12 +286,20 @@ fn usage() -> ! {
          say which environment this deployment is, or remove or rename one.\n      \
          The deployment's own cannot be removed, and neither can one a stored\n      \
          promotion names be removed or renamed.\n  \
-         ordo promote <version> --from <host> --reason \"<text>\" [--no-activate] --host <h>\n      \
-         the promotion gate: the target takes the version from the step before\n      \
-         (read as you), refuses what that step has not activated or what was\n      \
-         edited (naming the file), and runs its own secret and external checks\n      \
-         before storing. `ordo apply --env <name>` checks the name is registered\n      \
-         and is this deployment. Production pins only what came through the gate.\n  \
+         ordo environments door <name> <address> <its space> [--handle <h>] --reason \"<text>\"\n      \
+         where that environment's deployment answers, so the next step can\n      \
+         read a version from it. `--clear` forgets it.\n  \
+         ordo environments set skip-staging on|off --reason \"<text>\"\n      \
+         promotion.skip_staging: promote past staging from the step before it.\n  \
+         ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
+         the promotion gate: the target reads the version from the step before\n      \
+         itself, as you (a token for it from your `ordo login` sign-in, or\n      \
+         --from-token), refuses what that step has not activated or what\n      \
+         differs from what it recorded (naming the file), and runs its own\n      \
+         secret, external and reader checks before storing. `ordo apply` with\n      \
+         no --env goes to the first step of the chain (dev); `--env <name>`\n      \
+         checks the name is registered and is this deployment. Every step\n      \
+         after the first pins only what came through the gate.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \

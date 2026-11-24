@@ -1023,7 +1023,11 @@ secrets. Ruled 2026-10-08: each is served at a real address. Ruled
 - Environments are registered in config. Today's live deployment is marked
   production. A missing environment is refused with the command that
   creates it.
-- `ordo apply` targets dev by default.
+- `ordo apply` targets dev by default. **Built 2026-11-24 (owner, ask 5):**
+  dev is the first step of the chain. A deployment that registered nothing
+  is its own first step, so a single deployment applies as before. A later
+  step refuses an apply with no `--env`, naming the first step's address
+  and `ordo promote`.
 - **The target enforces the gate.** It fetches the source from the step
   before, never from the caller's tree. It recompiles, recomputes the
   source identity, and refuses on a difference, naming the differing file.
@@ -1036,7 +1040,14 @@ secrets. Ruled 2026-10-08: each is served at a real address. Ruled
 Added by the review of 2026-11-23:
 
 - **`ordo promote` goes through the target's door** (§1.8). The target
-  fetches the source through the door of the step before.
+  fetches the source through the door of the step before. **Built
+  2026-11-24:** each environment records its door (address, its own space,
+  its handle at the identity service) on the next step. The CLI asks the
+  person's sign-in for a token for the step before's handle, or takes
+  `--from-token`, and hands it to the target, which reads `versionSource`
+  there with it. The step before answers who it read; the target refuses a
+  different person. A staging deployment is gated as production is (owner,
+  2026-11-24, ask 4).
 - **Ruled 2026-11-24 (Q11):** no key to set up. The owner
   found a machine key a nuisance (*"Having to provide a key sounds like
   work"*), with GitHub-driven promotion coming. So staging reads dev's
@@ -1271,8 +1282,8 @@ round is about 35 minutes for the full suite.
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
 | 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. **Built 2026-11-23, commit 0c62ff1a:** `$environments`, `std.deployment.environments` and `registerEnvironment`, `ordo environments list\|register`. Changing which environment a deployment is, removing and renaming one (owner, 2026-11-23) built in fbc3b4c6: `set-own`, `remove`, `rename`, each with a reason and on the stream; the deployment's own and one a stored promotion names are refused. | S | 1 | a missing environment is refused with the command that creates it | none |
-| | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waits on Q11.* | | | | |
-| 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. Built: the step before, activated there, the edited file named, the target's secret and external checks before storing, the record and stream act, production pins only through the gate (history stored before the first registration still counts). **Not built:** the `requires` and reader checks (the host does not read `requires` yet), `promotion.skip_staging`, and the target's own read of the source (Q11): the source arrives as input behind `promotion::fetch_source`, and the caller's claim of what the step before activated is trusted until that read exists. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
+| | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waited on Q11, ruled 2026-11-24 and built in the finish below.* | | | | |
+| 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. **Finished 2026-11-24, c3ac5754 (owner rulings 2026-11-24):** the target reads the version from the step before's door itself, as the person promoting, with their own token for it from the same sign-in (Q11, no machine key; `step_door.rs`, the one client to another deployment's door). The gate no longer takes a source or an "activated" claim from the caller. The step before must answer as the environment the target expects and must have read the same person. `SourceCredential` is the one seam a GitHub workflow's token joins later. Each environment records its door (`ordo environments door`, `std.deployment.setEnvironmentDoor`: address, own space, identity handle). Staging is gated as production is: every step after the first pins only what arrived through the gate. `ordo apply` with no `--env` goes to the first step of the chain (dev; a deployment that registered nothing is its own first step, so it applies as before); a later step is refused naming dev's address and `ordo promote`. The reader check runs on the target (`ordo_exec::peer::check_readers`). `promotion.skip_staging` built (`ordo environments set skip-staging on`, `$promotion_settings`), named in a refusal about a staging step before. `ORDO_PROMOTION_PLAIN_HTTP` allows a plain address to another host. Tests: `crates/ordo-host/tests/promotion.rs` (real doors for dev and staging and one fake identity service; each refusal), `crates/ordo-cli/tests/promote.rs`. **Not built:** the `requires` check. The language has no `requires` yet: the parser refuses it (`ordo_syntax::auth`) and the host derives no needs (`plan-configuration-in-the-file.md` §3, step 2). The gate calls it once that step lands. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
 | 6 | **Release check.** Designed in §2.8 (review 2026-11-23), steps R1 to R3: the checked set, digests, functions under the new runtime, `auth` ranges, the `ordo release-check` mode of the one image, the boot-time run, the override. | M | 3 | an upgrade with an uncompilable version names it and its tenants, and every other tenant serves; the notes upgrade test passes through it | none |
 | 6b | **Language editions and `ordo fix`.** §2.8, step R4. | M | 6 | an old edition loads within its window and `ordo fix` rewrites it | none |
@@ -1416,7 +1427,8 @@ task `program-versions-the-core-under-schema`:
 **After the review of 2026-11-23:** 16 questions, Q1 to Q16, in
 `review-evolution-plans-2026-11-23.md`. 13 were ruled 2026-11-23 on the
 board. Q3 (tenant hotfixes beside a rollout), Q11 (how promotion reads the
-step before) and Q14 (backfill functions calling out) are asked again.
+step before) and Q14 (backfill functions calling out) were asked again; all
+three are ruled (Q11 on 2026-11-24).
 Nothing marked **Proposed** is built before its question is answered.
 
 ---

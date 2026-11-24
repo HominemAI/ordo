@@ -147,6 +147,22 @@ const CALLS: &[(&str, Rule)] = &[
             test: "promotion.rs",
         },
     ),
+    (
+        "std.deployment.setEnvironmentDoor",
+        Write {
+            act: "environment-door",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.setPromotionSetting",
+        Write {
+            act: "promotion-setting",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
     // A tenant's version, moved from the Tenants screen.
     (
         "std.deployment.pin",

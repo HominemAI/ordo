@@ -139,24 +139,23 @@ export default defineConfig({
       dependencies: ['orphans'],
       use: { ...devices['Desktop Chrome'] },
     },
-    // The signed rehearsal (plan-versions.md increment 12b): staging
-    // rehearses v3 to 0.3.3 on a clone and signs it; production refuses the
-    // step until it accepts that. It puts staging in production's chain
-    // while it runs, so it runs after `clone`. Locally,
-    // `--project=rehearsal --no-deps`.
-    {
-      name: 'rehearsal',
-      testMatch: /rehearsal\/.*\.spec\.ts/,
-      dependencies: ['clone'],
-      use: { ...devices['Desktop Chrome'] },
-    },
     // notes.body sealed on live data (plan-versions.md increment 13), from
     // v3 to 0.3.4 (versions written by the spec). It seals a field for the whole
-    // stack, so it runs after `rehearsal`, last. Locally, `--project=seal --no-deps`.
+    // stack, so it runs after `clone`. Locally, `--project=seal --no-deps`.
     {
       name: 'seal',
       testMatch: /seal\/.*\.spec\.ts/,
-      dependencies: ['rehearsal'],
+      dependencies: ['clone'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The signed rehearsal (plan-versions.md increment 12b): staging
+    // rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses
+    // the step until it accepts that. Version numbers only rise, so it runs
+    // after `seal`, last. Locally, `--project=rehearsal --no-deps`.
+    {
+      name: 'rehearsal',
+      testMatch: /rehearsal\/.*\.spec\.ts/,
+      dependencies: ['seal'],
       use: { ...devices['Desktop Chrome'] },
     },
     {

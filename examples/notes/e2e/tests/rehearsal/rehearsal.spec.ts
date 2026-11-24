@@ -6,27 +6,29 @@
  * handle `main`) and staging (handle `staging`). A new developer signs the
  * `ordo` command in to each. Every command goes through a door.
  *
- * The step is notes v3 (0.3.0) to 0.3.3, which takes `notes` off the
- * `reader note_viewer` line: the same 0.3.3 `seal` applies next, written
- * the same way, so `seal` finds it stored and its numbers still rise.
+ * The step starts from the version production serves. After `seal` that is
+ * 0.3.4 (notes.body sealed, notes off the reader line), and the step goes to
+ * 0.3.5, which adds an optional `mood`. Run alone (`--no-deps`), v3 is
+ * applied and the step is 0.3.0 to 0.3.3, which takes notes off the reader
+ * line. Version numbers only rise, so it runs after `seal`, last.
  *
- * 1. Production stores 0.3.3, not activated, before staging joins its chain.
- * 2. Staging clones Ada's tenant (on 0.3.0), stores 0.3.3 and the plan,
- *    and rehearses it on the clone: green, signed with a key staging made
+ * 1. Production stores the new version, not activated, before staging
+ *    joins its chain.
+ * 2. Staging clones Ada's tenant, stores the version and the plan, and
+ *    rehearses it on the clone: green, signed with a key staging made
  *    itself (Q11: nothing to set up).
  * 3. Production stores its own plan for the step, and running it on Ada's
  *    tenant (`ordo evolve --tenant`) is refused: staging's signature was
- *    not accepted here. The refusal names
- *    `ordo rehearsals rehearse` and `accept`.
+ *    not accepted here. The refusal names `ordo rehearsals rehearse` and
+ *    `accept`.
  * 4. Production accepts the rehearsal, read from staging as the developer:
  *    the signature checks and production renders the same digest.
  *
- * A regression looks like a step that runs unrefused, a rehearsal that
- * is not signed, or an acceptance whose digest is not staging's.
+ * A regression looks like a step that runs unrefused, a rehearsal that is
+ * not signed, or an acceptance whose digest is not staging's.
  *
- * It puts staging in production's chain and takes it out at the end, so it
- * runs after `clone` and before `seal`. Locally,
- * `--project=rehearsal --no-deps`. Chromium only.
+ * It puts staging in production's chain and takes it out at the end.
+ * Locally, `--project=rehearsal --no-deps`. Chromium only.
  */
 
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -35,7 +37,7 @@ import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { developerOfTwo, type TwoDeployments } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, servingVersion, stack, unique } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -60,18 +62,24 @@ function okOrAlready(r: { code: number; out: string; err: string }): void {
 }
 
 /**
- * Notes v3 at 0.3.3 with `notes` off the reader line, beside its `fn` code:
- * byte for byte what `seal`'s `v3As('0.3.3', false, true)` writes.
+ * Notes v3 at `version`, beside its `fn` code, written as `seal`'s `v3As`
+ * writes it: `sealed` seals notes.body, `noReader` takes notes off the
+ * reader line. `mood` adds an optional field.
  */
-function v3At033(): string {
+function v3As(version: string, sealed: boolean, noReader: boolean, mood: boolean): string {
   let src = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swap = (from: string, to: string) => {
     expect(src, `notes v3 still holds ${from}`).toContain(from);
     src = src.replace(from, to);
   };
-  swap('domain notes @ 0.3.0', 'domain notes @ 0.3.3');
-  swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
-  const dir = mkdtempSync(join(tmpdir(), 'notes-0.3.3-'));
+  swap('domain notes @ 0.3.0', `domain notes @ ${version}`);
+  if (sealed) swap('  body:  text = ""\n', '  body:  text sealed\n');
+  if (noReader) swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
+  if (mood) {
+    const body = sealed ? '  body:  text sealed\n' : '  body:  text = ""\n';
+    swap(body, `${body}  mood:  text?\n`);
+  }
+  const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
   writeFileSync(join(dir, 'notes.ordo'), src);
   cpSync(join(stack().programV3, 'fn'), join(dir, 'fn'), { recursive: true });
   return dir;
@@ -79,7 +87,8 @@ function v3At033(): string {
 
 test.afterAll(async () => {
   if (!dev) return;
-  // Production goes back to a chain of one, so `seal` applies to it.
+  // Production goes back to a chain of one, so a later apply on a reused
+  // stack goes to it.
   dev.main(['environments', 'remove', 'staging', '--reason', 'the rehearsal test is done', ...prod()]);
   await dev.close();
   dev = null;
@@ -87,13 +96,20 @@ test.afterAll(async () => {
 
 test('production refuses a plan digest staging did not sign, and accepts the one it did', async ({ browser }, testInfo) => {
   testInfo.setTimeout(300_000);
-  const dir = v3At033();
+  // After `seal`, production serves 0.3.4. Run alone, v3 is applied here.
+  if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
+    ensureServing(stack().programV2, '0.2.0');
+    applyProgram(stack().programV3);
+  }
+  const from = servingVersion() ?? '';
+  const to = from === '0.3.4' ? '0.3.5' : '0.3.3';
+  const dir = from === '0.3.4' ? v3As(to, true, true, true) : v3As(to, false, true, false);
   const d = await developerOfTwo(browser, unique('Dev'), 'staging');
   dev = d;
 
-  await test.step('production stores 0.3.3, not activated, while it is a chain of one', () => {
+  await test.step(`production stores ${to}, not activated, while it is a chain of one`, () => {
     const out = ok(d.main(['apply', dir, '--no-activate', ...prod()]));
-    expect(out).toContain('0.3.3');
+    expect(out).toContain(to);
   });
 
   await test.step('the chain: staging before production, each knows where the other answers', () => {
@@ -123,8 +139,8 @@ test('production refuses a plan digest staging did not sign, and accepts the one
   let tenant = '';
   try {
     await addNote(ada.page, unique('Rehearsed '), 'A note the rehearsal carries, masked.');
-    await test.step("staging clones Ada's tenant on 0.3.0", () => {
-      const args = ['clones', 'clone', name, '--reason', 'rehearse 0.3.3', ...staging()];
+    await test.step(`staging clones Ada's tenant on ${from}`, () => {
+      const args = ['clones', 'clone', name, '--reason', `rehearse ${to}`, ...staging()];
       let r = d.other(args);
       // notes v3 declares llmKey: staging gets its own test value first.
       const missing = /declares secrets this deployment has no value for: ([\w, ]+)\. Set each/.exec(`${r.out}${r.err}`);
@@ -140,23 +156,23 @@ test('production refuses a plan digest staging did not sign, and accepts the one
       // Her tenant's id in production, which the clone names.
       tenant = /^cloned +(\S+) from production into/m.exec(out)?.[1] ?? '';
       expect(tenant, out).not.toBe('');
-      expect(out).toMatch(/^version +0\.3\.0$/m);
+      expect(out).toMatch(new RegExp(`^version +${from.replace(/\./g, '\\.')}$`, 'm'));
     });
   } finally {
     await ada.close();
   }
 
   let signed = '';
-  await test.step('staging stores 0.3.3 and the plan, and rehearses it on the clone: green and signed', () => {
+  await test.step(`staging stores ${to} and the plan, and rehearses it on the clone: green and signed`, () => {
     ok(d.other(['apply', dir, '--no-activate', ...staging()]));
-    ok(d.other(['evolve', '--from', '0.3.0', '--to', '0.3.3', ...staging()]));
+    ok(d.other(['evolve', '--from', from, '--to', to, ...staging()]));
     const out = ok(
       d.other([
-        'rehearsals', 'rehearse', '--from', '0.3.0', '--to', '0.3.3', '--clone', space,
+        'rehearsals', 'rehearse', '--from', from, '--to', to, '--clone', space,
         '--reason', 'the reader line on a real shape', ...staging(),
       ]),
     );
-    expect(out).toMatch(/^rehearsed +0\.3\.0 to 0\.3\.3 on 1 clone\(s\), green$/m);
+    expect(out).toContain(`rehearsed   ${from} to ${to} on 1 clone(s), green`);
     expect(out).toMatch(/^signed by +staging \(key [0-9a-f]{64}\)$/m);
     signed = /^digest +(\S+)$/m.exec(out)?.[1] ?? '';
     expect(signed).toMatch(/^sha256:/);
@@ -164,10 +180,10 @@ test('production refuses a plan digest staging did not sign, and accepts the one
 
   await test.step("production refuses to run the step on Ada's tenant: staging signed nothing it accepted", () => {
     // Production's own plan for the step. Its own database already records
-    // 0.3.3 (the apply above changed no table), so the step that would run
-    // is on Ada's tenant database, still on 0.3.0.
-    ok(d.main(['evolve', '--from', '0.3.0', '--to', '0.3.3', ...prod()]));
-    const r = d.main(['evolve', '--tenant', tenant, '--to', '0.3.3', ...prod()]);
+    // the new version (the apply above made its additive changes), so the
+    // step that would run is on Ada's tenant database, still on `from`.
+    ok(d.main(['evolve', '--from', from, '--to', to, ...prod()]));
+    const r = d.main(['evolve', '--tenant', tenant, '--to', to, ...prod()]);
     expect(r.code, r.out).not.toBe(0);
     const said = `${r.out}${r.err}`;
     expect(said).toContain('plan_not_rehearsed');
@@ -176,10 +192,10 @@ test('production refuses a plan digest staging did not sign, and accepts the one
   });
 
   await test.step("production accepts staging's rehearsal: read as the developer, the same digest", () => {
-    const out = ok(d.main(['rehearsals', 'accept', '--from', '0.3.0', '--to', '0.3.3', ...prod()]));
-    expect(out).toMatch(/^accepted +0\.3\.0 to 0\.3\.3, rehearsed on staging$/m);
+    const out = ok(d.main(['rehearsals', 'accept', '--from', from, '--to', to, ...prod()]));
+    expect(out).toContain(`accepted    ${from} to ${to}, rehearsed on staging`);
     expect(out).toContain(`digest      ${signed}`);
     const list = ok(d.main(['rehearsals', 'list', ...prod()]));
-    expect(list).toContain(`0.3.0 to 0.3.3  ${signed}  from staging`);
+    expect(list).toContain(`${from} to ${to}  ${signed}  from staging`);
   });
 });

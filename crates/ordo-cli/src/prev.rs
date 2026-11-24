@@ -105,7 +105,7 @@ mod tests {
         let file = dir.join("app.ordo");
         std::fs::write(
             &file,
-            "domain app @ 1.0.0\n\nentity notes (key: note, prev: memos) {\n  heading: text prev(title)\n  body: text?\n}\n",
+            "domain notes @ 1.0.0\n\nentity notes (key: note, prev: memos) {\n  heading: text prev(title)\n  body: text?\n}\n",
         )
         .unwrap();
         let report = format!(
@@ -118,7 +118,7 @@ mod tests {
         let after = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             after,
-            "domain app @ 1.0.0\n\nentity notes (key: note) {\n  heading: text\n  body: text?\n}\n"
+            "domain notes @ 1.0.0\n\nentity notes (key: note) {\n  heading: text\n  body: text?\n}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -131,13 +131,13 @@ mod tests {
         let file = dir.join("app.ordo");
         std::fs::write(
             &file,
-            "domain app @ 1.0.0\n\nentity notes (prev: memos) {\n  body: text?\n}\n",
+            "domain notes @ 1.0.0\n\nentity notes (prev: memos) {\n  body: text?\n}\n",
         )
         .unwrap();
         remove(&file, &["notes (prev: memos)".to_string()]).unwrap();
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "domain app @ 1.0.0\n\nentity notes {\n  body: text?\n}\n"
+            "domain notes @ 1.0.0\n\nentity notes {\n  body: text?\n}\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

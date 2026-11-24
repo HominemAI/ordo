@@ -2883,10 +2883,14 @@ pub fn safe_changes_value(v: Option<&str>) -> Option<bool> {
     }
 }
 
-/// A change that cannot lose or reject data: class A, or a foreign key
-/// that arrives on a table this same plan creates (so it holds no rows).
+/// A change that cannot lose or reject data: class A, a foreign key
+/// that arrives on a table this same plan creates (so it holds no rows), or
+/// a field rename the program declares with `prev` (§5 B4,
+/// `plan-syntax-additions.md` §5): the values are copied and the old column
+/// is kept, so nothing is lost and a revert reads it again.
 fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
     match c {
+        Change::RenameField { .. } => true,
         Change::AddForeignKey { entity, .. } => all
             .iter()
             .any(|o| matches!(o, Change::AddEntity { entity: e } if e == entity)),

@@ -3,7 +3,7 @@ import { DEFAULT_LIVE_PACE_MS, LiveHub, createPacer, effectivePaceMs, type LiveS
 import { useOrdoRuntime } from '../src/hooks/context.js';
 import { useOpPages } from '../src/hooks/useOpPages.js';
 import { useOpQuery } from '../src/hooks/useOpQuery.js';
-import { LiveDoor, mount, settle, until, type Mounted } from './live-door.js';
+import { LiveDoor, mount, settle, sse, until, type Mounted } from './live-door.js';
 
 const rowsOf = (...titles: string[]) => ({
   body: { rows: titles.map((title, i) => ({ id: `task_${i + 1}`, title })) },
@@ -49,6 +49,58 @@ describe('live: the hub and the stream it shares', () => {
     expect(statuses.get('boards')?.at(-1)).toEqual({ state: 'open' });
     expect(statuses.get('tasks')?.at(-1)).toEqual({ state: 'open' });
     expect(hub.connected).toBe(true);
+  });
+
+  it('a version_changed frame reconnects at once, adds every read again, and invalidates it', async () => {
+    // The tenant moved to another program version (plan-versions.md §1.4).
+    // The frame's class is `space_unavailable`, a standing answer anywhere
+    // else; the hub knows the frame by its name and never stops for it.
+    const door = new LiveDoor();
+    const wait = vi.fn(async () => undefined);
+    const hub = new LiveHub(door.client(), { wait });
+    const seen: LiveStatus[] = [];
+    let invalidated = 0;
+    hub.subscribe(TASKS, {}, { invalidate: () => (invalidated += 1), status: (s) => seen.push(s) });
+    await until(() => door.live.length === 1, 'the stream to open');
+    door.ready();
+    await until(() => door.readsOf(TASKS).length === 1, 'the read');
+    const before = invalidated;
+
+    const stream = door.live[0]!;
+    stream.push(
+      sse('version_changed', {
+        error: { code: 'space_unavailable', message: 'the version changed; open it again' },
+      }),
+    );
+    stream.close();
+    await until(() => door.live.length === 2, 'a second stream');
+    // The normal backoff, from its first step: no wait.
+    for (const call of wait.mock.calls as unknown as [number][]) expect(call[0]).toBe(0);
+    door.ready();
+    await until(() => door.readsOf(TASKS).length === 1 && seen.at(-1)?.state === 'open', 'the read again');
+    expect(seen.some((s) => s.state === 'failed')).toBe(false);
+    expect(invalidated).toBeGreaterThan(before);
+  });
+
+  it('after a version change, space_unavailable on the re-add is a wait, not a failure', async () => {
+    const door = new LiveDoor();
+    const hub = new LiveHub(door.client(), { backoff: () => 0 });
+    const seen: LiveStatus[] = [];
+    hub.subscribe(TASKS, {}, { invalidate: () => undefined, status: (s) => seen.push(s) });
+    await until(() => door.live.length === 1, 'the stream to open');
+    door.ready();
+    await until(() => door.readsOf(TASKS).length === 1, 'the read');
+
+    // The door is bringing the tenant to the new version: the first re-add
+    // answers "closed for a moment".
+    door.refuseRead(TASKS, 503, 'space_unavailable');
+    const stream = door.live[0]!;
+    stream.push(sse('version_changed', { error: { code: 'space_unavailable', message: 'open it again' } }));
+    stream.close();
+    await until(() => door.live.length === 2, 'a second stream');
+    door.ready();
+    await until(() => seen.at(-1)?.state === 'open', 'the read open again');
+    expect(seen.some((s) => s.state === 'failed')).toBe(false);
   });
 
   it('an error frame with a renewable token reconnects at once with the new one', async () => {

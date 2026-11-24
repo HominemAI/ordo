@@ -102,6 +102,10 @@ fn usage() -> ! {
          rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
          stored version, follow it, and control it. `ordo rollout` alone\n      \
          prints each subcommand.\n  \
+         ordo evolve --orphans\n      \
+         what versions left behind in every database (`std.deployment.orphans`).\n  \
+         ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
+         remove an orphan from every database, asked twice (`std.deployment.prune`).\n  \
          ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
          run from the new image before its tag changes: every version a\n      \
          tenant is pinned to or may move to must compile and load under\n      \
@@ -153,7 +157,7 @@ fn usage() -> ! {
          `deploys`, `usage`, `triggers`, `prune`, `revert` and `checkpoint`\n\
          still open the database (`--db <name>`, no `--direct`);\n         they move to the door next.\n  \
          ordo apply     <dir|file.ordo> --host <h> | --direct [--as <actor>] [--no-activate]\n                \
-         [--bump] [--label \"<text>\"]\n      \
+         [--bump] [--remove-landed-prev] [--label \"<text>\"]\n      \
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
@@ -163,6 +167,8 @@ fn usage() -> ! {
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \
          `--bump` writes that number into the source and applies again.\n      \
+         A clean apply names each `prev` mark whose rename has landed in\n      \
+         every environment; `--remove-landed-prev` cuts them from the source.\n      \
          `--label` stores a label with the version: one line, at most 80\n      \
          characters. The git commit of the source is recorded too, with\n      \
          `-dirty` when the applied files changed since it; outside a git\n      \
@@ -307,12 +313,14 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
-         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
          seals each clone to it. clone.mask names the fields that leave\n      \
          production unmasked (deny by default, `off` to opt out);\n      \
-         clone.readers names who besides staging's admins opens a clone.\n  \
+         clone.readers names who besides staging's admins opens a clone.\n      \
+         clone.sinks: `on` (default) sends every staging tenant's mail and\n      \
+         function calls to the sink, `clones` only the clones'; `sink` reads it.\n  \
          ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \

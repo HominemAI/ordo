@@ -582,6 +582,13 @@ At issue time the door refuses `$ops` outside the profile
 
 ## 5 · `prev`: renames and correspondence across versions
 
+**Built 2026-11-23** (`plan-versions.md` increment 15): the spelling below,
+the 3 compile checks, the plan checks, the CDK, and the offer to remove a
+landed mark. Added in the build: `prev_sealed` (a sealed field cannot be
+copied under a new name) and `prev_mapping_required` (a merge or a move,
+refused until the plan offers a mapping). An entity rename renders and is
+refused until increment 10b. See `definition-language.md`, "`prev`".
+
 **What it is.** A declaration that a renamed entity or field is the same
 thing as a name in the previous version, so the plan renders a rename and
 never a drop-and-add. Ruled 2026-10-01 (`forward-gaps` asks 6, 8, 18;

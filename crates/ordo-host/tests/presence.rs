@@ -189,12 +189,18 @@ const READS: &[&str] = &[
     // Where the open or newest rollout stands, and its tenants; deployment
     // owner only, home space (versions increment 10).
     "std.deployment.rollout.status",
+    // What versions left behind in every database, and the tombstones;
+    // deployment owner only, home space (versions increment 14).
+    "std.deployment.orphans",
     // Staging's public clone key, which production seals a clone to. Public
     // by design; made on first read (versions increment 12).
     "std.deployment.cloneKey",
     // The clones this deployment holds and the clone settings; deployment
     // owner only, home space.
     "std.deployment.clones",
+    // What the staging clones would have sent (mail, push, egress), held
+    // in the sink; deployment owner only, home space (increment 12).
+    "std.deployment.sinks",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

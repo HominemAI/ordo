@@ -17,6 +17,12 @@
 //!   tenant's database, then pins it (`std.deployment.replay`).
 //! - `ordo evolve --list [--from X] [--to Y]` lists the stored plans
 //!   (`std.deployment.plans`).
+//! - `ordo evolve --orphans` lists what versions left behind in every
+//!   database, with drop dates and tombstones (`std.deployment.orphans`).
+//! - `ordo evolve --prune <entity.field>` shows what pruning would remove,
+//!   and removes it only when asked twice: `--confirm <entity.field>`, and in
+//!   production `--confirm-deployment <name>` (`std.deployment.prune`,
+//!   increment 14). On a terminal it asks for both instead.
 //!
 //! None opens a database connection (owner, 2026-11-05: the CLI goes
 //! through the door).
@@ -42,7 +48,13 @@ ordo evolve --tenant <id> [--to <version>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent).
 ordo evolve --list [--from <version>] [--to <version>]  --host <h> ...
-    the stored plans.";
+    the stored plans.
+ordo evolve --orphans  --host <h> ...
+    what versions left behind in every database: each orphan, its drop date, and the tombstones.
+ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]  --host <h> ...
+    what pruning would remove, then, asked twice, remove it from every database and keep a
+    tombstone. Production also asks for the deployment's name. Off in production until
+    `ordo environments set prune on --reason \"...\"`.";
 
 /// `ordo evolve`.
 pub(crate) async fn run(flags: Flags) -> Outcome {
@@ -57,6 +69,10 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--list",
         "--tenant",
         "--approve-sign-in-removal",
+        "--orphans",
+        "--prune",
+        "--confirm",
+        "--confirm-deployment",
     ];
     allowed.extend(crate::operator::DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
@@ -68,6 +84,12 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
     };
     if flags.has("--list") {
         return list(&host, &flags).await;
+    }
+    if flags.has("--orphans") {
+        return orphans(&host, &flags).await;
+    }
+    if let Some(name) = flags.named_value("--prune") {
+        return prune(&host, &flags, name).await;
     }
     if flags.has("--tenant") {
         return replay(&host, &flags).await;
@@ -123,6 +145,9 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "READER     {}\n",
             r["line"].as_str().unwrap_or("?")
         ));
+    }
+    for w in row["warnings"].as_array().into_iter().flatten() {
+        out.push_str(&format!("WARNING    {}\n", w.as_str().unwrap_or("?")));
     }
     if let Some(s) = row["signIn"].as_object() {
         out.push_str(&format!(
@@ -364,6 +389,160 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
         ));
     }
     Outcome::ok(out)
+}
+
+async fn orphans(host: &crate::wire::Host, flags: &Flags) -> Outcome {
+    let row = match crate::wire::door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::ORPHANS,
+        serde_json::json!({}),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = String::new();
+    for d in row["databases"].as_array().into_iter().flatten() {
+        let db = d["database"].as_str().unwrap_or("?");
+        if let Some(e) = d["error"].as_str() {
+            out.push_str(&format!("database `{db}`: not read: {e}\n"));
+            continue;
+        }
+        for o in d["orphans"].as_array().into_iter().flatten() {
+            let name = o["name"].as_str().unwrap_or("?");
+            let when = |k: &str| {
+                o[k].as_u64()
+                    .map(ordo_host::versions::utc_minute)
+                    .unwrap_or_else(|| "-".into())
+            };
+            if o["prunedAt"].is_null() {
+                out.push_str(&format!(
+                    "ORPHAN     {name}  database `{db}`  left by {}  since {}  drop date {}{}{}\n",
+                    o["to"].as_str().unwrap_or("?"),
+                    when("orphanedAt"),
+                    when("dropAfter"),
+                    if o["due"].as_bool() == Some(true) {
+                        " (due)"
+                    } else {
+                        ""
+                    },
+                    if o["sealed"].as_bool() == Some(true) {
+                        "  sealed"
+                    } else {
+                        ""
+                    },
+                ));
+            } else {
+                out.push_str(&format!(
+                    "PRUNED     {name}  database `{db}`  at {} by {}\n",
+                    when("prunedAt"),
+                    o["prunedBy"].as_str().unwrap_or("?"),
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("no orphans: no version left a field or an entity behind\n");
+    }
+    Outcome::ok(out)
+}
+
+/// Ask on the terminal, when there is one. `None` off a terminal.
+fn ask(question: &str) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    eprint!("{question}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok()?;
+    Some(line.trim().to_string())
+}
+
+async fn prune(host: &crate::wire::Host, flags: &Flags, name: &str) -> Outcome {
+    let call = |confirm: Option<String>, deployment: Option<String>| {
+        crate::wire::door_op(
+            host,
+            flags,
+            ordo_host::deploy_ops::PRUNE,
+            serde_json::json!({
+                "name": name,
+                "confirm": confirm,
+                "confirmDeployment": deployment,
+            }),
+            true,
+        )
+    };
+    let mut confirm = flags.named_value("--confirm").map(str::to_string);
+    let mut deployment = flags
+        .named_value("--confirm-deployment")
+        .map(str::to_string);
+    let first = match call(confirm.clone(), deployment.clone()).await {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = prune_lines(&first);
+    if first["pruned"].as_bool() == Some(true) {
+        return Outcome::ok(out);
+    }
+    // The second ask, typed at apply time.
+    let production = first["environment"].as_str() == Some("production");
+    if confirm.is_none() {
+        print!("{out}");
+        out.clear();
+        confirm = ask(&format!("Type `{name}` to prune it from every database: "));
+        if confirm.is_some() && production && deployment.is_none() {
+            deployment = ask("This is production. Type the deployment's name: ");
+        }
+    }
+    if confirm.is_none() {
+        out.push_str(&format!(
+            "nothing was pruned. To prune it, ask again: {}\n",
+            first["confirm"].as_str().unwrap_or("?")
+        ));
+        return Outcome::ok(out);
+    }
+    match call(confirm, deployment).await {
+        Ok(r) => Outcome::ok(format!("{out}{}", prune_lines(&r))),
+        Err(o) => o,
+    }
+}
+
+fn prune_lines(row: &serde_json::Value) -> String {
+    let name = row["name"].as_str().unwrap_or("?");
+    let pruned = row["pruned"].as_bool() == Some(true);
+    let mut out = String::new();
+    for d in row["databases"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{}  {name}  database `{}`  {} row(s) hold a value\n",
+            if pruned { "PRUNED     " } else { "WOULD PRUNE" },
+            d["database"].as_str().unwrap_or("?"),
+            d["rows"].as_i64().unwrap_or(0),
+        ));
+    }
+    for d in row["notRead"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "not read   database `{}`: {}\n",
+            d["database"].as_str().unwrap_or("?"),
+            d["why"].as_str().unwrap_or("?")
+        ));
+    }
+    for r in row["readers"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "READER     {} reads this table; it loses the column\n",
+            r.as_str().unwrap_or("?")
+        ));
+    }
+    if pruned {
+        out.push_str(&format!(
+            "pruned     {name}: removed, with what was written to it; a tombstone is kept\n"
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

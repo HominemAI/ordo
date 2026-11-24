@@ -107,6 +107,7 @@ const SWITCHES: &[&str] = &[
     "--dry-run",
     "--no-activate",
     "--bump",
+    "--remove-landed-prev",
     "--no-wait",
     "--apply",
     "--record",
@@ -142,7 +143,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
-        "evolve" => &["--run", "--list"],
+        "evolve" => &["--run", "--list", "--orphans"],
         "rollout" => &["--clear"],
         "release-check" => &["--json", "--override"],
         _ => &[],
@@ -1840,6 +1841,9 @@ fn floor_report(f: &ordo_exec::prune::Floor, policy: &ordo_exec::cadence::LogPol
 /// file is changed only on that refusal, and only with `--bump`.
 async fn apply(flags: Flags) -> Outcome {
     let first = apply_once(&flags).await;
+    if first.code == 0 && flags.has("--remove-landed-prev") {
+        return remove_landed_prev(&flags, first);
+    }
     if first.code == 0 || !flags.has("--bump") {
         return first;
     }
@@ -1865,6 +1869,35 @@ async fn apply(flags: Flags) -> Outcome {
     }
 }
 
+/// `--remove-landed-prev`: after a clean apply, cut the `prev` marks it
+/// named as landed out of the source (ruled 2026-10-04).
+fn remove_landed_prev(flags: &Flags, done: Outcome) -> Outcome {
+    let marks = crate::prev::read_landed(&done.report);
+    if marks.is_empty() {
+        return Outcome::ok(format!(
+            "{}prev       no `prev` mark has landed everywhere yet\n",
+            done.report
+        ));
+    }
+    let Some(path) = flags.positional.first() else {
+        return done;
+    };
+    match crate::prev::remove(std::path::Path::new(path), &marks) {
+        Ok(cut) => {
+            let mut out = done.report;
+            for at in cut {
+                out.push_str(&format!("removed    a landed `prev` mark at {at}\n"));
+            }
+            out.push_str("           apply again to store the source without it\n");
+            Outcome::ok(out)
+        }
+        Err(e) => Outcome::failed(format!(
+            "{}REFUSED  --remove-landed-prev: {e}\n",
+            done.report
+        )),
+    }
+}
+
 /// Raise `domain … @ from` to `to` in whichever file under `path` holds the
 /// header, and name that file.
 fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, String> {
@@ -1885,6 +1918,7 @@ fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, S
 async fn apply_once(flags: &Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--bump",
+        "--remove-landed-prev",
         "--label",
         "--db",
         "--as",
@@ -2176,7 +2210,7 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
 /// `path` and `db` are the caller's own facts rather than the report's —
 /// the server does not know what the operator called the file or the
 /// database — so the remedies that name a command are built here.
-pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _db: &str) -> String {
+pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db: &str) -> String {
     use ordo_host::apply_op::{Activation, SchemaOutcome, Stored};
 
     let mut out = String::new();
@@ -2284,6 +2318,18 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
                  forward; the deployment retries the ones that were unreachable\n",
             );
         }
+    }
+    // The offer to remove landed `prev` marks (ruled 2026-10-04).
+    for mark in &report.landed_prev {
+        out.push_str(&format!(
+            "{}`{mark}` has landed in every environment; the mark can go\n",
+            crate::prev::LANDED
+        ));
+    }
+    if !report.landed_prev.is_empty() {
+        out.push_str(&format!(
+            "           remove them with `ordo apply {path} --remove-landed-prev`\n"
+        ));
     }
     out
 }
@@ -2599,10 +2645,11 @@ const CLONES_USAGE: &str = "ordo clones key  --host <h> ...\n\
      ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] \
      --reason \"<text>\"  --host <h> ...\n\
      ordo clones list  --host <h> ...\n\
-     ordo clones set mask|readers <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones set mask|readers|sinks <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones sink [<tenant>] [--limit <n>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
-/// `ordo clones key|set-key|clone|list|set`: staging clones named
+/// `ordo clones key|set-key|clone|list|set|sink`: staging clones named
 /// production tenants (`plan-versions.md` §3.4, increment 12), through the
 /// door. `clone` runs on staging: staging asks production for the tenant as
 /// you, with your own token for production, and production masks it before
@@ -2615,12 +2662,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
     flags.positional.remove(0);
     let own: &[&str] = match sub.as_str() {
         "key" | "list" => &[],
+        "sink" => &["--limit"],
         "set-key" | "set" => &["--reason"],
         "clone" => &["--from", "--name", "--from-token", "--reason"],
         other => {
             return Outcome::usage(format!(
                 "unknown `ordo clones` subcommand `{other}`; there are `key`, `set-key`, \
-                 `clone`, `list` and `set`\n{CLONES_USAGE}\n"
+                 `clone`, `list`, `set` and `sink`\n{CLONES_USAGE}\n"
             ))
         }
     };
@@ -2643,6 +2691,23 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         ("list", []) => {
             crate::wire::door_op(&host, &flags, c::CLONES, serde_json::json!({}), false).await
+        }
+        ("sink", rest) if rest.len() <= 1 => {
+            let limit = match flags.named_value("--limit").map(str::parse::<u32>) {
+                None => None,
+                Some(Ok(n)) => Some(n),
+                Some(Err(_)) => {
+                    return Outcome::usage("`--limit <n>` takes a whole number\n".into())
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::SINKS,
+                serde_json::json!({ "tenant": rest.first(), "limit": limit }),
+                false,
+            )
+            .await
         }
         ("set-key", [env, key]) => {
             let Some(reason) = reason else {
@@ -2717,6 +2782,26 @@ async fn clones_cmd(flags: Flags) -> Outcome {
             row["env"].as_str().unwrap_or("?"),
             row["key"].as_str().unwrap_or("?"),
         ),
+        "sink" => {
+            let entries = row["entries"].as_array().cloned().unwrap_or_default();
+            if entries.is_empty() {
+                "SINK  empty: nothing in staging has sent anything\n".to_string()
+            } else {
+                let mut out = String::from("SINK  what staging would have sent, newest first\n");
+                for e in entries {
+                    out.push_str(&format!(
+                        "  {}  {}  {}  to {}  \"{}\"  {} bytes\n",
+                        e["at"].as_u64().unwrap_or(0),
+                        e["space"].as_str().unwrap_or("?"),
+                        e["kind"].as_str().unwrap_or("?"),
+                        e["target"].as_str().unwrap_or("?"),
+                        e["summary"].as_str().unwrap_or(""),
+                        e["bytes"].as_u64().unwrap_or(0),
+                    ));
+                }
+                out
+            }
+        }
         "set-key" => format!(
             "recorded    the clone key of {}\n",
             row["env"].as_str().unwrap_or("?")
@@ -2747,6 +2832,12 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 masked,
                 cl["opensAs"].as_str().unwrap_or("?"),
             );
+            if let Some(v) = row["arrived"].as_str() {
+                out.push_str(&format!(
+                    "arrived     {v} came down with the clone, through the promotion gate: \
+                     stored, not activated\n"
+                ));
+            }
             if let Some(n) = row["notCloned"].as_array().filter(|a| !a.is_empty()) {
                 out.push_str(&format!(
                     "not cloned  {} (foreign tables: staging needs its own copy and peer)\n",
@@ -2760,11 +2851,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         _ => {
             let mut out = format!(
-                "{} {}\n{} {}\nCLONES\n",
+                "{} {}\n{} {}\n{} {}\nCLONES\n",
                 c::MASK_SETTING,
                 row["mask"].as_str().unwrap_or("?"),
                 c::READERS_SETTING,
                 readers_line(&row["readers"]),
+                c::SINKS_SETTING,
+                row["sinks"].as_str().unwrap_or("on"),
             );
             for cl in row["clones"].as_array().cloned().unwrap_or_default() {
                 out.push_str(&format!(

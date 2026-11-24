@@ -112,6 +112,7 @@ pub async fn serve(target_db: &str) -> std::net::SocketAddr {
             .with_clones(Arc::new(ordo_host::clones::CloneOps {
                 apply,
                 keys: clone_keys,
+                tenants: None,
                 access: ordo_host::clones::CloneAccess::new(),
             }))
             .with_tenant_list(Arc::new(ordo_host::fleet::TenantListOps {

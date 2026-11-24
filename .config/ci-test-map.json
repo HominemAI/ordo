@@ -442,6 +442,7 @@
     "crates/ordo-host/src/node_status.rs": "all",
     "crates/ordo-host/src/observed_cost.rs": "all",
     "crates/ordo-host/src/oidc.rs": "all",
+    "crates/ordo-host/src/orphan_ops.rs": "all",
     "crates/ordo-host/src/own_download.rs": [
       "marketing_site_app",
       "notes_app",
@@ -458,6 +459,7 @@
     "crates/ordo-host/src/pin_stream.rs": "all",
     "crates/ordo-host/src/platform_ops.rs": "all",
     "crates/ordo-host/src/presence.rs": "all",
+    "crates/ordo-host/src/prev_offer.rs": "all",
     "crates/ordo-host/src/principal_directory.rs": "all",
     "crates/ordo-host/src/profile_ops.rs": "all",
     "crates/ordo-host/src/precheck.rs": "all",
@@ -524,6 +526,7 @@
     "crates/ordo-host/src/share_accept.rs": "all",
     "crates/ordo-host/src/share_links.rs": "all",
     "crates/ordo-host/src/share_ops.rs": "all",
+    "crates/ordo-host/src/sinks.rs": "all",
     "crates/ordo-host/src/spaces.rs": "all",
     "crates/ordo-host/src/step_door.rs": "all",
     "crates/ordo-host/src/supervisor.rs": "all",

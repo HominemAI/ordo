@@ -57,6 +57,17 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
+    // notes stops writing a column the viewer reads (plan-versions.md,
+    // increment 14). It changes notes' program again, so it runs after v3.
+    {
+      name: 'orphans',
+      testMatch: /orphans\/.*\.spec\.ts/,
+      dependencies: ['v3'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
   ],
   webServer: {
     command: 'bash stack.sh',

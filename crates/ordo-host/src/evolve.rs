@@ -515,6 +515,9 @@ pub struct Rendered {
     pub digest: String,
     /// F1: the readers of each table the step changes. Outside the digest.
     pub readers: Vec<ReaderNotice>,
+    /// `prev_stale`: marks whose rename X already has. Warnings, never
+    /// refusals, and outside the digest.
+    pub warnings: Vec<String>,
 }
 
 /// The digest of a receipt: SHA-256 of its canonical bytes, as
@@ -581,6 +584,31 @@ pub async fn render_stored(
 ) -> Result<Rendered, EvolveRefusal> {
     let x = compiled(a)?;
     let y = compiled(b)?;
+    // The `prev` marks against X (`plan-syntax-additions.md` §5): a mark the
+    // step cannot make refuses the render; a landed one is a warning.
+    let prev = ordo_schema::prev::check(Some(&x.schema), &y.schema);
+    if !prev.errors.is_empty() {
+        return Err(EvolveRefusal::Errors {
+            from: a.version.clone(),
+            to: b.version.clone(),
+            errors: prev
+                .errors
+                .iter()
+                .map(|i| PlanError {
+                    code: "B4".into(),
+                    change: format!("`{}`", i.mark.text()),
+                    class: i.class.to_string(),
+                    why: i.message.clone(),
+                    fix: i.fix.clone(),
+                })
+                .collect(),
+        });
+    }
+    let warnings: Vec<String> = prev
+        .stale
+        .iter()
+        .map(|i| format!("{}: {}; {}", i.class, i.message, i.fix))
+        .collect();
     let live = x_shape(pool, &a.ddl).await?;
     let changes = ordo_schema::diff_with(&live, Some(&x.schema), Some(&x.schema), &y.schema);
     // A fill for a field the step neither adds required nor makes required
@@ -688,7 +716,7 @@ pub async fn render_stored(
         "from": { "version": a.version, "sourceId": x.source_id },
         "to": { "version": b.version, "sourceId": y.source_id },
         "options": options_text(options),
-        "changes": changes.iter().map(|c| change_json(c, &y, options)).collect::<Vec<_>>(),
+        "changes": changes.iter().map(|c| change_json(c, &x, &y, options)).collect::<Vec<_>>(),
         "forward": forward,
     });
     // Present only when the step backfills, so every plan stored before
@@ -741,6 +769,7 @@ pub async fn render_stored(
         receipt,
         digest,
         readers,
+        warnings,
     })
 }
 
@@ -948,7 +977,7 @@ fn fix_for(c: &Change, class: &str) -> String {
 }
 
 /// One change as the receipt lists it.
-fn change_json(c: &Change, y: &Program, options: &Choices) -> Value {
+fn change_json(c: &Change, x: &Program, y: &Program, options: &Choices) -> Value {
     let option = match c {
         Change::ChangePlaces { entity, field, .. } => options
             .places_for(entity, field)
@@ -956,7 +985,7 @@ fn change_json(c: &Change, y: &Program, options: &Choices) -> Value {
             .unwrap_or(Value::Null),
         _ => Value::Null,
     };
-    let (reverse, why) = reverse_of(c, y);
+    let (reverse, why) = reverse_of(c, x, y);
     json!({
         "code": c.code(),
         "class": c.class().to_string(),
@@ -969,7 +998,7 @@ fn change_json(c: &Change, y: &Program, options: &Choices) -> Value {
 }
 
 /// A change's reverse: the statements, or none and why.
-fn reverse_of(c: &Change, y: &Program) -> (Vec<String>, Option<String>) {
+fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<String>) {
     use ordo_schema::ddl::q;
     let drop_constraint = |entity: &str, object: &str| {
         format!("ALTER TABLE {} DROP CONSTRAINT {};", q(entity), q(object))
@@ -1009,6 +1038,46 @@ fn reverse_of(c: &Change, y: &Program) -> (Vec<String>, Option<String>) {
             Vec::new(),
             Some("orphaned: the column is kept, so the reverse serves it again".into()),
         ),
+        // The rename read backwards: what the new version wrote is copied
+        // back into the old column, which was kept, and the new one goes.
+        Change::RenameField {
+            entity,
+            from,
+            field,
+        } => {
+            let t = q(entity);
+            let new = y
+                .schema
+                .native(entity)
+                .and_then(|e| e.field(field))
+                .map(|f| f.column())
+                .unwrap_or_else(|| field.clone());
+            // The sync trigger goes first, so the copy back is not mirrored.
+            let sync = q(&crate::schema_apply::rename_sync_name(entity, &new));
+            let mut out = vec![
+                format!("DROP TRIGGER IF EXISTS {sync} ON {t};"),
+                format!("DROP FUNCTION IF EXISTS {sync}();"),
+                format!("UPDATE {t} SET {} = {};", q(from), q(&new)),
+            ];
+            let old = x.schema.native(entity).and_then(|e| e.field(from));
+            if old.is_some_and(|f| !f.optional) {
+                out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;",
+                    q(from)
+                ));
+            }
+            if let Some(d) = old.and_then(|f| ordo_schema::ddl::column_default(f).ok().flatten()) {
+                out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {} SET DEFAULT {d};",
+                    q(from)
+                ));
+            }
+            out.push(format!("ALTER TABLE {t} DROP COLUMN {};", q(&new)));
+            (
+                out,
+                Some("the rename read backwards: the old column was kept, and gets back what was written to the new one".into()),
+            )
+        }
         Change::ChangePlaces { .. } | Change::ChangeType { .. } => (
             Vec::new(),
             Some("the reverse is the stored plan from the later version back, with the same option".into()),
@@ -1030,10 +1099,16 @@ fn reader_notices(x: &Program, y: &Program, changes: &[Change], at: u64) -> Vec<
     for c in changes {
         let (table, field) = match c {
             Change::DropField { entity, field }
+            | Change::RenameField {
+                entity,
+                from: field,
+                ..
+            }
             | Change::ChangeType { entity, field, .. }
             | Change::SealField { entity, field }
             | Change::UnsealField { entity, field } => (entity, Some(field.clone())),
             Change::DropEntity { entity } => (entity, None),
+            Change::RenameEntity { from, .. } => (from, None),
             _ => continue,
         };
         for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
@@ -1246,6 +1321,7 @@ impl Evolved {
                 "change": r.change, "grantEndsNotBefore": r.grant_ends_not_before,
                 "line": r.line(),
             })).collect::<Vec<_>>(),
+            "warnings": self.rendered.warnings,
             "signIn": self.sign_in.as_ref().map(crate::precheck::SignInRemoval::to_json),
         })
     }
@@ -1704,6 +1780,11 @@ pub async fn run_step_with(
         .await
         .map_err(|e| run_err("internal", e, true))?;
     }
+    // What the step leaves behind (§2.7): a removed field or entity is
+    // orphaned, and `$orphans` records it for erasure, export and pruning.
+    sa::record_orphans(target, &x.schema, &y, Some(&plan.from), actor)
+        .await
+        .map_err(|e| run_err("internal", e, true))?;
     Ok(StepRun::Ran {
         statements,
         backfills: reports,

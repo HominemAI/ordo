@@ -445,21 +445,36 @@ Ruled 2026-11-02 (D7).
 - The owner's exception, a migration rule for the shared subset, is a later
   item.
 
-**Not built in the increment 3 remainder** (2026-11-23). What was found:
+What PR 40 found (2026-11-23): consented feeds (the copy) are not built,
+and a window calls the owner's op in the owner's tenant, so the owner's
+version already decides the read. The gap was the pins: the access engine
+held one manifest per op, the active version's, so a share made in a
+tenant on X was pinned to the active version's shape.
 
-- Consented feeds (the copy) are not built, so there is no feed to compare.
-- A window (a guest's share) calls the owner's op in the owner's tenant,
-  so the owner's version already decides the read.
-- The gap is the pins. A share and a capability grant pin each op's
-  manifest and guards, and the door's drift check compares against them.
-  Both come from the access engine, which holds one manifest per op: the
-  active version's (§1.4, session 1). So a share made in a tenant on X is
-  pinned to the active version's shape, and the drift check for a tenant
-  on X compares against the active version, not X.
-- `versions_disagree` belongs there: the engine holds manifests per
-  version, a grant records the version it was pinned under, and a call in
-  a tenant on another version compares the fields read. That changes the
-  access engine (`ordo-identity`) and is its own session.
+**Built 2026-11-23** (d00afde0, `ordo-identity` `access.rs`, `pins.rs`):
+
+- The engine holds each served version's op manifests
+  (`deploy_op_in`), and asks the node which version serves a tenant
+  (`set_tenant_versions`, wired from the pins in `runtime.rs`). Platform
+  ops and functions are in every version.
+- A share or grant made in a tenant pins that tenant's version. Each pin
+  records the version (`pins.v2`); a pin with none encodes as `pins.v1`.
+- A grant called in a tenant on the version it was pinned under, or with
+  no recorded version, is compared as before (`ManifestChanged`).
+- A grant called in a tenant now on another version meets D7. Fewer fields
+  read, or an entity no longer reached, keeps sharing. A field more, an
+  entity newly reached, a tree walk, or **any** guard, `$caller` or
+  `unguarded` difference refuses as `versions_disagree`. A tighter guard
+  refuses too: across versions the guards must match, where one
+  version's redeploy lets a narrowing apply silently.
+- The door says `versions_disagree` (409) to the grant's holder only,
+  naming both versions, the op, the entity and the fix (share again, or
+  `ordo versions pin`). The security stream records `VersionsDisagree`.
+- Not compared: release and sealing. The pin carries neither, so a
+  version that seals a shared field is not caught here. Left, with the
+  dual-write shape during a move and moving share partners together.
+- Tests: `ordo-identity` `tests.rs` (6); `notes_app.rs`, a share both
+  ways between a tenant on notes v2 and one on notes v3, then the refusal.
 
 ### 1.8 One interface (rule 9)
 
@@ -529,7 +544,14 @@ switch.
     version answers `idempotency_mismatch`, as before.
   - `std.space.version`: a tenant's managers and owner read its version,
     order number, label and whether it is revoked.
-  - Not built: the SDK's own "version changed" event on the header.
+  - The SDK's "version changed" event on the header, built 2026-11-23
+    (d00afde0, `clients/ordo-sdk/src/core/versions.ts`). The client keeps
+    the last version each tenant's answers named, shared by every client
+    `withSpace` makes. An answer naming another raises
+    `onVersionChanged({space, from, to})`. The sync manager drops the
+    device copy on it, as on the feed's frame, and calls its own
+    `onVersionChanged`. A frame and the answers after it are one move,
+    dropped once. ordo-react's own client does not listen yet.
 - Offline writes (`plan-offline.md`) are filed for after the first
   deployment. When built, a queued write replays under the tenant's
   version at replay time, and an op that version lacks gets the distinct
@@ -1006,6 +1028,19 @@ Added by the review of 2026-11-23:
 - An orphaned `public` field stops being served at once, and the public
   cache drops (§1.14).
 
+Built 2026-11-23 (increment 14):
+
+- `$orphans`, one row per orphaned field or entity, in each database.
+  Erasure, export, the reader grants and pruning read it.
+- Every orphan gets a drop date, 30 days by default
+  (`ORDO_ORPHANS_PERSONAL_DROP_AFTER`). The language cannot mark a field
+  personal yet, so every orphan is treated as personal. The date is shown
+  as due. Nothing drops by itself.
+- `ordo evolve --prune <entity.field>` asks twice. In production it also
+  asks for the deployment's name, the domain of the active version.
+- A reader loses an orphaned column when it is orphaned, by a column grant.
+  The soak's close (Q1) replaces that moment once soaks exist (11a).
+
 ### 2.8 The release check and editions: design (review 2026-11-23)
 
 New section. Increments 6 and 6b had one table line each.
@@ -1328,16 +1363,52 @@ Added by the review of 2026-11-23:
 `clone.mask` and `clone.readers` are stored in `$version_settings` (Q15),
 set with `ordo clones set mask|readers <value>`.
 
+**Built, session 2 (2026-11-24, increment 12).**
+
+1. **Sinks** (`crates/ordo-host/src/sinks.rs`). A routine's notice and a
+   function's `fetch` in staging send nothing. Each is written to `$sink`
+   and read with `ordo clones sink [<tenant>]` (`std.deployment.sinks`,
+   deployment owner only). A sunk `fetch` passes every check the egress
+   kernel makes first, so a call production would refuse is refused here
+   too. Then no secret is opened, nothing is dialled, and the function
+   gets `200`, `{}` and `x-ordo-sink: recorded`.
+2. **Which tenants: `clone.sinks`.** `on`, the default, is every tenant of
+   a staging deployment (its own environment is `staging`) and every clone
+   anywhere. `clones` is only the clones. There is no `off`. D17 says "in
+   staging"; whether it means clones only is an open owner question, and
+   the default is the reading that sends less. The deployment's own
+   sign-in mail is not sunk.
+3. **A version staging does not hold comes down with the clone**
+   (`promotion::arrive_with_clone`). It is read from production as the
+   same person and passes every gate a promotion passes. It keeps its
+   number, is stored and not activated, and `$promotions` records it with
+   `via = clone`. A version edited after it was stored is refused on its
+   way. A secret its functions declare needs staging's own value first;
+   the refusal names `ordo secret set <name>`.
+4. **A tenant with a database of its own** gets one on staging, made by
+   staging with staging's credential, then brought to the clone's version.
+   Nothing of production's database is named. A clone on the shared
+   database never changes it: one that lacks the version's tables is
+   refused, naming `ordo promote` and `ordo evolve`.
+5. Tests: `ordo-host/tests/clones.rs` (8, real doors), and the notes e2e
+   project `clone`. stack.sh boots a second `ordo-host` as staging. A new
+   developer signs in to both deployments, sets up the chain and the clone
+   key, and clones a tenant through the doors.
+
 Not built yet:
 
-- Sinks for mail, push and egress in staging.
-- A version staging does not hold coming down with the clone. It is
-  refused, naming `ordo promote <version>`.
-- A tenant with its own database or bucket: the clone lands in staging's
-  shared database, and no production credential is carried, but its
-  attachment is not recreated.
+- **A tenant with `acl` rows.** The import mints the caller's access row
+  for each row it creates, then refuses the bundle's own access row for
+  the same row as a duplicate (`expected_absent`). Every example but a few
+  has `acl`. The e2e case with notes is `fixme`. `std.space.import` meets
+  the same import.
+- The clone's default name is production's tenant name and `-clone`. A
+  self-serve tenant is named after its person, so that name reaches
+  staging.
+- A tenant's own bucket is not recreated: files are never cloned, and the
+  clone's new files go to staging's store.
+- Push sinks: Ordo sends no push. `SinkKind::Push` is where one records.
 - The clone travels in one answer, at most 64 MiB.
-- The notes example test.
 
 ### 3.5 Rollout is which pins move when
 
@@ -1518,13 +1589,13 @@ round is about 35 minutes for the full suite.
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
-| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). The remainder, 2026-11-23 (PR 40): schedules and listeners per version and the cursor hand-over (bf5e6b16), the client contract (3f7171dc), load guards and `loading` health (f40bed05), UTC times and fixed window caps (d8f1fc01), the console's revoke target (d46f2e48), memory measured with view eviction, `max_loaded` and `memory_budget` (95fb3cfb). Left: the sharing rule (§1.7), the SDK's version-changed event, the schema shared by `Arc`. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
+| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). The remainder, 2026-11-23 (PR 40): schedules and listeners per version and the cursor hand-over (bf5e6b16), the client contract (3f7171dc), load guards and `loading` health (f40bed05), UTC times and fixed window caps (d8f1fc01), the console's revoke target (d46f2e48), memory measured with view eviction, `max_loaded` and `memory_budget` (95fb3cfb). Then the sharing rule and `versions_disagree` (§1.7) and the SDK's version-changed event (§1.9), d00afde0. ordo-react's header read is built too (2026-11-24). Left: the schema shared by `Arc`, and release and sealing in the share comparison. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); a share both ways between notes v2 and notes v3 tenants, and `versions_disagree` after a move (`notes_app.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. **Built 2026-11-23, commit 0c62ff1a:** `$environments`, `std.deployment.environments` and `registerEnvironment`, `ordo environments list\|register`. Changing which environment a deployment is, removing and renaming one (owner, 2026-11-23) built in fbc3b4c6: `set-own`, `remove`, `rename`, each with a reason and on the stream; the deployment's own and one a stored promotion names are refused. | S | 1 | a missing environment is refused with the command that creates it | none |
 | | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waited on Q11, ruled 2026-11-24 and built in the finish below.* | | | | |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. **Finished 2026-11-24, c3ac5754 (owner rulings 2026-11-24):** the target reads the version from the step before's door itself, as the person promoting, with their own token for it from the same sign-in (Q11, no machine key; `step_door.rs`, the one client to another deployment's door). The gate no longer takes a source or an "activated" claim from the caller. The step before must answer as the environment the target expects and must have read the same person. `SourceCredential` is the one seam a GitHub workflow's token joins later. Each environment records its door (`ordo environments door`, `std.deployment.setEnvironmentDoor`: address, own space, identity handle). Staging is gated as production is: every step after the first pins only what arrived through the gate. `ordo apply` with no `--env` goes to the first step of the chain (dev; a deployment that registered nothing is its own first step, so it applies as before); a later step is refused naming dev's address and `ordo promote`. The reader check runs on the target (`ordo_exec::peer::check_readers`). `promotion.skip_staging` built (`ordo environments set skip-staging on`, `$promotion_settings`), named in a refusal about a staging step before. `ORDO_PROMOTION_PLAIN_HTTP` allows a plain address to another host. Tests: `crates/ordo-host/tests/promotion.rs` (real doors for dev and staging and one fake identity service; each refusal), `crates/ordo-cli/tests/promote.rs`. **Not built:** the `requires` check. The language has no `requires` yet: the parser refuses it (`ordo_syntax::auth`) and the host derives no needs (`plan-configuration-in-the-file.md` §3, step 2). The gate calls it once that step lands. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
 | 6 | **Release check.** Designed in §2.8 (review 2026-11-23), steps R1 to R3: the checked set, digests, functions under the new runtime, `auth` ranges, the `ordo release-check` mode of the one image, the boot-time run, the override. **Built 2026-11-23 (R1 to R3), commit a2edc640:** `release_check.rs` in ordo-host. The checked set: every pinned version and the active one, `versions.new_tenant`, `versions.served`, every move target, every version on a stored path between them. Per version: the source fingerprint, the compile under this release, the `auth` ranges (reported as their own check from the compile), the door's specs and the platform's reserved names, the shape gate over a dropped shadow, each function's code by hash and its table, and each stored plan's digest re-rendered. A version the release builds to other bytes is a note, never a failure (§1.1). Reads tolerate a control database from any earlier release and never run the registry's setup. `ordo release-check --direct [--json] [--override --reason <why>]`: a `--direct` use, recorded before it runs; exits 1 when a version fails, naming it, its tenants and the fix; `--override` records the upgrade going ahead and exits 0. Each run and each override is a `$release_checks` row (release, act, result, actor, reason, report, time). The first boot of each release runs the check in the background, logs it and records it; it never holds the boot. The boot no longer stops when the active version fails to compile, register, or pass the shape gate under the new release: it serves no program, that version's tenants are closed, and every tenant pinned to another version serves. A tenant pinned to a version the node does not serve is answered `server_busy` and listed on `/health/ready`, never `access_denied` or an unknown op. A test build reads `ORDO_TEST_UNCOMPILABLE` (a release build never does) to make a version uncompilable. Tests: `ordo-host/tests/release_check.rs` (a pinned version and the active version made uncompilable, each with a real boot; a moved plan digest), `ordo-cli/tests/release_check_cli.rs`, and `upgrade_continuity.rs`, whose Ordo upgrade (CI's `upgrade (first-commit)` and `upgrade (functions)`) runs `ordo release-check` from this build between the previous Ordo and this one and checks the boot's own run. **Not built:** the notes e2e case with 2 images (the e2e stack builds one Ordo; the 2-image case is `upgrade_continuity.rs`); a JavaScript compile of function code without a call (the engine compiles it at each call); peers and readers on another release (`plan-evolution-federation.md` §5); editions (6b). | M | 3 | an upgrade with an uncompilable version names it and its tenants, and every other tenant serves; the notes upgrade test passes through it | none |
-| 6b | **Language editions and `ordo fix`.** §2.8, step R4. **Built 2026-11-23, commit b3d8b5ed:** the `edition <n>` line (`ordo-syntax`), the edition table and gate (`ordo_plan::edition`): the load window against the release's date, refusals `edition_unknown`, `edition_expired`, `edition_rule`, each naming its fix. The fingerprint takes the source's edition. `ordo fix <dir> [--write]`: a dry run prints the diff; `--write` compiles the rewrite, then writes it. An apply of the fixed source names the same version and moves its stored source and edition. The release check: an `edition` check outside the window, a note inside it, marked `soon` within 3 months of its end. Only edition 1 is released; edition 2 (bare `money` refused, `ordo fix` writes `money(0)`) is current only under a debug build's flag. Tests: `ordo-host/tests/editions.rs` (within the window both tenants serve; outside it only the pinned tenant closes and the check names it; fixed and applied, it is the same version and serves again; the refusals), `ordo-cli/tests/fix_cli.rs` (the dry run, the write, the same artifact, an unknown flag), `ordo-syntax/tests/edition.rs`, and the notes e2e (`tests/upgrade/v1-to-v2.spec.ts`: notes v1 at edition 1 is fixed, applied as 0.1.0, and the page works). **Not built:** the editor grammar does not colour `edition`; releasing edition 2 is the owner's call. | M | 6 | an old edition loads within its window and `ordo fix` rewrites it | none |
+| 6b | **Language editions and `ordo fix`.** §2.8, step R4. **Built 2026-11-23, commit b3d8b5ed:** the `edition <n>` line (`ordo-syntax`), the edition table and gate (`ordo_plan::edition`): the load window against the release's date, refusals `edition_unknown`, `edition_expired`, `edition_rule`, each naming its fix. The fingerprint takes the source's edition. `ordo fix <dir> [--write]`: a dry run prints the diff; `--write` compiles the rewrite, then writes it. An apply of the fixed source names the same version and moves its stored source and edition. The release check: an `edition` check outside the window, a note inside it, marked `soon` within 3 months of its end. Only edition 1 is released; edition 2 (bare `money` refused, `ordo fix` writes `money(0)`) is current only under a debug build's flag. Tests: `ordo-host/tests/editions.rs` (within the window both tenants serve; outside it only the pinned tenant closes and the check names it; fixed and applied, it is the same version and serves again; the refusals), `ordo-cli/tests/fix_cli.rs` (the dry run, the write, the same artifact, an unknown flag), `ordo-syntax/tests/edition.rs`, and the notes e2e (`tests/upgrade/v1-to-v2.spec.ts`: notes v1 at edition 1 is fixed, applied as 0.1.0, and the page works). **Built 2026-11-24:** the editor grammar colours `edition <n>` (`declaration-edition`, a contextual word; test in `editor_grammar.rs`). **Not built:** releasing edition 2 is the owner's call. | M | 6 | an old edition loads within its window and `ordo fix` rewrites it | none |
 | 7 | **Seamless additive move.** Expand, gate, supported set, switch pin. **Built 2026-11-23:** an activation pins a tenant with a database of its own only when the apply's walk brought that database to Y; every other one keeps its pin on X and gets an open move in `$moves` (`Versions::activate_with`, phase `expanding`, `waiting` or `refused`, with `reason`). The catch-up's sweep expands the database (`bring_forward`), whose gate is `schema_state` over Y; the supported set is the database's `$migrations` `version` row for Y beside X's shape, which `Spaces::fits` checks for a tenant on X. Then `Versions::finish_moves` switches the pin, cause `move`, in one transaction with its `$pins` row. Unreachable is `waiting` and swept again (Q10); a refusal by name is `refused` and not retried for Y. The owner reads each move on `std.deployment.tenants` (`move`), in the apply's report and in `ordo apply`'s wait. `Versions::pin` closes a tenant's open move. Test: `notes_app.rs`, `a_change_one_tenants_data_cannot_take_leaves_that_tenant_serving_its_version`. Not built: a command to retry a refused move (a new version retries it); the console does not show moves. | M | 3 | a refused change leaves the tenant serving X, and the deployment owner sees why | 27c (additive) |
 | 7a | **Evolution through the examples** (new, review 2026-11-23; owner, 2026-11-23). `examples/notes-v3`: one additive change, one rename with `prev`, one removed field. The harness applies it over a running notes v2 with a browser open, and note-viewer reads through it. Later increments add cases to it. **Built 2026-11-23:** `examples/notes-v3` (0.3.0) adds `notes.starred` (constant default) with `starNote` and `starredNotes`, and stops declaring `attachments.size`; `addAttachment` still takes `$size`, so the v2 page still adds a file. The rename waits for increment 15: `prev` does not parse yet outside an external. There is no v3 page: the v2 page stays open across the move. **Found and fixed by it:** an apply that added a field beside a drop the serving version still reads was refused whole (`drop_read_by_active_op` counted against the addition). The drop is now left pending and the addition applied, on the deployment's database and each tenant's (`schema_apply::without_drops`; test `tenant_forward.rs`, `an_addition_beside_a_drop_the_serving_version_reads_applies`). Tests: notes e2e project `v3` (`tests/v3/v2-to-v3.spec.ts`: notes, a pin, a tag and a file kept with no reload and no alert, a note added after, then a reload) and note-viewer e2e project `v3` (`tests/v3/notes-v3.spec.ts`: the viewer lists every note through the move). Increment 7 is d583de86. | M | 7 | the notes page keeps every note across v2 to v3 with no reload error; the test is in the example's own e2e | none |
 | 7b | **Federation under versions** (new, review 2026-11-23). `plan-evolution-federation.md`, steps F1 to F6: readers named in a plan, column grants that follow the served fields, every loaded version checked against its peers, the checks in rollback and promotion. | M, in 2 parts: F1, F3, F4 with 8; F2, F5, F6 with 11a | 7, 8, 11a | note-viewer never reads a stale column: it reads through the soak, then is refused naming the fix | none |
@@ -1535,11 +1606,11 @@ round is about 35 minutes for the full suite.
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. **Built 2026-11-23** (37bba572, 3f931aed, 0d4082f5, f684a30a): a stored plan fills a field it makes required (B2, B5) with `--fill <entity>.<field>=<Ordo expression>` or `=fn <name> [secrets ..] [hosts ..]`; the step expands the column nullable, `backfill.rs` fills it in chunks with its cursor in `$backfills` in the same transaction, verify recomputes each space's count and content hash, then `NOT NULL` lands. Until then the database records the version before the step, so a run again resumes from the cursor. 5 failed chunks mark it `dead`; a run again retries. The audit record is trailer `0x04` on the chain: one summarised group per space, or with `--audit-images` one image group per space per chunk; goldens of every older group kind landed first. Backfill functions run once per chunk with exactly the declared secrets and hosts (Q14), and the receipt marks them not reproducible. Tests: `backfill.rs` (the kill mid-chunk, verify, images, dead, render refusals, functions), `notes_app.rs` (`a_backfill_over_existing_notes_shows_the_new_values_once_it_completes`), the command log's goldens. **Not built:** the Playwright test in `examples/notes-v3` (the harness holds no deployment-owner credential for `ordo evolve`; asked), live writes during the backfill (11a), the settings stored in Ordo (`backfill.chunk_rows` and the rest are defaults until 10 stores them, Q15), the move lock and `backfill.concurrency` across tenants (11b), sealed backfills (13), refusing `ordo revert` of a backfill group by name. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
 | 11a | **Dual writes on one tenant** (split from 11, review 2026-11-23). `plan-backfill-dual-writes.md` steps B2, B4: the move overlay in the host write path, both versions' guards, the soak, the reverse writes, soak close into `$orphans`. Research: 2 to 3 tries. | L | 10b | a rename on 1 tenant under live writes loses no write; a revert in the soak keeps every write | 13c (reshaped) |
 | 11b | **Every tenant** (split from 11, review 2026-11-23). Step B5: moves driven by a rollout, shared databases, `ordo rollback` and its `--dry-run`, grants stay killed. | M | 10, 11a | a rename on 3 tenants under live writes loses no write; a rollback in the soak keeps every write | 27c |
-| 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. **Session 1 built 2026-11-24** (branch `evo-12-clones`, §3.4 "Built"): `clones.rs`; production masks before export (deny by default, `clone.mask`, `off` opt-in), drops files, the command log and every member's name and sign-in link; the bundle is sealed to staging's clone key (`ordo_crypto::recipient`) recorded with `ordo clones set-key`; staging reads it from production's door as the person, pins a new tenant to the version with the same source identity and imports it under its own keys; Q12 built: a staging admin or a `clone.readers` person opens it as its founding owner, and a cloned member's `$clone:` principal is never mapped. Door ops `std.deployment.cloneKey`, `setCloneKey`, `cloneOut`, `cloneIn`, `clones`, `setCloneSetting`; `ordo clones key\|set-key\|clone\|list\|set`. Tests: `ordo-host/tests/clones.rs` (2 real doors: the clone serves masked notes through staging's door, no production value anywhere in staging's database, a cloned member refused, each refusal), `ordo-cli/tests/clones_cli.rs`. **Not built:** sinks, a version staging does not hold (refused naming `ordo promote`), a tenant's own database or bucket recreated, the notes example test. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
+| 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. **Session 1 built 2026-11-24** (branch `evo-12-clones`, §3.4 "Built"): `clones.rs`; production masks before export (deny by default, `clone.mask`, `off` opt-in), drops files, the command log and every member's name and sign-in link; the bundle is sealed to staging's clone key (`ordo_crypto::recipient`) recorded with `ordo clones set-key`; staging reads it from production's door as the person, pins a new tenant to the version with the same source identity and imports it under its own keys; Q12 built: a staging admin or a `clone.readers` person opens it as its founding owner, and a cloned member's `$clone:` principal is never mapped. Door ops `std.deployment.cloneKey`, `setCloneKey`, `cloneOut`, `cloneIn`, `clones`, `setCloneSetting`; `ordo clones key\|set-key\|clone\|list\|set`. Tests: `ordo-host/tests/clones.rs` (2 real doors: the clone serves masked notes through staging's door, no production value anywhere in staging's database, a cloned member refused, each refusal), `ordo-cli/tests/clones_cli.rs`. **Session 2 built 2026-11-24** (branch `evo-12-clones-2`, §3.4 "Built, session 2"): sinks for mail and egress (`sinks.rs`, `clone.sinks`, `std.deployment.sinks`, `ordo clones sink`); a version staging does not hold comes down with the clone through the promotion gate, recorded as a clone; a tenant with its own database gets one on staging, brought to its version. Tests: 8 in `ordo-host/tests/clones.rs`; notes e2e project `clone`. **Not built:** a tenant with `acl` rows clones (the import refuses the bundle's access row, the e2e case is `fixme`); push sinks (Ordo sends no push); the 64 MiB cap. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
 | 12b | **Signed rehearsal (provisional, §3.2).** | M | 8, 12 | production refuses a plan digest staging did not sign | 27f (rest) |
 | 13 | **Sealed backfills.** No plaintext dual write, plaintext dropped on verify, `Purpose::Migration`. | L | 11b | sealing on 3 tenants under live writes verifies by count and hash, and no plaintext column remains | 13d |
-| 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
-| 15 | **`prev` in the language.** The syntax is ruled (2026-10-04) and written in `plan-syntax-additions.md` §5 (review 2026-11-23). Parser, the 3 compile checks, the 3 plan checks, the CDK's `prev()`, and the offer to remove landed `prev` lines. Refused on an external. | M | 8 | a declared rename renders as a rename; notes v3 uses it | 27x |
+| 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). **Built 2026-11-23** (239afd67, 525a781d, aefe7a8a): `$orphans` in each database (`ordo_exec::orphans`), written wherever a database is brought to a version that stops declaring a field or an entity: the deployment's own apply, each tenant's database brought forward, each stored step run (`schema_apply::record_orphans`). Each row has its columns, a sealed flag, a drop date and, once pruned, a tombstone. A version that declares the field again removes its row. Erasure deletes a space's rows from an orphaned table too, and names the orphans it reached (`std.space.delete`, `orphans`). Export writes each orphan under `orphans/` with the row's id. `std.deployment.orphans` and `ordo evolve --orphans` list them. `std.deployment.prune` and `ordo evolve --prune <entity.field>`: the first ask prunes nothing and says what would go; `--confirm <name>` prunes; in production `--confirm-deployment <domain>` too. Refused when `prune.enabled` is off (off in production; `ordo environments set prune on`), for a name no database records, and for a field the active version or a pinned one still declares. The reader rule (Q1): a table on a `reader` line that holds an orphaned column is granted by column, without it. The reader's check holds the entity with `external_changed`, naming the column, the read app and the fix. Tests: `orphans.rs`, `reader_grants.rs` (`a_reader_loses_an_orphaned_column_with_a_named_error`); notes e2e project `orphans` (`tests/orphans/orphans.spec.ts`); note-viewer e2e project `orphans` (`tests/orphans/orphaned-column.spec.ts`, fixture `notes-no-tags`). **Found by it:** `std.space.delete` failed on a tenant with a database of its own, which had no `$logconsumers`; erasure now makes it. **Not built:** soaks (11a), so an orphan is recorded when the database moves, not at a soak's close; nothing drops at the drop date by itself; the language cannot mark a field personal, so every orphan gets a drop date; restorable versions (17) are not yet checked by pruning; an orphaned `public` field (§1.14) is not handled apart. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
+| 15 | **`prev` in the language.** The syntax is ruled (2026-10-04) and written in `plan-syntax-additions.md` §5 (review 2026-11-23). Parser, the 3 compile checks, the 3 plan checks, the CDK's `prev()`, and the offer to remove landed `prev` lines. Refused on an external. **Built 2026-11-23 (branch `evo-15-prev`):** `prev(old)` on a field and `prev: old` in an entity's header; `prev_self`, `prev_still_declared`, `prev_duplicate` in the parser; `external_unsupported` on an external's field and header; `ordo_schema::prev` checks `prev_unresolved`, `prev_type`, `prev_mapping_required`, `prev_sealed` (added: a sealed copy cannot be read), and `prev_stale` as a warning; the diff renders `RenameField` and `RenameEntity` (B4) in place of a drop and an add. A field rename adds the column, copies the values, keeps the old column with its `NOT NULL` (the version before still loads over it) and drops its default; the receipt carries the reverse. A sync trigger made in the copy's transaction copies each write to either column into the other, so no write is lost between the copy and the pin switch (review fix; test `writes_during_the_rename_reach_the_new_column`). The trigger is a stopgap and does not ship: increment 11a (the next PR) replaces it with dual writes before any release (owner rule, no stopgaps shipped). `ordo apply` makes a field rename itself. An entity rename renders and is refused as `rename_entity_not_built` until 10b. The apply answer carries `landedPrev` (last environment of the chain, every tenant on a version with the new name), and `ordo apply --remove-landed-prev` cuts those marks. CDK: `TypeSpec.prev()`, `EntityOptions.prev`. Tests: `crates/ordo-syntax/tests/prev.rs`, `crates/ordo-host/tests/prev_rename.rs`, `clients/ordo-cdk/test/prev.test.ts`; notes v3 renames `attachments.kind` to `mediaType`, and its e2e `v3` keeps every image drawn across the move. **Not built:** merges, splits and moves (refused, no mapping option yet); type casts on a rename. | M | 8 | a declared rename renders as a rename; notes v3 uses it | 27x |
 | 16 | **Tenant builds.** After first deployment. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
 | 17 | **Restore and import across versions** (new, review 2026-11-23; design in §2.9). | M | 3, 8 | a snapshot taken on X restores beside tenants on Y and serves X | 11-10b (`snapshot-restore`) |
 
@@ -1564,12 +1635,25 @@ round is about 35 minutes for the full suite.
 - Session 2 built `versions.served` and `versions.minimum` (§1.6).
   Increment 10 built the refusal of a rollout that strands a tenant. Left:
   a command that removes a stored version (`--move-to`).
-- Sharing rule (§1.7), `versions_disagree`. Not built in the remainder;
-  §1.7 says what was found and where it goes.
+- Sharing rule (§1.7), `versions_disagree`. Built 2026-11-23 (d00afde0):
+  per-version manifests in the access engine, a pin records its version,
+  D7 across versions. Left: release and sealing in the comparison.
 - Client contract (§1.9): version on every answer, the distinct refusal for
   an op the version lacks, idempotency across one switch and the tenant
-  admin's label are built in the remainder. Left: the SDK's
-  version-changed event on the header.
+  admin's label are built in the remainder. The SDK's version-changed
+  event on the header is built 2026-11-23 (d00afde0). Built 2026-11-24 in
+  `clients/ordo-react`: `DescriptorClient` reads `x-ordo-tenant-version`
+  off every answer, `onVersionChange(from, to)` fires when it moves (the
+  first answer is the baseline), and every read hook refetches, with or
+  without a live feed (`test/live.test.ts`, "the version header"). One
+  reader since 2026-11-24 (AGENTS rule 9): `TenantVersions` in
+  `clients/ordo-sdk/src/core/versions.ts` holds the header name and the
+  last version per tenant, shared by `withSpace`. `OrdoClient`, the sync
+  manager and ordo-react's `DescriptorClient` all use it; `VersionWatch`
+  and `OrdoClient.versions` are gone. The manager subscribes once and drops
+  the device copy once per change, as on the `version_changed` frame (Q7;
+  `manager.test.ts`, "clears the device copy exactly once"). No example
+  step, the §4 table names none.
 - Session 3 built stream close on a pin switch (9acbc2cf). A feed
   (`?live=1`, a sync, a read on `/live`) records the version its tenant
   was served when it opened. When a pin moves or the active version
@@ -1647,6 +1731,7 @@ to an example's own e2e, beside its host tests:
 | 7b | notes-v2 and note-viewer | the viewer reads through a rename, then is refused naming the fix |
 | 10, 10c | teamspace, 3 tenants | each tenant shows its own version's page during a rolling rollout |
 | 11a, 11b | notes-v3 | type into a note during the backfill; nothing typed is lost; roll back in the soak |
+| 12 | notes, 2 deployments | staging clones a production tenant through the doors; its version comes down with it; staging's door serves it (project `clone`). The case with notes is `fixme` until acl rows import |
 | 13 | notes-v3 | seal a field on live data; the page reads it and the table holds no plaintext |
 | 17 | notes-v3 | snapshot on v2, move, restore, read the v2 notes |
 | CLI | one example, start to end | `ordo dev`, `apply`, `evolve`, `rollout status`, `rollback`, each through the door (owner, 2026-11-23, ask 5) |
@@ -1821,7 +1906,7 @@ day:
 | `promotion.release_mismatch` | refuse | environment |
 | `promotion.attestation_max_age` | 7 days (provisional) | environment |
 | `clone.mask` | deny every field not marked safe | environment |
-| `clone.sinks` | on | environment |
+| `clone.sinks` | on: every staging tenant and every clone; `clones`: the clones only | environment |
 | `orphans.personal_drop_after` | 30 days | environment |
 | `prune.enabled` | off in production, on in dev | environment |
 | `branch.idle_list_after` | 14 days | deployment |

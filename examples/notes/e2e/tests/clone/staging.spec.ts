@@ -17,12 +17,11 @@
  * clone gets a database of its own, brought to that version. Then the
  * developer reads the clone through staging's door.
  *
- * Built: a tenant with no notes. **Not yet: a tenant with notes.** Notes has
- * `acl`, and the import a clone lands through mints the caller's access row
- * for each note it creates, then refuses the bundle's own access row for the
- * same note as a duplicate (`expected_absent` on `notesAccess.note,
- * member`). That test is marked `fixme` until the import is fixed (row 12,
- * "Not built").
+ * Two tenants: one with no notes, and one with 3 notes. Notes has `acl`,
+ * so each note carries its access row; the clone restores exactly those
+ * rows as the tenant's owner (a Reported fix, 2026-11-24: the import used to
+ * mint its own row per note and refuse the bundle's). The clone's name is
+ * neutral (`clone-...`), never Ada's.
  *
  * A regression looks like a refused clone, a version that does not arrive,
  * a clone staging's door does not serve, or any of Ada's words in what it
@@ -157,9 +156,7 @@ test("a clone of Ada's tenant serves in staging on her version; it came down wit
   }
 });
 
-// Fixme: the import mints the caller's access row for each note, then
-// refuses the bundle's access row for the same note (see the header).
-test.fixme("a clone of Ada's notes serves them in staging, masked, with none of her words", async ({
+test("a clone of Ada's notes serves them in staging, masked, with none of her words", async ({
   browser,
 }, testInfo) => {
   testInfo.setTimeout(300_000);
@@ -169,7 +166,10 @@ test.fixme("a clone of Ada's notes serves them in staging, masked, with none of 
     const words = [unique('Lunch with Charles '), unique('Doctor on Tuesday '), unique('Gift for Byron ')];
     for (const w of words) await addNote(ada.page, w, `${w}: private.`);
     const d = await developer(browser);
-    const { space } = cloneOf(d, name);
+    const { space, out } = cloneOf(d, name);
+    // Its name is neutral: Ada's tenant is named after her.
+    expect(out).toMatch(/^cloned .* into clone-\S+ \(/m);
+    expect(out.slice(out.indexOf(' into '))).not.toContain(name);
     const served = await cloneNotes(d, space);
     expect(served.rows).toHaveLength(3);
     for (const r of served.rows) {

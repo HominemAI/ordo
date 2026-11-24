@@ -376,6 +376,10 @@ pub struct Fixture {
     /// write path scopes by one.
     space: ordo_crypto::SpaceId,
     seed: &'static str,
+    /// **An import restoring a bundle** (`Fixture::run_restore_on`): no
+    /// acl bootstrap row is minted for the caller, because the bundle
+    /// carries every access row. False everywhere else.
+    restoring: bool,
 }
 
 /// The space the fixture's custody lives in by default.
@@ -404,6 +408,7 @@ impl Fixture {
             keys: self.keys.clone(),
             space: self.space.clone(),
             seed: self.seed,
+            restoring: self.restoring,
         }
     }
 
@@ -465,6 +470,7 @@ impl Fixture {
             keys: std::sync::Arc::new(ordo_crypto::TestProvider::with_space(FIXTURE_SPACE)),
             space: fixture_space(),
             seed,
+            restoring: false,
         })
     }
 
@@ -484,6 +490,7 @@ impl Fixture {
             keys: self.keys.clone(),
             space: ordo_crypto::SpaceId(space.to_string()),
             seed: self.seed,
+            restoring: self.restoring,
         }
     }
 

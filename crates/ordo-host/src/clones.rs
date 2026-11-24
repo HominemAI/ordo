@@ -842,6 +842,12 @@ pub fn mask_bundle(
                     }
                 } else if entity.platform {
                     value
+                } else if ordo_schema::acl_link_root(schema, &entity.name).is_some() {
+                    // An acl access row is who may do what: a note, a
+                    // member and a level, none of it anyone's words. Masked,
+                    // its level became the first one, and the clone's access
+                    // changed (found 2026-11-24).
+                    value
                 } else if matches!(f.ty, FieldTy::Scalar(ScalarTy::Blob)) {
                     if !value.is_null() {
                         masked.insert(key);
@@ -1208,8 +1214,7 @@ pub struct CloneInRequest<'a> {
     /// The person's own token for that environment, from the same sign-in.
     /// Sent there once, never stored.
     pub token: &'a str,
-    /// The new tenant's name here. The source's name and `-clone` when
-    /// left out.
+    /// The new tenant's name here. [`default_name`] when left out.
     pub name: Option<&'a str>,
     pub reason: &'a str,
 }
@@ -1305,6 +1310,21 @@ async fn version_here(pool: &Pool, source_id: &str) -> Result<Option<String>, Cl
         }
     }
     Ok(None)
+}
+
+/// **A clone's name when the caller gives none**: `clone-` and the last 8
+/// characters of its new id. Never production's tenant name: a self-serve
+/// tenant is named after its person, and that name is personal data.
+pub fn default_name(id: &str) -> String {
+    let tail: String = id
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("clone-{tail}")
 }
 
 fn check_tenant_name(name: &str) -> Result<String, CloneRefusal> {
@@ -1442,8 +1462,8 @@ pub async fn clone_in(
         serde_json::to_vec_pretty(&manifest).expect("JSON"),
     );
 
-    let tenant_name = name.unwrap_or_else(|| format!("{}-clone", out.name));
     let id = crate::tenants::mint_space_id();
+    let tenant_name = name.unwrap_or_else(|| default_name(&id));
     crate::tenants::ensure_table(pool).await?;
     crate::tenants::reserve(pool, &id, &tenant_name, actor, at, None).await?;
     // **Its own database, when production's tenant has one** (§3.4): made
@@ -1664,7 +1684,9 @@ async fn land(
             name: &import_name,
             fixture,
             artifact,
-            caller: actor,
+            // The founding owner the staging admin opens it as: access rows
+            // are restored as the space's owner (`run_restore_on`).
+            caller: &opens_as,
             batch: ordo_exec::import::BATCH,
             people: &people,
             blobs: None,

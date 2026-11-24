@@ -803,7 +803,9 @@ fn import_refusal(e: ordo_exec::import::ImportError) -> ExecError {
         // A profile that cannot be restored faithfully: an op the program no
         // longer has, a member the map cannot place, or a destination that
         // already has a profile. Each is repaired outside the request.
-        | E::ProfileRefused { .. } => ExecError::new(ErrorCode::ImportRefused, message),
+        | E::ProfileRefused { .. }
+        // Access rows are restored as the space's owner: the owner runs it.
+        | E::NotOwner { .. } => ExecError::new(ErrorCode::ImportRefused, message),
         _ => ExecError::internal(message),
     }
 }

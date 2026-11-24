@@ -291,6 +291,7 @@ fn a_command_group_body_is_not_a_security_body() {
             at: Timestamp(1),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };

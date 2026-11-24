@@ -380,6 +380,10 @@ pub enum Stored {
     /// The same source as the stored version, a new build of it. No
     /// version moved (`plan-versions.md` §1.1).
     Rebuilt,
+    /// The same program as the stored version, from a source at a newer
+    /// language edition, which the version now holds (`ordo fix`,
+    /// `plan-versions.md` §2.8). No version moved.
+    EditionMoved,
 }
 
 /// What one apply did, as data.
@@ -930,6 +934,7 @@ async fn sequence(
         Ok(versions::Applied::Stored(_)) => Stored::Written,
         Ok(versions::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
         Ok(versions::Applied::Rebuilt(_)) => Stored::Rebuilt,
+        Ok(versions::Applied::EditionMoved(_)) => Stored::EditionMoved,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
     let ordinal = Versions::on(pool)
@@ -1673,6 +1678,7 @@ impl Report {
                 Stored::Written => "written",
                 Stored::AlreadyPresent => "alreadyPresent",
                 Stored::Rebuilt => "rebuilt",
+                Stored::EditionMoved => "editionMoved",
             },
             "activation": activation,
             "tenants": {
@@ -1764,6 +1770,7 @@ impl Report {
             Some("written") => Stored::Written,
             Some("alreadyPresent") => Stored::AlreadyPresent,
             Some("rebuilt") => Stored::Rebuilt,
+            Some("editionMoved") => Stored::EditionMoved,
             other => {
                 return Err(format!(
                     "the apply's result named stored state {other:?}, which this client does \
@@ -1845,6 +1852,10 @@ pub struct ApplyOps {
     /// (`plan-console.md` G12). `None` records nothing there; the registry
     /// rows still name the caller.
     pub stream: Option<Arc<ordo_secevent::Recorder>>,
+    /// Runs backfill functions (10b, B6): this node's backend functions,
+    /// set by the runtime once they are built. Unset, a step that fills a
+    /// field with a function is refused naming why.
+    pub backfill_functions: std::sync::OnceLock<Arc<dyn crate::backfill::BackfillFunctions>>,
 }
 
 impl ApplyOps {
@@ -1868,7 +1879,18 @@ impl ApplyOps {
             pools,
             home: home.to_string(),
             stream,
+            backfill_functions: std::sync::OnceLock::new(),
         })
+    }
+
+    /// What a stored step runs its backfills with (10b): the plan's default
+    /// settings, and this node's backend functions when the runtime gave
+    /// them ([`ApplyOps::backfill_functions`]).
+    pub fn step_context(&self) -> crate::evolve::StepContext {
+        crate::evolve::StepContext {
+            settings: crate::backfill::BackfillSettings::default(),
+            functions: self.backfill_functions.get().cloned(),
+        }
     }
 
     /// Check 3 of the gate (see the module doc), for every deploy op.

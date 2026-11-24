@@ -2117,6 +2117,9 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             apply_op::APPLY => true,
             // G1 to G3, wired with `APPLY`'s state.
             name if crate::deploy_ops::OPS.contains(&name) => true,
+            // Staging clones (versions increment 12), wired with
+            // `APPLY`'s state and the deployment's keys.
+            name if crate::clones::OPS.contains(&name) => true,
             // Maintenance windows, wired with the same state.
             name if crate::window_ops::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.
@@ -2388,6 +2391,8 @@ impl ordo_commandlog::Signer for SharedSigner {
 /// recorder would be a door whose denials reach no database at all.
 pub struct SwappableAccess {
     inner: RwLock<Arc<crate::IdentityAccess>>,
+    /// The register of staging clones every door installed is given.
+    clones: std::sync::OnceLock<Arc<crate::clones::CloneAccess>>,
     /// **The spaces whose members could not be read when this door was
     /// built** (18d T5), as `(space, reason)`.
     ///
@@ -2482,8 +2487,22 @@ impl SwappableAccess {
         }
     }
 
+    /// Give the door that is serving, and every door installed after it,
+    /// the register of staging clones (`plan-versions.md` §3.4). Once.
+    pub fn wire_clones(&self, access: Arc<crate::clones::CloneAccess>) {
+        if self.clones.set(access.clone()).is_ok() {
+            self.current().wire_clones(access);
+        }
+    }
+
+    /// The register of staging clones, when it is wired.
+    pub fn clones(&self) -> Option<Arc<crate::clones::CloneAccess>> {
+        self.clones.get().cloned()
+    }
+
     pub fn new(door: crate::IdentityAccess) -> SwappableAccess {
         SwappableAccess {
+            clones: std::sync::OnceLock::new(),
             second_step: std::sync::OnceLock::new(),
             console_home: std::sync::OnceLock::new(),
             identity_keys: std::sync::OnceLock::new(),
@@ -2552,6 +2571,9 @@ impl SwappableAccess {
         }
         if let Some(keys) = self.identity_keys.get() {
             door.wire_identity_keys(keys.clone());
+        }
+        if let Some(clones) = self.clones.get() {
+            door.wire_clones(clones.clone());
         }
         *self.inner.write().expect("door lock") = Arc::new(door);
     }
@@ -2961,12 +2983,20 @@ async fn platform_ops_for(
     // T7 R-S3: the deploy door applies to every database this deployment
     // serves from, through the same resolver everything else resolves
     // through, and holds the activation back unless every one took it.
-    ops = ops.with_apply(crate::apply_op::ApplyOps::recording(
+    let apply = crate::apply_op::ApplyOps::recording(
         w.pool.clone(),
         w.pools.clone(),
         &w.home.0,
         Some(stream.clone()),
-    ));
+    );
+    ops = ops.with_apply(apply.clone());
+    // Staging clones (`plan-versions.md` §3.4). Always, for `with_apply`'s
+    // reason: the specs are always registered.
+    ops = ops.with_clones(Arc::new(crate::clones::CloneOps {
+        apply,
+        keys: w.keys.clone(),
+        access: w.access.clones().unwrap_or_default(),
+    }));
     // 17aa piece 3. Always, for `with_apply`'s reason and one more: the
     // `KeyProvider` is here already (`ExitOps` took it above), and a
     // deployment that registered `std.space.create` and wired nothing for
@@ -4583,6 +4613,13 @@ async fn assemble_program(
     let access = Arc::new(SwappableAccess::new(door));
     access.wire_second_step(second_levels.clone());
     access.wire_console_home(&cfg.space.0);
+    // Staging clones (`plan-versions.md` §3.4): who opens one. A deployment
+    // that never cloned reads an empty register.
+    let clone_access = crate::clones::CloneAccess::new();
+    if let Err(e) = clone_access.refresh(&pool).await {
+        eprintln!("  the staging clones could not be read: {e}");
+    }
+    access.wire_clones(clone_access);
     if let Some(c) = auth.as_ref().and_then(|(a, _)| a.contact().cloned()) {
         access.wire_contact(c);
     }
@@ -5032,6 +5069,9 @@ async fn assemble_program(
     let links_for_auth = platform_ops.links.clone();
     // The agent's half of the consent ceremony (11-4b) runs the same state.
     let consent_for_auth = platform_ops.consent.clone();
+    // A stored step's backfill functions run on this node's backend
+    // functions (10b, B6), handed over once they are built below.
+    let apply_for_backfills = platform_ops.apply.clone();
     // Tenant-owned sign-in providers (`plan-tenant-providers.md`): one state
     // for the four ops and the sign-in routes. Wired whenever there is
     // authentication, so the ops answer, off, with the setting to change.
@@ -5599,27 +5639,34 @@ async fn assemble_program(
         usage_rollup,
         catchup,
         node_status,
-        functions: Arc::new(
-            crate::functions::HostFunctions::new(
-                ordo_fn::HostConfig {
-                    engine_cache: functions_engine_cache,
-                    ..ordo_fn::HostConfig::default()
-                },
-                crate::functions::FnTable::default(),
-                spaces.clone(),
-                pool_for_functions,
-                crate::secrets::fn_fetch(
-                    secrets_for_functions.clone(),
-                    ordo_egress::TlsRoots::webpki(),
-                    functions_deny,
-                    functions_settings.fetch_limits(),
-                ),
-                secrets_for_functions,
-            )
-            .with_blobs(functions_blobs)
-            .with_settings(functions_settings)
-            .with_versions(functions_versions),
-        ),
+        functions: {
+            let functions = Arc::new(
+                crate::functions::HostFunctions::new(
+                    ordo_fn::HostConfig {
+                        engine_cache: functions_engine_cache,
+                        ..ordo_fn::HostConfig::default()
+                    },
+                    crate::functions::FnTable::default(),
+                    spaces.clone(),
+                    pool_for_functions,
+                    crate::secrets::fn_fetch(
+                        secrets_for_functions.clone(),
+                        ordo_egress::TlsRoots::webpki(),
+                        functions_deny,
+                        functions_settings.fetch_limits(),
+                    ),
+                    secrets_for_functions,
+                )
+                .with_blobs(functions_blobs)
+                .with_settings(functions_settings)
+                .with_versions(functions_versions),
+            );
+            if let Some(apply) = &apply_for_backfills {
+                let runner: Arc<dyn crate::backfill::BackfillFunctions> = functions.clone();
+                let _ = apply.backfill_functions.set(runner);
+            }
+            functions
+        },
         spaces,
         quotas,
         secrets,

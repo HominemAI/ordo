@@ -159,6 +159,7 @@ async fn harness(db: &str) -> Harness {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
     });
     let spaces = Spaces::routed(
         deployment.clone(),

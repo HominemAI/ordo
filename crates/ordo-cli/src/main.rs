@@ -337,6 +337,10 @@ fn usage() -> ! {
          on production: read staging's signed rehearsal as you, check it,\n      \
          and render the plan to the same digest. Production runs only an\n      \
          accepted digest while staging is in its chain.\n  \
+         ordo rehearsals break-glass --from <v> --to <v> --reason \"<text>\"\n      \
+         on production, when staging does not answer: the deployment owner\n      \
+         lets the step's stored plan run for 1 hour without a rehearsal.\n      \
+         Refused while staging answers. The stream marks it; `list` shows it.\n  \
          ordo tenant-builds list | set <name> <version> --reason \"<text>\" | join <name> <tenant>\n      \
          | leave <tenant> | remove <name> --reason \"<text>\"\n      \
          a named build serves one version to the tenants named while the rest\n      \

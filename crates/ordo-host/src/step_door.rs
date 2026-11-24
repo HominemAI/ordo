@@ -232,6 +232,36 @@ impl StepDoor {
         self.first_row(read, READ_SECS).await
     }
 
+    /// **Whether the step before answers at all**: `GET /health/live`, no
+    /// sign-in. The status when it answers below 500. `Unreachable` when it
+    /// cannot be reached in [`READ_SECS`], or answers 500 or more. Break-glass
+    /// (`crate::rehearsals`, §3.2 item 6) runs only when staging is down.
+    pub async fn live(&self) -> Result<u16, StepDoorError> {
+        let read = self.send("GET", "/health/live", "", "", None, MAX_ANSWER_BYTES);
+        let (status, _) =
+            match tokio::time::timeout(std::time::Duration::from_secs(READ_SECS), read).await {
+                Ok(r) => r?,
+                Err(_) => {
+                    return Err(StepDoorError::Unreachable {
+                        address: self.address.clone(),
+                        cause: format!("no answer in {READ_SECS} seconds"),
+                    })
+                }
+            };
+        if status >= 500 {
+            return Err(StepDoorError::Unreachable {
+                address: self.address.clone(),
+                cause: format!("it answered {status}"),
+            });
+        }
+        Ok(status)
+    }
+
+    /// The address as recorded.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
     async fn first_row(
         &self,
         read: impl std::future::Future<Output = Result<(u16, Vec<u8>), StepDoorError>>,

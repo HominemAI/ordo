@@ -2932,6 +2932,7 @@ const REHEARSALS_USAGE: &str =
      --reason \"<text>\"  --host <staging> ...\n\
      ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>]  \
      --host <production> ...\n\
+     ordo rehearsals break-glass --from <v> --to <v> --reason \"<text>\"  --host <production> ...\n\
      ordo rehearsals list [--from <v>] [--to <v>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
@@ -2939,6 +2940,8 @@ const REHEARSALS_USAGE: &str =
 /// (`plan-versions.md` §3.2, increment 12b), through the door. `rehearse`
 /// runs on staging, over clones; `accept` runs on production, which reads
 /// staging's signed rehearsal as you, with your own token for staging.
+/// `break-glass` runs on production when staging is down: the step's
+/// stored plan runs without a rehearsal for one hour, with your reason.
 async fn rehearsals_cmd(flags: Flags) -> Outcome {
     let Some(sub) = flags.positional.first().cloned() else {
         return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
@@ -2949,10 +2952,11 @@ async fn rehearsals_cmd(flags: Flags) -> Outcome {
         "list" => &["--from", "--to"],
         "rehearse" => &["--from", "--to", "--clone", "--reason"],
         "accept" => &["--from", "--to", "--from-token", "--trust-key"],
+        "break-glass" => &["--from", "--to", "--reason"],
         other => {
             return Outcome::usage(format!(
                 "unknown `ordo rehearsals` subcommand `{other}`; there are `rehearse`, \
-                 `accept` and `list`\n{REHEARSALS_USAGE}\n"
+                 `accept`, `break-glass` and `list`\n{REHEARSALS_USAGE}\n"
             ))
         }
     };
@@ -3011,6 +3015,27 @@ async fn rehearsals_cmd(flags: Flags) -> Outcome {
                 serde_json::json!({
                     "from": from, "to": to, "tenants": tenants, "reason": reason,
                 }),
+                true,
+            )
+            .await
+        }
+        "break-glass" => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let Some(reason) = named("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why staging is passed by, and is kept on the \
+                     deployment's stream\n"
+                        .into(),
+                );
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::BREAK_GLASS,
+                serde_json::json!({ "from": from, "to": to, "reason": reason }),
                 true,
             )
             .await
@@ -3108,6 +3133,18 @@ fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
             }
             out
         }
+        "break-glass" => format!(
+            "broke glass {} to {}: {} is down\ndigest      {}\nstaging     {}\nreason      {}\n\
+             until       {} (1 hour)\nThe step's stored plan runs here until then, without a \
+             rehearsal. The deployment's stream marks it.\n",
+            s(&row["from"]),
+            s(&row["to"]),
+            s(&row["env"]),
+            s(&row["digest"]),
+            s(&row["stagingSaid"]),
+            s(&row["reason"]),
+            row["until"].as_u64().unwrap_or(0),
+        ),
         _ => {
             let mut out = format!(
                 "environment {}\nsigning key {}\nSIGNED\n",
@@ -3135,6 +3172,23 @@ fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
                     s(&x["digest"]),
                     s(&x["env"]),
                     s(&x["actor"]),
+                ));
+            }
+            out.push_str("BREAK-GLASS\n");
+            for x in row["brokenGlass"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {} to {}  {}  by {}  until {} ({})  reason: {}\n",
+                    s(&x["from"]),
+                    s(&x["to"]),
+                    s(&x["digest"]),
+                    s(&x["actor"]),
+                    x["until"].as_u64().unwrap_or(0),
+                    if x["active"].as_bool() == Some(true) {
+                        "active"
+                    } else {
+                        "ended"
+                    },
+                    s(&x["reason"]),
                 ));
             }
             out

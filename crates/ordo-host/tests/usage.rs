@@ -518,6 +518,7 @@ fn group(n: usize, commands: usize) -> CommandGroup {
             })
             .collect(),
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }
@@ -548,6 +549,7 @@ fn rollup_group(space: &str, tag: usize, commands: usize) -> CommandGroup {
             })
             .collect(),
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }

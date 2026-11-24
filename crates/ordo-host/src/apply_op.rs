@@ -178,7 +178,7 @@ pub fn parse_code(raw: Option<&str>) -> Result<CodeFiles, ApplyRefused> {
 /// Binds each function's code into `program`, as the local apply does:
 /// every declared `code` path must be carried, and each text must hash to
 /// the hash the caller read. Answers the texts to store, by hash.
-fn bind_code(
+pub(crate) fn bind_code(
     program: &mut Program,
     code: &CodeFiles,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, ApplyRefused> {
@@ -345,7 +345,7 @@ pub enum SchemaOutcome {
     Matches { pending: usize },
     /// The database was behind by safe additive changes only, and the apply
     /// made them itself (`ORDO_APPLY_SAFE_CHANGES`, on by default), the way
-    /// `ordo migrate --apply` does, with the same `$migrations` record.
+    /// `ordo evolve --run` does, with the same `$migrations` record.
     Migrated {
         changes: Vec<(String, String)>,
         migration: i64,
@@ -354,6 +354,10 @@ pub enum SchemaOutcome {
     /// The live schema lacks something the program asserts. The artifact is
     /// stored; nothing is activated over it.
     Behind { changes: Vec<(String, String)> },
+    /// A dev branch's apply (`crate::branches`): the deployment's own
+    /// database was not read or changed. The branch's tables are in its
+    /// tenant's own database.
+    Untouched,
 }
 
 /// What the activation half did.
@@ -369,6 +373,16 @@ pub enum Activation {
     /// `--no-activate`: stored, and the deployment still points where it
     /// did.
     Staged,
+    /// `rollout.strategy` is set, so the apply stored the version and
+    /// started a rollout to it (`plan-versions.md` §3.7, increment 10). The
+    /// deployment points where it did until the rollout moves its own
+    /// space.
+    RolloutStarted {
+        id: i64,
+        strategy: String,
+        from: Option<String>,
+        to: String,
+    },
 }
 
 /// Whether the artifact was written, was already there byte-identical, or
@@ -380,6 +394,10 @@ pub enum Stored {
     /// The same source as the stored version, a new build of it. No
     /// version moved (`plan-versions.md` §1.1).
     Rebuilt,
+    /// The same program as the stored version, from a source at a newer
+    /// language edition, which the version now holds (`ordo fix`,
+    /// `plan-versions.md` §2.8). No version moved.
+    EditionMoved,
 }
 
 /// What one apply did, as data.
@@ -405,6 +423,10 @@ pub struct Report {
     pub activation: Activation,
     /// What the apply did to each tenant's own database.
     pub tenants: TenantsReport,
+    /// The program's `prev` marks whose rename has landed in every
+    /// environment (`crate::prev_offer`), as written: the CLI offers to
+    /// remove them. Empty from an older host.
+    pub landed_prev: Vec<String>,
 }
 
 /// What an apply did to the databases tenants are served from, apart from
@@ -484,11 +506,22 @@ pub enum ApplyRefused {
     /// activated or rolled back to. The text names the revoke and the
     /// command that lifts it.
     Revoked(String),
+    /// A production deployment takes only a version that arrived through
+    /// the promotion gate (`crate::promotion`). The text names the command.
+    NotPromoted(String),
+    /// A rollout is open, and one deployment-wide rollout runs at a time
+    /// (ruled 2026-11-23, Q3). The text names `ordo rollout status` and
+    /// `ordo rollout abort`.
+    RolloutOpen(String),
     /// An external entity's table is gone, changed or unreadable in this
     /// database (slice C, `external-entities`). One line per entity, each
     /// leading with its class (`external_missing`, `external_changed`,
     /// `external_no_grant`) and ending with the fix. Nothing was applied.
     External(Vec<String>),
+    /// Staging comes before this deployment, and the version renames a
+    /// field or an entity: a change only a stored plan staging rehearsed
+    /// makes here (`crate::rehearsals`, §3.2). The text names the commands.
+    NotRehearsed(String),
 }
 
 impl ApplyRefused {
@@ -507,7 +540,10 @@ impl ApplyRefused {
             ApplyRefused::VersionBehind { .. } => "version_behind",
             ApplyRefused::Provenance(_) => "provenance_refused",
             ApplyRefused::Revoked(_) => "version_revoked",
+            ApplyRefused::NotPromoted(_) => "not_promoted",
+            ApplyRefused::RolloutOpen(_) => "rollout_open",
             ApplyRefused::External(_) => "external_refused",
+            ApplyRefused::NotRehearsed(_) => "plan_not_rehearsed",
         }
     }
 
@@ -524,7 +560,10 @@ impl ApplyRefused {
             | ApplyRefused::VersionTaken { .. }
             | ApplyRefused::VersionBehind { .. }
             | ApplyRefused::Revoked(_)
-            | ApplyRefused::External(_) => ErrorCode::ApplyRefused,
+            | ApplyRefused::NotPromoted(_)
+            | ApplyRefused::RolloutOpen(_)
+            | ApplyRefused::External(_)
+            | ApplyRefused::NotRehearsed(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -583,7 +622,10 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
             // Its text leads with the class already.
-            ApplyRefused::Revoked(e) => write!(f, "{e}"),
+            ApplyRefused::Revoked(e)
+            | ApplyRefused::NotPromoted(e)
+            | ApplyRefused::RolloutOpen(e) => write!(f, "{e}"),
+            ApplyRefused::NotRehearsed(e) => write!(f, "plan_not_rehearsed: {e}"),
             ApplyRefused::External(lines) => write!(
                 f,
                 "external_refused: {} external entit{} cannot be read, so nothing was \
@@ -705,7 +747,9 @@ fn checked(p: &versions::Provenance) -> Result<(), ApplyRefused> {
 /// [`triage_errors`]): the program, the ops that refuse an apply, and the
 /// notes that do not. One body for [`run`] and [`preview`], so a preview
 /// refuses exactly what an apply would.
-fn compile_checked(source: &str) -> Result<(Program, Vec<String>, Vec<String>), ApplyRefused> {
+pub(crate) fn compile_checked(
+    source: &str,
+) -> Result<(Program, Vec<String>, Vec<String>), ApplyRefused> {
     // `DoesNotCompile`, never `Internal`: this is the caller's text, and a
     // 500 for a program with a typo in it is a page for somebody who can
     // do nothing about it.
@@ -791,9 +835,38 @@ async fn sequence(
     // below writes the name into `$migrations`, so an unchanged program
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
-    let naming = sa::name_version(pool, program).await.map_err(refused)?;
+    // A version that arrives with a staging clone keeps the number it was
+    // applied under, lower than this deployment's highest or not.
+    // A dev branch's version is named the same way, with one difference:
+    // a number lower than the highest stored is taken, so 2 branches that
+    // number their versions apart do not refuse each other
+    // (`crate::branches`). A used number with other content is still
+    // refused.
+    let branch = op == crate::branches::BRANCH_OP_LABEL;
+    let naming = if op == crate::promotion::CLONE_OP_LABEL || branch {
+        sa::name_arrival(pool, program).await
+    } else {
+        sa::name_version(pool, program).await
+    }
+    .map_err(refused)?;
+    // **A production deployment takes only what arrived through the gate**,
+    // refused before anything is stored (`crate::promotion`).
+    if activate {
+        Versions::on(pool)
+            .require_arrival(&naming.version)
+            .await
+            .map_err(|e| match e {
+                versions::VersionRefusal::NotPromoted(_) => {
+                    ApplyRefused::NotPromoted(e.to_string())
+                }
+                other => ApplyRefused::Internal(other.to_string()),
+            })?;
+    }
     let mut notes = notes;
     notes.extend(naming.note.clone());
+    // **A dev branch's apply leaves the deployment's own database alone**
+    // (`crate::branches`): no schema step, no orphans. The branch's
+    // tables are made in its tenant's own database.
     let renamed;
     let program = if naming.version != program.version {
         let mut p = program.clone();
@@ -821,55 +894,123 @@ async fn sequence(
     // The schema, before the artifact: a first apply creates it, a match
     // proceeds, and a database that is behind stores but does not activate.
     let mut behind: Vec<(String, String)> = Vec::new();
-    let schema = match sa::schema_state(pool, &program.schema)
-        .await
-        .map_err(ApplyRefused::Internal)?
-    {
-        SchemaState::Ghost { serving } => return Err(ApplyRefused::Ghost { serving }),
-        SchemaState::Empty => {
-            let c = sa::create_schema(pool, program, actor, op)
+    // The version serving before this apply: what an orphan is read against.
+    let prior = if branch {
+        None
+    } else {
+        sa::active_schema(pool).await
+    };
+    let state = if branch {
+        None
+    } else {
+        Some(
+            sa::schema_state(pool, &program.schema)
                 .await
-                .map_err(ApplyRefused::Internal)?;
-            SchemaOutcome::Created {
-                tables: c.tables,
-                migration: c.migration,
-                event: c.event,
-            }
-        }
-        SchemaState::Matches { pending } => {
-            // A program that only stops declaring a field applies no DDL,
-            // so no `$migrations` row says this database is at the new
-            // version. Recorded here, on the same terms a tenant's
-            // database gets it, or a space routed to this database would
-            // read as behind the version it is serving.
-            if let Err(e) = sa::record_version_if_behind(pool, program, actor, op).await {
-                eprintln!("apply: the deployment's own database could not record its version: {e}");
-            }
-            SchemaOutcome::Matches { pending }
-        }
-        SchemaState::Behind(changes) => {
-            match sa::apply_safe(pool, program, actor, op, Some(external.clone()))
-                .await
-                .map_err(ApplyRefused::Internal)?
-            {
-                sa::SafeApply::Applied {
-                    changes,
-                    migration,
-                    event,
-                } => SchemaOutcome::Migrated {
-                    changes,
-                    migration,
-                    event,
-                },
-                sa::SafeApply::NotSafe => {
-                    behind = changes.iter().map(named).collect();
-                    SchemaOutcome::Behind {
-                        changes: behind.clone(),
+                .map_err(ApplyRefused::Internal)?,
+        )
+    };
+    let schema = match state {
+        None => SchemaOutcome::Untouched,
+        Some(state) => {
+            match state {
+                SchemaState::Ghost { serving } => return Err(ApplyRefused::Ghost { serving }),
+                SchemaState::Empty => {
+                    let c = sa::create_schema(pool, program, actor, op)
+                        .await
+                        .map_err(ApplyRefused::Internal)?;
+                    SchemaOutcome::Created {
+                        tables: c.tables,
+                        migration: c.migration,
+                        event: c.event,
+                    }
+                }
+                SchemaState::Matches { pending } => {
+                    // A program that only stops declaring a field applies no DDL,
+                    // so no `$migrations` row says this database is at the new
+                    // version. Recorded here, on the same terms a tenant's
+                    // database gets it, or a space routed to this database would
+                    // read as behind the version it is serving.
+                    if let Err(e) = sa::record_version_if_behind(pool, program, actor, op).await {
+                        eprintln!("apply: the deployment's own database could not record its version: {e}");
+                    }
+                    SchemaOutcome::Matches { pending }
+                }
+                SchemaState::Behind(changes) => {
+                    // **Past staging, an apply makes no rename** (§3.2, 12b): the
+                    // one change the safe apply makes that a stored step makes too.
+                    // It is stored and left behind, and an activation is refused,
+                    // naming the rehearsal.
+                    let renames: Vec<String> = changes
+                        .iter()
+                        .filter(|c| {
+                            matches!(c, Change::RenameField { .. } | Change::RenameEntity { .. })
+                        })
+                        .map(|c| c.to_string())
+                        .collect();
+                    let unrehearsed = !renames.is_empty()
+                        && crate::rehearsals::required(pool)
+                            .await
+                            .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
+                    if unrehearsed && activate {
+                        return Err(ApplyRefused::NotRehearsed(format!(
+                        "staging comes before this deployment, and {} renames {}: a change this \
+                         deployment makes only through a stored plan staging rehearsed. Store it \
+                         without activating (`--no-activate`), render the step (`ordo evolve \
+                         --from <serving> --to {}`), rehearse it on staging (`ordo rehearsals \
+                         rehearse`), accept it here (`ordo rehearsals accept`), then run it",
+                        program.version,
+                        renames.join(", "),
+                        program.version
+                    )));
+                    }
+                    let safe = if unrehearsed {
+                        sa::SafeApply::NotSafe
+                    } else {
+                        sa::apply_safe(pool, program, actor, op, Some(external.clone()))
+                            .await
+                            .map_err(ApplyRefused::Internal)?
+                    };
+                    match safe {
+                        sa::SafeApply::Applied {
+                            changes,
+                            migration,
+                            event,
+                        } => SchemaOutcome::Migrated {
+                            changes,
+                            migration,
+                            event,
+                        },
+                        sa::SafeApply::NotSafe => {
+                            behind = changes.iter().map(named).collect();
+                            SchemaOutcome::Behind {
+                                changes: behind.clone(),
+                            }
+                        }
                     }
                 }
             }
         }
     };
+
+    // What this version leaves behind on the deployment's own database
+    // (`$orphans`, `plan-versions.md` §2.7): kept, never written, and still
+    // reached by erasure and export. A database still behind recorded
+    // nothing new, so it is read only once the schema step matched.
+    if let (Some(prior), true) = (&prior, behind.is_empty()) {
+        let from = sa::deployed_artifact(pool).await.map(|a| a.version);
+        match sa::record_orphans(pool, prior, program, from.as_deref(), actor).await {
+            Ok(names) => {
+                for n in names {
+                    notes.push(format!(
+                        "orphaned    `{n}`: kept with what was written to it, never written \
+                         again; erasure and export still reach it. `ordo evolve --prune {n}` \
+                         removes it"
+                    ));
+                }
+            }
+            Err(e) => return Err(ApplyRefused::Internal(e)),
+        }
+    }
 
     let artifact = versions::Artifact {
         version: program.version.clone(),
@@ -888,6 +1029,7 @@ async fn sequence(
         Ok(versions::Applied::Stored(_)) => Stored::Written,
         Ok(versions::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
         Ok(versions::Applied::Rebuilt(_)) => Stored::Rebuilt,
+        Ok(versions::Applied::EditionMoved(_)) => Stored::EditionMoved,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
     let ordinal = Versions::on(pool)
@@ -917,10 +1059,11 @@ async fn sequence(
     // **A tenant that could not be brought forward does not hold back the
     // activation**, which is the change 25i makes to R-S3's gate. With one
     // tenant per person, one unreachable or refused database would stop
-    // every deploy for everybody. The tenant is closed instead, alone, by
-    // the schema-behind quarantine (R-S4), with the reason on
-    // `/health/ready` and in this report, and the catch-up
-    // (`tenant_forward`) retries it. An activation is still gated on the
+    // every deploy for everybody. Since increment 7 (`plan-versions.md`
+    // §2.1) the tenant keeps its pin and serves the version it was on, with
+    // a move open in `$moves` carrying the reason, shown in this report and
+    // by `std.deployment.tenants`. The catch-up (`tenant_forward`) retries
+    // a database that could not be reached. An activation is still gated on the
     // deployment's own database, which is refused above when it is behind.
     //
     // A deployment with no attached target walks a one-element list and
@@ -985,10 +1128,20 @@ async fn sequence(
     };
     for (target, why) in &tenants.held {
         eprintln!(
-            "apply {}: tenant database {target} was not brought forward and stays closed: {why}",
+            "apply {}: tenant database {target} was not brought forward, and its tenants stay \
+             on the version they serve: {why}",
             program.version
         );
     }
+    // **What the activation needs to know about each tenant's database**
+    // (`plan-versions.md` §2.1, increment 7): the tenants whose database the
+    // walk brought to this version are pinned with the activation, and the
+    // rest keep their version with a move open saying why.
+    let plan = if activate {
+        move_plan(pool, &fleet).await
+    } else {
+        versions::MovePlan::default()
+    };
 
     // Behind and asked to activate is the refusal. Behind and staged is a
     // report — that is what `--no-activate` is for.
@@ -998,16 +1151,65 @@ async fn sequence(
             changes: behind,
         });
     }
+    // **A rollout instead of an activation** when `rollout.strategy` is set
+    // (`plan-versions.md` §3.7, increment 10). Unset, every tenant moves at
+    // once, as before rollouts.
+    let strategy = if activate {
+        match crate::rollouts::Rollouts::on(pool).settings().await {
+            Ok(s) => s.strategy,
+            Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
+        }
+    } else {
+        None
+    };
+    let active_now = if strategy.is_some() {
+        Versions::on(pool)
+            .active_version()
+            .await
+            .map_err(|e| ApplyRefused::Internal(e.to_string()))?
+    } else {
+        None
+    };
     let activation = if !activate {
         Activation::Staged
+    } else if let Some(strategy) = strategy
+        .filter(|_| active_now.is_some() && active_now.as_deref() != Some(program.version.as_str()))
+    {
+        let opts = crate::rollouts::StartOptions {
+            strategy: Some(strategy),
+            ..Default::default()
+        };
+        match crate::rollouts::Rollouts::on(pool)
+            .reaching(pools)
+            .start(&program.version, &opts, actor, now_secs())
+            .await
+        {
+            Ok(r) => Activation::RolloutStarted {
+                id: r.id,
+                strategy: r.strategy.as_str().to_string(),
+                from: r.from,
+                to: r.target,
+            },
+            Err(e @ crate::rollouts::RolloutRefusal::Open { .. }) => {
+                return Err(ApplyRefused::RolloutOpen(e.to_string()))
+            }
+            Err(crate::rollouts::RolloutRefusal::Version(
+                e @ versions::VersionRefusal::Revoked { .. },
+            )) => return Err(ApplyRefused::Revoked(e.to_string())),
+            Err(crate::rollouts::RolloutRefusal::Version(
+                e @ versions::VersionRefusal::NotPromoted(_),
+            )) => return Err(ApplyRefused::NotPromoted(e.to_string())),
+            Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
+        }
     } else {
-        // Every tenant is re-pinned to it in the same transaction
-        // (`plan-versions.md` §1.3).
+        // Every tenant whose database holds it is re-pinned to it in the
+        // same transaction (`plan-versions.md` §1.3, §2.1).
         match Versions::on(pool)
-            .activate(
+            .activate_with(
                 &program.version,
                 actor,
                 ordo_commandlog::Timestamp(now_secs()),
+                &plan,
             )
             .await
         {
@@ -1018,10 +1220,27 @@ async fn sequence(
             Err(e @ versions::VersionRefusal::Revoked { .. }) => {
                 return Err(ApplyRefused::Revoked(e.to_string()))
             }
+            Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
+                return Err(ApplyRefused::NotPromoted(e.to_string()))
+            }
+            Err(e @ versions::VersionRefusal::RolloutOpen { .. }) => {
+                return Err(ApplyRefused::RolloutOpen(e.to_string()))
+            }
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
         }
     };
 
+    // A clean apply ends by offering to remove the `prev` marks that have
+    // landed in every environment (ruled 2026-10-04).
+    let landed_prev = if activate {
+        crate::prev_offer::landed(pool, program)
+            .await
+            .iter()
+            .map(|m| m.text())
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Report {
         version: program.version.clone(),
         ordinal,
@@ -1031,7 +1250,52 @@ async fn sequence(
         stored,
         activation,
         tenants,
+        landed_prev,
     })
+}
+
+/// The walk's outcome per tenant: each tenant database it reached is named
+/// by its label, and every tenant attached to it shares its outcome. A
+/// database that could not be read for its tenants gives an empty plan, so
+/// every attached tenant starts its move `expanding` and the catch-up tries
+/// it.
+async fn move_plan(pool: &Pool, fleet: &sa::Forwarded) -> versions::MovePlan {
+    let mut plan = versions::MovePlan::default();
+    if fleet.applied.is_empty() {
+        return plan;
+    }
+    let attached = match ordo_exec::spacedb::all(pool).await {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("apply: the tenants' databases could not be read for their moves: {e}");
+            return plan;
+        }
+    };
+    let by_label: std::collections::HashMap<&str, &sa::TenantApply> = fleet
+        .applied
+        .iter()
+        .map(|t| (t.label.as_str(), t))
+        .collect();
+    for (space, a) in &attached {
+        let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
+        let Some(t) = by_label.get(label.as_str()) else {
+            continue;
+        };
+        match &t.outcome {
+            Ok(_) => {
+                plan.ready.insert(space.0.clone());
+            }
+            Err(r) => {
+                let phase = if r.transient {
+                    versions::MovePhase::Waiting
+                } else {
+                    versions::MovePhase::Refused
+                };
+                plan.held.insert(space.0.clone(), (phase, r.to_string()));
+            }
+        }
+    }
+    plan
 }
 
 fn named(c: &Change) -> (String, String) {
@@ -1145,6 +1409,12 @@ async fn activate_locked(
         Err(versions::VersionRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
         Err(e @ versions::VersionRefusal::Revoked { .. }) => {
             Err(ApplyRefused::Revoked(e.to_string()))
+        }
+        Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
+            Err(ApplyRefused::NotPromoted(e.to_string()))
+        }
+        Err(e @ versions::VersionRefusal::RolloutOpen { .. }) => {
+            Err(ApplyRefused::RolloutOpen(e.to_string()))
         }
         Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }
@@ -1548,6 +1818,7 @@ impl Report {
                     .map(|(c, t)| json!({ "code": c, "change": t }))
                     .collect::<Vec<_>>(),
             }),
+            SchemaOutcome::Untouched => json!({ "state": "untouched" }),
         };
         let activation = match &self.activation {
             Activation::Switched { from, to } => json!({
@@ -1557,6 +1828,15 @@ impl Report {
                 "state": "alreadyActive", "version": version,
             }),
             Activation::Staged => json!({ "state": "staged" }),
+            Activation::RolloutStarted {
+                id,
+                strategy,
+                from,
+                to,
+            } => json!({
+                "state": "rolloutStarted", "rollout": id, "strategy": strategy,
+                "from": from, "to": to,
+            }),
         };
         json!({
             "version": self.version,
@@ -1569,8 +1849,10 @@ impl Report {
                 Stored::Written => "written",
                 Stored::AlreadyPresent => "alreadyPresent",
                 Stored::Rebuilt => "rebuilt",
+                Stored::EditionMoved => "editionMoved",
             },
             "activation": activation,
+            "landedPrev": self.landed_prev,
             "tenants": {
                 "advanced": self.tenants.advanced,
                 "current": self.tenants.current,
@@ -1619,6 +1901,7 @@ impl Report {
                     })
                     .collect(),
             },
+            Some("untouched") => SchemaOutcome::Untouched,
             Some("behind") => SchemaOutcome::Behind {
                 changes: schema["changes"]
                     .as_array()
@@ -1649,6 +1932,12 @@ impl Report {
                 version: a["version"].as_str().unwrap_or_default().to_string(),
             },
             Some("staged") => Activation::Staged,
+            Some("rolloutStarted") => Activation::RolloutStarted {
+                id: a["rollout"].as_i64().unwrap_or(0),
+                strategy: a["strategy"].as_str().unwrap_or_default().to_string(),
+                from: a["from"].as_str().map(str::to_string),
+                to: a["to"].as_str().unwrap_or_default().to_string(),
+            },
             other => {
                 return Err(format!(
                     "the apply's result named activation state {other:?}, which this client \
@@ -1660,6 +1949,7 @@ impl Report {
             Some("written") => Stored::Written,
             Some("alreadyPresent") => Stored::AlreadyPresent,
             Some("rebuilt") => Stored::Rebuilt,
+            Some("editionMoved") => Stored::EditionMoved,
             other => {
                 return Err(format!(
                     "the apply's result named stored state {other:?}, which this client does \
@@ -1683,6 +1973,12 @@ impl Report {
             schema,
             stored,
             activation,
+            landed_prev: v["landedPrev"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(str::to_string))
+                .collect(),
             // Absent from an older host's answer, which walked no tenants
             // in this shape: read as none rather than refused, because the
             // rest of the report is still true.
@@ -1741,6 +2037,18 @@ pub struct ApplyOps {
     /// (`plan-console.md` G12). `None` records nothing there; the registry
     /// rows still name the caller.
     pub stream: Option<Arc<ordo_secevent::Recorder>>,
+    /// Runs backfill functions (10b, B6): this node's backend functions,
+    /// set by the runtime once they are built. Unset, a step that fills a
+    /// field with a function is refused naming why.
+    pub backfill_functions: std::sync::OnceLock<Arc<dyn crate::backfill::BackfillFunctions>>,
+    /// This node's resolver, set by the runtime: a move with dual writes
+    /// (increment 11a) has this node take each pin and overlay change at
+    /// once, rather than on the pin stream's next read. Unset, the stream
+    /// takes them.
+    pub spaces: std::sync::OnceLock<Arc<crate::spaces::Spaces>>,
+    /// Key custody for a step that seals a field (increment 13), set by the
+    /// runtime. Unset, such a step is refused naming why.
+    pub backfill_keys: std::sync::OnceLock<Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 impl ApplyOps {
@@ -1764,6 +2072,26 @@ impl ApplyOps {
             pools,
             home: home.to_string(),
             stream,
+            backfill_functions: std::sync::OnceLock::new(),
+            spaces: std::sync::OnceLock::new(),
+            backfill_keys: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// What a stored step runs its backfills with (10b): the backfill
+    /// settings as stored in `$version_settings` (Q15; unset ones are the
+    /// plan's defaults), and this node's backend functions when the runtime
+    /// gave them ([`ApplyOps::backfill_functions`]).
+    pub async fn step_context(&self) -> Result<crate::evolve::StepContext, ExecError> {
+        let settings = crate::backfill::stored_settings(&self.pool)
+            .await
+            .map_err(|e| {
+                e.to_exec_error("the step was not run: the backfill settings could not be read")
+            })?;
+        Ok(crate::evolve::StepContext {
+            settings,
+            functions: self.backfill_functions.get().cloned(),
+            keys: self.backfill_keys.get().cloned(),
         })
     }
 
@@ -1869,6 +2197,12 @@ impl ApplyOps {
                     ),
                     Activation::AlreadyActive { .. } => "activation=already-active".to_string(),
                     Activation::Staged => "activation=staged".to_string(),
+                    Activation::RolloutStarted {
+                        id, strategy, from, ..
+                    } => format!(
+                        "activation=rollout rollout={id} strategy={strategy} was={}",
+                        from.as_deref().unwrap_or("none")
+                    ),
                 };
                 self.record(
                     caller,
@@ -1981,6 +2315,7 @@ mod tests {
                         "not_class_a: it adds a required field".into(),
                     )],
                 },
+                landed_prev: vec!["notes.heading prev(title)".into()],
             },
             Report {
                 version: "v_2".into(),
@@ -1993,6 +2328,7 @@ mod tests {
                     version: "v_2".into(),
                 },
                 tenants: TenantsReport::default(),
+                landed_prev: vec![],
             },
             Report {
                 version: "v_3".into(),
@@ -2005,6 +2341,7 @@ mod tests {
                 stored: Stored::Written,
                 activation: Activation::Staged,
                 tenants: TenantsReport::default(),
+                landed_prev: vec![],
             },
         ] {
             let back = Report::from_json(&report.to_json()).expect("round trip");

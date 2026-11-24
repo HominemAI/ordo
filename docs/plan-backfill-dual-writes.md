@@ -277,6 +277,33 @@ in one database and 1 in its own.
 
 - **Sealed backfills** are increment 13. They use this worker with a key
   lease per space, `Purpose::Migration`, and no plaintext dual write (D9).
+
+**Built (13, 2026-11-24, first part: cce76e88, 7f231dd5).**
+
+- A stored step that makes a `text` field `sealed` (B7) expands a `bytea`
+  column `<field>$seal` beside the plaintext. `ordo apply` refuses B7 as
+  `seal_needs_stored_plan`, naming `ordo evolve`.
+- The worker seals each row's plaintext under its space's key, at its row
+  (`Anchor::Row`), the way the write path does. One lease per space per
+  chunk, `Purpose::Migration` (new in `ordo-crypto`), so the key-release
+  count names the step. The plaintext column is never written.
+- Verify opens every sealed value in memory and compares it with the row's
+  plaintext, then each space's count and content hash. The hash is over
+  the envelopes, never the plaintext.
+- A verify failure clears the sealed column and the cursor, so a run again
+  seals every row as it then is.
+- After verify: the plaintext column is dropped, the sealed one renamed to
+  the field's name, and its `NOT NULL` set when the field is required.
+- The receipt shows the backfill (`mapping` `seal`, `sealFrom`) and what
+  happens to the plaintext. Its old values stay in earlier backups and WAL.
+- Refused by name: `sealed indexed` or `sealed unique` in one step
+  (`sealed_index_backfill_not_built`, B8), a field that is not `text`
+  before (`seal_type_not_built`), a node with no key custody.
+- Not built: the plaintext kept by `seal.keep_plaintext`; live writes during
+  the seal and the pin switch at its end (11a); every tenant by a rollout
+  (11b). Each tenant runs it with `ordo evolve --tenant`, which pins the
+  tenant as its seal ends. The deployment's own space serves the version
+  before between `--run` and the activation.
 - **Blobs.** An object's key is `<space>/<handle>`
   (`plan-tenant-storage.md`). It holds no field name. A renamed blob field
   moves no object, in the deployment's bucket or a tenant's own.

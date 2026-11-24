@@ -76,6 +76,10 @@ use crate::versions::{Move, MovePhase, PinChange, Versions};
 /// at the switch.
 pub const SOAK_DEFAULT_SECS: u64 = crate::evolve::SOAK_DEFAULT_DAYS * 86_400;
 
+/// How long a move's command waits for this node to load the version a
+/// tenant was just pinned to.
+const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The actor a soak closed by its time is recorded under.
 pub const SOAK_ACTOR: &str = "system:soak";
 
@@ -515,10 +519,18 @@ impl MoveContext<'_> {
         Ok(target)
     }
 
-    /// Take the tenant's new pin and move on this node now.
+    /// Take the tenant's new pin and move on this node now, and wait (up to
+    /// [`LOAD_WAIT`]) for this node to serve the version the pin names, so
+    /// the command answers once the tenant is served again. The pin stream
+    /// loads a version a pin names when it reads the pin.
     async fn take(&self, tenant: &str) {
-        if let Some(s) = self.spaces {
-            s.reload_pin(tenant).await;
+        let Some(s) = self.spaces else {
+            return;
+        };
+        s.reload_pin(tenant).await;
+        let deadline = std::time::Instant::now() + LOAD_WAIT;
+        while s.deployment().for_space(tenant).is_err() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 }

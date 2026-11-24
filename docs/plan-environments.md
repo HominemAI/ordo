@@ -80,6 +80,44 @@ user contract."* Whether a clone may keep real personal data is the app
 developer's decision, made under their agreement with their users, so it is
 the app developer's setting, default masked.
 
+**Ruled 2026-11-23 (Q12):** staging registers with the identity service as
+its own deployment. A cloned tenant is opened by any staging deployment
+admin or a person the staging deployment allows. Cloned members' own
+sign-ins are never carried.
+
+**Built, session 1 (2026-11-24, `plan-versions.md` row 12).** On staging,
+`ordo clones clone <tenant> --reason "..."`:
+
+- Staging asks production's door as you, with your own token for
+  production.
+- Production masks the tenant before it leaves: every field not named in
+  `clone.mask` is replaced, and files, the command log, members' names and
+  sign-in links are dropped. `ordo clones set mask off` is the opt-in.
+- Production seals it to staging's clone key. `ordo clones key` on staging
+  prints the key; `ordo clones set-key staging <key>` on production
+  records it.
+- Staging imports it into a new tenant, pinned to the same version, sealed
+  under staging's own keys.
+- A staging admin opens it as its founding owner. `ordo clones set readers
+  <person>` lets others in. A cloned member cannot sign in.
+
+**Built, session 2 (2026-11-24).**
+
+- In staging, a routine's mail and a function's calls go to a sink, read
+  with `ordo clones sink`. `clone.sinks` is `on` by default: every staging
+  tenant and every clone. `clones` narrows it to the clones. Whether D17's
+  "in staging" means clones only is an open owner question.
+- A version staging does not hold comes down with the clone through the
+  promotion gate, stored and not activated, recorded as a clone.
+- A tenant with a database of its own gets one on staging, made by
+  staging and brought to the clone's version.
+- The notes e2e clones a tenant into a second deployment through the doors.
+
+Fixed after it: a tenant with `acl` rows clones whole, its access rows
+restored as the owner; a clone's default name is neutral (`clone-...`).
+
+Not built yet: a tenant's own bucket; push. Details in `plan-versions.md` §3.4.
+
 ### 2.4 Blue/green per tenant (g33)
 
 Production moves tenant by tenant. **Ruled 2026-10-01**, a program setting

@@ -933,10 +933,20 @@ this build is that each node reports the **labels it holds** (names only, never
 values) on its health surface, so 18e can check the fleet before it copies
 anything. That is one field, now, rather than a fleet-wide probe invented later.
 
-**C-M4 · A move's destination must be at the activated schema version, and
+**C-M4 · A move's destination must be at the tenant's pinned version (review
+2026-11-23: this said "the activated schema version", from before pins;
+`plan-versions.md` §1.3), and
 R-S1's `$migrations` row in every database is what makes that checkable.** A
 tenant moved onto a cluster one version behind is R-S4's quarantine, discovered
 after the cutover rather than before it.
+
+**C-M6 · A database move and a version move never overlap (review
+2026-11-23).** A version move keeps its cursor in the tenant's own database
+(`$backfills`, `plan-backfill-dual-writes.md` §2) and its phase in the control
+database (`$moves`). A copy taken in the middle of one carries half of each. So
+18e refuses a tenant with an open `$moves` row, and a version move refuses a
+tenant 18e is copying. Both name the other and say to wait. The destination
+also needs the `$orphans` and `$backfills` tables, which travel with the tenant.
 
 **C-M5 · The witness stays in the control database.** `Witness`
 (`ordo_exec::witness`, held on `Runtime::witness` over the control pool) is the

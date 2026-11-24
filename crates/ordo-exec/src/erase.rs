@@ -284,6 +284,11 @@ pub struct Erased {
     /// caller records each as a custody action. Empty when every object was
     /// in the deployment's own store.
     pub objects_left: Vec<crate::blobgc::ObjectsLeft>,
+    /// The orphans the erasure reached (`entity.field`, or `entity`): what a
+    /// version left behind in this database, read from `$orphans`. An
+    /// orphaned field went with its row; an orphaned table had the space's
+    /// rows deleted like a declared one (`plan-versions.md` §2.7).
+    pub orphans: Vec<String>,
 }
 
 impl Erased {
@@ -305,6 +310,11 @@ pub async fn disclose(
     let cutoff = now.saturating_sub(policy.undo_horizon.as_secs());
     let horizon = crate::prune::horizon_position(pool, &sid, cutoff).await?;
 
+    // A tenant's own database may never have registered a consumer, and so
+    // never made `$logconsumers`. Found by the notes e2e (increment 14): an
+    // erasure of a tenant with a database of its own failed on the missing
+    // table. Made here, empty, so the answer is "no consumers".
+    crate::prune::ensure_tables(pool).await?;
     let mut pinned = Vec::new();
     let mut stranded = Vec::new();
     for c in crate::prune::consumers(pool, &sid).await? {
@@ -455,7 +465,13 @@ pub async fn erase_space(
     };
 
     let deleted = delete_rows(pool, space, schema).await?;
+    let orphans = crate::orphans::live(pool)
+        .await?
+        .iter()
+        .map(crate::orphans::Orphan::name)
+        .collect();
     Ok(Erased {
+        orphans,
         objects_deleted: objects.deleted,
         objects_left: objects.left,
         space: space.0.clone(),
@@ -487,7 +503,20 @@ async fn space_scoped_tables(
         .iter()
         .map(|e| (e.name.clone(), ordo_schema::SPACE_COLUMN.to_string()))
         .collect();
+    // **The orphaned tables** (`plan-versions.md` §2.7): an entity a version
+    // stopped declaring keeps its table and its rows. `$orphans` names it,
+    // so a space's rows there are erased with the rest. One that was
+    // pruned is gone, and one the schema declares again is already above.
+    for o in crate::orphans::live(pool).await? {
+        if o.is_entity()
+            && schema.native(&o.entity).is_none()
+            && has_space_column(pool, &o.entity).await?
+        {
+            out.push((o.entity.clone(), ordo_schema::SPACE_COLUMN.to_string()));
+        }
+    }
     out.sort();
+    out.dedup();
 
     let rows = pool
         .rows(&format!(
@@ -512,6 +541,20 @@ async fn space_scoped_tables(
         out.push((table.clone(), col.clone()));
     }
     Ok(out)
+}
+
+/// Whether `table` exists here with a `$space` column.
+async fn has_space_column(pool: &Pool, table: &str) -> Result<bool, PoolError> {
+    let rows = pool
+        .rows(&format!(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = {} AND table_name = {} AND column_name = {}",
+            pool.schema_lit(),
+            sql_lit(table),
+            sql_lit(ordo_schema::SPACE_COLUMN)
+        ))
+        .await?;
+    Ok(!rows.is_empty())
 }
 
 /// The platform tables that say **where** a space is stored rather than
@@ -541,6 +584,9 @@ async fn space_scoped_tables(
 ///
 /// `$move_targets` joined it on 2026-11-05: it names the version a tenant
 /// moves to off a revoked one, not what the tenant holds.
+///
+/// `$rollout_tenants` and `$rollout_holds` joined it on 2026-11-23: where a
+/// tenant stands in a rollout, and a hold on its moves.
 pub const ATTACHMENTS: &[&str] = &[
     "$spacedb",
     "$spacebucket",
@@ -548,6 +594,8 @@ pub const ATTACHMENTS: &[&str] = &[
     "$moves",
     "$window_tenants",
     "$move_targets",
+    "$rollout_tenants",
+    "$rollout_holds",
 ];
 
 /// How many rows `space` holds in `pool`'s database, across every table an

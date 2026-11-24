@@ -393,6 +393,18 @@ fn column_def(pc: &PhysicalColumn<'_>) -> Result<String, SchemaError> {
     Ok(col)
 }
 
+/// The literal of a field's column `DEFAULT`, as [`column_def`] writes it,
+/// or none when the column has none (no default, or a sealed field).
+pub fn column_default(f: &Field) -> Result<Option<String>, SchemaError> {
+    if f.name == "rev" {
+        return Ok(Some("1".into()));
+    }
+    match &f.default {
+        Some(d) if !f.sealed => default_literal(f, d).map(Some),
+        _ => Ok(None),
+    }
+}
+
 /// `ALTER TABLE … ADD COLUMN` for one declared field: its value column,
 /// and its blind-index column when the field is `sealed indexed`.
 ///

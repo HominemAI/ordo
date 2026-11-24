@@ -137,7 +137,7 @@ jobs:
       ORDO_PG_PASSWORD: ordo
       ORDO_PSQL: psql
       # The screenshot projects run in their own step below, never here.
-      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2' }}
+      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2 --project=evolve --project=v3 --project=evolve-checks --project=orphans --project=clone --project=seal --project=rehearsal' }}
       BROWSERS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && 'off' || 'on' }}
 
     steps:
@@ -181,9 +181,9 @@ jobs:
         if: env.REACHED == 'true'
         run: bash scripts/ci-pg-fast-commits.sh
 
-      - name: Build ordo-host and ordo
+      - name: Build ordo-host, ordo and the identity service
         if: env.REACHED == 'true'
-        run: cargo build -p ordo-host -p ordo-cli
+        run: cargo build -p ordo-host -p ordo-cli -p ordo-identity-service
 
       - name: Install the page and the tests
         if: env.REACHED == 'true'

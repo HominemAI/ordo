@@ -49,6 +49,13 @@
 //!   read was refused, its `key`; the stream then closes. A client that
 //!   reopens it meets each read's refusal on its `POST`.
 //!
+//! - **A tenant whose version moves ends its feeds** (`plan-versions.md`
+//!   §1.4). Each feed records the version its tenant was served when the
+//!   read was added. The host asks every feed's door at once when a pin
+//!   moves or the active version swaps ([`LiveStreams::recheck_now`]), and
+//!   a moved tenant's feed ends with `event: version_changed`, class
+//!   `space_unavailable`, naming no version. The client opens it again.
+//!
 //! The idle window, the read cap and the re-check interval are
 //! [`LiveSettings`]: a setting each, with a shipped default, read from
 //! `ORDO_LIVE_IDLE_CLOSE_SECS`, `ORDO_LIVE_MAX_READS` and
@@ -172,10 +179,19 @@ pub(crate) fn well_formed_key(key: &str) -> bool {
 
 /// The open shared streams of one door. Cloned into every request's state.
 /// `Default::default()` is an empty table under the shipped settings.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LiveStreams {
     inner: Arc<Mutex<Table>>,
     settings: Arc<LiveSettings>,
+    /// Bumped by [`LiveStreams::recheck_now`]: every feed of this door,
+    /// on `/live`, `?live=1` or a sync, asks its door again at once.
+    nudge: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+impl Default for LiveStreams {
+    fn default() -> Self {
+        LiveStreams::new(LiveSettings::default())
+    }
 }
 
 struct Table {
@@ -202,6 +218,9 @@ struct StreamEntry {
     /// been dropped or replaced is not sent.
     generation: u64,
     empty_since: Option<Instant>,
+    /// The version each space was served when a read of it was added: the
+    /// stream's door's own table ([`crate::router::Door::admitted`]).
+    versions: crate::router::Admitted,
 }
 
 struct ReadEntry {
@@ -243,7 +262,22 @@ impl LiveStreams {
         LiveStreams {
             inner: Arc::default(),
             settings: Arc::new(settings),
+            nudge: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
+    }
+
+    /// **Every feed asks its door again now**, not at its next tick. The
+    /// host calls it when a tenant's pin moves or the active version
+    /// swaps: a feed opened under the tenant's earlier version then ends
+    /// with `version_changed` (`plan-versions.md` §1.4).
+    pub fn recheck_now(&self) {
+        self.nudge.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// What a feed's re-check ticker listens on for
+    /// [`LiveStreams::recheck_now`].
+    pub(crate) fn nudged(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.nudge.subscribe()
     }
 
     /// The settings this table runs under.
@@ -285,6 +319,7 @@ impl LiveStreams {
                     reads: HashMap::new(),
                     generation: 0,
                     empty_since: Some(Instant::now()),
+                    versions: door.admitted(),
                 },
             );
             id
@@ -297,7 +332,7 @@ impl LiveStreams {
             streams: self.clone(),
             rx,
             tick: tokio::time::interval(self.settings.idle_tick()),
-            recheck: crate::router::recheck_ticker(self.settings.recheck),
+            recheck: crate::router::recheck_ticker(self.settings.recheck, self.nudged()),
             door,
             first: Some(ready),
             refused: false,
@@ -366,7 +401,10 @@ impl LiveStreams {
     }
 
     /// Carry `subscription`'s signals on stream `id`, tagged `key`. A read
-    /// already under `key` is replaced.
+    /// already under `key` is replaced. `version` is the program version
+    /// `space` was served when the read's first envelope was read; the
+    /// first read of a space records it for the stream.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &self,
         id: &str,
@@ -375,6 +413,7 @@ impl LiveStreams {
         subscription: Subscription,
         op: &OpSpec,
         space: &str,
+        version: Option<String>,
     ) -> Result<(), AddRefused> {
         let mut table = self.inner.lock().unwrap();
         let s = table
@@ -385,6 +424,11 @@ impl LiveStreams {
         if !s.reads.contains_key(key) && s.reads.len() >= self.settings.max_reads_per_stream {
             return Err(AddRefused::Full);
         }
+        s.versions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(space.to_string())
+            .or_insert(version);
         s.generation += 1;
         let generation = s.generation;
         let tx = s.tx.clone();
@@ -493,7 +537,7 @@ struct Feed {
     rx: mpsc::UnboundedReceiver<Signal>,
     tick: tokio::time::Interval,
     /// The door's idle re-check ([`LiveSettings::recheck`]).
-    recheck: tokio::time::Interval,
+    recheck: crate::router::Recheck,
     door: Door,
     first: Option<Event>,
     /// The door refused; the refusal has been sent and the stream ends.

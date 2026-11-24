@@ -40,9 +40,9 @@ function env(dir = configDir()): NodeJS.ProcessEnv {
 }
 
 /** `ordo <args>`, as the developer. Door commands get `--host` and `--space`. */
-function run(args: readonly string[], dir = configDir()): CliRun {
+function run(args: readonly string[], dir = configDir(), input?: string): CliRun {
   const started = Date.now();
-  const r = spawnSync(stack().ordo, [...args], { env: env(dir), encoding: 'utf8', timeout: 240_000 });
+  const r = spawnSync(stack().ordo, [...args], { env: env(dir), encoding: 'utf8', timeout: 240_000, input });
   const run = { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' };
   // In the run's log, so a failure shows what each command answered.
   console.log(`$ ordo ${args.join(' ')}  (exit ${run.code}, ${Date.now() - started} ms)\n${run.out}${run.err}`);
@@ -142,8 +142,8 @@ export function identityCommand(args: readonly string[]): string {
 export interface TwoDeployments {
   /** `ordo <args>` with a token for the identity service's own deployment. */
   readonly main: (args: readonly string[]) => CliRun;
-  /** `ordo <args>` with a token for `handle`. */
-  readonly other: (args: readonly string[]) => CliRun;
+  /** `ordo <args>` with a token for `handle`; `input` is its standard input. */
+  readonly other: (args: readonly string[], input?: string) => CliRun;
   /** Their token for `handle`, as `ordo login` keeps it. */
   readonly otherToken: () => string;
   readonly close: () => Promise<void>;
@@ -173,7 +173,7 @@ export async function developerOfTwo(browser: Browser, name: string, handle: str
   await login(page, otherDir, handle);
   return {
     main: (args) => run(args, mainDir),
-    other: (args) => run(args, otherDir),
+    other: (args, input) => run(args, otherDir, input),
     otherToken: () => {
       const m = /"token"\s*:\s*"([^"]+)"/.exec(readFileSync(`${otherDir}/sessions.json`, 'utf8'));
       expect(m, `a token in the ${handle} session`).not.toBeNull();

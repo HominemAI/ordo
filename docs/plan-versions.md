@@ -1361,7 +1361,8 @@ set with `ordo clones set mask|readers <value>`.
    same person and passes every gate a promotion passes. It keeps its
    number, is stored and not activated, and `$promotions` records it with
    `via = clone`. A version edited after it was stored is refused on its
-   way.
+   way. A secret its functions declare needs staging's own value first;
+   the refusal names `ordo secret set <name>`.
 4. **A tenant with a database of its own** gets one on staging, made by
    staging with staging's credential, then brought to the clone's version.
    Nothing of production's database is named. A clone on the shared

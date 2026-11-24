@@ -81,7 +81,21 @@ async function developer(browser: import('@playwright/test').Browser): Promise<T
 
 /** `ordo clones clone <name>` on staging: the clone's space and version. */
 function cloneOf(d: TwoDeployments, name: string): { space: string; version: string; out: string } {
-  const out = ok(d.other(['clones', 'clone', name, '--reason', 'QA on a real shape', ...staging()]));
+  const args = ['clones', 'clone', name, '--reason', 'QA on a real shape', ...staging()];
+  let first = d.other(args);
+  // A version whose functions declare secrets is refused on its way down
+  // until staging holds a value for each, naming the command (notes v3:
+  // llmKey). Staging gets its own test value, never production's.
+  const missing = /declares secrets this deployment has no value for: ([\w, ]+)\. Set each: `ordo secret set/.exec(
+    `${first.out}${first.err}`,
+  );
+  if (first.code !== 0 && missing) {
+    for (const secret of missing[1]!.split(',').map((x) => x.trim())) {
+      ok(d.other(['secret', 'set', secret, ...staging()], `staging-test-${secret}`));
+    }
+    first = d.other(args);
+  }
+  const out = ok(first);
   const space = /^cloned .* into \S+ \((\S+)\)$/m.exec(out)?.[1] ?? '';
   const version = /^version +(\S+)$/m.exec(out)?.[1] ?? '';
   expect(space, out).not.toBe('');

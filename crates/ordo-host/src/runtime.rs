@@ -2123,6 +2123,8 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             // Dev branches (versions increment 5), wired with `APPLY`'s
             // state, the tenant ops and reap.
             name if crate::branches::OPS.contains(&name) => true,
+            // The signed rehearsal (12b), wired with the clone ops' state.
+            name if crate::rehearsals::OPS.contains(&name) => true,
             // Maintenance windows, wired with the same state.
             name if crate::window_ops::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.

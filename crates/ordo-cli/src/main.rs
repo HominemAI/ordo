@@ -316,6 +316,8 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
+         ordo environments set release-mismatch refuse|warn | attestation-max-age <n>d --reason \"<text>\"\n      \
+         what production accepts of a signed rehearsal (default refuse, 7d).\n  \
          ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
@@ -328,6 +330,13 @@ fn usage() -> ! {
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \
          Members come without their sign-in; a staging admin opens it.\n  \
+         ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] --reason \"<text>\"\n      \
+         on staging: run the stored plan on clones and sign it when green.\n      \
+         Staging makes its own signing key; nothing to set up.\n  \
+         ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>] | list\n      \
+         on production: read staging's signed rehearsal as you, check it,\n      \
+         and render the plan to the same digest. Production runs only an\n      \
+         accepted digest while staging is in its chain.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \
@@ -611,6 +620,7 @@ fn main() {
             | "environments"
             | "clones"
             | "branches"
+            | "rehearsals"
             | "promote"
             | "evolve"
             | "rollout"

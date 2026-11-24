@@ -339,7 +339,7 @@ A node can serve more than one version at once. The active version is the one an
   - Start one: `ordo rollout start <version> [--strategy rolling|all|canary|group|query] [--batch-interval 5m] [--window 1h] [--failure-threshold 1] [--deployment-space first|last] [--batch-size <n>]`. With `rollout.strategy` set, `ordo apply` starts one itself and returns when it starts.
   - **A first stage, then the rest** (increment 10c). `canary` moves `--canary-count` tenants at random (default 1). `group` moves `--group a,b`. `query` moves the tenants `--query` selects, in `--order`, a batch at a time. The rest then roll once the first stage has been healthy for `--canary-wait` (default 1h).
   - **Healthy** means server faults (5xx answers) stay under `--health-error-rate` (default 1%) of the moved tenants' calls, counted by every node. An unhealthy first stage pauses the rollout. `resume` moves the rest anyway; `abort` stops it.
-  - **A query** is an Ordo condition over the tenant facts: `tenant`, `name`, `version`, `created_at`, `age_days`, `members`, `personal`, `own_database`, `paused`. Example: `--query "members < 5 and not personal" --order "members asc"`. It reads nothing else and writes nothing. `members` is not read for a tenant with its own database.
+  - **A query** is an Ordo condition over the tenant facts: `tenant`, `name`, `version`, `createdAt`, `ageDays`, `members`, `requests30d`, `writes30d`, `personal`, `ownDatabase`, `paused`, and `rows.<entity>`. Example: `--query "members < 5 and not personal" --order "members asc"`. `--limit <n>` keeps the first n: `--query true --order "requests30d asc" --limit 5` moves the 5 least used first. It reads nothing else and writes nothing. A tenant's own database is read for its members and rows; one that cannot be read gives no value.
   - **Share partners** (`--share-partners`, or `rollout.share_partners on`): a tenant that holds an open grant to a member of another tenant moves in the same batch as it.
   - **Told**: every pause and the finish are on the deployment's stream. `--alert-channel mail:<address>` (or `rollout.alert_channel`) also mails that address.
   - Follow it: `ordo rollout status`. It names each tenant that waits, failed or was skipped, and why.
@@ -609,7 +609,7 @@ Turning it on creates four tables in the control database at boot:
 `$credential` (identifier, argon2id PHC string, `enrolled_at`,
 `updated_at`), `$sessionrevocation` (session id, when it was revoked,
 and the instant past which the row may be swept), `$principal` (id,
-kind, display, `created_at`) and `$authenticator` (authenticator id,
+kind, display, `createdAt`) and `$authenticator` (authenticator id,
 principal, `linked_at`). All four are safe in the database backup:
 `$credential` holds no reversible secret, `$sessionrevocation` holds no
 principal, no client and no behaviour, and `$principal`/`$authenticator`

@@ -452,7 +452,7 @@ async fn share_partners_move_in_the_same_batch() {
     ))
     .await
     .expect("a grant");
-    let partners = strategies::partners(&pool, NOW).await.unwrap();
+    let partners = strategies::partners(&pool, None, NOW).await.unwrap();
     assert_eq!(
         partners
             .get("spc_c")
@@ -482,7 +482,10 @@ async fn share_partners_move_in_the_same_batch() {
     pool.rows("UPDATE \"$capabilitygrant\" SET \"revoked_at\" = 2")
         .await
         .unwrap();
-    assert!(strategies::partners(&pool, NOW).await.unwrap().is_empty());
+    assert!(strategies::partners(&pool, None, NOW)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// **The refusals** name the flag or setting that fixes them.
@@ -603,4 +606,279 @@ async fn the_door_sets_the_strategy_settings_and_starts_a_query() {
         .count();
     assert_eq!(first, 3, "{row}");
     assert_eq!(row["health"]["healthy"], true);
+}
+
+// ── usage, rows, and tenants with their own database ────────────────────
+
+/// Seed `$usage_replica`: `requests` served per tenant in this period.
+async fn seed_usage(pool: &Pool, served: &[(&str, i64)]) {
+    pool.rows(ordo_exec::usage::USAGE_DDL)
+        .await
+        .expect("usage tables");
+    for (i, (space, n)) in served.iter().enumerate() {
+        pool.rows(&format!(
+            "INSERT INTO \"$usage_replica\" (\"space\", \"period_start\", \"period_end\", \
+               \"replica\", \"requests\", \"rows_returned\", \"worker_runs\", \"state\", \
+               \"method_version\") \
+             VALUES ('{space}', {}, {}, 'r{i}', '{{\"sql\": {n}, \"blind-index\": 1}}', 0, 0, \
+               'closed', 'ordo.usage/1')",
+            NOW - 3_600,
+            NOW
+        ))
+        .await
+        .expect("usage");
+    }
+    // A period older than the window does not count.
+    pool.rows(&format!(
+        "INSERT INTO \"$usage_replica\" (\"space\", \"period_start\", \"period_end\", \
+           \"replica\", \"requests\", \"rows_returned\", \"worker_runs\", \"state\", \
+           \"method_version\") \
+         VALUES ('spc_d', {}, {}, 'old', '{{\"sql\": 100000}}', 0, 0, 'closed', 'ordo.usage/1')",
+        NOW - 40 * 86_400,
+        NOW - 40 * 86_400 + 3_600
+    ))
+    .await
+    .expect("old usage");
+}
+
+async fn tasks(pool: &Pool, space: &str, n: usize) {
+    for i in 0..n {
+        pool.rows(&format!(
+            "INSERT INTO \"task\" (\"$space\", \"id\", \"rev\", \"title\", \"done\") \
+             VALUES ('{space}', '{space}_t{i}', 1, 't', false)"
+        ))
+        .await
+        .expect("a task");
+    }
+}
+
+/// **"The 2 least used" and "most rows of an entity"** (the owner's
+/// examples, plan-environments §2.4). Usage is the requests of the last 30
+/// days from the usage ledger; a tenant never counted sorts last. Rows are
+/// counted per tenant.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_least_used_and_the_most_rows_move_first() {
+    let pool = deployment("ordo_rs_usage", &["spc_a", "spc_b", "spc_c", "spc_d"]).await;
+    seed_usage(&pool, &[("spc_a", 900), ("spc_b", 40), ("spc_c", 5)]).await;
+    let r = Rollouts::on(&pool);
+    r.set_setting("rollout.limit", Some("2"), OWNER, "two first", NOW)
+        .await
+        .unwrap();
+    let started = r
+        .start(
+            "0.2.0",
+            &StartOptions {
+                strategy: Some(Strategy::Query),
+                query: Some("requests30d is not null".into()),
+                order: Some("requests30d asc".into()),
+                canary_wait: Some(0),
+                batch_size: Some(5),
+                ..Default::default()
+            },
+            OWNER,
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert!(
+        started.selection.ends_with("limit: 2"),
+        "{}",
+        started.selection
+    );
+    let (ops, _) = ops_for(&pool);
+    let t = rollouts::tick(&ops, "n", NOW).await.unwrap();
+    // spc_d served nothing in 30 days (its only period is older), spc_c 6.
+    assert_eq!(t.moved, ["spc_d", "spc_c"]);
+    let t = rollouts::tick(&ops, "n", NOW + 1).await.unwrap();
+    assert!(t.gate_passed && t.finished, "{t:?}");
+
+    // Most rows of `task`.
+    let pool = deployment("ordo_rs_rows", &["spc_a", "spc_b", "spc_c"]).await;
+    tasks(&pool, "spc_a", 1).await;
+    tasks(&pool, "spc_b", 3).await;
+    let facts = strategies::facts(
+        &pool,
+        None,
+        strategies::Query::parse("rows.task > 0", None)
+            .unwrap()
+            .needs(),
+        NOW,
+    )
+    .await
+    .unwrap();
+    let c = facts.iter().find(|f| f.tenant == "spc_c").unwrap();
+    assert_eq!(c.get("rows.task"), &strategies::Fact::Int(0));
+    let r = Rollouts::on(&pool);
+    let e = r
+        .start(
+            "0.2.0",
+            &StartOptions {
+                strategy: Some(Strategy::Query),
+                query: Some("rows.invoice > 0".into()),
+                ..Default::default()
+            },
+            OWNER,
+            NOW,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        e.to_string().contains("names no entity") && e.to_string().contains("task"),
+        "{e}"
+    );
+    r.start(
+        "0.2.0",
+        &StartOptions {
+            strategy: Some(Strategy::Query),
+            query: Some("rows.task > 0".into()),
+            order: Some("rows.task desc".into()),
+            canary_wait: Some(0),
+            batch_size: Some(5),
+            ..Default::default()
+        },
+        OWNER,
+        NOW,
+    )
+    .await
+    .unwrap();
+    let (ops, _) = ops_for(&pool);
+    let t = rollouts::tick(&ops, "n", NOW).await.unwrap();
+    assert_eq!(t.moved, ["spc_b", "spc_a"]);
+}
+
+fn attach_row(db: &str) -> ordo_exec::spacedb::DbAttachment {
+    let env = PoolConfig::from_env();
+    ordo_exec::spacedb::DbAttachment {
+        host: env.host,
+        port: env.port,
+        user: env.user,
+        db: db.to_string(),
+        credential: "tf".into(),
+        custody: ordo_exec::spacedb::DbCustody::PlatformManaged,
+        attached_at: 1,
+        attached_by: "test".into(),
+    }
+}
+
+/// **A tenant with its own database** has its members and rows counted
+/// there, and its grants and members make share partners there too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_with_its_own_database_is_counted_there() {
+    let control = deployment("ordo_rs_own_ctl", &["spc_shared"]).await;
+    ordo_exec::spacedb::ensure_table(&control).await.unwrap();
+    let v1 = Program::compile(V1).unwrap();
+    let pg = Pg::scoped("ordo_rs_own_t");
+    pg.exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        .expect("an empty database");
+    let own = Pool::connect(cfg(&pg.db)).await.expect("a pool");
+    ordo_exec::spacedb::apply_schema_at_version(&own, &v1.ddl, &v1.version, "test", "A1", 1_000)
+        .await
+        .expect("the tenant's schema");
+    assert!(
+        tenants::reserve(&control, "spc_own", "spc_own", "dev:ada", 10, None)
+            .await
+            .unwrap()
+    );
+    tenants::activate(&control, "spc_own", 11).await.unwrap();
+    ordo_exec::spacedb::attach(
+        &control,
+        &ordo_crypto::SpaceId("spc_own".into()),
+        &attach_row(&pg.db),
+    )
+    .await
+    .expect("attached");
+    Versions::on(&control)
+        .pin("spc_own", "0.1.0", OWNER, NOW)
+        .await
+        .expect("on 0.1.0");
+    // In its own database: 2 members, 3 tasks, and a grant to Cleo, who is
+    // a member of spc_shared on the deployment's database.
+    own.rows(
+        r#"INSERT INTO "members" ("$space", "id", "principal", "displayName", "kind", "memberCount", "role", "status", "joined") VALUES
+          ('spc_own', 'mem_o1', 'prn_omar', 'Omar', 'principal', 1, 'owner', 'active', DATE '2026-01-01'),
+          ('spc_own', 'mem_o2', 'prn_ola', 'Ola', 'principal', 1, 'editor', 'active', DATE '2026-01-01')"#,
+    )
+    .await
+    .expect("members");
+    tasks(&own, "spc_own", 3).await;
+    own.rows(ordo_host::grants::GRANT_DDL).await.unwrap();
+    own.rows(ordo_host::grants::GRANT_PIN_DDL).await.unwrap();
+    own.rows(&format!(
+        r#"INSERT INTO "$capabilitygrant" ("$space", "grant_id", "op", "principal", "manifest_hash", "granted_at", "expires")
+           VALUES ('spc_own', 'g1', 'openTasks', 'prn_cleo', 'h', 1, {})"#,
+        NOW + 86_400
+    ))
+    .await
+    .unwrap();
+    control
+        .rows(
+            r#"INSERT INTO "members" ("$space", "id", "principal", "displayName", "kind", "memberCount", "role", "status", "joined") VALUES
+              ('spc_shared', 'mem_c1', 'prn_cleo', 'Cleo', 'principal', 1, 'owner', 'active', DATE '2026-01-01')"#,
+        )
+        .await
+        .unwrap();
+    let pools: Arc<dyn ordo_exec::route::PoolResolver> =
+        Arc::new(ordo_exec::route::AttachedPools::new(
+            control.clone(),
+            control.clone(),
+            cfg("unused"),
+            Arc::new(ordo_exec::route::Installed::new().as_configured("tf")),
+        ));
+
+    let q = strategies::Query::parse("members > 0", Some("rows.task desc")).unwrap();
+    let facts = strategies::facts(&control, Some(pools.as_ref()), q.needs(), NOW)
+        .await
+        .unwrap();
+    let own_facts = facts.iter().find(|f| f.tenant == "spc_own").unwrap();
+    assert_eq!(own_facts.get("members"), &strategies::Fact::Int(2));
+    assert_eq!(own_facts.get("rows.task"), &strategies::Fact::Int(3));
+    assert_eq!(own_facts.get("ownDatabase"), &strategies::Fact::Bool(true));
+    // Without the resolver its database is not read: no value, never 0.
+    let facts = strategies::facts(&control, None, q.needs(), NOW)
+        .await
+        .unwrap();
+    let own_facts = facts.iter().find(|f| f.tenant == "spc_own").unwrap();
+    assert_eq!(own_facts.get("members"), &strategies::Fact::Null);
+
+    let partners = strategies::partners(&control, Some(pools.as_ref()), NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        partners
+            .get("spc_shared")
+            .map(|p| p.iter().cloned().collect::<Vec<_>>()),
+        Some(vec!["spc_own".to_string()])
+    );
+    assert!(strategies::partners(&control, None, NOW)
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Through the door, which reaches its database: the query selects it.
+    let stream = Arc::new(ordo_secevent::Recorder::default());
+    let ops = ApplyOps::recording(control.clone(), pools.clone(), "home", Some(stream));
+    let b = ordo_api::BoundParams(
+        serde_json::json!({"version": "0.2.0", "strategy": "query",
+                           "query": "members > 1", "canaryWait": "0s"})
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let started = ordo_host::deploy_ops::execute(
+        &ops,
+        ordo_host::deploy_ops::ROLLOUT_START,
+        "home",
+        &b,
+        "sys:updater",
+    )
+    .await
+    .expect("started");
+    let first: Vec<&str> = started.rows[0]["tenants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["firstStage"] == true)
+        .filter_map(|t| t["tenant"].as_str())
+        .collect();
+    assert_eq!(first, ["spc_own"]);
 }

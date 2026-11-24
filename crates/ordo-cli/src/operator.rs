@@ -413,6 +413,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "environments" => rt.block_on(environments_cmd(flags)),
         "clones" => rt.block_on(clones_cmd(flags)),
         "branches" => rt.block_on(crate::branches::run(flags)),
+        "rehearsals" => rt.block_on(rehearsals_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
         "rollout" => rt.block_on(crate::rollout::run(flags)),
@@ -2923,6 +2924,223 @@ async fn clones_cmd(flags: Flags) -> Outcome {
     Outcome::ok(out)
 }
 
+// ── rehearsals ───────────────────────────────────────────────────────────
+
+const REHEARSALS_USAGE: &str =
+    "ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] \
+     --reason \"<text>\"  --host <staging> ...\n\
+     ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>]  \
+     --host <production> ...\n\
+     ordo rehearsals list [--from <v>] [--to <v>]  --host <h> ...\n\
+     each goes through the door (`--host <h>` or ORDO_HOST)";
+
+/// `ordo rehearsals rehearse|accept|list`: the signed rehearsal
+/// (`plan-versions.md` §3.2, increment 12b), through the door. `rehearse`
+/// runs on staging, over clones; `accept` runs on production, which reads
+/// staging's signed rehearsal as you, with your own token for staging.
+async fn rehearsals_cmd(flags: Flags) -> Outcome {
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    let own: &[&str] = match sub.as_str() {
+        "list" => &["--from", "--to"],
+        "rehearse" => &["--from", "--to", "--clone", "--reason"],
+        "accept" => &["--from", "--to", "--from-token", "--trust-key"],
+        other => {
+            return Outcome::usage(format!(
+                "unknown `ordo rehearsals` subcommand `{other}`; there are `rehearse`, \
+                 `accept` and `list`\n{REHEARSALS_USAGE}\n"
+            ))
+        }
+    };
+    let mut allowed = own.to_vec();
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    if !flags.positional.is_empty() {
+        return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
+    }
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    use ordo_host::rehearsals as r;
+    let named = |k: &str| flags.named_value(k).map(str::to_string);
+    let step = || match (named("--from"), named("--to")) {
+        (Some(f), Some(t)) => Ok((f, t)),
+        _ => Err(Outcome::usage(
+            "`--from <version> --to <version>` name the step\n".into(),
+        )),
+    };
+    let row = match sub.as_str() {
+        "list" => {
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::REHEARSALS,
+                serde_json::json!({ "from": named("--from"), "to": named("--to") }),
+                false,
+            )
+            .await
+        }
+        "rehearse" => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let Some(tenants) = named("--clone") else {
+                return Outcome::usage(
+                    "`--clone <clone>` names the clones to rehearse on; `ordo clones list` \
+                     names them\n"
+                        .into(),
+                );
+            };
+            let Some(reason) = named("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why, and is kept with the rehearsal\n".into(),
+                );
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::REHEARSE,
+                serde_json::json!({
+                    "from": from, "to": to, "tenants": tenants, "reason": reason,
+                }),
+                true,
+            )
+            .await
+        }
+        _ => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let token = match named("--from-token") {
+                Some(t) => t,
+                None => {
+                    match clone_source_token(&host, &flags, ordo_host::environments::STAGING).await
+                    {
+                        Ok(t) => t,
+                        Err(o) => return o,
+                    }
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::ACCEPT,
+                serde_json::json!({
+                    "from": from, "to": to, "fromToken": token,
+                    "trustKey": named("--trust-key"),
+                }),
+                true,
+            )
+            .await
+        }
+    };
+    let row = match row {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    Outcome::ok(rehearsal_lines(&sub, &row))
+}
+
+/// What `ordo rehearsals <sub>` prints for the door's answer.
+fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
+    let count = |v: &serde_json::Value| v.as_array().map(|c| c.len()).unwrap_or(0);
+    match sub {
+        "rehearse" => {
+            let a = &row["rehearsal"]["attestation"];
+            let mut out = format!(
+                "rehearsed   {} to {} on {} clone(s), green\ndigest      {}\nsigned by   {} \
+                 (key {})\nrelease     {}\n",
+                s(&a["from"]),
+                s(&a["to"]),
+                count(&a["clones"]),
+                s(&a["digest"]),
+                s(&a["env"]),
+                s(&a["key"]),
+                s(&a["release"]),
+            );
+            for nr in a["notReproducible"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "not reproducible  {}.{} by function {}: it declares secrets or hosts\n",
+                    s(&nr["entity"]),
+                    s(&nr["field"]),
+                    s(&nr["function"]),
+                ));
+            }
+            out.push_str(&format!(
+                "Accept it on production: `ordo rehearsals accept --from {} --to {}`\n",
+                s(&a["from"]),
+                s(&a["to"])
+            ));
+            out
+        }
+        "accept" => {
+            let mut out = format!(
+                "accepted    {} to {}, rehearsed on {}\ndigest      {}\nkey         {}{}\n\
+                 plan        {}\n",
+                s(&row["from"]),
+                s(&row["to"]),
+                s(&row["env"]),
+                s(&row["digest"]),
+                s(&row["key"]),
+                if row["keyRecorded"].as_bool() == Some(true) {
+                    " (recorded)"
+                } else {
+                    ""
+                },
+                if row["planStored"].as_bool() == Some(true) {
+                    "stored here"
+                } else {
+                    "already stored here"
+                },
+            );
+            for w in row["warnings"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!("warning     {}\n", s(&w)));
+            }
+            out
+        }
+        _ => {
+            let mut out = format!(
+                "environment {}\nsigning key {}\nSIGNED\n",
+                s(&row["env"]),
+                row["key"].as_str().unwrap_or("none yet"),
+            );
+            for x in row["rehearsals"].as_array().cloned().unwrap_or_default() {
+                let a = &x["attestation"];
+                out.push_str(&format!(
+                    "  {} to {}  {}  {} clone(s)  by {}  at {}\n",
+                    s(&a["from"]),
+                    s(&a["to"]),
+                    s(&a["digest"]),
+                    count(&a["clones"]),
+                    s(&a["actor"]),
+                    a["at"].as_u64().unwrap_or(0),
+                ));
+            }
+            out.push_str("ACCEPTED\n");
+            for x in row["accepted"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {} to {}  {}  from {}  by {}\n",
+                    s(&x["from"]),
+                    s(&x["to"]),
+                    s(&x["digest"]),
+                    s(&x["env"]),
+                    s(&x["actor"]),
+                ));
+            }
+            out
+        }
+    }
+}
+
 fn readers_line(v: &serde_json::Value) -> String {
     let names: Vec<&str> = v
         .as_array()
@@ -2984,6 +3202,8 @@ const ENVIRONMENTS_USAGE: &str = "ordo environments list [<name>]  --host <h> ..
      --host <h> ...\n\
      ordo environments door <name> --clear --reason \"<text>\"  --host <h> ...\n\
      ordo environments set skip-staging on|off --reason \"<text>\"  --host <h> ...\n\
+     ordo environments set release-mismatch refuse|warn --reason \"<text>\"  --host <h> ...\n\
+     ordo environments set attestation-max-age <n>d --reason \"<text>\"  --host <h> ...\n\
      ordo environments set-own <name> --reason \"<text>\"  --host <h> ...\n\
      ordo environments remove <name> --reason \"<text>\"  --host <h> ...\n\
      ordo environments rename <name> <new-name> --reason \"<text>\"  --host <h> ...\n\

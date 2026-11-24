@@ -745,7 +745,8 @@ person. It is hash-chained, so it is not a place for bulk rows.
 | A plan stored by `ordo evolve` | `$plans`, with its actor; act `plan-stored` (and `plan-run`, `replayed`) on the deployment's stream | built (increment 8) |
 | The deployment owner's approval of a sign-in method removal (Q6) | the deployment's stream, act `sign-in-removal-approved`, with the methods and the count | built (increment 9) |
 | A backfill on one tenant | that tenant's command chain, one summarised group (ruled 2026-09-08, 2026-09-20) | increment 10b |
-| A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b |
+| A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b (break-glass not built) |
+| A signed rehearsal, and its acceptance | `$rehearsals` on staging, `$rehearsals_accepted` on production; acts `rehearsed`, `rehearsal-failed` and `rehearsal-accepted` on each deployment's stream | built (increment 12b) |
 | Rollout start, pause, resume, skip, retry, abort, finish, hold | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | built (increment 10) |
 | A one-way confirmation, a prune, a `--move-to` | **ruled 2026-11-23 (Q9):** the deployment's stream, naming the person | increments 11a, 14 |
 | A release check and its override | `$release_checks` | built (increment 6) |
@@ -1285,6 +1286,72 @@ What may change:
   some step classes.
 - The break-glass path.
 
+**Built (2026-11-24, increment 12b, branch `evo-12b-signed-rehearsal`, commit ba25aec9).**
+`crates/ordo-host/src/rehearsals.rs`:
+
+1. **Staging rehearses** (`ordo rehearsals rehearse --from X --to Y
+   --clone <clone> --reason "..."`, `std.deployment.rehearse`). Refused
+   unless this deployment is staging, each tenant is a clone, and each
+   clone is pinned to X. The stored plan runs on each clone's database,
+   and the clone is pinned to Y.
+2. **When every clone runs green, staging signs** an attestation
+   (`ordo.rehearsal.v1`): both source identities, the plan digest and
+   options, Y's build identity, the Ordo release, `green`, the clones, the
+   backfills that are not reproducible, the actor, the reason and the
+   time. Ed25519 over its canonical JSON. Kept in `$rehearsals`. Nothing
+   is signed when a clone fails; `rehearsal-failed` goes on the stream.
+3. **Q11, no key to set up.** Staging's signing key is made on first use
+   and sealed under its own keys (`$rehearsal_key`). Production reads it
+   with the attestation and records it the first time
+   (`$rehearsal_keys`). A later attestation under another key is refused
+   until the person names it: `--trust-key <key>`.
+4. **Production accepts** (`ordo rehearsals accept --from X --to Y`,
+   `std.deployment.acceptRehearsal`). It reads the attestation from
+   staging's door as the person, with their own token for staging, as a
+   promotion reads its source. It checks the signature, the environment
+   and the step, `promotion.release_mismatch` (refuse by default; `warn`
+   accepts and says so), `promotion.attestation_max_age` (7 days), and that
+   it holds X and Y with the same source identities. It renders the plan
+   itself with the signed options and refuses another digest. Then it
+   stores the plan and records the acceptance (`$rehearsals_accepted`).
+5. **The gate.** A deployment with staging before it in its chain runs a
+   stored step only when it accepted a rehearsal of that step with that
+   digest (`require_rehearsed`, called by every stored step's run). The
+   refusal, `plan_not_rehearsed`, names `ordo rehearsals rehearse`,
+   `accept`, and `promotion.skip_staging`, which turns the rule off.
+6. **Q12.** Any staging deployment admin may rehearse, and so may a person
+   `clone.readers` names: the door lets them call `std.deployment.rehearse`
+   in the deployment's own space, and nothing else there.
+7. **Q14.** A backfill whose function declares secrets or hosts is listed
+   under `notReproducible`, and production's acceptance warns about each.
+8. `ordo rehearsals list` reads the signed and the accepted rehearsals.
+9. **An apply makes no rename past staging.** `ordo apply` (and the apply
+   inside `ordo promote`) runs class A changes and a field rename itself
+   (`schema_apply::is_safe_change`). The rename is a stored step's change,
+   so on a deployment with staging before it the apply leaves it unmade:
+   `--no-activate` stores the version behind, and an activation is refused
+   `plan_not_rehearsed` (`apply_op`). Class A changes (add an entity, an
+   optional or constant field, an index; drop an index) still apply.
+
+Tests: `ordo-host/tests/clones.rs` (2 real doors: production refuses the
+step, staging rehearses and signs, production accepts and then runs it;
+an edited attestation, another person, too old, another key, a clone
+reader, a non-clone, no plan, no staging), unit tests in `rehearsals.rs`
+(signature, Q14 marking, the age setting), and the notes e2e project
+`rehearsal`, run after `seal` (0.3.4 to 0.3.5 rehearsed on a clone of Ada's tenant; production's
+its step on her tenant (`ordo evolve --tenant`) refused, then the rehearsal accepted with the same digest).
+
+Not built yet:
+
+- **Break-glass** (item 6): a promotion with a recorded reason when staging
+  is down. Today `promotion.skip_staging` is the only way past the gate.
+- A clone on staging's shared database: the step runs on that database,
+  as `ordo evolve --run` on staging would, so the shared database moves to
+  Y for every staging tenant on it. A clone of a tenant with its own
+  database is rehearsed on its own database alone.
+- The release mismatch is checked when production accepts, not again at
+  each run. So is the age.
+
 ### 3.3 Dev branches are tenants on their own version
 
 - `ordo apply --branch feature-x` stores the version in dev and pins a dev
@@ -1659,10 +1726,28 @@ partners, health by error rate, the alert channel.
 - Tests: `crates/ordo-host/tests/rollout_strategies.rs` (6), and the
   example test `teamspace_app.rs`
   `a_canary_that_fails_its_health_check_pauses_the_rest`.
-- **Not built:** `members` for a tenant with its own database; usage and
-  rows-of-an-entity facts (the owner's examples "least usage" and "most
-  rows"); partners found in a tenant's own database; alert channels
-  beyond mail.
+- **Not built:** alert channels beyond mail.
+
+**Added 2026-11-24** (branch `evo-10c-facts`):
+
+- Fact names are lowerCamel, as every Ordo name is: `createdAt`,
+  `ageDays`, `ownDatabase`. The first build's snake_case names did not
+  parse in a condition.
+- **Usage**: `requests30d` (the usage ledger's requests, `$usage_replica`)
+  and `writes30d` (the rollup's writes, `$usage`), over the last 30 days.
+  No value when the ledger was never on.
+- **Rows**: `rows.<entity>`, the tenant's rows of an entity of the version
+  rolled out. Another entity is refused naming the ones there are.
+- **A limit**: `rollout.limit`, `--limit`. "The 5 least used" is `--query
+  true --order "requests30d asc" --limit 5`.
+- **Tenants with their own database**: `members` and `rows.<entity>` are
+  counted there, and their grants and members make share partners. The
+  rollout client reaches them through the deployment's resolver
+  (`Rollouts::reaching`), from the door, `ordo apply` and the worker. A
+  database that cannot be read gives no value, never 0.
+- Tests: `rollout_strategies.rs`
+  `the_least_used_and_the_most_rows_move_first` and
+  `a_tenant_with_its_own_database_is_counted_there`.
 
 ---
 
@@ -1690,12 +1775,12 @@ round is about 35 minutes for the full suite.
 | 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. **Session 1 built 2026-11-23** (6d93397c, ef5fe610, 9856f637): `$plans` and `evolve.rs`; the step renders from the 2 stored sources against an empty database of X, so the digest is the same in every environment; `--digest` refuses another; a plan with errors is never stored; the receipt lists each change, class, option, forward and reverse, and leaves out Ordo's own tables; replay walks the stored path, each step checking the recorded version, drift and the digest; `std.deployment.evolve`, `plans`, `replay`; `ordo evolve [<dir>] --from --to [--run]`, `--tenant`, `--list`; F1 and F4's rollback check. Tests: `stored_plans.rs`. **Through the examples, built 2026-11-23** (branch `evo-examples-evolve`): the notes e2e runs the identity service, and its developer signs in with `ordo login` approved by passkey (`tests/developer.ts`); project `evolve` (`tests/evolve/v2-to-v3.spec.ts`) stores v3, runs `ordo evolve --from 0.2.0 --to 0.3.0`, then `--run`, with the v2 page open. `ordo migrate --apply --direct` is removed and refuses naming `ordo evolve` (§6 conflict 9). **Not built:** option expressions beyond `--places`, backfill functions (D16, with 10b). | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
 | 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). **Built 2026-11-23** (f8828906): `precheck.rs`. `ordo evolve` stores the plan, then asks every database (shared or per tenant) the data probes and the external check, and lists every issue with its database, spaces and fix. `--run` refuses while one is open, and `run_step` refuses a tenant's step the same way. A database at another version is listed as not asked. Readers are listed from the render (F1). The sign-in removal check (Q6): a version whose `auth` block drops a method counts the people left with none, and is not stored until `--approve-sign-in-removal <count>` names that count; the approval is act `sign-in-removal-approved` on the stream. Tests: `prechecks.rs`. **Not built:** the `requires` check (the declaration is not in the language; the answer says so), the peer note on a removed shared provider (`plan-evolution-federation.md`), **Through the examples, built 2026-11-23** (branch `evo-examples-evolve`): project `evolve-checks` (`tests/evolve/prechecks.spec.ts`) stores 0.3.1 (`fixtures/notes-v3-1.ordo.fixture`, v3 with `title` unique) over a tenant holding 2 notes with one title; `ordo evolve` lists them with the fix, `--run` is refused, the title is changed on the page, and `--run` passes. | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
 | 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). **Built 2026-11-23** (branch `evo-10-rollouts`, 2d15a71b and after): `rollouts.rs`, `std.deployment.rollout.start\|status\|resume\|skip\|retry\|abort\|finish\|hold`, `ordo rollout ...`, the settings in `$version_settings` (Q15), the one-tenant hotfix skipped (Q3), `retry` of a refused move, `ordo apply` starting a rollout when `rollout.strategy` is set. The backfill settings (`backfill.chunk_rows`, `chunk_timeout`, `max_attempts`, `budget`) are stored in `$version_settings` too, set with `ordo versions set backfill.<name>`, and a stored step's backfill runs with them (`rollouts.rs` `the_backfill_settings_are_stored_and_a_step_runs_with_them`). Tests: `rollouts.rs`, `rollout_cli.rs`, teamspace's rolling rollout. **Not built:** removing a stored version with `--move-to`; the console screen. As built in §3.7. | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
-| 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. **Built 2026-11-24** (branch `evo-10c-strategies`, efec46c6): `canary`, `group`, `query` with a first stage and a health gate, `$rollout_health` summed over every node, 9 tenant facts, share partners from grants, `mail:<address>` alerts, 8 settings. Tests: `rollout_strategies.rs`, teamspace's canary. **Not built:** usage and row-count facts; facts and partners from a tenant's own database. As built in §3.7. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
+| 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. **Built 2026-11-24** (branch `evo-10c-strategies`, efec46c6): `canary`, `group`, `query` with a first stage and a health gate, `$rollout_health` summed over every node, 11 tenant facts and `rows.<entity>`, share partners from grants, `mail:<address>` alerts, 9 settings. Usage and row-count facts, a limit, and facts and partners from a tenant's own database added on `evo-10c-facts`. Tests: `rollout_strategies.rs`, teamspace's canary. As built in §3.7. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. **Built 2026-11-23** (37bba572, 3f931aed, 0d4082f5, f684a30a): a stored plan fills a field it makes required (B2, B5) with `--fill <entity>.<field>=<Ordo expression>` or `=fn <name> [secrets ..] [hosts ..]`; the step expands the column nullable, `backfill.rs` fills it in chunks with its cursor in `$backfills` in the same transaction, verify recomputes each space's count and content hash, then `NOT NULL` lands. Until then the database records the version before the step, so a run again resumes from the cursor. 5 failed chunks mark it `dead`; a run again retries. The audit record is trailer `0x04` on the chain: one summarised group per space, or with `--audit-images` one image group per space per chunk; goldens of every older group kind landed first. Backfill functions run once per chunk with exactly the declared secrets and hosts (Q14), and the receipt marks them not reproducible. Tests: `backfill.rs` (the kill mid-chunk, verify, images, dead, render refusals, functions), `notes_app.rs` (`a_backfill_over_existing_notes_shows_the_new_values_once_it_completes`), the command log's goldens. **Not built:** the Playwright test in `examples/notes-v3` (the harness holds no deployment-owner credential for `ordo evolve`; asked), live writes during the backfill (11a), the move lock and `backfill.concurrency` across tenants (11b), sealed backfills (13), refusing `ordo revert` of a backfill group by name. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
 | 11a | **Dual writes on one tenant** (split from 11, review 2026-11-23). `plan-backfill-dual-writes.md` steps B2, B4: the move overlay in the host write path, both versions' guards, the soak, the reverse writes, soak close into `$orphans`. Research: 2 to 3 tries. | L | 10b | a rename on 1 tenant under live writes loses no write; a revert in the soak keeps every write | 13c (reshaped) |
 | 11b | **Every tenant** (split from 11, review 2026-11-23). Step B5: moves driven by a rollout, shared databases, `ordo rollback` and its `--dry-run`, grants stay killed. | M | 10, 11a | a rename on 3 tenants under live writes loses no write; a rollback in the soak keeps every write | 27c |
 | 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. **Session 1 built 2026-11-24** (branch `evo-12-clones`, §3.4 "Built"): `clones.rs`; production masks before export (deny by default, `clone.mask`, `off` opt-in), drops files, the command log and every member's name and sign-in link; the bundle is sealed to staging's clone key (`ordo_crypto::recipient`) recorded with `ordo clones set-key`; staging reads it from production's door as the person, pins a new tenant to the version with the same source identity and imports it under its own keys; Q12 built: a staging admin or a `clone.readers` person opens it as its founding owner, and a cloned member's `$clone:` principal is never mapped. Door ops `std.deployment.cloneKey`, `setCloneKey`, `cloneOut`, `cloneIn`, `clones`, `setCloneSetting`; `ordo clones key\|set-key\|clone\|list\|set`. Tests: `ordo-host/tests/clones.rs` (2 real doors: the clone serves masked notes through staging's door, no production value anywhere in staging's database, a cloned member refused, each refusal), `ordo-cli/tests/clones_cli.rs`. **Session 2 built 2026-11-24** (branch `evo-12-clones-2`, §3.4 "Built, session 2"): sinks for mail and egress (`sinks.rs`, `clone.sinks`, `std.deployment.sinks`, `ordo clones sink`); a version staging does not hold comes down with the clone through the promotion gate, recorded as a clone; a tenant with its own database gets one on staging, brought to its version. Tests: 8 in `ordo-host/tests/clones.rs`; notes e2e project `clone`. **Fixed after** (branch `evo-12-acl-import`): a tenant with `acl` rows clones and imports, restored as the owner; access rows unmasked; a neutral default name. **Not built:** push sinks (Ordo sends no push); the 64 MiB cap. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
-| 12b | **Signed rehearsal (provisional, §3.2).** | M | 8, 12 | production refuses a plan digest staging did not sign | 27f (rest) |
+| 12b | **Signed rehearsal (provisional, §3.2).** **Built 2026-11-24** (branch `evo-12b-signed-rehearsal`, commit ba25aec9, §3.2 "Built"): `rehearsals.rs`; staging runs a stored plan on clones and signs an Ed25519 attestation with a key it made itself (Q11); production reads it from staging's door as the person, checks signature, release, age, source identities and its own render of the digest, and records it; every stored step on a deployment with staging before it runs only an accepted digest (`plan_not_rehearsed`). Q12: a `clone.readers` person may rehearse. Q14: backfills that declare secrets or hosts are marked not reproducible. Door ops `std.deployment.rehearse`, `rehearsals`, `acceptRehearsal`; `ordo rehearsals rehearse\|accept\|list`; settings `promotion.release_mismatch`, `promotion.attestation_max_age`. Tests: 2 in `ordo-host/tests/clones.rs`, notes e2e project `rehearsal`. **Not built:** break-glass. | M | 8, 12 | production refuses a plan digest staging did not sign | 27f (rest) |
 | 13 | **Sealed backfills.** No plaintext dual write, plaintext dropped on verify, `Purpose::Migration`. **First part built 2026-11-24** (cce76e88, 7f231dd5): a stored step that makes a `text` field `sealed` (B7) adds `<field>$seal` beside it; `backfill.rs` seals each row under its space's key at its row, one `Purpose::Migration` lease per space per chunk; verify opens every value against its plaintext, then each space's count and hash; then the plaintext column is dropped and the sealed one takes its name. A verify failure starts the seal over. `ordo apply` refuses B7 (`seal_needs_stored_plan`); `sealed indexed` in one step is refused (`sealed_index_backfill_not_built`), and so is a seal of a field a reader app reads (`seal_read_by_reader`, naming the reader and the fix: 7b, or the table off the `reader` line in a version before). Details in `plan-backfill-dual-writes.md` §7. Tests: `sealed_backfill.rs` (3 spaces, resume, verify, no custody, refusals); notes e2e project `seal` (`tests/seal/seal.spec.ts`, its versions written by the spec, the reader refusal first). **Not built:** live writes during the seal and the pin switch at its end (11a); each tenant is run with `ordo evolve --tenant`, which pins it as its seal ends, since an activation holds a tenant closed on B7 instead of running its stored step (11b); the deployment's own space serves the version before between `--run` and the activation; `seal.keep_plaintext`; B8 and B10 over sealed fields; note-viewer reading a field sealed under it (7b). | L | 11b | sealing on 3 tenants under live writes verifies by count and hash, and no plaintext column remains | 13d |
 | 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). **Built 2026-11-23** (239afd67, 525a781d, aefe7a8a): `$orphans` in each database (`ordo_exec::orphans`), written wherever a database is brought to a version that stops declaring a field or an entity: the deployment's own apply, each tenant's database brought forward, each stored step run (`schema_apply::record_orphans`). Each row has its columns, a sealed flag, a drop date and, once pruned, a tombstone. A version that declares the field again removes its row. Erasure deletes a space's rows from an orphaned table too, and names the orphans it reached (`std.space.delete`, `orphans`). Export writes each orphan under `orphans/` with the row's id. `std.deployment.orphans` and `ordo evolve --orphans` list them. `std.deployment.prune` and `ordo evolve --prune <entity.field>`: the first ask prunes nothing and says what would go; `--confirm <name>` prunes; in production `--confirm-deployment <domain>` too. Refused when `prune.enabled` is off (off in production; `ordo environments set prune on`), for a name no database records, and for a field the active version or a pinned one still declares. The reader rule (Q1): a table on a `reader` line that holds an orphaned column is granted by column, without it. The reader's check holds the entity with `external_changed`, naming the column, the read app and the fix. Tests: `orphans.rs`, `reader_grants.rs` (`a_reader_loses_an_orphaned_column_with_a_named_error`); notes e2e project `orphans` (`tests/orphans/orphans.spec.ts`); note-viewer e2e project `orphans` (`tests/orphans/orphaned-column.spec.ts`, fixture `notes-no-tags`). **Found by it:** `std.space.delete` failed on a tenant with a database of its own, which had no `$logconsumers`; erasure now makes it. **Not built:** soaks (11a), so an orphan is recorded when the database moves, not at a soak's close; nothing drops at the drop date by itself; the language cannot mark a field personal, so every orphan gets a drop date; restorable versions (17) are not yet checked by pruning; an orphaned `public` field (§1.14) is not handled apart. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
 | 15 | **`prev` in the language.** The syntax is ruled (2026-10-04) and written in `plan-syntax-additions.md` §5 (review 2026-11-23). Parser, the 3 compile checks, the 3 plan checks, the CDK's `prev()`, and the offer to remove landed `prev` lines. Refused on an external. **Built 2026-11-23 (branch `evo-15-prev`):** `prev(old)` on a field and `prev: old` in an entity's header; `prev_self`, `prev_still_declared`, `prev_duplicate` in the parser; `external_unsupported` on an external's field and header; `ordo_schema::prev` checks `prev_unresolved`, `prev_type`, `prev_mapping_required`, `prev_sealed` (added: a sealed copy cannot be read), and `prev_stale` as a warning; the diff renders `RenameField` and `RenameEntity` (B4) in place of a drop and an add. A field rename adds the column, copies the values, keeps the old column with its `NOT NULL` (the version before still loads over it) and drops its default; the receipt carries the reverse. A sync trigger made in the copy's transaction copies each write to either column into the other, so no write is lost between the copy and the pin switch (review fix; test `writes_during_the_rename_reach_the_new_column`). The trigger is a stopgap and does not ship: increment 11a (the next PR) replaces it with dual writes before any release (owner rule, no stopgaps shipped). `ordo apply` makes a field rename itself. An entity rename renders and is refused as `rename_entity_not_built` until 10b. The apply answer carries `landedPrev` (last environment of the chain, every tenant on a version with the new name), and `ordo apply --remove-landed-prev` cuts those marks. CDK: `TypeSpec.prev()`, `EntityOptions.prev`. Tests: `crates/ordo-syntax/tests/prev.rs`, `crates/ordo-host/tests/prev_rename.rs`, `clients/ordo-cdk/test/prev.test.ts`; notes v3 renames `attachments.kind` to `mediaType`, and its e2e `v3` keeps every image drawn across the move. **Not built:** merges, splits and moves (refused, no mapping option yet); type casts on a rename. | M | 8 | a declared rename renders as a rename; notes v3 uses it | 27x |
@@ -1820,6 +1905,7 @@ to an example's own e2e, beside its host tests:
 | 10, 10c | teamspace, 3 tenants | each tenant shows its own version's page during a rolling rollout; a canary that fails on the server pauses the rest (built, `a_canary_that_fails_its_health_check_pauses_the_rest`) |
 | 11a, 11b | notes-v3 | type into a note during the backfill; nothing typed is lost; roll back in the soak |
 | 12 | notes, 2 deployments | staging clones a production tenant through the doors; its version comes down with it; staging's door serves it, 3 notes masked, under a neutral name (project `clone`) |
+| 12b | notes, 2 deployments | after `seal`, staging rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses the step on a tenant (`ordo evolve --tenant`) until it accepts the rehearsal, with the same digest (project `rehearsal`) |
 | 13 | notes-v3 | seal a field on live data; the page reads it and the table holds no plaintext |
 | 17 | notes-v3 | snapshot on v2, move, restore, read the v2 notes |
 | CLI | one example, start to end | `ordo dev`, `apply`, `evolve`, `rollout status`, `rollback`, each through the door (owner, 2026-11-23, ask 5) |
@@ -1989,12 +2075,13 @@ day:
 | `rollout.alert_channel` | the deployment's stream; `mail:<address>` adds a mail (built with 10c) | environment |
 | `rollout.share_partners` | off (built with 10c) | environment |
 | `rollout.group`, `rollout.query`, `rollout.order` | none: `group` and `query` need them (built with 10c) | environment |
+| `rollout.limit` | none: every tenant the query selects (added 2026-11-24) | environment |
 | `apply.wait` | until the rollout starts; 300 seconds at most | command |
 | `tenant.maintenance_window` | none: no window; set by `ordo windows set` for every tenant, some, or all but some (2b) | deployment, tenant |
 | `promotion.chain` | dev, staging, production | deployment |
 | `promotion.skip_staging` | off | deployment |
-| `promotion.release_mismatch` | refuse | environment |
-| `promotion.attestation_max_age` | 7 days (provisional) | environment |
+| `promotion.release_mismatch` | refuse; `warn` accepts and says so (built, 12b) | environment |
+| `promotion.attestation_max_age` | 7 days (provisional; built, 12b) | environment |
 | `clone.mask` | deny every field not marked safe | environment |
 | `clone.sinks` | on: every staging tenant and every clone; `clones`: the clones only | environment |
 | `orphans.personal_drop_after` | 30 days | environment |

@@ -23,6 +23,7 @@ entity products {
   features:    json = [] public
   rank:        int = 100 public
   internalNote: text = ""
+  check price >= 0.00
 }
 
 entity plans {
@@ -33,6 +34,7 @@ entity plans {
   features:    json = []
   highlighted: bool = false
   rank:        int = 100
+  check price >= 0.00
   public
 }
 
@@ -43,6 +45,7 @@ entity testimonials {
   quote:   text
   stars:   int = 5
   rank:    int = 100
+  check stars >= 1 and stars <= 5
   public
 }
 

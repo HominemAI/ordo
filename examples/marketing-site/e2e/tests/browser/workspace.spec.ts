@@ -1,17 +1,48 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type CDPSession } from '@playwright/test';
 import { stack, state, owner, rows } from '../support.js';
+const devices = new WeakMap<Page, { cdp: CDPSession; authenticatorId: string }>();
+// Keep counters from real assertions, including step-up. Reusing the original
+// credential snapshot would look like a cloned authenticator to the server.
+test.afterEach(async ({ page }) => {
+  const device = devices.get(page);
+  if (!device) return;
+  const { credentials } = await device.cdp.send('WebAuthn.getCredentials', { authenticatorId: device.authenticatorId });
+  writeFileSync(`${state}/browser-owner-credentials.json`, JSON.stringify(credentials), { mode: 0o600 });
+});
+function unzip(data: Buffer): Map<string, Buffer> {
+  const entries = new Map<string, Buffer>();
+  let at = 0;
+  while (at + 30 <= data.length && data.readUInt32LE(at) === 0x04034b50) {
+    expect(data.readUInt16LE(at + 8), 'The server ZIP stores uncompressed entries').toBe(0);
+    const size = data.readUInt32LE(at + 18);
+    const length = data.readUInt16LE(at + 26);
+    const extra = data.readUInt16LE(at + 28);
+    const name = data.toString('utf8', at + 30, at + 30 + length);
+    const start = at + 30 + length + extra;
+    entries.set(name, data.subarray(start, start + size));
+    at = start + size;
+  }
+  return entries;
+}
 async function signIn(page: Page) {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('WebAuthn.enable');
-  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
-    protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
-    isUserVerified: true, automaticPresenceSimulation: true,
-  } });
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', {
+    options: {
+      protocol: 'ctap2',
+      transport: 'internal',
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
   for (const credential of JSON.parse(readFileSync(`${state}/browser-owner-credentials.json`, 'utf8'))) {
     await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
   }
+  devices.set(page, { cdp, authenticatorId });
   await page.goto('/studio');
   await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
   await expect(page.getByRole('heading', { name: 'Enquiry inbox' })).toBeVisible();
@@ -21,7 +52,13 @@ test('a staff member follows up on an enquiry and sees another browser update li
   await signIn(page);
   const name = `Visitor ${randomUUID()}`;
   const headers = await owner(request);
-  const id = (await rows(await request.post(`${stack().door}/op/contact`, { data: { name, email: 'visitor@example.org', company: 'Design team', message: 'Please send a quote' } })))[0].created;
+  const id = (
+    await rows(
+      await request.post(`${stack().door}/op/contact`, {
+        data: { name, email: 'visitor@example.org', company: 'Design team', message: 'Please send a quote' },
+      }),
+    )
+  )[0].created;
   try {
     const row = page.getByRole('row').filter({ hasText: name });
     await expect(row).toBeVisible();
@@ -30,14 +67,23 @@ test('a staff member follows up on an enquiry and sees another browser update li
     await page.getByLabel('Private notes').fill('Sent a proposal');
     await page.getByRole('button', { name: 'Save changes', exact: true }).click();
     await expect(row).toContainText('responding');
-    await page.evaluate(() => { (window as any).__e2eMarker = 'same-document'; });
-    const current = (await rows(await request.get(`${stack().door}/op/inbox`, { headers }))).find(r => r.id === id)!;
-    await rows(await request.post(`${stack().door}/op/triageEnquiry`, { headers, data: { id, rev: current.rev, status: 'won', notes: 'Approved remotely' } }));
+    await page.evaluate(() => {
+      (window as any).__e2eMarker = 'same-document';
+    });
+    const current = (await rows(await request.get(`${stack().door}/op/inbox`, { headers }))).find((r) => r.id === id)!;
+    await rows(
+      await request.post(`${stack().door}/op/triageEnquiry`, {
+        headers,
+        data: { id, rev: current.rev, status: 'won', notes: 'Approved remotely' },
+      }),
+    );
     await expect(row).toContainText('won');
     expect(await page.evaluate(() => (window as any).__e2eMarker)).toBe('same-document');
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Sign in with a passkey' })).toBeVisible();
-  } finally { await rows(await request.delete(`${stack().door}/op/deleteEnquiry`, { headers, params: { id } })); }
+  } finally {
+    await rows(await request.delete(`${stack().door}/op/deleteEnquiry`, { headers, params: { id } }));
+  }
 });
 
 test('staff create a campaign, upload a brief and schedule a reminder', async ({ page }) => {
@@ -58,7 +104,9 @@ test('staff create a campaign, upload a brief and schedule a reminder', async ({
   await page.getByLabel('Approval note (required)').fill('Reviewed for launch');
   await page.getByRole('button', { name: 'Approve campaign' }).click();
   await expect(page.getByRole('row').filter({ hasText: 'Reviewed for launch' })).toBeVisible();
-  await page.getByLabel('Choose a file (required)').setInputFiles({ name: 'brief.txt', mimeType: 'text/plain', buffer: Buffer.from('A campaign brief') });
+  await page
+    .getByLabel('Choose a file (required)')
+    .setInputFiles({ name: 'brief.txt', mimeType: 'text/plain', buffer: Buffer.from('A campaign brief') });
   await page.getByRole('button', { name: 'Upload file' }).click();
   await expect(page.getByRole('row').filter({ hasText: 'brief.txt' })).toBeVisible();
   await page.getByLabel('Remind at (your local time)').fill('2030-01-01T10:00');
@@ -66,6 +114,19 @@ test('staff create a campaign, upload a brief and schedule a reminder', async ({
   await expect(page.getByRole('button', { name: 'Clear reminder' })).toBeVisible();
   await page.getByRole('button', { name: 'Clear reminder' }).click();
   await expect(page.getByRole('button', { name: 'Clear reminder' })).toBeHidden();
+  const [bundle] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Download studio data' }).click(),
+  ]);
+  const archive = unzip(readFileSync(await bundle.path()));
+  expect(JSON.parse(archive.get('manifest.json')!.toString())).toMatchObject({
+    format: 'ordo.download',
+    complete: true,
+  });
+  expect(JSON.parse(archive.get('campaigns.json')!.toString()).some((r: any) => r.title === title)).toBe(true);
+  const assets = JSON.parse(archive.get('assets.json')!.toString());
+  const brief = assets.find((r: any) => r.name === 'brief.txt');
+  expect(archive.get(brief.file.path)?.toString()).toBe('A campaign brief');
   await row.getByRole('button', { name: 'Delete', exact: true }).click();
   await row.getByRole('button', { name: 'Confirm delete' }).click();
   await expect(row).toBeHidden();
@@ -91,33 +152,102 @@ test('staff create and revoke an invitation with a real passkey session', async 
   await page.screenshot({ path: info.outputPath('studio-mobile.png'), fullPage: true });
 });
 
-test('a colleague accepts an invitation, receives read access, and loses it on revocation', async ({ page, request }) => {
+test('a colleague accepts an invitation, receives read access, and loses it on revocation', async ({
+  page,
+  request,
+}) => {
   await signIn(page);
   const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('lumen.studio')!));
   const headers = { Origin: stack().page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' };
-  const invitation = (await rows(await request.post(`${stack().door}/op/std.space.invite`, { headers, data: { role: 'editor', expires: '1h', label: `Campaign reviewer ${randomUUID()}` } })))[0];
-  const accepted = await request.post(`${stack().door}/auth/complete`, { headers: { Origin: stack().page }, data: { method: 'guest', kind: 'new', display: `Reviewer ${randomUUID()}`, space: 'system', invitation: invitation.ticket } });
+  const invitation = (
+    await rows(
+      await request.post(`${stack().door}/op/std.space.invite`, {
+        headers,
+        data: { role: 'editor', expires: '1h', label: `Campaign reviewer ${randomUUID()}` },
+      }),
+    )
+  )[0];
+  const accepted = await request.post(`${stack().door}/auth/complete`, {
+    headers: { Origin: stack().page },
+    data: {
+      method: 'guest',
+      kind: 'new',
+      display: `Reviewer ${randomUUID()}`,
+      space: 'system',
+      invitation: invitation.ticket,
+    },
+  });
   expect(accepted.status(), await accepted.text()).toBe(200);
-  const colleague = { Origin: stack().page, Authorization: `Bearer ${(await accepted.json()).token}`, 'X-Ordo-Space': 'system' };
+  const colleague = {
+    Origin: stack().page,
+    Authorization: `Bearer ${(await accepted.json()).token}`,
+    'X-Ordo-Space': 'system',
+  };
   const me = (await rows(await request.get(`${stack().door}/op/me`, { headers: colleague })))[0];
-  const created = (await rows(await request.post(`${stack().door}/op/createCampaign`, { headers, data: { title: `Private ${randomUUID()}`, brief: 'Private launch plan', tags: [], budget: '75.00', due: null, created: new Date().toISOString() } })))[0];
+  const created = (
+    await rows(
+      await request.post(`${stack().door}/op/createCampaign`, {
+        headers,
+        data: {
+          title: `Private ${randomUUID()}`,
+          brief: 'Private launch plan',
+          tags: [],
+          budget: '75.00',
+          due: null,
+          created: new Date().toISOString(),
+        },
+      }),
+    )
+  )[0];
   const id = created.created;
   try {
-    expect((await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some(r => r.id === id)).toBe(false);
-    await rows(await request.post(`${stack().door}/op/grantCampaignsAccess`, { headers, data: { campaign: id, member: me.id, level: 'read' } }));
-    const visible = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).find(r => r.id === id)!;
+    expect(
+      (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some((r) => r.id === id),
+    ).toBe(false);
+    await rows(
+      await request.post(`${stack().door}/op/grantCampaignsAccess`, {
+        headers,
+        data: { campaign: id, member: me.id, level: 'read' },
+      }),
+    );
+    const visible = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).find(
+      (r) => r.id === id,
+    )!;
     expect(visible.brief).toBe('Private launch plan');
-    const denied = await request.post(`${stack().door}/op/editCampaign`, { headers: colleague, data: { id, rev: visible.rev, title: 'Taken over', brief: '', tags: [], budget: '0.00', due: null, status: 'draft' } });
-    expect(denied.status()).toBe(403); expect((await denied.json()).error.code).toBe('access_guard');
-    await rows(await request.delete(`${stack().door}/op/unshareCampaign`, { headers, params: { campaign: id, member: me.id } }));
-    expect((await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some(r => r.id === id)).toBe(false);
-    await rows(await request.post(`${stack().door}/op/std.space.setRole`, { headers, data: { member: me.id, role: 'viewer' } }));
+    const denied = await request.post(`${stack().door}/op/editCampaign`, {
+      headers: colleague,
+      data: {
+        id,
+        rev: visible.rev,
+        title: 'Taken over',
+        brief: '',
+        tags: [],
+        budget: '0.00',
+        due: null,
+        status: 'draft',
+      },
+    });
+    expect(denied.status()).toBe(403);
+    expect((await denied.json()).error.code).toBe('access_guard');
+    await rows(
+      await request.delete(`${stack().door}/op/unshareCampaign`, { headers, params: { campaign: id, member: me.id } }),
+    );
+    expect(
+      (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some((r) => r.id === id),
+    ).toBe(false);
+    await rows(
+      await request.post(`${stack().door}/op/std.space.setRole`, { headers, data: { member: me.id, role: 'viewer' } }),
+    );
     const blocked = await request.post(`${stack().door}/op/createCampaign`, { headers: colleague, data: {} });
-    expect(blocked.status()).toBe(403); expect((await blocked.json()).error.code).toBe('access_denied');
+    expect(blocked.status()).toBe(403);
+    expect((await blocked.json()).error.code).toBe('access_denied');
     await rows(await request.post(`${stack().door}/op/std.space.suspend`, { headers, data: { member: me.id } }));
     const suspended = await request.get(`${stack().door}/op/people`, { headers: colleague });
-    expect(suspended.status()).toBe(403); expect((await suspended.json()).error.code).toBe('access_denied');
+    expect(suspended.status()).toBe(403);
+    expect((await suspended.json()).error.code).toBe('access_denied');
     await rows(await request.post(`${stack().door}/op/std.space.reinstate`, { headers, data: { member: me.id } }));
     await rows(await request.get(`${stack().door}/op/people`, { headers: colleague }));
-  } finally { await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } })); }
+  } finally {
+    await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } }));
+  }
 });

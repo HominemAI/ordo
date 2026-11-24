@@ -467,6 +467,11 @@ pub fn options_text(c: &Choices) -> String {
             fill.mapping.text()
         ));
     }
+    // `seal.keep_plaintext` (D9): present only when stated, so every plan
+    // stored before it keeps its digest.
+    for (e, f) in &c.keep_plaintext {
+        out.push_str(&format!("\nkeep-plaintext {e}.{f}"));
+    }
     out
 }
 
@@ -485,6 +490,11 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
     c.stored = true;
     for line in lines.map(str::trim).filter(|l| !l.is_empty()) {
         let bad = || EvolveRefusal::Options(format!("a stored fill does not read back: `{line}`"));
+        if let Some(target) = line.strip_prefix("keep-plaintext ") {
+            c.parse_keep_plaintext(target)
+                .map_err(|e| EvolveRefusal::Options(format!("--keep-plaintext {e}")))?;
+            continue;
+        }
         let rest = line.strip_prefix("fill ").ok_or_else(bad)?;
         let (audit, spec) = rest.split_once(' ').ok_or_else(bad)?;
         let images = match audit {
@@ -498,11 +508,19 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
     Ok(c)
 }
 
-/// The options a caller types: `--places`, `--fill` and `--audit-images`.
-pub fn typed_options(places: &str, fill: &str, images: &str) -> Result<Choices, EvolveRefusal> {
+/// The options a caller types: `--places`, `--fill`, `--audit-images` and
+/// `--keep-plaintext`.
+pub fn typed_options(
+    places: &str,
+    fill: &str,
+    images: &str,
+    keep_plaintext: &str,
+) -> Result<Choices, EvolveRefusal> {
     let mut c = parse_options(places)?;
     c.parse_fills(fill, images)
         .map_err(|e| EvolveRefusal::Options(format!("--fill {e}")))?;
+    c.parse_keep_plaintext(keep_plaintext)
+        .map_err(|e| EvolveRefusal::Options(format!("--keep-plaintext {e}")))?;
     Ok(c)
 }
 
@@ -794,10 +812,29 @@ pub async fn render_stored(
                         json!(f.is_none_or(|f| f.secrets.is_empty() && f.hosts.is_empty()));
                     // D9: what a sealed backfill does with the plaintext.
                     if bf.sealing_from.is_some() {
-                        j["plaintext"] = json!(
-                            "no plaintext dual write; the plaintext column is dropped once \
-                             every row's seal opens to it and each space's count and hash \
-                             verify. Its old values stay in earlier backups and WAL"
+                        j["plaintext"] = json!(match &bf.kept_plaintext {
+                            None => "no plaintext dual write; the plaintext column is dropped \
+                                     once every row's seal opens to it and each space's count \
+                                     and hash verify. Its old values stay in earlier backups and \
+                                     WAL"
+                            .to_string(),
+                            Some(k) => format!(
+                                "kept (seal.keep_plaintext): the plaintext column is renamed \
+                                 `{k}` and orphaned, never written again, until `ordo evolve \
+                                 --prune {}.{k}` removes it. Until then every value stays \
+                                 readable in the database, and in its WAL and backups for \
+                                 good, which no later step can undo",
+                                bf.entity
+                            ),
+                        });
+                    }
+                    // B8: what the blind index costs and reveals.
+                    if bf.indexing_from.is_some() {
+                        j["index"] = json!(
+                            "every row's sealed value is opened under its space's key, one \
+                             lease per space per chunk, and its blind index written; the index \
+                             is required once every row's index verifies. Equal values in one \
+                             space have equal indexes, which is what makes `==` work"
                         );
                     }
                     j["oldValues"] = json!(match bf.audit {
@@ -1612,6 +1649,12 @@ pub struct StepContext {
     /// Key custody, for a step that seals a field (increment 13). `None`
     /// refuses the seal, naming why.
     pub keys: Option<std::sync::Arc<dyn ordo_crypto::KeyProvider>>,
+    /// The tenant and the pin epoch it will be pinned under once the step
+    /// ends (`ordo evolve --tenant`). A seal's end raises the tenant's pin
+    /// fence to it in the transaction that drops the plaintext, so a node
+    /// still on the version before writes nothing more there until it
+    /// reads the new pin (increment 13 under live writes).
+    pub fence: Option<(String, i64)>,
 }
 
 /// The database's recorded version.
@@ -1951,9 +1994,12 @@ pub async fn run_step_with(
         }
         // A rename's copy runs beside its versions' dual writes (the rename
         // overlays, increment 11a), so rows change under it by design and
-        // verify checks the mapping on every row. A fill has no overlay
-        // outside a move, and verify checks the chunks too.
-        let verified = if bf.code == "B4" {
+        // verify checks the mapping on every row. So do a seal and a blind
+        // index (increment 13): every write seals what it wrote (`$seals`),
+        // and verify opens every row. A fill has no overlay outside a move,
+        // and verify checks the chunks too.
+        let live = bf.code == "B4" || bf.sealing_from.is_some() || bf.indexing_from.is_some();
+        let verified = if live {
             Box::pin(worker.verify_live_and_close()).await
         } else {
             Box::pin(worker.verify_and_close()).await
@@ -1968,10 +2014,56 @@ pub async fn run_step_with(
         });
         reports.push(report);
     }
+    let mut after = after;
+    let sealing = backfills
+        .iter()
+        .any(|b| b.sealing_from.is_some() || b.indexing_from.is_some());
+    if let (true, false, Some((space, epoch))) = (sealing, after.is_empty(), &ctx.fence) {
+        // In the end's own transaction (it runs after the records' lock).
+        after.push(sa::Step {
+            code: "B7",
+            phase: sa::Phase::Alter,
+            sql: format!(
+                "{};\nINSERT INTO \"$pin_fence\" (\"space\", \"epoch\") VALUES ({}, {epoch}) \
+                 ON CONFLICT (\"space\") DO UPDATE \
+                 SET \"epoch\" = GREATEST(\"$pin_fence\".\"epoch\", EXCLUDED.\"epoch\");\n",
+                ordo_exec::PIN_FENCE_DDL,
+                sql_lit(space)
+            ),
+            index: None,
+            constraint: None,
+            table: String::new(),
+        });
+    }
     if !after.is_empty() {
         sa::execute(target, &after)
             .await
             .map_err(|f| run_err("execute_failed", f.to_string(), false))?;
+    }
+    // `seal.keep_plaintext`: the kept plaintext column is an orphan, for
+    // erasure, export and pruning (increment 14's table).
+    let kept: Vec<ordo_exec::orphans::Left> = backfills
+        .iter()
+        .filter_map(|b| {
+            Some(ordo_exec::orphans::Left {
+                entity: b.entity.clone(),
+                field: Some(b.kept_plaintext.clone()?),
+                columns: vec![b.kept_plaintext.clone()?],
+                sealed: false,
+            })
+        })
+        .collect();
+    if !kept.is_empty() {
+        ordo_exec::orphans::record(
+            target,
+            &kept,
+            Some(&plan.from),
+            &plan.to,
+            actor,
+            crate::runtime::now_secs(),
+        )
+        .await
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     }
     // What was applied is checked rather than assumed: the record below
     // says the database holds Y.
@@ -2165,6 +2257,9 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         if let Some(n) = b["plaintext"].as_str() {
             out.push(format!("    plaintext: {n}"));
         }
+        if let Some(n) = b["index"].as_str() {
+            out.push(format!("    index: {n}"));
+        }
     }
     for s in receipt["after"].as_array().into_iter().flatten() {
         out.push(format!(
@@ -2203,6 +2298,18 @@ fn dual_writes_step(p: &StoredPlan) -> bool {
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
     !fills.is_empty() && fills.iter().all(|b| b["sql"].is_string())
+}
+
+/// A stored step that seals a field (increment 13). Its end drops the
+/// plaintext and raises the tenant's pin fence, so it is the last step of
+/// a replay before the pin.
+fn sealing_step(p: &StoredPlan) -> bool {
+    serde_json::from_str::<Value>(&p.receipt).is_ok_and(|r| {
+        r["backfills"].as_array().is_some_and(|b| {
+            b.iter()
+                .any(|x| x["sealFrom"].is_string() || x["indexFrom"].is_string())
+        })
+    })
 }
 
 /// What a move command runs its backfills with: the step's settings, with
@@ -2329,6 +2436,9 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 // `entity.field`, comma-separated: fills audited with full
                 // per-row images instead of a summary.
                 text("auditImages", 1024, false),
+                // `entity.field`, comma-separated: seals that keep the
+                // plaintext column, orphaned (`seal.keep_plaintext`, D9).
+                text("keepPlaintext", 1024, false),
                 // The digest the step rendered to where it was rehearsed.
                 text("expectDigest", 128, false),
                 // Run the stored plan on the deployment's own database.
@@ -2417,6 +2527,7 @@ pub async fn execute(
                 text("places").unwrap_or_default(),
                 text("fill").unwrap_or_default(),
                 text("auditImages").unwrap_or_default(),
+                text("keepPlaintext").unwrap_or_default(),
             )
             .map_err(|e| e.to_exec_error(WHAT))?;
             let run = bound
@@ -2732,7 +2843,34 @@ pub async fn execute(
                 .to_exec_error(WHAT)
             })?;
             let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;
-            let ctx = ops.step_context().await?;
+            // `--budget` and `--chunk-rows` reach a step run here too.
+            let mut ctx = move_context(ops, bound).await?;
+            // **A seal under live writes** (increment 13): its end drops the
+            // plaintext, after which the version before cannot write the
+            // field. The end raises the tenant's pin fence to the epoch of
+            // the pin below, so a node still on that version is told the
+            // pin moved and writes nothing, rather than failing on the
+            // column. A seal is therefore the last step before the pin.
+            if let Some(from) = pin.version.as_deref().filter(|f| *f != to) {
+                let steps = path(pool, from, &to)
+                    .await
+                    .map_err(|e| e.to_exec_error(WHAT))?;
+                if let Some(i) = steps.iter().position(sealing_step) {
+                    if i + 1 < steps.len() {
+                        drop(lock);
+                        let stop = &steps[i].to;
+                        return Err(EvolveRefusal::Options(format!(
+                            "the stored path from `{from}` to `{to}` seals a field in the step \
+                             from `{}` to `{stop}`, and a seal ends with the tenant's pin. \
+                             Replay the tenant to `{stop}` first (`ordo evolve --tenant \
+                             {tenant} --to {stop}`), then on to `{to}`",
+                            steps[i].from,
+                        ))
+                        .to_exec_error(WHAT));
+                    }
+                    ctx.fence = Some((tenant.to_string(), pin.epoch + 1));
+                }
+            }
             let done = Box::pin(replay_with(pool, &target, tenant, &to, caller, &ctx))
                 .await
                 .map_err(|e| e.to_exec_error(WHAT))?;

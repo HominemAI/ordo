@@ -1229,6 +1229,9 @@ impl Pool {
             // The renames this database is in the middle of (increment
             // 11a): every write reads them first ([`overlay::RENAMES_DDL`]).
             overlay::RENAMES_DDL,
+            // The sealed backfills it is in the middle of (increment 13),
+            // read under the same fence ([`overlay::SEALS_DDL`]).
+            overlay::SEALS_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -2817,6 +2820,27 @@ impl Executor {
                 return Err(ExecFail::Pool(e));
             }
         };
+        // The sealed backfills in progress (increment 13), under the same
+        // lock: a seal's expand records itself under `"$renames"` too.
+        let seals = match overlay::seals_in(&tx).await {
+            Ok(s) => s,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::SEALS_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the seals table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
         // The pin fence next: a node whose pin of this tenant is older
         // than one another node already wrote under writes nothing.
         if let Err(e) = self.check_pin_fence(&tx).await {
@@ -2901,6 +2925,37 @@ impl Executor {
                         return Err(match e {
                             overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
                             overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
+                // **The seal overlay** (increment 13): a field this version
+                // writes as plaintext while a stored step seals it, or as
+                // sealed while one indexes it, gets the column the worker
+                // fills, on every row written, in this transaction.
+                let sealing = overlay::seals_for(&self.schema, &seals);
+                if let (false, Some(group)) = (sealing.is_empty(), scratch.pending()) {
+                    let written: Vec<(String, String)> = group
+                        .commands
+                        .iter()
+                        .filter(|c| c.kind != ordo_commandlog::CommandKind::Delete)
+                        .map(|c| (c.entity.clone(), c.row_id.clone()))
+                        .collect();
+                    if let Err(e) = overlay::apply_seals(
+                        &tx,
+                        &self.schema,
+                        self.keys.as_ref(),
+                        &self.space.0,
+                        &sealing,
+                        &written,
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::SealOverlayError::Pool(p) => ExecFail::Pool(p),
+                            k @ overlay::SealOverlayError::Keys(_) => {
+                                ExecFail::Compile(k.to_string())
+                            }
                         });
                     }
                 }

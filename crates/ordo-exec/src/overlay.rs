@@ -100,6 +100,293 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
         .collect())
 }
 
+/// **`$seals`**: the sealed backfills a database is in the middle of
+/// (increment 13): a field being sealed (B7), or a sealed field gaining its
+/// blind index (B8). Recorded the way a rename is ([`RENAMES_DDL`]): the
+/// step's expand takes `"$renames"` in `EXCLUSIVE` mode, adds the column
+/// the worker fills, and writes the row here, in one transaction. Every
+/// write already holds `"$renames"` in `ROW SHARE` mode from its first
+/// statement, so it reads this table under the same fence
+/// ([`seals_in`]) and fills the column for every row it wrote
+/// ([`apply_seals`]), in its own transaction, with its own key custody.
+///
+/// - `kind` `seal`: `target` (a `bytea` beside the plaintext) holds the
+///   row's `source` (the plaintext column) sealed at its row. Written by a
+///   version that declares the field plaintext.
+/// - `kind` `index`: `target` (`<field>$bidx`) holds the blind index of the
+///   value sealed in `source`. Written by a version that declares the field
+///   sealed and not indexed.
+///
+/// The row leaves in the transaction that lands the step's end (the
+/// plaintext dropped, or the index made `NOT NULL`), under the same
+/// exclusive lock.
+pub const SEALS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$seals\" ( \
+  \"entity\" text NOT NULL, \
+  \"field\" text NOT NULL, \
+  \"kind\" text NOT NULL, \
+  \"source\" text NOT NULL, \
+  \"target\" text NOT NULL, \
+  \"version\" text NOT NULL, \
+  PRIMARY KEY (\"entity\", \"field\", \"kind\") \
+)";
+
+/// What a sealed backfill in progress fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealKind {
+    /// B7: the plaintext sealed at its row.
+    Seal,
+    /// B8: the sealed value's blind index.
+    Index,
+}
+
+impl SealKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SealKind::Seal => "seal",
+            SealKind::Index => "index",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<SealKind> {
+        match s {
+            "seal" => Some(SealKind::Seal),
+            "index" => Some(SealKind::Index),
+            _ => None,
+        }
+    }
+}
+
+/// One row of `$seals`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seal {
+    pub entity: String,
+    pub field: String,
+    pub kind: SealKind,
+    /// The column read: the plaintext (B7) or the sealed value (B8).
+    pub source: String,
+    /// The column filled.
+    pub target: String,
+}
+
+/// Read `$seals`. Run after [`renames_in`], whose lock fences this table
+/// too.
+pub async fn seals_in(tx: &TxConn) -> Result<Vec<Seal>, PoolError> {
+    let rows = tx
+        .rows(
+            "SELECT \"entity\", \"field\", \"kind\", \"source\", \"target\" FROM \"$seals\" \
+             ORDER BY \"entity\", \"field\", \"kind\"",
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some(Seal {
+                entity: it.next()??,
+                field: it.next()??,
+                kind: SealKind::parse(&it.next()??)?,
+                source: it.next()??,
+                target: it.next()??,
+            })
+        })
+        .collect())
+}
+
+/// Why the seal overlay did not run.
+#[derive(Debug)]
+pub enum SealOverlayError {
+    /// Custody refused: nothing was written.
+    Keys(ordo_crypto::KeyError),
+    Pool(PoolError),
+}
+
+impl From<PoolError> for SealOverlayError {
+    fn from(e: PoolError) -> Self {
+        SealOverlayError::Pool(e)
+    }
+}
+
+impl From<ordo_crypto::KeyError> for SealOverlayError {
+    fn from(e: ordo_crypto::KeyError) -> Self {
+        SealOverlayError::Keys(e)
+    }
+}
+
+impl std::fmt::Display for SealOverlayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SealOverlayError::Keys(e) => write!(
+                f,
+                "seal_overlay: a field of this write is being sealed, and its key could not be \
+                 released ({e}). Nothing was written; try again"
+            ),
+            SealOverlayError::Pool(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The seals in progress a version writes into: a `seal` while it declares
+/// the field plaintext, an `index` while it declares it sealed and not
+/// indexed. A version that already declares the end shape writes nothing
+/// more: the step's end lands before it serves.
+pub fn seals_for<'a>(schema: &ordo_schema::Schema, seals: &'a [Seal]) -> Vec<&'a Seal> {
+    seals
+        .iter()
+        .filter(|s| {
+            let Some(f) = schema.native(&s.entity).and_then(|e| e.field(&s.field)) else {
+                return false;
+            };
+            match s.kind {
+                SealKind::Seal => !f.sealed,
+                SealKind::Index => f.sealed && !f.indexed,
+            }
+        })
+        .collect()
+}
+
+/// **The seal overlay** (increment 13 under live writes): every row this
+/// write wrote, `(entity, id)`, gets the column a sealed backfill in
+/// progress fills, computed from the row as it now stands, in this
+/// transaction. One `Purpose::Write` lease per write. A column the
+/// database does not hold yet is skipped under a savepoint.
+///
+/// Why the worker and a write cannot disagree: both compute the target
+/// from the row's own source column under the row's lock, and verify
+/// opens every value against its row before the step ends.
+pub async fn apply_seals(
+    tx: &TxConn,
+    schema: &ordo_schema::Schema,
+    keys: &dyn ordo_crypto::KeyProvider,
+    space: &str,
+    seals: &[&Seal],
+    written: &[(String, String)],
+) -> Result<(), SealOverlayError> {
+    let sid = ordo_crypto::SpaceId(space.to_string());
+    let mut lease: Option<ordo_crypto::KeyLease> = None;
+    for s in seals {
+        let mut ids: Vec<&str> = written
+            .iter()
+            .filter(|(entity, _)| *entity == s.entity)
+            .map(|(_, id)| id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            continue;
+        }
+        let normalize = schema
+            .native(&s.entity)
+            .and_then(|e| e.field(&s.field))
+            .and_then(|f| f.normalize.clone());
+        for chunk in ids.chunks(IDS_PER_STATEMENT) {
+            let list = chunk
+                .iter()
+                .map(|i| sql_lit(i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let read = format!(
+                "SELECT \"id\"::text, {src}::text FROM {t} WHERE \"$space\" = {} \
+                 AND \"id\" IN ({list})",
+                sql_lit(space),
+                src = quote(&s.source),
+                t = quote(&s.entity),
+            );
+            // The target is named so a database without it skips here.
+            let probe = format!(
+                "SELECT {} FROM {} WHERE FALSE",
+                quote(&s.target),
+                quote(&s.entity)
+            );
+            if !guarded(tx, &probe).await? {
+                continue;
+            }
+            let rows = tx.rows(&read).await?;
+            for r in rows {
+                let mut it = r.into_iter();
+                let Some(id) = it.next().flatten() else {
+                    continue;
+                };
+                let source = it.next().flatten();
+                let value: Option<Vec<u8>> = match (s.kind, source) {
+                    (SealKind::Seal, None) => None,
+                    (SealKind::Seal, Some(text)) => {
+                        if lease.is_none() {
+                            lease =
+                                Some(keys.release(&sid, ordo_crypto::Purpose::Write, "seal")?);
+                        }
+                        let l = lease.as_ref().expect("taken just above");
+                        Some(keys.seal_at(
+                            l,
+                            &s.entity,
+                            &s.field,
+                            ordo_crypto::Anchor::Row(&id),
+                            text.as_bytes(),
+                        )?)
+                    }
+                    (SealKind::Index, sealed) => {
+                        let plain = match sealed {
+                            None => None,
+                            Some(hexed) => {
+                                if lease.is_none() {
+                                    lease = Some(keys.release(
+                                        &sid,
+                                        ordo_crypto::Purpose::Write,
+                                        "seal",
+                                    )?);
+                                }
+                                let l = lease.as_ref().expect("taken just above");
+                                let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(&hexed));
+                                let open = keys.open_at(
+                                    l,
+                                    &s.entity,
+                                    &s.field,
+                                    ordo_crypto::Anchor::Row(&id),
+                                    &bytes,
+                                )?;
+                                Some(String::from_utf8_lossy(&open).into_owned())
+                            }
+                        };
+                        let normalized = plain.map(|v| match normalize.as_deref() {
+                            Some("lower") => v.to_lowercase(),
+                            _ => v,
+                        });
+                        Some(
+                            keys.blind_index(
+                                &sid,
+                                &s.entity,
+                                &s.field,
+                                normalized.as_deref().into(),
+                            )?
+                            .to_vec(),
+                        )
+                    }
+                };
+                let lit = match value {
+                    None => "NULL".to_string(),
+                    Some(b) => format!("'\\x{}'::bytea", ordo_crypto::hex(&b)),
+                };
+                tx.rows(&format!(
+                    "UPDATE {t} SET {c} = {lit} WHERE \"$space\" = {} AND \"id\" = {}",
+                    sql_lit(space),
+                    sql_lit(&id),
+                    t = quote(&s.entity),
+                    c = quote(&s.target),
+                ))
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 /// How many row ids one overlay statement names at most.
 const IDS_PER_STATEMENT: usize = 500;
 

@@ -25,6 +25,11 @@
 //!   member outside the group is still refused.
 //! - **Invite-only.** Under `ORDO_AUTH_PROVISIONING=invite-only`, a newcomer
 //!   with an invitation joins, and a stranger without one is refused.
+//! - **A rolling rollout** (`plan-versions.md` §3.7, increment 10). Three
+//!   teams; teamspace 0.2.0 adds an op; a rolling rollout moves one team a
+//!   batch. During it each team is served its own version: the moved team
+//!   answers the new op, the others do not and still serve 0.1.0. Then
+//!   every team moves and the rollout finishes.
 //!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
@@ -267,6 +272,9 @@ impl Deployment {
             .env("ORDO_AUTH_PROVISIONING", provisioning)
             .env("ORDO_PROVISION_SELF_SERVE", "on-signup")
             .env("ORDO_ACCESS_TEMPLATE", TEMPLATE)
+            // The rollout worker's turn, short so a rollout test waits
+            // seconds and not minutes (`plan-versions.md` §3.7).
+            .env("ORDO_ROLLOUT_TICK_SECS", "1")
             .env_remove("ORDO_PG_ROUTING")
             .env_remove("ORDO_TENANT_CREDENTIALS")
             .env_remove("ORDO_TENANT_CREDENTIALS_DIR")
@@ -1196,4 +1204,122 @@ async fn a_new_tenant_and_a_new_colleague_are_served_on_their_first_call() {
             });
         }
     });
+}
+
+/// Teamspace 0.2.0: 0.1.0 and one read the rollout test can tell apart.
+fn teamspace_v2() -> String {
+    assert!(SOURCE.contains("domain teamspace @ 0.1.0"));
+    SOURCE.replace("domain teamspace @ 0.1.0", "domain teamspace @ 0.2.0")
+        + "\n# Added by 0.2.0: the projects' names, A to Z.\n\
+           op projectNames unbounded =\n  projects[name]\n  sort name\n"
+}
+
+/// **A rolling rollout over three teams** (`plan-versions.md` §3.7 and §4,
+/// increment 10). Each team is served its own version while the rollout
+/// runs: the team that moved answers 0.2.0's new op, and the two that have
+/// not refuse it and keep serving 0.1.0. The worker in the running binary
+/// moves them; this test only stores the version, starts the rollout, and
+/// makes the next batch due.
+#[tokio::test(flavor = "multi_thread")]
+async fn during_a_rolling_rollout_each_team_is_served_its_own_version() {
+    let _serial = SERIAL.lock().await;
+    const DB: &str = "ordo_teamspace_rollout";
+    let d = Deployment::boot(DB, "auto-onboard").await;
+    let teams = [
+        found(&d, &device(61, "ana"), "Ana"),
+        found(&d, &device(62, "bo"), "Bo"),
+        found(&d, &device(63, "cy"), "Cy"),
+    ];
+    for t in &teams {
+        new_project(&d, t, &format!("{} launch", t.who));
+    }
+
+    // `ordo apply --no-activate` of 0.2.0, then `ordo rollout start 0.2.0
+    // --strategy rolling --batch-size 1 --batch-interval 1h`.
+    let pool = Pool::connect(PoolConfig { size: 4, ..cfg(DB) })
+        .await
+        .expect("pool");
+    let v2 = ordo_host::schema_apply::Program::compile(&teamspace_v2()).expect("0.2.0 compiles");
+    ordo_host::apply_op::run_program(
+        &pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &v2,
+        vec![],
+        "operator:teamspace-test",
+        "test.apply",
+        false,
+    )
+    .await
+    .expect("0.2.0 stored");
+    let rollouts = ordo_host::rollouts::Rollouts::on(&pool);
+    let started = rollouts
+        .start(
+            "0.2.0",
+            &ordo_host::rollouts::StartOptions {
+                strategy: Some(ordo_host::rollouts::Strategy::Rolling),
+                batch_interval: Some(3_600),
+                batch_size: Some(1),
+                ..Default::default()
+            },
+            "operator:teamspace-test",
+            ordo_host::runtime::now_secs(),
+        )
+        .await
+        .expect("the rollout starts");
+
+    // The binary's worker moves the deployment's own space and one team.
+    let moved = eventually("the first batch", || {
+        let rt = tokio::runtime::Handle::current();
+        let s = tokio::task::block_in_place(|| rt.block_on(rollouts.status(Some(started.id))))
+            .expect("status")
+            .expect("the rollout");
+        (s.counts["moved"] == 1).then(|| {
+            s.tenants
+                .iter()
+                .find(|t| t.state == ordo_host::rollouts::TenantState::Moved)
+                .expect("the moved team")
+                .space
+                .clone()
+        })
+    });
+    for t in &teams {
+        if t.space == moved {
+            let names = eventually(&format!("{} serves 0.2.0", t.who), || {
+                let (status, body) = d.op(t, "GET", "projectNames", json!({}));
+                (status == 200).then_some(body)
+            });
+            assert_eq!(
+                names["rows"][0]["name"],
+                format!("{} launch", t.who),
+                "{names}"
+            );
+        } else {
+            let (status, body) = d.op(t, "GET", "projectNames", json!({}));
+            assert_ne!(status, 200, "{} is still on 0.1.0: {body}", t.who);
+            // 0.1.0 still serves it: its own ops answer.
+            let (status, body) = d.op(t, "GET", "myProjects", json!({}));
+            assert_eq!(status, 200, "{} on 0.1.0: {body}", t.who);
+        }
+    }
+
+    // The next batches come due; the worker moves the other two teams.
+    pool.rows(&format!(
+        "UPDATE \"$rollouts\" SET \"batch_interval\" = 1 WHERE \"id\" = {}",
+        started.id
+    ))
+    .await
+    .expect("due");
+    eventually("the rollout finishes", || {
+        let rt = tokio::runtime::Handle::current();
+        let s = tokio::task::block_in_place(|| rt.block_on(rollouts.status(Some(started.id))))
+            .expect("status")
+            .expect("the rollout");
+        (s.rollout.state == ordo_host::rollouts::RolloutState::Finished).then_some(())
+    });
+    for t in &teams {
+        eventually(&format!("{} serves 0.2.0", t.who), || {
+            let (status, _) = d.op(t, "GET", "projectNames", json!({}));
+            (status == 200).then_some(())
+        });
+    }
 }

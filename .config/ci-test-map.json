@@ -413,7 +413,8 @@
       "store_pool_stress",
       "teamspace_app",
       "two_instances",
-      "upgrade_continuity"
+      "upgrade_continuity",
+      "versions_loaded"
     ],
     "crates/ordo-host/src/grants.rs": "all",
     "crates/ordo-host/src/guess_limits.rs": "all",

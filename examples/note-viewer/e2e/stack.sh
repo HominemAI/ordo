@@ -218,6 +218,9 @@ wait_for "notes v2" "$notes_door/health/live" "$last"
 (notes_env "$ordo" apply "$repo/examples/notes-v2" --as fed-e2e --direct) >"$state/notes-apply.log" 2>&1 ||
   { cat "$state/notes-apply.log" >&2; echo "stack: ordo apply of notes v2 failed" >&2; exit 1; }
 admit notes editor
+# notes v2's environment, for a test that applies another notes program over
+# it with the same `--direct` apply (tests/v3, increment 7a). Test values.
+(notes_env env) >"$state/notes.env"
 
 viewer_env "$host" >"$state/viewer.log" 2>&1 &
 last=$!
@@ -234,6 +237,8 @@ cat >"$state/stack.json" <<EOF
   "viewerDoor": "$viewer_door",
   "notesPage": "$notes_page/",
   "viewerPage": "$viewer_page/",
+  "ordo": "$ordo",
+  "programV3": "$repo/examples/notes-v3",
   "pg": { "host": "$pg_host", "port": "$pg_port", "db": "$db", "admin": "$pg_user", "rolePassword": "$role_password" },
   "logs": "$state"
 }

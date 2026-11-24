@@ -625,6 +625,33 @@ pub trait OpRegistry: Send + Sync {
         let _ = space;
         self.get(name)
     }
+
+    /// The program version that serves `space` now, when the registry
+    /// serves versions per tenant. A live feed records it when it opens and
+    /// ends with `version_changed` when it moves (`plan-versions.md` §1.4).
+    /// `None`: one program for every space, and no feed ever ends for it.
+    fn version_in(&self, space: &str) -> Option<String> {
+        let _ = space;
+        None
+    }
+
+    /// Is `name` declared by a program version this registry serves, while
+    /// the one serving `space` lacks it (`plan-versions.md` §1.9)? The door
+    /// then answers `op_not_in_version` rather than as an unknown op. The
+    /// default, one program everywhere, never says yes.
+    fn declared_elsewhere(&self, space: &str, name: &str) -> bool {
+        let _ = (space, name);
+        false
+    }
+
+    /// The op's version hash in the program version that served `space`
+    /// before its last switch, when this registry knows it. An idempotency
+    /// key sent before the switch is honoured across it (`plan-versions.md`
+    /// §1.9): the retry's fingerprint is also taken with this hash.
+    fn prior_version_hash(&self, space: &str, name: &str) -> Option<String> {
+        let _ = (space, name);
+        None
+    }
 }
 
 /// Parameters that passed type + bounds validation, keyed by declared name.

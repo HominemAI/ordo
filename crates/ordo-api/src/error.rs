@@ -177,6 +177,13 @@ pub enum ErrorCode {
     /// you learn a row exists only if you may read it (SH-5 / X-032).
     NotFound,
     VersionSkew,
+    /// The op exists in another program version this deployment serves, and
+    /// not in the one serving this tenant (`plan-versions.md` §1.9). Said
+    /// only to a caller the door would let call the op, so it maps nothing
+    /// a stranger could not see. Distinct from `access_denied` and
+    /// `version_skew`: the app is newer or older than the tenant, and
+    /// reloading it, or waiting for the tenant to move, is the fix.
+    OpNotInVersion,
     /// The write asserted `rev: null` — create-once — and the unique key
     /// already matches a row (spec §6 rule 9). Nothing applied. Distinct from
     /// `Duplicate`, which is a constraint violation the caller did not
@@ -735,7 +742,7 @@ pub enum ErrorCode {
     /// in the message, each with its diff code.
     ///
     /// **409**: nothing is wrong with the request, and it lands unchanged
-    /// once the schema is moved (`ordo migrate --apply`). Its own class
+    /// once the schema is moved (`ordo evolve --run`). Its own class
     /// rather than `apply_refused`, because the outcomes differ in the one
     /// way an operator cares about — here the artifact *is* stored, so the
     /// next step is a migration and not a recompile.
@@ -765,6 +772,7 @@ impl ErrorCode {
             ErrorCode::HumanCheckFailed => "human_check_failed",
             ErrorCode::NotFound => "not_found",
             ErrorCode::VersionSkew => "version_skew",
+            ErrorCode::OpNotInVersion => "op_not_in_version",
             ErrorCode::ExpectedAbsent => "expected_absent",
             ErrorCode::NullKeyAddress => "null_key_address",
             ErrorCode::ConflictingIdentity => "conflicting_identity",
@@ -844,6 +852,7 @@ impl ErrorCode {
         ErrorCode::HumanCheckFailed,
         ErrorCode::NotFound,
         ErrorCode::VersionSkew,
+        ErrorCode::OpNotInVersion,
         ErrorCode::ExpectedAbsent,
         ErrorCode::NullKeyAddress,
         ErrorCode::ConflictingIdentity,
@@ -953,6 +962,8 @@ impl ErrorCode {
             // The door's, after the access check: only the door knows who
             // is calling and what the app developer requires.
             | ErrorCode::EmailRequired
+            // The door's: only it knows which version serves the tenant.
+            | ErrorCode::OpNotInVersion
             | ErrorCode::PresenceRequired => false,
             // `invalid_cursor` IS the executor's to say as well as the
             // door's: a cursor presented against a plan with no total order
@@ -1087,6 +1098,7 @@ impl ErrorCode {
             ErrorCode::QuotaExceeded => StatusCode::TOO_MANY_REQUESTS,
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::VersionSkew
+            | ErrorCode::OpNotInVersion
             | ErrorCode::ExpectedAbsent
             | ErrorCode::ConflictingIdentity
             | ErrorCode::Duplicate
@@ -1199,6 +1211,10 @@ impl ErrorCode {
     }
 }
 
+/// The frame name a live feed ends with when its tenant's version changed
+/// ([`ApiError::version_changed`]).
+pub const VERSION_CHANGED_EVENT: &str = "version_changed";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiError {
     pub code: ErrorCode,
@@ -1214,6 +1230,10 @@ pub struct ApiError {
     /// `Retry-After`, in seconds, for a refusal whose wait is a setting
     /// rather than the class's own (`tenant_not_ready`).
     pub retry_after: Option<u64>,
+    /// The tenant's program version moved under a live feed: the feed
+    /// ends with a [`VERSION_CHANGED_EVENT`] frame rather than `error`.
+    /// Set only by [`ApiError::version_changed`].
+    pub version_moved: bool,
 }
 
 impl ApiError {
@@ -1226,6 +1246,7 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
     }
 
@@ -1238,7 +1259,23 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
+    }
+
+    /// **A live feed's tenant moved to another version** (`plan-versions.md`
+    /// §1.4: a pin switch closes the tenant's streams with a reconnect
+    /// signal). The feed ends with an `event: version_changed` frame. The
+    /// class is `space_unavailable`, retryable: the client opens the feed
+    /// again and is served the new version. No version is named, so an end
+    /// user learns nothing about the deployment's versions.
+    pub fn version_changed() -> Self {
+        let mut e = ApiError::new(
+            ErrorCode::SpaceUnavailable,
+            "this tenant's program version changed while the feed was open; open it again",
+        );
+        e.version_moved = true;
+        e
     }
 
     /// Name the op on an error built without a spec — the door's denial for
@@ -1273,6 +1310,7 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
     }
 

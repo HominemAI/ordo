@@ -13,8 +13,14 @@ export interface Stack {
   readonly page: string;
   readonly pageV2: string;
   readonly programV2: string;
+  /** examples/notes-v3, applied over notes v2 by tests/v3 (increment 7a). */
+  readonly programV3: string;
   readonly provider: string;
   readonly mail: string;
+  /** The identity service's address, where the deployment's people sign in. */
+  readonly identity: string;
+  /** Its data folder; its first start writes `first-invite` there. */
+  readonly identityData: string;
   readonly program: string;
   readonly pg: { readonly host: string; readonly port: string; readonly user: string; readonly db: string };
   readonly ordo: string;

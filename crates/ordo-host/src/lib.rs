@@ -73,6 +73,8 @@ pub mod direct_uses;
 pub mod directory;
 pub mod email_code;
 pub mod enrolment;
+pub mod environments;
+pub mod evolve;
 pub mod exit_ops;
 pub mod external_check;
 pub mod federation;
@@ -101,9 +103,11 @@ pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
 pub mod platform_ops;
+pub mod precheck;
 pub mod presence;
 pub mod principal_directory;
 pub mod profile_ops;
+pub mod promotion;
 pub mod provision;
 pub mod proxy;
 pub mod public;
@@ -139,6 +143,7 @@ pub mod share_accept;
 pub mod share_links;
 pub mod share_ops;
 pub mod spaces;
+pub mod step_door;
 pub mod supervisor;
 pub mod tenant_forward;
 pub mod tenant_identities;
@@ -1180,7 +1185,16 @@ impl OpExecutor for FixtureExecutor {
             // this string is the space the door *authorized*, which is the
             // check the assertion was standing next to and is the one that
             // matters.
-            let bound_space = self.spaces.resolve(space).await.map_err(space_refusal)?;
+            // A version unloaded for idleness is loaded again for a
+            // signed-in caller, who waits for it; never for an anonymous
+            // one (V-29), whose calls reach only the deployment's own
+            // space, on the active version, which is never evicted.
+            let bound_space = if caller != ordo_api::ANONYMOUS {
+                self.spaces.resolve_waking(space).await
+            } else {
+                self.spaces.resolve(space).await
+            }
+            .map_err(space_refusal)?;
             let view = &bound_space.view;
             match op.kind {
                 OpKind::Read => {
@@ -1524,6 +1538,9 @@ pub fn interface_for(
             conditions: limits.max_conditions,
             in_values: limits.max_in_values,
         },
+        // The program's sign-in facts: the same for every asker, and the
+        // file's values, which the deployment's ceilings may narrow.
+        ordo_plan::artifact::auth_artifact(&f.schema).as_ref(),
     )
 }
 

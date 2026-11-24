@@ -1,13 +1,18 @@
-//! `ordo plan --against <db>` and `ordo migrate --apply`: the operator's
-//! two front doors onto [`ordo_host::schema_apply`].
+//! `ordo plan`'s report of a plan against a database, and the refusal of
+//! the removed `ordo migrate`.
+//!
+//! `ordo migrate --apply --direct` is removed (ruled 2026-11-05: every
+//! evolution command is a door op). `ordo evolve` replaces it
+//! (`plan-versions.md` increment 8); [`removed`] is what the verb answers.
+//! What follows is the plan report's own description.
 //!
 //! The logic is the service's (owner-ruled 2026-09-20: *"the apply belongs
 //! to the service as opposed to a run from the client to the database"*),
 //! so everything here is argument parsing, rendering and an exit code. The
 //! plan, the probes, the triage, the execution and the record all live in
 //! `ordo_host::schema_apply`, which takes a pool and a compiled program and
-//! returns structured outcomes; this module prints them. What these two
-//! verbs are for is confirming that logic against a real database and
+//! returns structured outcomes; this module prints them. What the report
+//! is for is confirming that logic against a real database and
 //! testing it; a hosted control plane (checklist 18l) calls the same
 //! functions from behind an owner-gated platform op.
 //!
@@ -23,8 +28,7 @@
 //! 3. **The classified change list**, one line per change with its taxonomy
 //!    code, then its probe, then its cost.
 //! 4. **The verdict**, which is a refusal whenever any probe came back
-//!    non-empty, and for `--apply` the APPLY section: what was sent, or
-//!    what was refused by name and what an operator can run instead.
+//!    non-empty.
 //!
 //! # The refusal rule, and why it is a refusal rather than a warning
 //!
@@ -51,9 +55,7 @@ use std::collections::BTreeMap;
 
 use ordo_exec::migrate;
 use ordo_exec::Pool;
-use ordo_host::schema_apply::{
-    self as sa, Applied, ApplyRefusal, Choices, Phase, Plan, Probe, Program, Triaged,
-};
+use ordo_host::schema_apply::{self as sa, Choices, Plan, Probe, Program};
 use ordo_schema::diff::{Change, Class};
 use ordo_schema::Schema;
 
@@ -91,62 +93,20 @@ pub(crate) fn run(path: &str, flags: Flags) -> Outcome {
     })
 }
 
-/// `--places <entity>.<field>=rescale|keep[,…]`: what happens to a stored
-/// money or decimal field's amounts when its places change (25aa). Refused
-/// by the plan until it is stated.
-fn stated(flags: &Flags) -> Result<Choices, Outcome> {
-    match flags.named.get("--places") {
-        None => Ok(Choices::default()),
-        Some(spec) => {
-            Choices::parse_places(spec).map_err(|e| Outcome::usage(format!("--places {e}")))
-        }
-    }
+/// `ordo migrate`, removed (ruled 2026-11-05: every evolution command is a
+/// door op; `plan-versions.md` increment 8 replaces it). The verb stays only
+/// to refuse, naming what replaces it, so a script that still types it
+/// learns the new commands instead of "unknown command".
+pub(crate) fn removed() -> Outcome {
+    Outcome::usage(format!("{REMOVED}\n"))
 }
 
-/// `ordo migrate <program> --apply --db <db> [--as <actor>]`.
-///
-/// `--apply` is required rather than implied: a verb whose bare form
-/// changed a database would be the wrong default for a tool whose other
-/// verb is the read-only plan.
-pub(crate) fn run_migrate(path: &str, flags: Flags) -> Outcome {
-    if let Err(e) = flags.only(&["--apply", "--db", "--as", "--places"]) {
-        return Outcome::usage(e);
-    }
-    if !flags.switches.iter().any(|s| s == "--apply") {
-        return Outcome::usage(
-            "migrate needs `--apply`: the read-only form is `ordo plan <program> --host <h>`"
-                .into(),
-        );
-    }
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => return Outcome::failed(format!("runtime: {e}")),
-    };
-    rt.block_on(async move {
-        let src = match crate::Sources::read(std::path::Path::new(path)) {
-            Ok(s) => s,
-            Err(e) => return Outcome::failed(format!("{e}\n")),
-        };
-        let db = flags.named.get("--db").cloned().unwrap_or_default();
-        let actor = flags
-            .named
-            .get("--as")
-            .cloned()
-            .unwrap_or_else(|| "operator:unattributed".to_string());
-        let choices = match stated(&flags) {
-            Ok(c) => c,
-            Err(o) => return o,
-        };
-        let pool = match connect(&flags).await {
-            Ok(p) => p,
-            Err(o) => return o,
-        };
-        apply_report(&pool, &src, path, &db, &actor, &choices).await
-    })
-}
+/// What `ordo migrate` answers.
+pub const REMOVED: &str = "`ordo migrate` is removed: every schema evolution goes through the \
+     deployment's door (ruled 2026-11-05). Store the new version with `ordo apply <dir> \
+     --no-activate --host <h>`, run the step with `ordo evolve --from <version> --to <version> \
+     --run --host <h>`, then `ordo apply <dir> --host <h>` activates it. Each step's \
+     plan and receipt is listed by `ordo evolve --list`.";
 
 /// The library entry `ordo plan --against <db>` is a shell over.
 ///
@@ -172,34 +132,6 @@ pub async fn plan_against_database_with(
         Err(o) => return o,
     };
     report(&pool, src, label, db, choices).await
-}
-
-/// The library entry `ordo migrate --apply` is a shell over. Same contract
-/// as [`plan_against_database`], and the same reason for existing.
-pub async fn apply_against_database(
-    src: &crate::Sources,
-    label: &str,
-    db: &str,
-    actor: &str,
-) -> Outcome {
-    apply_against_database_with(src, label, db, actor, &Choices::default()).await
-}
-
-/// [`apply_against_database`] with `--places` stated.
-pub async fn apply_against_database_with(
-    src: &crate::Sources,
-    label: &str,
-    db: &str,
-    actor: &str,
-    choices: &Choices,
-) -> Outcome {
-    let mut flags = Flags::default();
-    flags.named.insert("--db".into(), db.to_string());
-    let pool = match connect(&flags).await {
-        Ok(p) => p,
-        Err(o) => return o,
-    };
-    apply_report(&pool, src, label, db, actor, choices).await
 }
 
 /// Compile through the CLI's own diagnostic path first, so a program that
@@ -622,10 +554,9 @@ fn verdict(r: &mut String, plan: &Plan) {
         return;
     }
     r.push_str(&format!(
-        "  PLANNABLE  every probe came back empty. `ordo migrate --apply` executes class A\n  \
-         (and a constraint that constrains no existing data) and refuses the rest by name;\n  \
-         increment 3 is the barrier and the plaintext backfill. Then `ordo apply` stores and\n  \
-         activates version {}.\n",
+        "  PLANNABLE  every probe came back empty. `ordo apply --no-activate` stores version {},\n  \
+         `ordo evolve --from <version> --to {0} --run` runs the step through the door, and\n  \
+         `ordo apply` activates it.\n",
         plan.program.version
     ));
     if plan.destructive > 0 {
@@ -651,217 +582,5 @@ fn why(class: &str) -> &'static str {
              \x20              fixed so every log line ever emitted stays self-describing."
         }
         _ => "refused by ruling",
-    }
-}
-
-// ── `ordo migrate --apply` ───────────────────────────────────────────────
-
-async fn apply_report(
-    pool: &Pool,
-    src: &crate::Sources,
-    path: &str,
-    db: &str,
-    actor: &str,
-    choices: &Choices,
-) -> Outcome {
-    let program = match compile(src) {
-        Ok(p) => p,
-        Err(e) => return Outcome::failed(format!("{e}\n")),
-    };
-    let (plan, outcome) =
-        sa::apply_with(pool, &program, actor, "ordo migrate --apply", choices).await;
-    let plan = match plan {
-        Ok(p) => p,
-        Err(e) => return Outcome::failed(format!("{e}\n")),
-    };
-    let mut r = String::new();
-    render_plan(pool, &mut r, &plan, path, db).await;
-    let next = format!(
-        "  next     `ordo apply {path} --db {}` stores and activates {}\n",
-        if db.is_empty() { "…" } else { db },
-        plan.program.version
-    );
-    match outcome {
-        Ok(Applied::Created(c)) => {
-            r.push_str(&format!(
-                "APPLY\n  target   empty: none of this program's tables existed\n  \
-                 CREATED  {} table(s) with every constraint and index, in one transaction\n  \
-                 APPLIED  recorded as `$migrations` #{}; {}\n{next}",
-                c.tables, c.migration, c.event
-            ));
-            Outcome::ok(r)
-        }
-        Ok(Applied::Nothing) => {
-            r.push_str(
-                "APPLY\n  nothing to apply: the live schema already holds everything this \
-                 program declares\n",
-            );
-            r.push_str(&next);
-            Outcome::ok(r)
-        }
-        Ok(Applied::Additive {
-            steps,
-            executed,
-            recorded,
-        }) => {
-            r.push_str(&format!("APPLY  ({} statement(s))\n", steps.len()));
-            render_steps(&mut r, &steps);
-            // 27d: a lock another session held was waited out and the
-            // apply tried again. Worth a line, because a retry that happens
-            // on every deploy is a long transaction somebody should know
-            // about.
-            let retried = match executed.retries {
-                0 => String::new(),
-                1 => ", after 1 retry for a lock".to_string(),
-                n => format!(", after {n} retries for a lock"),
-            };
-            r.push_str(&format!(
-                "  APPLIED  {} statement(s) in one transaction, {} constraint(s) validated and \
-                 {} index(es) built concurrently after it{retried};\n           {}\n",
-                executed.transactional,
-                executed.validated,
-                executed.indexes,
-                recorded_line(&recorded)
-            ));
-            r.push_str(&next);
-            Outcome::ok(r)
-        }
-        Err(ApplyRefusal::Ghost { serving }) => {
-            r.push_str(&format!(
-                "APPLY\n  REFUSED  serving_schema_drifted — the registry says {serving} is \
-                 serving, and none of\n           its tables exist. This is not an empty \
-                 target: restore the database, or\n           clear `$artifacts` and \
-                 `$activations` if the registry is what is wrong.\n"
-            ));
-            Outcome::failed(r)
-        }
-        Err(ApplyRefusal::Plan) => {
-            verdict(&mut r, &plan);
-            Outcome::failed(r)
-        }
-        Err(ApplyRefusal::ServingDrifted { serving, drift }) => {
-            r.push_str(&format!(
-                "APPLY\n  REFUSED  serving_schema_drifted — the database does not hold what the \
-                 serving\n           version ({serving}) declares, so the deployment is \
-                 refusing to load it, and\n           this program's changes are measured \
-                 against a baseline that is not there.\n           Restore or repair the live \
-                 schema first; the gap is:\n"
-            ));
-            for c in &drift {
-                r.push_str(&format!("           {:<3} {c}\n", c.code()));
-            }
-            Outcome::failed(r)
-        }
-        Err(ApplyRefusal::NotApplied(Triaged { refused, .. })) => {
-            r.push_str(&format!(
-                "APPLY\n  REFUSED  {} of {} change(s) are not applied by this increment, so \
-                 none are: an apply\n           that landed half its changes would leave a \
-                 database that matches no version.\n",
-                refused.len(),
-                plan.assessed.len()
-            ));
-            for x in &refused {
-                r.push_str(&format!(
-                    "  {:<3} {}\n       {}\n       {}\n",
-                    x.change.code(),
-                    x.change,
-                    x.class,
-                    x.why
-                ));
-                if let Some(run) = &x.run {
-                    r.push_str("       to run by hand, after reading the probe:\n");
-                    for line in run.lines() {
-                        r.push_str(&format!("         {line}\n"));
-                    }
-                }
-            }
-            Outcome::failed(r)
-        }
-        Err(ApplyRefusal::CreateFailed(e)) => {
-            r.push_str(&format!("APPLY\n  FAILED   {e}\n"));
-            Outcome::failed(r)
-        }
-        Err(ApplyRefusal::ExecFailed(failed)) => {
-            let sa::ExecFailed {
-                steps,
-                failure,
-                recorded,
-            } = *failed;
-            r.push_str(&format!("APPLY  ({} statement(s))\n", steps.len()));
-            render_steps(&mut r, &steps);
-            r.push_str(&format!("  FAILED   {failure}\n"));
-            match &failure {
-                sa::ExecFailure::Transaction { .. } => {
-                    r.push_str("           the transaction rolled back; nothing changed\n")
-                }
-                sa::ExecFailure::LockTimeout { table, .. } => r.push_str(&format!(
-                    "           another session holds a lock on `{table}`; nothing changed. \
-                     Wait for it, or end it, and apply again\n"
-                )),
-                sa::ExecFailure::Validate {
-                    transactional,
-                    validated_before,
-                    dropped,
-                    ..
-                } => r.push_str(&format!(
-                    "           the {transactional} transactional statement(s) are committed \
-                     and {validated_before} earlier constraint(s) are validated;\n           {}\n",
-                    match dropped {
-                        Ok(()) => {
-                            "this constraint was dropped again, so the table holds everything \
-                             else and nothing of it. Fix the rows it names and apply again"
-                        }
-                        Err(_) => {
-                            "this constraint is in place NOT VALID: new writes are checked, the \
-                             rows it names are not. Drop it as the message says, then apply again"
-                        }
-                    }
-                )),
-                sa::ExecFailure::Index {
-                    transactional,
-                    indexes_before,
-                    ..
-                } => r.push_str(&format!(
-                    "           the {transactional} transactional statement(s) are committed \
-                     and {indexes_before} earlier index(es) are valid;\n           this index \
-                     is present by name and used by nothing until it is dropped and re-created\n"
-                )),
-                other => r.push_str(&format!("           {other}\n")),
-            }
-            r.push_str(&format!("           {}\n", recorded_line(&recorded)));
-            Outcome::failed(r)
-        }
-        Err(ApplyRefusal::Internal(e)) | Err(ApplyRefusal::VersionTaken(e)) => {
-            r.push_str(&format!("APPLY\n  FAILED   {e}\n"));
-            Outcome::failed(r)
-        }
-        Err(e) => {
-            r.push_str(&format!("APPLY\n  FAILED   {e:?}\n"));
-            Outcome::failed(r)
-        }
-    }
-}
-
-fn render_steps(r: &mut String, steps: &[sa::Step]) {
-    for s in steps {
-        let where_ = match s.phase {
-            Phase::Table | Phase::Alter => "tx ",
-            Phase::Validate => "vc ",
-            Phase::ConcurrentIndex => "cc ",
-        };
-        for (i, line) in s.sql.trim_end().lines().enumerate() {
-            r.push_str(&format!(
-                "  {} {:<3} {line}\n",
-                if i == 0 { where_ } else { "   " },
-                if i == 0 { s.code } else { "" }
-            ));
-        }
-    }
-}
-
-fn recorded_line(recorded: &Result<(i64, String), String>) -> String {
-    match recorded {
-        Ok((seq, event)) => format!("recorded as `$migrations` #{seq}; {event}"),
-        Err(e) => format!("NOT RECORDED ({e}); the DDL still landed"),
     }
 }

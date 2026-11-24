@@ -224,6 +224,18 @@ export class LocalReplica {
   }
 
   /**
+   * The tenant moved to another program version: every record, hold and
+   * result hash goes, and the keys stay, so the feeds fill the copy again
+   * in the new version's shape (owner ruling Q7, 2026-11-23). Not a purge:
+   * the replica keeps serving and storing.
+   */
+  clear(): Promise<void> {
+    return this.#serial(async () => {
+      await this.#backend.deletePrefix(`${this.#ns}/`);
+    });
+  }
+
+  /**
    * Access was revoked: purge, and refuse to serve anything afterwards.
    *
    * The door cannot tell a device the difference between "you are revoked"

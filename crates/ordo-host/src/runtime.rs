@@ -2108,6 +2108,7 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             name if crate::window_ops::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.
             crate::revoked_moves::MOVE_SELF => true,
+            crate::revoked_moves::VERSION_SELF => true,
             // 17aa piece 3 and 11-15: wired unconditionally in `assemble`
             // (`with_tenants`, `with_reap`), and until 2026-09-29 missing
             // here, so the binary answered 404 for both.

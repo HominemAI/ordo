@@ -62,6 +62,9 @@ op tickList =
   ticks[n]
   take 500
 
+op addNote($title: text) =
+  set cards { title: $title }
+
 routine follow {
   trigger when board.cards.created
   run:
@@ -105,6 +108,14 @@ op cardList =
 op tickList =
   ticks[n]
   take 500
+
+op addNote($title: text) =
+  set cards { title: $title, watched: true }
+
+op onlyTwo =
+  cards[title]
+  sort title
+  take 5
 
 routine follow {
   trigger when board.cards.created
@@ -273,7 +284,24 @@ async fn wait(mut done: impl FnMut() -> bool) {
 
 struct Answer {
     status: u16,
+    headers: axum::http::HeaderMap,
     body: Value,
+}
+
+impl Answer {
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
+    fn code(&self) -> String {
+        self.body["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
 }
 
 async fn call(
@@ -284,11 +312,26 @@ async fn call(
     who: &str,
     body: Option<Value>,
 ) -> Answer {
+    call_keyed(node, method, uri, space, who, body, None).await
+}
+
+async fn call_keyed(
+    node: &Node,
+    method: &str,
+    uri: &str,
+    space: &str,
+    who: &str,
+    body: Option<Value>,
+    key: Option<&str>,
+) -> Answer {
     let mut req = Request::builder()
         .method(method)
         .uri(uri)
         .header("x-ordo-space", space)
         .header("authorization", format!("Bearer {}", mint(who)));
+    if let Some(k) = key {
+        req = req.header("idempotency-key", k);
+    }
     let req = match body {
         Some(v) => req
             .header("content-type", "application/json")
@@ -301,11 +344,13 @@ async fn call(
     };
     let resp = node.app.clone().oneshot(req).await.unwrap();
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
     Answer {
         status,
+        headers,
         body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     }
 }
@@ -458,4 +503,130 @@ async fn a_pin_switch_hands_the_cursor_over_and_retires_what_the_new_version_lac
     let n = ticks(&node, SPC_A, "ada").await;
     tokio::time::sleep(Duration::from_secs(5)).await;
     assert_eq!(ticks(&node, SPC_A, "ada").await, n, "tickOne stopped");
+}
+
+// ── the client contract (§1.9) ───────────────────────────────────────────
+
+/// **Every answer carries the tenant's version** (§1.9), as
+/// `x-ordo-tenant-version`: `spc_a`'s are 0.1.0's, `spc_b`'s 0.2.0's.
+/// **An op the tenant's version lacks gets its own refusal**: `onlyTwo`,
+/// which 0.2.0 alone declares, answers `op_not_in_version` in `spc_a`,
+/// distinct from the unknown op's `access_denied`. A caller who may not call
+/// it there gets the unknown op's answer, so the code maps nothing for a
+/// stranger.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_answer_names_the_tenants_version_and_a_missing_op_says_so() {
+    let node = boot("ordo_vbg_contract").await;
+    let a = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+    assert_eq!(a.status, 200, "{}", a.body);
+    assert_eq!(a.header("x-ordo-tenant-version").as_deref(), Some("0.1.0"));
+    let b = call(&node, "GET", "/op/cardList", SPC_B, "bo", None).await;
+    assert_eq!(b.header("x-ordo-tenant-version").as_deref(), Some("0.2.0"));
+
+    let only = call(&node, "GET", "/op/onlyTwo", SPC_B, "bo", None).await;
+    assert_eq!(only.status, 200, "{}", only.body);
+    let missing = call(&node, "GET", "/op/onlyTwo", SPC_A, "ada", None).await;
+    assert_eq!(missing.code(), "op_not_in_version", "{}", missing.body);
+    assert_eq!(missing.status, 409, "{}", missing.body);
+    let text = missing.body.to_string();
+    assert!(!text.contains("0.1.0") && !text.contains("0.2.0"), "{text}");
+
+    let unknown = call(&node, "GET", "/op/noSuchOp", SPC_A, "ada", None).await;
+    assert_eq!(unknown.code(), "access_denied", "{}", unknown.body);
+    // `bo` is no member of `spc_a`: the unknown op's answer, not the new one.
+    let stranger = call(&node, "GET", "/op/onlyTwo", SPC_A, "bo", None).await;
+    assert_eq!(stranger.code(), unknown.code(), "{}", stranger.body);
+    assert_eq!(stranger.status, unknown.status);
+}
+
+/// **An idempotency key is honoured across one switch** (§1.9). `addNote`
+/// differs between 0.1.0 and 0.2.0, so its version hash moves with the
+/// pin. A write sent under 0.1.0 and retried with its key after the move
+/// replays the first answer and writes nothing more. A different payload
+/// under the key is still `idempotency_mismatch`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idempotency_key_is_honoured_across_one_switch() {
+    let node = boot("ordo_vbg_idem").await;
+    let body = || Some(json!({ "title": "once" }));
+    let first = call_keyed(
+        &node,
+        "POST",
+        "/op/addNote",
+        SPC_A,
+        "ada",
+        body(),
+        Some("k-1"),
+    )
+    .await;
+    assert_eq!(first.status, 200, "{}", first.body);
+    let hash_before = first.header("x-ordo-op-version");
+
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.2.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    wait(|| node.deployment.loaded("0.1.0").is_none()).await;
+
+    let again = call_keyed(
+        &node,
+        "POST",
+        "/op/addNote",
+        SPC_A,
+        "ada",
+        body(),
+        Some("k-1"),
+    )
+    .await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_ne!(
+        again.header("x-ordo-op-version"),
+        hash_before,
+        "the op changed with the version"
+    );
+    assert_eq!(
+        again.header("x-ordo-idempotent-replay").as_deref(),
+        Some("true"),
+        "the first answer replayed: {}",
+        again.body
+    );
+    let titles: Vec<String> = cards(&node, SPC_A, "ada")
+        .await
+        .into_iter()
+        .map(|c| c.0)
+        .collect();
+    assert_eq!(titles, vec!["once".to_string()], "written once");
+
+    let other = call_keyed(
+        &node,
+        "POST",
+        "/op/addNote",
+        SPC_A,
+        "ada",
+        Some(json!({ "title": "else" })),
+        Some("k-1"),
+    )
+    .await;
+    assert_eq!(other.code(), "idempotency_mismatch", "{}", other.body);
+}
+
+/// **The tenant admin sees its version's label** (§1.9):
+/// `std.space.version` answers the tenant's version, order number, label
+/// and whether it is revoked. A member below manager is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tenant_admin_reads_its_versions_label() {
+    let node = boot("ordo_vbg_label").await;
+    Versions::on(&node.pool)
+        .set_label("0.1.0", Some("spring release"))
+        .await
+        .expect("labelled");
+    let a = call(&node, "GET", "/op/std.space.version", SPC_A, "ada", None).await;
+    assert_eq!(a.status, 200, "{}", a.body);
+    let row = &a.body["rows"][0];
+    assert_eq!(row["version"], "0.1.0", "{row}");
+    assert_eq!(row["ordinal"], 1, "{row}");
+    assert_eq!(row["label"], "spring release", "{row}");
+    assert_eq!(row["revoked"], false, "{row}");
+    // The refusal: no member of the tenant.
+    let b = call(&node, "GET", "/op/std.space.version", SPC_A, "bo", None).await;
+    assert_eq!(b.code(), "access_denied", "{}", b.body);
 }

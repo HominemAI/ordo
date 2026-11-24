@@ -437,6 +437,22 @@ switch.
   the feed's `version_changed` frame the sync manager drops the
   device copy of that tenant and fills it again. One rule, the same one
   the public cache uses on a deploy.
+- **Built in the increment 3 remainder** (`router.rs`, `deploy.rs`,
+  `revoked_moves.rs`; tests in `versions_background.rs`):
+  - Every answer past the door carries `x-ordo-tenant-version`, the
+    version serving the tenant. CORS exposes it.
+  - `op_not_in_version` (409): an op another served version declares,
+    called in a tenant whose version lacks it. Said only to a caller the
+    door would let call it there; anyone else gets the unknown op's
+    `access_denied`. It names no version. The SDK reads it as `restart`.
+  - An idempotency key is honoured across one switch: on a payload
+    mismatch the door tries the fingerprint under the op's hash in the
+    tenant's previous version. A node keeps the op tables of the last 8
+    versions it dropped for this. A node that never served the previous
+    version answers `idempotency_mismatch`, as before.
+  - `std.space.version`: a tenant's managers and owner read its version,
+    order number, label and whether it is revoked.
+  - Not built: the SDK's own "version changed" event on the header.
 - Offline writes (`plan-offline.md`) are filed for after the first
   deployment. When built, a queued write replays under the tenant's
   version at replay time, and an op that version lacks gets the distinct
@@ -1317,8 +1333,9 @@ round is about 35 minutes for the full suite.
   command that removes a stored version (`--move-to`).
 - Sharing rule (§1.7), `versions_disagree`.
 - Client contract (§1.9): version on every answer, the distinct refusal for
-  an op the version lacks, the SDK's version-changed event, idempotency
-  across one switch, the tenant admin's label.
+  an op the version lacks, idempotency across one switch and the tenant
+  admin's label are built in the remainder. Left: the SDK's
+  version-changed event on the header.
 - Session 3 built stream close on a pin switch (9acbc2cf). A feed
   (`?live=1`, a sync, a read on `/live`) records the version its tenant
   was served when it opened. When a pin moves or the active version

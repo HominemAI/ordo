@@ -957,6 +957,11 @@ pub struct Deployment {
     /// is provisioned with that version's tables
     /// ([`Deployment::new_tenant_loaded`], increment 3 session 2).
     new_tenant: RwLock<Option<String>>,
+    /// The op tables of versions this node served and dropped, newest
+    /// last, at most [`RETIRED_SPECS`]. Read only for
+    /// [`OpRegistry::prior_version_hash`]: an idempotency key sent before a
+    /// tenant's switch is honoured across it (`plan-versions.md` §1.9).
+    retired: RwLock<Vec<(String, Arc<dyn OpRegistry>)>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -1004,6 +1009,10 @@ pub struct Unserved {
 
 type Others = RwLock<std::collections::HashMap<String, Arc<Loaded>>>;
 
+/// How many dropped versions' op tables a node keeps for
+/// [`OpRegistry::prior_version_hash`].
+pub const RETIRED_SPECS: usize = 8;
+
 fn others_empty() -> Others {
     RwLock::new(std::collections::HashMap::new())
 }
@@ -1018,6 +1027,7 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
         })
     }
 
@@ -1042,6 +1052,7 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
         }))
     }
 
@@ -1177,6 +1188,7 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
         }))
     }
 
@@ -1212,6 +1224,7 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
         })
     }
 
@@ -1233,6 +1246,7 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
         }))
     }
 
@@ -1434,9 +1448,15 @@ impl Deployment {
             .filter(|v| !pinned.contains(*v))
             .cloned()
             .collect();
+        let mut retired = self.retired.write().expect("deployment lock");
         for v in &gone {
-            others.remove(v);
+            if let Some(l) = others.remove(v) {
+                retired.retain(|(name, _)| name != v);
+                retired.push((v.clone(), l.specs.clone()));
+            }
         }
+        let over = retired.len().saturating_sub(RETIRED_SPECS);
+        retired.drain(..over);
         gone
     }
 
@@ -1596,6 +1616,46 @@ impl OpRegistry for Deployment {
             Ok((loaded, _)) => loaded.version.clone(),
             Err(unserved) => unserved.version,
         })
+    }
+
+    /// Declared by a served version, and not by the one serving `space`.
+    fn declared_elsewhere(&self, space: &str, name: &str) -> bool {
+        let Ok((mine, _)) = self.for_space(space) else {
+            return false;
+        };
+        if mine.specs.get(name).is_some() {
+            return false;
+        }
+        let active = self.current();
+        (active.version != mine.version && active.specs.get(name).is_some())
+            || self
+                .others()
+                .iter()
+                .any(|l| l.version != mine.version && l.specs.get(name).is_some())
+    }
+
+    /// The op's hash in the version `space` was pinned to before its last
+    /// switch, read from that version while it is loaded or among the
+    /// dropped ones this node keeps.
+    fn prior_version_hash(&self, space: &str, name: &str) -> Option<String> {
+        let (was, _) = self
+            .pins
+            .read()
+            .expect("pin lock")
+            .prior
+            .get(space)
+            .cloned()?;
+        if let Some(l) = self.loaded(&was) {
+            return l.specs.get(name).map(|s| s.version_hash);
+        }
+        self.retired
+            .read()
+            .expect("deployment lock")
+            .iter()
+            .rev()
+            .find(|(v, _)| *v == was)
+            .and_then(|(_, specs)| specs.get(name))
+            .map(|s| s.version_hash)
     }
 }
 

@@ -1226,6 +1226,9 @@ impl Pool {
             // The pin fence, in every database a write reaches
             // (`plan-versions.md` §1.3).
             PIN_FENCE_DDL,
+            // The renames this database is in the middle of (increment
+            // 11a): every write reads them first ([`overlay::RENAMES_DDL`]).
+            overlay::RENAMES_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -2787,7 +2790,34 @@ impl Executor {
             .begin_for(OpClass::MultiStatementGroup)
             .await
             .map_err(ExecFail::Pool)?;
-        // The pin fence first: a node whose pin of this tenant is older
+        // **The renames first** (increment 11a), as this transaction's first
+        // statement: its share lock is taken before its snapshot, so a
+        // rename that commits while this write waits is read here, and one
+        // that has not started waits for this write to commit. A write
+        // can therefore never land between a rename's new column and its
+        // dual writes, whatever this node has read.
+        let renames = match overlay::renames_in(&tx).await {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => {
+                // A database no dial of this build reached yet: make the
+                // table and run the write again.
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::RENAMES_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the renames table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
+        // The pin fence next: a node whose pin of this tenant is older
         // than one another node already wrote under writes nothing.
         if let Err(e) = self.check_pin_fence(&tx).await {
             let _ = tx.rollback().await;
@@ -2848,7 +2878,18 @@ impl Executor {
                 // columns and guards on every row this write touched, in
                 // this transaction, before the chain append. A row it
                 // refuses refuses the whole write.
-                if let (Some(overlay), Some(group)) = (self.pool.overlay(), scratch.pending()) {
+                // Outside a move, the renames this database is in the
+                // middle of, as this version reads them.
+                let by_renames = match self.pool.overlay() {
+                    Some(_) => None,
+                    None => overlay::MoveOverlay::for_renames(&self.schema, &renames),
+                };
+                let run = self
+                    .pool
+                    .overlay()
+                    .map(|o| o.as_ref())
+                    .or(by_renames.as_ref());
+                if let (Some(overlay), Some(group)) = (run, scratch.pending()) {
                     let written: Vec<(String, String)> = group
                         .commands
                         .iter()

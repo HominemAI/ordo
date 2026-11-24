@@ -662,14 +662,12 @@ impl Spaces {
             Some(e) => pool.with_pin_epoch(e),
             None => pool,
         };
-        // Dual writes (increment 11a): a tenant in a move, or served a
-        // version a rename reaches, runs the overlay of the version it is
-        // served, keeping the other version's columns current in the same
-        // transaction.
-        let pool = match self
-            .deployment
-            .overlay_for(space, &live.version, &live.fixture.schema)
-        {
+        // A tenant moving with dual writes (increment 11a): its writes run
+        // the overlay of the version they are served, keeping the other
+        // version's shape current in the same transaction. A rename outside
+        // a move needs nothing here: every write reads `$renames` from its
+        // own database (`ordo_exec::overlay::RENAMES_DDL`).
+        let pool = match self.deployment.overlay_for(space, &live.version) {
             Some(o) => pool.with_overlay(Some(o)),
             None => pool,
         };

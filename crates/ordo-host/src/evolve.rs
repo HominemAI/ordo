@@ -575,6 +575,7 @@ pub fn is_system_statement(sql: &str) -> bool {
     s.contains("\"$places\"")
         || s.contains("\"$migrations\"")
         || s.starts_with("CREATE TABLE IF NOT EXISTS \"$")
+        || crate::schema_apply::is_rename_record(s)
 }
 
 /// A removed field or entity: kept as an orphan, never dropped by a step.
@@ -1150,7 +1151,15 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
             // copy back is not mirrored. On any other database the two
             // statements find nothing.
             let sync = q(&format!("{entity}${new}$prev"));
+            // The rename leaves `$renames` first, so writes stop keeping
+            // the new column current before it goes.
             let mut out = vec![
+                format!("{};", ordo_exec::overlay::RENAMES_DDL),
+                format!(
+                    "DELETE FROM \"$renames\" WHERE \"entity\" = '{}' AND \"from\" = '{}';",
+                    entity.replace('\'', "''"),
+                    from.replace('\'', "''")
+                ),
                 format!("DROP TRIGGER IF EXISTS {sync} ON {t};"),
                 format!("DROP FUNCTION IF EXISTS {sync}();"),
                 format!("UPDATE {t} SET {} = {};", q(from), q(&new)),
@@ -1874,7 +1883,7 @@ pub async fn run_step_with(
         x,
         y,
         receipt,
-    }) = expand_step(registry, target, label, plan, actor).await?
+    }) = Box::pin(expand_step(registry, target, label, plan, actor)).await?
     else {
         return Ok(StepRun::Current);
     };
@@ -1927,7 +1936,7 @@ pub async fn run_step_with(
         };
         let bf_err =
             |e: crate::backfill::BackfillRefusal| run_err(e.class(), e.to_string(), e.transient());
-        let progress = worker.run().await.map_err(bf_err)?;
+        let progress = Box::pin(worker.run()).await.map_err(bf_err)?;
         let mut report = json!({
             "entity": bf.entity, "field": bf.field, "mapping": bf.mapping.text(),
             "audit": bf.audit.as_str(), "progress": progress.to_json(),
@@ -1945,9 +1954,9 @@ pub async fn run_step_with(
         // verify checks the mapping on every row. A fill has no overlay
         // outside a move, and verify checks the chunks too.
         let verified = if bf.code == "B4" {
-            worker.verify_live_and_close().await
+            Box::pin(worker.verify_live_and_close()).await
         } else {
-            worker.verify_and_close().await
+            Box::pin(worker.verify_and_close()).await
         }
         .map_err(bf_err)?;
         report["verified"] = json!({

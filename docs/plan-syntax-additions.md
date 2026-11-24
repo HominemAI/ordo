@@ -694,10 +694,11 @@ columns stay current through the soak, so the reverse is a switch.
 - **With orphans (§6)**: a field that is removed and has no `prev` pointing
   at it is orphaned. A field with a `prev` pointing at it is renamed, and
   nothing is orphaned.
-- **With external entities (§8)**: not settled. A breaking change to the
+- **With external entities (§8)**: settled 2026-11-15 (`external-entities`
+  ask 7; review 2026-11-23). `prev` on an external's field is refused as
+  `external_unsupported`. A breaking change to the
   foreign table stops every op reading the entity until a regenerated
-  translation is applied (`plan-external-entities.md` §7). Whether `prev`
-  may say which field moved is open.
+  translation is applied (`plan-external-entities.md` §7).
 - **With settings (§7)**: a renamed setting is a catalogue matter, not a
   program one; the catalogue keeps old names as aliases for one release.
 
@@ -744,6 +745,10 @@ count, typed back by whoever applies it.
 
 `ordo prune` is already a command: it trims the command log. The plan flag
 `--prune` lives under `ordo plan`, so the two never share a command line.
+
+Review 2026-11-23: `ordo evolve` was ruled on 2026-10-04 as the command that
+renders and stores a plan. So the flag is `ordo evolve --prune <field>`.
+Build order: `plan-versions.md` §4, increment 14.
 
 Why not a source spelling (`drop customers.fax`): a drop is an act on one
 deployment's data, with an actor and a confirmation. It can differ between

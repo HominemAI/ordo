@@ -5066,11 +5066,27 @@ async fn assemble_program(
             detail,
         }
     })?;
+    // Every version this node serves is read, and a hold holds only the
+    // tenants of the version it was found for (`plan-evolution-federation.md`
+    // step F3).
     let external_gate = {
-        let deployment = deployment.clone();
-        crate::external_check::ExternalGate::new(Arc::new(move || {
-            deployment.current().fixture.clone()
-        }))
+        let active = deployment.clone();
+        let served = deployment.clone();
+        let for_space = deployment.clone();
+        crate::external_check::ExternalGate::per_version(
+            Arc::new(move || active.current().fixture.clone()),
+            Arc::new(move || {
+                let mut out = vec![served.current()];
+                out.extend(served.others());
+                out.into_iter()
+                    .map(|l| (l.version.clone(), l.fixture.clone()))
+                    .collect()
+            }),
+            Arc::new(move |space: &str| match for_space.for_space(space) {
+                Ok((l, _)) => l.fixture.clone(),
+                Err(_) => for_space.current().fixture.clone(),
+            }),
+        )
     };
     crate::external_check::spawn_watch(external_gate.clone(), pool.clone(), external_every);
     let api = ApiState {
@@ -5438,6 +5454,9 @@ async fn assemble_program(
     // A function reads files through the blob door's own port, as the
     // person calling. No store, no port: `ctx.blob` answers `blob_no_store`.
     let functions_blobs = blobs.as_ref().map(|b| b.port.clone());
+    // Each tenant calls its own version's functions (`plan-versions.md`
+    // §1.10): the runner asks the deployment which version serves it.
+    let functions_versions = deployment.clone();
     // `ORDO_FN_CACHE_DIR`: where the compiled function engine is kept.
     let functions_engine_cache = {
         let env = |k: &str| std::env::var(k).ok();
@@ -5548,7 +5567,8 @@ async fn assemble_program(
                 secrets_for_functions,
             )
             .with_blobs(functions_blobs)
-            .with_settings(functions_settings),
+            .with_settings(functions_settings)
+            .with_versions(functions_versions),
         ),
         spaces,
         quotas,
@@ -6696,6 +6716,7 @@ async fn spawn_deploy_listener(
     let routines = rt.routines.clone();
     let spaces = rt.spaces.clone();
     let functions = rt.functions.clone();
+    let live_streams = rt.api.live_streams.clone();
     // The serving version's functions, read before the first call can come.
     {
         let current = deployment.current();
@@ -6736,6 +6757,8 @@ async fn spawn_deploy_listener(
         let delegations = delegations.clone();
         let credentials = credentials.clone();
         let node_status = node_status.clone();
+        let functions = functions.clone();
+        let live_streams = live_streams.clone();
         move |read: crate::pin_stream::Read| {
             let deployment = deployment.clone();
             let pool = pool.clone();
@@ -6744,9 +6767,17 @@ async fn spawn_deploy_listener(
             let delegations = delegations.clone();
             let credentials = credentials.clone();
             let node_status = node_status.clone();
+            let functions = functions.clone();
+            let live_streams = live_streams.clone();
             async move {
                 for line in crate::pin_stream::log_lines(&read) {
                     println!("{line}");
+                }
+                // A tenant whose pin moved: every live feed this node holds
+                // asks its door again now, and a feed opened under the
+                // tenant's earlier version closes with `version_changed`.
+                if !read.moved.is_empty() {
+                    live_streams.recheck_now();
                 }
                 if let Some(named) = &read.new_tenant {
                     node_status.new_tenant(named.as_deref());
@@ -6758,6 +6789,11 @@ async fn spawn_deploy_listener(
                 }
                 if !read.versions_changed() {
                     return;
+                }
+                // Each served version's functions, so a tenant pinned beside
+                // the active version calls its own (§1.10).
+                for line in functions.sync(&pool, &deployment).await {
+                    println!("{line}");
                 }
                 // The door knows every served version's ops.
                 if let Err(e) = refresh_access(
@@ -6947,6 +6983,15 @@ async fn spawn_deploy_listener(
                     if let Err(e) = functions.reload(&pool, &to, &schema).await {
                         eprintln!("deploy {to}: no functions served: {e}");
                     }
+                    // The version swapped out keeps its table while a pin
+                    // still names it.
+                    for line in functions.sync(&pool, &deployment).await {
+                        println!("{line}");
+                    }
+                    // Every tenant now on the new version: a live feed
+                    // opened under the old one closes with
+                    // `version_changed`.
+                    live_streams.recheck_now();
                     // The bus learns the new version's ops and entities, and
                     // the public cache drops everything: a deploy may move
                     // rows, and one rule is easier to trust than a per-op

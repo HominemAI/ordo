@@ -423,6 +423,42 @@
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
  },
+ "close-the-coverage-gap-through-the:1": {
+  "mark": "done",
+  "at": "2026-11-23T21:14:07+00:00"
+ },
+ "close-the-coverage-gap-through-the:10": {
+  "mark": "done",
+  "at": "2026-11-24T00:39:29+00:00"
+ },
+ "close-the-coverage-gap-through-the:3": {
+  "mark": "done",
+  "at": "2026-11-23T21:14:45+00:00"
+ },
+ "close-the-coverage-gap-through-the:4": {
+  "mark": "done",
+  "at": "2026-11-23T21:14:54+00:00"
+ },
+ "close-the-coverage-gap-through-the:5": {
+  "mark": "done",
+  "at": "2026-11-23T21:15:04+00:00"
+ },
+ "close-the-coverage-gap-through-the:6": {
+  "mark": "done",
+  "at": "2026-11-24T00:38:40+00:00"
+ },
+ "close-the-coverage-gap-through-the:7": {
+  "mark": "done",
+  "at": "2026-11-24T00:38:46+00:00"
+ },
+ "close-the-coverage-gap-through-the:8": {
+  "mark": "done",
+  "at": "2026-11-24T00:38:56+00:00"
+ },
+ "close-the-coverage-gap-through-the:9": {
+  "mark": "done",
+  "at": "2026-11-24T00:39:11+00:00"
+ },
  "closing-a-whole-share-window-no:1": {
   "mark": "done",
   "at": "2026-10-22T02:39:41+00:00"
@@ -778,6 +814,70 @@
  "evolution-plans:5": {
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
+ },
+ "evolution-review-federation-sign-in-and-devices:1": {
+  "mark": "done",
+  "at": "2026-11-24T00:39:48+00:00"
+ },
+ "evolution-review-federation-sign-in-and-devices:2": {
+  "mark": "done",
+  "at": "2026-11-24T00:39:51+00:00"
+ },
+ "evolution-review-federation-sign-in-and-devices:3": {
+  "mark": "done",
+  "at": "2026-11-24T00:39:55+00:00"
+ },
+ "evolution-review-federation-sign-in-and-devices:4": {
+  "mark": "done",
+  "at": "2026-11-24T00:40:09+00:00"
+ },
+ "evolution-review-federation-sign-in-and-devices:5": {
+  "mark": "done",
+  "at": "2026-11-24T00:40:52+00:00"
+ },
+ "evolution-review-federation-sign-in-and-devices:6": {
+  "mark": "done",
+  "at": "2026-11-24T00:41:01+00:00"
+ },
+ "evolution-review-release-check-promotion-staging:1": {
+  "mark": "done",
+  "at": "2026-11-24T00:41:15+00:00"
+ },
+ "evolution-review-release-check-promotion-staging:2": {
+  "mark": "done",
+  "at": "2026-11-24T00:51:59+00:00"
+ },
+ "evolution-review-release-check-promotion-staging:3": {
+  "mark": "done",
+  "at": "2026-11-24T00:42:45+00:00"
+ },
+ "evolution-review-release-check-promotion-staging:4": {
+  "mark": "done",
+  "at": "2026-11-24T00:42:53+00:00"
+ },
+ "evolution-review-rollouts-records-and-backfills:1": {
+  "mark": "done",
+  "at": "2026-11-24T00:52:28+00:00"
+ },
+ "evolution-review-rollouts-records-and-backfills:2": {
+  "mark": "done",
+  "at": "2026-11-24T00:44:08+00:00"
+ },
+ "evolution-review-rollouts-records-and-backfills:3": {
+  "mark": "done",
+  "at": "2026-11-24T00:44:26+00:00"
+ },
+ "evolution-review-rollouts-records-and-backfills:4": {
+  "mark": "done",
+  "at": "2026-11-24T00:44:56+00:00"
+ },
+ "evolution-review-rollouts-records-and-backfills:5": {
+  "mark": "done",
+  "at": "2026-11-24T00:45:00+00:00"
+ },
+ "evolution-review-rollouts-records-and-backfills:6": {
+  "mark": "done",
+  "at": "2026-11-24T00:52:19+00:00"
  },
  "example-apps-notes-v2-plus-note_viewer:1": {
   "mark": "done",
@@ -2586,6 +2686,14 @@
  "versions-increment-3-session-2-three:4": {
   "mark": "done",
   "at": "2026-11-06T02:40:03+00:00"
+ },
+ "versions-increment-4a-three-small-choices:2": {
+  "mark": "done",
+  "at": "2026-11-24T00:53:42+00:00"
+ },
+ "versions-increment-4a-three-small-choices:3": {
+  "mark": "done",
+  "at": "2026-11-24T00:53:44+00:00"
  },
  "versions-plan-review-identity-and-promotion:1": {
   "mark": "done",

@@ -17,7 +17,6 @@ import { checkRefine, encodeRefine, type Refine } from './refine.js';
 import { OrdoLocalRefusal, type RefusalClass } from './refusal.js';
 import type { OpSpec, ParamSpec } from './spec.js';
 import { busyRetryOf, conflictRetryOf } from './busy.js';
-import { VersionWatch } from './version.js';
 import { NO_RETRY, busyOnly, doorRequest, fetchOf, readBody, refusalOf } from './door.js';
 import type {
   BusyRetryOptions,
@@ -220,8 +219,6 @@ export class OrdoClient {
   readonly #renew: (() => Promise<boolean>) | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #site: NetworkSite;
-  /** The program version the door names on its answers; see {@link VersionWatch}. */
-  readonly versions = new VersionWatch();
   readonly #callTimeoutMs: number | undefined;
   readonly #newKey: () => string;
   readonly #busyRetry: ResolvedBusyRetry;
@@ -373,7 +370,7 @@ export class OrdoClient {
     });
     // Every answer past the door names the tenant's version (§1.9).
     this.#versions.sawResponse(this.space, response);
-    return this.versions.observe(response);
+    return response;
   }
 
   /**

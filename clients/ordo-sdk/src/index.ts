@@ -29,9 +29,8 @@ export type {
 export { compareDecimal } from './core/client.js';
 export type { FunctionCallOptions, FunctionResponse } from './core/function.js';
 export type { BusyRetryOptions, ConflictRetryOptions, OnRetry, RetryReason } from './core/busy.js';
-export { VersionWatch, TENANT_VERSION_HEADER } from './core/version.js';
 export { OrdoVersionChanged, VERSION_CHANGED_EVENT } from './core/busy.js';
-export { TenantVersions } from './core/versions.js';
+export { TENANT_VERSION_HEADER, TenantVersions } from './core/versions.js';
 export type { VersionChange } from './core/versions.js';
 export { ReadCall, SingleReadCall, WriteCall } from './core/call.js';
 export type { CallOptions, Page } from './core/call.js';

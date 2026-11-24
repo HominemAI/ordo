@@ -10,9 +10,12 @@
  * `version_changed` frame (owner ruling Q7, 2026-11-23).
  */
 
-import { TENANT_VERSION_HEADER } from './version.js';
-
-export { TENANT_VERSION_HEADER };
+/**
+ * The header every answer past the door carries. This module is the one
+ * place that reads it: the SDK's client, the sync manager and ordo-react's
+ * client all take their signal from a {@link TenantVersions}.
+ */
+export const TENANT_VERSION_HEADER = 'x-ordo-tenant-version';
 
 /** A tenant moved from one program version to another. */
 export interface VersionChange {

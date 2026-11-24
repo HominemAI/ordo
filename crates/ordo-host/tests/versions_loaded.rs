@@ -540,8 +540,23 @@ async fn loading_a_version_beside_the_active_one_drops_no_public_cache() {
     // The deployment's own space moves: everything drops.
     apply(&node.pool, V030, &v020_files()).await;
     wait(|| node.deployment.current().version == "0.3.0").await;
-    let moved = call(&node, "GET", "/op/noticeList", None, None, None).await;
-    assert_eq!(cache(&moved), "miss", "an activation drops the cache");
+    // The swap sets the version a moment before it drops the cache (seen on
+    // CI, PR 37), so the first answer after it may still be a hit. Each
+    // read before the drop is a hit; the first after it is a miss.
+    let mut seen = Vec::new();
+    for _ in 0..50 {
+        let moved = call(&node, "GET", "/op/noticeList", None, None, None).await;
+        seen.push(cache(&moved));
+        if seen.last().map(String::as_str) == Some("miss") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some("miss"),
+        "an activation drops the cache: {seen:?}"
+    );
 }
 
 /// Read SSE frames until one named `event`, or `limit` passes. Answers

@@ -5582,6 +5582,9 @@ async fn assemble_program(
     };
 
     let catchup = crate::tenant_forward::CatchUp::new(spaces.clone(), pool.clone());
+    if let Some(apply) = &apply_for_backfills {
+        catchup.steps_with(apply.clone());
+    }
     // What this node serves, in `$nodes`, so `ordo apply` can wait for it.
     let beat_secs: u64 = parsed(
         crate::node_status::BEAT_SETTING,

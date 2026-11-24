@@ -1377,12 +1377,43 @@ pub fn triage_errors(
 /// version that only lacks something the newer one added passes, since
 /// the gate tolerates extra columns.
 pub async fn activate(pool: &Pool, version: &str, actor: &str) -> Result<Activation, ApplyRefused> {
+    activate_reverting(pool, None, None, version, actor)
+        .await
+        .map(|(a, _)| a)
+}
+
+/// [`activate`], then **every tenant soaking on a move from `version` goes
+/// back to it** (`plan-versions.md` §2.5, increment 11b): a revert in its
+/// soak, every write kept. An activation leaves a tenant in a move with
+/// dual writes alone, so this is what `ordo rollback` adds, whether or not
+/// `version` was already active (an aborted rollout leaves its moved
+/// tenants on the target). With `pools`, each tenant database's pin fence
+/// rises too. The tenants put back.
+pub async fn activate_reverting(
+    pool: &Pool,
+    pools: Option<&dyn ordo_exec::route::PoolResolver>,
+    spaces: Option<&crate::spaces::Spaces>,
+    version: &str,
+    actor: &str,
+) -> Result<(Activation, Vec<String>), ApplyRefused> {
     let lock = match ApplyLock::take(pool).await {
         Ok(Some(lock)) => lock,
         Ok(None) => return Err(ApplyRefused::InProgress),
         Err(e) => return Err(ApplyRefused::Internal(e)),
     };
-    let out = activate_locked(pool, version, actor).await;
+    let out = match activate_locked(pool, version, actor).await {
+        Ok(a) => {
+            match crate::every_tenant::revert_soaks_from(pool, pools, spaces, version, actor).await
+            {
+                Ok(back) => Ok((a, back)),
+                Err(e) => Err(ApplyRefused::Internal(format!(
+                    "{version} is active, and a tenant soaking on a move from it was not put \
+                     back: {e}. `ordo evolve --tenant <id> --revert` puts one back"
+                ))),
+            }
+        }
+        Err(e) => Err(e),
+    };
     lock.release().await;
     out
 }

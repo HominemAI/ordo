@@ -78,6 +78,7 @@ pub mod dual_writes;
 pub mod email_code;
 pub mod enrolment;
 pub mod environments;
+pub mod every_tenant;
 pub mod evolve;
 pub mod exit_ops;
 pub mod external_check;

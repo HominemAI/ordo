@@ -1,0 +1,441 @@
+//! **Every tenant** (`plan-versions.md` increment 11b, part 1;
+//! `plan-backfill-dual-writes.md` step B5; §2.5 of `plan-versions.md`).
+//!
+//! Increment 11a moved one tenant at a time, by hand (`ordo evolve
+//! --tenant`). This moves every tenant with a database of its own through
+//! the stored path, and brings them back:
+//!
+//! - **A rollout** moves each tenant through its stored path to the
+//!   rollout's target ([`forward_tenant`]). A step that rewrites data by a
+//!   per-row mapping is a move with dual writes and a soak
+//!   (`crate::dual_writes`); every other step, a seal included, is
+//!   replayed and the tenant pinned. A backfill takes `backfill.budget`
+//!   chunks per turn, so the rollout's turn stays short and the tenant
+//!   says `moving` until its switch.
+//! - **An activation's catch-up** replays the stored path on each tenant
+//!   database ([`forward_database`]) rather than the apply path, which
+//!   refuses what only a stored plan makes (a seal, a fill).
+//! - **`ordo rollback` to X** puts every tenant soaking on a move from X
+//!   back on X ([`revert_soaks_from`]). It is a pin switch: Y wrote X's
+//!   columns too, so every write is kept.
+//! - **`ordo rollback --dry-run`** lists each tenant the rollback moves and
+//!   what it keeps or loses ([`rollback_tenants`]).
+//!
+//! # What waits (11b, part 2)
+//!
+//! - A tenant on the deployment's own database shares it with every other
+//!   tenant there. A rollout pins it once that database holds the target
+//!   (`ordo evolve --run`), and `$renames` keeps both columns of a rename
+//!   current for all of them. Its soaks, the constraints of the new shape
+//!   landing at the last tenant's close, and soaks on a read table closing
+//!   together (Q1) are part 2.
+//! - `backfill.concurrency` and `backfill.per_database` across tenants: a
+//!   rollout's turn runs its tenants one after another.
+//! - Grants a move killed staying killed after a revert.
+
+use ordo_exec::route::PoolResolver;
+use ordo_exec::Pool;
+use serde_json::{json, Value};
+
+use crate::dual_writes::{MoveContext, Moved};
+use crate::evolve::{EvolveRefusal, Plans, StepContext, StoredPlan};
+use crate::schema_apply as sa;
+use crate::versions::{MovePhase, VersionRefusal, Versions};
+
+/// Where one tenant stands after [`forward_tenant`].
+#[derive(Debug)]
+pub enum Forward {
+    /// No stored step leads from its database's version to the target: the
+    /// apply path brings it forward, as before.
+    NoPath,
+    /// Its database holds the target and passed the gate. The caller pins
+    /// the tenant.
+    Ready,
+    /// A backfill stopped at its budget. The tenant serves its version, and
+    /// the next try resumes from the cursor. Says how far it got.
+    Backfilling(String),
+    /// A move with dual writes switched the tenant: it serves the target in
+    /// its soak, or the soak closed at once (`soak` 0).
+    Switched(Box<Moved>),
+}
+
+/// A backfill's progress, in words, from a step's reports.
+fn progress_line(reports: &[Value]) -> String {
+    let parts: Vec<String> = reports
+        .iter()
+        .map(|r| {
+            let p = &r["progress"];
+            format!(
+                "{}.{} {} of {} rows",
+                r["entity"].as_str().unwrap_or("?"),
+                r["field"].as_str().unwrap_or("?"),
+                p["rowsDone"].as_i64().unwrap_or(0),
+                p["rowsTotal"].as_i64().unwrap_or(0),
+            )
+        })
+        .collect();
+    format!(
+        "backfilling ({}); it serves its version, every write keeps both shapes, and the next \
+         turn resumes from the cursor",
+        if parts.is_empty() {
+            "started".to_string()
+        } else {
+            parts.join(", ")
+        }
+    )
+}
+
+/// The refusal for a stored path whose rewriting step is not alone: a
+/// move with dual writes switches one step's pin, so the steps around it
+/// run first, each on its own.
+pub fn runs_alone(
+    tenant: &str,
+    from: &str,
+    to: &str,
+    steps: &[StoredPlan],
+    i: usize,
+) -> EvolveRefusal {
+    let stop = if i == 0 { &steps[0].to } else { &steps[i].from };
+    EvolveRefusal::Options(format!(
+        "the stored path from `{from}` to `{to}` holds {} steps, and the step from `{}` to `{}` \
+         rewrites data with live writes beside it, so it runs alone. Replay the tenant to \
+         `{stop}` first (`ordo evolve --tenant {tenant} --to {stop}`), then on to `{to}`",
+        steps.len(),
+        steps[i].from,
+        steps[i].to,
+    ))
+}
+
+/// **Move one tenant with a database of its own toward `to`** through the
+/// stored path, as far as this try goes. The caller holds the apply lock.
+///
+/// - A tenant already in a move with dual writes continues it, when the
+///   move goes to `to`.
+/// - Its database's recorded version is where the path starts. No stored
+///   path from there answers [`Forward::NoPath`].
+/// - A path of one rewriting step is a move with dual writes, its soak
+///   `soak` seconds long. A rewriting step among others is refused, naming
+///   the version to replay to first.
+/// - Any other path is replayed on the database, step by step, and checked
+///   against `to` before [`Forward::Ready`].
+pub async fn forward_tenant(
+    cx: &MoveContext<'_>,
+    ctx: &StepContext,
+    tenant: &str,
+    to: &str,
+    soak: u64,
+    actor: &str,
+) -> Result<Forward, EvolveRefusal> {
+    let v = Versions::on(cx.control);
+    if let Some(m) = v.dual_move(tenant).await? {
+        if m.to != to {
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            }
+            .into());
+        }
+        let plan = Plans::on(cx.control)
+            .all()
+            .await?
+            .into_iter()
+            .find(|p| p.digest == m.step)
+            .ok_or_else(|| {
+                EvolveRefusal::Store(format!(
+                    "the stored plan {} of tenant `{tenant}`'s move is gone",
+                    m.step
+                ))
+            })?;
+        return run_move(cx, ctx, tenant, &plan, soak, actor).await;
+    }
+    let space = ordo_crypto::SpaceId(tenant.to_string());
+    let target = cx
+        .pools
+        .resolve(&space)
+        .await
+        .map_err(|e| EvolveRefusal::Run {
+            database: tenant.to_string(),
+            from: String::new(),
+            to: to.to_string(),
+            class: "unreachable",
+            why: e.to_string(),
+            transient: true,
+        })?;
+    let from = match ordo_exec::spacedb::recorded_version(&target).await {
+        Ok(ordo_exec::spacedb::TargetVersion::At(v)) => v,
+        Ok(ordo_exec::spacedb::TargetVersion::Unknown) => return Ok(Forward::NoPath),
+        Err(e) => {
+            return Err(EvolveRefusal::Run {
+                database: tenant.to_string(),
+                from: String::new(),
+                to: to.to_string(),
+                class: "unreachable",
+                why: e.to_string(),
+                transient: true,
+            })
+        }
+    };
+    if from == to {
+        return Ok(Forward::NoPath);
+    }
+    let steps = match crate::evolve::path(cx.control, &from, to).await {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) | Err(EvolveRefusal::NoPath { .. }) => return Ok(Forward::NoPath),
+        Err(e) => return Err(e),
+    };
+    match steps.iter().position(crate::evolve::dual_writes_step) {
+        Some(0) if steps.len() == 1 => run_move(cx, ctx, tenant, &steps[0], soak, actor).await,
+        Some(i) => Err(runs_alone(tenant, &from, to, &steps, i)),
+        None => {
+            let done = Box::pin(crate::evolve::replay_with(
+                cx.control, &target, tenant, to, actor, ctx,
+            ))
+            .await?;
+            if done.backfilling() {
+                let reports = done
+                    .steps
+                    .last()
+                    .map(|(_, r)| r.backfills().to_vec())
+                    .unwrap_or_default();
+                return Ok(Forward::Backfilling(progress_line(&reports)));
+            }
+            gate(cx.control, &target, tenant, &done.from, to).await?;
+            Ok(Forward::Ready)
+        }
+    }
+}
+
+/// One move with dual writes, as far as this try goes.
+async fn run_move(
+    cx: &MoveContext<'_>,
+    ctx: &StepContext,
+    tenant: &str,
+    plan: &StoredPlan,
+    soak: u64,
+    actor: &str,
+) -> Result<Forward, EvolveRefusal> {
+    let moved = Box::pin(crate::dual_writes::run(cx, tenant, plan, ctx, soak, actor)).await?;
+    if moved.phase == MovePhase::Backfilling && !moved.closed {
+        return Ok(Forward::Backfilling(progress_line(&moved.backfills)));
+    }
+    Ok(Forward::Switched(Box::new(moved)))
+}
+
+/// The move's own check before a pin: the database holds all of `to`.
+async fn gate(
+    control: &Pool,
+    target: &Pool,
+    tenant: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), EvolveRefusal> {
+    let Some(a) = Versions::on(control).get(to).await? else {
+        return Err(VersionRefusal::UnknownVersion(to.to_string()).into());
+    };
+    let program = crate::evolve::compiled(&a)?;
+    match sa::schema_state(target, &program.schema).await {
+        Ok(sa::SchemaState::Matches { .. }) => Ok(()),
+        Ok(other) => Err(EvolveRefusal::Run {
+            database: tenant.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            class: "still_behind",
+            why: format!("the tenant's database lacks part of `{to}`: {other:?}"),
+            transient: false,
+        }),
+        Err(e) => Err(EvolveRefusal::Store(e)),
+    }
+}
+
+/// **Bring one tenant database to `program` by its stored path**, for an
+/// activation's catch-up. `None` when no stored path leads there, and the
+/// apply path does it as before. A rewriting step is replayed as `ordo
+/// evolve --run` runs it on the deployment's own database: `$renames` keeps
+/// both columns of a rename current for every version writing there.
+pub async fn forward_database(
+    control: &Pool,
+    target: &Pool,
+    label: &str,
+    program: &sa::Program,
+    actor: &str,
+    ctx: &StepContext,
+) -> Option<Result<sa::Forward, sa::ForwardRefused>> {
+    let from = match ordo_exec::spacedb::recorded_version(target).await {
+        Ok(ordo_exec::spacedb::TargetVersion::At(v)) if v != program.version => v,
+        _ => return None,
+    };
+    match crate::evolve::path(control, &from, &program.version).await {
+        Ok(s) if !s.is_empty() => {}
+        _ => return None,
+    }
+    let refused = |e: EvolveRefusal| sa::ForwardRefused {
+        class: e.class(),
+        why: e.to_string(),
+        transient: e.transient(),
+    };
+    let done = match Box::pin(crate::evolve::replay_with(
+        control,
+        target,
+        label,
+        &program.version,
+        actor,
+        ctx,
+    ))
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => return Some(Err(refused(e))),
+    };
+    if done.backfilling() {
+        let reports = done
+            .steps
+            .last()
+            .map(|(_, r)| r.backfills().to_vec())
+            .unwrap_or_default();
+        return Some(Err(sa::ForwardRefused {
+            class: "backfilling",
+            why: progress_line(&reports),
+            transient: true,
+        }));
+    }
+    if let Err(e) = gate(control, target, label, &from, &program.version).await {
+        return Some(Err(refused(e)));
+    }
+    Some(Ok(sa::Forward::Advanced {
+        statements: done
+            .steps
+            .iter()
+            .map(|(_, r)| r.statements())
+            .sum::<usize>(),
+    }))
+}
+
+// ── rollback ─────────────────────────────────────────────────────────────
+
+/// **Put every tenant soaking on a move from `version` back on it**
+/// (§2.5): each is a revert in its soak, a pin switch, and every write
+/// made since the switch is kept. With `pools`, each tenant database's pin
+/// fence rises too (`crate::dual_writes::revert`); without (`ordo rollback
+/// --direct`), the pin epoch rises and every node reads it on the pin
+/// stream, and both overlays keep both shapes meanwhile. The tenants put
+/// back. The caller holds the apply lock.
+pub async fn revert_soaks_from(
+    control: &Pool,
+    pools: Option<&dyn PoolResolver>,
+    spaces: Option<&crate::spaces::Spaces>,
+    version: &str,
+    actor: &str,
+) -> Result<Vec<String>, EvolveRefusal> {
+    let v = Versions::on(control);
+    let soaking: Vec<_> = match v.dual_moves().await {
+        Ok(m) => m
+            .into_iter()
+            .filter(|m| m.phase == MovePhase::Soaking && m.from == version)
+            .collect(),
+        Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut back = Vec::new();
+    for m in soaking {
+        match pools {
+            Some(pools) => {
+                let cx = MoveContext {
+                    control,
+                    pools,
+                    spaces,
+                };
+                crate::dual_writes::revert(&cx, &m.space, actor).await?;
+            }
+            None => {
+                v.revert_dual_move(&m.space, actor, crate::runtime::now_secs())
+                    .await?;
+            }
+        }
+        back.push(m.space);
+    }
+    Ok(back)
+}
+
+/// How many tenants a rollback's dry run names; the rest are counted.
+pub const DRY_RUN_LISTED: usize = 1_000;
+
+/// **What `ordo rollback --dry-run` to `version` says of each tenant** not
+/// on it (§2.5): one in its soak on a move from `version` goes back with
+/// every write kept; any other moves back, and loses what its version wrote
+/// to a field it renamed once its soak closed, since `version` reads the
+/// old column. Reads; changes nothing.
+pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value>, EvolveRefusal> {
+    let v = Versions::on(control);
+    let moves = match v.dual_moves().await {
+        Ok(m) => m,
+        Err(e) if e.is_missing_table() => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let (pins, _) = v.all_pins().await?;
+    let mut out = Vec::new();
+    let mut lost_by_version: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (space, on, _) in pins {
+        if on == version || out.len() >= DRY_RUN_LISTED {
+            continue;
+        }
+        if let Some(m) = moves.iter().find(|m| m.space == space) {
+            if m.phase == MovePhase::Soaking && m.from == version {
+                out.push(json!({
+                    "tenant": space, "on": on, "kept": true,
+                    "note": format!(
+                        "in its soak until {}: back on {version}, every write kept",
+                        crate::versions::utc_minute(m.soak_until)
+                    ),
+                }));
+                continue;
+            }
+        }
+        if !lost_by_version.contains_key(&on) {
+            let renamed = match crate::evolve::path(control, version, &on).await {
+                Ok(steps) => steps
+                    .iter()
+                    .flat_map(|p| renamed_fields(&p.receipt))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            lost_by_version.insert(on.clone(), renamed);
+        }
+        let renamed = &lost_by_version[&on];
+        let note = if renamed.is_empty() {
+            format!("moves back to {version}; {on} renamed no field from it")
+        } else {
+            format!(
+                "past its soak, or never in one: moves back to {version}, and what {on} wrote to \
+                 {} since its soak closed is not in {version}'s columns",
+                renamed.join(", ")
+            )
+        };
+        out.push(json!({
+            "tenant": space, "on": on, "kept": renamed.is_empty(), "note": note,
+        }));
+    }
+    Ok(out)
+}
+
+/// Each field a stored step renamed, `entity.field (was old)`.
+fn renamed_fields(receipt: &str) -> Vec<String> {
+    let Ok(r) = serde_json::from_str::<Value>(receipt) else {
+        return Vec::new();
+    };
+    r["backfills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["code"] == "B4")
+        .map(|b| {
+            format!(
+                "{}.{}",
+                b["entity"].as_str().unwrap_or("?"),
+                b["field"].as_str().unwrap_or("?")
+            )
+        })
+        .collect()
+}

@@ -26,7 +26,7 @@ const test = base.extend<{ plans: Plans }>({
         return { name, id };
       } });
     } finally {
-      for (const id of ids) await rows(await request.post(`${stack().door}/op/std.plans.delete`, {
+      for (const id of ids) await rows(await request.delete(`${stack().door}/op/std.plans.delete`, {
         headers: { ...headers, 'Idempotency-Key': randomUUID() }, data: { id },
       }));
     }

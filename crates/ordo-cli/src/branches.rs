@@ -22,6 +22,9 @@ ordo branches delete <name> --reason \"...\"
     The only way a branch goes; a merge never removes one.
 Each takes --host <h> (or ORDO_HOST), and --token or a signed-in session.";
 
+/// How long the seed step waits for the door to serve a new branch tenant.
+const SEED_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// One seed line: an op and its parameters.
 fn seed_lines(path: &str) -> Result<Vec<(String, Value)>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -118,8 +121,20 @@ pub(crate) async fn apply(
         return Outcome::ok(out);
     }
     for (i, (op, params)) in lines.iter().enumerate() {
-        if let Err(o) = crate::wire::door_op_in(host, flags, &space, op, params.clone(), true).await
-        {
+        // A new tenant, and its move to the branch's version, reach the door
+        // within its rebuild and pin reading times; until then it refuses at
+        // the door, before anything runs. So a door refusal is asked again,
+        // for at most `SEED_WAIT`; any other answer is final.
+        let started = std::time::Instant::now();
+        let done = loop {
+            match crate::wire::door_op_in(host, flags, &space, op, params.clone(), true).await {
+                Err(o) if o.report.contains("[access_denied]") && started.elapsed() < SEED_WAIT => {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                other => break other,
+            }
+        };
+        if let Err(o) = done {
             out.push_str(&format!(
                 "seed       stopped at line {} of {file} (`{op}`), {} of {} run:\n{}",
                 i + 1,

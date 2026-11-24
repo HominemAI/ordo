@@ -211,6 +211,7 @@ entity approvals {
   reviewer -> members
   at: datetime
   note: text
+  check note != ""
 }
 op approveCampaign($id: id, $rev: int, $note: text, $at: datetime filled) =
   set campaigns { id: $id, rev: $rev, status: "published" }

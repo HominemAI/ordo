@@ -296,6 +296,17 @@ async fn boot(stem: &str) -> Node {
         .await
         .expect("provisions");
     }
+    // These tests watch a version drop the moment no pin names it.
+    Versions::on(&pool)
+        .set_setting(
+            ordo_host::versions::VersionSetting::MinResidency,
+            Some("0"),
+            "dev:ada",
+            "tests drop a version at once",
+            12,
+        )
+        .await
+        .expect("min_residency 0");
     let rt = runtime::assemble(config(&pg.db)).await.expect("assembles");
     // Each tenant's custody, under the node's own key provider.
     for space in [SPC_A, SPC_B] {

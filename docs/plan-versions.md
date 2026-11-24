@@ -322,16 +322,72 @@ The pin this plan adds:
   every pin just before it swaps, so the catch-up the swap starts sees the
   new pins and no tenant is served the old version from a stale pin.
 
+**Load guards, built in the increment 3 remainder** (`deploy.rs`,
+`pin_stream.rs`, `spaces.rs`; tests in `versions_background.rs`):
+
+- `versions.min_residency` (stored in Ordo, default 10m): a version no
+  pin names stays loaded until it has been loaded this long.
+- `versions.idle_evict_after` (stored in Ordo, default 30m, or `off`): a
+  version beside the active one that served nothing this long is
+  unloaded. The pin stream does not load it again by itself. A signed-in
+  request for one of its tenants wakes it and waits for the load, up to
+  5 seconds (`WAKE_WAIT`), then is answered as ever. Past that it answers
+  `server_busy` with `Retry-After`, which the SDK retries by itself. A
+  request that meets the version while it loads waits too. No anonymous
+  call wakes one (V-29), and none needs to: a signed-out call reaches
+  only the deployment's own space, on the active version, which is never
+  evicted. Kept: the active version, the one `versions.new_tenant`
+  names, and everything during a swap. The op path waits; a function
+  call or a file read meeting an evicted version still answers
+  `space_unavailable` (a later change).
+- `versions.max_concurrent_loads` (node, `ORDO_VERSIONS_MAX_CONCURRENT_LOADS`,
+  default 1, 1 to 16): loads in one pass at once. One pass runs at a
+  time, so a version never loads twice at once.
+- `/health/deploy` lists `loading` per node: what is loading now, apart
+  from `alsoServing`.
+- Both stored guards are set with `ordo versions set min-residency |
+  idle-evict-after <value>` or `std.deployment.setVersionSetting`. A value
+  that is not a duration is refused, naming the setting and the command.
+
 ### 1.5 What serving many versions costs
 
 | Cost | Size | When it is paid |
 |---|---|---|
-| Memory | one `Loaded` per served version per node, and one `SpaceView` per space per `Loaded`. **Not measured.** Increment 3 measures it at 1,000+ spaces, shares schema and registry by `Arc`, and evicts views per space. | per version in use |
+| Memory | one `Loaded` per served version per node, and one `SpaceView` per space per `Loaded`. Measured in increment 3 (below): a view is 67 to 222 KB, so 1,000 spaces cost 65 to 217 MB per version. Bounded by `versions.memory_budget` and view eviction. | per version in use |
 | Load | one compile plus one gate per version per node | at pin time, at boot, and after each Ordo release |
 | Idle versions | evicted after `versions.idle_evict_after` | only when a version has no traffic |
 | Ordo releases | every reachable version's source compiles and gates under the new release (§2.6) | every release |
 | Mixed fleets | during a rolling Ordo upgrade, nodes differ. A pin switch completes when every live node has Y loaded. | each upgrade |
 | Fixes | a fix to the app's ops reaches a tenant only when it moves | the app developer's choice (owner, 2026-10-01) |
+
+**Measured in the increment 3 remainder** (`tests/versions_memory.rs`,
+release build, macOS, 2026-11-23; resident memory by `ps`, so the
+figures are approximate):
+
+| Program | Source | One `Loaded` | One view | 1,000 views | Cutting one view |
+|---|---|---|---|---|---|
+| teamspace | 4 KB | 3.6 MB (first, so it carries the process's warm-up) | 222 KB | 217 MB | 83 µs |
+| shopfront | 5 KB | 0.3 MB | 132 KB | 129 MB | 115 µs |
+| notes-v2 | 8 KB | 0.05 MB | 67 KB | 65 MB | 107 µs |
+
+- A view clones the version's schema and registry, so it is the cost
+  that grows with spaces. The `Loaded` itself is small.
+- A view is cheap to cut again, about 0.1 ms. So views are evicted, and
+  the schema is not yet shared by `Arc`: that changes the public type of
+  `ordo_exec::Executor` and every test that builds one, and is left as a
+  separate change while 2 other increments work in the same code.
+- What was set from it:
+  - `versions.memory_budget` (`ORDO_VERSIONS_MEMORY_BUDGET`, 512MB): a
+    view counts as 256 KB, the largest rounded up. Each loaded version
+    keeps its share, the least recently used evicted first, on every pin
+    read (`PinStream::evict_views`). Views idle for
+    `versions.idle_evict_after` go too. A view a request holds is never
+    evicted.
+  - `versions.max_loaded` (`ORDO_VERSIONS_MAX_LOADED`, 8): a load past it
+    is refused, naming the setting, and that version's tenants stay closed
+    on this node.
+- Tries: 2. The first, a counting allocator, is refused by the
+  workspace's `unsafe_code = "forbid"`; the second reads resident memory.
 
 Rollout arithmetic at `backfill.concurrency` 8 and 1 second per tenant:
 
@@ -389,6 +445,22 @@ Ruled 2026-11-02 (D7).
 - The owner's exception, a migration rule for the shared subset, is a later
   item.
 
+**Not built in the increment 3 remainder** (2026-11-23). What was found:
+
+- Consented feeds (the copy) are not built, so there is no feed to compare.
+- A window (a guest's share) calls the owner's op in the owner's tenant,
+  so the owner's version already decides the read.
+- The gap is the pins. A share and a capability grant pin each op's
+  manifest and guards, and the door's drift check compares against them.
+  Both come from the access engine, which holds one manifest per op: the
+  active version's (§1.4, session 1). So a share made in a tenant on X is
+  pinned to the active version's shape, and the drift check for a tenant
+  on X compares against the active version, not X.
+- `versions_disagree` belongs there: the engine holds manifests per
+  version, a grant records the version it was pinned under, and a call in
+  a tenant on another version compares the fields read. That changes the
+  access engine (`ordo-identity`) and is its own session.
+
 ### 1.8 One interface (rule 9)
 
 - **`Versions`**, one client in `ordo-host`, is the only reader and writer of
@@ -442,6 +514,22 @@ switch.
   the feed's `version_changed` frame the sync manager drops the
   device copy of that tenant and fills it again. One rule, the same one
   the public cache uses on a deploy.
+- **Built in the increment 3 remainder** (`router.rs`, `deploy.rs`,
+  `revoked_moves.rs`; tests in `versions_background.rs`):
+  - Every answer past the door carries `x-ordo-tenant-version`, the
+    version serving the tenant. CORS exposes it.
+  - `op_not_in_version` (409): an op another served version declares,
+    called in a tenant whose version lacks it. Said only to a caller the
+    door would let call it there; anyone else gets the unknown op's
+    `access_denied`. It names no version. The SDK reads it as `restart`.
+  - An idempotency key is honoured across one switch: on a payload
+    mismatch the door tries the fingerprint under the op's hash in the
+    tenant's previous version. A node keeps the op tables of the last 8
+    versions it dropped for this. A node that never served the previous
+    version answers `idempotency_mismatch`, as before.
+  - `std.space.version`: a tenant's managers and owner read its version,
+    order number, label and whether it is revoked.
+  - Not built: the SDK's own "version changed" event on the header.
 - Offline writes (`plan-offline.md`) are filed for after the first
   deployment. When built, a queued write replays under the tenant's
   version at replay time, and an op that version lacks gets the distinct
@@ -458,8 +546,22 @@ Routines, schedules, functions, mail and webhooks:
 As built in increment 3, session 1: each run resolves its tenant first and
 runs the routine as the tenant's version declares it, named
 `<routine>@<that version>`. A routine the tenant's version does not
-declare is skipped and recorded `undeclared`. The schedules and listeners
-are still the active version's alone (session 2).
+declare is skipped and recorded `undeclared`.
+
+Built in the increment 3 remainder (`routines.rs`, `workers.rs`):
+
+- The schedules and listeners are the union over served versions,
+  rebuilt when a version loads or drops (`LiveRoutines::switch_served`).
+- Each tenant is drained and fired only what its own version declares. A
+  tenant on a version this node has not loaded keeps its cursors still.
+- Two versions declaring one routine share one schedule row. Where their
+  timings differ, the active version's timing wins.
+- The hand-over at a switch: a routine both versions declare keeps its
+  cursor, so no change runs twice and none is missed. A routine the new
+  version adds starts at the head. A listener the new version lacks has
+  its cursor retired. A switch made while a node was down retires nothing
+  on that node.
+- Tests: `versions_background.rs`.
 
 **Backend functions under a pin** (review 2026-11-23; functions are V1,
 ruled 2026-10-31; `plan-backend-functions.md` §4.3):
@@ -1287,7 +1389,7 @@ round is about 35 minutes for the full suite.
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
-| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
+| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). The remainder, 2026-11-23 (PR 40): schedules and listeners per version and the cursor hand-over (bf5e6b16), the client contract (3f7171dc), load guards and `loading` health (f40bed05), UTC times and fixed window caps (d8f1fc01), the console's revoke target (d46f2e48), memory measured with view eviction, `max_loaded` and `memory_budget` (95fb3cfb). Left: the sharing rule (§1.7), the SDK's version-changed event, the schema shared by `Arc`. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. **Built 2026-11-23, commit 0c62ff1a:** `$environments`, `std.deployment.environments` and `registerEnvironment`, `ordo environments list\|register`. Changing which environment a deployment is, removing and renaming one (owner, 2026-11-23) built in fbc3b4c6: `set-own`, `remove`, `rename`, each with a reason and on the stream; the deployment's own and one a stored promotion names are refused. | S | 1 | a missing environment is refused with the command that creates it | none |
 | | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waited on Q11, ruled 2026-11-24 and built in the finish below.* | | | | |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. **Finished 2026-11-24, c3ac5754 (owner rulings 2026-11-24):** the target reads the version from the step before's door itself, as the person promoting, with their own token for it from the same sign-in (Q11, no machine key; `step_door.rs`, the one client to another deployment's door). The gate no longer takes a source or an "activated" claim from the caller. The step before must answer as the environment the target expects and must have read the same person. `SourceCredential` is the one seam a GitHub workflow's token joins later. Each environment records its door (`ordo environments door`, `std.deployment.setEnvironmentDoor`: address, own space, identity handle). Staging is gated as production is: every step after the first pins only what arrived through the gate. `ordo apply` with no `--env` goes to the first step of the chain (dev; a deployment that registered nothing is its own first step, so it applies as before); a later step is refused naming dev's address and `ordo promote`. The reader check runs on the target (`ordo_exec::peer::check_readers`). `promotion.skip_staging` built (`ordo environments set skip-staging on`, `$promotion_settings`), named in a refusal about a staging step before. `ORDO_PROMOTION_PLAIN_HTTP` allows a plain address to another host. Tests: `crates/ordo-host/tests/promotion.rs` (real doors for dev and staging and one fake identity service; each refusal), `crates/ordo-cli/tests/promote.rs`. **Not built:** the `requires` check. The language has no `requires` yet: the parser refuses it (`ordo_syntax::auth`) and the host derives no needs (`plan-configuration-in-the-file.md` §3, step 2). The gate calls it once that step lands. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
@@ -1317,9 +1419,11 @@ round is about 35 minutes for the full suite.
 - Session 2 built the revoked-version moves (§1.11): in the window, on
   demand, by the tenant when granted, each to the developer's target.
 - Memory at 1,000+ spaces, measured and recorded here; `versions.max_loaded`
-  and `versions.memory_budget` set from it; views evicted per space.
+  and `versions.memory_budget` set from it; views evicted per space. Done
+  in the remainder (§1.5). Left: sharing the schema by `Arc`.
 - Load guards: `versions.min_residency`, `versions.idle_evict_after`,
-  `versions.max_concurrent_loads` as settings.
+  `versions.max_concurrent_loads` as settings. Built in the remainder
+  (§1.4, "Load guards").
 - Session 3 built digest at load (9acbc2cf): every load of a stored
   version recomputes its source fingerprint and refuses a mismatch,
   naming the version (`LoadRefusal::Digest`, §6 conflict 4).
@@ -1327,14 +1431,16 @@ round is about 35 minutes for the full suite.
   served version, and a function's `uses` resolve in its version (§1.10).
   Left: the per-version catalog and generated interface.
 - Schedules and listeners as the union over served versions; cursor
-  hand-over at a switch. Not started in session 3.
+  hand-over at a switch. Built in the remainder (§1.10).
 - Session 2 built `versions.served` and `versions.minimum` (§1.6). Left:
   the refusal of a rollout that strands a tenant (with rollouts), and a
   command that removes a stored version (`--move-to`).
-- Sharing rule (§1.7), `versions_disagree`.
+- Sharing rule (§1.7), `versions_disagree`. Not built in the remainder;
+  §1.7 says what was found and where it goes.
 - Client contract (§1.9): version on every answer, the distinct refusal for
-  an op the version lacks, the SDK's version-changed event, idempotency
-  across one switch, the tenant admin's label.
+  an op the version lacks, idempotency across one switch and the tenant
+  admin's label are built in the remainder. Left: the SDK's
+  version-changed event on the header.
 - Session 3 built stream close on a pin switch (9acbc2cf). A feed
   (`?live=1`, a sync, a read on `/live`) records the version its tenant
   was served when it opened. When a pin moves or the active version
@@ -1359,16 +1465,24 @@ round is about 35 minutes for the full suite.
 - Session 3's tests: `versions_loaded.rs` (a running node: functions per
   pin and the negative, digest, public cache, feed close) and
   `external_review.rs` (a hold per version).
-- Session 2 built per-node health on `/health/deploy`. Left: a version
-  still loading is not shown apart from one that loaded.
+- Session 2 built per-node health on `/health/deploy`. The remainder
+  added `loading`: a version still loading, apart from `alsoServing`.
 - Session 2 built provisioning on the tenant's own version (§1.3).
 - Session 2 built the console's parts: Deploys says `serving N tenants`
   and `active (new tenants)`; Tenants has a Version column
   (`std.deployment.tenants` carries `version` and `ordinal`). Left: the
   console has no screen to move a tenant, set its target, or name a
-  revoke's `--move-to` for a version that is not active.
+  revoke's `--move-to` for a version that is not active. The Tenants
+  screen's Version button (pin, move now, target) was built in f4459729.
+  The remainder added the last: Deploys' revoke of a version that does
+  not serve takes "Its tenants move to", the active version by default,
+  and the warning says where each revoked version's tenants go
+  (`windows.spec.ts`).
 - Audit leftovers not taken by the CLI-output fixes: times as UTC, window
-  caps as settings or recorded as fixed.
+  caps as settings or recorded as fixed. Done in the remainder: `ordo
+  versions show` (applied, activations) and `ordo versions tenant` (pin
+  history) print times as `2026-11-05 14:02 UTC`, as revoke times
+  already did. The window caps are recorded as fixed (§7, "Fixed caps").
 
 What sets the pace:
 
@@ -1521,11 +1635,11 @@ refusal a setting can fix names the setting and the value.
 | `versions.served` | `in-use` | deployment, stored in Ordo |
 | `versions.minimum` | none | deployment, stored in Ordo |
 | `versions.new_tenant` | last version that finished a rollout (the active version until rollouts) | deployment, stored in Ordo |
-| `versions.idle_evict_after` | 30 minutes | deployment |
-| `versions.min_residency` | 10 minutes | deployment |
-| `versions.max_loaded` | set from increment 3's memory measurement | node |
-| `versions.max_concurrent_loads` | 1 | node |
-| `versions.memory_budget` | set from increment 3's memory measurement | node |
+| `versions.idle_evict_after` | 30 minutes, or `off` (built in increment 3, stored in Ordo) | deployment |
+| `versions.min_residency` | 10 minutes (built in increment 3, stored in Ordo) | deployment |
+| `versions.max_loaded` | 8 (`ORDO_VERSIONS_MAX_LOADED`, set from increment 3's measurement) | node |
+| `versions.max_concurrent_loads` | 1 (`ORDO_VERSIONS_MAX_CONCURRENT_LOADS`, built in increment 3) | node |
+| `versions.memory_budget` | 512MB of per-space views (`ORDO_VERSIONS_MEMORY_BUDGET`, set from increment 3's measurement) | node |
 | `pins.reconcile_interval` | 30 seconds (`ORDO_PINS_RECONCILE_SECS`, built 2026-11-05) | deployment |
 | `forward.retry_interval` | 15 seconds | deployment |
 | `editions.load_window` | 12 months | Ordo release |
@@ -1584,6 +1698,20 @@ day:
 
 Defaults not set by a ruling are proposals, checked in the increment that
 builds them.
+
+**Fixed caps** (recorded in the increment 3 remainder, not settings). Each
+bounds input or the cost of one answer, like every other text and list
+bound in Ordo. None is a policy a deployment would tune.
+
+| Cap | Value | Why fixed |
+|---|---|---|
+| A window's message | 2,000 characters | an input bound |
+| A skip's reason | 500 characters | an input bound |
+| A window or skip id | 64 characters | an input bound |
+| Tenants one window lists | 1,000 | more is `all` or `all except`; bounds one write |
+| The window list's reach | 12 months back and ahead | the 24-month list the owner ruled (asks 22, 24) |
+| Times one cron window gives in the list | 20,000 | about once an hour; bounds the list's cost |
+| Times one list answers | 100,000 | the list is cut and says so |
 
 Added by the review of 2026-11-23:
 

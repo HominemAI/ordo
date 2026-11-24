@@ -337,6 +337,10 @@ fn usage() -> ! {
          on production: read staging's signed rehearsal as you, check it,\n      \
          and render the plan to the same digest. Production runs only an\n      \
          accepted digest while staging is in its chain.\n  \
+         ordo rehearsals break-glass --from <v> --to <v> --reason \"<text>\"\n      \
+         on production, when staging does not answer: the deployment owner\n      \
+         lets the step's stored plan run for 1 hour without a rehearsal.\n      \
+         Refused while staging answers. The stream marks it; `list` shows it.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \

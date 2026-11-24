@@ -21,11 +21,18 @@
  *    tenant (`ordo evolve --tenant`) is refused: staging's signature was
  *    not accepted here. The refusal names `ordo rehearsals rehearse` and
  *    `accept`.
- * 4. Production accepts the rehearsal, read from staging as the developer:
+ * 4. Break-glass (§3.2 item 6) is refused while staging answers. Then
+ *    production's record of staging's door names a port nothing answers
+ *    on, the developer breaks glass with a reason, `ordo rehearsals list`
+ *    shows it active, and the step runs on Ada's tenant database (her pin
+ *    then meets the promotion gate, as the version was applied here, not
+ *    promoted). The door is put back.
+ * 5. Production accepts the rehearsal, read from staging as the developer:
  *    the signature checks and production renders the same digest.
  *
  * A regression looks like a step that runs unrefused, a rehearsal that is
- * not signed, or an acceptance whose digest is not staging's.
+ * not signed, an acceptance whose digest is not staging's, or a break-glass
+ * granted while staging answers.
  *
  * It puts staging in production's chain and takes it out at the end.
  * Locally, `--project=rehearsal --no-deps`. Chromium only.
@@ -189,6 +196,45 @@ test('production refuses a plan digest staging did not sign, and accepts the one
     expect(said).toContain('plan_not_rehearsed');
     expect(said).toContain('ordo rehearsals rehearse');
     expect(said).toContain('ordo rehearsals accept');
+  });
+
+  await test.step('break-glass is refused while staging answers', () => {
+    const r = d.main(['rehearsals', 'break-glass', '--from', from, '--to', to, '--reason', 'staging is slow', ...prod()]);
+    expect(r.code, r.out).not.toBe(0);
+    const said = `${r.out}${r.err}`;
+    expect(said).toContain('break_glass_staging_answers');
+    expect(said).toContain('ordo rehearsals accept');
+  });
+
+  await test.step("staging is down: the developer breaks glass with a reason, and the step runs on Ada's tenant", () => {
+    // Production's record of staging's door now names a port nothing
+    // answers on: staging is down, as production sees it.
+    ok(
+      d.main([
+        'environments', 'door', 'staging', 'http://127.0.0.1:9', 'system', '--handle', 'staging',
+        '--reason', 'staging is down', ...prod(),
+      ]),
+    );
+    const reason = 'staging cluster down; ship the mood field';
+    const out = ok(d.main(['rehearsals', 'break-glass', '--from', from, '--to', to, '--reason', reason, ...prod()]));
+    expect(out).toContain(`broke glass ${from} to ${to}: staging is down`);
+    expect(out).toContain(`reason      ${reason}`);
+    const list = ok(d.main(['rehearsals', 'list', ...prod()]));
+    expect(list).toMatch(new RegExp(`^BREAK-GLASS\\n  ${from.replace(/\./g, '\\.')} to ${to.replace(/\./g, '\\.')} .*\\(active\\)  reason: ${reason}$`, 'm'));
+    // The rehearsal gate lets the step run: her tenant's database is
+    // replayed. Production then refuses the pin by its other gate: here
+    // the version was applied to production, not promoted from staging.
+    const run = d.main(['evolve', '--tenant', tenant, '--to', to, ...prod()]);
+    const ran = `${run.out}${run.err}`;
+    expect(ran).not.toContain('plan_not_rehearsed');
+    expect(ran).toContain("the tenant's database was replayed");
+    // Staging is back: production records its door again.
+    ok(
+      d.main([
+        'environments', 'door', 'staging', stack().staging, 'system', '--handle', 'staging',
+        '--reason', 'staging is back', ...prod(),
+      ]),
+    );
   });
 
   await test.step("production accepts staging's rehearsal: read as the developer, the same digest", () => {

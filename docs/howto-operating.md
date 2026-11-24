@@ -356,7 +356,7 @@ A node can serve more than one version at once. The active version is the one an
 - **Where new tenants start:** `ordo versions set new-tenant <version>`, such as a beta. A version not stored, revoked, or outside the served list is refused.
 - **Upgrading from the environment variables.** `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM` and `ORDO_VERSIONS_NEW_TENANT` are read once. On the first boot after the upgrade, a value set there is stored, if nothing is stored yet, and the log says the variable is now ignored and can be removed. Each later boot while it stays set logs that it is ignored. A value the checks refuse is not stored; the log says why, and the boot goes on.
 - **A stored problem never stops a boot.** If a stored setting no longer fits what is applied, boot logs it, naming the setting, and serves on (owner, 2026-11-02: an upgrade never stops a running deployment).
-- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (`versions.new_tenant` as that node last read it), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads.
+- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (`versions.new_tenant` as that node last read it), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads. `loading` lists the versions the node is loading now, apart from the ones it serves.
 
 ## Health Endpoints
 

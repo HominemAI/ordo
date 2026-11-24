@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | [`Route::Door`] | `versions`, `windows`, `fleet`, `quota`, `touches`, `plan` | refused; names `--host` |
 //! | [`Route::Either`] | `apply`, `rollback` | refused; names `--host` and `--direct` |
-//! | [`Route::Direct`] | `keys`, `verify`, `restore`, `identity recover` | refused; names `--direct` and `--host` |
+//! | [`Route::Direct`] | `keys`, `verify`, `restore`, `identity recover`, `release-check` | refused; names `--direct` and `--host` |
 //! | [`Route::Open`] | the rest | unchanged (session 2 moves them) |
 //!
 //! `migrate` is in no row: it is removed, and refuses before this gate,
@@ -54,6 +54,9 @@ pub fn policy(cmd: &str, sub: Option<&str>, flags: &Flags) -> Route {
         // is the deployment's plan, which is the door's.
         "plan" => Route::Door,
         "apply" | "rollback" => Route::Either,
+        // The new image's check before an upgrade: no host of this release
+        // is up yet (ruled 2026-11-23, Q8).
+        "release-check" => Route::Direct,
         "restore" => Route::Direct,
         // `verify --proof <file>` reads a file and no database.
         "verify" if flags.named_value("--proof").is_some() => Route::Open,

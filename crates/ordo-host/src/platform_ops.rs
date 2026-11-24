@@ -2767,6 +2767,10 @@ impl PlatformOps {
             crate::revoked_moves::MOVE_SELF => {
                 crate::revoked_moves::execute(self.apply_ops()?, space, bound, caller).await
             }
+            // The tenant admin reads its own version and label (§1.9).
+            crate::revoked_moves::VERSION_SELF => {
+                crate::revoked_moves::version(self.apply_ops()?, space).await
+            }
             crate::tenant_ops::CREATE => self.tenant_ops()?.create(space, bound, caller).await,
             crate::reap_op::REAP => self.reap_ops()?.reap(space, bound, caller).await,
             name if crate::pause::OPS.contains(&name) => {

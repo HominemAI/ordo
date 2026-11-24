@@ -634,6 +634,24 @@ pub trait OpRegistry: Send + Sync {
         let _ = space;
         None
     }
+
+    /// Is `name` declared by a program version this registry serves, while
+    /// the one serving `space` lacks it (`plan-versions.md` §1.9)? The door
+    /// then answers `op_not_in_version` rather than as an unknown op. The
+    /// default, one program everywhere, never says yes.
+    fn declared_elsewhere(&self, space: &str, name: &str) -> bool {
+        let _ = (space, name);
+        false
+    }
+
+    /// The op's version hash in the program version that served `space`
+    /// before its last switch, when this registry knows it. An idempotency
+    /// key sent before the switch is honoured across it (`plan-versions.md`
+    /// §1.9): the retry's fingerprint is also taken with this hash.
+    fn prior_version_hash(&self, space: &str, name: &str) -> Option<String> {
+        let _ = (space, name);
+        None
+    }
 }
 
 /// Parameters that passed type + bounds validation, keyed by declared name.

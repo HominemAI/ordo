@@ -2121,6 +2121,7 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             name if crate::window_ops::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.
             crate::revoked_moves::MOVE_SELF => true,
+            crate::revoked_moves::VERSION_SELF => true,
             // 17aa piece 3 and 11-15: wired unconditionally in `assemble`
             // (`with_tenants`, `with_reap`), and until 2026-09-29 missing
             // here, so the binary answered 404 for both.
@@ -3904,6 +3905,7 @@ async fn assemble_program(
         .backfill(crate::versions::SYSTEM_ACTOR, now_secs())
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
+    let from_registry = matches!(program, ProgramSource::Registry);
     let deployment = match program {
         ProgramSource::Registry => {
             match deploy::load_active(&pool, &cfg.pg, keys.clone(), cfg.space.clone()).await {
@@ -3927,6 +3929,29 @@ async fn assemble_program(
                     platform,
                 )
                 .map_err(BootRefusal::Load)?,
+                // **A release that no longer loads the active version**
+                // (`plan-versions.md` §2.8, increment 6). The boot goes on
+                // with no program serving: the active version's tenants
+                // are closed until they move, every tenant pinned to
+                // another version is served it, and the control plane
+                // serves (owner, 2026-11-06: an upgrade must not stop a
+                // running deployment). The release check names them.
+                Err(e) if crate::release_check::closes_only_its_tenants(&e) => {
+                    eprintln!(
+                        "ordo-host: the active version is not served under Ordo {}, so its \
+                         tenants are closed until they move; every other tenant serves: {e}",
+                        crate::release_check::release()
+                    );
+                    let d = Deployment::empty_with_platform_ops(
+                        cfg.space.clone(),
+                        pool.clone(),
+                        keys.clone(),
+                        platform,
+                    )
+                    .map_err(BootRefusal::Load)?;
+                    d.follow(versions.active_version().await.ok().flatten());
+                    d
+                }
                 Err(other) => return Err(BootRefusal::Load(other)),
             }
         }
@@ -3955,6 +3980,18 @@ async fn assemble_program(
             Deployment::boot_with_platform_ops(verified, platform).map_err(BootRefusal::Load)?
         }
     };
+
+    // **The release check at the first boot of a release** (§2.8, R3). In
+    // the background: it only logs and records, and never holds the boot.
+    // A failing version's tenants are closed by its own load refusal.
+    if from_registry {
+        let (check_pool, check_cfg) = (pool.clone(), cfg.pg.clone());
+        tokio::spawn(async move {
+            for line in crate::release_check::at_boot(&check_pool, &check_cfg, now_secs()).await {
+                eprintln!("{line}");
+            }
+        });
+    }
 
     // **The resolver, built here and built once** (18d T2).
     //
@@ -6239,6 +6276,29 @@ struct AccessRebuild<'a> {
     credentials: &'a Arc<dyn ordo_exec::route::DbCredentials>,
 }
 
+/// Every pinned tenant this node does not serve, with why: its version is
+/// not loaded here, and it is not waiting for a swap that would serve it.
+fn unserved_spaces(d: &Deployment) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = d
+        .pins()
+        .by_space
+        .keys()
+        .filter_map(|space| match d.for_space(space) {
+            Ok(_) => None,
+            Err(u) => Some((
+                space.clone(),
+                format!(
+                    "it is pinned to version {}, which this node does not serve; it is closed \
+                     until it moves",
+                    u.version
+                ),
+            )),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// One rebuild. The dials happen first, with no lock held. The cache is
 /// then locked until the new door is installed, so two rebuilds install in
 /// the order they built and the later one holds every newer read. The
@@ -6298,6 +6358,11 @@ async fn rebuild_access(
         w.access.revocations.clone(),
     );
     w.access.install(door);
+    // A tenant pinned to a version this node does not serve (one a release
+    // no longer loads, §2.8) is closed: its verified callers are answered
+    // `server_busy`, never `access_denied`, and `/health/ready` names it.
+    let mut unread = unread;
+    unread.extend(unserved_spaces(w.deployment));
     // Together with the door they describe, so the two can never be one
     // rebuild apart.
     w.access.note_unread(unread);
@@ -6752,12 +6817,20 @@ async fn spawn_deploy_listener(
     // **Every tenant's pin, and every version they name** (`plan-versions.md`
     // §1.4, increment 3), before the first request: a tenant pinned beside
     // the active version is served its own from the start.
-    let pins = crate::pin_stream::PinStream::new(
+    let pins = crate::pin_stream::PinStream::with_loads(
         deployment.clone(),
         pool.clone(),
         pg.clone(),
         keys.clone(),
         space.clone(),
+        {
+            let (limits, said) = crate::pin_stream::NodeLimits::from_env();
+            for line in said {
+                eprintln!("versions: {line}");
+            }
+            limits
+        },
+        node_status.clone(),
     );
     // `versions.new_tenant` is read from the control database with the
     // pins (`PinStream::settle`), and kept loaded so a new tenant is
@@ -6772,6 +6845,7 @@ async fn spawn_deploy_listener(
         let node_status = node_status.clone();
         let functions = functions.clone();
         let live_streams = live_streams.clone();
+        let routines = routines.clone();
         move |read: crate::pin_stream::Read| {
             let deployment = deployment.clone();
             let pool = pool.clone();
@@ -6782,6 +6856,7 @@ async fn spawn_deploy_listener(
             let node_status = node_status.clone();
             let functions = functions.clone();
             let live_streams = live_streams.clone();
+            let routines = routines.clone();
             async move {
                 for line in crate::pin_stream::log_lines(&read) {
                     println!("{line}");
@@ -6807,6 +6882,12 @@ async fn spawn_deploy_listener(
                 // the active version calls its own (§1.10).
                 for line in functions.sync(&pool, &deployment).await {
                     println!("{line}");
+                }
+                // Schedules and listeners are the union over served
+                // versions; each tenant runs what its own declares (§1.10).
+                match routines.switch_served(&pool, &deployment).await {
+                    Ok(line) => println!("{line}"),
+                    Err(e) => eprintln!("versions: the routines were not switched ({e})"),
                 }
                 // The door knows every served version's ops.
                 if let Err(e) = refresh_access(
@@ -6839,6 +6920,27 @@ async fn spawn_deploy_listener(
             "pins: not read at boot ({e}); every tenant is served the active version until \
              the next read"
         ),
+    }
+    // **A signed-in request woke a version unloaded for idleness**
+    // (`versions.idle_evict_after`): read the pins again, which loads it.
+    // Wakes that arrive together are taken in one read.
+    {
+        let (tx, mut woken) = tokio::sync::mpsc::unbounded_channel::<String>();
+        spaces.set_waker(Arc::new(move |version: String| {
+            let _ = tx.send(version);
+        }));
+        let pins = pins.clone();
+        let rebuild = rebuild.clone();
+        tokio::spawn(async move {
+            while let Some(version) = woken.recv().await {
+                while woken.try_recv().is_ok() {}
+                println!("versions: {version} woken by a request; loading it again");
+                match pins.reload().await {
+                    Ok(read) => rebuild(read).await,
+                    Err(e) => eprintln!("pins: not read for a woken version ({e})"),
+                }
+            }
+        });
     }
     // The reconcile tick: a whole read, whatever the stream said, the
     // version settings with it.
@@ -7078,10 +7180,7 @@ async fn spawn_deploy_listener(
                     // ones start, removed ones stop, retimed ones move.
                     // Before the row below, so an apply that waited sees
                     // them running.
-                    match routines
-                        .switch(&pool, &deployment.current().fixture.schema, &to)
-                        .await
-                    {
+                    match routines.switch_served(&pool, &deployment).await {
                         Ok(line) => println!("{line}"),
                         Err(e) => eprintln!(
                             "deploy {to}: the routines were not switched ({e}); the previous \

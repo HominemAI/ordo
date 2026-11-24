@@ -92,6 +92,13 @@ fn usage() -> ! {
          what versions left behind in every database (`std.deployment.orphans`).\n  \
          ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
          remove an orphan from every database, asked twice (`std.deployment.prune`).\n  \
+         ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
+         run from the new image before its tag changes: every version a\n      \
+         tenant is pinned to or may move to must compile and load under\n      \
+         this release. Names each failing version and its tenants; exits 1\n      \
+         when one fails. Reads only, and records one `$release_checks` row.\n      \
+         `--override` records the upgrade going ahead anyway: those tenants\n      \
+         close at the boot, and every other tenant serves.\n  \
          ordo migrate   removed: every schema evolution goes through the door\n      \
          (ruled 2026-11-05). It refuses, naming `ordo apply --no-activate`\n      \
          and `ordo evolve --run`, which replace it.\n  \
@@ -128,7 +135,7 @@ fn usage() -> ! {
          when no server can be up open the database from this machine\n\
          instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
          `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
-         --proof), `restore`, `identity recover`, and\n\
+         --proof), `restore`, `identity recover`, `release-check`, and\n\
          `apply` and `rollback` when no host can boot. Without `--direct`\n\
          and without `--host` they refuse, naming both. Each `--direct` use\n\
          is recorded before it runs and written to the deployment\'s\n\
@@ -272,7 +279,7 @@ fn usage() -> ! {
          and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
@@ -577,6 +584,7 @@ fn main() {
             | "restore"
             | "keys"
             | "migrate"
+            | "release-check"
             | "quota"
             | "usage"
             | "space"

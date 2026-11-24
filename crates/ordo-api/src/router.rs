@@ -70,6 +70,10 @@ const REPLAY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// than guessing at its case.
 pub const SPACE_HEADER: &str = "x-ordo-space";
 
+/// The program version serving the answer's tenant (`plan-versions.md`
+/// §1.9), on every answer past the door.
+pub const TENANT_VERSION_HEADER: &str = "x-ordo-tenant-version";
+
 /// The header form of `$page`. Cursors are **data**, not addressing: a token
 /// in a query string lands in proxy logs, browser history, and `Referer`
 /// headers (SH-6), so generated SDKs prefer this. The query form stays
@@ -259,6 +263,29 @@ async fn fn_body(
     Ok(Bytes::from(out))
 }
 
+/// `op_not_in_version`, when `name` is declared by a program version this
+/// deployment serves other than `space`'s, and `token` may call it there.
+/// `None` otherwise, and the caller gets the unregistered op's answer. The
+/// refusal names no version: version detail is the deployment owner's.
+fn not_in_version(state: &ApiState, token: &str, space: &str, name: &str) -> Option<ApiError> {
+    if !state.registry.current().declared_elsewhere(space, name) {
+        return None;
+    }
+    match state.access.check(token, space, name) {
+        AccessDecision::Allow { .. } => Some(
+            ApiError::new(
+                ErrorCode::OpNotInVersion,
+                format!(
+                    "`{name}` is not in the program version this space is served now. The app \
+                     is newer or older than the space: reload it, or wait for the space to move"
+                ),
+            )
+            .with_op(name),
+        ),
+        AccessDecision::Deny => None,
+    }
+}
+
 /// The caller may read files, checked as `GET /blob/{handle}` checks it
 /// (`std.$blob.get`), before a function with a `blob` argument runs. The
 /// row guard is the second half, when the runner reads each file.
@@ -344,11 +371,14 @@ async fn run_function(
         (replay_key, fingerprint)
     });
     if let Some((replay_key, fingerprint)) = &slot {
+        let prior = prior_hash(state, &space, spec)
+            .map(|h| RequestFingerprint::compute(&space, &spec.name, &h, &bound, None, None));
         if let Some(outcome) = reserve_or_replay(
             state,
             spec,
             replay_key,
             fingerprint,
+            prior,
             KeyBinding::UntilExpiry,
         )
         .await?
@@ -817,6 +847,14 @@ async fn dispatch(
     else {
         // An op nobody registered answers exactly as a forbidden op does.
         let token = bearer(&headers);
+        // Except an op another served version declares, asked by a caller
+        // the door would let call it (`plan-versions.md` §1.9): the app is
+        // newer or older than the tenant, and it gets its own answer.
+        if let (Some(t), Some(space)) = (token, named_space(&headers)) {
+            if let Some(refusal) = not_in_version(&state, t, space, &name) {
+                return refusal.into_response();
+            }
+        }
         if token.is_none() {
             state.public.count("-", "door", "refused");
         }
@@ -907,7 +945,7 @@ async fn dispatch(
         // so any page may read it (`design-public-path.md` §8).
         let mut response = response;
         response.extensions_mut().insert(crate::cors::PublicAnswer);
-        return with_version_headers(response, &op, &headers);
+        return with_version_headers(&state, response, &op, &headers);
     }
     let response = if method == Method::GET && wants_live(&query) {
         let resume = headers
@@ -938,7 +976,7 @@ async fn dispatch(
             Err(err) => err.into_response(),
         }
     };
-    with_version_headers(kept_off_disk(response), &op, &headers)
+    with_version_headers(&state, kept_off_disk(response), &op, &headers)
 }
 
 /// A member's answer is never stored by the browser's HTTP cache.
@@ -2049,11 +2087,23 @@ async fn run_call(
         KeyBinding::UntilExpiry
     };
     if let Some((replay_key, fingerprint)) = &slot {
+        // Honoured across one switch: the same request under the op as the
+        // tenant's previous version declared it (§1.9).
+        let prior = prior_hash(state, &space, op).map(|h| {
+            RequestFingerprint::compute(
+                &space,
+                &op.name,
+                &h,
+                &bound,
+                refinement.as_ref(),
+                cursor.as_ref(),
+            )
+        });
         // Reserve *before* executing (Z-012). A lookup here and a put after
         // execution would let two concurrent identical requests both miss and
         // both run.
         if let Some(outcome) =
-            reserve_or_replay(state, op, replay_key, fingerprint, binding).await?
+            reserve_or_replay(state, op, replay_key, fingerprint, prior, binding).await?
         {
             return Ok(outcome);
         }
@@ -2182,16 +2232,33 @@ async fn run_call(
 /// the call. The loser of a race never executes: it waits out the winner and
 /// replays, and if the wait budget elapses first it says
 /// `idempotency_in_flight` rather than running a second copy of the write.
+///
+/// `prior` is the same request's fingerprint under the op as the tenant's
+/// previous version declared it. A key whose stored payload matches it is
+/// honoured across that one switch (`plan-versions.md` §1.9).
+/// The op's hash in the version `space` was served before its last switch,
+/// when it differs from the hash serving it now.
+fn prior_hash(state: &ApiState, space: &str, op: &OpSpec) -> Option<String> {
+    state
+        .registry
+        .current()
+        .prior_version_hash(space, &op.name)
+        .filter(|h| *h != op.version_hash)
+}
+
 async fn reserve_or_replay(
     state: &ApiState,
     op: &OpSpec,
     replay_key: &ReplayKey,
     fingerprint: &RequestFingerprint,
+    prior: Option<RequestFingerprint>,
     binding: KeyBinding,
 ) -> Result<Option<CallOutcome>, ApiError> {
     let deadline = tokio::time::Instant::now() + REPLAY_WAIT_BUDGET;
+    let mut fingerprint = *fingerprint;
+    let mut prior = prior;
     loop {
-        match state.replay.claim(replay_key, fingerprint, binding).await {
+        match state.replay.claim(replay_key, &fingerprint, binding).await {
             ReplayClaim::Reserved => return Ok(None),
             ReplayClaim::Hit(stored) => {
                 return Ok(Some(CallOutcome {
@@ -2202,6 +2269,10 @@ async fn reserve_or_replay(
                 }));
             }
             ReplayClaim::Mismatch => {
+                if let Some(before) = prior.take() {
+                    fingerprint = before;
+                    continue;
+                }
                 return Err(ApiError::for_op(
                     ErrorCode::IdempotencyMismatch,
                     op,
@@ -2871,7 +2942,7 @@ async fn live_add_inner(
     }
     .await
     .unwrap_or_else(IntoResponse::into_response);
-    Ok(with_version_headers(answer, &op, headers))
+    Ok(with_version_headers(state, answer, &op, headers))
 }
 
 /// `DELETE /live/{stream}/{key}`: drop one read. A key the stream does not
@@ -2936,9 +3007,30 @@ fn success_envelope(
 ///
 /// Applied to stage-2 responses only: announcing an op's version to a caller
 /// the door turned away would confirm the op exists, undoing [`door_denial`].
-fn with_version_headers(mut response: Response, op: &OpSpec, request: &HeaderMap) -> Response {
+///
+/// **The tenant's program version rides on every such answer**
+/// (`plan-versions.md` §1.9), as [`TENANT_VERSION_HEADER`]: during a rollout
+/// one front-end bundle meets 2 versions, and this is how it tells which it
+/// is talking to. A registry that serves one program everywhere sends none.
+fn with_version_headers(
+    state: &ApiState,
+    mut response: Response,
+    op: &OpSpec,
+    request: &HeaderMap,
+) -> Response {
     if let Ok(value) = HeaderValue::from_str(&op.version_hash) {
         response.headers_mut().insert("x-ordo-op-version", value);
+    }
+    let space = named_space(request)
+        .map(str::to_string)
+        .or_else(|| state.access.anonymous_space());
+    if let Some(version) = space
+        .and_then(|s| state.registry.current().version_in(&s))
+        .filter(|v| !v.is_empty())
+    {
+        if let Ok(value) = HeaderValue::from_str(&version) {
+            response.headers_mut().insert(TENANT_VERSION_HEADER, value);
+        }
     }
     let pinned = request.get("x-ordo-version").and_then(|v| v.to_str().ok());
     if pinned.is_some_and(|p| p != op.version_hash) {

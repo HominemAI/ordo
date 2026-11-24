@@ -368,7 +368,15 @@ pub fn specs() -> Vec<OpSpec> {
                     max: Some(crate::versions::MAX_SETTING_HISTORY.to_string()),
                 }),
             }],
-            &["served", "minimum", "newTenant", "history", "waiting"],
+            &[
+                "served",
+                "minimum",
+                "newTenant",
+                "minResidency",
+                "idleEvictAfter",
+                "history",
+                "waiting",
+            ],
         ),
         spec(
             SET_VERSION_SETTING,
@@ -401,6 +409,8 @@ pub fn specs() -> Vec<OpSpec> {
                 "served",
                 "minimum",
                 "newTenant",
+                "minResidency",
+                "idleEvictAfter",
                 "waiting",
             ],
         ),
@@ -557,6 +567,8 @@ fn settings_json(s: &crate::versions::VersionSettings) -> serde_json::Value {
         "served": s.value(VersionSetting::Served),
         "minimum": s.value(VersionSetting::Minimum),
         "newTenant": s.value(VersionSetting::NewTenant),
+        "minResidency": s.value(VersionSetting::MinResidency),
+        "idleEvictAfter": s.value(VersionSetting::IdleEvictAfter),
     })
 }
 

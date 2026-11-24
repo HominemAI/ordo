@@ -1524,6 +1524,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"none"#,
         r#""#,
     ),
+    s(
+        "ORDO_VERSIONS_MAX_CONCURRENT_LOADS",
+        "Databases and pools",
+        r#"1"#,
+        r#"1 to 16"#,
+    ),
     s("ORDO_BLOB_STORE", "Storage and blobs", r#"none"#, r#""#),
     s(
         "ORDO_BLOB_S3_ENDPOINT",

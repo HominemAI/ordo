@@ -406,6 +406,9 @@ pub struct Spaces {
     /// fingerprint on this node (§1.4 step 6). Asked once per pair per
     /// process, like continuity.
     fits: Mutex<HashSet<(String, String)>>,
+    /// Told the name of an evicted version a signed-in request woke
+    /// ([`Spaces::wake`]); the node's pin stream loads it.
+    waker: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
 impl Spaces {
@@ -437,7 +440,26 @@ impl Spaces {
             paused: Mutex::new(BTreeMap::new()),
             pause_answers: Mutex::new(crate::pause::PauseAnswers::default()),
             fits: Mutex::new(HashSet::new()),
+            waker: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Set what [`Spaces::wake`] tells. Once; a second call is ignored.
+    pub fn set_waker(&self, waker: Arc<dyn Fn(String) + Send + Sync>) {
+        let _ = self.waker.set(waker);
+    }
+
+    /// **A signed-in request met a tenant whose version was unloaded for
+    /// idleness** (`versions.idle_evict_after`): mark it wanted and tell
+    /// the pin stream, which loads it under `versions.max_concurrent_loads`.
+    /// The request itself answers `space_unavailable`, retryable. Never
+    /// called for an anonymous caller (V-29).
+    pub fn wake(&self, version: &str) {
+        if self.deployment.wake(version) {
+            if let Some(w) = self.waker.get() {
+                w(version.to_string());
+            }
+        }
     }
 
     /// Whether this tenant is paused, and how. `None` serves.

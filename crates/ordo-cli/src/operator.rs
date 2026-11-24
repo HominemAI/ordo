@@ -2810,7 +2810,7 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...
      ordo versions unrevoke <version> --reason \"<text>\"  --host <h> ...\n\
      ordo versions revoked  --host <h> ...\n\
      ordo versions settings [--limit <n>]  --host <h> ...\n\
-     ordo versions set <served|minimum|new-tenant> <value> | --clear  --reason \"<text>\"  \
+     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
      every `versions` command goes through the door (`--host <h>` or ORDO_HOST)\n\
      a version is its name or its order number, `#4`";
@@ -3264,8 +3264,9 @@ async fn versions_settings(flags: Flags) -> Outcome {
     Outcome::ok(out)
 }
 
-/// `ordo versions set <served|minimum|new-tenant> <value> | --clear
-/// --reason "..."`: change one version setting through the door
+/// `ordo versions set <setting> <value> | --clear --reason "..."`, the
+/// setting one of `served`, `minimum`, `new-tenant`, `min-residency` and
+/// `idle-evict-after`: change one version setting through the door
 /// (`std.deployment.setVersionSetting`). The deployment owner, or a machine
 /// key with the `deployment` grant.
 async fn versions_set(flags: Flags) -> Outcome {
@@ -3281,8 +3282,8 @@ async fn versions_set(flags: Flags) -> Outcome {
     };
     let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
         return Outcome::usage(format!(
-            "`{name}` is not a version setting; there are `served`, `minimum` and \
-             `new-tenant`\n"
+            "`{name}` is not a version setting; there are `served`, `minimum`, \
+             `new-tenant`, `min-residency` and `idle-evict-after`\n"
         ));
     };
     let Some(reason) = flags.named_value("--reason") else {

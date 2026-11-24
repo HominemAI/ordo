@@ -322,6 +322,27 @@ The pin this plan adds:
   every pin just before it swaps, so the catch-up the swap starts sees the
   new pins and no tenant is served the old version from a stale pin.
 
+**Load guards, built in the increment 3 remainder** (`deploy.rs`,
+`pin_stream.rs`, `spaces.rs`; tests in `versions_background.rs`):
+
+- `versions.min_residency` (stored in Ordo, default 10m): a version no
+  pin names stays loaded until it has been loaded this long.
+- `versions.idle_evict_after` (stored in Ordo, default 30m, or `off`): a
+  version beside the active one that served nothing this long is
+  unloaded. The pin stream does not load it again by itself. A signed-in
+  request for one of its tenants wakes it: that request answers
+  `space_unavailable`, retryable, and the stream loads it. No anonymous
+  call wakes one (V-29). Kept: the active version, the one
+  `versions.new_tenant` names, and everything during a swap.
+- `versions.max_concurrent_loads` (node, `ORDO_VERSIONS_MAX_CONCURRENT_LOADS`,
+  default 1, 1 to 16): loads in one pass at once. One pass runs at a
+  time, so a version never loads twice at once.
+- `/health/deploy` lists `loading` per node: what is loading now, apart
+  from `alsoServing`.
+- Both stored guards are set with `ordo versions set min-residency |
+  idle-evict-after <value>` or `std.deployment.setVersionSetting`. A value
+  that is not a duration is refused, naming the setting and the command.
+
 ### 1.5 What serving many versions costs
 
 | Cost | Size | When it is paid |
@@ -1319,7 +1340,8 @@ round is about 35 minutes for the full suite.
 - Memory at 1,000+ spaces, measured and recorded here; `versions.max_loaded`
   and `versions.memory_budget` set from it; views evicted per space.
 - Load guards: `versions.min_residency`, `versions.idle_evict_after`,
-  `versions.max_concurrent_loads` as settings.
+  `versions.max_concurrent_loads` as settings. Built in the remainder
+  (§1.4, "Load guards").
 - Session 3 built digest at load (9acbc2cf): every load of a stored
   version recomputes its source fingerprint and refuses a mismatch,
   naming the version (`LoadRefusal::Digest`, §6 conflict 4).
@@ -1360,8 +1382,8 @@ round is about 35 minutes for the full suite.
 - Session 3's tests: `versions_loaded.rs` (a running node: functions per
   pin and the negative, digest, public cache, feed close) and
   `external_review.rs` (a hold per version).
-- Session 2 built per-node health on `/health/deploy`. Left: a version
-  still loading is not shown apart from one that loaded.
+- Session 2 built per-node health on `/health/deploy`. The remainder
+  added `loading`: a version still loading, apart from `alsoServing`.
 - Session 2 built provisioning on the tenant's own version (§1.3).
 - Session 2 built the console's parts: Deploys says `serving N tenants`
   and `active (new tenants)`; Tenants has a Version column
@@ -1514,10 +1536,10 @@ refusal a setting can fix names the setting and the value.
 | `versions.served` | `in-use` | deployment, stored in Ordo |
 | `versions.minimum` | none | deployment, stored in Ordo |
 | `versions.new_tenant` | last version that finished a rollout (the active version until rollouts) | deployment, stored in Ordo |
-| `versions.idle_evict_after` | 30 minutes | deployment |
-| `versions.min_residency` | 10 minutes | deployment |
+| `versions.idle_evict_after` | 30 minutes, or `off` (built in increment 3, stored in Ordo) | deployment |
+| `versions.min_residency` | 10 minutes (built in increment 3, stored in Ordo) | deployment |
 | `versions.max_loaded` | set from increment 3's memory measurement | node |
-| `versions.max_concurrent_loads` | 1 | node |
+| `versions.max_concurrent_loads` | 1 (`ORDO_VERSIONS_MAX_CONCURRENT_LOADS`, built in increment 3) | node |
 | `versions.memory_budget` | set from increment 3's memory measurement | node |
 | `pins.reconcile_interval` | 30 seconds (`ORDO_PINS_RECONCILE_SECS`, built 2026-11-05) | deployment |
 | `forward.retry_interval` | 15 seconds | deployment |

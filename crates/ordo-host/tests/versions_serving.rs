@@ -716,6 +716,18 @@ async fn node(
         .expect("loads");
     let d = Deployment::boot(active);
     let s = ordo_host::pin_stream::PinStream::new(d.clone(), pool.clone(), c.clone(), keys, space);
+    // These tests watch a version drop the moment no pin names it, so
+    // `versions.min_residency` is 0 here (its default keeps it 10 minutes).
+    Versions::on(pool)
+        .set_setting(
+            ordo_host::versions::VersionSetting::MinResidency,
+            Some("0"),
+            "dev:ada",
+            "tests drop a version at once",
+            12,
+        )
+        .await
+        .expect("min_residency 0");
     (d, s)
 }
 

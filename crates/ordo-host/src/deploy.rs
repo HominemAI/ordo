@@ -119,6 +119,52 @@ pub struct Loaded {
     /// cut is re-taken once per space per version and can never name a
     /// version that is no longer serving.
     views: RwLock<std::collections::HashMap<String, Arc<SpaceView>>>,
+    /// When this version was installed on this node and when a request was
+    /// last served under it, in seconds: what the load guards read
+    /// (`versions.min_residency`, `versions.idle_evict_after`).
+    clock: LoadClock,
+}
+
+/// When a [`Loaded`] was installed and last used, in seconds.
+#[derive(Debug, Default)]
+pub struct LoadClock {
+    installed_at: std::sync::atomic::AtomicU64,
+    used_at: std::sync::atomic::AtomicU64,
+}
+
+impl LoadClock {
+    fn installed(&self, now: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.installed_at.store(now, Relaxed);
+        self.used_at.store(now, Relaxed);
+    }
+
+    fn touch(&self, now: u64) {
+        self.used_at
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Seconds since it was installed, and since it was last used.
+    pub fn ages(&self, now: u64) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            now.saturating_sub(self.installed_at.load(Relaxed)),
+            now.saturating_sub(self.used_at.load(Relaxed)),
+        )
+    }
+}
+
+/// **The load guards** (`plan-versions.md` §1.4 step 5, §1.5, §7), as this
+/// node last read them. An embedding that sets none keeps nothing and
+/// evicts nothing, which is how a [`Deployment`] behaved before them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoadGuards {
+    /// `versions.min_residency`: a version stays loaded at least this
+    /// long after it is installed, pinned or not.
+    pub min_residency: u64,
+    /// `versions.idle_evict_after`: a version beside the active one that
+    /// served nothing for this long is unloaded. `None`: never.
+    pub idle_evict: Option<u64>,
 }
 
 /// One version of the program, cut to **one space**.
@@ -283,6 +329,7 @@ impl Verified {
             report: Some(Arc::new(report)),
             canary_op,
             views: RwLock::new(std::collections::HashMap::new()),
+            clock: LoadClock::default(),
         }))
     }
 
@@ -962,6 +1009,12 @@ pub struct Deployment {
     /// [`OpRegistry::prior_version_hash`]: an idempotency key sent before a
     /// tenant's switch is honoured across it (`plan-versions.md` §1.9).
     retired: RwLock<Vec<(String, Arc<dyn OpRegistry>)>>,
+    /// The load guards in force ([`LoadGuards`]).
+    guards: RwLock<LoadGuards>,
+    /// Versions a pin names that were unloaded for idleness. Not loaded
+    /// again by the pin stream until a signed-in request for one of their
+    /// tenants wakes them ([`Deployment::wake`]).
+    evicted: RwLock<std::collections::BTreeSet<String>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -1028,6 +1081,8 @@ impl Deployment {
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
             retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1053,6 +1108,8 @@ impl Deployment {
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
             retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1177,6 +1234,7 @@ impl Deployment {
             canary_op: String::new(),
             fixture,
             views: RwLock::new(std::collections::HashMap::new()),
+            clock: LoadClock::default(),
         };
         // Vetted like a boot's, so a malformed platform spec is refused
         // here too; no program means no name to collide with.
@@ -1189,6 +1247,8 @@ impl Deployment {
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
             retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1218,6 +1278,7 @@ impl Deployment {
                 report: None,
                 canary_op,
                 views: RwLock::new(std::collections::HashMap::new()),
+                clock: LoadClock::default(),
             })),
             platform: Vec::new(),
             others: others_empty(),
@@ -1225,6 +1286,8 @@ impl Deployment {
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
             retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1247,6 +1310,8 @@ impl Deployment {
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
             retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1305,7 +1370,10 @@ impl Deployment {
         let mut others = self.others.write().expect("deployment lock");
         // A version a tenant was already served stays the same `Loaded`,
         // gated when it was installed.
-        let incoming = others.remove(&to).unwrap_or_else(|| Arc::new(next.0));
+        let incoming = others.remove(&to).unwrap_or_else(|| {
+            next.0.clock.installed(crate::runtime::now_secs());
+            Arc::new(next.0)
+        });
         let old = std::mem::replace(&mut *slot, incoming);
         // The version replaced stays loaded while a pin this node holds
         // still names it; `retain_pinned` drops it once none does.
@@ -1338,7 +1406,9 @@ impl Deployment {
             return Swapped::AlreadyServing(next.0.version.clone());
         }
         let to = next.0.version.clone();
+        next.0.clock.installed(crate::runtime::now_secs());
         others.insert(to.clone(), Arc::new(next.0));
+        self.evicted.write().expect("deployment lock").remove(&to);
         Swapped::Installed {
             from: active.version.clone(),
             to,
@@ -1370,6 +1440,7 @@ impl Deployment {
             return Ok((active, Some(epoch)));
         }
         if let Some(l) = self.loaded(&version) {
+            l.clock.touch(crate::runtime::now_secs());
             return Ok((l, Some(epoch)));
         }
         let following = self.following.read().expect("pin lock").as_deref() == Some(&version);
@@ -1442,11 +1513,16 @@ impl Deployment {
             }
             pinned
         };
+        let residency = self.guards().min_residency;
+        let now = crate::runtime::now_secs();
         let mut others = self.others.write().expect("deployment lock");
+        // A version no pin names stays until it has been loaded for
+        // `versions.min_residency`, so a pin moved away and back does not
+        // compile it twice.
         let gone: Vec<String> = others
-            .keys()
-            .filter(|v| !pinned.contains(*v))
-            .cloned()
+            .iter()
+            .filter(|(v, l)| !pinned.contains(*v) && l.clock.ages(now).0 >= residency)
+            .map(|(v, _)| v.clone())
             .collect();
         let mut retired = self.retired.write().expect("deployment lock");
         for v in &gone {
@@ -1458,6 +1534,80 @@ impl Deployment {
         let over = retired.len().saturating_sub(RETIRED_SPECS);
         retired.drain(..over);
         gone
+    }
+
+    /// The load guards in force.
+    pub fn guards(&self) -> LoadGuards {
+        *self.guards.read().expect("deployment lock")
+    }
+
+    /// Put the load guards in force, as the stored settings say.
+    pub fn set_guards(&self, guards: LoadGuards) {
+        *self.guards.write().expect("deployment lock") = guards;
+    }
+
+    /// **Unload every version beside the active one that served nothing
+    /// for `versions.idle_evict_after`** and has been loaded for
+    /// `versions.min_residency`, and answer them. A version
+    /// `versions.new_tenant` names, or one a tenant waiting for this node's
+    /// swap is served, stays. An evicted version is loaded again only when
+    /// a signed-in request for one of its tenants wakes it.
+    pub fn evict_idle(&self, now: u64) -> Vec<String> {
+        let guards = self.guards();
+        let Some(idle) = guards.idle_evict else {
+            return Vec::new();
+        };
+        // A swap in progress: leave everything as it is.
+        if self
+            .following()
+            .is_some_and(|v| v != self.current().version)
+        {
+            return Vec::new();
+        }
+        let keep = self.new_tenant.read().expect("pin lock").clone();
+        let mut others = self.others.write().expect("deployment lock");
+        let gone: Vec<String> = others
+            .iter()
+            .filter(|(v, l)| {
+                let (resident, unused) = l.clock.ages(now);
+                keep.as_deref() != Some(v.as_str())
+                    && resident >= guards.min_residency
+                    && unused >= idle
+            })
+            .map(|(v, _)| v.clone())
+            .collect();
+        let mut retired = self.retired.write().expect("deployment lock");
+        let mut evicted = self.evicted.write().expect("deployment lock");
+        for v in &gone {
+            if let Some(l) = others.remove(v) {
+                retired.retain(|(name, _)| name != v);
+                retired.push((v.clone(), l.specs.clone()));
+                evicted.insert(v.clone());
+            }
+        }
+        let over = retired.len().saturating_sub(RETIRED_SPECS);
+        retired.drain(..over);
+        gone
+    }
+
+    /// Versions unloaded for idleness and not woken since.
+    pub fn evicted(&self) -> Vec<String> {
+        self.evicted
+            .read()
+            .expect("deployment lock")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// **Wake an evicted version**: the pin stream loads it again on its
+    /// next read. True when it was evicted. Called for a signed-in
+    /// caller's request only, so no anonymous call starts a load (V-29).
+    pub fn wake(&self, version: &str) -> bool {
+        self.evicted
+            .write()
+            .expect("deployment lock")
+            .remove(version)
     }
 
     /// The registry's active version as the pin stream last read it. See

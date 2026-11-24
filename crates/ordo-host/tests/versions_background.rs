@@ -207,7 +207,13 @@ fn mint(principal: &str) -> String {
     )
 }
 
+/// At most 3 nodes at once in this process: each holds pools and compiles
+/// two versions, and eight at once ran the local server out of
+/// connections. nextest's `serial-in-file` group does the same on CI.
+static AT_ONCE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
 struct Node {
+    _turn: tokio::sync::SemaphorePermit<'static>,
     app: axum::Router,
     pool: Pool,
     deployment: std::sync::Arc<ordo_host::deploy::Deployment>,
@@ -223,6 +229,12 @@ impl Drop for Node {
 /// 0.1.0 then 0.2.0 applied, 0.2.0 active, `spc_a` pinned to 0.1.0 before
 /// the node starts, and `spc_b` on 0.2.0.
 async fn boot(stem: &str) -> Node {
+    boot_with(stem, Some("0")).await
+}
+
+/// [`boot`], with `versions.min_residency` as given (`None`: the default).
+async fn boot_with(stem: &str, residency: Option<&str>) -> Node {
+    let turn = AT_ONCE.acquire().await.expect("open");
     let pg = Pg::scoped(stem);
     let pool = Pool::connect(pg_cfg(&pg.db)).await.expect("pool");
     tenants::ensure_table(&pool).await.expect("$spaces");
@@ -253,6 +265,18 @@ async fn boot(stem: &str) -> Node {
         .pin(SPC_A, "0.1.0", "deployment-owner:ada", 50)
         .await
         .expect("pinned");
+    if let Some(r) = residency {
+        Versions::on(&pool)
+            .set_setting(
+                ordo_host::versions::VersionSetting::MinResidency,
+                Some(r),
+                "dev:ada",
+                "the test's residency",
+                12,
+            )
+            .await
+            .expect("min_residency");
+    }
     let rt = runtime::assemble(config(&pg.db)).await.expect("assembles");
     for space in [SPC_A, SPC_B] {
         let _ = rt.keys.create_space(&ordo_crypto::SpaceId(space.into()));
@@ -263,6 +287,7 @@ async fn boot(stem: &str) -> Node {
         let _ = runtime::serve(rt).await;
     });
     let node = Node {
+        _turn: turn,
         app,
         pool,
         deployment,
@@ -272,8 +297,10 @@ async fn boot(stem: &str) -> Node {
     node
 }
 
+/// Up to 40 seconds: eight nodes booting at once each compile two
+/// versions.
 async fn wait(mut done: impl FnMut() -> bool) {
-    for _ in 0..200 {
+    for _ in 0..800 {
         if done() {
             return;
         }
@@ -629,4 +656,130 @@ async fn the_tenant_admin_reads_its_versions_label() {
     // The refusal: no member of the tenant.
     let b = call(&node, "GET", "/op/std.space.version", SPC_A, "bo", None).await;
     assert_eq!(b.code(), "access_denied", "{}", b.body);
+}
+
+// ── the load guards (§1.4 step 5, §1.5, §7) ──────────────────────────────
+
+async fn set_guard(node: &Node, setting: ordo_host::versions::VersionSetting, value: &str) {
+    Versions::on(&node.pool)
+        .set_setting(setting, Some(value), "dev:ada", "the test", 80)
+        .await
+        .expect("set");
+}
+
+/// Ask every node to read the pins now, as a pin change would.
+async fn nudge(node: &Node) {
+    node.pool
+        .rows(&format!(
+            "SELECT pg_notify('{}', '')",
+            ordo_host::versions::PINS_CHANNEL
+        ))
+        .await
+        .expect("notify");
+}
+
+/// **`versions.min_residency`**: at its default, 10 minutes, a version no
+/// pin names any more stays loaded, so a pin moved back does not compile
+/// it again. Set to `0`, it drops at the next read. A value that is not a
+/// duration is refused, naming the setting and the command.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_version_stays_loaded_for_min_residency() {
+    use ordo_host::versions::VersionSetting;
+    let node = boot_with("ordo_vbg_residency", None).await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.2.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    // The move is read, and 0.1.0 is still served though nothing names it.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        node.deployment.loaded("0.1.0").is_some(),
+        "kept for versions.min_residency"
+    );
+
+    let refused = Versions::on(&node.pool)
+        .set_setting(
+            VersionSetting::MinResidency,
+            Some("soon"),
+            "dev:ada",
+            "t",
+            81,
+        )
+        .await
+        .expect_err("not a duration");
+    let text = refused.to_string();
+    assert!(
+        text.contains("versions.min_residency") && text.contains("ordo versions set min-residency"),
+        "{text}"
+    );
+
+    set_guard(&node, VersionSetting::MinResidency, "0").await;
+    wait(|| node.deployment.loaded("0.1.0").is_none()).await;
+}
+
+/// **`versions.idle_evict_after`**: 0.1.0 serves nothing for a second and
+/// is unloaded. Nothing loads it again by itself. The next signed-in
+/// request for its tenant answers `space_unavailable`, retryable, and
+/// wakes it; the request after that is served by 0.1.0.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
+    use ordo_host::versions::VersionSetting;
+    let node = boot("ordo_vbg_idle").await;
+    set_guard(&node, VersionSetting::IdleEvictAfter, "1s").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    nudge(&node).await;
+    wait(|| node.deployment.loaded("0.1.0").is_none()).await;
+    assert_eq!(node.deployment.evicted(), vec!["0.1.0".to_string()]);
+
+    // Not loaded again by a read with no request behind it.
+    nudge(&node).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(node.deployment.loaded("0.1.0").is_none(), "stays unloaded");
+
+    // Off from here, so the reload is not evicted again under the test.
+    set_guard(&node, VersionSetting::IdleEvictAfter, "off").await;
+    let first = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+    assert_eq!(first.status, 503, "{}", first.body);
+    assert_eq!(first.code(), "space_unavailable");
+    wait(|| node.deployment.loaded("0.1.0").is_some()).await;
+    let again = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert_eq!(
+        again.header("x-ordo-tenant-version").as_deref(),
+        Some("0.1.0")
+    );
+}
+
+/// **Per-node health shows a version still loading apart from one
+/// loaded**: `$nodes.loading` round-trips, and `/health/deploy` carries it
+/// beside `alsoServing`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_says_which_versions_it_is_still_loading() {
+    let node = boot("ordo_vbg_loading").await;
+    let row = ordo_exec::nodes::Node {
+        node: "other-node".into(),
+        serving: "0.2.0".into(),
+        also_serving: vec!["0.1.0".into()],
+        loading: vec!["0.3.0".into()],
+        beat_secs: 5,
+        ..Default::default()
+    };
+    ordo_exec::nodes::beat(&node.pool, &row)
+        .await
+        .expect("beat");
+    let live = ordo_exec::nodes::live(&node.pool).await.expect("live");
+    let other = live.iter().find(|n| n.node == "other-node").expect("row");
+    assert_eq!(other.loading, vec!["0.3.0".to_string()]);
+    assert_eq!(other.also_serving, vec!["0.1.0".to_string()]);
+    // This node: once 0.1.0 lands it is served, and no longer loading.
+    let landed = eventually(10, || async {
+        let live = ordo_exec::nodes::live(&node.pool).await.expect("live");
+        live.iter().any(|n| {
+            n.node == "versions-background-test"
+                && n.loading.is_empty()
+                && n.also_serving == vec!["0.1.0".to_string()]
+        })
+    })
+    .await;
+    assert!(landed, "{:?}", ordo_exec::nodes::live(&node.pool).await);
 }

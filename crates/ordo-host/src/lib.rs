@@ -1182,7 +1182,19 @@ impl OpExecutor for FixtureExecutor {
             // this string is the space the door *authorized*, which is the
             // check the assertion was standing next to and is the one that
             // matters.
-            let bound_space = self.spaces.resolve(space).await.map_err(space_refusal)?;
+            let bound_space = match self.spaces.resolve(space).await {
+                Ok(b) => b,
+                Err(e) => {
+                    // A version unloaded for idleness is loaded again for
+                    // a signed-in caller, never an anonymous one (V-29).
+                    if let spaces::SpaceRefusal::Unserved { version, .. } = &e {
+                        if caller != ordo_api::ANONYMOUS {
+                            self.spaces.wake(version);
+                        }
+                    }
+                    return Err(space_refusal(e));
+                }
+            };
             let view = &bound_space.view;
             match op.kind {
                 OpKind::Read => {

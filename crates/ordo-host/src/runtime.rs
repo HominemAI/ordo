@@ -6740,12 +6740,17 @@ async fn spawn_deploy_listener(
     // **Every tenant's pin, and every version they name** (`plan-versions.md`
     // §1.4, increment 3), before the first request: a tenant pinned beside
     // the active version is served its own from the start.
-    let pins = crate::pin_stream::PinStream::new(
+    let pins = crate::pin_stream::PinStream::with_loads(
         deployment.clone(),
         pool.clone(),
         pg.clone(),
         keys.clone(),
         space.clone(),
+        crate::pin_stream::max_loads_from_env().unwrap_or_else(|why| {
+            eprintln!("versions: {why}; loading one at a time");
+            crate::pin_stream::DEFAULT_MAX_LOADS
+        }),
+        node_status.clone(),
     );
     // `versions.new_tenant` is read from the control database with the
     // pins (`PinStream::settle`), and kept loaded so a new tenant is
@@ -6835,6 +6840,27 @@ async fn spawn_deploy_listener(
             "pins: not read at boot ({e}); every tenant is served the active version until \
              the next read"
         ),
+    }
+    // **A signed-in request woke a version unloaded for idleness**
+    // (`versions.idle_evict_after`): read the pins again, which loads it.
+    // Wakes that arrive together are taken in one read.
+    {
+        let (tx, mut woken) = tokio::sync::mpsc::unbounded_channel::<String>();
+        spaces.set_waker(Arc::new(move |version: String| {
+            let _ = tx.send(version);
+        }));
+        let pins = pins.clone();
+        let rebuild = rebuild.clone();
+        tokio::spawn(async move {
+            while let Some(version) = woken.recv().await {
+                while woken.try_recv().is_ok() {}
+                println!("versions: {version} woken by a request; loading it again");
+                match pins.reload().await {
+                    Ok(read) => rebuild(read).await,
+                    Err(e) => eprintln!("pins: not read for a woken version ({e})"),
+                }
+            }
+        });
     }
     // The reconcile tick: a whole read, whatever the stream said, the
     // version settings with it.

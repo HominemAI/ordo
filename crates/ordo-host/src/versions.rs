@@ -119,14 +119,54 @@ pub enum VersionSetting {
     Served,
     Minimum,
     NewTenant,
+    /// `versions.min_residency`: how long a loaded version stays loaded
+    /// at the least, so a pin moved away and back does not compile it
+    /// twice (`plan-versions.md` §1.4 step 5, §7).
+    MinResidency,
+    /// `versions.idle_evict_after`: a version beside the active one that
+    /// served no request for this long is unloaded, and loaded again on the
+    /// next signed-in request for one of its tenants (§1.5).
+    IdleEvictAfter,
+}
+
+/// `versions.min_residency`.
+pub const MIN_RESIDENCY_SETTING: &str = "versions.min_residency";
+/// `versions.idle_evict_after`.
+pub const IDLE_EVICT_SETTING: &str = "versions.idle_evict_after";
+/// Their defaults, in seconds: 10 minutes and 30 minutes (§7).
+pub const DEFAULT_MIN_RESIDENCY_SECS: u64 = 600;
+pub const DEFAULT_IDLE_EVICT_SECS: u64 = 1_800;
+
+/// A load guard's value: a duration like `10m`, `30s` or `2h`, `0`, or
+/// for `versions.idle_evict_after` also `off`. `None` when it is none of
+/// these.
+pub fn guard_secs(setting: VersionSetting, value: &str) -> Option<Option<u64>> {
+    let v = value.trim();
+    if v == "off" && setting == VersionSetting::IdleEvictAfter {
+        return Some(None);
+    }
+    if v == "0" {
+        return Some(Some(0));
+    }
+    crate::share_ops::duration_secs(v).map(Some)
 }
 
 impl VersionSetting {
-    pub const ALL: [VersionSetting; 3] = [
+    pub const ALL: [VersionSetting; 5] = [
         VersionSetting::Served,
         VersionSetting::Minimum,
         VersionSetting::NewTenant,
+        VersionSetting::MinResidency,
+        VersionSetting::IdleEvictAfter,
     ];
+
+    /// A load guard: a duration, not a version.
+    pub fn is_guard(self) -> bool {
+        matches!(
+            self,
+            VersionSetting::MinResidency | VersionSetting::IdleEvictAfter
+        )
+    }
 
     /// `versions.served`, `versions.minimum`, `versions.new_tenant`.
     pub fn name(self) -> &'static str {
@@ -134,6 +174,8 @@ impl VersionSetting {
             VersionSetting::Served => SERVED_SETTING,
             VersionSetting::Minimum => MINIMUM_SETTING,
             VersionSetting::NewTenant => NEW_TENANT_SETTING,
+            VersionSetting::MinResidency => MIN_RESIDENCY_SETTING,
+            VersionSetting::IdleEvictAfter => IDLE_EVICT_SETTING,
         }
     }
 
@@ -143,6 +185,8 @@ impl VersionSetting {
             VersionSetting::Served => SERVED_ENV,
             VersionSetting::Minimum => MINIMUM_ENV,
             VersionSetting::NewTenant => NEW_TENANT_ENV,
+            // Never an environment variable: stored in Ordo from the start.
+            VersionSetting::MinResidency | VersionSetting::IdleEvictAfter => "",
         }
     }
 
@@ -152,6 +196,8 @@ impl VersionSetting {
             VersionSetting::Served => "ordo versions set served",
             VersionSetting::Minimum => "ordo versions set minimum",
             VersionSetting::NewTenant => "ordo versions set new-tenant",
+            VersionSetting::MinResidency => "ordo versions set min-residency",
+            VersionSetting::IdleEvictAfter => "ordo versions set idle-evict-after",
         }
     }
 
@@ -161,6 +207,8 @@ impl VersionSetting {
             VersionSetting::Served => "in-use",
             VersionSetting::Minimum => "none",
             VersionSetting::NewTenant => "the active version",
+            VersionSetting::MinResidency => "10m",
+            VersionSetting::IdleEvictAfter => "30m",
         }
     }
 
@@ -173,6 +221,12 @@ impl VersionSetting {
             "served" => Some(VersionSetting::Served),
             "minimum" => Some(VersionSetting::Minimum),
             "new_tenant" | "new-tenant" | "newTenant" => Some(VersionSetting::NewTenant),
+            "min_residency" | "min-residency" | "minResidency" => {
+                Some(VersionSetting::MinResidency)
+            }
+            "idle_evict_after" | "idle-evict-after" | "idleEvictAfter" => {
+                Some(VersionSetting::IdleEvictAfter)
+            }
             _ => None,
         }
     }
@@ -194,6 +248,10 @@ fn command_of(setting: &str) -> &'static str {
 pub struct VersionSettings {
     pub policy: ServedPolicy,
     pub new_tenant: Option<String>,
+    /// `versions.min_residency` as stored, `None` for the default.
+    pub min_residency: Option<String>,
+    /// `versions.idle_evict_after` as stored, `None` for the default.
+    pub idle_evict_after: Option<String>,
 }
 
 impl VersionSettings {
@@ -203,6 +261,27 @@ impl VersionSettings {
             VersionSetting::Served => self.policy.served.as_ref().map(|l| l.join(",")),
             VersionSetting::Minimum => self.policy.minimum.clone(),
             VersionSetting::NewTenant => self.new_tenant.clone(),
+            VersionSetting::MinResidency => self.min_residency.clone(),
+            VersionSetting::IdleEvictAfter => self.idle_evict_after.clone(),
+        }
+    }
+
+    /// `versions.min_residency` in seconds: the stored value, or the
+    /// default when unset or unreadable.
+    pub fn min_residency_secs(&self) -> u64 {
+        self.min_residency
+            .as_deref()
+            .and_then(|v| guard_secs(VersionSetting::MinResidency, v))
+            .flatten()
+            .unwrap_or(DEFAULT_MIN_RESIDENCY_SECS)
+    }
+
+    /// `versions.idle_evict_after` in seconds, `None` when it is `off`.
+    pub fn idle_evict_secs(&self) -> Option<u64> {
+        match self.idle_evict_after.as_deref() {
+            None => Some(DEFAULT_IDLE_EVICT_SECS),
+            Some(v) => guard_secs(VersionSetting::IdleEvictAfter, v)
+                .unwrap_or(Some(DEFAULT_IDLE_EVICT_SECS)),
         }
     }
 
@@ -229,6 +308,8 @@ impl VersionSettings {
             }
             VersionSetting::Minimum => out.policy.minimum = value,
             VersionSetting::NewTenant => out.new_tenant = value,
+            VersionSetting::MinResidency => out.min_residency = value,
+            VersionSetting::IdleEvictAfter => out.idle_evict_after = value,
         }
         out
     }
@@ -983,6 +1064,11 @@ pub enum VersionRefusal {
     /// promotion gate (`crate::promotion`). The text says which, and the
     /// command that promotes it.
     NotPromoted(String),
+    /// A load guard's value that is not a duration. Fix the input.
+    Guard {
+        setting: &'static str,
+        value: String,
+    },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -1006,6 +1092,7 @@ impl VersionRefusal {
             | VersionRefusal::NotPromoted(_)
             | VersionRefusal::Stranded { .. }
             | VersionRefusal::MinimumAboveActive { .. }
+            | VersionRefusal::Guard { .. }
             | VersionRefusal::Revoked {
                 setting: Some(_), ..
             } => Remedy::FixInput,
@@ -1053,6 +1140,7 @@ impl VersionRefusal {
             | VersionRefusal::MoveTo(_)
             | VersionRefusal::Reason(_)
             | VersionRefusal::Setting { .. }
+            | VersionRefusal::Guard { .. }
             | VersionRefusal::Stranded { .. }
             | VersionRefusal::MinimumAboveActive { .. } => {
                 ExecError::new(ErrorCode::InvalidParam, message)
@@ -1084,6 +1172,17 @@ impl VersionRefusal {
 impl std::fmt::Display for VersionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            VersionRefusal::Guard { setting, value } => write!(
+                f,
+                "`{setting}` is a duration like `10m`, `30s` or `2h`, or `0`{}, not `{value}`. \
+                 Set it with `{}`",
+                if *setting == IDLE_EVICT_SETTING {
+                    ", or `off`"
+                } else {
+                    ""
+                },
+                command_of(setting)
+            ),
             // The registry's own words, so a refusal reads the same moved.
             VersionRefusal::UnknownVersion(v) => {
                 write!(f, "{}", RegistryRefusal::UnknownVersion(v.clone()))
@@ -2798,6 +2897,20 @@ impl<'a> Versions<'a> {
         value: Option<&str>,
     ) -> Result<(Option<String>, VersionSettings), VersionRefusal> {
         let value = value.map(str::trim).filter(|v| !v.is_empty());
+        // A load guard is a duration, checked alone: it names no version.
+        if setting.is_guard() {
+            let now = self.settings().await?;
+            if let Some(v) = value {
+                if guard_secs(setting, v).is_none() {
+                    return Err(VersionRefusal::Guard {
+                        setting: setting.name(),
+                        value: v.to_string(),
+                    });
+                }
+            }
+            let resolved = now.with(setting, value.map(str::to_string));
+            return Ok((resolved.value(setting), resolved));
+        }
         let value = match (setting, value) {
             (VersionSetting::Served, Some("in-use")) | (VersionSetting::Minimum, Some("none")) => {
                 None
@@ -2817,11 +2930,15 @@ impl<'a> Versions<'a> {
             VersionSetting::Served | VersionSetting::Minimum => {
                 stored_only.check_policy(&candidate.policy).await?
             }
-            VersionSetting::NewTenant => candidate.policy.clone(),
+            VersionSetting::NewTenant
+            | VersionSetting::MinResidency
+            | VersionSetting::IdleEvictAfter => candidate.policy.clone(),
         };
         let mut resolved = VersionSettings {
             policy,
             new_tenant: None,
+            min_residency: candidate.min_residency.clone(),
+            idle_evict_after: candidate.idle_evict_after.clone(),
         };
         if let Some(named) = &candidate.new_tenant {
             let version = match self.resolve(named).await {
@@ -2940,6 +3057,9 @@ impl<'a> Versions<'a> {
             return out;
         }
         for s in VersionSetting::ALL {
+            if s.is_guard() {
+                continue;
+            }
             // Empty was unset before 2026-11-05 too.
             let Some(raw) = read(s.env())
                 .map(|v| v.trim().to_string())

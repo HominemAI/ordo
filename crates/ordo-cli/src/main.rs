@@ -260,7 +260,7 @@ fn usage() -> ! {
          and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \

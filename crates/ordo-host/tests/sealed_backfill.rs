@@ -1254,7 +1254,22 @@ async fn a_new_normalize_computes_every_index_again_under_live_writes() {
     let ran = step(None).await.expect("the reindex ends");
     assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
     assert_eq!(recorded(&tpg), "1.1.0");
-    assert_eq!(one(&tpg, "SELECT count(*) FROM \"$seals\""), "0");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT string_agg(kind || ' ' || target || ' ' || normalize, ',') FROM \"$seals\""
+        ),
+        "kept body$bidx$prev ",
+        "only the old index is kept, under the old normalization"
+    );
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT columns FROM \"$orphans\" WHERE entity = 'note' AND field = 'body$bidx$prev'"
+        ),
+        "body$bidx$prev",
+        "the kept index is an orphan, pruned at the close"
+    );
     assert_eq!(
         column_type(&tpg, "body$bidx$next"),
         "",
@@ -1522,4 +1537,110 @@ async fn the_own_space_moves_with_a_seal_on_its_database_and_its_writes_land_sea
     assert_eq!(open(&keys, &pg, "home", &id), "own body 3");
     let id = one(&pg, "SELECT id FROM note WHERE title = 'after'");
     assert_eq!(open(&keys, &pg, "home", &id), "sealed after");
+}
+
+/// `==` on `body` under `source`, as a node serving it reads: the titles.
+async fn found(n: &Node, body: &str) -> Vec<String> {
+    n.exec
+        .read_as(&format!("note(body == \"{body}\")[title]"), Some("p_ada"))
+        .await
+        .expect("reads")
+        .iter()
+        .filter_map(|r| r["title"].as_str().map(String::from))
+        .collect()
+}
+
+/// **A rollback across B10 reads a whole index** (owner, 2026-11-24, PR
+/// 80). 1.0.0 has `body` sealed and indexed with no normalization; 1.1.0
+/// adds `normalize(lower)`. Notes in mixed case are written before the
+/// step and after 1.1.0 is active. The step keeps the old index as
+/// `body$bidx$prev` and every write keeps it current. Rolled back to
+/// 1.0.0, the kept index is traded back in, and `==` under 1.0.0 finds
+/// every note by its exact value, the ones 1.1.0 wrote too. Forward again,
+/// `==` under 1.1.0 finds them in any case.
+///
+/// A regression looks like a rollback where `==` misses a row written in
+/// another case, or a roll forward that reads the old index.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollback_across_a_new_normalize_finds_every_row() {
+    let (pg, pool) = empty("ordo_seal_renorm_back").await;
+    ordo_host::tenants::ensure_table(&pool)
+        .await
+        .expect("$spaces");
+    let x = Program::compile(&sealed_indexed_v1(false)).expect("1.0.0");
+    ordo_host::apply_op::run_program(
+        &pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &x,
+        vec![],
+        "dev:ada",
+        "t",
+        true,
+    )
+    .await
+    .expect("1.0.0 is active");
+    store(&pool, &normalized_v2(false)).await;
+    let keys: Arc<dyn KeyProvider> = Arc::new(TestProvider::new());
+    let old = node(&pg.db, &sealed_indexed_v1(false), "old", keys.clone()).await;
+    for (title, body) in [("a", "Mixed-A"), ("b", "mixed-b"), ("c", "MIXED-c")] {
+        old.write(format!(r#"addNote($title: "{title}", $body: "{body}")"#))
+            .await
+            .expect("a write before");
+    }
+    let plan = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("stored")
+        .plan;
+    let ran = evolve::run_step_with(
+        &pool,
+        &pool,
+        "default",
+        &plan,
+        OWNER,
+        &ctx(Some(keys.clone()), 100, None),
+    )
+    .await
+    .expect("the reindex runs");
+    assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+    ordo_host::apply_op::activate(&pool, "1.1.0", "dev:ada")
+        .await
+        .expect("1.1.0 is active");
+    let new = node(&pg.db, &normalized_v2(false), "new", keys.clone()).await;
+    for (title, body) in [("d", "NeW-D"), ("e", "new-E")] {
+        new.write(format!(r#"addNote($title: "{title}", $body: "{body}")"#))
+            .await
+            .expect("a write on 1.1.0");
+    }
+    assert_eq!(found(&new, "mixed-a").await, ["a"]);
+
+    ordo_host::apply_op::activate(&pool, "1.0.0", "dev:ada")
+        .await
+        .expect("rolled back");
+    for (body, title) in [
+        ("Mixed-A", "a"),
+        ("mixed-b", "b"),
+        ("MIXED-c", "c"),
+        ("NeW-D", "d"),
+        ("new-E", "e"),
+    ] {
+        assert_eq!(
+            found(&old, body).await,
+            [title],
+            "`{body}` under 1.0.0 after the rollback"
+        );
+    }
+    assert!(
+        found(&old, "mixed-a").await.is_empty(),
+        "1.0.0 compares exactly"
+    );
+    old.write(r#"addNote($title: "f", $body: "Back-F")"#.into())
+        .await
+        .expect("a write after the rollback");
+
+    ordo_host::apply_op::activate(&pool, "1.1.0", "dev:ada")
+        .await
+        .expect("forward again");
+    for (body, title) in [("MIXED-A", "a"), ("new-d", "d"), ("back-f", "f")] {
+        assert_eq!(found(&new, body).await, [title], "`{body}` under 1.1.0");
+    }
 }

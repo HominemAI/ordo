@@ -427,9 +427,16 @@ in one database and 1 in its own.
   ciphertext.
 - The diff compares declarations against the version a tenant's data was
   written under too, so a tenant's own database sees the change.
-- The receipt names the rollback: after the end, the version before
-  computes `==` under its own normalization and misses a value written in
-  another case.
+- **A rollback reads a whole index** (owner, 2026-11-24, PR 80). The end
+  keeps the old index as `<field>$bidx$prev`, recorded in `$seals` as kind
+  `kept` with the old normalization and in `$orphans`. Every write keeps it
+  current until `ordo evolve --prune` removes it (the close). An
+  activation of a version that declares the kept normalization trades it
+  back in before its gate (`apply_op::restore_kept_indexes`), so `==`
+  there finds every row; forward again trades back. Test:
+  `a_rollback_across_a_new_normalize_finds_every_row`. Only the
+  deployment's database is traded at an activation; a tenant's own
+  database is not yet (11b).
 - **`sealed unique` by backfill.** B8 and B10 under `unique`: once the
   indexes verify, the run reads the duplicates over them and refuses the
   end, naming each space and its rows (`sealed_unique_duplicates`). The

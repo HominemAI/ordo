@@ -126,6 +126,11 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
 /// before the column existed: the writer's own declaration is used then.
 /// [`SEALS_NORMALIZE_DDL`] adds it to a table made before it.
 ///
+/// - `kind` `kept` (B10 after its end): `target` (`<field>$bidx$prev`)
+///   holds the index under the normalization the row records, the one the
+///   step replaced. Written by every sealed writer until the column is
+///   pruned; a rollback trades it back in.
+///
 /// The row leaves in the transaction that lands the step's end (the
 /// plaintext dropped, or the index made `NOT NULL`), under the same
 /// exclusive lock.
@@ -154,6 +159,10 @@ pub enum SealKind {
     Index,
     /// B10: the sealed value's blind index under a new normalization.
     Reindex,
+    /// B10, after its end: the old blind index, kept under the old
+    /// normalization until its orphan is pruned, so a rollback reads a
+    /// whole index.
+    Kept,
 }
 
 impl SealKind {
@@ -162,6 +171,7 @@ impl SealKind {
             SealKind::Seal => "seal",
             SealKind::Index => "index",
             SealKind::Reindex => "reindex",
+            SealKind::Kept => "kept",
         }
     }
 
@@ -170,6 +180,7 @@ impl SealKind {
             "seal" => Some(SealKind::Seal),
             "index" => Some(SealKind::Index),
             "reindex" => Some(SealKind::Reindex),
+            "kept" => Some(SealKind::Kept),
             _ => None,
         }
     }
@@ -267,7 +278,7 @@ pub fn seals_for<'a>(schema: &ordo_schema::Schema, seals: &'a [Seal]) -> Vec<&'a
             match s.kind {
                 SealKind::Seal => !f.sealed,
                 SealKind::Index => f.sealed && !f.indexed,
-                SealKind::Reindex => f.sealed,
+                SealKind::Reindex | SealKind::Kept => f.sealed,
             }
         })
         .collect()
@@ -357,7 +368,7 @@ pub async fn apply_seals(
                             text.as_bytes(),
                         )?)
                     }
-                    (SealKind::Index | SealKind::Reindex, sealed) => {
+                    (SealKind::Index | SealKind::Reindex | SealKind::Kept, sealed) => {
                         let plain = match sealed {
                             None => None,
                             Some(hexed) => {

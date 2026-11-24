@@ -843,10 +843,11 @@ pub async fn render_stored(
                             "every row's sealed value is opened under its space's key, one \
                              lease per space per chunk, and its blind index computed again \
                              under the new `normalize` into `{}`; once every row's index \
-                             verifies, it replaces the old one. The version before computes \
-                             `==` under its own normalization, so after the end it no longer \
-                             finds a value written in another case",
-                            bf.column
+                             verifies, it replaces the old one. The old index is kept as \
+                             `{}$bidx$prev` and written by every write until `ordo evolve \
+                             --prune` removes it, so a rollback to the version before trades \
+                             it back and `==` there finds every row",
+                            bf.column, bf.field
                         ));
                     }
                     let unique = y
@@ -2143,13 +2144,20 @@ pub async fn run_step_with(
     }
     // `seal.keep_plaintext`: the kept plaintext column is an orphan, for
     // erasure, export and pruning (increment 14's table).
+    // B10's old blind index too: kept and written until it is pruned, so a
+    // rollback in the meantime reads a whole index.
     let kept: Vec<ordo_exec::orphans::Left> = backfills
         .iter()
         .filter_map(|b| {
+            let column = match (&b.kept_plaintext, b.code) {
+                (Some(k), _) => k.clone(),
+                (None, "B10") => format!("{}$bidx$prev", b.field),
+                _ => return None,
+            };
             Some(ordo_exec::orphans::Left {
                 entity: b.entity.clone(),
-                field: Some(b.kept_plaintext.clone()?),
-                columns: vec![b.kept_plaintext.clone()?],
+                field: Some(column.clone()),
+                columns: vec![column],
                 sealed: false,
             })
         })

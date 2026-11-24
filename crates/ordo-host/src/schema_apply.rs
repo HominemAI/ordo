@@ -2599,6 +2599,144 @@ pub fn reindex_column(field: &ordo_schema::Field) -> String {
     format!("{}$next", field.index_column())
 }
 
+/// The physical column B10 keeps the old blind index in after its end,
+/// written by every write, until its orphan is pruned.
+pub fn kept_index_column(field: &ordo_schema::Field) -> String {
+    format!("{}$prev", field.index_column())
+}
+
+/// The statements that make `incoming` the field's blind index and keep
+/// the one it replaces as `outgoing`, open to nulls, under a lock the
+/// caller holds. The field's unique and indexes are made again over the
+/// new index: renamed, they would follow the old one. `incoming` and
+/// `outgoing` may be one name (a swap).
+fn swap_index_columns(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    incoming: &str,
+    outgoing: &str,
+) -> String {
+    let q = ordo_schema::ddl::q;
+    let table = q(&e.name);
+    let bidx = f.index_column();
+    let swap = format!("{bidx}$swap");
+    let keys: Vec<Vec<String>> = e
+        .all_indexes()
+        .into_iter()
+        .filter(|k| k.contains(&f.name))
+        .collect();
+    let mut out = format!(
+        "ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {};\n",
+        q(&ordo_schema::diff::unique_name(&e.name, &f.name))
+    );
+    for key in &keys {
+        out.push_str(&format!(
+            "DROP INDEX IF EXISTS {};\n",
+            q(&ordo_schema::diff::index_name(&e.name, key))
+        ));
+    }
+    out.push_str(&format!(
+        "ALTER TABLE {table} RENAME COLUMN {b} TO {s};\n\
+         ALTER TABLE {table} RENAME COLUMN {i} TO {b};\n\
+         ALTER TABLE {table} RENAME COLUMN {s} TO {o};\n\
+         ALTER TABLE {table} ALTER COLUMN {o} DROP NOT NULL;\n\
+         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n",
+        b = q(&bidx),
+        s = q(&swap),
+        i = q(incoming),
+        o = q(outgoing),
+    ));
+    out.push_str(&sealed_unique_end(e, f, &bidx));
+    for key in &keys {
+        if let Ok(Some(sql)) = ordo_schema::ddl::index(e, key, false) {
+            out.push_str(&sql);
+        }
+    }
+    out
+}
+
+/// **A rollback across B10 reads a whole index** (owner, 2026-11-24, PR
+/// 80). For every blind index B10 kept (`$seals` kind `kept`) whose
+/// normalization is the one `schema` declares, the kept index and the
+/// field's index trade places under the `"$renames"` lock, and the row
+/// records the normalization of the index now kept: `leaving`'s, the
+/// version that served before. Every write kept both current, so `==`
+/// under `schema` finds every row. Run before an activation's gate. The
+/// fields swapped, `entity.field`.
+pub async fn restore_kept_indexes(
+    pool: &Pool,
+    schema: &Schema,
+    leaving: Option<&Schema>,
+) -> Result<Vec<String>, String> {
+    let rows = match pool
+        .rows(
+            "SELECT s.\"entity\", s.\"field\", s.\"target\", coalesce(to_jsonb(s) ->> \
+             'normalize', '') FROM \"$seals\" s WHERE s.\"kind\" = 'kept'",
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let mut done = Vec::new();
+    for r in rows {
+        let (Some(entity), Some(field), Some(target), Some(norm)) = (
+            r.first().cloned().flatten(),
+            r.get(1).cloned().flatten(),
+            r.get(2).cloned().flatten(),
+            r.get(3).cloned().flatten(),
+        ) else {
+            continue;
+        };
+        let Some(e) = schema.native(&entity) else {
+            continue;
+        };
+        let Some(f) = e.field(&field).filter(|f| f.sealed && f.indexed) else {
+            continue;
+        };
+        if f.normalize.as_deref().unwrap_or("") != norm {
+            continue;
+        }
+        let there = pool
+            .rows(&format!(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = {} AND \
+                 column_name = {}",
+                lit(&entity),
+                lit(&target)
+            ))
+            .await
+            .map_err(|e| e.to_string())?;
+        if there.is_empty() {
+            continue; // pruned: the soak closed
+        }
+        let other = leaving
+            .and_then(|s| s.native(&entity))
+            .and_then(|e| e.field(&field))
+            .and_then(|f| f.normalize.clone())
+            .unwrap_or_default();
+        let sql = format!(
+            "{};\nLOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n{}\
+             UPDATE \"$seals\" SET \"normalize\" = {} WHERE \"entity\" = {} AND \"field\" = {} \
+             AND \"kind\" = 'kept';\n",
+            ordo_exec::overlay::RENAMES_DDL,
+            swap_index_columns(e, f, &target, &target),
+            lit(&other),
+            lit(&entity),
+            lit(&field),
+        );
+        let tx = pool.begin().await.map_err(|e| e.to_string())?;
+        if let Err(e) = tx.rows(&sql).await {
+            let _ = tx.rollback().await;
+            return Err(format!("the kept index of `{entity}.{field}`: {e}"));
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        done.push(format!("{entity}.{field}"));
+    }
+    Ok(done)
+}
+
 /// **B10: a sealed indexed field's `normalize` changes.** Every row's blind
 /// index is computed again under the new normalization into
 /// `<field>$bidx$next`, beside the index the version before reads and
@@ -2614,6 +2752,7 @@ fn reindex_step(
     e: &ordo_schema::Entity,
     field: &str,
     version: &str,
+    from_normalize: Option<&str>,
 ) -> Result<SealStep, Box<Refused>> {
     let Some(f) = e.field(field) else {
         return Err(Box::new(Refused {
@@ -2624,41 +2763,38 @@ fn reindex_step(
         }));
     };
     let table = ordo_schema::ddl::q(&e.name);
-    let bidx = f.index_column();
     let next = reindex_column(f);
     let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let record = index_record(e, f, "reindex", &next, version);
+    let prev = kept_index_column(f);
+    // The old index is kept, as `<field>$bidx$prev`, and written by every
+    // write under its own normalization (`$seals` kind `kept`), until its
+    // orphan is pruned: a rollback swaps it back
+    // ([`restore_kept_indexes`]) and reads a whole index.
     let mut end = format!(
         "{};\n\
          LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
          DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {n} IS NULL) THEN RAISE \
          EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
-         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n\
-         ALTER TABLE {table} DROP COLUMN {b};\n\
-         ALTER TABLE {table} RENAME COLUMN {n} TO {b};\n\
-         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n",
+         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n",
         ordo_exec::overlay::RENAMES_DDL,
         n = ordo_schema::ddl::q(&next),
-        b = ordo_schema::ddl::q(&bidx),
         name = e.name,
     );
-    // Dropping the old index dropped every constraint and index over it.
-    end.push_str(&sealed_unique_end(e, f, &bidx));
-    for key in e.unique_keys.iter().filter(|k| k.contains(&f.name)) {
-        if let Ok(Some(sql)) = ordo_schema::ddl::composite_unique(e, key) {
-            end.push_str(&sql);
-        }
-    }
-    for key in e.all_indexes().iter().filter(|k| k.contains(&f.name)) {
-        if let Ok(Some(sql)) = ordo_schema::ddl::index(e, key, false) {
-            end.push_str(&sql);
-        }
-    }
+    end.push_str(&swap_index_columns(e, f, &next, &prev));
     end.push_str(&format!(
-        "DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = \
-         'reindex';\n",
-        lit(&e.name),
-        lit(field),
+        "DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
+         'reindex';\n\
+         INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+         \"version\", \"normalize\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}) ON CONFLICT \
+         (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = EXCLUDED.\"target\", \
+         \"version\" = EXCLUDED.\"version\", \"normalize\" = EXCLUDED.\"normalize\";\n",
+        e = lit(&e.name),
+        fl = lit(field),
+        s = lit(&f.column()),
+        p = lit(&prev),
+        v = lit(version),
+        o = lit(from_normalize.unwrap_or("")),
     ));
     Ok(SealStep {
         backfill: BackfillStep {
@@ -3221,8 +3357,10 @@ pub fn triage_counted(
             }
             // B10 in a stored plan (increment 13): every row's blind index
             // is computed again under the new normalization.
-            Change::Normalize { field, .. } if choices.stored && reindexes(e, live, field) => {
-                match reindex_step(c, e, field, version) {
+            Change::Normalize { field, from, .. }
+                if choices.stored && reindexes(e, live, field) =>
+            {
+                match reindex_step(c, e, field, version, from.as_deref()) {
                     Err(r) => refused.push(*r),
                     Ok(SealStep {
                         backfill: b,

@@ -354,17 +354,67 @@ in one database and 1 in its own.
 - The receipt shows the backfill (`mapping` `seal`, `sealFrom`) and what
   happens to the plaintext. Its old values stay in earlier backups and WAL.
 - Refused by name: `sealed indexed` or `sealed unique` in one step
-  (`sealed_index_backfill_not_built`, B8), a field that is not `text`
+  (`seal_then_index`, renamed in part 2), a field that is not `text`
   before (`seal_type_not_built`), a node with no key custody, and a field
   a reader app reads (`seal_read_by_reader`): the reader would read
   ciphertext. It names the reader and the fix: a reader version that reads
   the sealed field (7b, not built), or the table off the `reader` line in a
   version before the seal.
-- Not built: the plaintext kept by `seal.keep_plaintext`; live writes during
-  the seal and the pin switch at its end (11a); every tenant by a rollout
-  (11b). Each tenant runs it with `ordo evolve --tenant`, which pins the
-  tenant as its seal ends. The deployment's own space serves the version
-  before between `--run` and the activation.
+
+**Built (13, 2026-11-24, second part: 64612e41).**
+
+- **Live writes during the seal.** The seal records itself in the tenant
+  database's `$seals` (`ordo_exec::overlay::SEALS_DDL`), in its expand's
+  transaction, under `"$renames"` in `EXCLUSIVE` mode: 11a's fence. Every
+  write holds `"$renames"` in `ROW SHARE` from its first statement, reads
+  `$seals` under it, and, while its version declares the field plaintext,
+  seals what it wrote into `<field>$seal` in its own transaction with its
+  own custody (`overlay::apply_seals`, `Purpose::Write`). No node needs to
+  have read anything.
+- Verify runs as verify under live writes: it opens every row against its
+  plaintext and records the count and hash it reads. The per-chunk hashes
+  are not compared, since writes reseal rows.
+- **The end** runs in one transaction under the same exclusive lock: a row
+  left unsealed (written outside the write path after verify) refuses it
+  (`seal_unfinished`), then the plaintext is dropped, the sealed column
+  renamed, and the `$seals` row deleted.
+- **The pin at the end.** With `ordo evolve --tenant`, the end also raises
+  the tenant's pin fence to the epoch of the pin that follows, in the same
+  transaction. A node still on the version before is told the pin moved
+  (503, retried), never a type error on the column. A seal is therefore
+  the last step of a replay: a path with steps after it is refused, naming
+  the version to stop at. `--budget` and `--chunk-rows` reach this path.
+  If the pin then fails, the tenant writes nothing until a run again pins
+  it.
+- **`seal.keep_plaintext`** (`ordo evolve --keep-plaintext
+  <entity>.<field>`, D9's opt-in): stored in the plan's options and so in
+  its digest. The plaintext column is renamed `<column>$plaintext`, never
+  written again, and recorded in `$orphans` for erasure, export and
+  `ordo evolve --prune`. The receipt names the risk: its values stay
+  readable until pruned, and in WAL and backups for good.
+- **B8, a sealed field gains `indexed`.** Recorded in `$seals` as kind
+  `index`; `<field>$bidx` is added open to nulls. The worker opens each
+  row's sealed value under a `Purpose::Migration` lease per space per
+  chunk, normalizes it as the field declares and writes its blind index (a
+  null indexes the null sentinel). A write by the version before computes
+  the index of what it sealed. Verify computes every index again. The end
+  makes `<field>$bidx` `NOT NULL` under the lock. `ordo apply` refuses it
+  (`index_needs_stored_plan`); `sealed indexed unique` is refused
+  (`sealed_unique_backfill_not_built`), since its duplicates can only be
+  found over the indexes the backfill computes.
+- Tests: `sealed_backfill.rs`
+  (`writes_during_the_seal_land_sealed_and_none_is_lost`,
+  `keep_plaintext_keeps_the_column_as_an_orphan_and_says_why_not_to`,
+  `a_sealed_field_gains_its_blind_index_under_live_writes`,
+  `a_blind_index_outside_a_stored_plan_or_unique_is_refused_by_name`);
+  notes e2e project `seal`: Ada edits a note and writes one while her seal
+  stops at its budget; both land sealed; the page reads them after.
+- Not built: activating a version that runs a tenant's stored seal on a
+  shared database (11b); the deployment's own space still serves the
+  version before between `--run` and the activation, and its writes to the
+  sealed field fail after the end until then; B10; `sealed unique` by
+  backfill; a seal's end killed between the drop and the record (a run
+  again does not find the sealed column).
 - **Blobs.** An object's key is `<space>/<handle>`
   (`plan-tenant-storage.md`). It holds no field name. A renamed blob field
   moves no object, in the deployment's bucket or a tenant's own.

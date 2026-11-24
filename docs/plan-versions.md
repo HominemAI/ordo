@@ -1389,7 +1389,12 @@ round is about 35 minutes for the full suite.
   and `active (new tenants)`; Tenants has a Version column
   (`std.deployment.tenants` carries `version` and `ordinal`). Left: the
   console has no screen to move a tenant, set its target, or name a
-  revoke's `--move-to` for a version that is not active.
+  revoke's `--move-to` for a version that is not active. The Tenants
+  screen's Version button (pin, move now, target) was built in f4459729.
+  The remainder added the last: Deploys' revoke of a version that does
+  not serve takes "Its tenants move to", the active version by default,
+  and the warning says where each revoked version's tenants go
+  (`windows.spec.ts`).
 - Audit leftovers not taken by the CLI-output fixes: times as UTC, window
   caps as settings or recorded as fixed. Done in the remainder: `ordo
   versions show` (applied, activations) and `ordo versions tenant` (pin

@@ -56,7 +56,9 @@
 //! list, fails on it until it is fixed. None is listed today (2026-10-27).
 //!
 //! Recorded by the first runs: across a program update the open feed carries
-//! on and the page cursor continues; across the Ordo upgrade from ef37d9de
+//! on and the page cursor continues. Since 2026-11-23 (increment 3, session
+//! 3) the feed ends with `event: version_changed` at the swap and a new one
+//! carries on; across the Ordo upgrade from ef37d9de
 //! the feed's connection closes (a new one carries on) and the cursor is
 //! refused `version_skew`, which the SDK answers by starting from page one.
 //!
@@ -1398,22 +1400,35 @@ async fn chains(w: &World, s: &Seeded) -> Vec<Check> {
 /// The live feed across the upgrade: after a write it carries the change,
 /// or it has ended (cleanly: an error frame, or the connection closed) and
 /// a new one carries it, as the SDK reconnects.
+///
+/// A program update moves the tenant to the new version, so a feed opened
+/// under the old one ends with `event: version_changed` as the swap lands
+/// (`plan-versions.md` §1.4). That frame comes before the write below, so
+/// it is looked for in everything the feed heard.
 fn feed_after(h: &Host, s: &Seeded, feed: &Feed) -> Check {
     let mark = feed.len();
-    create_note(h, &s.ada, "Written after the upgrade");
+    let moved = feed.text().contains("event: version_changed");
+    if !moved {
+        create_note(h, &s.ada, "Written after the upgrade");
+    }
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(10) {
+    while !moved && started.elapsed() < Duration::from_secs(10) {
         let text = feed.text();
         if text.len() > mark && text[mark..].contains("event: invalidate") {
             return check("the open feed", Ok("carried on".into()));
         }
-        if feed.ended() || (text.len() > mark && text[mark..].contains("event: error")) {
+        if feed.ended()
+            || (text.len() > mark && text[mark..].contains("event: error"))
+            || text.contains("event: version_changed")
+        {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     let text = feed.text();
-    let how = if feed.ended() {
+    let how = if text.contains("event: version_changed") {
+        "ended with a version_changed frame".to_string()
+    } else if feed.ended() {
         "ended: the connection closed".to_string()
     } else if text[mark..].contains("event: error") {
         format!("ended with an error frame: {}", &text[mark..])

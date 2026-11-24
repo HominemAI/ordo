@@ -1713,6 +1713,36 @@ pub async fn triage_with(
     choices: &Choices,
     version: &str,
 ) -> Result<Triaged, String> {
+    // Rows in each live table a change touches, read once per entity. A
+    // table this apply creates holds none.
+    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
+    for a in assessed.iter().filter(|a| a.refused.is_empty()) {
+        let Some(e) = schema.native(a.change.entity()) else {
+            continue;
+        };
+        if live.table(&e.name).is_some() && !rows.contains_key(&e.name) {
+            let n = migrate::extent(pool, &e.name)
+                .await
+                .map_err(|x| format!("counting `{}`: {x}", e.name))?
+                .rows;
+            rows.insert(e.name.clone(), n);
+        }
+    }
+    triage_counted(schema, live, assessed, choices, version, &rows)
+}
+
+/// [`triage_with`], given the rows each live table holds (`rows`; a table
+/// not named holds none). Reads nothing. A stored plan renders its step
+/// with this against an empty database of the version it starts from
+/// (`crate::evolve`), so the rendering is the same in every environment.
+pub fn triage_counted(
+    schema: &Schema,
+    live: &LiveShape,
+    assessed: &[Assessed],
+    choices: &Choices,
+    version: &str,
+    rows: &BTreeMap<String, i64>,
+) -> Result<Triaged, String> {
     // The columns this apply brings into existence, `(entity, column)`.
     // A constraint over only these constrains no existing data.
     let mut arriving: BTreeSet<(String, String)> = BTreeSet::new();
@@ -1737,7 +1767,6 @@ pub async fn triage_with(
             _ => {}
         }
     }
-    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
     let mut steps = Vec::new();
     let mut refused = Vec::new();
     let ddl_err = |x: ordo_schema::SchemaError| format!("{}: {}", x.code, x.message);
@@ -1759,20 +1788,9 @@ pub async fn triage_with(
             refused.push(not_built(c));
             continue;
         };
-        // Rows in the live table, read once per entity. A table this apply
-        // creates holds none.
+        // Rows in the live table. A table this apply creates holds none.
         let live_rows = if live.table(&e.name).is_some() {
-            match rows.get(&e.name) {
-                Some(n) => *n,
-                None => {
-                    let n = migrate::extent(pool, &e.name)
-                        .await
-                        .map_err(|x| format!("counting `{}`: {x}", e.name))?
-                        .rows;
-                    rows.insert(e.name.clone(), n);
-                    n
-                }
-            }
+            rows.get(&e.name).copied().unwrap_or(0)
         } else {
             0
         };
@@ -2860,7 +2878,7 @@ pub async fn apply_safe(
 /// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
 /// table this apply creates is granted in the same apply, and a table taken
 /// off a line is revoked.
-async fn apply_planned(
+pub(crate) async fn apply_planned(
     pool: &Pool,
     plan: &Plan,
     actor: &str,

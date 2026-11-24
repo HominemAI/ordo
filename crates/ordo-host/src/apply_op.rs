@@ -178,7 +178,7 @@ pub fn parse_code(raw: Option<&str>) -> Result<CodeFiles, ApplyRefused> {
 /// Binds each function's code into `program`, as the local apply does:
 /// every declared `code` path must be carried, and each text must hash to
 /// the hash the caller read. Answers the texts to store, by hash.
-fn bind_code(
+pub(crate) fn bind_code(
     program: &mut Program,
     code: &CodeFiles,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, ApplyRefused> {
@@ -484,6 +484,9 @@ pub enum ApplyRefused {
     /// activated or rolled back to. The text names the revoke and the
     /// command that lifts it.
     Revoked(String),
+    /// A production deployment takes only a version that arrived through
+    /// the promotion gate (`crate::promotion`). The text names the command.
+    NotPromoted(String),
     /// An external entity's table is gone, changed or unreadable in this
     /// database (slice C, `external-entities`). One line per entity, each
     /// leading with its class (`external_missing`, `external_changed`,
@@ -507,6 +510,7 @@ impl ApplyRefused {
             ApplyRefused::VersionBehind { .. } => "version_behind",
             ApplyRefused::Provenance(_) => "provenance_refused",
             ApplyRefused::Revoked(_) => "version_revoked",
+            ApplyRefused::NotPromoted(_) => "not_promoted",
             ApplyRefused::External(_) => "external_refused",
         }
     }
@@ -524,6 +528,7 @@ impl ApplyRefused {
             | ApplyRefused::VersionTaken { .. }
             | ApplyRefused::VersionBehind { .. }
             | ApplyRefused::Revoked(_)
+            | ApplyRefused::NotPromoted(_)
             | ApplyRefused::External(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
@@ -583,7 +588,7 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
             // Its text leads with the class already.
-            ApplyRefused::Revoked(e) => write!(f, "{e}"),
+            ApplyRefused::Revoked(e) | ApplyRefused::NotPromoted(e) => write!(f, "{e}"),
             ApplyRefused::External(lines) => write!(
                 f,
                 "external_refused: {} external entit{} cannot be read, so nothing was \
@@ -705,7 +710,9 @@ fn checked(p: &versions::Provenance) -> Result<(), ApplyRefused> {
 /// [`triage_errors`]): the program, the ops that refuse an apply, and the
 /// notes that do not. One body for [`run`] and [`preview`], so a preview
 /// refuses exactly what an apply would.
-fn compile_checked(source: &str) -> Result<(Program, Vec<String>, Vec<String>), ApplyRefused> {
+pub(crate) fn compile_checked(
+    source: &str,
+) -> Result<(Program, Vec<String>, Vec<String>), ApplyRefused> {
     // `DoesNotCompile`, never `Internal`: this is the caller's text, and a
     // 500 for a program with a typo in it is a page for somebody who can
     // do nothing about it.
@@ -792,6 +799,19 @@ async fn sequence(
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
     let naming = sa::name_version(pool, program).await.map_err(refused)?;
+    // **A production deployment takes only what arrived through the gate**,
+    // refused before anything is stored (`crate::promotion`).
+    if activate {
+        Versions::on(pool)
+            .require_arrival(&naming.version)
+            .await
+            .map_err(|e| match e {
+                versions::VersionRefusal::NotPromoted(_) => {
+                    ApplyRefused::NotPromoted(e.to_string())
+                }
+                other => ApplyRefused::Internal(other.to_string()),
+            })?;
+    }
     let mut notes = notes;
     notes.extend(naming.note.clone());
     let renamed;
@@ -1018,6 +1038,9 @@ async fn sequence(
             Err(e @ versions::VersionRefusal::Revoked { .. }) => {
                 return Err(ApplyRefused::Revoked(e.to_string()))
             }
+            Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
+                return Err(ApplyRefused::NotPromoted(e.to_string()))
+            }
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
         }
     };
@@ -1145,6 +1168,9 @@ async fn activate_locked(
         Err(versions::VersionRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
         Err(e @ versions::VersionRefusal::Revoked { .. }) => {
             Err(ApplyRefused::Revoked(e.to_string()))
+        }
+        Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
+            Err(ApplyRefused::NotPromoted(e.to_string()))
         }
         Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }

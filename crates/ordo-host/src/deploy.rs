@@ -386,6 +386,17 @@ pub enum LoadRefusal {
         version: String,
         refusal: Box<ordo_exec::peer::SchemaRefusal>,
     },
+    /// **The stored row is not the version it is named** (`plan-versions.md`
+    /// §1.4 step 4, §6 conflict 4). The source fingerprint recomputed from
+    /// the stored source and the code hashes its document carries differs
+    /// from the one recorded when it was stored. The row was changed by
+    /// hand, or damaged, after `ordo apply` stored it. Never served: the
+    /// version's name would no longer say what runs.
+    Digest {
+        version: String,
+        stored: String,
+        computed: String,
+    },
     Registry(RegistryRefusal),
     Store(ordo_exec::PoolError),
 }
@@ -429,6 +440,27 @@ impl std::fmt::Display for LoadRefusal {
                     .collect::<Vec<_>>()
                     .join("\n")
             ),
+            LoadRefusal::Digest {
+                version,
+                stored,
+                computed,
+            } => {
+                let short = |s: &str| s.chars().take(16).collect::<String>();
+                let stored = if stored.is_empty() {
+                    "none".to_string()
+                } else {
+                    short(stored)
+                };
+                write!(
+                    f,
+                    "version `{version}` is not what was stored under its name: its source \
+                     fingerprint was {stored} when it was stored and is {} now, so its row in \
+                     `$artifacts` was changed after `ordo apply`. It will not be served. \
+                     Restore the row from a backup, or pin its tenants to another version \
+                     with `ordo versions pin`",
+                    short(computed)
+                )
+            }
             LoadRefusal::Registry(e) => write!(f, "{e}"),
             LoadRefusal::Store(e) => write!(f, "{e}"),
         }
@@ -558,6 +590,7 @@ pub async fn load_pinned(
             version.to_string(),
         )));
     };
+    check_digest(pool, &stored).await?;
     let compiled = Fixture::from_source(&stored.source, "").map_err(|e| LoadRefusal::Compile {
         version: stored.version.clone(),
         error: e,
@@ -836,7 +869,33 @@ pub async fn load_active(
     let Some(stored) = Versions::on(pool).active().await? else {
         return Err(LoadRefusal::NoActiveVersion);
     };
+    check_digest(pool, &stored).await?;
     verify_candidate(&stored, pool, cfg, keys, space).await
+}
+
+/// **Digest at load** (`plan-versions.md` §1.4 step 4, §6 conflict 4).
+/// Recompute a stored version's source fingerprint from its stored source
+/// and the code hashes its document carries, and refuse the load when it
+/// is not the fingerprint recorded when the version was stored
+/// ([`LoadRefusal::Digest`]). Run on every load of a stored version: the
+/// active one at boot and on a swap, and each one served beside it.
+pub async fn check_digest(pool: &Pool, stored: &artifacts::Artifact) -> Result<(), LoadRefusal> {
+    use ordo_plan::artifact as a;
+    let recorded = Versions::on(pool)
+        .identity(&stored.version)
+        .await?
+        .map(|(_, source_id)| source_id)
+        .unwrap_or_default();
+    let doc: serde_json::Value = serde_json::from_str(&stored.artifact).unwrap_or_default();
+    let computed = a::source_identity(&stored.source, a::FIRST_EDITION, &a::code_hashes(&doc));
+    if recorded == computed {
+        return Ok(());
+    }
+    Err(LoadRefusal::Digest {
+        version: stored.version.clone(),
+        stored: recorded,
+        computed,
+    })
 }
 
 /// Load and gate one named version — what a node does when it is told a
@@ -853,6 +912,7 @@ pub async fn load_version(
             version.to_string(),
         )));
     };
+    check_digest(pool, &stored).await?;
     verify_candidate(&stored, pool, cfg, keys, space).await
 }
 
@@ -1526,6 +1586,16 @@ impl OpRegistry for Deployment {
             Some(Ok((loaded, _))) => loaded.specs.get(name),
             _ => self.current().specs.get(name),
         }
+    }
+
+    /// The version serving `space`: the one [`Deployment::for_space`]
+    /// answers, or the one it is pinned to when this node does not serve
+    /// it yet. Either way a move is seen.
+    fn version_in(&self, space: &str) -> Option<String> {
+        Some(match self.for_space(space) {
+            Ok((loaded, _)) => loaded.version.clone(),
+            Err(unserved) => unserved.version,
+        })
     }
 }
 

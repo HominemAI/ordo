@@ -1296,6 +1296,11 @@ pub async fn run_step(
         .await
         .map_err(|e| run_err("internal", e, true))?;
     }
+    // What the step leaves behind (§2.7): a removed field or entity is
+    // orphaned, and `$orphans` records it for erasure, export and pruning.
+    sa::record_orphans(target, &x.schema, &y, Some(&plan.from), actor)
+        .await
+        .map_err(|e| run_err("internal", e, true))?;
     Ok(StepRun::Ran { statements })
 }
 

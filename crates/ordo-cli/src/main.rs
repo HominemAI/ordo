@@ -88,6 +88,10 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo evolve --orphans\n      \
+         what versions left behind in every database (`std.deployment.orphans`).\n  \
+         ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
+         remove an orphan from every database, asked twice (`std.deployment.prune`).\n  \
          ordo migrate   removed: every schema evolution goes through the door\n      \
          (ruled 2026-11-05). It refuses, naming `ordo apply --no-activate`\n      \
          and `ordo evolve --run`, which replace it.\n  \

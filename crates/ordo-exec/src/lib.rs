@@ -57,6 +57,7 @@ pub mod metrics;
 pub mod migrate;
 pub mod nfc;
 pub mod nodes;
+pub mod orphans;
 pub mod peer;
 mod pool_error;
 pub mod prune;

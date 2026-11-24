@@ -1312,6 +1312,9 @@ What may change:
 - The tenant is made the first time with `std.space.create`'s path: a
   database of its own, the person applying as its founding owner. A
   server that gives no tenant a database refuses, naming why.
+- A deployment admin of dev opens a branch tenant as its founding owner,
+  with a touch in the last 5 minutes, as a staging admin opens a clone
+  (`clones::CloneAccess`). Nobody else reaches it with a deployment token.
 - Its database is brought to the version and the tenant pinned. An apply
   again moves it. `$branches` records branch, tenant, space, version and
   times.

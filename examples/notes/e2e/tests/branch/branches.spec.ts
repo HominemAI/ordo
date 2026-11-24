@@ -10,7 +10,9 @@
  *   version of its own, filled by a seed file on its first apply.
  *
  * Each branch is a tenant of its own (`branch-...`), with a database of its
- * own and the developer as its owner, pinned to its branch's version. The
+ * own and the developer as its owner, pinned to its branch's version. A
+ * deployment admin opens it as that owner, with a touch in the last 5
+ * minutes, so the developer here has just signed in. The
  * deployment keeps serving its version: Ada's page works throughout.
  * Branch B answers `branchTitles` with its seeded note; branch A, on the
  * version before, does not have the op. A second name that maps to branch
@@ -29,7 +31,7 @@ import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
-import { developer, developerToken, door, type Developer } from '../developer.js';
+import { door, freshDeveloper, type Developer, type FreshDeveloper } from '../developer.js';
 import { owner } from '../people.js';
 import { addNote, applyProgram, ensureServing, noteInList, servingVersion, stack, unique } from '../support.js';
 
@@ -72,9 +74,9 @@ function applyBranch(dev: Developer, dir: string, branch: string, extra: string[
 }
 
 /** One op in a branch's tenant, as the developer: the status and the rows. */
-async function call(space: string, op: string): Promise<{ status: number; rows: { title: string }[] }> {
+async function call(dev: FreshDeveloper, space: string, op: string): Promise<{ status: number; rows: { title: string }[] }> {
   const r = await fetch(`${stack().door}/op/${op}`, {
-    headers: { authorization: `Bearer ${developerToken()}`, 'x-ordo-space': space },
+    headers: { authorization: `Bearer ${dev.token()}`, 'x-ordo-space': space },
   });
   const body = (await r.json().catch(() => ({}))) as { rows?: { title: string }[] };
   return { status: r.status, rows: body.rows ?? [] };
@@ -91,7 +93,9 @@ test('2 branches are served side by side in dev, each on its own version', async
   }
   const sealed = serving === '0.3.4';
   const ada = await owner(unique('Ada'));
-  const dev = await developer(browser);
+  // Signed in now: a deployment admin reaches a branch's tenant with a
+  // touch in the last 5 minutes.
+  const dev = await freshDeveloper(browser, unique('Dev'));
   const a = `e2e/${unique('a')}`;
   const b = `e2e/${unique('b')}`;
   try {
@@ -125,18 +129,18 @@ test('2 branches are served side by side in dev, each on its own version', async
 
     await test.step('branch B serves its own op with its seeded note', async () => {
       await expect
-        .poll(async () => (await call(branchB.space, 'branchTitles')).status, { timeout: 30_000, message: 'branch B serves branchTitles' })
+        .poll(async () => (await call(dev, branchB.space, 'branchTitles')).status, { timeout: 30_000, message: 'branch B serves branchTitles' })
         .toBe(200);
-      const rows = (await call(branchB.space, 'branchTitles')).rows;
+      const rows = (await call(dev, branchB.space, 'branchTitles')).rows;
       expect(rows.map((r) => r.title)).toContain(seeded);
     });
 
     await test.step('branch A, on the version before, has no such op, and serves its own', async () => {
       await expect
-        .poll(async () => (await call(branchA.space, 'myNotes')).status, { timeout: 30_000, message: 'branch A serves myNotes' })
+        .poll(async () => (await call(dev, branchA.space, 'myNotes')).status, { timeout: 30_000, message: 'branch A serves myNotes' })
         .toBe(200);
-      expect((await call(branchA.space, 'myNotes')).rows).toHaveLength(0);
-      expect((await call(branchA.space, 'branchTitles')).status).not.toBe(200);
+      expect((await call(dev, branchA.space, 'myNotes')).rows).toHaveLength(0);
+      expect((await call(dev, branchA.space, 'branchTitles')).status).not.toBe(200);
     });
 
     await test.step("Ada's page works on the deployment's version", async () => {

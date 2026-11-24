@@ -2710,6 +2710,16 @@ impl PlatformOps {
         })
     }
 
+    /// The door reads which tenants are dev branches, so a deployment admin
+    /// opens one (`crate::branches`, `clones::CloneAccess`).
+    async fn refresh_branch_access(&self) {
+        if let (Some(clones), Some(apply)) = (&self.clones, &self.apply) {
+            if let Err(e) = clones.access.refresh(&apply.pool).await {
+                eprintln!("branches: the door's register was not read again ({e})");
+            }
+        }
+    }
+
     fn tenant_ops(&self) -> Result<&crate::tenant_ops::TenantOps, ExecError> {
         self.tenants.as_deref().ok_or_else(|| {
             ExecError::internal(
@@ -2788,18 +2798,20 @@ impl PlatformOps {
             // `ordo apply --branch` (`plan-versions.md` §3.3): the apply's
             // own op, with the tenant ops to make the branch's tenant.
             crate::apply_op::APPLY if crate::branches::names_branch(bound) => {
-                crate::branches::apply_op(
+                let out = crate::branches::apply_op(
                     self.apply_ops()?,
                     self.tenant_ops()?,
                     space,
                     bound,
                     caller,
                 )
-                .await
+                .await;
+                self.refresh_branch_access().await;
+                out
             }
             crate::apply_op::APPLY => self.apply_ops()?.apply(space, bound, caller).await,
             name if crate::branches::OPS.contains(&name) => {
-                crate::branches::execute(
+                let out = crate::branches::execute(
                     self.apply_ops()?,
                     self.reap.as_deref(),
                     name,
@@ -2807,7 +2819,9 @@ impl PlatformOps {
                     bound,
                     caller,
                 )
-                .await
+                .await;
+                self.refresh_branch_access().await;
+                out
             }
             name if crate::deploy_ops::OPS.contains(&name) => {
                 crate::deploy_ops::execute(self.apply_ops()?, name, space, bound, caller).await

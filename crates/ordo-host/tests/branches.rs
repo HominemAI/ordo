@@ -274,6 +274,17 @@ async fn two_branches_are_served_side_by_side_on_their_own_versions() {
     assert_eq!(owners[0][0].as_deref(), Some(ADA));
     assert_eq!(owners[0][1].as_deref(), Some("owner"));
 
+    // A deployment admin opens a branch as its founding owner; nobody
+    // else does through a deployment token.
+    let access = ordo_host::clones::CloneAccess::new();
+    access.refresh(&d.pool).await.expect("register read");
+    assert_eq!(
+        access.opens_as(&a.branch.space, "p_bob", true).as_deref(),
+        Some(ADA)
+    );
+    assert_eq!(access.opens_as(&a.branch.space, ADA, false), None);
+    assert_eq!(access.opens_as("spc_not_a_branch", "p_bob", true), None);
+
     // An apply again moves the branch's tenant; nothing new is made.
     let again = apply(&d, "feature/a", &branch_a("0.2.1"))
         .await

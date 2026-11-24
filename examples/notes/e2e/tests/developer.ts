@@ -49,13 +49,6 @@ function run(args: readonly string[], dir = configDir(), input?: string): CliRun
   return run;
 }
 
-/** The developer's token, as `ordo login` keeps it, for calling a tenant's ops directly. */
-export function developerToken(): string {
-  const m = /"token"\s*:\s*"([^"]+)"/.exec(readFileSync(`${configDir()}/sessions.json`, 'utf8'));
-  expect(m, 'a token in the developer session').not.toBeNull();
-  return m![1]!;
-}
-
 /** The door flags of every deployment command: the deployment's own space. */
 export function door(): string[] {
   return ['--host', stack().door, '--space', 'system'];
@@ -143,6 +136,36 @@ export function identityCommand(args: readonly string[]): string {
   console.log(`$ ordo-identity-service ${args.join(' ')}  (exit ${r.status})\n${r.stdout}${r.stderr}`);
   expect(r.status, `ordo-identity-service ${args.join(' ')}:\n${r.stdout}\n${r.stderr}`).toBe(0);
   return r.stdout;
+}
+
+/** A new developer, just signed in, and their token as `ordo login` keeps it. */
+export interface FreshDeveloper extends Developer {
+  readonly token: () => string;
+}
+
+/**
+ * **A new developer, an admin of `main`, signed in now**: invited with the
+ * host command, joined with a passkey, `ordo login` in a folder of its own.
+ * Its touch is fresh, so the door lets it reach a tenant for the next 5
+ * minutes (a dev branch, `tests/branch`).
+ */
+export async function freshDeveloper(browser: Browser, name: string): Promise<FreshDeveloper> {
+  const { context, page } = await person(browser);
+  const link = /https?:\/\/\S+/.exec(identityCommand(['invite', '--label', name]))?.[0] ?? '';
+  expect(link, 'an invite link').not.toBe('');
+  await join(page, link, name);
+  const dir = `${stack().logs}/cli-config-${name}`;
+  mkdirSync(dir, { recursive: true });
+  await login(page, dir);
+  return {
+    ordo: (args) => run(args, dir),
+    token: () => {
+      const m = /"token"\s*:\s*"([^"]+)"/.exec(readFileSync(`${dir}/sessions.json`, 'utf8'));
+      expect(m, 'a token in the session').not.toBeNull();
+      return m![1]!;
+    },
+    close: () => context.close(),
+  };
 }
 
 /** A developer signed in to two deployments at one identity service. */

@@ -1768,10 +1768,15 @@ pub async fn clones(pool: &Pool) -> Result<Vec<CloneRecord>, CloneRefusal> {
 ///
 /// Held in memory, because the door's check is synchronous. Loaded at boot
 /// and after every clone ([`CloneAccess::refresh`]).
+///
+/// **Dev branch tenants are opened the same way** (`crate::branches`,
+/// increment 5): a deployment admin of dev opens one as its founding owner,
+/// the person who first applied it. `clone.readers` does not reach them.
 #[derive(Debug, Default)]
 pub struct CloneAccess {
     spaces: RwLock<BTreeMap<String, String>>,
     readers: RwLock<BTreeSet<String>>,
+    branches: RwLock<BTreeMap<String, String>>,
 }
 
 impl CloneAccess {
@@ -1787,8 +1792,15 @@ impl CloneAccess {
             .map(|c| (c.space, c.opens_as))
             .collect();
         let readers = settings(pool).await?.readers;
+        let branches: BTreeMap<String, String> = crate::branches::list(pool)
+            .await
+            .map_err(|e| CloneRefusal::Data(format!("the branches could not be read: {e}")))?
+            .into_iter()
+            .map(|b| (b.space, b.actor))
+            .collect();
         *self.spaces.write().unwrap_or_else(|p| p.into_inner()) = spaces;
         *self.readers.write().unwrap_or_else(|p| p.into_inner()) = readers;
+        *self.branches.write().unwrap_or_else(|p| p.into_inner()) = branches;
         Ok(())
     }
 
@@ -1804,12 +1816,24 @@ impl CloneAccess {
     /// clone and the person is a deployment admin (`admin`) or named in
     /// `clone.readers`.
     pub fn opens_as(&self, space: &str, person: &str, admin: bool) -> Option<String> {
-        let member = self
+        let clone = self
             .spaces
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .get(space)
-            .cloned()?;
+            .cloned();
+        let Some(member) = clone else {
+            // A dev branch: deployment admins alone.
+            return if admin {
+                self.branches
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(space)
+                    .cloned()
+            } else {
+                None
+            };
+        };
         let allowed = admin
             || self
                 .readers

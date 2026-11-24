@@ -182,6 +182,15 @@ fn only_the_write_protocol_updates_entity_rows() {
              2026-09-20)",
         ),
         (
+            "ordo-exec/src/overlay.rs",
+            "the move overlay and the rename overlays (plan-versions.md increment 11a): \
+             dual writes. It runs inside the write protocol's own transaction, after the \
+             op's statements and before the chain append, on the rows the command group \
+             wrote, and sets the other version's columns from those rows' own columns. \
+             The group's images and its one chain record cover the write; a refused guard \
+             rolls the whole write back",
+        ),
+        (
             "ordo-exec/src/reseal.rs",
             "the re-seal pass (K1): it rewrites a sealed column's envelope to the same value \
              under a new epoch key, and moves a blob column from an old handle to a new \

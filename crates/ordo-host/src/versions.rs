@@ -532,7 +532,9 @@ CREATE TABLE IF NOT EXISTS \"$moves\" ( \
   \"phase\" text NOT NULL, \
   \"soak_until\" bigint NOT NULL DEFAULT 0, \
   \"started_at\" bigint NOT NULL, \
-  \"reason\" text NOT NULL DEFAULT '' \
+  \"reason\" text NOT NULL DEFAULT '', \
+  \"step\" text NOT NULL DEFAULT '', \
+  \"overlay\" text NOT NULL DEFAULT '' \
 )";
 
 /// `$tenant_builds` and `$tenant_build_members` (`plan-versions.md` §3.8,
@@ -625,6 +627,22 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
             .await?;
         }
         Err(e) if e.is_missing_table() => ensure_pin_tables(pool).await?,
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
+    // `$moves.step` and `overlay` came with increment 11a (dual writes).
+    match pool
+        .rows("SELECT \"step\", \"overlay\" FROM \"$moves\" LIMIT 0")
+        .await
+    {
+        Err(e) if e.is_missing_column() => {
+            pool.rows(
+                "ALTER TABLE \"$moves\" ADD COLUMN IF NOT EXISTS \"step\" text NOT NULL \
+                 DEFAULT ''; ALTER TABLE \"$moves\" ADD COLUMN IF NOT EXISTS \"overlay\" text \
+                 NOT NULL DEFAULT ''",
+            )
+            .await?;
+        }
         Err(e) => return Err(e),
         Ok(_) => {}
     }
@@ -991,6 +1009,16 @@ pub enum MovePhase {
     /// The change was refused by name. The tenant stays on its version
     /// until a new version is activated.
     Refused,
+    /// A move with dual writes (increment 11a): the expand landed, the
+    /// backfill worker fills the new shape, and every write the tenant
+    /// makes on `from` writes both shapes.
+    Backfilling,
+    /// Verified: both shapes are full and current. The tenant still
+    /// serves `from` and writes both. A revert in the soak returns here.
+    Gated,
+    /// The pin switched to `to`. Every write the tenant makes writes the
+    /// old shape too, so a revert is a pin switch, until `soak_until`.
+    Soaking,
 }
 
 impl MovePhase {
@@ -999,6 +1027,9 @@ impl MovePhase {
             MovePhase::Expanding => "expanding",
             MovePhase::Waiting => "waiting",
             MovePhase::Refused => "refused",
+            MovePhase::Backfilling => "backfilling",
+            MovePhase::Gated => "gated",
+            MovePhase::Soaking => "soaking",
         }
     }
 
@@ -1006,6 +1037,9 @@ impl MovePhase {
         match text {
             "waiting" => MovePhase::Waiting,
             "refused" => MovePhase::Refused,
+            "backfilling" => MovePhase::Backfilling,
+            "gated" => MovePhase::Gated,
+            "soaking" => MovePhase::Soaking,
             _ => MovePhase::Expanding,
         }
     }
@@ -1022,6 +1056,14 @@ pub struct Move {
     /// Empty until a try fails. Never shown to the tenant's people.
     pub reason: String,
     pub started_at: u64,
+    /// The stored plan's digest, for a move with dual writes (increment
+    /// 11a). Empty for an activation's move (increment 7).
+    pub step: String,
+    /// When the soak ends, in seconds. 0 outside `soaking`.
+    pub soak_until: u64,
+    /// The move overlays, as `crate::dual_writes` renders them. Empty for
+    /// an activation's move.
+    pub overlay: String,
 }
 
 impl Move {
@@ -1040,7 +1082,35 @@ impl Move {
                 "{} stays on {} and keeps serving it: moving to {} was refused: {}",
                 self.space, self.from, self.to, self.reason
             ),
+            MovePhase::Backfilling => format!(
+                "{} serves {} while its database is filled for {}; every write keeps both shapes{}",
+                self.space,
+                self.from,
+                self.to,
+                if self.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (last try: {})", self.reason)
+                }
+            ),
+            MovePhase::Gated => format!(
+                "{} serves {}; its database holds {} too, and every write keeps both shapes",
+                self.space, self.from, self.to
+            ),
+            MovePhase::Soaking => format!(
+                "{} serves {} in its soak until {}; every write keeps {}'s shape too, so a revert \
+                 loses nothing",
+                self.space,
+                self.to,
+                utc_minute(self.soak_until),
+                self.from
+            ),
         }
+    }
+
+    /// A move with dual writes (increment 11a), rather than an activation's.
+    pub fn is_dual(&self) -> bool {
+        !self.step.is_empty()
     }
 }
 
@@ -1056,7 +1126,8 @@ pub struct MovePlan {
     pub held: BTreeMap<String, (MovePhase, String)>,
 }
 
-const MOVE_COLUMNS: &str = "\"space\", \"from\", \"to\", \"phase\", \"reason\", \"started_at\"";
+const MOVE_COLUMNS: &str = "\"space\", \"from\", \"to\", \"phase\", \"reason\", \"started_at\", \
+                            \"step\", \"soak_until\", \"overlay\"";
 
 fn move_row(r: &[Option<String>]) -> Option<Move> {
     Some(Move {
@@ -1066,7 +1137,57 @@ fn move_row(r: &[Option<String>]) -> Option<Move> {
         phase: MovePhase::parse(r.get(3)?.as_deref()?),
         reason: r.get(4).cloned().flatten().unwrap_or_default(),
         started_at: r.get(5)?.clone()?.parse().ok()?,
+        step: r.get(6).cloned().flatten().unwrap_or_default(),
+        soak_until: r
+            .get(7)
+            .cloned()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        overlay: r.get(8).cloned().flatten().unwrap_or_default(),
     })
+}
+
+/// Raise one tenant's pin epoch without moving its version, cause `move`,
+/// and nudge the pin stream: a move with dual writes changed what its
+/// writes carry. The epoch after.
+async fn bump_in(
+    tx: &ordo_exec::TxConn,
+    space: &str,
+    actor: &str,
+    at: u64,
+) -> Result<i64, PoolError> {
+    let rows = tx
+        .rows(&format!(
+            "WITH bumped AS ( \
+               UPDATE \"$spaces\" SET \"pin_epoch\" = \"pin_epoch\" + 1 \
+               WHERE \"$space\" = {space} AND \"version\" IS NOT NULL \
+               RETURNING \"$space\" AS \"space\", \"version\", \"pin_epoch\") \
+             INSERT INTO \"$pins\" (\"space\", \"from\", \"to\", \"epoch\", \"actor\", \"cause\", \"at\") \
+             SELECT \"space\", \"version\", \"version\", \"pin_epoch\", {}, {}, {at} FROM bumped \
+             RETURNING \"epoch\"",
+            sql_lit(actor),
+            sql_lit(PinCause::Move.as_str()),
+            space = sql_lit(space),
+        ))
+        .await?;
+    tx.notify(PINS_CHANNEL, "").await?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .and_then(|e| e.parse().ok())
+        .unwrap_or(0))
+}
+
+/// The tenant's open move with dual writes, read inside `tx`.
+async fn dual_move_in(tx: &ordo_exec::TxConn, space: &str) -> Result<Option<Move>, PoolError> {
+    let rows = tx
+        .rows(&format!(
+            "SELECT {MOVE_COLUMNS} FROM \"$moves\" WHERE \"space\" = {} AND \"step\" <> ''",
+            sql_lit(space)
+        ))
+        .await?;
+    Ok(rows.first().and_then(|r| move_row(r)))
 }
 
 fn sql_list(items: &[String]) -> String {
@@ -1364,6 +1485,18 @@ pub enum VersionRefusal {
         setting: &'static str,
         value: String,
     },
+    /// A tenant in a move with dual writes (increment 11a): its pin moves
+    /// only through the move's own commands, which keep both shapes
+    /// current. The text names them.
+    Moving {
+        space: String,
+        from: String,
+        to: String,
+        phase: String,
+    },
+    /// A revert or a soak's close for a tenant with no move with dual
+    /// writes open. Fix the input.
+    NoMove { space: String },
     /// **A tenant a build holds** (increment 16): only the build moves it.
     /// The text names `ordo tenant-builds leave`.
     InBuild {
@@ -1403,8 +1536,10 @@ impl VersionRefusal {
             | VersionRefusal::AlreadyRevoked { .. }
             | VersionRefusal::NotOnRevoked { .. }
             | VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::Moving { .. }
             | VersionRefusal::RolloutOpen { .. }
             | VersionRefusal::InBuild { .. } => Remedy::Refuse,
+            VersionRefusal::NoMove { .. } => Remedy::FixInput,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
                 // same call may pass once it is.
@@ -1462,10 +1597,10 @@ impl VersionRefusal {
             | VersionRefusal::NotPromoted(_)
             | VersionRefusal::RolloutOpen { .. }
             | VersionRefusal::InBuild { .. }
-            | VersionRefusal::NamedBySetting { .. } => {
-                ExecError::new(ErrorCode::ApplyRefused, message)
-            }
+            | VersionRefusal::NamedBySetting { .. }
+            | VersionRefusal::Moving { .. } => ExecError::new(ErrorCode::ApplyRefused, message),
             VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::NoMove { .. }
             | VersionRefusal::NoTenant { .. }
             | VersionRefusal::NotOnRevoked { .. } => ExecError::new(ErrorCode::NotFound, message),
             VersionRefusal::Store(e) => {
@@ -1583,6 +1718,25 @@ impl std::fmt::Display for VersionRefusal {
                  it. Set another with `{cmd} <version>`, or `{cmd} --clear` to start them on \
                  the active version, then revoke",
                 cmd = command_of(setting)
+            ),
+            VersionRefusal::Moving {
+                space,
+                from,
+                to,
+                phase,
+            } => write!(
+                f,
+                "tenant_moving: tenant `{space}` is moving from {from} to {to} with dual writes \
+                 ({phase}), and its pin moves only through the move. Finish it with `ordo \
+                 evolve --tenant {space}`, revert it in its soak with `ordo evolve --tenant \
+                 {space} --revert`, or close the soak with `ordo evolve --tenant {space} \
+                 --close-soak`"
+            ),
+            VersionRefusal::NoMove { space } => write!(
+                f,
+                "no_move: tenant `{space}` has no move with dual writes open, so there is no \
+                 soak to revert or close. `ordo fleet --host <h>` shows each tenant's move; \
+                 `ordo evolve --tenant {space} --to <version>` starts one"
             ),
             VersionRefusal::NoTenant { space } => write!(
                 f,
@@ -1941,8 +2095,21 @@ impl<'a> Versions<'a> {
     // ── stored versions ────────────────────────────────────────────────
 
     /// Store a version. See [`registry::store`].
+    ///
+    /// A version newly stored nudges the pin stream, so every node reads
+    /// the renames it declares before a step makes them (increment 11a,
+    /// [`crate::dual_writes::read_renames`]).
     pub async fn store(&self, a: &Artifact) -> Result<Applied, VersionRefusal> {
-        Ok(registry::store(self.pool, a).await?)
+        let stored = registry::store(self.pool, a).await?;
+        if matches!(stored, Applied::Stored(_)) {
+            self.pool
+                .rows(&format!(
+                    "SELECT pg_notify({}, '')",
+                    ordo_exec::sql_lit(PINS_CHANNEL)
+                ))
+                .await?;
+        }
+        Ok(stored)
     }
 
     /// Store this release's build of a stored version. See
@@ -2304,14 +2471,15 @@ impl<'a> Versions<'a> {
             .first()
             .and_then(|r| r.first().cloned().flatten())
             .is_some_and(|v| v == "t" || v == "true");
-        tx.rows("DELETE FROM \"$moves\"").await?;
+        // A tenant in a move with dual writes (increment 11a) keeps its
+        // move and its pin: only the move's own commands switch it.
+        tx.rows("DELETE FROM \"$moves\" WHERE \"step\" = ''")
+            .await?;
+        let moving = "AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\")";
         if !attached {
             // A tenant in a tenant build keeps the build's version.
-            repin(
-                &tx,
-                &repin_sql(version, actor, cause, at.0, Some(NOT_IN_A_BUILD)),
-            )
-            .await?;
+            let keep = format!("{moving} {NOT_IN_A_BUILD}");
+            repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&keep))).await?;
         } else {
             let ready: Vec<String> = plan.ready.iter().cloned().collect();
             let ready_sql = if ready.is_empty() {
@@ -2324,7 +2492,7 @@ impl<'a> Versions<'a> {
             let now = format!(
                 "AND (\"version\" IS NULL \
                   OR \"$space\" NOT IN (SELECT \"$space\" FROM \"$spacedb\"){ready_sql}) \
-                 {NOT_IN_A_BUILD}"
+                 {moving} {NOT_IN_A_BUILD}"
             );
             repin(&tx, &repin_sql(version, actor, cause, at.0, Some(&now))).await?;
             // Every other tenant stays where it is, with a move open.
@@ -2336,6 +2504,7 @@ impl<'a> Versions<'a> {
                  WHERE \"state\" IN {PINNED_STATES} AND \"version\" IS NOT NULL \
                    AND \"version\" <> {to} \
                    AND \"$space\" IN (SELECT \"$space\" FROM \"$spacedb\") \
+                   AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\") \
                    {NOT_IN_A_BUILD}",
                 to = sql_lit(version),
                 at = at.0,
@@ -2344,7 +2513,7 @@ impl<'a> Versions<'a> {
             for (space, (phase, reason)) in &plan.held {
                 tx.rows(&format!(
                     "UPDATE \"$moves\" SET \"phase\" = {}, \"reason\" = {} \
-                     WHERE \"space\" = {}",
+                     WHERE \"space\" = {} AND \"step\" = ''",
                     sql_lit(phase.as_str()),
                     sql_lit(reason),
                     sql_lit(space)
@@ -2666,6 +2835,264 @@ impl<'a> Versions<'a> {
         Ok(moved)
     }
 
+    // ── moves with dual writes (increment 11a) ─────────────────────────
+
+    /// The tenant's open move with dual writes, if any.
+    pub async fn dual_move(&self, space: &str) -> Result<Option<Move>, VersionRefusal> {
+        Ok(self
+            .moves()
+            .await?
+            .into_iter()
+            .find(|m| m.space == space && m.is_dual()))
+    }
+
+    /// Every open move with dual writes.
+    pub async fn dual_moves(&self) -> Result<Vec<Move>, VersionRefusal> {
+        Ok(self
+            .moves()
+            .await?
+            .into_iter()
+            .filter(Move::is_dual)
+            .collect())
+    }
+
+    /// **Open a move with dual writes** for one tenant pinned to `from`
+    /// (`plan-backfill-dual-writes.md` §1): the move, its step and its
+    /// overlays, in phase `expanding`, and the tenant's pin epoch raised in
+    /// the same transaction, so every node takes the overlays before it
+    /// writes again (the pin fence refuses one that has not). An
+    /// activation's move for the tenant is replaced. The epoch after.
+    // The move's two ends, its step and overlays, and who and when: each
+    // is one column of the row it writes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_dual_move(
+        &self,
+        space: &str,
+        from: &str,
+        to: &str,
+        step: &str,
+        overlay: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<i64, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(m) = dual_move_in(&tx, space).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            });
+        }
+        let held = tx
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$spaces\" WHERE \"$space\" = {} \
+                 AND \"state\" IN {PINNED_STATES} FOR UPDATE",
+                sql_lit(space)
+            ))
+            .await?;
+        let Some(version) = held.first().and_then(|r| r.first().cloned().flatten()) else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        };
+        if version != from {
+            tx.rollback().await?;
+            return Err(VersionRefusal::MoveTo(format!(
+                "tenant `{space}` is on {version}, and the step starts from {from}: replay it \
+                 to {from} first (`ordo evolve --tenant {space} --to {from}`)"
+            )));
+        }
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+        tx.rows(&format!(
+            "INSERT INTO \"$moves\" (\"space\", \"from\", \"to\", \"phase\", \"reason\", \
+               \"soak_until\", \"started_at\", \"step\", \"overlay\") \
+             VALUES ({}, {}, {}, 'expanding', '', 0, {at}, {}, {})",
+            sql_lit(space),
+            sql_lit(from),
+            sql_lit(to),
+            sql_lit(step),
+            sql_lit(overlay),
+        ))
+        .await?;
+        let epoch = bump_in(&tx, space, actor, at).await?;
+        tx.commit().await?;
+        Ok(epoch)
+    }
+
+    /// Say where a move with dual writes stands. The overlays do not
+    /// change, so no pin epoch moves.
+    pub async fn note_dual_move(
+        &self,
+        space: &str,
+        phase: MovePhase,
+        reason: &str,
+    ) -> Result<(), VersionRefusal> {
+        self.pool
+            .rows(&format!(
+                "UPDATE \"$moves\" SET \"phase\" = {}, \"reason\" = {} \
+                 WHERE \"space\" = {} AND \"step\" <> ''",
+                sql_lit(phase.as_str()),
+                sql_lit(reason),
+                sql_lit(space)
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// **The switch** (§2.1 step 5): the tenant's pin moves from the move's
+    /// `from` to its `to`, cause `move`, and the move enters its soak until
+    /// `soak_until`, in one transaction. Only from `gated`.
+    pub async fn switch_dual_move(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+        soak_until: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        self.flip_dual_move(
+            space,
+            MovePhase::Gated,
+            MovePhase::Soaking,
+            actor,
+            at,
+            soak_until,
+        )
+        .await
+    }
+
+    /// **A revert in the soak** (`plan-backfill-dual-writes.md` §1): the
+    /// pin moves back to the move's `from`, cause `rollback`, and the move
+    /// returns to `gated`, both shapes still current. Only from `soaking`.
+    pub async fn revert_dual_move(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        self.flip_dual_move(space, MovePhase::Soaking, MovePhase::Gated, actor, at, 0)
+            .await
+    }
+
+    async fn flip_dual_move(
+        &self,
+        space: &str,
+        expect: MovePhase,
+        next: MovePhase,
+        actor: &str,
+        at: u64,
+        soak_until: u64,
+    ) -> Result<PinChange, VersionRefusal> {
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let Some(m) = dual_move_in(&tx, space).await? else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoMove {
+                space: space.to_string(),
+            });
+        };
+        if m.phase != expect {
+            tx.rollback().await?;
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            });
+        }
+        let (to, cause) = if next == MovePhase::Soaking {
+            (&m.to, PinCause::Move)
+        } else {
+            (&m.from, PinCause::Rollback)
+        };
+        if let Some(mark) = mark_in(&tx, to).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let filter = format!("AND \"$space\" = {}", sql_lit(space));
+        repin(&tx, &repin_sql(to, actor, cause, at, Some(&filter))).await?;
+        tx.rows(&format!(
+            "UPDATE \"$moves\" SET \"phase\" = {}, \"soak_until\" = {soak_until}, \
+             \"reason\" = '' WHERE \"space\" = {} AND \"step\" <> ''",
+            sql_lit(next.as_str()),
+            sql_lit(space)
+        ))
+        .await?;
+        let epoch = tx
+            .rows(&format!(
+                "SELECT \"pin_epoch\" FROM \"$spaces\" WHERE \"$space\" = {}",
+                sql_lit(space)
+            ))
+            .await?
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .and_then(|e| e.parse().ok())
+            .unwrap_or(0);
+        tx.commit().await?;
+        Ok(PinChange {
+            seq: 0,
+            space: space.to_string(),
+            from: Some(if next == MovePhase::Soaking {
+                m.from.clone()
+            } else {
+                m.to.clone()
+            }),
+            to: to.clone(),
+            epoch,
+            actor: actor.to_string(),
+            cause: cause.as_str().to_string(),
+            at,
+        })
+    }
+
+    /// **The soak's close**: the move leaves `$moves` and the tenant's pin
+    /// epoch rises, so every node drops its overlays. Only from `soaking`.
+    /// The caller has made the database the move's `to` alone first. The
+    /// epoch after.
+    pub async fn close_dual_move(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<i64, VersionRefusal> {
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        match dual_move_in(&tx, space).await? {
+            None => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::NoMove {
+                    space: space.to_string(),
+                });
+            }
+            Some(m) if m.phase != MovePhase::Soaking => {
+                tx.rollback().await?;
+                return Err(VersionRefusal::Moving {
+                    space: m.space,
+                    from: m.from,
+                    to: m.to,
+                    phase: m.phase.as_str().to_string(),
+                });
+            }
+            Some(_) => {}
+        }
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+        let epoch = bump_in(&tx, space, actor, at).await?;
+        tx.commit().await?;
+        Ok(epoch)
+    }
+
     /// The version a tenant created now starts on: `versions.new_tenant`
     /// when set, the active version otherwise.
     ///
@@ -2870,6 +3297,15 @@ impl<'a> Versions<'a> {
             });
         };
         let from = row.first().cloned().flatten();
+        if let Some(m) = dual_move_in(&tx, space).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::Moving {
+                space: m.space,
+                from: m.from,
+                to: m.to,
+                phase: m.phase.as_str().to_string(),
+            });
+        }
         if cause != PinCause::Build {
             if let Some((build, on)) = build_of_in(&tx, space).await? {
                 tx.rollback().await?;

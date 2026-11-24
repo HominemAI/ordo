@@ -2166,7 +2166,7 @@ async fn past_staging_an_apply_makes_no_rename_without_a_rehearsal() {
     let p = pair("r3", PROGRAM).await;
     let renamed = PROGRAM
         .replace("@ 0.1.0", "@ 0.2.0")
-        .replace("  title: text\n", "  heading: text prev(title)\n")
+        .replace("  title: text\n", "  heading: text = \"\" prev(title)\n")
         .replace("notes[title, body", "notes[heading, body");
     let apply = |activate: bool| {
         let body = json!({"program": renamed, "activate": activate});

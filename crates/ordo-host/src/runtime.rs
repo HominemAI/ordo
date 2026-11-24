@@ -5742,6 +5742,7 @@ async fn assemble_program(
             if let Some(apply) = &apply_for_backfills {
                 let runner: Arc<dyn crate::backfill::BackfillFunctions> = functions.clone();
                 let _ = apply.backfill_functions.set(runner);
+                let _ = apply.spaces.set(spaces.clone());
             }
             functions
         },

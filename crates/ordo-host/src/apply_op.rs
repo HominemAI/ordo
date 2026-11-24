@@ -2041,6 +2041,11 @@ pub struct ApplyOps {
     /// set by the runtime once they are built. Unset, a step that fills a
     /// field with a function is refused naming why.
     pub backfill_functions: std::sync::OnceLock<Arc<dyn crate::backfill::BackfillFunctions>>,
+    /// This node's resolver, set by the runtime: a move with dual writes
+    /// (increment 11a) has this node take each pin and overlay change at
+    /// once, rather than on the pin stream's next read. Unset, the stream
+    /// takes them.
+    pub spaces: std::sync::OnceLock<Arc<crate::spaces::Spaces>>,
     /// Key custody for a step that seals a field (increment 13), set by the
     /// runtime. Unset, such a step is refused naming why.
     pub backfill_keys: std::sync::OnceLock<Arc<dyn ordo_crypto::KeyProvider>>,
@@ -2068,6 +2073,7 @@ impl ApplyOps {
             home: home.to_string(),
             stream,
             backfill_functions: std::sync::OnceLock::new(),
+            spaces: std::sync::OnceLock::new(),
             backfill_keys: std::sync::OnceLock::new(),
         })
     }

@@ -441,6 +441,13 @@ impl CatchUp {
         let _one = self.sweeping.lock().await;
         let started = std::time::Instant::now();
         let mut out = Swept::default();
+        // Soaks whose time has passed close on this tick (increment 11a).
+        crate::dual_writes::close_due(&crate::dual_writes::MoveContext {
+            control: &self.control,
+            pools: self.spaces.pools().as_ref(),
+            spaces: Some(self.spaces.as_ref()),
+        })
+        .await;
         let Some(program) = self.serving_program().await else {
             return out;
         };
@@ -470,19 +477,28 @@ impl CatchUp {
         // a tenant still on its old version while its database is brought
         // forward. Its database counts as behind, not as on its pin. A move
         // refused by name is not tried again for this version, and is said.
-        let moves: HashMap<String, crate::versions::Move> =
-            match crate::versions::Versions::on(&self.control).moves().await {
-                Ok(m) => m
-                    .into_iter()
-                    .filter(|m| m.to == program.version)
-                    .map(|m| (m.space.clone(), m))
-                    .collect(),
-                Err(e) => {
-                    eprintln!("tenant catch-up: the open moves could not be read ({e})");
-                    out.transient = true;
-                    HashMap::new()
-                }
-            };
+        // A move with dual writes (increment 11a) is its own: its database
+        // holds both its versions, and only its own commands move it.
+        let (moves, dual): (
+            HashMap<String, crate::versions::Move>,
+            HashMap<String, crate::versions::Move>,
+        ) = match crate::versions::Versions::on(&self.control).moves().await {
+            Ok(m) => {
+                let (dual, rest): (Vec<_>, Vec<_>) = m.into_iter().partition(|m| m.is_dual());
+                (
+                    rest.into_iter()
+                        .filter(|m| m.to == program.version)
+                        .map(|m| (m.space.clone(), m))
+                        .collect(),
+                    dual.into_iter().map(|m| (m.space.clone(), m)).collect(),
+                )
+            }
+            Err(e) => {
+                eprintln!("tenant catch-up: the open moves could not be read ({e})");
+                out.transient = true;
+                (HashMap::new(), HashMap::new())
+            }
+        };
         let mut movers: HashMap<String, Vec<String>> = HashMap::new();
         for (space, a) in &occupants {
             let Some(m) = moves.get(&space.0) else {
@@ -509,6 +525,15 @@ impl CatchUp {
             let mut m: HashMap<String, HashSet<String>> = HashMap::new();
             for (space, a) in occupants {
                 if moving(&space.0) {
+                    continue;
+                }
+                if let Some(mv) = dual.get(&space.0) {
+                    let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
+                    for v in [&mv.from, &mv.to] {
+                        if *v != program.version {
+                            m.entry(label.clone()).or_default().insert(v.clone());
+                        }
+                    }
                     continue;
                 }
                 let v = match pins.get(&space.0) {

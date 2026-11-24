@@ -158,14 +158,25 @@ export default defineConfig({
       dependencies: ['seal'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A rename on one tenant under live writes (plan-versions.md, increment
+    // 11a): the move with dual writes, the soak, a revert and the close, with
+    // the page open. It stores 0.3.6, above
+    // `rehearsal`'s 0.3.5 and below `branch`'s 0.5.x, and version numbers only
+    // rise, so it runs between them. Locally, `--project=moves --no-deps`.
+    {
+      name: 'moves',
+      testMatch: /evolve\/dual-writes\.spec\.ts/,
+      dependencies: ['rehearsal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Dev branches as tenants on their own version (plan-versions.md
     // increment 5): 2 branches served side by side while the stack serves
-    // its own. It applies programs, so it runs after `rehearsal`, last. Locally,
+    // its own. It applies programs, so it runs after `moves`. Locally,
     // `--project=branch --no-deps`.
     {
       name: 'branch',
       testMatch: /branch\/.*\.spec\.ts/,
-      dependencies: ['rehearsal'],
+      dependencies: ['moves'],
       use: { ...devices['Desktop Chrome'] },
     },
     // Tenant builds (plan-versions.md increment 16): a beta tenant serves the

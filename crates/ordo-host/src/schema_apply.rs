@@ -572,6 +572,13 @@ pub struct Choices {
     /// (`crate::evolve`); the apply path never states one, so there B2 and
     /// B5 stay refused as before.
     pub fills: BTreeMap<(String, String), Fill>,
+    /// A declared rename (`prev`, §5 B4) is copied by the backfill worker,
+    /// in chunks, rather than by one `UPDATE` in the step (increment 11a).
+    /// Set by a stored plan (`crate::evolve`), whose step can run with live
+    /// writes beside it: the new column lands open to nulls, the worker
+    /// fills it, and its `NOT NULL` waits for the move's close. Never
+    /// stated by a person, so outside the options text.
+    pub renames_backfill: bool,
     /// A stored plan renders or runs this step (`crate::evolve`). Only then
     /// is a field that becomes sealed (B7) sealed, through the backfill
     /// worker with a key lease per space (`plan-versions.md` increment 13).
@@ -2056,6 +2063,31 @@ impl BackfillStep {
         }
         j
     }
+
+    /// Read one back from a stored receipt ([`BackfillStep::to_json`]).
+    pub fn from_json(v: &serde_json::Value) -> Option<BackfillStep> {
+        let code = match v["code"].as_str()? {
+            "B2" => "B2",
+            "B4" => "B4",
+            "B5" => "B5",
+            "B7" => "B7",
+            _ => return None,
+        };
+        Some(BackfillStep {
+            code,
+            entity: v["entity"].as_str()?.to_string(),
+            field: v["field"].as_str()?.to_string(),
+            column: v["column"].as_str()?.to_string(),
+            column_ty: v["type"].as_str()?.to_string(),
+            mapping: FillMapping::parse(v["mapping"].as_str()?).ok()?,
+            sql: v["sql"].as_str().map(String::from),
+            audit: match v["audit"].as_str()? {
+                "images" => ordo_commandlog::BackfillAudit::Images,
+                _ => ordo_commandlog::BackfillAudit::Summarised,
+            },
+            sealing_from: v["sealFrom"].as_str().map(String::from),
+        })
+    }
 }
 
 /// The physical column a sealed backfill (B7) fills beside the plaintext
@@ -2526,6 +2558,25 @@ pub fn triage_counted(
                     steps.extend(places_steps(c, e, choice, version)?.into_iter().map(alter));
                 }
             },
+            Change::RenameField { from, field, .. } if choices.renames_backfill => {
+                match rename_backfill(c, e, live, from, field) {
+                    Err(r) => refused.push(*r),
+                    Ok((expand, b, close)) => {
+                        steps.extend(expand.into_iter().map(alter));
+                        if let Some(sql) = close {
+                            after.push(Step {
+                                code: c.code(),
+                                phase: Phase::Alter,
+                                sql,
+                                index: None,
+                                constraint: None,
+                                table: e.name.clone(),
+                            });
+                        }
+                        backfills.push(b);
+                    }
+                }
+            }
             Change::RenameField { from, field, .. } => {
                 steps.extend(
                     rename_field_steps(e, live, from, field)?
@@ -2642,26 +2693,24 @@ pub fn triage_counted(
 }
 
 /// The statements of a declared rename (§5 B4, `plan-syntax-additions.md`
-/// §5): the new column, open to nulls; the sync trigger; the old column's
-/// values copied into the new one; then the new column's `NOT NULL`. The
+/// §5), as `ordo apply` makes it: the new column, open to nulls; the old
+/// column's values copied into it; then the new column's `NOT NULL`. The
 /// old column is kept with its `NOT NULL`, so the version before still
 /// loads over this database and a rollback by `ordo apply` is not refused.
-/// It loses its `DEFAULT`, so an insert by the new version, which no longer
-/// writes it, leaves it empty and the trigger fills it before the `NOT
-/// NULL` is checked. The serving version still reads it until its tenants
-/// move. Never `ALTER … RENAME`, which would drift the serving version the
-/// instant it landed. The new column's unique, reference and value set are
-/// their own changes in the same step.
+/// The serving version still reads it until its tenants move. Never
+/// `ALTER … RENAME`, which would drift the serving version the instant it
+/// landed. The new column's unique, reference and value set are their own
+/// changes in the same step.
 ///
-/// **No write is lost between the copy and the pin switch.** The switch is
-/// in the control database and each tenant's data may be in a database of
-/// its own, so the copy and the switch cannot share a transaction. The
-/// trigger ([`rename_sync_steps`]) is created in the copy's own
-/// transaction, before the copy, so from the copy on every write the
-/// serving version makes to the old column reaches the new one, and every
-/// write the new version makes to the new one reaches the old one. The
-/// `ADD COLUMN` holds the table's lock to the commit, so no write lands
-/// between the copy and the trigger. The reverse drops the trigger.
+/// **No write is lost between the copy and the pin switch.** Both
+/// versions' writes reach both columns through the host's dual writes
+/// (increment 11a, [`crate::dual_writes::rename_overlays`]): a write on the
+/// version before also sets the new column from the old one, and a write
+/// on the new version sets the old column from the new one, each in the
+/// write's own transaction. An insert that does not name a required
+/// column takes its default first: the old column keeps its own, or gets
+/// the new field's when it has none (`prev_default_required` refuses a
+/// rename with neither).
 pub fn rename_field_steps(
     e: &ordo_schema::Entity,
     live: &LiveShape,
@@ -2680,16 +2729,10 @@ pub fn rename_field_steps(
         .ok_or_else(|| format!("`{}.{field}` is not declared", e.name))?;
     let mut out = ordo_schema::ddl::add_column(&open, of)
         .map_err(|x| format!("{}: {}", x.code, x.message))?;
+    out.extend(rename_old_default(e, f, live, from)?);
     let t = ordo_schema::ddl::q(&e.name);
     let new = ordo_schema::ddl::q(&f.column());
     let old = ordo_schema::ddl::q(from);
-    let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
-    if old_live.is_some_and(|c| c.has_default) {
-        out.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {old} DROP DEFAULT;\n"
-        ));
-    }
-    out.extend(rename_sync_steps(&e.name, from, &f.column()));
     out.push(format!("UPDATE {t} SET {new} = {old};\n"));
     if !f.optional {
         out.push(format!(
@@ -2699,62 +2742,120 @@ pub fn rename_field_steps(
     Ok(out)
 }
 
-/// The name of a rename's sync trigger and of its function:
-/// `<table>$<new column>$prev`, after the way [`ordo_schema::ddl`] names
-/// every object it emits.
-pub fn rename_sync_name(table: &str, new: &str) -> String {
-    format!("{table}${new}$prev")
+/// The old column of a rename keeps its `NOT NULL`, so an insert by the
+/// new version, which does not name it, needs a default there. A column
+/// with none gets the new field's; the dual writes then set the real value
+/// in the same transaction. Nothing when the old column is optional or
+/// has a default of its own.
+fn rename_old_default(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    live: &LiveShape,
+    from: &str,
+) -> Result<Vec<String>, String> {
+    let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
+    if !old_live.is_some_and(|c| !c.nullable && !c.has_default) {
+        return Ok(Vec::new());
+    }
+    match ordo_schema::ddl::column_default(f).map_err(|x| format!("{}: {}", x.code, x.message))? {
+        Some(d) => Ok(vec![format!(
+            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {d};\n",
+            ordo_schema::ddl::q(&e.name),
+            ordo_schema::ddl::q(from)
+        )]),
+        None => Err(format!(
+            "prev_default_required: `{}.{from}` is required and has no default, and \
+             `{}.{}` declares none, so an insert by the new version could not leave it \
+             empty. Give `{}` a default (`= <value>`)",
+            e.name, e.name, f.name, f.name
+        )),
+    }
 }
 
-/// The sync trigger of a field rename, as two statements: its function and
-/// the trigger. Until increment 11a's dual writes, this is what keeps the
-/// old column and the new one equal while both versions may write.
+/// A declared rename in a stored plan (increment 11a): the statements of
+/// the expand, the backfill that copies the old column into the new one,
+/// and the new column's `NOT NULL`, which lands when the move closes.
 ///
-/// - An insert that fills the old column came from the version that still
-///   writes it (the old column has no default any more), so its value is
-///   copied into the new one. An insert that leaves it empty came from the
-///   new version, and the new column's value is copied back into it, so a
-///   tenant still on the old version reads the row whole.
-/// - An update that changes one column and not the other copies the
-///   change across.
-///
-/// Either column dropped by a later version leaves the trigger a no-op
-/// rather than an error, because it first asks the row whether both
-/// columns are still on it.
-pub fn rename_sync_steps(table: &str, old: &str, new: &str) -> Vec<String> {
-    use ordo_schema::ddl::q;
-    let name = q(&rename_sync_name(table, new));
-    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let (o, n) = (q(old), q(new));
-    let (ok, nk) = (lit(old), lit(new));
-    vec![
+/// The expand adds the new column open to nulls (with its default, if it
+/// has one). The old column keeps its `NOT NULL`, so the version before
+/// still loads over the database; when it has no default it gets the new
+/// field's, so the new version's inserts, which do not name it, are taken
+/// and the dual writes set its value in the same transaction. Until the
+/// move closes, the new field's `required` is held by the host's guards on
+/// every write (`ordo_exec::overlay`). A sealed or file field is not copied
+/// this way: its copy needs the write path's custody.
+type RenameParts = (Vec<String>, BackfillStep, Option<String>);
+
+fn rename_backfill(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    field: &str,
+) -> Result<RenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.sealed || f.indexed || f.is_content() {
+        return Err(refuse(
+            "rename_backfill_not_built",
+            format!(
+                "`{}.{field}` is sealed or a file, and the backfill worker copies neither: a \
+                 sealed copy needs a key lease (increment 13), a file's handle the upload's \
+                 custody. Apply the rename with `ordo apply`, which copies it in the step",
+                e.name
+            ),
+        ));
+    }
+    let mut open = e.clone();
+    for g in open.fields.iter_mut().filter(|g| g.name == field) {
+        g.optional = true;
+    }
+    let of = open
+        .field(field)
+        .ok_or_else(|| refuse("mapping_invalid", format!("`{}.{field}`", e.name)))?;
+    let mut expand = ordo_schema::ddl::add_column(&open, of)
+        .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+    expand.extend(rename_old_default(e, f, live, from).map_err(|why| {
+        let (class, why) = match why.split_once(": ") {
+            Some(("prev_default_required", rest)) => ("prev_default_required", rest.to_string()),
+            _ => ("mapping_invalid", why),
+        };
+        refuse(class, why)
+    })?);
+    let t = ordo_schema::ddl::q(&e.name);
+    let close = (!f.optional).then(|| {
         format!(
-            "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $ordo_prev$
-BEGIN
-  IF NOT (to_jsonb(NEW) ? {ok} AND to_jsonb(NEW) ? {nk}) THEN
-    RETURN NEW;
-  END IF;
-  IF TG_OP = 'INSERT' THEN
-    IF NEW.{o} IS NOT NULL THEN
-      NEW.{n} := NEW.{o};
-    ELSE
-      NEW.{o} := NEW.{n};
-    END IF;
-  ELSIF NEW.{o} IS DISTINCT FROM OLD.{o} AND NEW.{n} IS NOT DISTINCT FROM OLD.{n} THEN
-    NEW.{n} := NEW.{o};
-  ELSIF NEW.{n} IS DISTINCT FROM OLD.{n} AND NEW.{o} IS NOT DISTINCT FROM OLD.{o} THEN
-    NEW.{o} := NEW.{n};
-  END IF;
-  RETURN NEW;
-END
-$ordo_prev$;\n"
-        ),
-        format!("DROP TRIGGER IF EXISTS {name} ON {t};\n", t = q(table)),
-        format!(
-            "CREATE TRIGGER {name} BEFORE INSERT OR UPDATE ON {t} FOR EACH ROW EXECUTE FUNCTION {name}();\n",
-            t = q(table)
-        ),
-    ]
+            "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+            ordo_schema::ddl::q(&f.column())
+        )
+    });
+    Ok((
+        expand,
+        BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: f.column(),
+            column_ty: ordo_schema::ddl::column_ty(f),
+            mapping: FillMapping::Expr(from.to_string()),
+            sql: Some(ordo_schema::ddl::q(from)),
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+        },
+        close,
+    ))
 }
 
 /// The two steps a foreign key, an enum pin or a check takes onto a table

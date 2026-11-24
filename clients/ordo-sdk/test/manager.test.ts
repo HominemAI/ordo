@@ -61,6 +61,8 @@ class LiveDoor {
   /** For each call, how many feeds were still open when it was made. */
   readonly openAtCall: number[] = [];
   readonly waits: number[] = [];
+  /** The `x-ordo-tenant-version` every answer names; none when null. */
+  version: string | null = null;
   #refusals: ({ status: number; json: unknown; retryAfter?: string } | null)[] = [];
   #waiting: (() => void)[] = [];
 
@@ -98,7 +100,9 @@ class LiveDoor {
     const feed = new Feed(init?.signal);
     this.feeds.push(feed);
     for (const w of this.#waiting.splice(0)) w();
-    return new Response(feed.stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    const headers: Record<string, string> = { 'Content-Type': 'text/event-stream' };
+    if (this.version !== null) headers['x-ordo-tenant-version'] = this.version;
+    return new Response(feed.stream, { status: 200, headers });
   };
 
   /** The nth feed, once the manager has opened it. */
@@ -1519,6 +1523,84 @@ describe('a version change under the feeds (plan-versions.md §1.4, owner ruling
     again.close();
     const stopped = await when(manager, (v) => v.ops[0]?.stopped !== null);
     expect(stopped.ops[0]?.stopped?.detail.class).toBe('space_unavailable');
+    await manager.stop();
+  });
+});
+
+describe('a version change an answer names (plan-versions.md §1.9)', () => {
+  type Change = { readonly from: string | null; readonly to: string | null };
+  const moved = () =>
+    frame('version_changed', {
+      error: { code: 'space_unavailable', message: 'the version changed while the feed was open; open it again' },
+    });
+  const managed = (door: LiveDoor, r: LocalReplica, heard: Change[]) =>
+    SyncManager.start(door.client(), r, [{ spec: tasks }, { spec: mine }], {
+      wait: async (ms) => {
+        door.waits.push(ms);
+      },
+      onVersionChanged: (c) => heard.push(c),
+    });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  it('drops the device copy and fills it again when an answer names another version, with no frame', async () => {
+    const door = new LiveDoor();
+    door.version = '0.1.0';
+    const r = await replica();
+    const heard: Change[] = [];
+    const manager = managed(door, r, heard);
+    (await door.nth(0)).push(load([task(1), task(2)], 5));
+    (await door.nth(1)).push(load([task(3)], 5));
+    await when(manager, (v) => v.complete);
+    expect(await rows(r)).toHaveLength(3);
+
+    // The tenant moved and no feed heard a frame: one feed ends cleanly and
+    // its reconnect is answered under 0.2.0.
+    door.version = '0.2.0';
+    (await door.nth(0)).close();
+    await door.nth(2);
+    // Every feed is reopened, the one that heard it too.
+    await door.nth(4);
+    await settle();
+    expect(await rows(r)).toEqual([]);
+    expect(heard).toEqual([{ from: '0.1.0', to: '0.2.0' }]);
+
+    const open = door.feeds.filter((f) => !f.ended);
+    expect(open).toHaveLength(2);
+    open[0]!.push(load([task(1, 'new shape')], 9));
+    open[1]!.push(load([task(3, 'new shape')], 9));
+    await when(manager, (v) => v.complete && v.position === 9);
+    // Answers under the same version raise nothing more.
+    await settle();
+    expect(heard).toHaveLength(1);
+    expect(door.feeds).toHaveLength(5);
+    await manager.stop();
+  });
+
+  it('a frame and the answers after it are one move, dropped once', async () => {
+    const door = new LiveDoor();
+    door.version = '0.1.0';
+    const r = await replica();
+    const heard: Change[] = [];
+    const manager = managed(door, r, heard);
+    (await door.nth(0)).push(load([task(1)], 5));
+    (await door.nth(1)).push(load([task(3)], 5));
+    await when(manager, (v) => v.complete);
+
+    door.version = '0.2.0';
+    const first = await door.nth(0);
+    first.push(moved());
+    first.close();
+    const a = await door.nth(2);
+    const b = await door.nth(3);
+    await settle();
+    // The reconnects answered under 0.2.0 are the move the frame told, not a
+    // second one: no further feed is opened and the copy is dropped once.
+    expect(door.feeds).toHaveLength(4);
+    expect(heard).toEqual([{ from: '0.1.0', to: null }]);
+    a.push(load([task(1, 'v2')], 9));
+    b.push(load([task(3, 'v2')], 9));
+    await when(manager, (v) => v.complete && v.position === 9);
+    expect(await rows(r)).toHaveLength(2);
     await manager.stop();
   });
 });

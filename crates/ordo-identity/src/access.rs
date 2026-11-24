@@ -177,7 +177,34 @@ pub enum DenyReason {
     /// only holds the set and checks it. An agent that may act as Ada may
     /// still not delete as Ada unless the app developer opened that op.
     OpNotDelegable,
+    /// The grant was pinned under one program version, the tenant is now
+    /// served by another, and the two disagree on what a listed op reads
+    /// or on its guards (`plan-versions.md` §1.7, ruled D7). The data
+    /// owner's version decides, so the grant stops here until the sharer
+    /// shares again or the tenants move together.
+    ///
+    /// Distinct from [`DenyReason::ManifestChanged`]: that is one version's
+    /// redeploy widening an op; this is two versions meeting. Its holder
+    /// already holds the grant, so the door names it on the wire as
+    /// `versions_disagree`.
+    VersionsDisagree {
+        /// The version the grant was pinned under.
+        pinned: String,
+        /// The version serving the tenant now.
+        serving: String,
+        /// The listed op that disagrees.
+        op: String,
+        /// The entity it disagrees on, when it is one entity.
+        entity: Option<String>,
+        /// What differs, in one line.
+        detail: String,
+    },
 }
+
+/// A tenant's program version, as the deployment serving it answers
+/// (`plan-versions.md` §1.4). Reads in-memory state only: the engine does
+/// no I/O.
+pub type TenantVersions = std::sync::Arc<dyn Fn(&SpaceId) -> Option<String> + Send + Sync>;
 
 /// The outcome of the one check. Denials always name the attempted op.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,6 +497,14 @@ pub struct AccessEngine {
     /// (`plan-auth-federated.md` §8.2). `None` is the default: no provider's
     /// claim satisfies step-up anywhere.
     upstream: Option<std::sync::Arc<crate::upstream::UpstreamAcceptance>>,
+    /// Each served program version's ops as that version declares them
+    /// (`plan-versions.md` §1.7). Empty for an engine that serves one
+    /// version, which then answers every tenant from `deployed`.
+    by_version: BTreeMap<String, BTreeMap<String, OpPin>>,
+    /// Which version serves a tenant. Set once, after the engine is shared,
+    /// by the node that knows the pins. Unset, every tenant is answered from
+    /// `deployed`.
+    tenant_versions: std::sync::OnceLock<TenantVersions>,
 }
 
 impl Default for AccessEngine {
@@ -478,6 +513,8 @@ impl Default for AccessEngine {
             memberships: BTreeMap::new(),
             member_ids: BTreeMap::new(),
             profiles: BTreeMap::new(),
+            by_version: BTreeMap::new(),
+            tenant_versions: std::sync::OnceLock::new(),
             deployed: BTreeMap::new(),
             op_step_up: BTreeMap::new(),
             client_step_up: BTreeMap::new(),
@@ -713,6 +750,54 @@ impl AccessEngine {
         &self.deployed
     }
 
+    /// Register what an op means in one served program version
+    /// (`plan-versions.md` §1.7). The pin is stamped with the version, so a
+    /// grant made from it records the version it was pinned under.
+    pub fn deploy_op_in(&mut self, version: &str, op: &str, mut pin: OpPin) {
+        pin.version = Some(version.to_string());
+        self.by_version
+            .entry(version.to_string())
+            .or_default()
+            .insert(op.to_string(), pin);
+    }
+
+    /// Give every served version the ops no program version declares: the
+    /// platform's own and the functions, which mean the same in each. Ops
+    /// in `program` are left to the versions that declare them, so an op
+    /// only one version declares stays absent from the others.
+    pub fn share_unversioned(&mut self, program: &BTreeSet<String>) {
+        for ops in self.by_version.values_mut() {
+            for (op, pin) in &self.deployed {
+                if !program.contains(op) {
+                    ops.entry(op.clone()).or_insert_with(|| pin.clone());
+                }
+            }
+        }
+    }
+
+    /// Tell the engine which version serves each tenant. Once: the engine
+    /// may already be shared. Unset, every tenant is answered from
+    /// [`AccessEngine::deployed`].
+    pub fn set_tenant_versions(&self, versions: TenantVersions) {
+        let _ = self.tenant_versions.set(versions);
+    }
+
+    /// The version serving `space`, when the engine knows versions.
+    pub fn version_of(&self, space: &SpaceId) -> Option<String> {
+        self.tenant_versions.get().and_then(|f| f(space))
+    }
+
+    /// What each op means **in `space`**: the ops of the version serving it
+    /// (`plan-versions.md` §1.7), or [`AccessEngine::deployed`] when the
+    /// engine holds no manifests for that version. A share or a grant made
+    /// in a tenant pins from here, so it is pinned to the tenant's version,
+    /// not the active one.
+    pub fn deployed_in(&self, space: &SpaceId) -> &BTreeMap<String, OpPin> {
+        self.version_of(space)
+            .and_then(|v| self.by_version.get(&v))
+            .unwrap_or(&self.deployed)
+    }
+
     /// Close `op` to every delegated token (SH-20). A token that acts for
     /// somebody is refused it with [`DenyReason::OpNotDelegable`] even when
     /// its allowlist names it and its delegator could call it. Tokens that
@@ -843,18 +928,67 @@ impl AccessEngine {
         ops: BTreeSet<String>,
         expires: Timestamp,
     ) -> Option<CapabilityGrant> {
+        // The tenant's version's ops, so a grant made in a tenant pinned
+        // beside the active version is pinned to what that tenant runs.
+        let deployed = self.deployed_in(space);
         let mut pins = BTreeMap::new();
         for op in ops {
-            let pin = self.deployed.get(&op)?.clone();
+            let pin = deployed.get(&op)?.clone();
             pins.insert(op, pin);
         }
         Some(CapabilityGrant::new(id, space.clone(), pins, expires))
     }
 
     /// The drift report for a grant against this deployment — the input to an
-    /// audit record, and to a consent page rendering what changed.
+    /// audit record, and to a consent page rendering what changed. Compared
+    /// with the ops of the version serving the grant's space.
     pub fn drift(&self, grant: &CapabilityGrant) -> Vec<(String, PinDrift)> {
-        grant_drift(grant, &self.deployed)
+        grant_drift(grant, self.deployed_in(grant.space()))
+    }
+
+    /// Why a grant's pins refuse a call in `space`, or `None`.
+    ///
+    /// A pin made under the version serving `space` now, or under no
+    /// recorded version, is compared as one deployment's redeploy: any
+    /// expansion kills the grant ([`DenyReason::ManifestChanged`]). A pin
+    /// made under another version meets the sharing rule instead
+    /// (`plan-versions.md` §1.7): fields read and guards are compared, and a
+    /// disagreement is [`DenyReason::VersionsDisagree`]. Every listed op is
+    /// evaluated, as consent was one act over the set.
+    fn pin_refusal(&self, grant: &CapabilityGrant, space: &SpaceId) -> Option<DenyReason> {
+        let serving = self.version_of(space);
+        let deployed = self.deployed_in(space);
+        let mut changed = false;
+        for (op, pinned) in grant.pins() {
+            match (&pinned.version, &serving) {
+                (Some(was), Some(now)) if was != now && self.by_version.contains_key(now) => {
+                    let found = match deployed.get(op) {
+                        None => Some(pins::Disagreement {
+                            entity: None,
+                            detail: format!("`{op}` is not in version {now}"),
+                        }),
+                        Some(current) => pins::disagreement(pinned, current),
+                    };
+                    if let Some(d) = found {
+                        return Some(DenyReason::VersionsDisagree {
+                            pinned: was.clone(),
+                            serving: now.clone(),
+                            op: op.clone(),
+                            entity: d.entity,
+                            detail: d.detail,
+                        });
+                    }
+                }
+                _ => {
+                    let drift = match deployed.get(op) {
+                        Some(current) => pins::compare(pinned, current),
+                        None => PinDrift::Undeployed,
+                    };
+                    changed |= drift.is_fatal();
+                }
+            }
+        }
+        changed.then_some(DenyReason::ManifestChanged)
     }
 
     /// The one check at the door. Membership status → (role + groups +
@@ -934,8 +1068,10 @@ impl AccessEngine {
             if self.no_capability.contains(op) {
                 return Decision::deny(op, DenyReason::OpNotDelegable);
             }
-            if self.drift(grant).iter().any(|(_, d)| d.is_fatal()) {
-                return Decision::deny(op, DenyReason::ManifestChanged);
+            // Across 2 versions the sharing rule decides instead
+            // ([`AccessEngine::pin_refusal`], `plan-versions.md` §1.7).
+            if let Some(reason) = self.pin_refusal(grant, space) {
+                return Decision::deny(op, reason);
             }
             if !grant.allows(op) {
                 return Decision::deny(op, DenyReason::OpNotInAllowlist);

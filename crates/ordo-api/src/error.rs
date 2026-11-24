@@ -184,6 +184,12 @@ pub enum ErrorCode {
     /// `version_skew`: the app is newer or older than the tenant, and
     /// reloading it, or waiting for the tenant to move, is the fix.
     OpNotInVersion,
+    /// A share or grant pinned under one program version, called in a
+    /// tenant now served by another, and the two disagree on what the op
+    /// reads or on its guards (`plan-versions.md` §1.7, ruled D7). Said only
+    /// to the grant's holder, whose grant is otherwise good here. The
+    /// sharer shares again, or the tenants move to one version.
+    VersionsDisagree,
     /// The write asserted `rev: null` — create-once — and the unique key
     /// already matches a row (spec §6 rule 9). Nothing applied. Distinct from
     /// `Duplicate`, which is a constraint violation the caller did not
@@ -773,6 +779,7 @@ impl ErrorCode {
             ErrorCode::NotFound => "not_found",
             ErrorCode::VersionSkew => "version_skew",
             ErrorCode::OpNotInVersion => "op_not_in_version",
+            ErrorCode::VersionsDisagree => "versions_disagree",
             ErrorCode::ExpectedAbsent => "expected_absent",
             ErrorCode::NullKeyAddress => "null_key_address",
             ErrorCode::ConflictingIdentity => "conflicting_identity",
@@ -853,6 +860,7 @@ impl ErrorCode {
         ErrorCode::NotFound,
         ErrorCode::VersionSkew,
         ErrorCode::OpNotInVersion,
+        ErrorCode::VersionsDisagree,
         ErrorCode::ExpectedAbsent,
         ErrorCode::NullKeyAddress,
         ErrorCode::ConflictingIdentity,
@@ -964,6 +972,7 @@ impl ErrorCode {
             | ErrorCode::EmailRequired
             // The door's: only it knows which version serves the tenant.
             | ErrorCode::OpNotInVersion
+            | ErrorCode::VersionsDisagree
             | ErrorCode::PresenceRequired => false,
             // `invalid_cursor` IS the executor's to say as well as the
             // door's: a cursor presented against a plan with no total order
@@ -1099,6 +1108,7 @@ impl ErrorCode {
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::VersionSkew
             | ErrorCode::OpNotInVersion
+            | ErrorCode::VersionsDisagree
             | ErrorCode::ExpectedAbsent
             | ErrorCode::ConflictingIdentity
             | ErrorCode::Duplicate

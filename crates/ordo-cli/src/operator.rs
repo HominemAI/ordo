@@ -412,6 +412,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
         "clones" => rt.block_on(clones_cmd(flags)),
+        "branches" => rt.block_on(crate::branches::run(flags)),
         "rehearsals" => rt.block_on(rehearsals_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
@@ -1927,11 +1928,37 @@ async fn apply_once(flags: &Flags) -> Outcome {
         "--no-wait",
         "--wait-secs",
         "--env",
+        "--branch",
+        "--seed",
         "--host",
         "--token",
         "--space",
     ]) {
         return Outcome::usage(e);
+    }
+    // `--branch` (`plan-versions.md` §3.3): through the door only, never
+    // activated, in dev. `--seed` comes with it.
+    let branch = flags.named_value("--branch").map(str::to_string);
+    if branch.is_none() && flags.named_value("--seed").is_some() {
+        return Outcome::usage(
+            "`--seed <file>` fills a new branch tenant, so it goes with `--branch <name>`\n".into(),
+        );
+    }
+    if branch.is_some() {
+        for clash in ["--no-activate", "--env", "--as", "--bump"] {
+            if flags.has(clash) || flags.named.contains_key(clash) {
+                return Outcome::usage(format!(
+                    "`--branch` takes no `{clash}`: a branch's version is stored in dev and \
+                     never activated, and serves the branch's own tenant alone\n"
+                ));
+            }
+        }
+        if flags.direct || crate::wire::requested(flags).is_none() {
+            return Outcome::usage(
+                "`--branch` goes through the door: drop `--direct` and give `--host <dev>`\n"
+                    .into(),
+            );
+        }
     }
     // How long to wait for the nodes to serve what this activates
     // (`deploy_wait`). Read before anything is applied, so a bad value
@@ -2008,6 +2035,19 @@ async fn apply_once(flags: &Flags) -> Outcome {
             Ok(c) => c,
             Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
         };
+        if let Some(branch) = &branch {
+            return crate::branches::apply(
+                &host,
+                flags,
+                branch,
+                src.text(),
+                code,
+                &provenance,
+                &path,
+                &db,
+            )
+            .await;
+        }
         return crate::wire::apply_over_the_wire(
             &host,
             flags,
@@ -2249,6 +2289,9 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
              objects, increment 5 contracts them)\n"
         )),
         SchemaOutcome::Behind { changes } => behind = changes,
+        SchemaOutcome::Untouched => out.push_str(
+            "schema     untouched  (a branch: the deployment's own database is not changed)\n",
+        ),
     }
     let version = numbered(report.ordinal, &report.version);
     out.push_str(&match report.stored {
@@ -2280,6 +2323,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
              --to {} --run --host <h>`, then activate)\n",
             report.version
         )),
+        Activation::Staged if report.schema == SchemaOutcome::Untouched => out.push_str(
+            "activated  no  (a branch's version serves its own tenant; the deployment still \
+             points where it did)\n",
+        ),
         Activation::Staged => out
             .push_str("activated  no  (--no-activate: the deployment still points where it did)\n"),
         Activation::Switched { from, to } => out.push_str(&format!(

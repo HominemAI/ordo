@@ -69,6 +69,10 @@ Promoting a branch to serve chosen production tenants depends on serving
 more than one version (`plan-evolution-plans.md` §3.5) and is filed for after
 first deployment (`tenant-builds`).
 
+**Built 2026-11-24** (`plan-versions.md` increment 5, §3.3): `ordo apply
+--branch`, `ordo branches list|delete`. Each branch tenant has a database
+of its own, so main's database never holds a branch's tables.
+
 ### 2.3 Staging clones named tenants (g37)
 
 The deployment owner names which production tenants staging copies. Each is

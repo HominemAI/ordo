@@ -198,6 +198,9 @@ const READS: &[&str] = &[
     // The clones this deployment holds and the clone settings; deployment
     // owner only, home space.
     "std.deployment.clones",
+    // The dev branches and which are idle; deployment owner only, home
+    // space (increment 5).
+    "std.deployment.branches",
     // What the staging clones would have sent (mail, push, egress), held
     // in the sink; deployment owner only, home space (increment 12).
     "std.deployment.sinks",

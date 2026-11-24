@@ -812,6 +812,18 @@ pub fn specs() -> Vec<OpSpec> {
                     bounds: None,
                 },
                 ParamSpec {
+                    // `ordo apply --branch <name>` (`plan-versions.md`
+                    // §3.3): store without activating, and serve the
+                    // version to the branch's own tenant alone
+                    // (`crate::branches`). The name is checked there.
+                    name: crate::branches::BRANCH_PARAM.to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(crate::branches::MAX_BRANCH_CHARS as u32 * 4),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+                ParamSpec {
                     // The git commit the CLI read where the source lives,
                     // `-dirty` when the applied files had changes not in
                     // it. Asserted by the caller, as `--as` is on the
@@ -1060,6 +1072,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
     .chain(crate::clones::specs())
+    .chain(crate::branches::specs())
     .chain(crate::rehearsals::specs())
     .chain(crate::window_ops::specs())
     .chain(crate::revoked_moves::specs())
@@ -1877,6 +1890,9 @@ pub fn owner_only(name: &str) -> bool {
         // Staging clones (`plan-versions.md` §3.4): the deployment's, on
         // `APPLY`'s terms. A clone discloses a tenant, masked.
         || crate::clones::OPS.contains(&name)
+        // Dev branches (`plan-versions.md` §3.3): the deployment's, on
+        // `APPLY`'s terms. Deleting one drops its tenant's database.
+        || crate::branches::OPS.contains(&name)
         // The signed rehearsal (§3.2, 12b): the deployment's, on `APPLY`'s
         // terms. A `clone.readers` person may also rehearse (Q12): the
         // door lets them, not a role.
@@ -2699,6 +2715,16 @@ impl PlatformOps {
         })
     }
 
+    /// The door reads which tenants are dev branches, so a deployment admin
+    /// opens one (`crate::branches`, `clones::CloneAccess`).
+    async fn refresh_branch_access(&self) {
+        if let (Some(clones), Some(apply)) = (&self.clones, &self.apply) {
+            if let Err(e) = clones.access.refresh(&apply.pool).await {
+                eprintln!("branches: the door's register was not read again ({e})");
+            }
+        }
+    }
+
     fn tenant_ops(&self) -> Result<&crate::tenant_ops::TenantOps, ExecError> {
         self.tenants.as_deref().ok_or_else(|| {
             ExecError::internal(
@@ -2774,7 +2800,34 @@ impl PlatformOps {
             }
             crate::bucket_ops::ATTACH_BUCKET => self.buckets()?.attach(space, bound, caller).await,
             crate::bucket_ops::DETACH_BUCKET => self.buckets()?.detach(space, caller).await,
+            // `ordo apply --branch` (`plan-versions.md` §3.3): the apply's
+            // own op, with the tenant ops to make the branch's tenant.
+            crate::apply_op::APPLY if crate::branches::names_branch(bound) => {
+                let out = crate::branches::apply_op(
+                    self.apply_ops()?,
+                    self.tenant_ops()?,
+                    space,
+                    bound,
+                    caller,
+                )
+                .await;
+                self.refresh_branch_access().await;
+                out
+            }
             crate::apply_op::APPLY => self.apply_ops()?.apply(space, bound, caller).await,
+            name if crate::branches::OPS.contains(&name) => {
+                let out = crate::branches::execute(
+                    self.apply_ops()?,
+                    self.reap.as_deref(),
+                    name,
+                    space,
+                    bound,
+                    caller,
+                )
+                .await;
+                self.refresh_branch_access().await;
+                out
+            }
             name if crate::deploy_ops::OPS.contains(&name) => {
                 crate::deploy_ops::execute(self.apply_ops()?, name, space, bound, caller).await
             }

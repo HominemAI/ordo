@@ -1376,6 +1376,10 @@ Not built yet:
 - A branch number below the highest stored is taken, as a clone's is, so
   2 branches do not refuse each other. A used number with other content is
   still refused.
+- Main's rising-number check counts main's line alone: a version a branch
+  stored first and never activated (`$branch_versions`) does not count, so
+  a branch at 0.5.x never refuses main's 0.4.0 (owner, 2026-11-24). Main's
+  own lower number is still refused.
 - The tenant is made the first time with `std.space.create`'s path: a
   database of its own, the person applying as its founding owner. A
   server that gives no tenant a database refuses, naming why.

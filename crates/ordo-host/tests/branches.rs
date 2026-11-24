@@ -403,3 +403,63 @@ async fn a_tenant_that_is_not_a_branch_keeps_its_name() {
     assert!(matches!(e, BranchRefusal::TenantTaken { .. }), "{e}");
     assert!(e.to_string().contains("Rename the branch"), "{e}");
 }
+
+/// Main at `version`, with one op of its own so its content is new.
+fn main_at(version: &str, op: &str) -> String {
+    MAIN.replace("@ 0.1.0", &format!("@ {version}"))
+        + &format!("\nop {op} unbounded =\n  notes[title]\n")
+}
+
+async fn apply_main(d: &Dev, source: &str) -> Result<apply_op::Report, apply_op::ApplyRefused> {
+    apply_op::run(
+        &d.pool,
+        d.apply.pools.as_ref(),
+        source,
+        &apply_op::CodeFiles::new(),
+        ADA,
+        "t",
+        true,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_number_never_refuses_mains_lower_one() {
+    let d = dev("ordo_branches_numbers", true).await;
+    // A branch stores 0.5.0 and is never activated.
+    let b = apply(&d, "feature-x", &branch_b().replace("@ 0.3.0", "@ 0.5.0"))
+        .await
+        .expect("branch at 0.5.0");
+    assert_eq!(b.report.version, "0.5.0");
+
+    // Main's 0.4.0 is not refused for it, and serves.
+    let main = apply_main(&d, &main_at("0.4.0", "titles"))
+        .await
+        .expect("main's 0.4.0 is not behind a branch's number");
+    assert_eq!(main.version, "0.4.0");
+    let versions = Versions::on(&d.pool);
+    assert_eq!(
+        versions.active_version().await.unwrap().as_deref(),
+        Some("0.4.0")
+    );
+
+    // Main's own lower number is still refused, naming main's highest.
+    let e = apply_main(&d, &main_at("0.3.5", "headings"))
+        .await
+        .unwrap_err();
+    match &e {
+        apply_op::ApplyRefused::VersionBehind { highest, .. } => assert_eq!(highest, "0.4.0"),
+        other => panic!("refused as behind main's 0.4.0, not {other}"),
+    }
+
+    // The branch's number is still taken: other content under it is refused.
+    let e = apply_main(&d, &main_at("0.5.0", "other"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(e, apply_op::ApplyRefused::VersionTaken { .. }),
+        "{e}"
+    );
+
+    drop_db(&d, &database_of(&d, &b.branch.space).await);
+}

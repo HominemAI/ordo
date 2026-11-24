@@ -92,6 +92,42 @@ CREATE TABLE IF NOT EXISTS \"$branches\" ( \
 const COLUMNS: &str = "\"branch\", \"tenant\", \"space\", \"version\", \"actor\", \
      \"created_at\"::text, \"applied_at\"::text";
 
+/// `$branch_versions`: each version a branch apply stored first. Kept when
+/// the branch is deleted, because the version stays stored.
+const VERSIONS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$branch_versions\" ( \
+  \"version\" text PRIMARY KEY, \
+  \"branch\" text NOT NULL, \
+  \"at\" bigint NOT NULL \
+)";
+
+/// **The `@` numbers on main's line**: every declared number stored here,
+/// less those of versions a branch stored first and that were never
+/// activated. What main's rising-number check counts
+/// (`schema_apply::name_version`), so a branch at 0.5.x never refuses
+/// main's 0.4.0. A version main activates counts from then on.
+pub async fn main_declared_versions(pool: &Pool) -> Result<Vec<String>, PoolError> {
+    const ALL: &str = "SELECT DISTINCT \"declared\" FROM \"$artifacts\" WHERE \"declared\" <> ''";
+    const MAINS: &str = "SELECT DISTINCT a.\"declared\" FROM \"$artifacts\" a \
+         WHERE a.\"declared\" <> '' \
+         AND NOT EXISTS (SELECT 1 FROM \"$branch_versions\" b WHERE b.\"version\" = a.\"version\" \
+           AND NOT EXISTS (SELECT 1 FROM \"$activations\" x WHERE x.\"version\" = a.\"version\"))";
+    let rows = match pool.rows(MAINS).await {
+        Ok(rows) => rows,
+        // No branch ever stored a version, or nothing was ever activated.
+        Err(e) if e.is_missing_table() => match pool.rows(ALL).await {
+            Ok(rows) => rows,
+            Err(e) if e.is_missing_table() => return Ok(vec![]),
+            Err(e) => return Err(e),
+        },
+        Err(e) => return Err(e),
+    };
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect())
+}
+
 /// Why a branch op was refused. Each names what fixes it.
 #[derive(Debug)]
 pub enum BranchRefusal {
@@ -450,6 +486,19 @@ pub async fn apply(
     program.version = version.clone();
 
     ensure(&ops.pool).await?;
+    // A version this branch stored first stays off main's number line until
+    // main activates it.
+    if matches!(report.stored, apply_op::Stored::Written) {
+        ops.pool.rows(VERSIONS_DDL).await?;
+        ops.pool
+            .rows(&format!(
+                "INSERT INTO \"$branch_versions\" (\"version\", \"branch\", \"at\") \
+                 VALUES ({}, {}, {at}) ON CONFLICT DO NOTHING",
+                sql_lit(&version),
+                sql_lit(branch)
+            ))
+            .await?;
+    }
     let (space, created) = match existing {
         Some(b) => (b.space, false),
         None => {

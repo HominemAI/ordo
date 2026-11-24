@@ -6,8 +6,8 @@ visitor leave a message.
 
 ## What it shows
 
-- `site.ordo`: three public entities (`products`, `plans`, `testimonials`), one
-  private entity (`enquiries`), and these ops:
+- `site.ordo`: public product fields, public plans and testimonials, private
+  product notes and enquiries, and these ops:
   - Public reads: `catalogue`, `product` (by slug), `pricing`, `reviews`.
   - One public write: `contact`.
   - For the site owner: `addProduct`, `addPlan`, `addTestimonial`, `enquiryList`.

@@ -67,6 +67,7 @@ pub(crate) const MASTER_KEY_SHORT: &str = "ORDO_MASTER_KEY is too short to be a 
 pub mod custody;
 pub mod inline;
 pub mod master;
+pub mod recipient;
 pub mod sealed;
 pub mod stream;
 

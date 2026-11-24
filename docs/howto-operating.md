@@ -112,13 +112,13 @@ If any check fails, the output names which ops failed and why. The node keeps se
 
 - `schema     created` on an empty database (none of the program's tables, nothing serving): the whole schema is created in one transaction, recorded in `$migrations`, and the apply goes on to store and activate. This is the first deployment.
 - `schema     matches`: the database holds everything the program declares. Store and activate.
-- `schema     behind`: the database lacks something the program declares, so no node could load it. The artifact is stored and activation is **refused**; the output names the changes and the command to run (`ordo migrate --apply`, below). Run it, then `ordo apply` again.
+- `schema     behind`: the database lacks something the program declares, so no node could load it. The artifact is stored and activation is **refused**; the output names the changes and the command to run (`ordo evolve --run`, below). Run it, then `ordo apply` again.
 - `REFUSED  serving_schema_drifted`: the registry names a serving version and none of its tables exist. Restore the database, or clear `$artifacts` and `$activations` if the registry is what is wrong. Nothing is created over a registry that disagrees with the catalog.
 
 A refusal over the door carries the same class the database path prints,
 under a wire code: `apply_refused` (the program or one of its ops does not
 compile, and nothing was stored), `not_activated` (stored, and the load gate
-would refuse it: run `ordo migrate --apply`), `apply_in_progress`,
+would refuse it: run `ordo evolve --run`), `apply_in_progress`,
 `schema_drift` (the registry names a serving version whose tables are gone).
 
 **First deployment:**
@@ -147,23 +147,34 @@ REFUSED  2 op(s) in this program do not compile, so no node could load the artif
 
 ## Changing the Schema
 
-A program whose entities changed needs the database moved before the artifact can be activated. Two commands, in this order:
+A program whose entities changed needs the database moved before the artifact can be activated. Every step goes through the door (ruled 2026-11-05). First the plan, then the stored plan:
 
 1. `ordo plan ./myprogram.ordo --host <h>` asks the deployment what applying the program would do (`std.deployment.plan`) and prints the verdict and every change between the database and the program, classified (`A2`, `C1`, `B5`…), with what refuses it. Read-only. Exit code 1 means the apply would refuse, and the report says which. `--against <db>` is gone: the plan goes through the door.
-2. `ordo migrate ./myprogram.ordo --apply --direct --db prod --as my-service` runs the same plan and then applies it: class A (a new entity, an optional field, a constant-defaulted field, an index) in one transaction, then each constraint validated and each index built concurrently after it. A foreign key or a check onto a table that exists is added `NOT VALID` in the transaction (a moment's lock, no scan) and validated as its own step (the rows scanned under a lock that lets writes continue). A unique applies only where it constrains no existing data. Recorded in `$migrations` and on the deployment's security stream. Then `ordo apply` stores and activates.
+2. Through the door, with stored plans (increment 8): `ordo apply ./myprogram.ordo --no-activate --host <h>` stores the version, then `ordo evolve ./myprogram --from <serving> --to <version> --host <h>` renders the step between the 2 stored versions, refuses it if any change cannot be made (naming the fix, such as `--places invoice.total=rescale`), and stores it in `$plans` with its digest. The receipt is written to `./myprogram/receipts/<from>-to-<to>.json` for the repository. `--run` runs the stored plan on the deployment's own database. `--digest <d>` refuses a deployment that renders another digest, so staging can check it runs what dev rendered. `ordo evolve --tenant <id>` replays the stored path on that tenant's database, one step at a time, then pins it. `ordo evolve --list` shows the stored plans. Each step checks the version the database records first and refuses a stale one. A field or entity a version stops declaring is orphaned: kept with what was written, never written again, and still reached by erasure and export. `ordo evolve --orphans` lists them with their drop dates. `ordo evolve --prune <entity.field>` removes one from every database when asked twice, `--confirm <entity.field>`, and in production `--confirm-deployment <domain>`. Pruning is off in production until `ordo environments set prune on --reason "..."`.
+3. Before a step is stored, its pre-checks ask every database (the deployment's own and each tenant's) for rows the new shape would refuse, and list each with its fix. `--run` refuses while one is open. Fix the rows through the app, then run it again. Then `ordo apply ./myprogram.ordo --host <h>` activates the version.
 
-**Healthy result:**
+`ordo migrate --apply --direct` is removed (ruled 2026-11-05: every evolution command is a door op). Typed, it refuses and names `ordo evolve`.
+
+**Healthy result** (`ordo evolve --from 0.3.0 --to 0.3.1 --run`):
 ```
-APPLY  (5 statement(s))
-  tx  A2  ALTER TABLE "orders" ADD COLUMN "note" text;
-  tx  A3  ALTER TABLE "orders" ADD COLUMN "priority" bigint NOT NULL DEFAULT 0;
-  tx  C9  ALTER TABLE "orders" ADD CONSTRAINT "orders$priority_gte_0" CHECK ("priority" >= 0) NOT VALID;
-  vc  C9  ALTER TABLE "orders" VALIDATE CONSTRAINT "orders$priority_gte_0";
-  cc  A4  CREATE INDEX CONCURRENTLY "orders$customer$placed$ix" ON "orders" ("$space", "customer", "placed");
-  APPLIED  3 statement(s) in one transaction, 1 constraint(s) validated and 1 index(es) built concurrently after it;
-           recorded as `$migrations` #7; event recorded on the deployment stream
-  next     `ordo apply ./myprogram.ordo --direct --db prod` stores and activates abc123def456…
+plan       0.3.0 to 0.3.1
+digest     sha256:9e8afbed088559cf577d0af933a7669f26c701f1e7fdb386f52a28eac80860bd
+stored     already stored
+  C1 [C] `notes.title` becomes unique
+      reverse: ALTER TABLE "notes" DROP CONSTRAINT "notes$title$uq";
+  forward: ALTER TABLE "notes" ADD CONSTRAINT "notes$title$uq" UNIQUE NULLS NOT DISTINCT ("$space", "title");
+prechecks  2 database(s) asked, 0 issue(s)
+ran        on the deployment's database: 1 statement(s)
 ```
+
+**Bad data looks like** (the same step, before the rows were fixed):
+```
+prechecks  2 database(s) asked, 1 issue(s)
+ISSUE      database `…/spc_269rpaydr3aphwaw6xr3acrdc0`: C1 duplicates over `notes`.`title`
+             space `spc_269rpaydr3aphwaw6xr3acrdc0`  value twice  2 row(s)
+  fix      make `notes`.`title` distinct in each space listed, through the app's own ops, or leave `unique` out of `0.3.1`. Ordo does not choose which row survives
+```
+`--run` then answers `REFUSED  [apply_refused] the plan was stored and not run: precheck_failed`, with the same lines.
 
 The deployment keeps serving throughout: the serving artifact tolerates the extra column, and the new artifact reads it once activated.
 
@@ -323,14 +334,25 @@ A node can serve more than one version at once. The active version is the one an
 - **A pin** is the version one tenant is served. `$spaces.version` holds it, in the control database, with an epoch that grows by 1 on every change. `$pins` keeps every change: from, to, epoch, who, why, when.
 - **The active version** is where new tenants start (unless `versions.new_tenant` names another) and where an activation moves every tenant.
 - **A new tenant gets its own version's tables.** With `versions.new_tenant` set, each node keeps that version loaded, and a new tenant's database is made in its shape. A beta that adds a table works for its tenants at once. A node still loading it refuses the create for a moment, nothing made, and the identical call lands once it has. The catch-up leaves such a database alone; it is on its pin, not behind.
-- **An activation moves every tenant at once**, a tenant you pinned elsewhere included. Rollouts that move tenants in batches come later.
+- **An activation moves every tenant at once**, a tenant you pinned elsewhere included, unless `rollout.strategy` is set (next item).
+- **Rollouts** (`plan-versions.md` §3.7). A rollout moves tenants to a stored version a batch at a time.
+  - Start one: `ordo rollout start <version> [--strategy rolling|all] [--batch-interval 5m] [--window 1h] [--failure-threshold 1] [--deployment-space first|last] [--batch-size <n>]`. With `rollout.strategy` set, `ordo apply` starts one itself and returns when it starts.
+  - Follow it: `ordo rollout status`. It names each tenant that waits, failed or was skipped, and why.
+  - Control it: `resume`, `skip <tenant>`, `retry <tenant>`, `abort --reason "..."`, `finish`, `hold <tenant> --reason "..."` or `--clear`. Each is a door op, `std.deployment.rollout.*`, with no reauth, and one entry on the security stream.
+  - One rollout runs at a time. A second, and an activation, are refused naming `ordo rollout status` and `ordo rollout abort`. One tenant may still move on its own (`ordo versions pin`), and the rollout then skips it.
+  - The deployment's own space moves first, like a tenant, or last with `rollout.deployment_space` `last`. The active version changes only when the rollout finishes: sign-in and new tenants follow it then.
+  - A tenant outside its maintenance window waits, and so does a held one. A tenant whose database cannot be reached waits; it is never failed.
+  - `rollout.failure_threshold` failed tenants pause the rollout. A failed tenant serves its old version. `retry` or `skip` it, then `resume`.
+  - `abort` stops new moves. Moved tenants stay; `ordo rollback` moves them back.
+  - `retry <tenant>` with no rollout reopens a tenant's refused move for the catch-up.
+  - The settings are stored in Ordo beside the version settings: `ordo rollout settings`, `ordo rollout set <setting> <value> --reason "..."`. Every node runs the worker every `ORDO_ROLLOUT_TICK_SECS` seconds (default 5); one node leads each turn under a lock, and another goes on when it dies.
 - **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no reauth, of a person or of a machine key, so you can move many tenants at once and your own system may drive moves (owner, 2026-11-05).
 - **See one tenant's version:** `ordo versions list --tenant <id>` prints its version, its epoch and every pin change. Through the door: `std.deployment.tenantVersion`.
 - `ordo versions list` says, per version, how many tenants it serves, and marks the active one `active (new tenants)`.
 - **How a node learns of a pin.** Every pin change notifies the nodes in its own transaction. A node then reads `$pins` from the last row it read. It also reads every pin again every `ORDO_PINS_RECONCILE_SECS` seconds (`pins.reconcile_interval`, default 30), so a missed notice costs at most that long.
 - **Loading.** A node loads every version a pin names at boot and when a pin first names it, one at a time. A request never starts a load. A tenant whose version is still loading answers "closed for a moment" and the same request lands once it has. A version no pin names any more is dropped.
 - **The pin fence.** Each tenant's own database records the newest epoch any node wrote under (`$pin_fence`). A node whose pin is older has its write refused, reads the pin again and writes once more. The caller sees one answer.
-- **Which moves wait for a maintenance window.** Only a move off a revoked version (above). An activation and a pin move a tenant at once, whatever its window says.
+- **Which moves wait for a maintenance window.** A move off a revoked version (above) and a rollout's move. An activation and a pin move a tenant at once, whatever its window says.
 - **The version settings live in Ordo**, not the environment (owner, 2026-11-05). They are stored in the control database with who set each, when and why. Every node reads the one stored value.
   - Read them: `ordo versions settings` (or `std.deployment.versionSettings`, or the console's Deploys screen). It prints the three and the recent changes.
   - Change one: `ordo versions set <served|minimum|new-tenant> <value> --reason "..."`, or `--clear` for the default. Through the door: `std.deployment.setVersionSetting`. You, or your own system with a machine key that has the `deployment` grant. No reauth is asked below `ORDO_SECURITY_LEVEL=high`.
@@ -338,10 +360,14 @@ A node can serve more than one version at once. The active version is the one an
   - A change reaches every node at once, on the same notice as a pin, and at the latest on the next reconcile tick.
 - **Which versions stay served** is yours to set. `in-use`, the default, serves every version a tenant is pinned to. A list, such as `ordo versions set served '#4,#5'`, serves only those beside the active version: a pin or move target outside it is refused, naming the value to add. A list that leaves out a version tenants are on is refused the same way.
 - **The oldest version a tenant may stay on:** `ordo versions set minimum '#4'`. Tenants below it move in their maintenance window, or on demand (`ordo versions move`), as off a revoked version. Nothing is pinned, activated or started below it. A minimum above the active version is refused.
+- **The chain of environments** (dev, staging, production) is declared on each deployment. A deployment that registered nothing is production, with no action from you. Register one: `ordo environments register dev --reason "..."`. It goes before this deployment's own, or at `--position <n>`. Read the chain: `ordo environments list [<name>]`. Through the door: `std.deployment.environments` and `std.deployment.registerEnvironment`. A command that names an environment not registered is refused, and the refusal names `ordo environments register <name>`. Say which one a deployment is: `ordo environments set-own <name> --reason "..."`. Remove or rename one: `ordo environments remove <name>` and `rename <name> <new>`, each with `--reason`. The deployment's own cannot be removed, and neither can one a stored promotion names be removed or renamed.
+- **Where the step before answers** is recorded on the next step: `ordo environments door dev https://dev.example.com system --handle dev --reason "..." --host <staging>`. The address is that deployment's door, `system` is its own space (its `ORDO_SPACE`), and `--handle` is its handle at the identity service (its `ORDO_IDENTITY_DEPLOYMENT`). Plain `http://` is taken only to loopback, unless `ORDO_PROMOTION_PLAIN_HTTP=on`. `--clear` forgets it.
+- **Promoting a version** goes through the target: `ordo promote <version> --reason "..." --host <target>`. The target reads the version from the step before itself, as you: the CLI asks your `ordo login` sign-in for a token for the step before's handle (or takes `--from-token <t>`) and hands it to the target, which sends it there once and keeps nothing. Sign in to both through the same identity service, as an admin of both; no machine key is involved. The target refuses a version the step before has not activated, files that differ from what it recorded (naming the file), a step before that read someone else, and its own missing secrets, external entities and `reader` roles, before it stores anything. The promotion is recorded in `$promotions` and on the security stream. Every step after the first (staging and production) pins only versions that arrived this way; versions stored before the first environment was registered still count. `ordo environments set skip-staging on --reason "..."` makes a promotion past staging read from the step before it.
+- **`ordo apply` goes to dev**, the first step of the chain. A deployment that registered nothing is its own first step, so it applies as before. On staging or production it is refused, naming dev's address and `ordo promote`. `ordo apply --env <name>` refuses a name that is not registered or not this deployment.
 - **Where new tenants start:** `ordo versions set new-tenant <version>`, such as a beta. A version not stored, revoked, or outside the served list is refused.
 - **Upgrading from the environment variables.** `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM` and `ORDO_VERSIONS_NEW_TENANT` are read once. On the first boot after the upgrade, a value set there is stored, if nothing is stored yet, and the log says the variable is now ignored and can be removed. Each later boot while it stays set logs that it is ignored. A value the checks refuse is not stored; the log says why, and the boot goes on.
 - **A stored problem never stops a boot.** If a stored setting no longer fits what is applied, boot logs it, naming the setting, and serves on (owner, 2026-11-02: an upgrade never stops a running deployment).
-- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (`versions.new_tenant` as that node last read it), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads.
+- **Per-node health.** `/health/deploy`, read with the deployment owner's token, lists each node with `alsoServing` (versions served beside the active one), `newTenant` (`versions.new_tenant` as that node last read it), and `notLoaded`: each version a pin names that the node could not load, with why. Their tenants are closed on that node until it loads. `loading` lists the versions the node is loading now, apart from the ones it serves.
 
 ## Health Endpoints
 

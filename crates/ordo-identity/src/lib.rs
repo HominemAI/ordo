@@ -93,7 +93,10 @@ pub use passkey::{
     PasskeyStoreError, PendingRegistration, RelyingParty, RelyingPartyError, RequestOptions,
     SecondStepProof, StoredPasskey, UserPresence, UserVerification, CHALLENGE_TTL_SECS,
 };
-pub use pins::{compare, decode_pins, encode_pins, EntityPin, GuardPin, OpPin, PinDrift};
+pub use pins::{
+    compare, decode_pins, disagreement, encode_pins, Disagreement, EntityPin, GuardPin, OpPin,
+    PinDrift,
+};
 pub use principal::{
     AccessProfile, AuthMethodKind, CapabilityGrant, ClientId, DelegationId, GrantId, GroupId,
     ManifestHash, MemberOverride, MembershipStatus, Principal, PrincipalId, PrincipalKind, Role,

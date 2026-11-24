@@ -1,0 +1,253 @@
+# Fixture for note_viewer's e2e (plan-versions.md increment 14): notes v3
+# with `notes.tags` no longer declared, at 0.3.2. It keeps 0.3.1's rename
+# of `title` to `heading` (notes-heading.ordo.fixture), which runs
+# before it. The note viewer maps `tags`. Once this version serves, `notes.tags` is an orphan: kept, never
+# written, and taken out of the viewer's grant (owner ruling 2026-11-23,
+# Q1). The viewer is held with `external_changed`, naming the column.
+#
+# Not an example to copy: the notes page reads `tags` and is not used
+# after this is applied.
+#
+# Notes v3. Notes v2 (examples/notes-v2) with one field added and one taken
+# away, applied over a running notes v2 to show a version move with people
+# using it (plan-versions.md, increment 7a). There is no v3 page: the v2
+# page stays open across the move and keeps working, which is the point.
+#
+# What v3 changes over a live v2, by change class (`ordo plan` codes):
+#
+#   notes.starred     A  a field with a constant default: every v2 note reads false
+#   attachments.size  -  no longer declared. Its column stays, with what v2
+#                        wrote in it, and nothing reads or writes it. A drop is
+#                        never applied by `ordo apply` (plan-schema-evolution.md
+#                        §8.2); pruning it is increment 14.
+#   attachments.mediaType  B4  renamed from `kind` with `prev(kind)`: a new
+#                        column, every v2 value copied into it, the `kind`
+#                        column kept. The ops still answer `kind`, so the v2
+#                        page reads the same rows (plan-syntax-additions.md §5).
+#
+# `addAttachment` still takes `$size`, and does not store it, so a page
+# built for v2 that sends it can still add a file. `myFiles` no longer
+# answers `size`; the v2 page reads a missing size as 0.
+#
+# Once v3 has landed in every environment, `ordo apply` offers to remove
+# the `prev(kind)` mark (`--remove-landed-prev`). The stored plan keeps the
+# rename for any tenant still behind.
+#
+# What follows is notes v2's own description.
+#
+# Notes owned by their author, shared read-only one note at a time, with
+# pins, an archive and files.
+#
+# `acl` derives the link entity `notesAccess`, the guards on `notes`,
+# `grantNotesAccess` and `revokeNotesAccess`, and the creator's admin
+# row in the same command group as the create.
+#
+# `deleteNote` is a plain `del`. A note owns its access rows and its
+# attachments, so they go with it (owner ruling 2026-09-29, `owned-delete`).
+# A file whose row is gone is collected by the blob worker.
+#
+# `tags` is a JSON array of words, `["work", "ideas"]`. `notesTagged` asks
+# the array for one word with `contains`, inside the document.
+#
+# What v2 changes over a live v1, by change class (`ordo plan` codes):
+#
+#   notes.pinned      A  a field with a constant default: every v1 note reads false
+#   notes.archived    A  an optional field: every v1 note reads null, not archived
+#   attachments       A  a new entity, its foreign key to notes inline
+#   reminders         A  a new entity, its foreign key to notes inline
+#
+# All four are additive, so `ordo apply` makes them itself
+# (ORDO_APPLY_SAFE_CHANGES, on by default) and no v1 row is touched.
+
+domain notes @ 0.3.2
+
+# note_viewer (examples/note-viewer) is a second deployment that reads these
+# notes. v3 changes nothing it reads, so it reads through the move. This
+# line is the notes app's consent: its database role, named by
+# ORDO_READER_NOTE_VIEWER_ROLE, gets SELECT on these two tables and the
+# sign-in columns, and nothing else. Postgres refuses it every other table.
+# Which rows a viewer's user sees is the viewer's own guard. It follows this
+# file's acl: a person sees a note they hold a level on. A note tagged
+# `public` is shown to anyone there.
+reader note_viewer reads notes, notesAccess
+
+entity notes {
+  # 0.3.1: was `title`. The old column is kept and written while a
+  # version that reads it is served.
+  heading: text = "" prev(title)
+  body:  text = ""
+  created: datetime
+  pinned: bool = false
+  # When the note was archived. Null is a note in the list.
+  archived: datetime?
+  # v3: a star, false on every note written before it.
+  starred: bool = false
+  acl (read, write, admin)
+}
+
+# A file on a note. The row comes first and the bytes follow through the
+# blob door: `PUT /blob/attachments/file/{id}`. A blob is never an op
+# parameter. `kind` is the file's media type, kept on the row because the
+# blob's own `mime` is not readable from an op yet. The row inherits the
+# note's acl, so a guest who reads a note reads its files.
+entity attachments {
+  note -> notes owned
+  name: text
+  # v3: was `kind`. The media type of the file.
+  mediaType: text = "" prev(kind)
+  created: datetime
+  file: blob?
+}
+
+op createNote($title: text, $body: text, $created: datetime) =
+  set notes { heading: $title, body: $body, created: $created }
+
+op editNote($id: id, $rev: int, $title: text, $body: text) =
+  set notes { id: $id, rev: $rev, heading: $title, body: $body }
+
+op deleteNote($id: id) =
+  del notes { id: $id }
+
+op pinNote($id: id, $rev: int, $pinned: bool) =
+  set notes { id: $id, rev: $rev, pinned: $pinned }
+
+op archiveNote($id: id, $rev: int, $at: datetime) =
+  set notes { id: $id, rev: $rev, archived: $at }
+
+op unarchiveNote($id: id, $rev: int) =
+  set notes { id: $id, rev: $rev, archived: null }
+
+# v3: star a note, or take its star off.
+op starNote($id: id, $rev: int, $starred: bool) =
+  set notes { id: $id, rev: $rev, starred: $starred }
+
+# v3: the starred notes. A new op, so no share made under v2 lists it, and
+# `allNotes` keeps the columns v2's shares pinned.
+op starredNotes unbounded =
+  notes(starred == true)[id, rev, title: heading, created]
+  sort -created
+
+# Take one note back from one guest. `revokeNotesAccess` is the derived form;
+# this one names the note and the guest and so needs no access row id.
+op unshareNote($note: id, $member: id) =
+  del notesAccess(note == $note and member == $member)
+
+# A reminder on a note: when it is due, and when it fired. One per note.
+# It is a row of its own and not a field on the note, so setting it or
+# firing it leaves the note's revision alone and an open editor never sees
+# a conflict for it. It inherits the note's acl, and no share lists
+# `myReminders`, so a guest who reads the note never sees its reminder.
+entity reminders {
+  note -> notes owned unique
+  due: datetime
+  # When the routine below fired it. Null is a reminder still to come.
+  fired: datetime?
+}
+
+# Set or move a note's reminder. The unique `note` makes this a create the
+# first time and a change after, and a moved reminder fires again.
+op setReminder($note: id, $due: datetime) =
+  set reminders { note: $note, due: $due, fired: null }
+
+# Take a note's reminder off, or dismiss one that fired.
+op clearReminder($note: id) =
+  del reminders(note == $note)
+
+# Every reminder on the caller's notes, with whether it fired.
+op myReminders unbounded =
+  reminders[id, rev, note, due, fired]
+  sort due
+
+# Fire what is due. Each run marks a due reminder fired, so the next run no
+# longer matches it: a reminder fires once, across restarts and servers (a
+# schedule fires once for the deployment). `notify admin` then emails the
+# note's owner, the one person who holds `admin` on it, through the
+# deployment's mail. A guest holds `read` and is not told. The mail carries
+# only this text; the note itself stays in the app.
+#
+# Every 30 seconds, in every tenant. A shorter period costs a run per tenant
+# that often.
+routine fireReminders in notes {
+  trigger every 30s
+  notify admin "A reminder on one of your notes is due"
+  run($now: datetime):
+    reminders(due <= $now and fired == null)[id]
+    each ->
+      set reminders { id: id, fired: $now }
+}
+
+# v1's list, kept exactly as it was. A share pins the columns of the ops it
+# lists, and an op that answers more columns than were pinned closes every
+# share that lists it until the sharer shares again. So the shares people
+# accepted under v1 keep working because this op does not change.
+op myNotes unbounded =
+  notes[id, rev, title: heading, body, created]
+  sort -created
+
+# Every note with its pin and archive state, archived ones too. The page
+# shows pinned first and hides the archived behind a filter, from the device
+# copy, so both work offline. Shares made under v2 list this op.
+#
+# `download` puts these rows in a person's own download (`GET /download`,
+# "Download all my notes"): `notes.json` holds every note this person may
+# read, with these fields. Reminders are not marked, so they stay out.
+op allNotes unbounded download =
+  notes[id, rev, title: heading, body, created, pinned, archived]
+  sort -created
+
+# A file's row, made before its bytes are sent. `$size` is taken and not
+# stored (v3), so a page built for v2 still adds a file.
+op addAttachment($note: id, $name: text, $kind: text, $size: int, $created: datetime) =
+  set attachments { note: $note, name: $name, mediaType: $kind, created: $created }
+
+# Taking a file off a note. Its bytes are collected once no row names them.
+op removeAttachment($id: id) =
+  del attachments { id: $id }
+
+# Every file on every note this caller may read. `file` answers the handle
+# the blob door serves the bytes by.
+#
+# `download`: `attachments.json` in a person's own download, and because
+# `file` is a blob field, each file's bytes under `files/attachments/`.
+op myFiles unbounded download =
+  attachments[id, rev, note, name, kind: mediaType, created, file]
+  sort created
+
+# A title for a note, suggested by a language model. The page sends the
+# note's text and gets `{ title }` back. It runs as the signed-in person, in
+# a fresh WebAssembly instance, and reaches one host. `llmKey` is set per
+# environment by the deployment owner (`ordo secret set llmKey`); the code
+# holds a handle to it and never the value, and the host sends it to
+# api.anthropic.com and nowhere else.
+secret llmKey for api.anthropic.com
+
+function suggestTitle in notes {
+  call($text: text(20000)) -> json by member
+  code "fn/suggest-title.js"
+  egress api.anthropic.com
+  secrets llmKey
+  limit wall 30s, memory 64 mb
+}
+
+# One note, by id, for `titleNote`. The note's guard applies: a person
+# reads only a note they may read.
+op oneNote($id: id) =
+  notes(id == $id)[id, rev, title: heading, body]
+
+# A new title for a note, and nothing else.
+op retitleNote($id: id, $rev: int, $title: text) =
+  set notes { id: $id, rev: $rev, heading: $title }
+
+# Give a saved note a title from a language model, and save it. It reads
+# the note with `oneNote` and writes the title with `retitleNote`, both as
+# the person who pressed the button: a note they may not read or write is
+# refused, and the write lands in the note's history as this function on
+# behalf of that person. `uses` lists every op it may call.
+function titleNote in notes {
+  call($note: id) -> json by member
+  code "fn/title-note.js"
+  egress api.anthropic.com
+  secrets llmKey
+  uses oneNote, retitleNote
+  limit wall 30s, memory 64 mb
+}

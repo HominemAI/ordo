@@ -288,13 +288,31 @@ impl Worker for TriggersClock {
             // tick during a pause is recorded and not caught up on resume,
             // and a routine marked `nopause` still runs. One mechanism for
             // the clock and the runner (`plan-tenant-pause.md` §5).
-            let spaces: Vec<LogSpace> = match &wiring.tenants {
-                Some(t) => t.list(&ctx.pool).await.into_iter().map(LogSpace).collect(),
-                None => vec![LogSpace(ctx.space.0.clone())],
+            let Some(t) = &wiring.tenants else {
+                let spaces = vec![LogSpace(ctx.space.0.clone())];
+                let fired =
+                    triggers::fire_clock_in(&ctx.pool, &spaces, &wiring.clock, ctx.now()).await?;
+                return Ok(Progress::did(fired.len() as u64));
             };
-            let fired =
-                triggers::fire_clock_in(&ctx.pool, &spaces, &wiring.clock, ctx.now()).await?;
-            Ok(Progress::did(fired.len() as u64))
+            // The schedules are the union over served versions
+            // (`plan-versions.md` §1.10): each one enqueues a run only for
+            // the tenants whose own version declares it.
+            let all = t.list(&ctx.pool).await;
+            let mut fired = 0u64;
+            for r in wiring.clock.iter() {
+                let key = r.key();
+                let spaces: Vec<LogSpace> = all
+                    .iter()
+                    .filter(|s| t.declares(s, &key))
+                    .cloned()
+                    .map(LogSpace)
+                    .collect();
+                fired +=
+                    triggers::fire_clock_in(&ctx.pool, &spaces, std::slice::from_ref(r), ctx.now())
+                        .await?
+                        .len() as u64;
+            }
+            Ok(Progress::did(fired))
         })
     }
 }

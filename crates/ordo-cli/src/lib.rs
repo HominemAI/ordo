@@ -56,6 +56,7 @@ pub mod rollout;
 pub mod signin;
 pub mod skill;
 pub mod sources;
+pub mod tenant_builds;
 pub mod triggers;
 pub mod windows;
 // 17u: the CLI talking to a deployment rather than to its database.

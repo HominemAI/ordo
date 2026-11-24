@@ -1652,6 +1652,7 @@ impl<'a> Rollouts<'a> {
             _ => (None, String::new()),
         };
 
+        crate::versions::ensure_build_tables(self.pool).await?;
         let tx = self.pool.begin().await?;
         tx.rows(&pin_lock_sql()).await?;
         if let Some((id, target)) = crate::versions::open_rollout_in(&tx).await? {
@@ -1702,13 +1703,16 @@ impl<'a> Rollouts<'a> {
             ))
             .await?;
         }
+        // A tenant a tenant build holds is not the rollout's: its build
+        // moves it (increment 16).
         tx.rows(&format!(
             "INSERT INTO \"$rollout_tenants\" (\"rollout\", \"space\", \"ord\", \"state\", \"at\") \
              SELECT {id}, \"$space\", row_number() OVER (ORDER BY \"$space\"), 'queued', {at} \
              FROM \"$spaces\" \
              WHERE \"state\" IN ('provisioning', 'active', 'paused') \
-               AND \"version\" IS NOT NULL AND \"version\" <> {}",
-            sql_lit(&target)
+               AND \"version\" IS NOT NULL AND \"version\" <> {} {}",
+            sql_lit(&target),
+            crate::versions::NOT_IN_A_BUILD,
         ))
         .await?;
         // The first stage: a random few for a canary; the group or the
@@ -2221,6 +2225,7 @@ async fn lead(
     let Some(r) = rollouts.open().await? else {
         return Ok(());
     };
+    crate::versions::ensure_build_tables(pool).await?;
     out.rollout = Some(r.id);
     pool.rows(&format!(
         "UPDATE \"$rollouts\" SET \"leader\" = {}, \"led_at\" = {now} WHERE \"id\" = {}",
@@ -2243,9 +2248,10 @@ async fn lead(
          WHERE s.\"state\" IN ('provisioning', 'active', 'paused') \
            AND s.\"version\" IS NOT NULL AND s.\"version\" <> {target} \
            AND NOT EXISTS (SELECT 1 FROM \"$rollout_tenants\" t \
-             WHERE t.\"rollout\" = {id} AND t.\"space\" = s.\"$space\")",
+             WHERE t.\"rollout\" = {id} AND t.\"space\" = s.\"$space\") {not_in_a_build}",
         id = r.id,
-        target = sql_lit(&r.target)
+        target = sql_lit(&r.target),
+        not_in_a_build = crate::versions::NOT_IN_A_BUILD,
     ))
     .await?;
 
@@ -2257,7 +2263,9 @@ async fn lead(
             "SELECT t.\"space\", s.\"version\", s.\"state\", \
                (SELECT p.\"cause\" || ' ' || p.\"actor\" || ' ' || p.\"to\" FROM \"$pins\" p \
                  WHERE p.\"space\" = t.\"space\" AND p.\"seq\" > {pin_seq} \
-                 ORDER BY p.\"seq\" DESC LIMIT 1) \
+                 ORDER BY p.\"seq\" DESC LIMIT 1), \
+               (SELECT b.\"build\" FROM \"$tenant_build_members\" b \
+                 WHERE b.\"space\" = t.\"space\") \
              FROM \"$rollout_tenants\" t \
              LEFT JOIN \"$spaces\" s ON s.\"$space\" = t.\"space\" \
              WHERE t.\"rollout\" = {id} AND t.\"space\" <> {step} \
@@ -2272,8 +2280,17 @@ async fn lead(
         let version = row.get(1).cloned().flatten();
         let state = row.get(2).cloned().flatten();
         let last = row.get(3).cloned().flatten().unwrap_or_default();
+        let build = row.get(4).cloned().flatten();
         let serving = matches!(state.as_deref(), Some("provisioning" | "active" | "paused"));
-        if !serving {
+        if let Some(build) = build {
+            // It joined a tenant build after the rollout started: the build
+            // moves it now (increment 16).
+            let why = format!("it is in tenant build `{build}`, which moves it");
+            rollouts
+                .set_tenant(r.id, &space, TenantState::Skipped, &why, now)
+                .await?;
+            out.skipped.push((space, why));
+        } else if !serving {
             let why = "it no longer serves (reaped or failed)".to_string();
             rollouts
                 .set_tenant(r.id, &space, TenantState::Skipped, &why, now)

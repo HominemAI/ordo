@@ -129,6 +129,16 @@ export default defineConfig({
       dependencies: ['evolve-checks'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A rename on one tenant under live writes (plan-versions.md, increment
+    // 11a): the move with dual writes, the soak, a revert and the close, with
+    // the page open. It moves one tenant onto 0.3.2, so it runs after
+    // `orphans`, last. Locally, `--project=moves --no-deps`.
+    {
+      name: 'moves',
+      testMatch: /evolve\/dual-writes\.spec\.ts/,
+      dependencies: ['orphans'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

@@ -2415,6 +2415,9 @@ impl<'a> Versions<'a> {
     /// the same transaction, so every node takes the overlays before it
     /// writes again (the pin fence refuses one that has not). An
     /// activation's move for the tenant is replaced. The epoch after.
+    // The move's two ends, its step and overlays, and who and when: each
+    // is one column of the row it writes.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_dual_move(
         &self,
         space: &str,

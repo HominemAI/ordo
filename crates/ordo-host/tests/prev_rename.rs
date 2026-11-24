@@ -121,12 +121,14 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         lines.contains("forward: ALTER TABLE \"note\" ADD COLUMN \"heading\""),
         "{lines}"
     );
+    // A stored plan copies the values with the backfill worker, so a tenant
+    // keeps writing while it moves (increment 11a); the new column's
+    // `NOT NULL` lands after the copy.
+    assert!(lines.contains("backfill: note.heading = title"), "{lines}");
     assert!(
-        lines.contains("forward: UPDATE \"note\" SET \"heading\" = \"title\";"),
-        "{lines}"
-    );
-    assert!(
-        lines.contains("forward: ALTER TABLE \"note\" ALTER COLUMN \"heading\" SET NOT NULL;"),
+        lines.contains(
+            "after backfill: ALTER TABLE \"note\" ALTER COLUMN \"heading\" SET NOT NULL;"
+        ),
         "{lines}"
     );
     assert!(

@@ -725,3 +725,53 @@ async fn a_second_worker_is_busy_and_a_done_backfill_does_nothing() {
     assert_eq!((again.state.as_str(), again.rows_this_run), ("done", 0));
     assert!(w.verify_and_close().await.unwrap().already);
 }
+
+/// Increment 11a: **a move with dual writes is refused where it cannot keep
+/// both shapes current**, each refusal naming the fix. A tenant whose rows
+/// are in the deployment's own database shares it with tenants that would
+/// not write both shapes (11b). A step filled by a backend function has no
+/// per-row mapping for the write path (D16's one-way step).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_with_dual_writes_is_refused_where_it_cannot_keep_both_shapes() {
+    let choices = fills(
+        "note.heading=fn headline secrets apiKey hosts api.example.com",
+        "",
+    );
+    let (_rpg, registry, _tpg, tenant, plan) =
+        setup("ordo_backfill_move", &v2_fn(), &choices).await;
+    let ctx = settings(50, None);
+
+    // The deployment's own database.
+    let shared = ordo_exec::route::SinglePool::new(registry.clone());
+    let cx = ordo_host::dual_writes::MoveContext {
+        control: &registry,
+        pools: &shared,
+        spaces: None,
+    };
+    let err = ordo_host::dual_writes::run(&cx, "acme", &plan, &ctx, 0, OWNER)
+        .await
+        .expect_err("a shared database");
+    let text = err.to_string();
+    assert!(text.starts_with("shared_database"), "{text}");
+    assert!(text.contains("--run"), "{text}");
+
+    // A database of its own, and a function fill: one way.
+    let own = ordo_exec::route::SinglePool::new(tenant.clone());
+    let cx = ordo_host::dual_writes::MoveContext {
+        control: &registry,
+        pools: &own,
+        spaces: None,
+    };
+    let err = ordo_host::dual_writes::run(&cx, "acme", &plan, &ctx, 0, OWNER)
+        .await
+        .expect_err("a function fill");
+    let text = err.to_string();
+    assert!(text.starts_with("one_way_step"), "{text}");
+    assert!(text.contains("backend function"), "{text}");
+    // Nothing was opened.
+    assert!(Versions::on(&registry)
+        .dual_move("acme")
+        .await
+        .expect("moves")
+        .is_none());
+}

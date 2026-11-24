@@ -142,9 +142,7 @@ pub fn render(
             let sa::FillMapping::Expr(from) = &bf.mapping else {
                 return None;
             };
-            let Some(old) = x.schema.native(&bf.entity).and_then(|e| e.field(from)) else {
-                return None;
-            };
+            let old = x.schema.native(&bf.entity).and_then(|e| e.field(from))?;
             let r = slot(&mut reverse, &bf.entity);
             r.1.push(json!([old.column(), col]));
             if !old.optional {

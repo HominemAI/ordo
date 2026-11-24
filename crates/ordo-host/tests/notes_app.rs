@@ -1447,6 +1447,122 @@ async fn a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keep
     d.stop();
 }
 
+/// Increment 11a: **what a move with dual writes refuses, each naming its
+/// fix.** A path whose rewriting step is not the only one left names the
+/// version to replay to first. (A shared database and a function fill are
+/// refused in `backfill.rs`.) A soak
+/// length that is not one names the form. A soak that has not started
+/// cannot be reverted or closed, and the refusal names the move's
+/// commands. With `--soak 0`, the move closes at its switch.
+///
+/// A regression looks like a move started on a shared database, a
+/// half-copied tenant switched by a close, or a soak of 0 left open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_with_dual_writes_refuses_what_it_cannot_keep_current() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_dual_refusals", Some(PAGE)).await;
+    let ada = sign_up(&d, &device(25, "ada"), "Ada");
+    for i in 0..3 {
+        create_note(&d, &ada, &format!("Note {i}"), "body");
+    }
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let store = |source: String| {
+        let control = control.clone();
+        async move {
+            let program = ordo_host::schema_apply::Program::compile(&source).expect("compiles");
+            ordo_host::apply_op::run_program(
+                &control,
+                &ordo_exec::route::SinglePool::new(control.clone()),
+                &program,
+                vec![],
+                "notes-test",
+                "ordo apply",
+                false,
+            )
+            .await
+            .expect("stored")
+            .version
+        }
+    };
+    let next = renamed_body();
+    let to = store(next.clone()).await;
+    // One more version after it, adding a field: a path of 2 steps.
+    let after = store(
+        ordo_plan::artifact::with_declared(
+            &next.replace(
+                "  created: datetime
+",
+                "  created: datetime
+  pinned: bool = false
+",
+            ),
+            "0.1.1",
+            "0.1.2",
+        )
+        .expect("declares 0.1.1"),
+    )
+    .await;
+    let owner = deployment_owner_token();
+    for (a, b) in [(&from, &to), (&to, &after)] {
+        let (status, body) = d.op(
+            HOME,
+            &owner,
+            "POST",
+            "std.deployment.evolve",
+            json!({"from": a, "to": b}),
+        );
+        assert_eq!(status, 200, "{body}");
+    }
+    let replay = |tenant: &str, extra: Value| {
+        let mut params = json!({"tenant": tenant, "to": to});
+        if let (Some(p), Some(e)) = (params.as_object_mut(), extra.as_object()) {
+            p.extend(e.clone());
+        }
+        d.op(HOME, &owner, "POST", "std.deployment.replay", params)
+    };
+
+    // The rewriting step is not the last on the path: replay to it first.
+    let (status, body) = replay(&ada.space, json!({"to": after}));
+    assert_ne!(status, 200, "{body}");
+    let text = body.to_string();
+    assert!(text.contains("runs alone"), "{text}");
+    assert!(text.contains(&format!("--to {to}`")), "{text}");
+
+    // A soak length that is not one.
+    let (status, body) = replay(&ada.space, json!({"soak": "soon"}));
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("`7d`"), "{body}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // Half copied: no soak to revert or close yet.
+    let (status, body) = replay(&ada.space, json!({"budget": "1", "chunkRows": "1"}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["move"]["phase"], "backfilling", "{body}");
+    for op in ["std.deployment.revertSoak", "std.deployment.closeSoak"] {
+        let (status, body) = d.op(HOME, &owner, "POST", op, json!({"tenant": ada.space}));
+        assert_ne!(status, 200, "{op}: {body}");
+        let text = body.to_string();
+        assert!(text.contains("tenant_moving"), "{op}: {text}");
+        assert!(text.contains("backfilling"), "{op}: {text}");
+    }
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // `--soak 0`: the move closes at its switch.
+    let (status, body) = replay(&ada.space, json!({"soak": "0"}));
+    assert_eq!(status, 200, "{body}");
+    let mv = &body["rows"][0]["move"];
+    assert_eq!(mv["phase"], "closed", "{mv}");
+    assert_eq!(mv["orphaned"][0], "notes.body", "{mv}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(to.as_str()));
+    let (rows, _) = eventually("Ada reads her notes on the new version", || {
+        let (status, out) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));
+        (status == 200).then(|| out["rows"].as_array().cloned().unwrap_or_default())
+    });
+    assert_eq!(rows.len(), 3);
+    d.stop();
+}
+
 /// Increment 7 (`plan-versions.md` §2.1). A change one tenant's data cannot
 /// take leaves that tenant serving the version it was on, and the deployment
 /// owner sees why. Ada has two notes and the program makes titles unique,

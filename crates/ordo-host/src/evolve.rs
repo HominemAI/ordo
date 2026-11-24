@@ -2483,17 +2483,18 @@ pub async fn execute(
                             match steps.iter().position(dual_writes_step) {
                                 Some(0) if steps.len() == 1 => steps.into_iter().next(),
                                 Some(i) => {
-                                    let before = &steps[i].from;
+                                    // The move first when it is the next
+                                    // step; the steps before it otherwise.
+                                    let stop = if i == 0 { &steps[0].to } else { &steps[i].from };
                                     return Err(EvolveRefusal::Options(format!(
                                         "the stored path from `{from}` to `{to}` holds {} \
-                                         steps, and the step from `{before}` to `{}` rewrites \
-                                         data with live writes beside it. That step runs \
-                                         alone: replay the tenant to `{before}` first \
-                                         (`ordo evolve --tenant {tenant} --to {before}`), then \
-                                         to `{}`",
+                                         steps, and the step from `{}` to `{}` rewrites data \
+                                         with live writes beside it, so it runs alone. Replay \
+                                         the tenant to `{stop}` first (`ordo evolve --tenant \
+                                         {tenant} --to {stop}`), then on to `{to}`",
                                         steps.len(),
+                                        steps[i].from,
                                         steps[i].to,
-                                        steps[i].to
                                     ))
                                     .to_exec_error(WHAT));
                                 }

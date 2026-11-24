@@ -109,7 +109,7 @@ impl std::fmt::Display for Refused {
 #[derive(Debug)]
 pub enum OverlayError {
     /// A row broke the other version's rule.
-    Refused(Refused),
+    Refused(Box<Refused>),
     /// The database refused a statement.
     Pool(PoolError),
 }
@@ -176,14 +176,14 @@ impl MoveOverlay {
                     let Some(found) = tx.rows(&sql).await?.into_iter().next() else {
                         continue;
                     };
-                    return Err(OverlayError::Refused(Refused {
+                    return Err(OverlayError::Refused(Box::new(Refused {
                         serving: self.serving.clone(),
                         other: self.other.clone(),
                         entity: e.entity.clone(),
                         field: g.field.clone(),
                         rule: g.rule.clone(),
                         row: found.into_iter().next().flatten().unwrap_or_default(),
-                    }));
+                    })));
                 }
             }
         }

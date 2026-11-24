@@ -937,10 +937,11 @@ async fn sequence(
     // **A tenant that could not be brought forward does not hold back the
     // activation**, which is the change 25i makes to R-S3's gate. With one
     // tenant per person, one unreachable or refused database would stop
-    // every deploy for everybody. The tenant is closed instead, alone, by
-    // the schema-behind quarantine (R-S4), with the reason on
-    // `/health/ready` and in this report, and the catch-up
-    // (`tenant_forward`) retries it. An activation is still gated on the
+    // every deploy for everybody. Since increment 7 (`plan-versions.md`
+    // §2.1) the tenant keeps its pin and serves the version it was on, with
+    // a move open in `$moves` carrying the reason, shown in this report and
+    // by `std.deployment.tenants`. The catch-up (`tenant_forward`) retries
+    // a database that could not be reached. An activation is still gated on the
     // deployment's own database, which is refused above when it is behind.
     //
     // A deployment with no attached target walks a one-element list and
@@ -1005,10 +1006,20 @@ async fn sequence(
     };
     for (target, why) in &tenants.held {
         eprintln!(
-            "apply {}: tenant database {target} was not brought forward and stays closed: {why}",
+            "apply {}: tenant database {target} was not brought forward, and its tenants stay \
+             on the version they serve: {why}",
             program.version
         );
     }
+    // **What the activation needs to know about each tenant's database**
+    // (`plan-versions.md` §2.1, increment 7): the tenants whose database the
+    // walk brought to this version are pinned with the activation, and the
+    // rest keep their version with a move open saying why.
+    let plan = if activate {
+        move_plan(pool, &fleet).await
+    } else {
+        versions::MovePlan::default()
+    };
 
     // Behind and asked to activate is the refusal. Behind and staged is a
     // report — that is what `--no-activate` is for.
@@ -1021,13 +1032,14 @@ async fn sequence(
     let activation = if !activate {
         Activation::Staged
     } else {
-        // Every tenant is re-pinned to it in the same transaction
-        // (`plan-versions.md` §1.3).
+        // Every tenant whose database holds it is re-pinned to it in the
+        // same transaction (`plan-versions.md` §1.3, §2.1).
         match Versions::on(pool)
-            .activate(
+            .activate_with(
                 &program.version,
                 actor,
                 ordo_commandlog::Timestamp(now_secs()),
+                &plan,
             )
             .await
         {
@@ -1055,6 +1067,50 @@ async fn sequence(
         activation,
         tenants,
     })
+}
+
+/// The walk's outcome per tenant: each tenant database it reached is named
+/// by its label, and every tenant attached to it shares its outcome. A
+/// database that could not be read for its tenants gives an empty plan, so
+/// every attached tenant starts its move `expanding` and the catch-up tries
+/// it.
+async fn move_plan(pool: &Pool, fleet: &sa::Forwarded) -> versions::MovePlan {
+    let mut plan = versions::MovePlan::default();
+    if fleet.applied.is_empty() {
+        return plan;
+    }
+    let attached = match ordo_exec::spacedb::all(pool).await {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("apply: the tenants' databases could not be read for their moves: {e}");
+            return plan;
+        }
+    };
+    let by_label: std::collections::HashMap<&str, &sa::TenantApply> = fleet
+        .applied
+        .iter()
+        .map(|t| (t.label.as_str(), t))
+        .collect();
+    for (space, a) in &attached {
+        let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
+        let Some(t) = by_label.get(label.as_str()) else {
+            continue;
+        };
+        match &t.outcome {
+            Ok(_) => {
+                plan.ready.insert(space.0.clone());
+            }
+            Err(r) => {
+                let phase = if r.transient {
+                    versions::MovePhase::Waiting
+                } else {
+                    versions::MovePhase::Refused
+                };
+                plan.held.insert(space.0.clone(), (phase, r.to_string()));
+            }
+        }
+    }
+    plan
 }
 
 fn named(c: &Change) -> (String, String) {

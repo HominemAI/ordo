@@ -1369,7 +1369,7 @@ async fn security_checkpoint(flags: Flags) -> Outcome {
 /// marker, `Versions::restore_pin` moves the tenant's pin to it, cause
 /// `restore`, or leaves the pin ahead and the tenant closed when that
 /// version is revoked or below `versions.minimum` (Q13). The manual form
-/// moves no pin.
+/// does the same when `--control-db` names a database other than `--db`.
 async fn restore(flags: Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--record",
@@ -1598,7 +1598,23 @@ async fn restore_target(
     if !flags.has("--tenant") {
         let pool = connect(flags).await?;
         let witness = witness_for(flags, &pool).await?;
-        return Ok((pool, witness, None, None));
+        // A control database apart from the tenant's (`--control-db` other
+        // than `--db`) holds the pin, which follows the restored data as it
+        // does with `--tenant`. One database for both was restored whole,
+        // pins and all, so nothing moves.
+        let control = match flags.named.get("--control-db") {
+            Some(db) if Some(db) != flags.named.get("--db") => {
+                let mut cfg = pool_config(flags);
+                cfg.db = db.clone();
+                Some(
+                    Pool::connect(cfg)
+                        .await
+                        .map_err(|e| Outcome::failed(format!("control database: {e}\n")))?,
+                )
+            }
+            _ => None,
+        };
+        return Ok((pool, witness, None, control));
     }
     // The control connection: `--control-db`, or `--db`'s own default —
     // the same fallback `witness_for` already uses for the single-database

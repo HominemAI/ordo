@@ -589,7 +589,7 @@ async fn a_gate_blocking_program_is_stored_and_refused_by_name() {
 
     // V3 makes a column required, so the gate would refuse an artifact of
     // it, and it is not a safe change `ordo apply` makes itself.
-    // `ordo migrate --apply` is what moves it.
+    // `ordo evolve --run` is what moves it.
     let (status, body) = call(&h.state, HOME, &token(DEP_OWNER), V3, true).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(code(&body), "not_activated");

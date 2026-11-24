@@ -119,6 +119,52 @@ pub struct Loaded {
     /// cut is re-taken once per space per version and can never name a
     /// version that is no longer serving.
     views: RwLock<std::collections::HashMap<String, Arc<SpaceView>>>,
+    /// When this version was installed on this node and when a request was
+    /// last served under it, in seconds: what the load guards read
+    /// (`versions.min_residency`, `versions.idle_evict_after`).
+    clock: LoadClock,
+}
+
+/// When a [`Loaded`] was installed and last used, in seconds.
+#[derive(Debug, Default)]
+pub struct LoadClock {
+    installed_at: std::sync::atomic::AtomicU64,
+    used_at: std::sync::atomic::AtomicU64,
+}
+
+impl LoadClock {
+    fn installed(&self, now: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.installed_at.store(now, Relaxed);
+        self.used_at.store(now, Relaxed);
+    }
+
+    fn touch(&self, now: u64) {
+        self.used_at
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Seconds since it was installed, and since it was last used.
+    pub fn ages(&self, now: u64) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            now.saturating_sub(self.installed_at.load(Relaxed)),
+            now.saturating_sub(self.used_at.load(Relaxed)),
+        )
+    }
+}
+
+/// **The load guards** (`plan-versions.md` §1.4 step 5, §1.5, §7), as this
+/// node last read them. An embedding that sets none keeps nothing and
+/// evicts nothing, which is how a [`Deployment`] behaved before them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoadGuards {
+    /// `versions.min_residency`: a version stays loaded at least this
+    /// long after it is installed, pinned or not.
+    pub min_residency: u64,
+    /// `versions.idle_evict_after`: a version beside the active one that
+    /// served nothing for this long is unloaded. `None`: never.
+    pub idle_evict: Option<u64>,
 }
 
 /// One version of the program, cut to **one space**.
@@ -142,6 +188,9 @@ pub struct SpaceView {
     pub fixture: Arc<Fixture>,
     /// This version's executor, rebound. Reads plan against its space.
     pub exec: ordo_exec::Executor,
+    /// When a request last took this view, in seconds: what view eviction
+    /// reads ([`Loaded::evict_views`]).
+    used_at: std::sync::atomic::AtomicU64,
 }
 
 impl Loaded {
@@ -163,6 +212,7 @@ impl Loaded {
     /// the old view and finishes on the old database) is the migration's own
     /// consistency argument, and it is not made here.
     pub fn in_space(&self, space: &str, pool: Pool) -> Arc<SpaceView> {
+        let now = crate::runtime::now_secs();
         if let Some(v) = self
             .views
             .read()
@@ -170,6 +220,7 @@ impl Loaded {
             .get(space)
             .filter(|v| v.exec.pool.same_handle(&pool))
         {
+            v.used_at.store(now, std::sync::atomic::Ordering::Relaxed);
             return v.clone();
         }
         let mut views = self
@@ -194,9 +245,49 @@ impl Loaded {
                 space: sid.clone(),
             },
             space: sid,
+            used_at: std::sync::atomic::AtomicU64::new(now),
         });
         views.insert(space.to_string(), view.clone());
         view
+    }
+
+    /// How many per-space views this version holds now.
+    pub fn view_count(&self) -> usize {
+        self.views
+            .read()
+            .expect("space view cache is not poisoned")
+            .len()
+    }
+
+    /// **Evict per-space views** (`plan-versions.md` §1.5): every view no
+    /// request holds that was last taken `idle_secs` ago or more, then the
+    /// least recently taken until at most `keep` remain. A view a request
+    /// holds is never evicted, and an evicted one is cut again on its
+    /// space's next request. The number evicted.
+    pub fn evict_views(&self, idle_secs: u64, keep: u64) -> usize {
+        use std::sync::atomic::Ordering::Relaxed;
+        let now = crate::runtime::now_secs();
+        let mut views = self
+            .views
+            .write()
+            .expect("space view cache is not poisoned");
+        let before = views.len();
+        views.retain(|_, v| {
+            Arc::strong_count(v) > 1 || now.saturating_sub(v.used_at.load(Relaxed)) < idle_secs
+        });
+        if views.len() as u64 > keep {
+            let mut free: Vec<(u64, String)> = views
+                .iter()
+                .filter(|(_, v)| Arc::strong_count(v) == 1)
+                .map(|(k, v)| (v.used_at.load(Relaxed), k.clone()))
+                .collect();
+            free.sort();
+            let over = views.len() as u64 - keep;
+            for (_, k) in free.into_iter().take(over as usize) {
+                views.remove(&k);
+            }
+        }
+        before - views.len()
     }
 }
 
@@ -283,6 +374,7 @@ impl Verified {
             report: Some(Arc::new(report)),
             canary_op,
             views: RwLock::new(std::collections::HashMap::new()),
+            clock: LoadClock::default(),
         }))
     }
 
@@ -386,6 +478,17 @@ pub enum LoadRefusal {
         version: String,
         refusal: Box<ordo_exec::peer::SchemaRefusal>,
     },
+    /// **The stored row is not the version it is named** (`plan-versions.md`
+    /// §1.4 step 4, §6 conflict 4). The source fingerprint recomputed from
+    /// the stored source and the code hashes its document carries differs
+    /// from the one recorded when it was stored. The row was changed by
+    /// hand, or damaged, after `ordo apply` stored it. Never served: the
+    /// version's name would no longer say what runs.
+    Digest {
+        version: String,
+        stored: String,
+        computed: String,
+    },
     Registry(RegistryRefusal),
     Store(ordo_exec::PoolError),
 }
@@ -429,6 +532,27 @@ impl std::fmt::Display for LoadRefusal {
                     .collect::<Vec<_>>()
                     .join("\n")
             ),
+            LoadRefusal::Digest {
+                version,
+                stored,
+                computed,
+            } => {
+                let short = |s: &str| s.chars().take(16).collect::<String>();
+                let stored = if stored.is_empty() {
+                    "none".to_string()
+                } else {
+                    short(stored)
+                };
+                write!(
+                    f,
+                    "version `{version}` is not what was stored under its name: its source \
+                     fingerprint was {stored} when it was stored and is {} now, so its row in \
+                     `$artifacts` was changed after `ordo apply`. It will not be served. \
+                     Restore the row from a backup, or pin its tenants to another version \
+                     with `ordo versions pin`",
+                    short(computed)
+                )
+            }
             LoadRefusal::Registry(e) => write!(f, "{e}"),
             LoadRefusal::Store(e) => write!(f, "{e}"),
         }
@@ -501,10 +625,11 @@ pub async fn verify_candidate(
     keys: Arc<dyn ordo_crypto::KeyProvider>,
     space: ordo_crypto::SpaceId,
 ) -> Result<Verified, LoadRefusal> {
-    let compiled = Fixture::from_source(&stored.source, "").map_err(|e| LoadRefusal::Compile {
-        version: stored.version.clone(),
-        error: e,
-    })?;
+    let compiled =
+        crate::release_check::compile_stored(stored).map_err(|e| LoadRefusal::Compile {
+            version: stored.version.clone(),
+            error: e,
+        })?;
     // **The places the stored amounts are held at** (25aa). A `money(p)`
     // column is `bigint` minor units whatever `p` is, so the shadow below
     // cannot see that the amounts were rescaled for another version. Once a
@@ -558,10 +683,12 @@ pub async fn load_pinned(
             version.to_string(),
         )));
     };
-    let compiled = Fixture::from_source(&stored.source, "").map_err(|e| LoadRefusal::Compile {
-        version: stored.version.clone(),
-        error: e,
-    })?;
+    check_digest(pool, &stored).await?;
+    let compiled =
+        crate::release_check::compile_stored(&stored).map_err(|e| LoadRefusal::Compile {
+            version: stored.version.clone(),
+            error: e,
+        })?;
     gate_fixture(
         compiled,
         pool,
@@ -836,7 +963,33 @@ pub async fn load_active(
     let Some(stored) = Versions::on(pool).active().await? else {
         return Err(LoadRefusal::NoActiveVersion);
     };
+    check_digest(pool, &stored).await?;
     verify_candidate(&stored, pool, cfg, keys, space).await
+}
+
+/// **Digest at load** (`plan-versions.md` §1.4 step 4, §6 conflict 4).
+/// Recompute a stored version's source fingerprint from its stored source
+/// and the code hashes its document carries, and refuse the load when it
+/// is not the fingerprint recorded when the version was stored
+/// ([`LoadRefusal::Digest`]). Run on every load of a stored version: the
+/// active one at boot and on a swap, and each one served beside it.
+pub async fn check_digest(pool: &Pool, stored: &artifacts::Artifact) -> Result<(), LoadRefusal> {
+    use ordo_plan::artifact as a;
+    let recorded = Versions::on(pool)
+        .identity(&stored.version)
+        .await?
+        .map(|(_, source_id)| source_id)
+        .unwrap_or_default();
+    let doc: serde_json::Value = serde_json::from_str(&stored.artifact).unwrap_or_default();
+    let computed = a::source_identity(&stored.source, a::FIRST_EDITION, &a::code_hashes(&doc));
+    if recorded == computed {
+        return Ok(());
+    }
+    Err(LoadRefusal::Digest {
+        version: stored.version.clone(),
+        stored: recorded,
+        computed,
+    })
 }
 
 /// Load and gate one named version — what a node does when it is told a
@@ -853,6 +1006,7 @@ pub async fn load_version(
             version.to_string(),
         )));
     };
+    check_digest(pool, &stored).await?;
     verify_candidate(&stored, pool, cfg, keys, space).await
 }
 
@@ -897,6 +1051,20 @@ pub struct Deployment {
     /// is provisioned with that version's tables
     /// ([`Deployment::new_tenant_loaded`], increment 3 session 2).
     new_tenant: RwLock<Option<String>>,
+    /// The op tables of versions this node served and dropped, newest
+    /// last, at most [`RETIRED_SPECS`]. Read only for
+    /// [`OpRegistry::prior_version_hash`]: an idempotency key sent before a
+    /// tenant's switch is honoured across it (`plan-versions.md` §1.9).
+    retired: RwLock<Vec<(String, Arc<dyn OpRegistry>)>>,
+    /// The load guards in force ([`LoadGuards`]).
+    guards: RwLock<LoadGuards>,
+    /// Versions a pin names that were unloaded for idleness. Not loaded
+    /// again by the pin stream until a signed-in request for one of their
+    /// tenants wakes them ([`Deployment::wake`]).
+    evicted: RwLock<std::collections::BTreeSet<String>>,
+    /// Evicted versions a request woke, while they load. A request for one
+    /// of their tenants waits for the load ([`Deployment::waking`]).
+    waking: RwLock<std::collections::BTreeSet<String>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -944,6 +1112,10 @@ pub struct Unserved {
 
 type Others = RwLock<std::collections::HashMap<String, Arc<Loaded>>>;
 
+/// How many dropped versions' op tables a node keeps for
+/// [`OpRegistry::prior_version_hash`].
+pub const RETIRED_SPECS: usize = 8;
+
 fn others_empty() -> Others {
     RwLock::new(std::collections::HashMap::new())
 }
@@ -958,6 +1130,10 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -982,6 +1158,10 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1106,6 +1286,7 @@ impl Deployment {
             canary_op: String::new(),
             fixture,
             views: RwLock::new(std::collections::HashMap::new()),
+            clock: LoadClock::default(),
         };
         // Vetted like a boot's, so a malformed platform spec is refused
         // here too; no program means no name to collide with.
@@ -1117,6 +1298,10 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1146,12 +1331,17 @@ impl Deployment {
                 report: None,
                 canary_op,
                 views: RwLock::new(std::collections::HashMap::new()),
+                clock: LoadClock::default(),
             })),
             platform: Vec::new(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1173,6 +1363,10 @@ impl Deployment {
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
             new_tenant: RwLock::new(None),
+            retired: RwLock::new(Vec::new()),
+            guards: RwLock::new(LoadGuards::default()),
+            evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1231,7 +1425,10 @@ impl Deployment {
         let mut others = self.others.write().expect("deployment lock");
         // A version a tenant was already served stays the same `Loaded`,
         // gated when it was installed.
-        let incoming = others.remove(&to).unwrap_or_else(|| Arc::new(next.0));
+        let incoming = others.remove(&to).unwrap_or_else(|| {
+            next.0.clock.installed(crate::runtime::now_secs());
+            Arc::new(next.0)
+        });
         let old = std::mem::replace(&mut *slot, incoming);
         // The version replaced stays loaded while a pin this node holds
         // still names it; `retain_pinned` drops it once none does.
@@ -1264,7 +1461,10 @@ impl Deployment {
             return Swapped::AlreadyServing(next.0.version.clone());
         }
         let to = next.0.version.clone();
+        next.0.clock.installed(crate::runtime::now_secs());
         others.insert(to.clone(), Arc::new(next.0));
+        self.evicted.write().expect("deployment lock").remove(&to);
+        self.waking.write().expect("deployment lock").remove(&to);
         Swapped::Installed {
             from: active.version.clone(),
             to,
@@ -1296,6 +1496,7 @@ impl Deployment {
             return Ok((active, Some(epoch)));
         }
         if let Some(l) = self.loaded(&version) {
+            l.clock.touch(crate::runtime::now_secs());
             return Ok((l, Some(epoch)));
         }
         let following = self.following.read().expect("pin lock").as_deref() == Some(&version);
@@ -1368,16 +1569,127 @@ impl Deployment {
             }
             pinned
         };
+        let residency = self.guards().min_residency;
+        let now = crate::runtime::now_secs();
+        let mut others = self.others.write().expect("deployment lock");
+        // A version no pin names stays until it has been loaded for
+        // `versions.min_residency`, so a pin moved away and back does not
+        // compile it twice.
+        let gone: Vec<String> = others
+            .iter()
+            .filter(|(v, l)| !pinned.contains(*v) && l.clock.ages(now).0 >= residency)
+            .map(|(v, _)| v.clone())
+            .collect();
+        let mut retired = self.retired.write().expect("deployment lock");
+        for v in &gone {
+            if let Some(l) = others.remove(v) {
+                retired.retain(|(name, _)| name != v);
+                retired.push((v.clone(), l.specs.clone()));
+            }
+        }
+        let over = retired.len().saturating_sub(RETIRED_SPECS);
+        retired.drain(..over);
+        gone
+    }
+
+    /// The load guards in force.
+    pub fn guards(&self) -> LoadGuards {
+        *self.guards.read().expect("deployment lock")
+    }
+
+    /// Put the load guards in force, as the stored settings say.
+    pub fn set_guards(&self, guards: LoadGuards) {
+        *self.guards.write().expect("deployment lock") = guards;
+    }
+
+    /// **Unload every version beside the active one that served nothing
+    /// for `versions.idle_evict_after`** and has been loaded for
+    /// `versions.min_residency`, and answer them. A version
+    /// `versions.new_tenant` names, or one a tenant waiting for this node's
+    /// swap is served, stays. An evicted version is loaded again only when
+    /// a signed-in request for one of its tenants wakes it.
+    pub fn evict_idle(&self, now: u64) -> Vec<String> {
+        let guards = self.guards();
+        let Some(idle) = guards.idle_evict else {
+            return Vec::new();
+        };
+        // A swap in progress: leave everything as it is.
+        if self
+            .following()
+            .is_some_and(|v| v != self.current().version)
+        {
+            return Vec::new();
+        }
+        let keep = self.new_tenant.read().expect("pin lock").clone();
         let mut others = self.others.write().expect("deployment lock");
         let gone: Vec<String> = others
-            .keys()
-            .filter(|v| !pinned.contains(*v))
-            .cloned()
+            .iter()
+            .filter(|(v, l)| {
+                let (resident, unused) = l.clock.ages(now);
+                keep.as_deref() != Some(v.as_str())
+                    && resident >= guards.min_residency
+                    && unused >= idle
+            })
+            .map(|(v, _)| v.clone())
             .collect();
+        let mut retired = self.retired.write().expect("deployment lock");
+        let mut evicted = self.evicted.write().expect("deployment lock");
         for v in &gone {
-            others.remove(v);
+            if let Some(l) = others.remove(v) {
+                retired.retain(|(name, _)| name != v);
+                retired.push((v.clone(), l.specs.clone()));
+                evicted.insert(v.clone());
+            }
         }
+        let over = retired.len().saturating_sub(RETIRED_SPECS);
+        retired.drain(..over);
         gone
+    }
+
+    /// Versions unloaded for idleness and not woken since.
+    pub fn evicted(&self) -> Vec<String> {
+        self.evicted
+            .read()
+            .expect("deployment lock")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// **Wake an evicted version**: the pin stream loads it again on its
+    /// next read. True when it was evicted. Called for a signed-in
+    /// caller's request only, so no anonymous call starts a load (V-29).
+    pub fn wake(&self, version: &str) -> bool {
+        let woke = self
+            .evicted
+            .write()
+            .expect("deployment lock")
+            .remove(version);
+        if woke {
+            self.waking
+                .write()
+                .expect("deployment lock")
+                .insert(version.to_string());
+        }
+        woke
+    }
+
+    /// Is `version` loading because a request woke it? A request for one
+    /// of its tenants waits for it rather than answering at once.
+    pub fn waking(&self, version: &str) -> bool {
+        self.waking
+            .read()
+            .expect("deployment lock")
+            .contains(version)
+    }
+
+    /// A woken version's load ended without installing it (refused): no
+    /// request waits for it any more.
+    pub fn woken_refused(&self, version: &str) {
+        self.waking
+            .write()
+            .expect("deployment lock")
+            .remove(version);
     }
 
     /// The registry's active version as the pin stream last read it. See
@@ -1524,8 +1836,68 @@ impl OpRegistry for Deployment {
         }
         match space.map(|s| self.for_space(s)) {
             Some(Ok((loaded, _))) => loaded.specs.get(name),
-            _ => self.current().specs.get(name),
+            // A tenant this node does not serve: its version is not loaded
+            // (a release that no longer loads it, §2.8). Any served
+            // version's spec lets the request reach the space's resolve,
+            // which answers that the tenant is closed, rather than calling
+            // the op unknown.
+            Some(Err(_)) => self
+                .current()
+                .specs
+                .get(name)
+                .or_else(|| self.others().iter().find_map(|l| l.specs.get(name))),
+            None => self.current().specs.get(name),
         }
+    }
+
+    /// The version serving `space`: the one [`Deployment::for_space`]
+    /// answers, or the one it is pinned to when this node does not serve
+    /// it yet. Either way a move is seen.
+    fn version_in(&self, space: &str) -> Option<String> {
+        Some(match self.for_space(space) {
+            Ok((loaded, _)) => loaded.version.clone(),
+            Err(unserved) => unserved.version,
+        })
+    }
+
+    /// Declared by a served version, and not by the one serving `space`.
+    fn declared_elsewhere(&self, space: &str, name: &str) -> bool {
+        let Ok((mine, _)) = self.for_space(space) else {
+            return false;
+        };
+        if mine.specs.get(name).is_some() {
+            return false;
+        }
+        let active = self.current();
+        (active.version != mine.version && active.specs.get(name).is_some())
+            || self
+                .others()
+                .iter()
+                .any(|l| l.version != mine.version && l.specs.get(name).is_some())
+    }
+
+    /// The op's hash in the version `space` was pinned to before its last
+    /// switch, read from that version while it is loaded or among the
+    /// dropped ones this node keeps.
+    fn prior_version_hash(&self, space: &str, name: &str) -> Option<String> {
+        let (was, _) = self
+            .pins
+            .read()
+            .expect("pin lock")
+            .prior
+            .get(space)
+            .cloned()?;
+        if let Some(l) = self.loaded(&was) {
+            return l.specs.get(name).map(|s| s.version_hash);
+        }
+        self.retired
+            .read()
+            .expect("deployment lock")
+            .iter()
+            .rev()
+            .find(|(v, _)| *v == was)
+            .and_then(|(_, specs)| specs.get(name))
+            .map(|s| s.version_hash)
     }
 }
 

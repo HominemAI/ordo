@@ -1114,6 +1114,7 @@ async fn sequence(
             ..Default::default()
         };
         match crate::rollouts::Rollouts::on(pool)
+            .reaching(pools)
             .start(&program.version, &opts, actor, now_secs())
             .await
         {

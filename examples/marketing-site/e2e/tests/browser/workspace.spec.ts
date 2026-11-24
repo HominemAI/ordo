@@ -132,7 +132,7 @@ test('staff create a campaign, upload a brief and schedule a reminder', async ({
   await expect(row).toBeHidden();
 });
 
-test('staff create and revoke an invitation with a real passkey session', async ({ page }, info) => {
+test('staff create and revoke an invitation with a real passkey session', async ({ page, request }, info) => {
   await signIn(page);
   await page.getByRole('button', { name: 'Team', exact: true }).click();
   const label = `Colleague ${randomUUID()}`;
@@ -140,11 +140,15 @@ test('staff create and revoke an invitation with a real passkey session', async 
   await page.getByLabel('Role', { exact: true }).selectOption('editor');
   await page.getByRole('button', { name: 'Create invitation' }).click();
   await expect(page.getByText('Invitation created.', { exact: false })).toBeVisible();
+  const ticket = await page.locator('output.ticket').innerText();
   await page.getByRole('button', { name: 'Hide invitation' }).click();
   const row = page.getByRole('row').filter({ hasText: label });
   await expect(row).toBeVisible();
   await row.getByRole('button', { name: 'Revoke invitation' }).click();
-  await expect(row).toContainText('revoked');
+  await expect(row).toBeHidden();
+  const revoked = await request.post(`${stack().door}/auth/invitation/peek`, { data: { ticket } });
+  expect(revoked.status()).toBe(403);
+  expect((await revoked.json()).error.code).toBe('invitation_refused');
   await page.screenshot({ path: info.outputPath('studio-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('heading', { name: 'Team access' })).toBeVisible();
@@ -194,7 +198,7 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
           tags: [],
           budget: '75.00',
           due: null,
-          created: new Date().toISOString(),
+          created: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
         },
       }),
     )
@@ -202,7 +206,9 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
   const id = created.created;
   try {
     expect(
-      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).some((r) => r.id === id),
+      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).some(
+        (r) => r.id === id,
+      ),
     ).toBe(false);
     await rows(
       await request.post(`${stack().door}/op/grantCampaignsAccess`, {
@@ -233,7 +239,9 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
       await request.delete(`${stack().door}/op/unshareCampaign`, { headers, params: { campaign: id, member: me.id } }),
     );
     expect(
-      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).some((r) => r.id === id),
+      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).some(
+        (r) => r.id === id,
+      ),
     ).toBe(false);
     await rows(
       await request.post(`${stack().door}/op/std.space.setRole`, { headers, data: { member: me.id, role: 'viewer' } }),
@@ -269,7 +277,7 @@ test('staff publish products, plans and reviews through the editor and remove th
       await page.getByLabel('Quote', { exact: true }).fill(`A lovely launch ${name}`);
     } else {
       if (kind === 'Products') await page.getByLabel('URL name (required)').fill(`product-${randomUUID()}`);
-      await page.getByLabel('Name (required)').fill(name);
+      await page.getByLabel('Name (required)', { exact: true }).fill(name);
       await page.getByLabel('Tagline (required)').fill('A thoughtful launch');
       await page.getByLabel('Price (required)').fill('24.50');
       await page.getByLabel('Features (one per line)').fill('Made for teams\nPersonal support');
@@ -280,7 +288,9 @@ test('staff publish products, plans and reviews through the editor and remove th
     const row = page.getByRole('row').filter({ hasText: name });
     await expect(row).toBeVisible();
     await publicPage.goto('/');
-    await expect(publicPage.getByText(kind === 'Reviews' ? `A lovely launch ${name}` : name, { exact: true })).toBeVisible();
+    await expect(
+      publicPage.getByText(kind === 'Reviews' ? `A lovely launch ${name}` : name, { exact: true }),
+    ).toBeVisible();
     await expect(publicPage.getByText('Never publish this note')).toBeHidden();
     await row.getByRole('button', { name: 'Edit', exact: true }).click();
     if (kind === 'Reviews') await page.getByLabel('Quote', { exact: true }).fill(`Updated recommendation ${name}`);

@@ -379,10 +379,10 @@ function Editor({
               : f.optional && !value
                 ? null
                 : f.kind === 'datetime-local'
-                  ? new Date(value).toISOString()
+                  ? new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z')
                   : value;
     }
-    if (op === 'createCampaign') params['created'] = new Date().toISOString();
+    if (op === 'createCampaign') params['created'] = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     try {
       await commit(ctx.client, ctx.session, op, params);
       onDone();
@@ -767,7 +767,7 @@ function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
               id: campaign,
               rev: Number(latest['rev']),
               note,
-              at: new Date().toISOString(),
+              at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
             }),
           );
         }}
@@ -903,7 +903,7 @@ function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
         aria-labelledby="reminder-title"
         onSubmit={(e) => {
           e.preventDefault();
-          const due = new Date(text(new FormData(e.currentTarget).get('due'))).toISOString();
+          const due = new Date(text(new FormData(e.currentTarget).get('due'))).toISOString().replace(/\.\d{3}Z$/, 'Z');
           void act(() => commit(ctx.client, ctx.session, 'setReminder', { campaign, due }));
         }}
       >
@@ -1011,7 +1011,7 @@ function Team(ctx: Context) {
         rows={invitations.rows}
         actions={(r) => (
           <button
-            disabled={busy || r['status'] === 'revoked' || r['status'] === 'accepted'}
+            disabled={busy || r['status'] !== 'open'}
             onClick={() => void act('std.space.revokeInvitation', { id: text(r['id']) })}
           >
             Revoke invitation

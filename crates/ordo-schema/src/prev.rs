@@ -19,6 +19,10 @@
 //! - `prev_sealed`: a sealed field's ciphertext is bound to its field, so
 //!   a copy cannot be read under the new name. Re-sealing is the backfill
 //!   worker's (increment 10b).
+//! - `prev_default_required`: a required field renamed with no default.
+//!   While both versions write, each one's insert names only its own column
+//!   and the host's dual writes set the other in the same transaction
+//!   (increment 11a), so a required column needs a default to take first.
 //! - `prev_stale`, a warning: the rename has already landed in the version
 //!   serving now. The mark can go.
 //!
@@ -57,7 +61,7 @@ impl PrevMark {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrevIssue {
     /// `prev_unresolved`, `prev_type`, `prev_mapping_required`,
-    /// `prev_sealed`, `prev_stale`.
+    /// `prev_sealed`, `prev_default_required`, `prev_stale`.
     pub class: &'static str,
     pub mark: PrevMark,
     pub message: String,
@@ -319,6 +323,28 @@ fn field_mark(
             fix: format!(
                 "rename it in one version with the type `{}`, and change the type in the next",
                 type_text(from)
+            ),
+        });
+        return;
+    }
+    // While both versions write, each one's insert names only its own
+    // column, and the dual writes set the other in the same transaction.
+    // A required column the insert does not name needs a default to be
+    // taken first: the new one its own, the old one its own or the new
+    // field's.
+    if to.default.is_none() && (!to.optional || (!from.optional && from.default.is_none())) {
+        out.errors.push(PrevIssue {
+            class: "prev_default_required",
+            mark: m.clone(),
+            message: format!(
+                "`{}.{f}` renames a required field and declares no default. While both \
+                 versions write, an insert by one leaves the other's column to its default \
+                 until the dual writes set it in the same write",
+                e.name
+            ),
+            fix: format!(
+                "give `{f}` a default: `{f}: {} = <value> prev({old})`",
+                type_text(to)
             ),
         });
     }

@@ -191,8 +191,24 @@ between them is needed.
 - The guards are each side's `required` on the moved fields: the database
   cannot hold them while both versions write, since a `NOT NULL` is
   checked per statement, before the overlay runs. The expand opens the new
-  column and drops the old column's `NOT NULL`; the new one's lands at the
-  soak's close.
+  column; its `NOT NULL` lands at the soak's close.
+- A rename's old column keeps its `NOT NULL`, so the version before still
+  loads over the database (increment 15's rule). An insert by Y does not
+  name it, so it takes its default first: its own, or the new field's when
+  it has none. A required field renamed with no default is refused
+  (`prev_default_required`). The reverse `SET` keeps the old value when Y
+  leaves the new one empty (`coalesce`), and the guard refuses the write.
+- **Renames outside a move** (merged 2026-11-24, replacing increment 15's
+  sync trigger). A rename `ordo apply` makes, or a stored step runs with
+  `--run`, has both versions serving on one database until the pins move,
+  with no `$moves` row. Each node reads the renames every stored version
+  declares (`read_renames`, with the pins; storing a version nudges the
+  stream) and gives each served version a rename overlay
+  (`rename_overlay`): the renaming version sets the old column from the
+  new one, a version still on the old name sets the new column from the
+  old one. Each is its own statement under a savepoint, skipped on a
+  database without the new column. A move's own overlay takes precedence.
+  A rename's copy in a `--run` step is verified under live writes.
 - The overlay is keyed by version, never by phase: forward for a write on
   X, reverse on Y. A node that took the new pin before the new move cannot
   run one version's overlay under the other. The pin stream reads the

@@ -981,7 +981,11 @@ pub async fn check_digest(pool: &Pool, stored: &artifacts::Artifact) -> Result<(
         .map(|(_, source_id)| source_id)
         .unwrap_or_default();
     let doc: serde_json::Value = serde_json::from_str(&stored.artifact).unwrap_or_default();
-    let computed = a::source_identity(&stored.source, a::FIRST_EDITION, &a::code_hashes(&doc));
+    let computed = a::source_identity(
+        &stored.source,
+        ordo_plan::edition::of_source(&stored.source),
+        &a::code_hashes(&doc),
+    );
     if recorded == computed {
         return Ok(());
     }
@@ -1070,6 +1074,11 @@ pub struct Deployment {
     /// the pins ([`crate::pin_stream`]), so a node that has a tenant's new
     /// pin has its overlays too.
     moves: RwLock<std::collections::HashMap<String, MoveOverlays>>,
+    /// The field renames stored versions declare with `prev`, and the
+    /// overlay each served version writes with outside a move (increment
+    /// 11a, [`crate::dual_writes::rename_overlay`]). Filled by the pin
+    /// stream beside the moves.
+    renames: RwLock<RenameState>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -1079,6 +1088,14 @@ pub struct Deployment {
     /// artifact's. Putting it in `Loaded` would make it *look* swappable,
     /// and something that looks swappable eventually gets swapped.
     platform: Vec<OpSpec>,
+}
+
+/// The renames this node knows, by the stored version that declares them,
+/// and the overlay worked out for each served version, built on first use.
+#[derive(Default)]
+struct RenameState {
+    by_version: std::collections::HashMap<String, Vec<crate::dual_writes::Rename>>,
+    overlays: std::collections::HashMap<String, Option<Arc<ordo_exec::overlay::MoveOverlay>>>,
 }
 
 /// A tenant's move with dual writes, as a node serves it (increment 11a,
@@ -1152,6 +1169,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            renames: RwLock::new(RenameState::default()),
         })
     }
 
@@ -1181,6 +1199,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            renames: RwLock::new(RenameState::default()),
         }))
     }
 
@@ -1322,6 +1341,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            renames: RwLock::new(RenameState::default()),
         }))
     }
 
@@ -1363,6 +1383,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            renames: RwLock::new(RenameState::default()),
         })
     }
 
@@ -1389,6 +1410,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            renames: RwLock::new(RenameState::default()),
         }))
     }
 
@@ -1773,23 +1795,72 @@ impl Deployment {
 
     /// **The overlay a tenant's write runs**, by the version it is served
     /// (increment 11a): the forward overlay for a write on the move's
-    /// `from`, the reverse one on its `to`, none outside a move. Keyed by
-    /// the version, never by the phase, so a node that took the new pin
-    /// before the new phase never writes one version's overlay under the
-    /// other.
+    /// `from`, the reverse one on its `to`. Keyed by the version, never by
+    /// the phase, so a node that took the new pin before the new phase
+    /// never writes one version's overlay under the other.
+    ///
+    /// Outside a move, the version's rename overlay, if any
+    /// ([`crate::dual_writes::rename_overlay`]): a rename `ordo apply` or
+    /// a stored step made keeps both columns current from either version.
     pub fn overlay_for(
         &self,
         space: &str,
         version: &str,
+        schema: &ordo_schema::Schema,
     ) -> Option<Arc<ordo_exec::overlay::MoveOverlay>> {
-        let moves = self.moves.read().expect("move lock");
-        let m = moves.get(space)?;
-        if version == m.from {
-            Some(m.forward.clone())
-        } else if version == m.to {
-            Some(m.reverse.clone())
-        } else {
-            None
+        {
+            let moves = self.moves.read().expect("move lock");
+            if let Some(m) = moves.get(space) {
+                if version == m.from {
+                    return Some(m.forward.clone());
+                }
+                if version == m.to {
+                    return Some(m.reverse.clone());
+                }
+            }
+        }
+        if let Some(o) = self
+            .renames
+            .read()
+            .expect("rename lock")
+            .overlays
+            .get(version)
+        {
+            return o.clone();
+        }
+        let mut st = self.renames.write().expect("rename lock");
+        let all: Vec<crate::dual_writes::Rename> =
+            st.by_version.values().flatten().cloned().collect();
+        let o = crate::dual_writes::rename_overlay(version, schema, &all).map(Arc::new);
+        st.overlays.insert(version.to_string(), o.clone());
+        o
+    }
+
+    /// The stored versions whose renames this node has read.
+    pub fn renames_read(&self) -> std::collections::BTreeSet<String> {
+        self.renames
+            .read()
+            .expect("rename lock")
+            .by_version
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Take the renames of stored versions read since the last call.
+    /// A version read with none is kept, so it is not compiled again.
+    pub fn add_renames(&self, read: Vec<(String, Vec<crate::dual_writes::Rename>)>) {
+        if read.is_empty() {
+            return;
+        }
+        let mut st = self.renames.write().expect("rename lock");
+        let mut changed = false;
+        for (v, r) in read {
+            changed |= !r.is_empty();
+            st.by_version.insert(v, r);
+        }
+        if changed {
+            st.overlays.clear();
         }
     }
 

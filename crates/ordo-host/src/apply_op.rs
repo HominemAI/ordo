@@ -380,6 +380,10 @@ pub enum Stored {
     /// The same source as the stored version, a new build of it. No
     /// version moved (`plan-versions.md` §1.1).
     Rebuilt,
+    /// The same program as the stored version, from a source at a newer
+    /// language edition, which the version now holds (`ordo fix`,
+    /// `plan-versions.md` §2.8). No version moved.
+    EditionMoved,
 }
 
 /// What one apply did, as data.
@@ -934,6 +938,7 @@ async fn sequence(
         Ok(versions::Applied::Stored(_)) => Stored::Written,
         Ok(versions::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
         Ok(versions::Applied::Rebuilt(_)) => Stored::Rebuilt,
+        Ok(versions::Applied::EditionMoved(_)) => Stored::EditionMoved,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
     let ordinal = Versions::on(pool)
@@ -1689,6 +1694,7 @@ impl Report {
                 Stored::Written => "written",
                 Stored::AlreadyPresent => "alreadyPresent",
                 Stored::Rebuilt => "rebuilt",
+                Stored::EditionMoved => "editionMoved",
             },
             "activation": activation,
             "landedPrev": self.landed_prev,
@@ -1781,6 +1787,7 @@ impl Report {
             Some("written") => Stored::Written,
             Some("alreadyPresent") => Stored::AlreadyPresent,
             Some("rebuilt") => Stored::Rebuilt,
+            Some("editionMoved") => Stored::EditionMoved,
             other => {
                 return Err(format!(
                     "the apply's result named stored state {other:?}, which this client does \

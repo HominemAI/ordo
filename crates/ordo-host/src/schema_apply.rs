@@ -172,8 +172,11 @@ impl Program {
 
     fn identify(&mut self) {
         use ordo_plan::artifact as a;
-        self.source_id =
-            a::source_identity(&self.source, a::FIRST_EDITION, &a::code_hashes(&self.doc));
+        self.source_id = a::source_identity(
+            &self.source,
+            ordo_plan::edition::of_source(&self.source),
+            &a::code_hashes(&self.doc),
+        );
         self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
         self.declared = a::declared_version(&self.source);
         self.version = match &self.declared {
@@ -2489,16 +2492,24 @@ pub fn triage_counted(
 }
 
 /// The statements of a declared rename (§5 B4, `plan-syntax-additions.md`
-/// §5): the new column, open to nulls; the old column's values copied into
-/// it; then the new column's `NOT NULL`. The old column is kept, and loses
-/// its `NOT NULL` so the new version's inserts, which no longer write it,
-/// are not refused. The serving version still reads it until its tenants
-/// move. Never `ALTER … RENAME`, which would drift the serving version the
-/// instant it landed. The new column's unique, reference and value set are
-/// their own changes in the same step.
+/// §5), as `ordo apply` makes it: the new column, open to nulls; the old
+/// column's values copied into it; then the new column's `NOT NULL`. The
+/// old column is kept with its `NOT NULL`, so the version before still
+/// loads over this database and a rollback by `ordo apply` is not refused.
+/// The serving version still reads it until its tenants move. Never
+/// `ALTER … RENAME`, which would drift the serving version the instant it
+/// landed. The new column's unique, reference and value set are their own
+/// changes in the same step.
 ///
-/// Until dual writes (increment 11a), a write the serving version makes
-/// after the copy and before the pin moves reaches only the old column.
+/// **No write is lost between the copy and the pin switch.** Both
+/// versions' writes reach both columns through the host's dual writes
+/// (increment 11a, [`crate::dual_writes::rename_overlays`]): a write on the
+/// version before also sets the new column from the old one, and a write
+/// on the new version sets the old column from the new one, each in the
+/// write's own transaction. An insert that does not name a required
+/// column takes its default first: the old column keeps its own, or gets
+/// the new field's when it has none (`prev_default_required` refuses a
+/// rename with neither).
 pub fn rename_field_steps(
     e: &ordo_schema::Entity,
     live: &LiveShape,
@@ -2517,30 +2528,47 @@ pub fn rename_field_steps(
         .ok_or_else(|| format!("`{}.{field}` is not declared", e.name))?;
     let mut out = ordo_schema::ddl::add_column(&open, of)
         .map_err(|x| format!("{}: {}", x.code, x.message))?;
+    out.extend(rename_old_default(e, f, live, from)?);
     let t = ordo_schema::ddl::q(&e.name);
     let new = ordo_schema::ddl::q(&f.column());
     let old = ordo_schema::ddl::q(from);
-    out.push(format!(
-        "UPDATE {t} SET {new} = {old};
-"
-    ));
+    out.push(format!("UPDATE {t} SET {new} = {old};\n"));
     if !f.optional {
         out.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {new} SET NOT NULL;
-"
-        ));
-    }
-    let old_required = live
-        .table(&e.name)
-        .and_then(|lt| lt.columns.get(from))
-        .is_some_and(|c| !c.nullable);
-    if old_required {
-        out.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {old} DROP NOT NULL;
-"
+            "ALTER TABLE {t} ALTER COLUMN {new} SET NOT NULL;\n"
         ));
     }
     Ok(out)
+}
+
+/// The old column of a rename keeps its `NOT NULL`, so an insert by the
+/// new version, which does not name it, needs a default there. A column
+/// with none gets the new field's; the dual writes then set the real value
+/// in the same transaction. Nothing when the old column is optional or
+/// has a default of its own.
+fn rename_old_default(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    live: &LiveShape,
+    from: &str,
+) -> Result<Vec<String>, String> {
+    let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
+    if !old_live.is_some_and(|c| !c.nullable && !c.has_default) {
+        return Ok(Vec::new());
+    }
+    match ordo_schema::ddl::column_default(f).map_err(|x| format!("{}: {}", x.code, x.message))? {
+        Some(d) => Ok(vec![format!(
+            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {d};\n",
+            ordo_schema::ddl::q(&e.name),
+            ordo_schema::ddl::q(from)
+        )]),
+        None => Err(format!(
+            "prev_default_required: `{}.{from}` is required and has no default, and \
+             `{}.{}` declares none, so an insert by the new version could not leave it \
+             empty. Give `{}` a default (`= <value>`)",
+            e.name, e.name, f.name, f.name
+        )),
+    }
 }
 
 /// A declared rename in a stored plan (increment 11a): the statements of
@@ -2548,11 +2576,13 @@ pub fn rename_field_steps(
 /// and the new column's `NOT NULL`, which lands when the move closes.
 ///
 /// The expand adds the new column open to nulls (with its default, if it
-/// has one) and drops the old column's `NOT NULL`, so the new version's
-/// inserts, which do not write it, are taken. Until the move closes, each
-/// side's `required` is held by the host's guards on every write
-/// (`ordo_exec::overlay`). A sealed or file field is not copied this way:
-/// its copy needs the write path's custody.
+/// has one). The old column keeps its `NOT NULL`, so the version before
+/// still loads over the database; when it has no default it gets the new
+/// field's, so the new version's inserts, which do not name it, are taken
+/// and the dual writes set its value in the same transaction. Until the
+/// move closes, the new field's `required` is held by the host's guards on
+/// every write (`ordo_exec::overlay`). A sealed or file field is not copied
+/// this way: its copy needs the write path's custody.
 type RenameParts = (Vec<String>, BackfillStep, Option<String>);
 
 fn rename_backfill(
@@ -2580,7 +2610,9 @@ fn rename_backfill(
         return Err(refuse(
             "rename_backfill_not_built",
             format!(
-                "`{}.{field}` is sealed or a file, and the backfill worker copies neither: a                  sealed copy needs a key lease (increment 13), a file's handle the upload's                  custody. Apply the rename with `ordo apply`, which copies it in the step",
+                "`{}.{field}` is sealed or a file, and the backfill worker copies neither: a \
+                 sealed copy needs a key lease (increment 13), a file's handle the upload's \
+                 custody. Apply the rename with `ordo apply`, which copies it in the step",
                 e.name
             ),
         ));
@@ -2594,17 +2626,14 @@ fn rename_backfill(
         .ok_or_else(|| refuse("mapping_invalid", format!("`{}.{field}`", e.name)))?;
     let mut expand = ordo_schema::ddl::add_column(&open, of)
         .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+    expand.extend(rename_old_default(e, f, live, from).map_err(|why| {
+        let (class, why) = match why.split_once(": ") {
+            Some(("prev_default_required", rest)) => ("prev_default_required", rest.to_string()),
+            _ => ("mapping_invalid", why),
+        };
+        refuse(class, why)
+    })?);
     let t = ordo_schema::ddl::q(&e.name);
-    let old_required = live
-        .table(&e.name)
-        .and_then(|lt| lt.columns.get(from))
-        .is_some_and(|c| !c.nullable);
-    if old_required {
-        expand.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {} DROP NOT NULL;\n",
-            ordo_schema::ddl::q(from)
-        ));
-    }
     let close = (!f.optional).then(|| {
         format!(
             "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",

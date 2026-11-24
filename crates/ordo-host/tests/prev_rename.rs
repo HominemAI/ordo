@@ -6,9 +6,12 @@
 //! - the same edit without `prev` renders as a new required field, which is
 //!   refused;
 //! - a tenant replaying the stored step keeps every value under the new
-//!   name, and the old column is kept;
+//!   name, and the old column is kept with its `NOT NULL`;
+//! - both versions' writes reach both columns through the dual writes
+//!   (increment 11a), and no database trigger is made;
 //! - the plan checks: `prev_unresolved`, `prev_type`,
-//!   `prev_mapping_required`, `prev_sealed`, and `prev_stale` as a warning;
+//!   `prev_mapping_required`, `prev_sealed`, `prev_default_required`, and
+//!   `prev_stale` as a warning;
 //! - an entity rename renders as a rename and is refused until the backfill
 //!   worker, naming the way round;
 //! - the offer to remove a landed mark, only in the chain's last
@@ -21,7 +24,9 @@
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
 use ordo_conformance::Pg;
+use ordo_exec::overlay::MoveOverlay;
 use ordo_exec::{Pool, PoolConfig};
+use ordo_host::dual_writes;
 use ordo_host::evolve::{self, EvolveRefusal};
 use ordo_host::schema_apply::{self as sa, Choices, Program};
 use ordo_host::versions::Versions;
@@ -36,7 +41,7 @@ fn notes(version: &str, fields: &str) -> String {
 }
 
 const V1: &str = "  title: text\n  body: text?\n";
-const V2: &str = "  heading: text prev(title)\n  body: text?\n";
+const V2: &str = "  heading: text = \"\" prev(title)\n  body: text?\n";
 
 async fn empty(stem: &str) -> (Pg, Pool) {
     let pg = Pg::scoped(stem);
@@ -79,6 +84,30 @@ fn one(pg: &Pg, sql: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The rename overlay `version` writes with, as a node works it out from
+/// the renames `y` declares ([`dual_writes::rename_overlay`]).
+fn overlay(version: &Program, y: &Program) -> MoveOverlay {
+    let renames = dual_writes::renames_of(&y.version, &y.schema);
+    dual_writes::rename_overlay(&version.version, &version.schema, &renames)
+        .unwrap_or_else(|| panic!("{} has no rename overlay", version.version))
+}
+
+/// One write as the host makes it: the statement, then the version's
+/// overlay over the row it wrote, in the same transaction (the executor's
+/// attempt runs the overlay the same way, `ordo_exec::Executor`).
+async fn write(pool: &Pool, overlay: &MoveOverlay, sql: &str, id: &str) -> Result<(), String> {
+    let tx = pool.begin().await.map_err(|e| e.to_string())?;
+    tx.rows(sql).await.map_err(|e| e.to_string())?;
+    if let Err(e) = overlay
+        .apply(&tx, "acme", &[("note".to_string(), id.to_string())])
+        .await
+    {
+        let _ = tx.rollback().await;
+        return Err(format!("{e:?}"));
+    }
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
 fn errors(r: Result<evolve::Rendered, EvolveRefusal>) -> Vec<(String, String, String)> {
     match r {
         Err(EvolveRefusal::Errors { errors, .. }) => errors
@@ -96,7 +125,7 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
     let (_reg_pg, registry) = empty("ordo_prev_reg").await;
     let (tenant_pg, tenant) = empty("ordo_prev_tenant").await;
     let x = store(&registry, &notes("1.0.0", V1)).await;
-    store(&registry, &notes("1.1.0", V2)).await;
+    let y = store(&registry, &notes("1.1.0", V2)).await;
     store(
         &registry,
         &notes("1.2.0", "  heading: text\n  body: text?\n"),
@@ -131,9 +160,17 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         ),
         "{lines}"
     );
+    // The old column keeps its `NOT NULL`: 1.0.0 still loads over it. It
+    // has no default, so it takes the new field's, and an insert by 1.1.0
+    // is taken.
+    assert!(!lines.contains("DROP NOT NULL"), "{lines}");
     assert!(
-        lines.contains("forward: ALTER TABLE \"note\" ALTER COLUMN \"title\" DROP NOT NULL;"),
+        lines.contains("forward: ALTER TABLE \"note\" ALTER COLUMN \"title\" SET DEFAULT '';"),
         "{lines}"
+    );
+    assert!(
+        !lines.contains("TRIGGER \"note"),
+        "no trigger is made: {lines}"
     );
     assert!(
         lines.contains("reverse: UPDATE \"note\" SET \"title\" = \"heading\";"),
@@ -177,7 +214,8 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         one(&tenant_pg, "SELECT heading FROM note WHERE id = 'n1'"),
         "first"
     );
-    // The old column is kept, with its value, and no longer required.
+    // The old column is kept, with its value, and still required, so
+    // 1.0.0 still loads over this database.
     assert_eq!(
         one(&tenant_pg, "SELECT title FROM note WHERE id = 'n1'"),
         "first"
@@ -188,7 +226,7 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
             "SELECT is_nullable FROM information_schema.columns \
              WHERE table_name = 'note' AND column_name = 'title'"
         ),
-        "YES"
+        "NO"
     );
     assert_eq!(
         one(
@@ -198,10 +236,202 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         ),
         "NO"
     );
-    // A row written under the new version needs no `title`.
-    tenant_pg
-        .exec("INSERT INTO note (\"$space\", id, rev, heading) VALUES ('acme', 'n2', 1, 'second')")
-        .expect("a row under 1.1.0");
+    // A row written under the new version names no `title`: it takes the
+    // default, and the dual writes set it in the same write.
+    write(
+        &tenant,
+        &overlay(&y, &y),
+        "INSERT INTO note (\"$space\", id, rev, heading) VALUES ('acme', 'n2', 1, 'second')",
+        "n2",
+    )
+    .await
+    .expect("a row under 1.1.0");
+    // A tenant still on 1.0.0 reads it whole.
+    assert_eq!(
+        one(&tenant_pg, "SELECT title FROM note WHERE id = 'n2'"),
+        "second"
+    );
+}
+
+/// **No write is lost between the copy and the pin switch.** A writer on
+/// the old version inserts rows while the rename runs, then inserts and
+/// changes rows after it and before any pin moves. Every row has the same
+/// value under the new name. A row the new version writes is read whole by
+/// the old one. Each write runs its version's dual writes in its own
+/// transaction, as the host runs them (increment 11a); the database holds
+/// no trigger. The reverse drops a trigger a build before 11a made, and
+/// gives the old column back its default.
+///
+/// A regression looks like a row whose new column is empty or holds the
+/// default where the old one holds a value: a write lost to the rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_during_the_rename_reach_the_new_column() {
+    let (_reg_pg, registry) = empty("ordo_prev_live_reg").await;
+    let (tenant_pg, tenant) = empty("ordo_prev_live_tenant").await;
+    let x = store(&registry, &notes("1.0.0", "  kind: text = \"\"\n")).await;
+    let y = store(
+        &registry,
+        &notes("1.1.0", "  mediaType: text = \"\" prev(kind)\n"),
+    )
+    .await;
+    let (on_x, on_y) = (overlay(&x, &y), overlay(&y, &y));
+    evolve::evolve(
+        &registry,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("stores");
+    let (_, created) = sa::apply(&tenant, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    for i in 0..50 {
+        tenant_pg
+            .exec(&format!(
+                "INSERT INTO note (\"$space\", id, rev, kind) VALUES ('acme', 'before{i}', 1, 'k{i}')"
+            ))
+            .expect("a row before");
+    }
+
+    // The old version writes while the rename runs.
+    let writer = {
+        let pool = tenant.clone();
+        let on_x = on_x.clone();
+        tokio::spawn(async move {
+            let mut n = 0usize;
+            let mut i = 0usize;
+            while i < 400 {
+                let sql = format!(
+                    "INSERT INTO note (\"$space\", id, rev, kind) VALUES ('acme', 'during{i}', 1, 'd{i}')"
+                );
+                if write(&pool, &on_x, &sql, &format!("during{i}"))
+                    .await
+                    .is_ok()
+                {
+                    n += 1;
+                }
+                i += 1;
+            }
+            n
+        })
+    };
+    evolve::replay(&registry, &tenant, "acme", "1.1.0", OWNER)
+        .await
+        .expect("replays the rename");
+    let written = writer.await.expect("the writer");
+    assert_eq!(written, 400, "every write by the old version landed");
+
+    // After the copy, before any pin moves: the old version writes again.
+    write(
+        &tenant,
+        &on_x,
+        "INSERT INTO note (\"$space\", id, rev, kind) VALUES ('acme', 'after', 1, 'image/png')",
+        "after",
+    )
+    .await
+    .expect("an insert after the copy");
+    write(
+        &tenant,
+        &on_x,
+        "UPDATE note SET kind = 'changed' WHERE id = 'before0'",
+        "before0",
+    )
+    .await
+    .expect("an update after the copy");
+
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT count(*) FROM note WHERE \"mediaType\" IS DISTINCT FROM kind"
+        ),
+        "0",
+        "every row has its value under the new name"
+    );
+    assert_eq!(
+        one(&tenant_pg, "SELECT count(*) FROM note"),
+        (50 + 400 + 1).to_string()
+    );
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT \"mediaType\" FROM note WHERE id = 'after'"
+        ),
+        "image/png"
+    );
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT \"mediaType\" FROM note WHERE id = 'before0'"
+        ),
+        "changed"
+    );
+
+    // The new version writes only the new column; the old one reads it.
+    write(
+        &tenant,
+        &on_y,
+        "INSERT INTO note (\"$space\", id, rev, \"mediaType\") VALUES ('acme', 'new1', 1, 'text/plain')",
+        "new1",
+    )
+    .await
+    .expect("an insert under 1.1.0");
+    write(
+        &tenant,
+        &on_y,
+        "UPDATE note SET \"mediaType\" = 'image/gif' WHERE id = 'after'",
+        "after",
+    )
+    .await
+    .expect("an update under 1.1.0");
+    assert_eq!(
+        one(&tenant_pg, "SELECT kind FROM note WHERE id = 'new1'"),
+        "text/plain"
+    );
+    assert_eq!(
+        one(&tenant_pg, "SELECT kind FROM note WHERE id = 'after'"),
+        "image/gif"
+    );
+
+    // 1.0.0 still loads over the renamed database: nothing it requires was
+    // relaxed, so applying it again (a rollback) is not refused.
+    let state = sa::schema_state(&tenant, &x.schema).await.expect("a state");
+    assert!(
+        !matches!(state, sa::SchemaState::Behind(_)),
+        "1.0.0 is behind: {state:?}"
+    );
+
+    // The dual writes are the host's: the database holds no trigger.
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal"
+        ),
+        "0"
+    );
+
+    // The reverse removes a trigger a build before 11a made, before it
+    // copies back.
+    let r = evolve::render(&registry, "1.0.0", "1.1.0", &Choices::default(), 1)
+        .await
+        .expect("renders");
+    let lines = evolve::receipt_lines(&r.receipt).join("\n");
+    let drop = lines
+        .find("reverse: DROP TRIGGER IF EXISTS \"note$mediaType$prev\" ON \"note\";")
+        .unwrap_or_else(|| panic!("{lines}"));
+    let back = lines
+        .find("reverse: UPDATE \"note\" SET \"kind\" = \"mediaType\";")
+        .unwrap_or_else(|| panic!("{lines}"));
+    assert!(drop < back, "{lines}");
+    assert!(
+        lines.contains("reverse: ALTER TABLE \"note\" ALTER COLUMN \"kind\" SET DEFAULT '';"),
+        "{lines}"
+    );
 }
 
 /// **Each plan check refuses what the step cannot make, naming the fix.**
@@ -241,6 +471,11 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
             "2.4.0",
             "  title: text\n  body: text?\n  hidden: text sealed prev(secret)\n",
             "prev_sealed",
+        ),
+        (
+            "2.5.0",
+            "  heading: text prev(title)\n  body: text?\n  secret: text sealed\n",
+            "prev_default_required",
         ),
     ];
     for (v, fields, class) in cases {

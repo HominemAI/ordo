@@ -293,6 +293,7 @@ export class SyncManager {
   /** The last common position published. It only ever rises. */
   #position: number | null = null;
   #running = true;
+  #offVersion: (() => void) | null = null;
   /** Observed handles, by key (`observe`). Only these keep rows in memory. */
   readonly #observed = new Map<string, Observed>();
   /** One row per reference, shared by every observed handle that holds it. */
@@ -344,6 +345,11 @@ export class SyncManager {
       // A Node process is not kept alive by it.
       (this.#touchTimer as { unref?: () => void }).unref?.();
     }
+    // A change in the version the door names on any answer is the same
+    // news as the feed's `version_changed` frame (owner ruling Q7).
+    this.#offVersion = client.versions.onChange(() => {
+      if (this.#running) void this.#versionChanged(null);
+    });
     if (target) {
       const onOnline = () => this.nudge();
       target.addEventListener('online', onOnline);
@@ -636,6 +642,8 @@ export class SyncManager {
     this.#running = false;
     this.#offOnline?.();
     this.#offOnline = null;
+    this.#offVersion?.();
+    this.#offVersion = null;
     if (this.#touchTimer !== null) clearInterval(this.#touchTimer);
     this.#touchTimer = null;
     this.#stopped();
@@ -796,7 +804,7 @@ export class SyncManager {
    * and on disk, and reopen every other feed so each fills it again. Feeds
    * hear it together, so the first one drops and the rest wait for it.
    */
-  #versionChanged(heard: Entry): Promise<void> {
+  #versionChanged(heard: Entry | null): Promise<void> {
     if (this.#dropping) return this.#dropping;
     const drop = (async () => {
       this.#poisoned();

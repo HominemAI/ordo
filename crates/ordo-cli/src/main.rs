@@ -41,6 +41,10 @@ fn usage() -> ! {
          params, returned fields or entity contain it. --entity and --file\n      \
          narrow the list to one group or one source file. Exits 1 when an op\n      \
          does not compile, as `check` does, or when nothing matches.\n  \
+         ordo fix   <dir|file.ordo> [--write]\n      \
+         rewrite the source from an old language edition to the current\n      \
+         one. Without --write, a dry run that prints the diff. With it, the\n      \
+         rewritten program is compiled, then written. No door, no database.\n  \
          ordo skill install [<project dir>] [--force]\n      \
          write the Ordo agent skill, the one this binary carries, into\n      \
          <dir>/.claude/skills/ordo/ and a marked block into <dir>/AGENTS.md\n      \
@@ -701,6 +705,23 @@ fn main() {
         print!("{out}");
         eprint!("{err}");
         exit(code);
+    }
+
+    // `ordo fix <dir> [--write]`: rewrite a source to the current language
+    // edition (`plan-versions.md` §2.8). No door and no database.
+    if cmd == "fix" {
+        if let Some(f) = rest.iter().find(|a| a.starts_with("--") && *a != "--write") {
+            eprintln!("ordo fix: unknown flag `{f}`; the one flag is `--write`");
+            exit(2);
+        }
+        let path = positional(rest, &[]).unwrap_or_else(|| usage());
+        let out = ordo_cli::fix::run(Path::new(&path), rest.iter().any(|a| a == "--write"));
+        if out.code == 0 {
+            print!("{}", out.report);
+        } else {
+            eprint!("{}", out.report);
+        }
+        exit(out.code);
     }
 
     // `ordo skill install [<dir>]`: the agent skill this binary carries.

@@ -1052,19 +1052,42 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
             field,
         } => {
             let t = q(entity);
-            let mut out = vec![format!("UPDATE {t} SET {} = {};", q(from), q(field))];
-            if x
+            let new = y
                 .schema
                 .native(entity)
-                .and_then(|e| e.field(from))
-                .is_some_and(|f| !f.optional)
-            {
+                .and_then(|e| e.field(field))
+                .map(|f| f.column())
+                .unwrap_or_else(|| field.clone());
+            // A database a build before increment 11a renamed holds a sync
+            // trigger, `<table>$<new column>$prev`: it goes first, so the
+            // copy back is not mirrored. On any other database the two
+            // statements find nothing.
+            let sync = q(&format!("{entity}${new}$prev"));
+            let mut out = vec![
+                format!("DROP TRIGGER IF EXISTS {sync} ON {t};"),
+                format!("DROP FUNCTION IF EXISTS {sync}();"),
+                format!("UPDATE {t} SET {} = {};", q(from), q(&new)),
+            ];
+            let old = x.schema.native(entity).and_then(|e| e.field(from));
+            if old.is_some_and(|f| !f.optional) {
                 out.push(format!(
                     "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;",
                     q(from)
                 ));
             }
-            out.push(format!("ALTER TABLE {t} DROP COLUMN {};", q(field)));
+            // The old column's own default back, or none: a rename gives a
+            // required one with no default the new field's.
+            match old.and_then(|f| ordo_schema::ddl::column_default(f).ok().flatten()) {
+                Some(d) => out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {} SET DEFAULT {d};",
+                    q(from)
+                )),
+                None => out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {} DROP DEFAULT;",
+                    q(from)
+                )),
+            }
+            out.push(format!("ALTER TABLE {t} DROP COLUMN {};", q(&new)));
             (
                 out,
                 Some("the rename read backwards: the old column was kept, and gets back what was written to the new one".into()),
@@ -1816,7 +1839,16 @@ pub async fn run_step_with(
                 backfills: reports,
             });
         }
-        let verified = worker.verify_and_close().await.map_err(bf_err)?;
+        // A rename's copy runs beside its versions' dual writes (the rename
+        // overlays, increment 11a), so rows change under it by design and
+        // verify checks the mapping on every row. A fill has no overlay
+        // outside a move, and verify checks the chunks too.
+        let verified = if bf.code == "B4" {
+            worker.verify_live_and_close().await
+        } else {
+            worker.verify_and_close().await
+        }
+        .map_err(bf_err)?;
         report["verified"] = json!({
             "rows": verified.rows,
             "already": verified.already,

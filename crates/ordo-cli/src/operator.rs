@@ -2254,6 +2254,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
         Stored::Rebuilt => {
             format!("stored     {version}  (already present; this Ordo release built it anew)\n")
         }
+        Stored::EditionMoved => format!(
+            "stored     {version}  (already present; its source moved to a newer edition, \
+             the same program)\n"
+        ),
     });
     out.push_str(&provenance_lines(&report.provenance));
     if !behind.is_empty() {

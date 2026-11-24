@@ -301,6 +301,13 @@ impl PinStream {
             Ok(m) => self.deployment.set_moves(m),
             Err(e) => eprintln!("pins: the moves with dual writes were not read ({e})"),
         }
+        // The renames stored versions declare (increment 11a): each version
+        // is read once. Storing a version nudges this stream.
+        let known = self.deployment.renames_read();
+        match crate::dual_writes::read_renames(&self.control, &known).await {
+            Ok(r) => self.deployment.add_renames(r),
+            Err(e) => eprintln!("pins: the renames of stored versions were not read ({e})"),
+        }
     }
 
     /// Load what the pins name and drop what they no longer do.

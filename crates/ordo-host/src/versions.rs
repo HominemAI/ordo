@@ -1890,8 +1890,21 @@ impl<'a> Versions<'a> {
     // ── stored versions ────────────────────────────────────────────────
 
     /// Store a version. See [`registry::store`].
+    ///
+    /// A version newly stored nudges the pin stream, so every node reads
+    /// the renames it declares before a step makes them (increment 11a,
+    /// [`crate::dual_writes::read_renames`]).
     pub async fn store(&self, a: &Artifact) -> Result<Applied, VersionRefusal> {
-        Ok(registry::store(self.pool, a).await?)
+        let stored = registry::store(self.pool, a).await?;
+        if matches!(stored, Applied::Stored(_)) {
+            self.pool
+                .rows(&format!(
+                    "SELECT pg_notify({}, '')",
+                    ordo_exec::sql_lit(PINS_CHANNEL)
+                ))
+                .await?;
+        }
+        Ok(stored)
     }
 
     /// Store this release's build of a stored version. See

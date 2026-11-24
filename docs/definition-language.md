@@ -2024,13 +2024,19 @@ entity customers (key: cust, prev: clients) {
 - `prev` reaches one version back only.
 - `prev` is contextual: a field may still be named `prev`.
 - A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
-  copies every value into it, and keeps the old column. The old column
-  loses its `NOT NULL`, so the new version's inserts are not refused. The
+  copies every value into it, and keeps the old column with its
+  `NOT NULL`, so the version before still loads over the database. The
   receipt's reverse copies the values back and drops the new column.
+- No write is lost between the copy and the tenant's pin switch. The
+  host's dual writes (increment 11a) run in each write's own transaction:
+  a write by the version before also sets the new column, and a write by
+  the new version also sets the old one.
+- A required field renamed needs a default (`prev_default_required`). Each
+  version's insert names only its own column, so the other takes its
+  default first, and the dual writes set it in the same write. An old
+  column with no default of its own takes the new field's.
 - `ordo apply` makes a field rename itself, as it makes an additive change.
-  Until dual writes (increment 11a), a write the serving version makes
-  after the copy and before the tenant's pin moves reaches only the old
-  column.
+  A stored step copies the values with the backfill worker.
 - An entity rename renders as a rename and is refused as
   `rename_entity_not_built` until the backfill worker (increment 10b).
 - A clean `ordo apply` names each mark whose rename has landed in every
@@ -3721,6 +3727,31 @@ The page calls a function with `POST /fn/<name>` or the SDK's
 `callFunction`. The body is at most `ORDO_FN_BODY_BYTES` (1 MiB). One call
 reads at most `ORDO_FN_BLOB_BYTES` (20 MiB) of files. Run history is
 `ordo fn runs` and `ordo fn log`.
+
+### Edition [built 2026-11-23]
+
+One top-level line names the language edition the source is written in:
+
+```
+domain shop @ 0.1.0
+edition 1
+```
+
+- A source with no edition line is edition 1, for good (ruled 2026-11-03).
+- At most one per program. `edition` stays an ordinary name elsewhere, so
+  a field may be called `edition`.
+- What each edition means, its load window and `ordo fix` are in
+  `deploying.md` ("Language editions and `ordo fix`") and
+  `plan-versions.md` §2.8.
+- Only edition 1 is released. Edition 2 is written, unreleased: it would
+  refuse bare `money`, and `ordo fix` would write `money(0)`.
+
+| Class | Refused |
+|---|---|
+| `duplicate_edition` | a second `edition` line |
+| `edition_unknown` | an edition newer than this Ordo release knows |
+| `edition_expired` | an edition outside `editions.load_window`; the refusal names `ordo fix` |
+| `edition_rule` | a construct the named edition refuses; the refusal names `ordo fix` |
 
 ### Domain package
 

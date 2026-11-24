@@ -202,6 +202,12 @@ export ORDO_PG_POOL_SIZE=${ORDO_PG_POOL_SIZE:-3} ORDO_PG_IDLE_SECS=${ORDO_PG_IDL
 export ORDO_AUTH_GUEST=on
 # Notes v2's `reader note_viewer` line names this role (made above).
 export ORDO_READER_NOTE_VIEWER_ROLE=note_viewer
+# A debug build's flag: edition 2 is current from this date, so notes v1,
+# written with no edition line, is an old edition inside its load window
+# (plan-versions.md §2.8). tests/upgrade rewrites it with `ordo fix`.
+# A release build never reads it. Keep it equal to EDITION_2_SINCE in
+# tests/support.ts.
+export ORDO_TEST_EDITION_2_SINCE=2026-11-01
 # Files on notes (notes v2) go to a blob store on this machine's disk, under
 # the stack's own folder. `fs:` is for tests and development only, so the
 # door refuses to boot on it without the unsafe switch beside it. A real

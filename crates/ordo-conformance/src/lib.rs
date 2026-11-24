@@ -438,6 +438,12 @@ impl Fixture {
     fn compile_source(src: &str, seed: &'static str) -> Result<Fixture, String> {
         let program =
             parse_program(src).map_err(|e| format!("{}: {} at {}", e.code, e.message, e.span))?;
+        // The edition gate (`plan-versions.md` §2.6): an edition outside
+        // its load window, or one this release does not know, is refused
+        // here, so a load, an apply and `ordo dev` refuse it alike.
+        ordo_plan::edition::Editions::this_release()
+            .gate(src, &program)
+            .map_err(|e| format!("{}: {} at {}", e.code, e.message, e.span))?;
         let keys = ordo_schema::KeyTable::from_env().map_err(|e| format!("keys: {e}"))?;
         let schema =
             ordo_schema::build_with_keys(&program, &keys).map_err(|e| format!("schema: {e}"))?;

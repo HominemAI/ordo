@@ -12,7 +12,7 @@ case "${1:-}" in
     case "$suite" in
       notes) state=examples/notes/e2e/.stack ;;
       federation) state=examples/note-viewer/e2e/.stack ;;
-      *) echo "Unknown suite: $suite" >&2; exit 1 ;;
+      *) state="examples/$suite/e2e/.stack" ;;
     esac
     test -s "$state/host-pids"
     # show-env names profiles with the process id and the binary signature.

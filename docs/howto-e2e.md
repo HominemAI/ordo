@@ -483,7 +483,8 @@ table; test code and dependencies do not.
 `coverage/floor.json` stores the per-crate floors. The ratchet rejects a
 missing crate or a fall larger than its tolerance. A higher result prints
 `raise <crate> <label> to <pct>`; put measured increases in the floor file.
-The initial floors need the first green instrumented run. S1 adds the new
+The initial floors come from the green measurement jobs in coverage run
+45298788448. They are rounded down to 2 decimal places. S1 adds the new
 examples workflow to the same collection when that suite exists.
 
 Check the accounting without a Rust build:

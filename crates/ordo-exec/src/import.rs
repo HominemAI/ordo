@@ -1159,12 +1159,14 @@ fn import_ops(schema: &Schema) -> ordo_syntax::decl::Program {
     }
     ordo_syntax::decl::Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),

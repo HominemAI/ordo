@@ -41,6 +41,10 @@ fn usage() -> ! {
          params, returned fields or entity contain it. --entity and --file\n      \
          narrow the list to one group or one source file. Exits 1 when an op\n      \
          does not compile, as `check` does, or when nothing matches.\n  \
+         ordo fix   <dir|file.ordo> [--write]\n      \
+         rewrite the source from an old language edition to the current\n      \
+         one. Without --write, a dry run that prints the diff. With it, the\n      \
+         rewritten program is compiled, then written. No door, no database.\n  \
          ordo skill install [<project dir>] [--force]\n      \
          write the Ordo agent skill, the one this binary carries, into\n      \
          <dir>/.claude/skills/ordo/ and a marked block into <dir>/AGENTS.md\n      \
@@ -52,7 +56,7 @@ fn usage() -> ! {
          set, recompiles on save, brings up its own Postgres (or connects\n      \
          to ORDO_PG_* when set), classifies every save's schema delta,\n      \
          applies an additive one through the same class-A path `ordo\n      \
-         migrate --apply` runs and resets and reseeds (from `seed.sql`)\n      \
+         apply` runs and resets and reseeds (from `seed.sql`)\n      \
          on anything else (§4.3), then gates and swaps\n      \
          through the SAME assembly a server gets, serving on ORDO_DEV_ADDR\n      \
          (default 127.0.0.1:4000) with no restart between saves.\n      \
@@ -73,17 +77,38 @@ fn usage() -> ! {
          the verdict, then every change with its class and what refuses it.\n      \
          Read-only. Exits 1 when the apply would refuse. Through the door\n      \
          only; `--against <db>` is gone.\n  \
-         ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
-         the plan, then the additive apply (schema-evolution increment 2):\n      \
-         a first apply against an empty database creates the whole schema;\n      \
-         over a deployed one it sends class A (new entity, optional or\n      \
-         constant-defaulted field, index) in one transaction with the index\n      \
-         concurrently after it, plus a constraint that constrains no\n      \
-         existing data. Everything else is refused by name with the\n      \
-         statement to run by hand where one exists. Recorded in\n      \
-         `$migrations` and on the deployment's security stream. Then\n      \
-         `ordo apply` stores and activates the artifact.\n      \
-         --places <entity>.<field>=rescale|keep[,...] (also on `plan`)\n      \
+         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--fill ...]\n      \
+         [--audit-images ...] [--digest <d>] [--run]\n      \
+         render the step between two stored versions on the deployment,\n      \
+         refuse it with its errors, store it, and print its receipt and\n      \
+         digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
+         written to <dir>/receipts/<from>-to-<to>.json. --digest refuses a\n      \
+         deployment that renders another digest. The pre-checks run on\n      \
+         every database and list each issue with its fix. --run runs the\n      \
+         stored plan on the deployment's own database, and refuses while an\n      \
+         issue is open. A step that removes a sign-in method some people\n      \
+         rely on stops until --approve-sign-in-removal <count>.\n      \
+         --fill <entity>.<field>=<expr> states how existing rows get a value\n      \
+         for a field the step makes required (or `=fn <name> [secrets ..]\n      \
+         [hosts ..]`); the backfill runs in chunks and resumes from its\n      \
+         cursor. --audit-images writes every row's images instead of one\n      \
+         summary per tenant.\n  \
+         ordo evolve --tenant <id> [--to <version>]\n      \
+         replay the stored path on the tenant's database, one step at a\n      \
+         time, then pin it (`std.deployment.replay`).\n  \
+         ordo evolve --list [--from <version>] [--to <version>]\n      \
+         the stored plans (`std.deployment.plans`).\n  \
+         ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
+         run from the new image before its tag changes: every version a\n      \
+         tenant is pinned to or may move to must compile and load under\n      \
+         this release. Names each failing version and its tenants; exits 1\n      \
+         when one fails. Reads only, and records one `$release_checks` row.\n      \
+         `--override` records the upgrade going ahead anyway: those tenants\n      \
+         close at the boot, and every other tenant serves.\n  \
+         ordo migrate   removed: every schema evolution goes through the door\n      \
+         (ruled 2026-11-05). It refuses, naming `ordo apply --no-activate`\n      \
+         and `ordo evolve --run`, which replace it.\n  \
+         --places <entity>.<field>=rescale|keep[,...] (on `evolve` and `plan`)\n      \
          states what a change of places on a stored money or decimal\n      \
          field does to its amounts: rescale keeps each value (money is\n      \
          multiplied or divided by 10^n); keep leaves the stored numbers\n      \
@@ -116,7 +141,7 @@ fn usage() -> ! {
          when no server can be up open the database from this machine\n\
          instead (ORDO_PG_HOST/PORT/USER/DB, or --db <name>), and only when\n\
          `--direct` is typed: `keys` (except seal-master), `verify` (except\n\
-         --proof), `restore`, `identity recover`, `migrate --apply`, and\n\
+         --proof), `restore`, `identity recover`, `release-check`, and\n\
          `apply` and `rollback` when no host can boot. Without `--direct`\n\
          and without `--host` they refuse, naming both. Each `--direct` use\n\
          is recorded before it runs and written to the deployment\'s\n\
@@ -128,8 +153,8 @@ fn usage() -> ! {
          compile the program, store its artifact under its `@` version,\n      \
          point the deployment at it, and nudge every replica. On an empty\n      \
          database it creates the schema first; on one the load gate would\n      \
-         refuse it stores and does not activate, naming `ordo migrate\n      \
-         --apply`. An op that does not compile refuses the whole apply.\n      \
+         refuse it stores and does not activate, naming `ordo evolve\n      \
+         --run`. An op that does not compile refuses the whole apply.\n      \
          `--no-activate` stores without re-pointing, for a staged deploy.\n      \
          A real change under an `@` version already applied is refused,\n      \
          naming the next number; comments and spacing never count.\n      \
@@ -260,10 +285,43 @@ fn usage() -> ! {
          and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
+         ordo environments list [<name>] | register <name> [--position <n>] --reason \"<text>\"\n      \
+         the chain of environments this deployment declares (dev, staging,\n      \
+         production), and which one it is. A deployment that registered\n      \
+         none is production. A name not registered is refused, naming the\n      \
+         `register` command. Through the door only (`--host ...`).\n  \
+         ordo environments set-own <name> | remove <name> | rename <name> <new> --reason \"<text>\"\n      \
+         say which environment this deployment is, or remove or rename one.\n      \
+         The deployment's own cannot be removed, and neither can one a stored\n      \
+         promotion names be removed or renamed.\n  \
+         ordo environments door <name> <address> <its space> [--handle <h>] --reason \"<text>\"\n      \
+         where that environment's deployment answers, so the next step can\n      \
+         read a version from it. `--clear` forgets it.\n  \
+         ordo environments set skip-staging on|off --reason \"<text>\"\n      \
+         promotion.skip_staging: promote past staging from the step before it.\n  \
+         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         staging clones of named production tenants. `key` prints this\n      \
+         deployment's clone key; `set-key` records it on production, which\n      \
+         seals each clone to it. clone.mask names the fields that leave\n      \
+         production unmasked (deny by default, `off` to opt out);\n      \
+         clone.readers names who besides staging's admins opens a clone.\n  \
+         ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
+         on staging: production masks the tenant, seals it to staging's key,\n      \
+         and staging imports it under its own keys, pinned to its version.\n      \
+         Members come without their sign-in; a staging admin opens it.\n  \
+         ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
+         the promotion gate: the target reads the version from the step before\n      \
+         itself, as you (a token for it from your `ordo login` sign-in, or\n      \
+         --from-token), refuses what that step has not activated or what\n      \
+         differs from what it recorded (naming the file), and runs its own\n      \
+         secret, external and reader checks before storing. `ordo apply` with\n      \
+         no --env goes to the first step of the chain (dev); `--env <name>`\n      \
+         checks the name is registered and is this deployment. Every step\n      \
+         after the first pins only what came through the gate.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \
@@ -535,10 +593,15 @@ fn main() {
             | "deploys"
             | "versions"
             | "windows"
+            | "environments"
+            | "clones"
+            | "promote"
+            | "evolve"
             | "prune"
             | "restore"
             | "keys"
             | "migrate"
+            | "release-check"
             | "quota"
             | "usage"
             | "space"
@@ -636,6 +699,23 @@ fn main() {
         print!("{out}");
         eprint!("{err}");
         exit(code);
+    }
+
+    // `ordo fix <dir> [--write]`: rewrite a source to the current language
+    // edition (`plan-versions.md` §2.8). No door and no database.
+    if cmd == "fix" {
+        if let Some(f) = rest.iter().find(|a| a.starts_with("--") && *a != "--write") {
+            eprintln!("ordo fix: unknown flag `{f}`; the one flag is `--write`");
+            exit(2);
+        }
+        let path = positional(rest, &[]).unwrap_or_else(|| usage());
+        let out = ordo_cli::fix::run(Path::new(&path), rest.iter().any(|a| a == "--write"));
+        if out.code == 0 {
+            print!("{}", out.report);
+        } else {
+            eprint!("{}", out.report);
+        }
+        exit(out.code);
     }
 
     // `ordo skill install [<dir>]`: the agent skill this binary carries.

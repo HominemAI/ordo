@@ -99,6 +99,7 @@ fn group(entity: &str, rows: &[(&str, CommandKind)], actor: Actor, corr: &str) -
             })
             .collect(),
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }

@@ -80,6 +80,31 @@ user contract."* Whether a clone may keep real personal data is the app
 developer's decision, made under their agreement with their users, so it is
 the app developer's setting, default masked.
 
+**Ruled 2026-11-23 (Q12):** staging registers with the identity service as
+its own deployment. A cloned tenant is opened by any staging deployment
+admin or a person the staging deployment allows. Cloned members' own
+sign-ins are never carried.
+
+**Built, session 1 (2026-11-24, `plan-versions.md` row 12).** On staging,
+`ordo clones clone <tenant> --reason "..."`:
+
+- Staging asks production's door as you, with your own token for
+  production.
+- Production masks the tenant before it leaves: every field not named in
+  `clone.mask` is replaced, and files, the command log, members' names and
+  sign-in links are dropped. `ordo clones set mask off` is the opt-in.
+- Production seals it to staging's clone key. `ordo clones key` on staging
+  prints the key; `ordo clones set-key staging <key>` on production
+  records it.
+- Staging imports it into a new tenant, pinned to the same version, sealed
+  under staging's own keys.
+- A staging admin opens it as its founding owner. `ordo clones set readers
+  <person>` lets others in. A cloned member cannot sign in.
+
+Not built yet: sinks for mail, push and egress; a version staging does not
+hold arriving with the clone; a tenant's own database or bucket recreated.
+Details in `plan-versions.md` §3.4.
+
 ### 2.4 Blue/green per tenant (g33)
 
 Production moves tenant by tenant. **Ruled 2026-10-01**, a program setting

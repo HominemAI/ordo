@@ -32,6 +32,7 @@ use ordo_syntax::decl::{
 use ordo_syntax::span::Span;
 use ordo_syntax::Expr;
 
+pub mod auth;
 pub mod check;
 pub mod ddl;
 pub mod diff;
@@ -435,6 +436,9 @@ pub struct Schema {
     /// The program's backend functions, checked by [`function::check`].
     /// Called through `POST /v1/fn/<name>`, never as ops.
     pub functions: Vec<ordo_syntax::FunctionDecl>,
+    /// The program's `auth` block, checked by [`auth::check`]. `None`:
+    /// the deployment's settings decide sign-in, as before the block.
+    pub auth: Option<ordo_syntax::AuthDecl>,
     /// The nicknames of the program's `peer` lines, in the order written.
     /// Each is read by at least one external.
     pub peers: Vec<String>,
@@ -1117,6 +1121,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
+        auth: program.auth.clone(),
         peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
         readers: program
             .readers
@@ -1157,6 +1162,9 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 });
             }
         }
+    }
+    if let Some(a) = &program.auth {
+        auth::check(a)?;
     }
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
@@ -2302,12 +2310,14 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
     }
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
@@ -2885,12 +2895,14 @@ pub fn std_ops(schema: &Schema) -> Program {
 
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),

@@ -79,6 +79,17 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
             // `function` is contextual the same way: a declaration head
             // only here, so a field or an expression function keeps it.
             TokenKind::Ident(w) if w == "function" => prog.functions.push(function_decl(&mut p)?),
+            TokenKind::Keyword(Keyword::Auth) => {
+                let a = crate::auth::auth_decl(&mut p)?;
+                if prog.auth.is_some() {
+                    return Err(p.err_class_at(
+                        parser::DUPLICATE_AUTH,
+                        a.span,
+                        "a program has one `auth` block; put every clause in the first",
+                    ));
+                }
+                prog.auth = Some(a);
+            }
             // `external` is contextual the same way (ruled 2026-11-15,
             // `external-entities`): a declaration head only here.
             TokenKind::Ident(w) if w == "external" => prog.externals.push(external_decl(&mut p)?),
@@ -115,6 +126,19 @@ fn parse_program_noting(src: &str) -> Result<(Program, Vec<crate::Span>), ParseE
                     ));
                 }
                 prog.readers.push(reader);
+            }
+            // `edition` is contextual the same way (`plan-versions.md`
+            // §2.6): a declaration head only here.
+            TokenKind::Ident(w) if w == "edition" => {
+                let e = edition_decl(&mut p)?;
+                if prog.edition.is_some() {
+                    return Err(p.err_class_at(
+                        parser::DUPLICATE_EDITION,
+                        e.span,
+                        "a program has one `edition` line; this is a second",
+                    ));
+                }
+                prog.edition = Some(e);
             }
             TokenKind::Ident(w) if w == "release" => {
                 let r = release_decl(&mut p)?;
@@ -394,7 +418,7 @@ fn skip_newlines(p: &mut Parser) {
     }
 }
 
-fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+pub(crate) fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
     match p.peek().clone() {
         TokenKind::Ident(name) => {
             let t = p.bump();
@@ -417,7 +441,7 @@ fn ident(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
 /// `groupMembers`' refs point at `members`. Refusing the word here made
 /// DL's own settled spelling unwritable. Whether the segment names a real
 /// field stays the binder's question, as for any identifier.
-fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
+pub(crate) fn segment(p: &mut Parser, what: &str) -> Result<Ident, ParseError> {
     match p.peek().clone() {
         TokenKind::Ident(name) => {
             let t = p.bump();
@@ -655,7 +679,7 @@ fn function_decl(p: &mut Parser) -> Result<crate::decl::FunctionDecl, ParseError
 
 /// One `egress` host: `api.openai.com` as dotted words, or in quotes for a
 /// name with a hyphen, `"my-model.example.com"`.
-fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
+pub(crate) fn function_host(p: &mut Parser) -> Result<crate::decl::FunctionHost, ParseError> {
     if let TokenKind::Str(h) = p.peek().clone() {
         let t = p.bump();
         return Ok(crate::decl::FunctionHost {
@@ -2177,6 +2201,24 @@ fn guard_atom(p: &mut Parser) -> Result<GuardAtom, ParseError> {
 /// The block, when present, opens on the same line. Inside braces the lexer
 /// emits no line breaks, so each effect is found by its leading word. A rule
 /// longer than one line is written inside parentheses for the same reason.
+fn edition_decl(p: &mut Parser) -> Result<EditionDecl, ParseError> {
+    let start = p.bump().span; // `edition`
+    match p.peek().clone() {
+        TokenKind::Int(n) if n >= 1 && n <= i128::from(u32::MAX) => {
+            let end = p.bump().span;
+            Ok(EditionDecl {
+                number: n as u32,
+                span: start.to(end),
+            })
+        }
+        other => Err(p.err_here(format!(
+            "expected an edition number after `edition`, found {}; write `edition 1`, \
+             `edition 2`, ... (a source with no edition line is edition 1)",
+            describe(&other)
+        ))),
+    }
+}
+
 fn release_decl(p: &mut Parser) -> Result<ReleaseDecl, ParseError> {
     let start = p.bump().span; // `release`
     match p.peek() {
@@ -5169,7 +5211,7 @@ mod unbuilt_tests {
     /// implement, which would make a working declaration unusable.
     #[test]
     fn nothing_built_is_in_the_unbuilt_table() {
-        for built in ["domain", "entity", "op", "routine", "trigger"] {
+        for built in ["domain", "entity", "op", "routine", "trigger", "auth"] {
             assert!(
                 !UNBUILT_DECLARATIONS.iter().any(|(k, _)| *k == built),
                 "`{built}` parses and must not be refused as unbuilt"

@@ -178,7 +178,7 @@ pub fn parse_code(raw: Option<&str>) -> Result<CodeFiles, ApplyRefused> {
 /// Binds each function's code into `program`, as the local apply does:
 /// every declared `code` path must be carried, and each text must hash to
 /// the hash the caller read. Answers the texts to store, by hash.
-fn bind_code(
+pub(crate) fn bind_code(
     program: &mut Program,
     code: &CodeFiles,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, ApplyRefused> {
@@ -345,7 +345,7 @@ pub enum SchemaOutcome {
     Matches { pending: usize },
     /// The database was behind by safe additive changes only, and the apply
     /// made them itself (`ORDO_APPLY_SAFE_CHANGES`, on by default), the way
-    /// `ordo migrate --apply` does, with the same `$migrations` record.
+    /// `ordo evolve --run` does, with the same `$migrations` record.
     Migrated {
         changes: Vec<(String, String)>,
         migration: i64,
@@ -380,6 +380,10 @@ pub enum Stored {
     /// The same source as the stored version, a new build of it. No
     /// version moved (`plan-versions.md` §1.1).
     Rebuilt,
+    /// The same program as the stored version, from a source at a newer
+    /// language edition, which the version now holds (`ordo fix`,
+    /// `plan-versions.md` §2.8). No version moved.
+    EditionMoved,
 }
 
 /// What one apply did, as data.
@@ -484,6 +488,9 @@ pub enum ApplyRefused {
     /// activated or rolled back to. The text names the revoke and the
     /// command that lifts it.
     Revoked(String),
+    /// A production deployment takes only a version that arrived through
+    /// the promotion gate (`crate::promotion`). The text names the command.
+    NotPromoted(String),
     /// An external entity's table is gone, changed or unreadable in this
     /// database (slice C, `external-entities`). One line per entity, each
     /// leading with its class (`external_missing`, `external_changed`,
@@ -507,6 +514,7 @@ impl ApplyRefused {
             ApplyRefused::VersionBehind { .. } => "version_behind",
             ApplyRefused::Provenance(_) => "provenance_refused",
             ApplyRefused::Revoked(_) => "version_revoked",
+            ApplyRefused::NotPromoted(_) => "not_promoted",
             ApplyRefused::External(_) => "external_refused",
         }
     }
@@ -524,6 +532,7 @@ impl ApplyRefused {
             | ApplyRefused::VersionTaken { .. }
             | ApplyRefused::VersionBehind { .. }
             | ApplyRefused::Revoked(_)
+            | ApplyRefused::NotPromoted(_)
             | ApplyRefused::External(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
@@ -583,7 +592,7 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
             // Its text leads with the class already.
-            ApplyRefused::Revoked(e) => write!(f, "{e}"),
+            ApplyRefused::Revoked(e) | ApplyRefused::NotPromoted(e) => write!(f, "{e}"),
             ApplyRefused::External(lines) => write!(
                 f,
                 "external_refused: {} external entit{} cannot be read, so nothing was \
@@ -705,7 +714,9 @@ fn checked(p: &versions::Provenance) -> Result<(), ApplyRefused> {
 /// [`triage_errors`]): the program, the ops that refuse an apply, and the
 /// notes that do not. One body for [`run`] and [`preview`], so a preview
 /// refuses exactly what an apply would.
-fn compile_checked(source: &str) -> Result<(Program, Vec<String>, Vec<String>), ApplyRefused> {
+pub(crate) fn compile_checked(
+    source: &str,
+) -> Result<(Program, Vec<String>, Vec<String>), ApplyRefused> {
     // `DoesNotCompile`, never `Internal`: this is the caller's text, and a
     // 500 for a program with a typo in it is a page for somebody who can
     // do nothing about it.
@@ -792,6 +803,19 @@ async fn sequence(
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
     let naming = sa::name_version(pool, program).await.map_err(refused)?;
+    // **A production deployment takes only what arrived through the gate**,
+    // refused before anything is stored (`crate::promotion`).
+    if activate {
+        Versions::on(pool)
+            .require_arrival(&naming.version)
+            .await
+            .map_err(|e| match e {
+                versions::VersionRefusal::NotPromoted(_) => {
+                    ApplyRefused::NotPromoted(e.to_string())
+                }
+                other => ApplyRefused::Internal(other.to_string()),
+            })?;
+    }
     let mut notes = notes;
     notes.extend(naming.note.clone());
     let renamed;
@@ -888,6 +912,7 @@ async fn sequence(
         Ok(versions::Applied::Stored(_)) => Stored::Written,
         Ok(versions::Applied::AlreadyStored(_)) => Stored::AlreadyPresent,
         Ok(versions::Applied::Rebuilt(_)) => Stored::Rebuilt,
+        Ok(versions::Applied::EditionMoved(_)) => Stored::EditionMoved,
         Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
     };
     let ordinal = Versions::on(pool)
@@ -917,10 +942,11 @@ async fn sequence(
     // **A tenant that could not be brought forward does not hold back the
     // activation**, which is the change 25i makes to R-S3's gate. With one
     // tenant per person, one unreachable or refused database would stop
-    // every deploy for everybody. The tenant is closed instead, alone, by
-    // the schema-behind quarantine (R-S4), with the reason on
-    // `/health/ready` and in this report, and the catch-up
-    // (`tenant_forward`) retries it. An activation is still gated on the
+    // every deploy for everybody. Since increment 7 (`plan-versions.md`
+    // §2.1) the tenant keeps its pin and serves the version it was on, with
+    // a move open in `$moves` carrying the reason, shown in this report and
+    // by `std.deployment.tenants`. The catch-up (`tenant_forward`) retries
+    // a database that could not be reached. An activation is still gated on the
     // deployment's own database, which is refused above when it is behind.
     //
     // A deployment with no attached target walks a one-element list and
@@ -985,10 +1011,20 @@ async fn sequence(
     };
     for (target, why) in &tenants.held {
         eprintln!(
-            "apply {}: tenant database {target} was not brought forward and stays closed: {why}",
+            "apply {}: tenant database {target} was not brought forward, and its tenants stay \
+             on the version they serve: {why}",
             program.version
         );
     }
+    // **What the activation needs to know about each tenant's database**
+    // (`plan-versions.md` §2.1, increment 7): the tenants whose database the
+    // walk brought to this version are pinned with the activation, and the
+    // rest keep their version with a move open saying why.
+    let plan = if activate {
+        move_plan(pool, &fleet).await
+    } else {
+        versions::MovePlan::default()
+    };
 
     // Behind and asked to activate is the refusal. Behind and staged is a
     // report — that is what `--no-activate` is for.
@@ -1001,13 +1037,14 @@ async fn sequence(
     let activation = if !activate {
         Activation::Staged
     } else {
-        // Every tenant is re-pinned to it in the same transaction
-        // (`plan-versions.md` §1.3).
+        // Every tenant whose database holds it is re-pinned to it in the
+        // same transaction (`plan-versions.md` §1.3, §2.1).
         match Versions::on(pool)
-            .activate(
+            .activate_with(
                 &program.version,
                 actor,
                 ordo_commandlog::Timestamp(now_secs()),
+                &plan,
             )
             .await
         {
@@ -1017,6 +1054,9 @@ async fn sequence(
             }
             Err(e @ versions::VersionRefusal::Revoked { .. }) => {
                 return Err(ApplyRefused::Revoked(e.to_string()))
+            }
+            Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
+                return Err(ApplyRefused::NotPromoted(e.to_string()))
             }
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
         }
@@ -1032,6 +1072,50 @@ async fn sequence(
         activation,
         tenants,
     })
+}
+
+/// The walk's outcome per tenant: each tenant database it reached is named
+/// by its label, and every tenant attached to it shares its outcome. A
+/// database that could not be read for its tenants gives an empty plan, so
+/// every attached tenant starts its move `expanding` and the catch-up tries
+/// it.
+async fn move_plan(pool: &Pool, fleet: &sa::Forwarded) -> versions::MovePlan {
+    let mut plan = versions::MovePlan::default();
+    if fleet.applied.is_empty() {
+        return plan;
+    }
+    let attached = match ordo_exec::spacedb::all(pool).await {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("apply: the tenants' databases could not be read for their moves: {e}");
+            return plan;
+        }
+    };
+    let by_label: std::collections::HashMap<&str, &sa::TenantApply> = fleet
+        .applied
+        .iter()
+        .map(|t| (t.label.as_str(), t))
+        .collect();
+    for (space, a) in &attached {
+        let label = ordo_exec::route::target_label(&a.host, a.port, &a.db);
+        let Some(t) = by_label.get(label.as_str()) else {
+            continue;
+        };
+        match &t.outcome {
+            Ok(_) => {
+                plan.ready.insert(space.0.clone());
+            }
+            Err(r) => {
+                let phase = if r.transient {
+                    versions::MovePhase::Waiting
+                } else {
+                    versions::MovePhase::Refused
+                };
+                plan.held.insert(space.0.clone(), (phase, r.to_string()));
+            }
+        }
+    }
+    plan
 }
 
 fn named(c: &Change) -> (String, String) {
@@ -1145,6 +1229,9 @@ async fn activate_locked(
         Err(versions::VersionRefusal::UnknownVersion(v)) => Err(ApplyRefused::UnknownVersion(v)),
         Err(e @ versions::VersionRefusal::Revoked { .. }) => {
             Err(ApplyRefused::Revoked(e.to_string()))
+        }
+        Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
+            Err(ApplyRefused::NotPromoted(e.to_string()))
         }
         Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }
@@ -1569,6 +1656,7 @@ impl Report {
                 Stored::Written => "written",
                 Stored::AlreadyPresent => "alreadyPresent",
                 Stored::Rebuilt => "rebuilt",
+                Stored::EditionMoved => "editionMoved",
             },
             "activation": activation,
             "tenants": {
@@ -1660,6 +1748,7 @@ impl Report {
             Some("written") => Stored::Written,
             Some("alreadyPresent") => Stored::AlreadyPresent,
             Some("rebuilt") => Stored::Rebuilt,
+            Some("editionMoved") => Stored::EditionMoved,
             other => {
                 return Err(format!(
                     "the apply's result named stored state {other:?}, which this client does \
@@ -1741,6 +1830,10 @@ pub struct ApplyOps {
     /// (`plan-console.md` G12). `None` records nothing there; the registry
     /// rows still name the caller.
     pub stream: Option<Arc<ordo_secevent::Recorder>>,
+    /// Runs backfill functions (10b, B6): this node's backend functions,
+    /// set by the runtime once they are built. Unset, a step that fills a
+    /// field with a function is refused naming why.
+    pub backfill_functions: std::sync::OnceLock<Arc<dyn crate::backfill::BackfillFunctions>>,
 }
 
 impl ApplyOps {
@@ -1764,7 +1857,18 @@ impl ApplyOps {
             pools,
             home: home.to_string(),
             stream,
+            backfill_functions: std::sync::OnceLock::new(),
         })
+    }
+
+    /// What a stored step runs its backfills with (10b): the plan's default
+    /// settings, and this node's backend functions when the runtime gave
+    /// them ([`ApplyOps::backfill_functions`]).
+    pub fn step_context(&self) -> crate::evolve::StepContext {
+        crate::evolve::StepContext {
+            settings: crate::backfill::BackfillSettings::default(),
+            functions: self.backfill_functions.get().cloned(),
+        }
     }
 
     /// Check 3 of the gate (see the module doc), for every deploy op.

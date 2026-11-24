@@ -563,8 +563,7 @@ is planned at apply time, labelled by class, and only additive changes are sent.
 
 ```
 ordo plan    examples/concepts/05-version-2.ordo --host https://ordo.example.com    # read-only report, through the door
-ordo migrate examples/concepts/05-version-2.ordo --apply --direct --db prod # the additive part
-ordo apply   examples/concepts/05-version-2.ordo --host https://ordo.example.com   # store and activate
+ordo apply   examples/concepts/05-version-2.ordo --host https://ordo.example.com   # the additive part, store and activate
 ordo deploys                                                       # stored, serving, every re-point
 ordo rollback --version abc123def456… --host https://ordo.example.com
 ```

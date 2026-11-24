@@ -1,7 +1,7 @@
 # A marketing site: products, pricing plans and testimonials that anyone can
 # read with no token, and a contact form that anyone can write to.
 #
-# Each content entity has a `public` line, so a public op may read its fields.
+# Products mark individual fields public; internalNote stays private.
 # The four reads below are `public`: a visitor calls `GET /op/pricing` with no
 # sign-in. The site owner fills the content with the ordinary add ops, signed
 # in, in the deployment's space (`system`).
@@ -12,17 +12,17 @@
 # `features` is a JSON array of short strings, `["SSO", "Audit log"]`.
 # `rank` orders each list on the page, lowest first.
 
-domain marketing @ 0.2.0
+domain marketing @ 0.2.1
 
 entity products {
-  slug:        text unique
-  name:        text
-  tagline:     text
-  description: text = ""
-  price:       money(2)
-  features:    json = []
-  rank:        int = 100
-  public
+  slug:        text unique public
+  name:        text public
+  tagline:     text public
+  description: text = "" public
+  price:       money(2) public
+  features:    json = [] public
+  rank:        int = 100 public
+  internalNote: text = ""
 }
 
 entity plans {
@@ -84,8 +84,8 @@ op enquiryList =
   enquiries[id, name, email, company, message]
   take 100
 
-op addProduct($slug: text, $name: text, $tagline: text, $description: text, $price: money(2), $features: json, $rank: int) =
-  set products { slug: $slug, name: $name, tagline: $tagline, description: $description, price: $price, features: $features, rank: $rank }
+op addProduct($slug: text, $name: text, $tagline: text, $description: text, $price: money(2), $features: json, $rank: int, $internalNote: text = "") =
+  set products { slug: $slug, name: $name, tagline: $tagline, description: $description, price: $price, features: $features, rank: $rank, internalNote: $internalNote }
 
 op addPlan($name: text, $tagline: text, $price: money(2), $period: text, $features: json, $highlighted: bool, $rank: int) =
   set plans { name: $name, tagline: $tagline, price: $price, period: $period, features: $features, highlighted: $highlighted, rank: $rank }

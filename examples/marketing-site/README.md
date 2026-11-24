@@ -6,8 +6,8 @@ visitor leave a message.
 
 ## What it shows
 
-- `site.ordo`: three public entities (`products`, `plans`, `testimonials`), one
-  private entity (`enquiries`), and these ops:
+- `site.ordo`: public product fields, public plans and testimonials, private
+  product notes and enquiries, and these ops:
   - Public reads: `catalogue`, `product` (by slug), `pricing`, `reviews`.
   - One public write: `contact`.
   - For the site owner: `addProduct`, `addPlan`, `addTestimonial`, `enquiryList`.
@@ -97,3 +97,55 @@ its `slug`.
   account. See `docs/howto-sharing.md`.
 
 Read next: `docs/howto-public.md`.
+
+## Tests
+
+Products mark their public fields individually. `internalNote` is private and
+seeded with `INTERNAL-<slug>` so a leak is visible in a test.
+
+The Playwright suite boots a fresh PostgreSQL database, applies this example,
+seeds through the real door and serves the built page. It checks public reads,
+private-operation refusals, refinements, tokenless live, space headers, contact
+writes, the signed-in path, request counters and the page's response bodies.
+
+```sh
+# Build only when no other cargo build is running.
+cargo build -p ordo-host -p ordo-cli
+(cd examples/marketing-site/web && npm ci)
+cd examples/marketing-site/e2e
+npm ci
+npx playwright install chromium
+npx playwright test
+```
+
+PostgreSQL 15 or later is required. `ORDO_PGBIN` names its binary directory.
+`ORDO` and `ORDO_HOST_BIN` can name prebuilt binaries. The default door and
+page ports are 4850 and 5391; override them with `E2E_DOOR_PORT` and
+`E2E_PAGE_PORT`. `E2E_STATE` changes the log and state directory. A supplied
+`ORDO_PG_HOST` uses that server with a unique database; it never drops an
+existing database. These are development keys and a disabled human check.
+
+The stack caps public writes at 1000 per hour. This suite does not exercise
+the limit outcome; the separate low-quota door is still needed for that check.
+The notes isolation suite checks private-file downloads (S1).
+
+### Public cache checks
+
+The stack also runs door B on port 4851 (`E2E_DOOR_B_PORT` overrides it),
+with the same database and keys and a distinct replica id. Both addresses
+and the database connection details are in `.stack/stack.json`.
+
+`tests/api/public-cache.spec.ts` checks cache hits against PostgreSQL's table
+scan counters, write invalidation on each node, both a comment-only apply and a version bump, and
+2 distinct signed-in owners bypassing the public cache. Counter checks wait
+for equal samples 11 seconds apart and include a miss control that must
+increase the count. Cross-node observations are attached to the test report.
+Each test removes the plans it created through the ordinary delete op.
+
+Run just these checks with `npx playwright test public-cache.spec.ts`.
+The full suite also retains S2's strict refusal comparisons.
+
+The real version-bump test boots a second throwaway deployment on free ports
+and its own database. It keeps failed migrations from disrupting the other
+checks. Its logs are test attachments, and its host pids join the coverage
+shutdown check. No shared fixture is reset to hide a failed deployment.

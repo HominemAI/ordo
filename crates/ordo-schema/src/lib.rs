@@ -39,6 +39,7 @@ pub mod diff;
 pub mod function;
 pub mod image;
 pub mod json;
+pub mod prev;
 pub mod routine;
 
 pub use ddl::{ddl_for, SPACE_COLUMN};
@@ -447,6 +448,34 @@ pub struct Schema {
     /// may read this one, and the tables each may read. Each table is one of
     /// this program's own entities.
     pub readers: Vec<Reader>,
+    /// The program's `prev` marks (`plan-syntax-additions.md` §5), in
+    /// declaration order: each entity's, then its fields'. Read by the plan
+    /// ([`prev::check`]), never by the DDL or an op.
+    pub prev: Vec<prev::PrevMark>,
+}
+
+/// Every `prev` mark of the program's native entities.
+fn prev_marks(program: &Program) -> Vec<prev::PrevMark> {
+    let mut out = Vec::new();
+    for e in &program.entities {
+        if let Some(p) = &e.prev {
+            out.push(prev::PrevMark {
+                entity: e.name.name.clone(),
+                field: None,
+                prev: vec![p.name.clone()],
+                line: p.span.line,
+            });
+        }
+        for f in e.fields.iter().filter(|f| !f.prev.is_empty()) {
+            out.push(prev::PrevMark {
+                entity: e.name.name.clone(),
+                field: Some(f.name.name.clone()),
+                prev: f.prev.iter().map(|n| n.text()).collect(),
+                line: f.prev_span.map(|s| s.line).unwrap_or(f.name.span.line),
+            });
+        }
+    }
+    out
 }
 
 /// One `reader <name> reads <table>, …` line.
@@ -1131,6 +1160,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 tables: r.tables.iter().map(|t| t.name.clone()).collect(),
             })
             .collect(),
+        prev: prev_marks(program),
     };
     // Every table a `reader` line names is one of this program's own
     // entities: an external is another system's table, and Ordo grants

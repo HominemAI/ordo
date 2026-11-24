@@ -226,7 +226,7 @@ What the types refuse:
 
 What runs and throws, naming the parser's class: `.column()` on a field that
 is `sealed` or `indexed` (`external_sealed`), `owned` (`external_owned`),
-`unique`, `tree`, `normalize`, has a `default` or is a `blob`
+`unique`, `tree`, `normalize`, `prev`, has a `default` or is a `blob`
 (`external_unsupported`). `synth` refuses a ref from an external to an
 entity, or to a name no external in the call declares (`external_ref_to_native`).
 

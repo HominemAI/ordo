@@ -212,6 +212,7 @@ function printField(f: FieldNode): string {
   if (f.inline) s += ' inline';
   if (f.private) s += ' private';
   if (f.normalize) s += ` normalize(${f.normalize})`;
+  if (f.prev) s += ` prev(${f.prev.join(', ')})`;
   if (f.default) s += ` = ${printExpr(f.default)}`;
   return s;
 }
@@ -261,7 +262,8 @@ function printGuardClause(g: GuardClauseNode): string {
 }
 
 function printEntity(e: EntityNode): string {
-  const head = e.key ? `entity ${e.name} (key: ${e.key}) {` : `entity ${e.name} {`;
+  const opts = [e.key ? `key: ${e.key}` : null, e.prev ? `prev: ${e.prev}` : null].filter(Boolean);
+  const head = `entity ${e.name}${opts.length ? ` (${opts.join(', ')})` : ''} {`;
   const lines: string[] = [head];
   for (const f of e.fields) lines.push(`  ${printField(f)}`);
   // Clause order is this printer's, and it is safe to fix because the AST

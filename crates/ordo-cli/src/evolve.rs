@@ -124,6 +124,9 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             r["line"].as_str().unwrap_or("?")
         ));
     }
+    for w in row["warnings"].as_array().into_iter().flatten() {
+        out.push_str(&format!("WARNING    {}\n", w.as_str().unwrap_or("?")));
+    }
     if let Some(s) = row["signIn"].as_object() {
         out.push_str(&format!(
             "SIGN-IN    removes {}; {} person(s) left with no method{}\n",

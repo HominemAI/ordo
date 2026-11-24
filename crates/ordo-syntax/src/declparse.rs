@@ -1113,20 +1113,82 @@ fn version_text(p: &mut Parser) -> Result<String, ParseError> {
 fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
     let start = p.bump().span; // `entity`
     let name = ident(p, "an entity name")?;
-    // Optional typed-id key override: `(key: proj)`.
-    let mut key = None;
+    // The header's option slot: `(key: proj)`, `(prev: clients)`, or both,
+    // comma-separated, each at most once (`plan-syntax-additions.md` §5).
+    let mut key: Option<Ident> = None;
+    let mut prev: Option<Ident> = None;
+    let mut prev_span = None;
     if matches!(p.peek(), TokenKind::LParen) {
-        p.bump();
-        let kw = ident(p, "`key`")?;
-        if kw.name != "key" {
-            return Err(p.err_at(
-                kw.span,
-                "an entity's parenthesis takes only `key: <prefix>`",
+        let open = p.bump().span;
+        let mut entries: Vec<(String, Span)> = Vec::new();
+        loop {
+            let kw = ident(p, "`key` or `prev`")?;
+            let is_key = match kw.name.as_str() {
+                "key" => true,
+                "prev" => false,
+                _ => {
+                    return Err(p.err_at(
+                        kw.span,
+                        "an entity's parenthesis takes `key: <prefix>` and `prev: <old name>`",
+                    ))
+                }
+            };
+            if (is_key && key.is_some()) || (!is_key && prev.is_some()) {
+                return Err(p.err_at(kw.span, format!("`{}` is written twice", kw.name)));
+            }
+            p.expect(&TokenKind::Colon, "`:` after the option's name")?;
+            let v = ident(
+                p,
+                if is_key {
+                    "the id prefix"
+                } else {
+                    "the entity's name in the version serving now"
+                },
+            )?;
+            entries.push((kw.name.clone(), kw.span.to(v.span)));
+            if is_key {
+                key = Some(v);
+            } else {
+                prev = Some(v);
+            }
+            if matches!(p.peek(), TokenKind::Comma) {
+                p.bump();
+                continue;
+            }
+            break;
+        }
+        let close = p.expect(&TokenKind::RParen, "`)` closing the entity's options")?;
+        if prev.is_some() {
+            // What the offer to remove a landed `prev` cuts: the whole
+            // parenthesis, with the space before it, when `prev` is its one
+            // entry; else the entry and the comma beside it.
+            prev_span = Some(if entries.len() == 1 {
+                let s = open.to(close.span);
+                Span::new(s.start.saturating_sub(1), s.end, s.line, s.col)
+            } else {
+                let at = entries.iter().position(|(n, _)| n == "prev").unwrap_or(0);
+                let mut s = entries[at].1;
+                if at > 0 {
+                    s.start = entries[at - 1].1.end;
+                } else {
+                    s.end = entries[1].1.start;
+                }
+                s
+            });
+        }
+    }
+    if let Some(prev) = &prev {
+        if prev.name == name.name {
+            return Err(p.err_class_at(
+                parser::PREV_SELF,
+                prev.span,
+                format!(
+                    "`{0} (prev: {0})` says nothing: `prev` names the entity's old name. Remove \
+                     it, or write the name `{0}` had in the version serving now",
+                    name.name
+                ),
             ));
         }
-        p.expect(&TokenKind::Colon, "`:` after `key`")?;
-        key = Some(ident(p, "the id prefix")?);
-        p.expect(&TokenKind::RParen, "`)` closing the key")?;
     }
     p.expect(&TokenKind::LBrace, "`{` to open the shape")?;
 
@@ -1262,9 +1324,12 @@ fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
         fields.push(field_decl(p)?);
     }
     let end = p.bump().span; // `}`
+    prev_checks(p, &fields)?;
     Ok(EntityDecl {
         name,
         key,
+        prev,
+        prev_span,
         fields,
         access_read,
         access_write,
@@ -1276,6 +1341,66 @@ fn entity_decl(p: &mut Parser) -> Result<EntityDecl, ParseError> {
         public,
         span: start.to(end),
     })
+}
+
+/// The compile-time checks of `prev` (`plan-syntax-additions.md` §5): the
+/// shape alone. Whether the old name exists is the plan's question, since
+/// the compiler never sees the version serving now.
+fn prev_checks(p: &Parser, fields: &[FieldDecl]) -> Result<(), ParseError> {
+    let mut claimed: Vec<(String, &FieldDecl)> = Vec::new();
+    for f in fields {
+        for n in &f.prev {
+            if n.entity.is_none() && n.field.name == f.name.name {
+                return Err(p.err_class_at(
+                    parser::PREV_SELF,
+                    n.field.span,
+                    format!(
+                        "`{0} prev({0})` says nothing: `prev` names the field's old name. \
+                         Remove it, or write the name `{0}` had in the version serving now",
+                        f.name.name
+                    ),
+                ));
+            }
+            if n.entity.is_none() && fields.iter().any(|g| g.name.name == n.field.name) {
+                return Err(p.err_class_at(
+                    parser::PREV_STILL_DECLARED,
+                    n.field.span,
+                    format!(
+                        "`{0}` still exists, so `{1}` is not its rename. Remove `{0}`, or \
+                         remove `prev({0})`",
+                        n.field.name, f.name.name
+                    ),
+                ));
+            }
+            let text = n.text();
+            if let Some((_, other)) = claimed
+                .iter()
+                .find(|(t, g)| *t == text && g.name.name != f.name.name)
+            {
+                return Err(p.err_class_at(
+                    parser::PREV_DUPLICATE,
+                    n.field.span,
+                    format!(
+                        "both `{}` and `{}` claim `{text}`. A split needs the plan's mapping; \
+                         keep `prev({text})` on one of them",
+                        other.name.name, f.name.name
+                    ),
+                ));
+            }
+            if claimed
+                .iter()
+                .any(|(t, g)| *t == text && g.name.name == f.name.name)
+            {
+                return Err(p.err_class_at(
+                    parser::PREV_DUPLICATE,
+                    n.field.span,
+                    format!("`{}` names `{text}` twice in its `prev`", f.name.name),
+                ));
+            }
+            claimed.push((text, f));
+        }
+    }
+    Ok(())
 }
 
 // ── external entities ────────────────────────────────────────────────────
@@ -1510,6 +1635,18 @@ fn external_decl(p: &mut Parser) -> Result<ExternalDecl, ParseError> {
     if matches!(p.peek(), TokenKind::LParen) {
         p.bump();
         let kw = ident(p, "`key`")?;
+        if kw.name == "prev" {
+            return Err(p.err_class_at(
+                parser::EXTERNAL_UNSUPPORTED,
+                kw.span,
+                format!(
+                    "`{}`: `prev` is not a clause an external takes: a translation is \
+                     re-imported on every apply. Remove `prev`; to follow a renamed table, \
+                     change the table after `from`",
+                    name.name
+                ),
+            ));
+        }
         if kw.name != "key" {
             return Err(p.err_at(
                 kw.span,
@@ -2463,6 +2600,8 @@ fn field_decl(p: &mut Parser) -> Result<FieldDecl, ParseError> {
         private: false,
         normalize: None,
         public: false,
+        prev: Vec::new(),
+        prev_span: None,
         span: Span::new(0, 0, 0, 0),
     };
     f.span = f.name.span;
@@ -2522,6 +2661,44 @@ fn field_decl(p: &mut Parser) -> Result<FieldDecl, ParseError> {
                 p.expect(&TokenKind::LParen, "`(` after `normalize`")?;
                 f.normalize = Some(ident(p, "a normalizer name")?);
                 p.expect(&TokenKind::RParen, "`)` to close `normalize`")?;
+            }
+            // `prev(name)`: contextual, like `refinable`. Only with its
+            // parenthesis, so a next line's field named `prev` is not taken.
+            TokenKind::Ident(w) if w == "prev" && matches!(p.peek_at(1), TokenKind::LParen) => {
+                let t = p.bump();
+                if !f.prev.is_empty() {
+                    return Err(
+                        p.err_at(t.span, "`prev(…)` is written twice; list every name in one")
+                    );
+                }
+                p.bump(); // `(`
+                loop {
+                    let first = ident(p, "the field's name in the version serving now")?;
+                    let name = if matches!(p.peek(), TokenKind::Dot) {
+                        p.bump();
+                        let field = ident(p, "the field's name in that entity")?;
+                        PrevName {
+                            entity: Some(first),
+                            field,
+                        }
+                    } else {
+                        PrevName {
+                            entity: None,
+                            field: first,
+                        }
+                    };
+                    f.prev.push(name);
+                    if matches!(p.peek(), TokenKind::Comma) {
+                        p.bump();
+                        continue;
+                    }
+                    break;
+                }
+                let close = p.expect(&TokenKind::RParen, "`)` to close `prev`")?;
+                // With the space before it, so removing it leaves the line
+                // as it was before the mark.
+                let s = t.span.to(close.span);
+                f.prev_span = Some(Span::new(s.start.saturating_sub(1), s.end, s.line, s.col));
             }
             // `refinable` is not reserved — it may only appear here.
             TokenKind::Ident(w) if w == "refinable" => {

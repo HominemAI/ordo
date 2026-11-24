@@ -78,6 +78,13 @@ pub const EXTERNAL_SEALED: &str = "external_sealed";
 /// Any other clause or modifier an external entity cannot carry: `unique`,
 /// `index`, `check`, `public`, `std sealed`, `tree`, a default.
 pub const EXTERNAL_UNSUPPORTED: &str = "external_unsupported";
+/// `prev` naming the field's or entity's own name (`plan-syntax-additions.md`
+/// §5).
+pub const PREV_SELF: &str = "prev_self";
+/// `prev(name)` while `name` is still a field of the entity.
+pub const PREV_STILL_DECLARED: &str = "prev_still_declared";
+/// Two fields of one entity with the same `prev` target.
+pub const PREV_DUPLICATE: &str = "prev_duplicate";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {

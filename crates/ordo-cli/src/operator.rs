@@ -107,6 +107,7 @@ const SWITCHES: &[&str] = &[
     "--dry-run",
     "--no-activate",
     "--bump",
+    "--remove-landed-prev",
     "--no-wait",
     "--apply",
     "--record",
@@ -1837,6 +1838,9 @@ fn floor_report(f: &ordo_exec::prune::Floor, policy: &ordo_exec::cadence::LogPol
 /// file is changed only on that refusal, and only with `--bump`.
 async fn apply(flags: Flags) -> Outcome {
     let first = apply_once(&flags).await;
+    if first.code == 0 && flags.has("--remove-landed-prev") {
+        return remove_landed_prev(&flags, first);
+    }
     if first.code == 0 || !flags.has("--bump") {
         return first;
     }
@@ -1862,6 +1866,35 @@ async fn apply(flags: Flags) -> Outcome {
     }
 }
 
+/// `--remove-landed-prev`: after a clean apply, cut the `prev` marks it
+/// named as landed out of the source (ruled 2026-10-04).
+fn remove_landed_prev(flags: &Flags, done: Outcome) -> Outcome {
+    let marks = crate::prev::read_landed(&done.report);
+    if marks.is_empty() {
+        return Outcome::ok(format!(
+            "{}prev       no `prev` mark has landed everywhere yet\n",
+            done.report
+        ));
+    }
+    let Some(path) = flags.positional.first() else {
+        return done;
+    };
+    match crate::prev::remove(std::path::Path::new(path), &marks) {
+        Ok(cut) => {
+            let mut out = done.report;
+            for at in cut {
+                out.push_str(&format!("removed    a landed `prev` mark at {at}\n"));
+            }
+            out.push_str("           apply again to store the source without it\n");
+            Outcome::ok(out)
+        }
+        Err(e) => Outcome::failed(format!(
+            "{}REFUSED  --remove-landed-prev: {e}\n",
+            done.report
+        )),
+    }
+}
+
 /// Raise `domain … @ from` to `to` in whichever file under `path` holds the
 /// header, and name that file.
 fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, String> {
@@ -1882,6 +1915,7 @@ fn bump_source(path: &std::path::Path, from: &str, to: &str) -> Result<String, S
 async fn apply_once(flags: &Flags) -> Outcome {
     if let Err(e) = flags.only(&[
         "--bump",
+        "--remove-landed-prev",
         "--label",
         "--db",
         "--as",
@@ -2171,7 +2205,7 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
 /// `path` and `db` are the caller's own facts rather than the report's —
 /// the server does not know what the operator called the file or the
 /// database — so the remedies that name a command are built here.
-pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _db: &str) -> String {
+pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db: &str) -> String {
     use ordo_host::apply_op::{Activation, SchemaOutcome, Stored};
 
     let mut out = String::new();
@@ -2264,6 +2298,18 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _d
                  forward; the deployment retries the ones that were unreachable\n",
             );
         }
+    }
+    // The offer to remove landed `prev` marks (ruled 2026-10-04).
+    for mark in &report.landed_prev {
+        out.push_str(&format!(
+            "{}`{mark}` has landed in every environment; the mark can go\n",
+            crate::prev::LANDED
+        ));
+    }
+    if !report.landed_prev.is_empty() {
+        out.push_str(&format!(
+            "           remove them with `ordo apply {path} --remove-landed-prev`\n"
+        ));
     }
     out
 }

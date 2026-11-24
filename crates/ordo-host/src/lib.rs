@@ -106,6 +106,7 @@ pub mod pin_stream;
 pub mod platform_ops;
 pub mod precheck;
 pub mod presence;
+pub mod prev_offer;
 pub mod principal_directory;
 pub mod profile_ops;
 pub mod promotion;

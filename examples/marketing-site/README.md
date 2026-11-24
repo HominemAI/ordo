@@ -128,3 +128,19 @@ existing database. These are development keys and a disabled human check.
 The stack caps public writes at 1000 per hour. This suite does not exercise
 the limit outcome; the separate low-quota door is still needed for that check.
 The notes isolation suite checks private-file downloads (S1).
+
+### Public cache checks
+
+The stack also runs door B on port 4851 (`E2E_DOOR_B_PORT` overrides it),
+with the same database and keys and a distinct replica id. Both addresses
+and the database connection details are in `.stack/stack.json`.
+
+`tests/api/public-cache.spec.ts` checks cache hits against PostgreSQL's table
+scan counters, write invalidation on each node, a comment-only apply and
+2 distinct signed-in owners bypassing the public cache. Counter checks wait
+for equal samples 11 seconds apart and include a miss control that must
+increase the count. Cross-node observations are attached to the test report.
+Each test removes the plans it created through the ordinary delete op.
+
+Run just these checks with `npx playwright test public-cache.spec.ts`.
+The full suite also retains S2's strict refusal comparisons.

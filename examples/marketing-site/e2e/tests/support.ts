@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, type APIRequestContext, type APIResponse } from '@playwright/test';
-const state = process.env['E2E_STATE'] ?? fileURLToPath(new URL('../.stack', import.meta.url));
-export const stack = (): { door: string; page: string } => JSON.parse(readFileSync(`${state}/stack.json`, 'utf8'));
-export async function owner(request: APIRequestContext) {
+export const state = process.env['E2E_STATE'] ?? fileURLToPath(new URL('../.stack', import.meta.url));
+export const stack = (): { door: string; doorB: string; page: string; ordo: string; psql: string; program: string; pg: { host: string; port: string; user: string; db: string } } => JSON.parse(readFileSync(`${state}/stack.json`, 'utf8'));
+export async function owner(request: APIRequestContext, account = 'owner') {
   const response = await request.post(`${stack().door}/auth/complete`, {
     headers: { Origin: stack().page },
-    data: { method: 'guest', kind: 'resume', secret: readFileSync(`${state}/owner-secret`, 'utf8').trim() },
+    data: { method: 'guest', kind: 'resume', secret: readFileSync(`${state}/${account}-secret`, 'utf8').trim() },
   });
   expect(response.status(), await response.text()).toBe(200);
   return { Origin: stack().page, Authorization: `Bearer ${(await response.json()).token}`, 'X-Ordo-Space': 'system' };

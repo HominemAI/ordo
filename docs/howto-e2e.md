@@ -476,3 +476,9 @@ each host so instrumented binaries can write their profiles.
 LLVM instrumentation and uploads `lcov-marketing-site`. The coverage helper
 is shared with increment 0. Merging that report into the overall ratchet
 requires the increment 0 coverage workflow integration.
+
+The marketing stack now starts 2 host replicas, A on 4850 and B on 4851.
+`E2E_DOOR_B_PORT` overrides B. The cache tests use the stack's `psql` path
+and database settings to read `pg_stat_user_tables`. They wait for statistics
+to settle and never reset shared PostgreSQL counters. All 3 host processes
+(the bootstrap host and the 2 serving replicas) must flush coverage profiles.

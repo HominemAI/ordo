@@ -1886,6 +1886,9 @@ pub struct ApplyOps {
     /// set by the runtime once they are built. Unset, a step that fills a
     /// field with a function is refused naming why.
     pub backfill_functions: std::sync::OnceLock<Arc<dyn crate::backfill::BackfillFunctions>>,
+    /// Key custody for a step that seals a field (increment 13), set by the
+    /// runtime. Unset, such a step is refused naming why.
+    pub backfill_keys: std::sync::OnceLock<Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 impl ApplyOps {
@@ -1910,6 +1913,7 @@ impl ApplyOps {
             home: home.to_string(),
             stream,
             backfill_functions: std::sync::OnceLock::new(),
+            backfill_keys: std::sync::OnceLock::new(),
         })
     }
 
@@ -1920,6 +1924,7 @@ impl ApplyOps {
         crate::evolve::StepContext {
             settings: crate::backfill::BackfillSettings::default(),
             functions: self.backfill_functions.get().cloned(),
+            keys: self.backfill_keys.get().cloned(),
         }
     }
 

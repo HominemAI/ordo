@@ -158,6 +158,7 @@ fn settings(chunk_rows: u32, budget: Option<u32>) -> StepContext {
             ..BackfillSettings::default()
         },
         functions: None,
+        keys: None,
     }
 }
 
@@ -446,6 +447,7 @@ async fn five_failed_chunks_mark_the_cursor_dead_and_a_run_again_finishes() {
             ..BackfillSettings::default()
         },
         functions: None,
+        keys: None,
     };
     let err = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &quick)
         .await
@@ -627,6 +629,7 @@ async fn a_backfill_function_runs_per_chunk_with_only_what_the_plan_declares() {
             ..BackfillSettings::default()
         },
         functions: Some(upper.clone()),
+        keys: None,
     };
     let ran = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &ctx)
         .await
@@ -705,6 +708,7 @@ async fn a_second_worker_is_busy_and_a_done_backfill_does_nothing() {
         entity: program.schema.native("note").unwrap(),
         settings: &s,
         functions: None,
+        keys: None,
     };
     // Another worker holds the lock.
     let holder = Pool::connect(cfg(&tpg.db)).await.expect("a second pool");

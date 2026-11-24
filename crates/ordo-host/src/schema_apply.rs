@@ -562,6 +562,12 @@ pub struct Choices {
     /// (`crate::evolve`); the apply path never states one, so there B2 and
     /// B5 stay refused as before.
     pub fills: BTreeMap<(String, String), Fill>,
+    /// A stored plan renders or runs this step (`crate::evolve`). Only then
+    /// is a field that becomes sealed (B7) sealed, through the backfill
+    /// worker with a key lease per space (`plan-versions.md` increment 13).
+    /// The apply path leaves it `false`, and B7 stays refused there. Not
+    /// part of the stored options: every stored plan has it.
+    pub stored: bool,
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -587,6 +593,10 @@ pub enum FillMapping {
         secrets: Vec<String>,
         hosts: Vec<String>,
     },
+    /// A sealed backfill (B7, increment 13): each row's plaintext sealed
+    /// under its space's key, at its row. No mapping: the value is the
+    /// same, only its custody changes.
+    Seal,
 }
 
 impl FillMapping {
@@ -608,6 +618,7 @@ impl FillMapping {
                 }
                 s
             }
+            FillMapping::Seal => "seal".into(),
         }
     }
 
@@ -1313,6 +1324,16 @@ pub async fn probe(
         }
         // B7/B8 — a sealed transform. The epochs must be checked before a
         // plan is offered, and a plan holds no key custody.
+        // B7 from plaintext: nothing sealed yet, so no epoch to check. A
+        // stored plan seals every row through the worker (increment 13).
+        Change::SealField { entity, field } if live_has(entity, std::slice::from_ref(field)) => {
+            let extent = migrate::extent(pool, entity).await?;
+            Ok(Probe::Clean(format!(
+                "`{entity}`.`{field}` to seal: {} row(s) in {} space(s), one key lease per \
+                 space; the plaintext column is dropped once the seal verifies",
+                extent.rows, extent.spaces
+            )))
+        }
         Change::SealField { entity, field } | Change::IndexSealedField { entity, field } => {
             let epochs = migrate::sealed_epochs(pool, entity, field).await.ok();
             let mut lines = vec![
@@ -2000,11 +2021,15 @@ pub struct BackfillStep {
     /// backfill function, which computes values outside the database.
     pub sql: Option<String>,
     pub audit: ordo_commandlog::BackfillAudit,
+    /// A sealed backfill (B7): the plaintext column the seal reads. The
+    /// filled `column` is a new `bytea` beside it; once verified, the
+    /// plaintext column is dropped and the sealed one takes its name.
+    pub sealing_from: Option<String>,
 }
 
 impl BackfillStep {
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut j = serde_json::json!({
             "code": self.code,
             "entity": self.entity,
             "field": self.field,
@@ -2013,8 +2038,111 @@ impl BackfillStep {
             "mapping": self.mapping.text(),
             "sql": self.sql,
             "audit": self.audit.as_str(),
-        })
+        });
+        // Present only on a sealed backfill, so every plan stored before
+        // them keeps its digest.
+        if let Some(plain) = &self.sealing_from {
+            j["sealFrom"] = serde_json::json!(plain);
+        }
+        j
     }
+}
+
+/// The physical column a sealed backfill (B7) fills beside the plaintext
+/// one, until the plaintext is dropped and it takes the field's name.
+pub fn seal_column(field: &ordo_schema::Field) -> String {
+    format!("{}$seal", field.column())
+}
+
+/// The sealed backfill for a field a stored plan seals (B7), and the
+/// statements that land once it verifies: the plaintext column dropped,
+/// the sealed one renamed to the field's column, and its `NOT NULL`.
+fn seal_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    field: &str,
+) -> Result<(BackfillStep, Vec<String>), Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.indexed || f.unique {
+        return Err(refuse(
+            "sealed_index_backfill_not_built",
+            format!(
+                "`{}.{field}` becomes `sealed indexed` or `sealed unique`: its blind index must \
+                 be computed for every row in every space (§7.3, B8), which is not built. Seal \
+                 it plain in one version, then add `indexed` in a later one",
+                e.name
+            ),
+        ));
+    }
+    if f.is_content() {
+        return Err(refuse(
+            "mapping_invalid",
+            format!(
+                "`{}.{field}` is a file: its bytes are sealed by the blob door",
+                e.name
+            ),
+        ));
+    }
+    let live_ty = live
+        .table(&e.name)
+        .and_then(|t| t.columns.get(&f.column()))
+        .map(|col| col.ty.clone())
+        .unwrap_or_default();
+    if live_ty != "text" {
+        return Err(refuse(
+            "seal_type_not_built",
+            format!(
+                "`{}.{field}` is `{live_ty}` before the step. A sealed backfill seals a `text` \
+                 field's value as it reads; another type is not built. Make it `text` in one \
+                 version, then seal it in a later one",
+                e.name
+            ),
+        ));
+    }
+    let table = ordo_schema::ddl::q(&e.name);
+    let plain = ordo_schema::ddl::q(&f.column());
+    let sealed = seal_column(f);
+    let not_null = ordo_schema::ddl::physical_columns(e)
+        .iter()
+        .any(|pc| pc.name == f.column() && pc.not_null);
+    let mut after = vec![format!(
+        "ALTER TABLE {table} DROP COLUMN {plain};\n\
+         ALTER TABLE {table} RENAME COLUMN {} TO {plain};\n",
+        ordo_schema::ddl::q(&sealed)
+    )];
+    if not_null {
+        after.push(format!(
+            "ALTER TABLE {table} ALTER COLUMN {plain} SET NOT NULL;\n"
+        ));
+    }
+    Ok((
+        BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: sealed,
+            column_ty: "bytea".into(),
+            mapping: FillMapping::Seal,
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: Some(f.column()),
+        },
+        after,
+    ))
 }
 
 /// The backfill for a B2 or B5 change the plan fills, or the refusal.
@@ -2081,6 +2209,12 @@ fn backfill_step(
             )
         }
         FillMapping::Function { .. } => None,
+        FillMapping::Seal => {
+            return Err(refuse(
+                "mapping_invalid",
+                format!("`seal` is not a fill: a stored plan seals `{}.{field}` when the version declares it `sealed`", e.name),
+            ))
+        }
     };
     if fill.audit == ordo_commandlog::BackfillAudit::Images
         && e.fields.iter().any(|x| x.sealed || x.is_content())
@@ -2104,6 +2238,7 @@ fn backfill_step(
         mapping: fill.mapping.clone(),
         sql,
         audit: fill.audit,
+        sealing_from: None,
     })
 }
 
@@ -2447,6 +2582,43 @@ pub fn triage_counted(
                     }
                 }
             }
+            // A field that becomes sealed, in a stored plan (increment 13):
+            // expand with a `bytea` beside the plaintext, seal every row
+            // through the worker, then drop the plaintext once it verifies
+            // (D9). No plaintext dual write.
+            Change::SealField { field, .. } if choices.stored => {
+                match seal_step(c, e, live, field) {
+                    Err(r) => refused.push(*r),
+                    Ok((b, contract)) => {
+                        steps.push(alter(format!(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
+                            ordo_schema::ddl::q(&e.name),
+                            ordo_schema::ddl::q(&b.column),
+                        )));
+                        after.extend(contract.into_iter().map(|sql| Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        }));
+                        backfills.push(b);
+                    }
+                }
+            }
+            Change::SealField { entity, field } => refused.push(Refused {
+                change: c.clone(),
+                class: "seal_needs_stored_plan",
+                why: format!(
+                    "`{entity}.{field}` becomes sealed. Every row's plaintext is sealed under its \
+                     space's key by the backfill worker, then the plaintext column is dropped \
+                     (plan-versions.md increment 13). `ordo apply` does not run that. Store the \
+                     version with `ordo apply --no-activate`, then run the step with \
+                     `ordo evolve --from <version> --to <version> --run`"
+                ),
+                run: None,
+            }),
             _ => refused.push(not_built(c)),
         }
     }

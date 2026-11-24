@@ -1459,8 +1459,8 @@ async fn land(
     for (k, v) in members {
         source.put(k, v.clone());
     }
-    // The import's name scopes its batch leases, which live beside every
-    // other tenant's in the database: one name per clone.
+    // The import's name, recorded in `$importmap`. Its batch leases are
+    // keyed by the space as well, so two clones never meet there.
     let import_name = format!("clone_{id}");
     let report = ordo_exec::import::import_space(
         &exec,

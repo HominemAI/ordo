@@ -334,14 +334,25 @@ A node can serve more than one version at once. The active version is the one an
 - **A pin** is the version one tenant is served. `$spaces.version` holds it, in the control database, with an epoch that grows by 1 on every change. `$pins` keeps every change: from, to, epoch, who, why, when.
 - **The active version** is where new tenants start (unless `versions.new_tenant` names another) and where an activation moves every tenant.
 - **A new tenant gets its own version's tables.** With `versions.new_tenant` set, each node keeps that version loaded, and a new tenant's database is made in its shape. A beta that adds a table works for its tenants at once. A node still loading it refuses the create for a moment, nothing made, and the identical call lands once it has. The catch-up leaves such a database alone; it is on its pin, not behind.
-- **An activation moves every tenant at once**, a tenant you pinned elsewhere included. Rollouts that move tenants in batches come later.
+- **An activation moves every tenant at once**, a tenant you pinned elsewhere included, unless `rollout.strategy` is set (next item).
+- **Rollouts** (`plan-versions.md` §3.7). A rollout moves tenants to a stored version a batch at a time.
+  - Start one: `ordo rollout start <version> [--strategy rolling|all] [--batch-interval 5m] [--window 1h] [--failure-threshold 1] [--deployment-space first|last] [--batch-size <n>]`. With `rollout.strategy` set, `ordo apply` starts one itself and returns when it starts.
+  - Follow it: `ordo rollout status`. It names each tenant that waits, failed or was skipped, and why.
+  - Control it: `resume`, `skip <tenant>`, `retry <tenant>`, `abort --reason "..."`, `finish`, `hold <tenant> --reason "..."` or `--clear`. Each is a door op, `std.deployment.rollout.*`, with no reauth, and one entry on the security stream.
+  - One rollout runs at a time. A second, and an activation, are refused naming `ordo rollout status` and `ordo rollout abort`. One tenant may still move on its own (`ordo versions pin`), and the rollout then skips it.
+  - The deployment's own space moves first, like a tenant, or last with `rollout.deployment_space` `last`. The active version changes only when the rollout finishes: sign-in and new tenants follow it then.
+  - A tenant outside its maintenance window waits, and so does a held one. A tenant whose database cannot be reached waits; it is never failed.
+  - `rollout.failure_threshold` failed tenants pause the rollout. A failed tenant serves its old version. `retry` or `skip` it, then `resume`.
+  - `abort` stops new moves. Moved tenants stay; `ordo rollback` moves them back.
+  - `retry <tenant>` with no rollout reopens a tenant's refused move for the catch-up.
+  - The settings are stored in Ordo beside the version settings: `ordo rollout settings`, `ordo rollout set <setting> <value> --reason "..."`. Every node runs the worker every `ORDO_ROLLOUT_TICK_SECS` seconds (default 5); one node leads each turn under a lock, and another goes on when it dies.
 - **Move one tenant now:** `ordo versions pin <tenant> <version>`. A version is its name or `#n`. A revoked version is refused. Through the door it is `std.deployment.pin`, deployment owner only. It asks no reauth, of a person or of a machine key, so you can move many tenants at once and your own system may drive moves (owner, 2026-11-05).
 - **See one tenant's version:** `ordo versions list --tenant <id>` prints its version, its epoch and every pin change. Through the door: `std.deployment.tenantVersion`.
 - `ordo versions list` says, per version, how many tenants it serves, and marks the active one `active (new tenants)`.
 - **How a node learns of a pin.** Every pin change notifies the nodes in its own transaction. A node then reads `$pins` from the last row it read. It also reads every pin again every `ORDO_PINS_RECONCILE_SECS` seconds (`pins.reconcile_interval`, default 30), so a missed notice costs at most that long.
 - **Loading.** A node loads every version a pin names at boot and when a pin first names it, one at a time. A request never starts a load. A tenant whose version is still loading answers "closed for a moment" and the same request lands once it has. A version no pin names any more is dropped.
 - **The pin fence.** Each tenant's own database records the newest epoch any node wrote under (`$pin_fence`). A node whose pin is older has its write refused, reads the pin again and writes once more. The caller sees one answer.
-- **Which moves wait for a maintenance window.** Only a move off a revoked version (above). An activation and a pin move a tenant at once, whatever its window says.
+- **Which moves wait for a maintenance window.** A move off a revoked version (above) and a rollout's move. An activation and a pin move a tenant at once, whatever its window says.
 - **The version settings live in Ordo**, not the environment (owner, 2026-11-05). They are stored in the control database with who set each, when and why. Every node reads the one stored value.
   - Read them: `ordo versions settings` (or `std.deployment.versionSettings`, or the console's Deploys screen). It prints the three and the recent changes.
   - Change one: `ordo versions set <served|minimum|new-tenant> <value> --reason "..."`, or `--clear` for the default. Through the door: `std.deployment.setVersionSetting`. You, or your own system with a machine key that has the `deployment` grant. No reauth is asked below `ORDO_SECURITY_LEVEL=high`.

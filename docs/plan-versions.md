@@ -738,7 +738,7 @@ person. It is hash-chained, so it is not a place for bulk rows.
 
 | Act | Recorded in | Status |
 |---|---|---|
-| Each pin change, with actor, cause and rollout id | `$pins` | built |
+| Each pin change, with actor, cause and rollout id | `$pins` | built (rollout id: increment 10) |
 | Revoke, unrevoke | `$revocations` | built |
 | A version setting changed | `$version_settings` | built |
 | A `--direct` use | the security log, at the next boot | built |
@@ -746,7 +746,7 @@ person. It is hash-chained, so it is not a place for bulk rows.
 | The deployment owner's approval of a sign-in method removal (Q6) | the deployment's stream, act `sign-in-removal-approved`, with the methods and the count | built (increment 9) |
 | A backfill on one tenant | that tenant's command chain, one summarised group (ruled 2026-09-08, 2026-09-20) | increment 10b |
 | A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b |
-| Rollout start, pause, resume, skip, retry, abort, finish | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | increment 10 |
+| Rollout start, pause, resume, skip, retry, abort, finish, hold | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | built (increment 10) |
 | A one-way confirmation, a prune, a `--move-to` | **ruled 2026-11-23 (Q9):** the deployment's stream, naming the person | increments 11a, 14 |
 | A release check and its override | `$release_checks` | built (increment 6) |
 
@@ -1526,6 +1526,56 @@ partners, health by error rate, the alert channel.
 
 **What sets the pace:** the owner's answers to Q3 and Q4, and 2 CI rounds.
 
+**As built in increment 10** (2026-11-23, `rollouts.rs`, `versions.rs`,
+`apply_op.rs`, `ordo-cli/src/rollout.rs`):
+
+- `$rollouts`, `$rollout_tenants` and `$rollout_holds` behind one client,
+  `Rollouts`, with one typed error, `RolloutRefusal`. It sits beside
+  `Versions`, as `Plans` does. A unique index keeps one rollout open.
+- `rolling`: a batch every `rollout.batch_interval`, sized to finish within
+  `rollout.window`, or `--batch-size`. `all`: every tenant in one batch.
+- **The deployment's own space** is the row `$deployment` (Q4). It moves
+  like a tenant: its pin is `$own_pin` (`Versions::pin_own`), a `$pins`
+  row and the nudge carry it to every node. First by default, last with
+  `rollout.deployment_space` `last`. Every activation moves it too.
+- **"Active" flips at the end** (Q5): when the rollout finishes, or is
+  finished by hand, `Versions::activate_alone` activates the target with no
+  tenant moved. Until then sign-in and new tenants stay on the version that
+  was active. Abort leaves "active" where it was.
+- A tenant on the deployment's database is pinned, cause `rollout`, its
+  `$pins.rollout` naming the rollout. A tenant with its own database is
+  brought to the target (`bring_forward_from`), gated, then pinned, under
+  the apply lock.
+- **Windows and holds.** A tenant a window covers moves only while one
+  holds. A held tenant waits until `ordo rollout hold <t> --clear`.
+- **Unreachable waits** (Q10). A failure by name is `failed`.
+  `rollout.failure_threshold` failures since the last resume pause it.
+- **One at a time** (Q3). A second start, and any activation while one is
+  open (`VersionRefusal::RolloutOpen`), are refused naming `ordo rollout
+  status` and `abort`. A tenant a person pinned after the start is
+  `skipped`, "moved on its own".
+- **The worker.** Every node ticks every `ORDO_ROLLOUT_TICK_SECS` (5 s).
+  A tick takes `pg_try_advisory_xact_lock` on the control database and does
+  nothing without it. A dead leader's lock goes with its connection, and a
+  tenant it left `moving` is moved first by the next leader. Each tick reads
+  the tenant set again.
+- **Stranded.** A start is refused when `versions.served` leaves out the
+  active version, or the target is below `versions.minimum`. `finish` is
+  refused when it would leave a tenant on a version the list leaves out.
+- **Refused at the start:** a version the deployment's own database does not
+  hold (naming `ordo evolve --run`), and nothing to move.
+- **The acts** (Q9): start, resume, skip, retry, abort, finish and hold are
+  one stream entry each; a pause by the threshold and the finish too.
+- **`ordo apply`** starts a rollout when `rollout.strategy` is set, and
+  returns when it starts. Unset, it activates as before (see below).
+- **`retry <tenant>`** with no rollout reopens a refused move (increment 7).
+- Tests: `crates/ordo-host/tests/rollouts.rs` (13), `ordo-cli/tests/
+  rollout_cli.rs`, and the example test in `teamspace_app.rs`,
+  `during_a_rolling_rollout_each_team_is_served_its_own_version`.
+- **Not built:** removing a stored version with `--move-to` (§1.6); the
+  console's rollout screen; `rollout.unreachable` as a setting (Q10 fixed
+  it at `wait`); the 10c strategies.
+
 ---
 
 ## 4 · Build order
@@ -1551,9 +1601,9 @@ round is about 35 minutes for the full suite.
 | 7b | **Federation under versions** (new, review 2026-11-23). `plan-evolution-federation.md`, steps F1 to F6: readers named in a plan, column grants that follow the served fields, every loaded version checked against its peers, the checks in rollback and promotion. | M, in 2 parts: F1, F3, F4 with 8; F2, F5, F6 with 11a | 7, 8, 11a | note-viewer never reads a stale column: it reads through the soak, then is refused naming the fix | none |
 | 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. **Session 1 built 2026-11-23** (6d93397c, ef5fe610, 9856f637): `$plans` and `evolve.rs`; the step renders from the 2 stored sources against an empty database of X, so the digest is the same in every environment; `--digest` refuses another; a plan with errors is never stored; the receipt lists each change, class, option, forward and reverse, and leaves out Ordo's own tables; replay walks the stored path, each step checking the recorded version, drift and the digest; `std.deployment.evolve`, `plans`, `replay`; `ordo evolve [<dir>] --from --to [--run]`, `--tenant`, `--list`; F1 and F4's rollback check. Tests: `stored_plans.rs`. **Through the examples, built 2026-11-23** (branch `evo-examples-evolve`): the notes e2e runs the identity service, and its developer signs in with `ordo login` approved by passkey (`tests/developer.ts`); project `evolve` (`tests/evolve/v2-to-v3.spec.ts`) stores v3, runs `ordo evolve --from 0.2.0 --to 0.3.0`, then `--run`, with the v2 page open. `ordo migrate --apply --direct` is removed and refuses naming `ordo evolve` (§6 conflict 9). **Not built:** option expressions beyond `--places`, backfill functions (D16, with 10b). | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
 | 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). **Built 2026-11-23** (f8828906): `precheck.rs`. `ordo evolve` stores the plan, then asks every database (shared or per tenant) the data probes and the external check, and lists every issue with its database, spaces and fix. `--run` refuses while one is open, and `run_step` refuses a tenant's step the same way. A database at another version is listed as not asked. Readers are listed from the render (F1). The sign-in removal check (Q6): a version whose `auth` block drops a method counts the people left with none, and is not stored until `--approve-sign-in-removal <count>` names that count; the approval is act `sign-in-removal-approved` on the stream. Tests: `prechecks.rs`. **Not built:** the `requires` check (the declaration is not in the language; the answer says so), the peer note on a removed shared provider (`plan-evolution-federation.md`), **Through the examples, built 2026-11-23** (branch `evo-examples-evolve`): project `evolve-checks` (`tests/evolve/prechecks.spec.ts`) stores 0.3.1 (`fixtures/notes-v3-1.ordo.fixture`, v3 with `title` unique) over a tenant holding 2 notes with one title; `ordo evolve` lists them with the fix, `--run` is refused, the title is changed on the page, and `--run` passes. | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
-| 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
+| 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). **Built 2026-11-23** (branch `evo-10-rollouts`, 2d15a71b and after): `rollouts.rs`, `std.deployment.rollout.start\|status\|resume\|skip\|retry\|abort\|finish\|hold`, `ordo rollout ...`, the settings in `$version_settings` (Q15), the one-tenant hotfix skipped (Q3), `retry` of a refused move, `ordo apply` starting a rollout when `rollout.strategy` is set. The backfill settings (`backfill.chunk_rows`, `chunk_timeout`, `max_attempts`, `budget`) are stored in `$version_settings` too, set with `ordo versions set backfill.<name>`, and a stored step's backfill runs with them (`rollouts.rs` `the_backfill_settings_are_stored_and_a_step_runs_with_them`). Tests: `rollouts.rs`, `rollout_cli.rs`, teamspace's rolling rollout. **Not built:** removing a stored version with `--move-to`; the console screen. As built in §3.7. | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
 | 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
-| 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. **Built 2026-11-23** (37bba572, 3f931aed, 0d4082f5, f684a30a): a stored plan fills a field it makes required (B2, B5) with `--fill <entity>.<field>=<Ordo expression>` or `=fn <name> [secrets ..] [hosts ..]`; the step expands the column nullable, `backfill.rs` fills it in chunks with its cursor in `$backfills` in the same transaction, verify recomputes each space's count and content hash, then `NOT NULL` lands. Until then the database records the version before the step, so a run again resumes from the cursor. 5 failed chunks mark it `dead`; a run again retries. The audit record is trailer `0x04` on the chain: one summarised group per space, or with `--audit-images` one image group per space per chunk; goldens of every older group kind landed first. Backfill functions run once per chunk with exactly the declared secrets and hosts (Q14), and the receipt marks them not reproducible. Tests: `backfill.rs` (the kill mid-chunk, verify, images, dead, render refusals, functions), `notes_app.rs` (`a_backfill_over_existing_notes_shows_the_new_values_once_it_completes`), the command log's goldens. **Not built:** the Playwright test in `examples/notes-v3` (the harness holds no deployment-owner credential for `ordo evolve`; asked), live writes during the backfill (11a), the settings stored in Ordo (`backfill.chunk_rows` and the rest are defaults until 10 stores them, Q15), the move lock and `backfill.concurrency` across tenants (11b), sealed backfills (13), refusing `ordo revert` of a backfill group by name. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
+| 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. **Built 2026-11-23** (37bba572, 3f931aed, 0d4082f5, f684a30a): a stored plan fills a field it makes required (B2, B5) with `--fill <entity>.<field>=<Ordo expression>` or `=fn <name> [secrets ..] [hosts ..]`; the step expands the column nullable, `backfill.rs` fills it in chunks with its cursor in `$backfills` in the same transaction, verify recomputes each space's count and content hash, then `NOT NULL` lands. Until then the database records the version before the step, so a run again resumes from the cursor. 5 failed chunks mark it `dead`; a run again retries. The audit record is trailer `0x04` on the chain: one summarised group per space, or with `--audit-images` one image group per space per chunk; goldens of every older group kind landed first. Backfill functions run once per chunk with exactly the declared secrets and hosts (Q14), and the receipt marks them not reproducible. Tests: `backfill.rs` (the kill mid-chunk, verify, images, dead, render refusals, functions), `notes_app.rs` (`a_backfill_over_existing_notes_shows_the_new_values_once_it_completes`), the command log's goldens. **Not built:** the Playwright test in `examples/notes-v3` (the harness holds no deployment-owner credential for `ordo evolve`; asked), live writes during the backfill (11a), the move lock and `backfill.concurrency` across tenants (11b), sealed backfills (13), refusing `ordo revert` of a backfill group by name. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
 | 11a | **Dual writes on one tenant** (split from 11, review 2026-11-23). `plan-backfill-dual-writes.md` steps B2, B4: the move overlay in the host write path, both versions' guards, the soak, the reverse writes, soak close into `$orphans`. Research: 2 to 3 tries. | L | 10b | a rename on 1 tenant under live writes loses no write; a revert in the soak keeps every write | 13c (reshaped) |
 | 11b | **Every tenant** (split from 11, review 2026-11-23). Step B5: moves driven by a rollout, shared databases, `ordo rollback` and its `--dry-run`, grants stay killed. | M | 10, 11a | a rename on 3 tenants under live writes loses no write; a rollback in the soak keeps every write | 27c |
 | 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. **Session 1 built 2026-11-24** (branch `evo-12-clones`, §3.4 "Built"): `clones.rs`; production masks before export (deny by default, `clone.mask`, `off` opt-in), drops files, the command log and every member's name and sign-in link; the bundle is sealed to staging's clone key (`ordo_crypto::recipient`) recorded with `ordo clones set-key`; staging reads it from production's door as the person, pins a new tenant to the version with the same source identity and imports it under its own keys; Q12 built: a staging admin or a `clone.readers` person opens it as its founding owner, and a cloned member's `$clone:` principal is never mapped. Door ops `std.deployment.cloneKey`, `setCloneKey`, `cloneOut`, `cloneIn`, `clones`, `setCloneSetting`; `ordo clones key\|set-key\|clone\|list\|set`. Tests: `ordo-host/tests/clones.rs` (2 real doors: the clone serves masked notes through staging's door, no production value anywhere in staging's database, a cloned member refused, each refusal), `ordo-cli/tests/clones_cli.rs`. **Session 2 built 2026-11-24** (branch `evo-12-clones-2`, §3.4 "Built, session 2"): sinks for mail and egress (`sinks.rs`, `clone.sinks`, `std.deployment.sinks`, `ordo clones sink`); a version staging does not hold comes down with the clone through the promotion gate, recorded as a clone; a tenant with its own database gets one on staging, brought to its version. Tests: 8 in `ordo-host/tests/clones.rs`; notes e2e project `clone`. **Not built:** a tenant with `acl` rows clones (the import refuses the bundle's access row, the e2e case is `fixme`); push sinks (Ordo sends no push); the 64 MiB cap. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
@@ -1582,9 +1632,9 @@ round is about 35 minutes for the full suite.
   Left: the per-version catalog and generated interface.
 - Schedules and listeners as the union over served versions; cursor
   hand-over at a switch. Built in the remainder (§1.10).
-- Session 2 built `versions.served` and `versions.minimum` (§1.6). Left:
-  the refusal of a rollout that strands a tenant (with rollouts), and a
-  command that removes a stored version (`--move-to`).
+- Session 2 built `versions.served` and `versions.minimum` (§1.6).
+  Increment 10 built the refusal of a rollout that strands a tenant. Left:
+  a command that removes a stored version (`--move-to`).
 - Sharing rule (§1.7), `versions_disagree`. Built 2026-11-23 (d00afde0):
   per-version manifests in the access engine, a pin records its version,
   D7 across versions. Left: release and sealing in the comparison.
@@ -1836,12 +1886,12 @@ day:
 - Environment variables stay for settings about the binary itself.
 | `soak.length` | 7 days, 0 allowed | plan |
 | `backfill.concurrency` | 8 | environment |
-| `backfill.chunk_rows` | 1,000 | plan |
-| `backfill.chunk_timeout` | 20 seconds | plan |
-| `backfill.budget` | none | environment |
+| `backfill.chunk_rows` | 1,000 (stored in Ordo, built with 10: `ordo versions set backfill.chunk_rows`) | plan |
+| `backfill.chunk_timeout` | 20 seconds (stored in Ordo, built with 10) | plan |
+| `backfill.budget` | none (stored in Ordo, built with 10) | environment |
 | `backfill.audit_images` | off | plan |
 | `seal.keep_plaintext` | off | plan |
-| `rollout.strategy` | rolling | environment |
+| `rollout.strategy` | rolling (as built: unset, and an apply moves every tenant at once; see §3.7) | environment |
 | `rollout.batch_interval` | 5 minutes | environment |
 | `rollout.window` | 1 hour, a target | environment |
 | `rollout.canary_count` | 1 tenant | environment |
@@ -1883,7 +1933,7 @@ Added by the review of 2026-11-23:
 | Setting | Default | Layer |
 |---|---|---|
 | `rollout.deployment_space` | `first` (ruled 2026-11-23, Q4) | environment |
-| `rollout.unreachable` | `wait` (ruled 2026-11-23, Q10) | environment |
+| `rollout.unreachable` | `wait` (ruled 2026-11-23, Q10; built as fixed, not a setting) | environment |
 | `backfill.per_database` | 2 moves at once in one database (proposed) | environment |
 | `backfill.function_egress` | off unless the backfill declares it (ruled 2026-11-23, Q14) | plan |
 
@@ -1898,3 +1948,7 @@ Added by the review of 2026-11-23:
   `$version_settings`, set through the door with who, when and why. The
   "plan" layer is the option recorded in the stored plan. This follows the
   2026-11-05 ruling's reason.
+- **Built in increment 10** for the 5 `rollout.*` settings:
+  `std.deployment.setVersionSetting` takes `rollout.<name>`, and
+  `versionSettings` answers them under `rollout`. `ordo rollout settings`
+  and `ordo rollout set`. A start may override each for one rollout.

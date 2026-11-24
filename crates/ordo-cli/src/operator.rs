@@ -144,6 +144,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
         "evolve" => &["--run", "--list", "--orphans"],
+        "rollout" => &["--clear"],
         "release-check" => &["--json", "--override"],
         _ => &[],
     }
@@ -413,6 +414,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "clones" => rt.block_on(clones_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
+        "rollout" => rt.block_on(crate::rollout::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -2192,7 +2194,9 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
     match &report.activation {
         Activation::Switched { to, .. } => Some(to.clone()),
         Activation::AlreadyActive { version } => Some(version.clone()),
-        Activation::Staged => None,
+        // `ordo apply` returns when the rollout starts (§3.5); the rollout
+        // moves the deployment, and `ordo rollout status` follows it.
+        Activation::Staged | Activation::RolloutStarted { .. } => None,
     }
 }
 
@@ -2284,6 +2288,17 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
         )),
         Activation::AlreadyActive { version } => out.push_str(&format!(
             "activated  {version}  (already active; nothing re-pointed)\n"
+        )),
+        Activation::RolloutStarted {
+            id,
+            strategy,
+            from,
+            to,
+        } => out.push_str(&format!(
+            "activated  not yet: rollout {id} to {to} started ({strategy}, from {}; \
+             rollout.strategy is set)\nrollout    `ordo rollout status` follows it; `ordo \
+             rollout abort` stops it\n",
+            from.as_deref().unwrap_or("nothing"),
         )),
     }
     let t = &report.tenants;
@@ -2489,7 +2504,9 @@ async fn rollback(flags: Flags) -> Outcome {
         Ok(Activation::AlreadyActive { version }) => {
             Outcome::ok(format!("UNCHANGED  {version} is already active\n"))
         }
-        Ok(Activation::Staged) => Outcome::failed("REFUSED an activation answered staged\n".into()),
+        Ok(Activation::Staged) | Ok(Activation::RolloutStarted { .. }) => {
+            Outcome::failed("REFUSED an activation answered staged\n".into())
+        }
         Err(e) => Outcome::failed(format!("REFUSED {e}\n")),
     }
 }
@@ -3311,6 +3328,8 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...
      ordo versions settings [--limit <n>]  --host <h> ...\n\
      ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
+     ordo versions set backfill.<chunk_rows|chunk_timeout|max_attempts|budget> <value> | --clear  --reason \"<text>\"  \
+     --host <h> ...\n\
      every `versions` command goes through the door (`--host <h>` or ORDO_HOST)\n\
      a version is its name or its order number, `#4`";
 
@@ -3784,7 +3803,11 @@ async fn versions_settings(flags: Flags) -> Outcome {
         Ok(r) => r,
         Err(o) => return o,
     };
-    let mut out = format!("VERSION SETTINGS\n{}", settings_lines(&row));
+    let mut out = format!(
+        "VERSION SETTINGS\n{}{}",
+        settings_lines(&row),
+        backfill_lines(&row["backfill"])
+    );
     let history = row["history"].as_array().cloned().unwrap_or_default();
     out.push_str(&format!("CHANGES ({})\n", history.len()));
     if history.is_empty() {
@@ -3819,16 +3842,29 @@ async fn versions_set(flags: Flags) -> Outcome {
         ([s], true) => (s.clone(), None),
         _ => return Outcome::usage(format!("{VERSIONS_USAGE}\n")),
     };
-    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
-        return Outcome::usage(format!(
-            "`{name}` is not a version setting; there are `served`, `minimum`, \
-             `new-tenant`, `min-residency` and `idle-evict-after`\n"
-        ));
-    };
     let Some(reason) = flags.named_value("--reason") else {
         return Outcome::usage(
             "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
         );
+    };
+    // The backfill settings are stored beside these and set the same way
+    // (Q15): `ordo versions set backfill.chunk_rows 500 --reason "..."`.
+    if name.trim().starts_with("backfill.") {
+        let Some(setting) = ordo_host::backfill::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not a backfill setting; there are {}\n",
+                ordo_host::backfill::SETTINGS.join(", ")
+            ));
+        };
+        return backfill_set(&flags, setting, value, reason).await;
+    }
+    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
+        return Outcome::usage(format!(
+            "`{name}` is not a version setting; there are `served`, `minimum`, \
+             `new-tenant`, `min-residency` and `idle-evict-after`, and the backfill \
+             settings {}\n",
+            ordo_host::backfill::SETTINGS.join(", ")
+        ));
     };
     let host = match door_only(&flags) {
         Ok(h) => h,
@@ -3856,6 +3892,57 @@ async fn versions_set(flags: Flags) -> Outcome {
         format!("unchanged  {} is already {now}\n", setting.name())
     };
     Outcome::ok(format!("{head}{}", settings_lines(&row)))
+}
+
+/// `ordo versions set backfill.<name> <value> | --clear --reason "..."`:
+/// one backfill setting through the same door op.
+async fn backfill_set(
+    flags: &Flags,
+    setting: &'static str,
+    value: Option<String>,
+    reason: &str,
+) -> Outcome {
+    let host = match door_only(flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        flags,
+        ordo_host::deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({ "setting": setting, "value": value, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let now = match &row["value"] {
+        serde_json::Value::Null => "none".to_string(),
+        v => v.to_string(),
+    };
+    let head = if row["changed"].as_bool() == Some(true) {
+        format!("set        {setting} = {now}\n")
+    } else {
+        format!("unchanged  {setting} is already {now}\n")
+    };
+    Outcome::ok(format!("{head}{}", backfill_lines(&row["backfill"])))
+}
+
+/// The backfill settings as the settings op answers them.
+fn backfill_lines(b: &serde_json::Value) -> String {
+    if b.is_null() {
+        return String::new();
+    }
+    let n = |k: &str| b[k].as_u64().map(|n| n.to_string());
+    format!(
+        "BACKFILL\n  chunk rows    {}\n  chunk timeout {}s\n  max attempts  {}\n  budget        {}\n",
+        n("chunkRows").unwrap_or_else(|| "?".into()),
+        n("chunkTimeout").unwrap_or_else(|| "?".into()),
+        n("maxAttempts").unwrap_or_else(|| "?".into()),
+        n("budget").map(|b| format!("{b} chunks")).unwrap_or_else(|| "none".into()),
+    )
 }
 
 /// What `ordo versions revoked` prints, on both paths.

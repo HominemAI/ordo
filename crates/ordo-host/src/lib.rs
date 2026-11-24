@@ -128,6 +128,7 @@ pub mod release_ops;
 pub mod renewal;
 pub mod replay;
 pub mod revoked_moves;
+pub mod rollouts;
 pub mod routines;
 pub mod runtime;
 pub mod schema_apply;

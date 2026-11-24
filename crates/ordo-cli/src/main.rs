@@ -98,6 +98,10 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo rollout start|status|resume|skip|retry|abort|finish|hold|settings|set ...\n      \
+         rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
+         stored version, follow it, and control it. `ordo rollout` alone\n      \
+         prints each subcommand.\n  \
          ordo evolve --orphans\n      \
          what versions left behind in every database (`std.deployment.orphans`).\n  \
          ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
@@ -605,6 +609,7 @@ fn main() {
             | "clones"
             | "promote"
             | "evolve"
+            | "rollout"
             | "prune"
             | "restore"
             | "keys"

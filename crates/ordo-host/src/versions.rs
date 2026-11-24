@@ -530,7 +530,7 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
 /// `$version_settings`, beside `$revocations`: every change to the three
 /// version settings ([`VersionSetting`]), append-only, with who, why and
 /// when. A setting's value is its newest row's; `value` NULL is unset.
-const SETTINGS_DDL: &str = "\
+pub(crate) const SETTINGS_DDL: &str = "\
 CREATE TABLE IF NOT EXISTS \"$version_settings\" ( \
   \"seq\" bigserial PRIMARY KEY, \
   \"setting\" text NOT NULL, \

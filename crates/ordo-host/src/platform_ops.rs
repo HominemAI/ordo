@@ -1056,6 +1056,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::secrets::specs())
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
+    .chain(crate::clones::specs())
     .chain(crate::window_ops::specs())
     .chain(crate::revoked_moves::specs())
     .chain(crate::fleet::specs())
@@ -1869,6 +1870,9 @@ pub fn owner_only(name: &str) -> bool {
         // G1 to G3: the program's history, its rollback and its preview
         // are the deployment's, on `APPLY`'s terms.
         || crate::deploy_ops::OPS.contains(&name)
+        // Staging clones (`plan-versions.md` §3.4): the deployment's, on
+        // `APPLY`'s terms. A clone discloses a tenant, masked.
+        || crate::clones::OPS.contains(&name)
         // Maintenance windows (owner, 2026-11-04): the app developer's
         // contract with each tenant, set by the deployment owner on
         // `APPLY`'s terms. A tenant has no say in them through Ordo.
@@ -2229,6 +2233,9 @@ pub struct PlatformOps {
     /// wires nothing for it is a bug in the deployment, not a state a
     /// caller reaches on a correct one.
     pub apply: Option<Arc<crate::apply_op::ApplyOps>>,
+    /// The clone ops' state (`plan-versions.md` §3.4): the deploy door's,
+    /// the deployment's keys, and who opens a clone.
+    pub clones: Option<Arc<crate::clones::CloneOps>>,
     /// `std.space.create`'s state. Separate from [`Self::apply`] and not
     /// folded into it, though both are deployment-scoped and both are
     /// owner-only: applying a program needs a pool, and minting a tenant
@@ -2340,6 +2347,7 @@ impl PlatformOps {
             identities: None,
             credentials: None,
             apply: None,
+            clones: None,
             tenants: None,
             pause: None,
             engine_source: None,
@@ -2433,6 +2441,12 @@ impl PlatformOps {
     /// serves no control plane needs no change.
     pub fn with_apply(mut self, apply: Arc<crate::apply_op::ApplyOps>) -> PlatformOps {
         self.apply = Some(apply);
+        self
+    }
+
+    /// Wire the clone ops (`plan-versions.md` §3.4).
+    pub fn with_clones(mut self, clones: Arc<crate::clones::CloneOps>) -> PlatformOps {
+        self.clones = Some(clones);
         self
     }
 
@@ -2755,6 +2769,14 @@ impl PlatformOps {
             crate::apply_op::APPLY => self.apply_ops()?.apply(space, bound, caller).await,
             name if crate::deploy_ops::OPS.contains(&name) => {
                 crate::deploy_ops::execute(self.apply_ops()?, name, space, bound, caller).await
+            }
+            name if crate::clones::OPS.contains(&name) => {
+                let clones = self.clones.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the clone ops and wired no state for them",
+                    )
+                })?;
+                clones.execute(name, space, bound, caller).await
             }
             name if crate::window_ops::OPS.contains(&name) => {
                 crate::window_ops::execute(self.apply_ops()?, name, space, bound, caller).await

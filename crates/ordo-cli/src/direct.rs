@@ -49,7 +49,7 @@ pub fn policy(cmd: &str, sub: Option<&str>, flags: &Flags) -> Route {
             Route::Open
         }
         "versions" | "windows" | "environments" | "promote" | "evolve" | "fleet" | "quota"
-        | "touches" => Route::Door,
+        | "touches" | "clones" => Route::Door,
         // `plan <dir>` alone only compiles. With `--against` or `--host` it
         // is the deployment's plan, which is the door's.
         "plan" => Route::Door,

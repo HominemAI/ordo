@@ -1158,6 +1158,50 @@ Added by the review of 2026-11-23:
   or a person the staging deployment allows. Cloned members' own sign-ins
   are never carried.
 
+**Built, session 1 (2026-11-24, increment 12).** `crates/ordo-host/src/clones.rs`:
+
+1. On staging, `ordo clones clone <tenant> --reason "..."`
+   (`std.deployment.cloneIn`) asks production's door for the tenant as the
+   person, with their own token for production (`step_door.rs`,
+   `clone_out`). Production must answer as `production` and for the same
+   person.
+2. Production (`std.deployment.cloneOut`) exports the tenant at its pinned
+   version and masks it there (`mask_bundle`). Masked values keep their
+   type: text becomes `masked-<tag>`, unique per row; numbers 0; dates
+   2000-01-01; a JSON document keeps its shape with every leaf replaced;
+   an optional field null. Refs keep their ids.
+3. Always dropped, masking off included: files, the command log (its
+   images hold the old values), each member's name and sign-in link.
+4. The bundle is sealed to staging's clone key (`ordo_crypto::recipient`:
+   X25519, then XChaCha20-Poly1305, bound to the tenant, the source
+   identity and the environment). Staging prints its key with `ordo clones
+   key`; production records it with `ordo clones set-key staging <key>`.
+   The secret is sealed under staging's own keys.
+5. Staging finds the version it holds with the same source identity, makes
+   a new tenant pinned to it, writes the members with principal
+   `$clone:<id>`, and imports the rows through the write protocol, so every
+   value is sealed again under staging's keys. Recorded in `$clones` and on
+   both deployments' streams.
+6. Q12: a staging deployment admin opens a clone's app ops as its founding
+   owner, recorded as the agent beside it. `clone.readers` names others
+   signed in to staging. The door never maps a `$clone:` principal, so a
+   cloned member cannot sign in.
+7. Foreign tables are not exported, and the answer names them.
+
+`clone.mask` and `clone.readers` are stored in `$version_settings` (Q15),
+set with `ordo clones set mask|readers <value>`.
+
+Not built yet:
+
+- Sinks for mail, push and egress in staging.
+- A version staging does not hold coming down with the clone. It is
+  refused, naming `ordo promote <version>`.
+- A tenant with its own database or bucket: the clone lands in staging's
+  shared database, and no production credential is carried, but its
+  attachment is not recreated.
+- The clone travels in one answer, at most 64 MiB.
+- The notes example test.
+
 ### 3.5 Rollout is which pins move when
 
 Ruled 2026-10-01 (27h). Ruled 2026-11-02 (D15). The maintenance window was
@@ -1304,7 +1348,7 @@ round is about 35 minutes for the full suite.
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
 | 11a | **Dual writes on one tenant** (split from 11, review 2026-11-23). `plan-backfill-dual-writes.md` steps B2, B4: the move overlay in the host write path, both versions' guards, the soak, the reverse writes, soak close into `$orphans`. Research: 2 to 3 tries. | L | 10b | a rename on 1 tenant under live writes loses no write; a revert in the soak keeps every write | 13c (reshaped) |
 | 11b | **Every tenant** (split from 11, review 2026-11-23). Step B5: moves driven by a rollout, shared databases, `ordo rollback` and its `--dry-run`, grants stay killed. | M | 10, 11a | a rename on 3 tenants under live writes loses no write; a rollback in the soak keeps every write | 27c |
-| 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
+| 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. **Session 1 built 2026-11-24** (branch `evo-12-clones`, §3.4 "Built"): `clones.rs`; production masks before export (deny by default, `clone.mask`, `off` opt-in), drops files, the command log and every member's name and sign-in link; the bundle is sealed to staging's clone key (`ordo_crypto::recipient`) recorded with `ordo clones set-key`; staging reads it from production's door as the person, pins a new tenant to the version with the same source identity and imports it under its own keys; Q12 built: a staging admin or a `clone.readers` person opens it as its founding owner, and a cloned member's `$clone:` principal is never mapped. Door ops `std.deployment.cloneKey`, `setCloneKey`, `cloneOut`, `cloneIn`, `clones`, `setCloneSetting`; `ordo clones key\|set-key\|clone\|list\|set`. Tests: `ordo-host/tests/clones.rs` (2 real doors: the clone serves masked notes through staging's door, no production value anywhere in staging's database, a cloned member refused, each refusal), `ordo-cli/tests/clones_cli.rs`. **Not built:** sinks, a version staging does not hold (refused naming `ordo promote`), a tenant's own database or bucket recreated, the notes example test. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
 | 12b | **Signed rehearsal (provisional, §3.2).** | M | 8, 12 | production refuses a plan digest staging did not sign | 27f (rest) |
 | 13 | **Sealed backfills.** No plaintext dual write, plaintext dropped on verify, `Purpose::Migration`. | L | 11b | sealing on 3 tenants under live writes verifies by count and hash, and no plaintext column remains | 13d |
 | 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |

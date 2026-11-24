@@ -152,7 +152,7 @@ entity reminders {
   due: datetime
   fired: datetime?
 }
-op campaigns unbounded download =
+op campaignList unbounded download =
   campaigns[id, rev, title, brief, tags, budget, status, due, created]
   sort -created
 op campaignsTagged($tag: text) unbounded =
@@ -169,12 +169,12 @@ op campaignAccess($campaign: id) unbounded =
   campaignsAccess(campaign == $campaign)[id, member, level]
 op unshareCampaign($campaign: id, $member: id) =
   del campaignsAccess(campaign == $campaign and member == $member)
-op assets($campaign: id) unbounded =
+op campaignFiles($campaign: id) unbounded =
   assets(campaign == $campaign)[id, rev, campaign, name, kind, size, file]
 op addAsset($campaign: id, $name: text, $kind: text, $size: int) =
   set assets { campaign: $campaign, name: $name, kind: $kind, size: $size }
 op deleteAsset($id: id) = del assets { id: $id }
-op reminders unbounded =
+op campaignReminders unbounded =
   reminders[id, campaign, due, fired]
   sort due
 op setReminder($campaign: id, $due: datetime) =
@@ -215,6 +215,6 @@ entity approvals {
 op approveCampaign($id: id, $rev: int, $note: text, $at: datetime filled) =
   set campaigns { id: $id, rev: $rev, status: "published" }
   set approvals { campaign: $id, reviewer: $caller, at: $at, note: $note }
-op approvals($campaign: id) unbounded =
+op approvalHistory($campaign: id) unbounded =
   approvals(campaign == $campaign)[id, reviewer, at, note]
   sort -at

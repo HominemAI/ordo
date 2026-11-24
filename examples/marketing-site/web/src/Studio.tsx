@@ -609,7 +609,7 @@ function Inbox(ctx: Context) {
 }
 function Campaigns(ctx: Context) {
   const [tag, setTag] = useState('');
-  const q = useListing(tag ? 'campaignsTagged' : 'campaigns', tag ? { tag } : undefined);
+  const q = useListing(tag ? 'campaignsTagged' : 'campaignList', tag ? { tag } : undefined);
   const report = useOpQuery('campaignReport');
   const [editing, setEditing] = useState<Row | null>(null);
   const [selected, setSelected] = useState<Row | null>(null);
@@ -689,13 +689,13 @@ function Campaigns(ctx: Context) {
 }
 function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
   const campaign = text(ctx.row['id']);
-  const files = useListing('assets', { campaign });
+  const files = useListing('campaignFiles', { campaign });
   const access = useListing('campaignAccess', { campaign });
-  const approvals = useListing('approvals', { campaign });
-  const current = useListing('campaigns');
+  const approvals = useListing('approvalHistory', { campaign });
+  const current = useListing('campaignList');
   const [review, setReview] = useState<{ words: number; checks: { label: string; passed: boolean }[] } | null>(null);
   const people = useListing('people');
-  const reminders = useListing('reminders');
+  const reminders = useListing('campaignReminders');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');

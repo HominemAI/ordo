@@ -168,7 +168,7 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
       data: Buffer.from('Launch brief'),
     });
     expect(upload.ok(), await upload.text()).toBe(true);
-    handle = (await rows(await request.get(`${stack().door}/op/assets`, { headers, params: { campaign: id } })))[0]
+    handle = (await rows(await request.get(`${stack().door}/op/campaignFiles`, { headers, params: { campaign: id } })))[0]
       .file;
     const download = await request.get(`${stack().door}/blob/${handle}`, { headers });
     expect(download.status()).toBe(200);
@@ -183,7 +183,7 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
     await expect
       .poll(
         async () =>
-          (await rows(await request.get(`${stack().door}/op/reminders`, { headers }))).find((r) => r.campaign === id)
+          (await rows(await request.get(`${stack().door}/op/campaignReminders`, { headers }))).find((r) => r.campaign === id)
             ?.fired,
         { timeout: 90_000 },
       )
@@ -198,9 +198,9 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
   } finally {
     await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } }));
   }
-  expect(await rows(await request.get(`${stack().door}/op/assets`, { headers, params: { campaign: id } }))).toEqual([]);
+  expect(await rows(await request.get(`${stack().door}/op/campaignFiles`, { headers, params: { campaign: id } }))).toEqual([]);
   expect(
-    (await rows(await request.get(`${stack().door}/op/reminders`, { headers }))).some((r) => r.campaign === id),
+    (await rows(await request.get(`${stack().door}/op/campaignReminders`, { headers }))).some((r) => r.campaign === id),
   ).toBe(false);
   await refused(await request.get(`${stack().door}/blob/${handle}`, { headers }), 404, 'not_found');
 });
@@ -212,9 +212,9 @@ test('a visitor cannot read or mutate any workspace surface', async ({ request }
     'studioReviews',
     'inbox',
     'enquiryReport',
-    'campaigns',
+    'campaignList',
     'campaignReport',
-    'reminders',
+    'campaignReminders',
     'people',
     'allAssets',
   ]) {
@@ -256,18 +256,18 @@ test('editorial review runs as the caller and a stale approval leaves no history
       403,
       'access_denied',
     );
-    const before = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers }))).find(
+    const before = (await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find(
       (r) => r.id === id,
     )!;
     const data = { id, rev: before.rev, note: 'Editorial approval', at: new Date().toISOString() };
     await rows(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }));
     await refused(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }), 409, 'cas_miss');
     const history = await rows(
-      await request.get(`${stack().door}/op/approvals`, { headers, params: { campaign: id } }),
+      await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } }),
     );
     expect(history).toHaveLength(1);
     expect(history[0].note).toBe('Editorial approval');
-    const after = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers }))).find(
+    const after = (await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find(
       (r) => r.id === id,
     )!;
     expect(after.status).toBe('published');
@@ -288,12 +288,12 @@ test('editorial review runs as the caller and a stale approval leaves no history
       'check_violation',
     );
     expect(
-      (await rows(await request.get(`${stack().door}/op/campaigns`, { headers }))).find((r) => r.id === id),
+      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find((r) => r.id === id),
     ).toEqual(after);
   } finally {
     await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } }));
   }
-  expect(await rows(await request.get(`${stack().door}/op/approvals`, { headers, params: { campaign: id } }))).toEqual(
+  expect(await rows(await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } }))).toEqual(
     [],
   );
 });

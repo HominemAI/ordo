@@ -99,6 +99,9 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             r["line"].as_str().unwrap_or("?")
         ));
     }
+    for w in row["warnings"].as_array().into_iter().flatten() {
+        out.push_str(&format!("WARNING    {}\n", w.as_str().unwrap_or("?")));
+    }
     if let Some(dir) = flags.positional.first() {
         match write_receipt(dir, &row) {
             Ok(path) => out.push_str(&format!("receipt    {path}\n")),

@@ -2527,6 +2527,30 @@ impl AccessChecker for IdentityAccess {
     /// verified capability token, whose holder already holds the grant; the
     /// engine reached this reason only after the grant's space, expiry and
     /// the token gate passed.
+    /// A grant a move with dual writes killed (`plan-versions.md` §2.5):
+    /// dead until consented again, so answered as a revoked share is, with
+    /// both versions and the fix named. Only for a verified capability
+    /// token, whose holder already holds the grant.
+    fn grant_killed(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        use ordo_identity::access::{Decision, DenyReason};
+        let now = ordo_identity::principal::Timestamp((self.now)());
+        let claims = ordo_identity::verify(&self.key, token, now).ok()?;
+        claims.capability.as_ref()?;
+        let ispace = ordo_identity::principal::SpaceId(space.to_string());
+        let Decision::Deny {
+            reason: DenyReason::GrantKilledByMove { from, to },
+            ..
+        } = self.engine.check(&claims, &ispace, op, now)
+        else {
+            return None;
+        };
+        Some(format!(
+            "`{op}`: this share was closed when the space moved from version {from} of the \
+             program to {to}, and it stays closed now the space is back on {from}. Ask the \
+             person who shared it to share it again (std.space.share)"
+        ))
+    }
+
     fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {
         use ordo_identity::access::{Decision, DenyReason};
         let now = ordo_identity::principal::Timestamp((self.now)());
@@ -2537,13 +2561,6 @@ impl AccessChecker for IdentityAccess {
             Decision::Deny { reason, .. } => reason,
             _ => return None,
         };
-        if let DenyReason::GrantKilledByMove { from, to } = &reason {
-            return Some(format!(
-                "`{op}`: this share or grant was refused when the space moved from version \
-                 {from} of the program to {to}, and it stays refused now the space is back on \
-                 {from}. Ask the person who shared it to share it again (std.space.share)"
-            ));
-        }
         let DenyReason::VersionsDisagree {
             pinned,
             serving,

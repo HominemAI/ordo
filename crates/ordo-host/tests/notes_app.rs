@@ -3420,7 +3420,8 @@ async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
         (got.0 != 200).then_some(got)
     })
     .0;
-    assert_eq!(status, 409, "{body}");
+    // Killed at the switch: answered as a revoked share, on either version.
+    assert_eq!(status, 403, "{body}");
     let kills = control
         .rows("SELECT grant_id, \"from\", \"to\" FROM \"$grant_kills\"")
         .await
@@ -3438,8 +3439,9 @@ async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
     });
     let window = window_of(&d, &bo, &ada.space);
     let (status, body) = read_my_notes_window(&d, &ada.space, &window);
-    assert_eq!(status, 409, "the window stays refused: {body}");
-    assert_eq!(body["error"]["code"], json!("versions_disagree"), "{body}");
+    assert_eq!(status, 403, "the window stays refused: {body}");
+    // Answered as a revoked share is, so a client drops its device copy.
+    assert_eq!(body["error"]["code"], json!("access_denied"), "{body}");
     let said = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
         said.contains(&from) && said.contains(&to) && said.contains("std.space.share"),

@@ -88,6 +88,44 @@ fn progress_line(reports: &[Value]) -> String {
     )
 }
 
+/// **Whether the tenants on the deployment's own database reach `to` by
+/// moves with dual writes** (increment 11b part 3): that database records
+/// a version from which the stored path to `to` is one step that rewrites
+/// data, so a rollout may start with the database still on it. Each
+/// tenant's move runs the expand; the soaks there close together.
+pub async fn moves_there(control: &Pool, to: &str) -> bool {
+    let Ok(ordo_exec::spacedb::TargetVersion::At(from)) =
+        ordo_exec::spacedb::recorded_version(control).await
+    else {
+        return false;
+    };
+    let one_move = match crate::evolve::path(control, &from, to).await {
+        Ok(steps) => steps.len() == 1 && crate::evolve::dual_writes_step(&steps[0]),
+        Err(_) => false,
+    };
+    // A tenant there to move, whose move runs the expand.
+    one_move
+        && crate::dual_writes::shared_spaces(control)
+            .await
+            .is_ok_and(|s| s.iter().any(|(_, v)| v == &from))
+}
+
+/// Whether a move to `to` on the deployment's own database has copied its
+/// rows, so the deployment's own space may serve `to` there.
+pub async fn copied_there(control: &Pool, to: &str) -> bool {
+    let shared: BTreeSet<String> = match crate::dual_writes::shared_spaces(control).await {
+        Ok(s) => s.into_iter().map(|(s, _)| s).collect(),
+        Err(_) => return false,
+    };
+    Versions::on(control).dual_moves().await.is_ok_and(|m| {
+        m.iter().any(|m| {
+            m.to == to
+                && shared.contains(&m.space)
+                && matches!(m.phase, MovePhase::Gated | MovePhase::Soaking)
+        })
+    })
+}
+
 /// The refusal for a stored path whose rewriting step is not alone: a
 /// move with dual writes switches one step's pin, so the steps around it
 /// run first, each on its own.

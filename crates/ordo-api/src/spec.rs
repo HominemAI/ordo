@@ -1019,6 +1019,18 @@ pub trait AccessChecker: Send + Sync {
         None
     }
 
+    /// Asked only after [`Self::check`] denied, before
+    /// [`Self::versions_disagree`]: is this a grant a move with dual writes
+    /// killed (`plan-versions.md` §2.5)? It is dead until the person
+    /// consents again, as a revoked share is, so the door answers
+    /// [`crate::ErrorCode::AccessDenied`], the class a client drops that
+    /// share's device copy on, with this message naming both versions and
+    /// the fix. Only for a verified token whose grant this is. The default
+    /// is `None`.
+    fn grant_killed(&self, _token: &str, _space: &str, _op: &str) -> Option<String> {
+        None
+    }
+
     /// Asked only after [`Self::check`] allowed `principal` to call `op`:
     /// does the app developer require a verified email address for this
     /// op, and does this person lack one? The answer is the refusal's

@@ -293,9 +293,11 @@ in one database and 1 in its own.
   (`a_seal_on_a_database_3_tenants_share_fences_each_of_them`),
   `rollouts.rs`
   (`a_turn_moves_tenants_at_once_up_to_backfill_concurrency_and_per_database`).
-- Not built: a rollout moving a tenant on the deployment's own database
-  with dual writes (it pins it once that database holds the target); a
-  unique index or a check held to the close (no step on the menu adds one
+- **Part 3 (2026-11-24):** a rollout moves a tenant on the deployment's
+  own database with dual writes too. It may start with that database on
+  the version before when the stored path is one rewriting step; the own
+  space waits for the first move's copy.
+- Not built: a fill there; a unique index or a check held to the close (no step on the menu adds one
   with dual writes yet); dropping an orphaned column per tenant.
 
 **Grants a move killed stay killed (V-53, built 2026-11-24).** The door
@@ -303,7 +305,8 @@ decides from the token, so a grant Y refuses would read again after a
 revert to X. At the switch, every live grant in the tenant that Y refuses,
 judged as the door judges it, is recorded in `$grant_kills` (control
 database). Every node reads it with the moves, and the door refuses the
-grant as `GrantKilledByMove`, answered `versions_disagree` naming both
+grant as `GrantKilledByMove`, answered `access_denied` (part 3, as a
+revoked share is, so a client drops that share's device copy) naming both
 versions and `std.space.share`. A grant made after the switch is never
 recorded, so sharing again reads. Test: `notes_app.rs`
 (`a_grant_a_move_killed_stays_killed_after_the_revert`).

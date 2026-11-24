@@ -1276,3 +1276,139 @@ async fn a_turn_moves_tenants_at_once_up_to_backfill_concurrency_and_per_databas
         );
     }
 }
+
+// ── tenants on the deployment's own database (11b part 3) ───────────────
+
+/// 0.1.0 with `title` renamed to `heading`, kept current by dual writes.
+const V2_RENAMED: &str = "domain tasks @ 0.2.0
+
+entity task {
+  heading: text = \"\" prev(title)
+  done:  bool
+}
+
+op openTasks unbounded =
+  task[heading, done]
+";
+
+/// Increment 11b part 3: **a rollout moves the tenants on the deployment's
+/// own database with dual writes**, as each tenant with a database of its
+/// own moves. 0.2.0 renames `task.title`, stored and not run: the
+/// deployment's own database still records 0.1.0, and the rollout starts
+/// all the same. Its first turn moves both tenants there through the
+/// stored step, the first running the expand and the copy; the own space
+/// waits for that copy, then moves. Each tenant soaks; the soaks close
+/// together once due, and only then does `heading` become required.
+///
+/// A regression looks like a rollout refused as `DeploymentBehind`, a
+/// tenant pinned with no move, the own space served on 0.2.0 before its
+/// columns exist, or the `NOT NULL` landing before the soaks close.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollout_moves_tenants_on_the_deployments_own_database_with_dual_writes() {
+    use ordo_host::versions::MovePhase;
+    let pool = fresh("ordo_ro_shared_moves").await;
+    for t in ["spc_a", "spc_b"] {
+        tenant(&pool, t).await;
+    }
+    apply(&pool, V1).await;
+    let y = Program::compile(V2_RENAMED).expect("compiles");
+    ordo_exec::registry::store(
+        &pool,
+        &ordo_exec::registry::Artifact {
+            version: y.version.clone(),
+            artifact: ordo_plan::artifact::to_bytes(&y.doc),
+            source: y.source.clone(),
+            ddl: y.ddl.clone(),
+            applied_at: ordo_commandlog::Timestamp(0),
+            actor: "dev:ada".into(),
+        },
+    )
+    .await
+    .expect("stored");
+    ordo_host::evolve::evolve(
+        &pool,
+        "0.1.0",
+        "0.2.0",
+        &ordo_host::schema_apply::Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("the step stores");
+    pool.rows(
+        "INSERT INTO task (\"$space\", id, rev, title, done) \
+         SELECT s, s || i, 1, s || ' ' || i, false \
+         FROM unnest(ARRAY['spc_a', 'spc_b', 'home']) s, generate_series(1, 10) i",
+    )
+    .await
+    .expect("rows");
+
+    let r = Rollouts::on(&pool);
+    let all = StartOptions {
+        strategy: Some(Strategy::All),
+        ..Default::default()
+    };
+    r.start("0.2.0", &all, OWNER, NOW)
+        .await
+        .expect("starts with the database on 0.1.0");
+    let (ops, _) = shared_ops(&pool);
+    let t = rollouts::tick(&ops, "n", NOW).await.expect("tick");
+    assert!(
+        !t.deployment_moved,
+        "the own space is not moved before the copy: {t:?}"
+    );
+    let mut moved = t.moved.clone();
+    moved.sort();
+    assert_eq!(moved, ["spc_a", "spc_b"], "{t:?}");
+    let moves = Versions::on(&pool).dual_moves().await.expect("moves");
+    assert_eq!(moves.len(), 2, "{moves:?}");
+    assert!(moves.iter().all(|m| m.phase == MovePhase::Soaking));
+    let nullable = || async {
+        pool.rows(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'task' AND column_name = 'heading'",
+        )
+        .await
+        .expect("columns")[0][0]
+            .clone()
+            .unwrap_or_default()
+    };
+    assert_eq!(nullable().await, "YES", "the NOT NULL waits for the close");
+    let copied = pool
+        .rows("SELECT count(*) FROM task WHERE heading IS DISTINCT FROM title")
+        .await
+        .expect("rows")[0][0]
+        .clone();
+    assert_eq!(copied.as_deref(), Some("0"), "every space's rows copied");
+
+    // Every tenant moved after the copy: the rollout finishes, and the
+    // own space follows "active" onto 0.2.0 over the copied columns.
+    assert!(t.finished, "{t:?}");
+    assert_eq!(
+        Versions::on(&pool)
+            .active_version()
+            .await
+            .expect("active")
+            .as_deref(),
+        Some("0.2.0")
+    );
+
+    // Both soaks due: they close together, and `heading` is required.
+    pool.rows("UPDATE \"$moves\" SET soak_until = 1")
+        .await
+        .expect("due");
+    let shared = SinglePool::new(pool.clone());
+    let cx = ordo_host::dual_writes::MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let mut closed = ordo_host::dual_writes::close_due(&cx).await;
+    closed.sort();
+    assert_eq!(closed, ["spc_a", "spc_b"]);
+    assert_eq!(nullable().await, "NO");
+    for t in ["spc_a", "spc_b"] {
+        assert_eq!(on(&pool, t).await.as_deref(), Some("0.2.0"), "{t}");
+    }
+}

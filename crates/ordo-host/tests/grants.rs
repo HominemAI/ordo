@@ -70,6 +70,7 @@ fn ng(
                     op.clone(),
                     OpPin {
                         manifest_hash: *manifest_hash,
+                        version: None,
                         unguarded: false,
                         entities: Vec::new(),
                     },

@@ -360,7 +360,9 @@ pub fn validate(
         if is_platform(op) {
             return Err(ShareRefusal::PlatformOp(op.clone()));
         }
-        let Some(pin) = engine.deployed().get(op) else {
+        // The ops of the version serving this tenant (`plan-versions.md`
+        // §1.7): a share is pinned to what the sharer's tenant runs.
+        let Some(pin) = engine.deployed_in(space).get(op) else {
             return Err(ShareRefusal::UnknownOp(op.clone()));
         };
         if pin.entities.iter().any(|e| !e.written.is_empty()) {
@@ -438,7 +440,7 @@ fn carry_files(
     {
         return;
     }
-    if let Some(pin) = engine.deployed().get(blob) {
+    if let Some(pin) = engine.deployed_in(space).get(blob) {
         if engine.membership_reaches(space, sharer, blob) {
             pins.insert(blob.to_string(), pin.clone());
             listed.push(blob.to_string());

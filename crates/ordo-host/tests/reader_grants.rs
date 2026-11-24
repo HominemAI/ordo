@@ -479,3 +479,198 @@ async fn a_version_the_gate_refuses_leaves_the_grants_as_they_were() {
         .await
         .expect("still reads");
 }
+
+/// The reader program, mapping `extra` beside `id` and `title`.
+fn reader_of(extra: &str) -> ordo_schema::Schema {
+    let mut f = Fixture::from_source(
+        &format!(
+            "peer journal\n\n\
+             external entries from journal.notes shared {{\n  id: text <- id\n  \
+             title: text <- title\n{extra}  access read open\n}}\n"
+        ),
+        SEED,
+    )
+    .expect("the reader compiles");
+    peer::resolve_with(&mut f.schema, "beta", |v| {
+        (v == "ORDO_PEER_JOURNAL_SCHEMA").then(|| "alpha".to_string())
+    })
+    .expect("resolves");
+    f.schema
+}
+
+/// **A reader reads only columns the read app still writes** (owner ruling
+/// 2026-11-23, Q1; `plan-versions.md` §2.7). The writer's `notes.mood` is
+/// orphaned by a version that stopped declaring it. The grant becomes one
+/// by column, without `mood`: Postgres refuses the reader that column and
+/// still serves the rest. The reader's start check passes, and its external
+/// check holds the entity with `external_changed`, naming `mood`, the peer
+/// and the fix. A reader that does not map `mood` reads on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_loses_an_orphaned_column_with_a_named_error() {
+    let w = world("ordo_rgrant_orphan").await;
+    w.pg.exec("ALTER TABLE alpha.notes ADD COLUMN mood text; UPDATE alpha.notes SET mood = 'calm'")
+        .expect("the column v1 wrote");
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted whole");
+    w.b.rows("SELECT mood FROM alpha.notes")
+        .await
+        .expect("read while written");
+
+    ordo_exec::orphans::record(
+        &w.a,
+        &[ordo_exec::orphans::Left {
+            entity: "notes".into(),
+            field: Some("mood".into()),
+            columns: vec!["mood".into()],
+            sealed: false,
+        }],
+        Some("1.0.0"),
+        "2.0.0",
+        "t",
+        1_900_000_000,
+    )
+    .await
+    .expect("orphaned");
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted by column");
+    assert!(denied(&w.b, "SELECT mood FROM alpha.notes").await);
+    w.b.rows("SELECT id, title FROM alpha.notes")
+        .await
+        .expect("the rest still reads");
+
+    let maps = reader_of("  mood: text? <- mood\n");
+    peer::check_access(&w.b, &maps, &BTreeSet::new(), false)
+        .await
+        .expect("a table granted by column is still granted");
+    let lines = ordo_host::external_check::check(&w.b, &maps)
+        .await
+        .expect("checks")
+        .refusals();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("external_changed on `entries`")
+            && lines[0].contains("column `mood` is no longer written by `journal`")
+            && lines[0].contains("ordo introspect --external"),
+        "{lines:?}"
+    );
+
+    let lines = ordo_host::external_check::check(&w.b, &reader_of(""))
+        .await
+        .expect("checks")
+        .refusals();
+    assert!(lines.is_empty(), "{lines:?}");
+}
+
+/// **The sign-in contract** (owner ruling 2026-11-23, Q16;
+/// `plan-evolution-federation.md` §5, step F6). Every column of
+/// `ordo_exec::sign_in_contract::CONTRACT` is in the tables a deployment
+/// makes, and the reader is granted it. The writer's release is granted to
+/// the reader too, and the reader's release check names the writer as a
+/// peer on another release; the writer's names the reader by its role.
+///
+/// A regression looks like a contract column missing from a fresh
+/// deployment (a release dropped it instead of retiring it), the release
+/// not granted, or a peer on another release not named.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sign_in_contract_is_granted_and_the_release_check_names_the_peer_on_another_release() {
+    use ordo_exec::sign_in_contract::{self as contract, PeerRelease};
+    use ordo_host::release_check;
+
+    let w = world("ordo_rgrant_contract").await;
+    let alpha = alpha_with("reader viewer reads notes");
+    peer::grant_readers_with(&w.a, &alpha, lookup)
+        .await
+        .expect("granted");
+    let (beta, _) = beta();
+    let at_alpha = |v: &str| (v == "ORDO_PEER_JOURNAL_SCHEMA").then(|| "alpha".to_string());
+
+    // Every contract column is there and the reader reads it.
+    for (t, cols) in contract::columns() {
+        let list = cols
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        w.b.rows(&format!("SELECT {list} FROM alpha.\"{t}\" LIMIT 1"))
+            .await
+            .unwrap_or_else(|e| panic!("contract columns of {t}: {e}"));
+    }
+
+    // A writer from before the release table records none.
+    assert_eq!(
+        contract::release_of(&w.b, "alpha").await.expect("reads"),
+        PeerRelease::Unrecorded
+    );
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), at_alpha)
+        .await
+        .expect("reads");
+    assert!(
+        n[0].line(release_check::release()).contains("records none"),
+        "{n:?}"
+    );
+
+    // The writer starts under another release. Until its grants are made
+    // again, the reader is not granted the table.
+    contract::record_release(&w.a, "0.4.0", 10)
+        .await
+        .expect("recorded");
+    assert_eq!(
+        contract::release_of(&w.b, "alpha").await.expect("reads"),
+        PeerRelease::NotGranted
+    );
+    peer::grant_readers_with(&w.a, &alpha, lookup)
+        .await
+        .expect("granted again");
+    assert_eq!(
+        contract::release_of(&w.b, "alpha").await.expect("reads"),
+        PeerRelease::Known("0.4.0".into())
+    );
+    // The release, and nothing else of the row.
+    assert!(denied(&w.b, "SELECT started_at FROM alpha.\"$ordorelease\"").await);
+
+    // The reader's release check names the peer on another release.
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), at_alpha)
+        .await
+        .expect("reads");
+    assert_eq!(n.len(), 1, "{n:?}");
+    let line = n[0].line(release_check::release());
+    assert!(
+        line == "peer journal (schema `alpha`): Ordo 0.4.0, ANOTHER RELEASE",
+        "{line}"
+    );
+    // Unset, the setting is named.
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), |_| None)
+        .await
+        .expect("reads");
+    assert!(
+        n[0].line(release_check::release())
+            .contains("`ORDO_PEER_JOURNAL_SCHEMA` is not set"),
+        "{n:?}"
+    );
+
+    // The same release reads as this one.
+    contract::record_release(&w.a, release_check::release(), 20)
+        .await
+        .expect("recorded");
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), at_alpha)
+        .await
+        .expect("reads");
+    assert!(
+        n[0].line(release_check::release())
+            .ends_with("this release"),
+        "{n:?}"
+    );
+
+    // The writer's release check names its reader by role.
+    let n = release_check::neighbours(&w.a, &[alpha], |_| None)
+        .await
+        .expect("reads");
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert_eq!(
+        (n[0].kind, n[0].name.as_str(), n[0].at.as_str()),
+        ("reader", "viewer", READER)
+    );
+    let _ = &w.pg;
+}

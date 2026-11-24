@@ -93,6 +93,71 @@ export default defineConfig({
       dependencies: ['upgrade'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // `ordo evolve` from v2 to v3 through the door, as a developer signed in
+    // with `ordo login` (plan-versions.md, increment 8). It stores v3 beside
+    // v2 and runs the step on the deployment's own database, so it runs
+    // after `v2` and before `v3`. Locally, `--project=evolve --no-deps`.
+    {
+      name: 'evolve',
+      testMatch: /evolve\/v2-to-v3\.spec\.ts/,
+      dependencies: ['v2'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Notes v3 over the running notes v2, with the page open (plan-versions.md,
+    // increment 7a). It moves the stack to v3, so it runs after `evolve`.
+    // Locally, `--project=v3 --no-deps` applies v2 itself and runs alone.
+    {
+      name: 'v3',
+      testMatch: /v3\/.*\.spec\.ts/,
+      dependencies: ['evolve'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The pre-checks of `ordo evolve` over bad data in a tenant (increment 9),
+    // from v3 to 0.3.1 (fixtures/notes-v3-1). It needs v3 serving, so it runs
+    // after `v3`, last. Locally, `--project=evolve-checks --no-deps`.
+    {
+      name: 'evolve-checks',
+      testMatch: /evolve\/prechecks\.spec\.ts/,
+      dependencies: ['v3'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // attachments.size, orphaned by v3: exported, erased, then pruned
+    // (plan-versions.md, increment 14). It prunes a column, so it runs last.
+    {
+      name: 'orphans',
+      testMatch: /orphans\/.*\.spec\.ts/,
+      dependencies: ['evolve-checks'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // A staging clone of a production tenant (plan-versions.md increment 12),
+    // into the stack's second deployment. It puts staging in production's
+    // chain while it runs, and `ordo apply` goes to a chain's first step, so
+    // it runs after `orphans`, last. Locally, `--project=clone --no-deps`.
+    {
+      name: 'clone',
+      testMatch: /clone\/.*\.spec\.ts/,
+      dependencies: ['orphans'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // notes.body sealed on live data (plan-versions.md increment 13), from
+    // v3 to 0.3.4 (versions written by the spec). It seals a field for the whole
+    // stack, so it runs after `clone`. Locally, `--project=seal --no-deps`.
+    {
+      name: 'seal',
+      testMatch: /seal\/.*\.spec\.ts/,
+      dependencies: ['clone'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The signed rehearsal (plan-versions.md increment 12b): staging
+    // rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses
+    // the step until it accepts that. Version numbers only rise, so it runs
+    // after `seal`, last. Locally, `--project=rehearsal --no-deps`.
+    {
+      name: 'rehearsal',
+      testMatch: /rehearsal\/.*\.spec\.ts/,
+      dependencies: ['seal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

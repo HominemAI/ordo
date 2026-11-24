@@ -1635,6 +1635,12 @@ pub fn boot_composers(email: Option<Arc<crate::email_code::EmailCodeProvider>>) 
         Arc::new(crate::routines::RoutineNotice),
     )
     .expect("one composer per kind, and this is the first");
+    // A rollout's alert (`rollout.alert_channel` `mail:<address>`).
+    c.register(
+        crate::rollout_strategies::ALERT_KIND,
+        Arc::new(crate::rollout_strategies::RolloutAlert),
+    )
+    .expect("one composer per kind, and this is the first");
     // The note to an address that is no longer the account's.
     c.register(
         crate::contact_email::CHANGED_KIND,

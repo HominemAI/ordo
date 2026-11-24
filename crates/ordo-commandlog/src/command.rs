@@ -224,6 +224,68 @@ pub struct CommandGroup {
     /// `None` for every other group, and a group with `None` renders
     /// exactly the bytes it rendered before this field existed.
     pub restore: Option<RestoreMarker>,
+    /// **The backfill record** (`plan-backfill-dual-writes.md` §5, B3;
+    /// ruled 2026-09-08 and 2026-09-20): this group is a backfill's audit
+    /// entry, and says which kind. Encoded as trailer `0x04`.
+    ///
+    /// - [`BackfillAudit::Summarised`], the default: one group per space per
+    ///   backfill, no commands, carrying the step, the mapping, the row
+    ///   count and the content hash. The rows' old values are not in the
+    ///   chain; they come back only from a backup.
+    /// - [`BackfillAudit::Images`], the app developer's per-backfill choice:
+    ///   one group per space per chunk, its converges carrying full before
+    ///   and after images, the record counting that chunk's rows.
+    ///
+    /// Its actor is `system:backfill` either way. `None` for every other
+    /// group, and a group with `None` renders exactly the bytes it rendered
+    /// before this field existed.
+    pub backfill: Option<BackfillRecord>,
+}
+
+/// The component a backfill's audit groups are attributed to:
+/// `system:backfill`.
+pub const BACKFILL_COMPONENT: &str = "backfill";
+
+/// Which kind of audit a backfill writes (ruled 2026-09-08).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackfillAudit {
+    /// One summary group per space: count and content hash, no images.
+    Summarised,
+    /// Full per-row images, one group per space per chunk.
+    Images,
+}
+
+impl BackfillAudit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackfillAudit::Summarised => "summarised",
+            BackfillAudit::Images => "images",
+        }
+    }
+}
+
+/// What a backfill's audit group attests. Every field is hashed into the
+/// chain with the group that carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillRecord {
+    /// Which chain this record belongs to. A summarised group has no
+    /// command to read a space from, so it carries its own, as a restore
+    /// marker does.
+    pub space: SpaceId,
+    pub kind: BackfillAudit,
+    /// The stored plan's step: its digest.
+    pub step: String,
+    pub entity: String,
+    pub field: String,
+    /// The forward mapping as the plan states it: an Ordo expression, or
+    /// `fn <name> <code hash>` for a backfill function.
+    pub mapping: String,
+    /// Rows this group covers: the space's whole count for a summary, the
+    /// chunk's for an image group.
+    pub rows: u64,
+    /// SHA-256 chained over the rows in `(space, id)` order, each row's
+    /// space, id and new value (`crate::chain`'s backfill grammar).
+    pub content: [u8; 32],
 }
 
 /// The component a restore marker is attributed to: its actor is
@@ -274,6 +336,42 @@ impl CommandGroup {
     /// marker, which must be empty, attributed to `system:restore`, and
     /// whose space is the marker's.
     pub fn validate(&self) -> Result<&SpaceId, GroupShapeError> {
+        if let Some(record) = &self.backfill {
+            let bad = |why: &'static str| GroupShapeError::BadBackfill {
+                correlation: self.correlation.clone(),
+                why,
+            };
+            if self.restore.is_some() {
+                return Err(bad(
+                    "a group is a restore marker or a backfill record, not both",
+                ));
+            }
+            if self.actor != Actor::System(BACKFILL_COMPONENT.into()) {
+                return Err(bad("a backfill record's actor is `system:backfill`"));
+            }
+            match record.kind {
+                BackfillAudit::Summarised => {
+                    if !self.commands.is_empty() {
+                        return Err(bad("a summarised backfill group carries no commands"));
+                    }
+                    return Ok(&record.space);
+                }
+                BackfillAudit::Images => {
+                    if self.commands.len() as u64 != record.rows {
+                        return Err(bad("an image group's row count is its command count"));
+                    }
+                    if self
+                        .commands
+                        .iter()
+                        .any(|c| c.kind != CommandKind::Converge || c.space != record.space)
+                    {
+                        return Err(bad(
+                            "an image group holds converges in the record's own space only",
+                        ));
+                    }
+                }
+            }
+        }
         if let Some(marker) = &self.restore {
             if !self.commands.is_empty() {
                 return Err(GroupShapeError::MarkerWithCommands {
@@ -340,6 +438,11 @@ pub enum GroupShapeError {
         correlation: CorrelationId,
         actor: String,
     },
+    /// A backfill record whose group does not have the record's shape.
+    BadBackfill {
+        correlation: CorrelationId,
+        why: &'static str,
+    },
 }
 
 impl std::fmt::Display for GroupShapeError {
@@ -379,6 +482,13 @@ impl std::fmt::Display for GroupShapeError {
                  is `system:{RESTORE_COMPONENT}`",
                 correlation.0
             ),
+            GroupShapeError::BadBackfill { correlation, why } => {
+                write!(
+                    f,
+                    "group `{}` is a malformed backfill record: {why}",
+                    correlation.0
+                )
+            }
         }
     }
 }

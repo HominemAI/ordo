@@ -411,7 +411,7 @@ fn spawn_host_with(
 
 impl Deployment {
     /// What `serve.sh` does when the program changes, against the
-    /// deployment's own database: `ordo migrate --apply` when `migrate_first`,
+    /// deployment's own database: the schema apply `ordo evolve --run` makes when `migrate_first`,
     /// then `ordo apply`, which by its contract touches one database and so
     /// reaches no tenant's. The running server learns of the new version from
     /// the notification the activation sends.
@@ -419,7 +419,7 @@ impl Deployment {
     /// Returns once the running server has swapped to the version, which it
     /// does some moments after the activation: until then it still serves the
     /// old one, and an old tenant is not yet behind anything.
-    async fn apply_program(&self, source: &str, migrate_first: bool) {
+    async fn apply_program(&self, source: &str, migrate_first: bool) -> String {
         let control = Pool::connect(cfg(&self.db))
             .await
             .expect("the control pool");
@@ -453,6 +453,30 @@ impl Deployment {
         eventually("the server swaps to the new version", || {
             self.log().contains(&swapped).then_some(())
         });
+        report.version
+    }
+
+    /// The version a tenant is pinned to, read from the control database.
+    async fn pin_of(&self, space: &str) -> Option<String> {
+        let control = Pool::connect(cfg(&self.db))
+            .await
+            .expect("the control pool");
+        ordo_host::versions::Versions::on(&control)
+            .pin_of(space)
+            .await
+            .expect("the pin")
+            .and_then(|p| p.version)
+    }
+
+    /// Wait until `space` is pinned to `version`, and say whether it was.
+    async fn moved_to(&self, space: &str, version: &str) -> bool {
+        for _ in 0..240 {
+            if self.pin_of(space).await.as_deref() == Some(version) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        false
     }
 
     /// What the server has printed so far.
@@ -794,10 +818,6 @@ fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> (T, Durati
     }
 }
 
-fn code_of(body: &Value) -> String {
-    body["error"]["code"].as_str().unwrap_or("").to_string()
-}
-
 fn titles(rows: &[Value]) -> Vec<String> {
     rows.iter()
         .map(|r| r["title"].as_str().unwrap_or("").to_string())
@@ -935,15 +955,18 @@ async fn a_program_update_leaves_the_people_who_signed_up_working() {
         .expect("Ada's database");
     assert!(!has_column(&ada_db, "notes", "pinned").await);
 
-    // The program gains a field.
-    d.apply_program(&with_pinned(), true).await;
+    // The program gains a field. Each tenant serves throughout (increment
+    // 7): on its old version until its own database takes the new one,
+    // then on the new one.
+    let to = d.apply_program(&with_pinned(), true).await;
     for (who, want) in [(&ada, "Groceries"), (&bo, "Ideas")] {
-        let (rows, took) = eventually("the tenant serves after the update", || {
-            let (status, body) = d.op(&who.space, &who.token, "GET", "myNotes", json!({}));
-            (status == 200).then(|| body["rows"].as_array().cloned().unwrap_or_default())
-        });
-        eprintln!("{} served again after {took:?}", who.space);
+        let (status, body) = d.op(&who.space, &who.token, "GET", "myNotes", json!({}));
+        assert_eq!(status, 200, "served during the move: {body}");
+        let rows = body["rows"].as_array().cloned().unwrap_or_default();
         assert_eq!(titles(&rows), [want], "the same person, the same notes");
+    }
+    for who in [&ada, &bo] {
+        assert!(d.moved_to(&who.space, &to).await, "{} moved", who.space);
     }
     assert!(
         has_column(&ada_db, "notes", "pinned").await,
@@ -979,14 +1002,148 @@ async fn a_program_update_leaves_the_people_who_signed_up_working() {
     d.stop();
 }
 
-/// 25i. A change one tenant's data cannot take keeps that tenant closed, and
-/// nobody else. Ada has two notes and the program makes titles unique, which
-/// is applied only over an empty table, so her database refuses it. Bo has
-/// written nothing, and his takes it. Ada is told her data is
-/// being brought to the current version of the app, and the deployment owner
-/// reads the refusal in `/health/ready`.
+/// Increment 10b (`plan-versions.md`; `plan-backfill-dual-writes.md` B1,
+/// B3): **a backfill over a person's existing notes, through the door.**
+/// The next version gives every note a required `heading`, filled from its
+/// title. The deployment owner stores the step with `--fill`
+/// (`std.deployment.evolve`) and replays Ada's tenant onto it
+/// (`std.deployment.replay`). Until the backfill completes Ada reads the
+/// same notes on the version she was on; after it, the new op shows each
+/// note's heading, her chain holds one summarised record of the 40 rows,
+/// and a note written after lands with its heading.
+///
+/// A regression looks like Ada's notes changing before the move, a heading
+/// left null, a tenant pinned to the new version over a half-filled column,
+/// or no audit record.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_change_one_tenants_data_cannot_take_closes_that_tenant_alone() {
+async fn a_backfill_over_existing_notes_shows_the_new_values_once_it_completes() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_backfill", Some(PAGE)).await;
+    let ada = sign_up(&d, &device(23, "ada"), "Ada");
+    for i in 0..40 {
+        create_note(&d, &ada, &format!("Note {i:02}"), "body");
+    }
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let before = titles(&d.rows(&ada.space, &ada.token, "myNotes"));
+    assert_eq!(before.len(), 40);
+
+    // The next version: a required heading on every note, written by the
+    // ops from here on, and an op that reads it.
+    let next = raised(
+        &SOURCE
+            .replace(
+                "  created: datetime\n",
+                "  created: datetime\n  heading: text\n",
+            )
+            .replace(
+                "set notes { title: $title, body: $body, tags: $tags, created: $created }",
+                "set notes { title: $title, body: $body, tags: $tags, created: $created, heading: $title }",
+            ),
+    ) + "\nop headings unbounded =\n  notes[id, title, heading]\n  sort -created\n";
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let program = ordo_host::schema_apply::Program::compile(&next).expect("compiles");
+    // Stored, not activated: no database holds the step yet.
+    let stored = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored");
+    let to = stored.version.clone();
+    let owner = deployment_owner_token();
+
+    // A step that makes a field required with no fill is refused, naming
+    // `--fill`; with it, it is stored with the backfill in its receipt.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.evolve",
+        json!({"from": from, "to": to}),
+    );
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("--fill notes.heading="), "{body}");
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.evolve",
+        json!({"from": from, "to": to, "fill": "notes.heading=title"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let plan = &body["rows"][0];
+    assert_eq!(
+        plan["receipt"]["backfills"][0]["mapping"], "title",
+        "{plan}"
+    );
+    assert_eq!(
+        plan["receipt"]["backfills"][0]["audit"], "summarised",
+        "{plan}"
+    );
+
+    // Nothing Ada sees has changed: she is still on her version.
+    assert_eq!(titles(&d.rows(&ada.space, &ada.token, "myNotes")), before);
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // The move: her database expands, the backfill fills 40 rows and
+    // verifies, `NOT NULL` lands, and her pin follows.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.replay",
+        json!({"tenant": ada.space, "to": to}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let r = &body["rows"][0];
+    let bf = &r["steps"][0]["backfills"][0];
+    assert_eq!(bf["verified"]["rows"], 40, "{r}");
+    assert_eq!(r["pinned"]["to"], json!(to), "{r}");
+
+    // Then the new values appear, beside the same notes.
+    let (rows, _) = eventually("Ada is served the new version", || {
+        let (status, body) = d.op(&ada.space, &ada.token, "GET", "headings", json!({}));
+        (status == 200).then(|| body["rows"].as_array().cloned().unwrap_or_default())
+    });
+    assert_eq!(rows.len(), 40);
+    for r in &rows {
+        assert_eq!(r["heading"], r["title"], "{r}");
+    }
+    assert_eq!(titles(&d.rows(&ada.space, &ada.token, "myNotes")), before);
+    create_note(&d, &ada, "After", "written on the new version");
+    let rows = d.rows(&ada.space, &ada.token, "headings");
+    assert_eq!(rows[0]["heading"], "After");
+
+    // Her chain holds one summarised record of the backfill.
+    let theirs = Pool::connect(cfg(&ada.space))
+        .await
+        .expect("Ada's database");
+    let n = theirs
+        .rows("SELECT count(*) FROM \"$commandlog\" WHERE actor = 'system:backfill'")
+        .await
+        .expect("the chain");
+    assert_eq!(n[0][0].as_deref(), Some("1"));
+    d.stop();
+}
+
+/// Increment 7 (`plan-versions.md` §2.1). A change one tenant's data cannot
+/// take leaves that tenant serving the version it was on, and the deployment
+/// owner sees why. Ada has two notes and the program makes titles unique,
+/// which is applied only over an empty table, so her database refuses it.
+/// Bo has written nothing, and his takes it and moves. Until 2026-11-23 Ada
+/// was held closed (25i); now she keeps reading and writing her notes under
+/// the old version, and `std.deployment.tenants` names her move as refused,
+/// with the refusal.
+///
+/// A regression looks like Ada answered 503, Ada pinned to the new version
+/// over a database that does not hold it, or no reason on her move.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_one_tenants_data_cannot_take_leaves_that_tenant_serving_its_version() {
     let _shared = shared().await;
     let d = Deployment::boot_with(
         "ordo_notes_refused",
@@ -998,74 +1155,72 @@ async fn a_change_one_tenants_data_cannot_take_closes_that_tenant_alone() {
     let bo = sign_up(&d, &device(22, "bo"), "Bo");
     create_note(&d, &ada, "Same", "one");
     create_note(&d, &ada, "Same", "two");
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
     // Bo has written nothing: a constraint is applied only over a table that
     // holds no rows, so an empty tenant takes it and a used one does not.
 
     let unique = raised(&SOURCE.replace("  title: text\n", "  title: text unique\n"));
     assert_ne!(unique, SOURCE, "the marker line moved");
-    d.apply_program(&unique, true).await;
+    let to = d.apply_program(&unique, true).await;
+    assert_ne!(from, to);
 
-    // Bo's database took it.
-    eventually("Bo serves after the update", || {
-        let (status, _) = d.op(&bo.space, &bo.token, "GET", "myNotes", json!({}));
-        (status == 200).then_some(())
-    });
+    // Bo's database took it, and his pin followed.
+    assert!(d.moved_to(&bo.space, &to).await, "Bo moved");
     assert!(d.rows(&bo.space, &bo.token, "myNotes").is_empty());
     create_note(&d, &bo, "Ideas", "a notes app");
 
-    // Ada's stays closed, and what she is told names no database and no
-    // version.
-    let (status, body) = d.op(&ada.space, &ada.token, "GET", "myNotes", json!({}));
-    assert_eq!(status, 503, "{body}");
-    assert_eq!(code_of(&body), "space_unavailable", "{body}");
-    let said = body["error"]["message"].as_str().unwrap_or("").to_string();
-    assert!(
-        said.contains("brought to the current version of the app"),
-        "{said}"
-    );
-    for leak in ["cannot reach", "database", "schema", "operator"] {
-        assert!(!said.contains(leak), "`{leak}` in: {said}");
-    }
-
-    // The deployment owner reads the reason, with the refusal in it.
-    let (reason, _) = eventually("readiness says why Ada is closed", || {
-        let (_, _, ready) = d.send(
+    // The deployment owner reads Ada's move: refused, with the reason.
+    let (line, _) = eventually("Ada's move is refused, with its reason", || {
+        let (status, body) = d.op(
+            HOME,
+            &deployment_owner_token(),
             "GET",
-            "/health/ready",
-            &[(
-                "Authorization",
-                &format!("Bearer {}", deployment_owner_token()),
-            )],
-            "",
+            "std.deployment.tenants",
+            json!({}),
         );
-        ready["quarantined"]
+        if status != 200 {
+            return None;
+        }
+        let found = body["rows"]
             .as_array()
             .into_iter()
             .flatten()
-            .find(|q| q["space"] == json!(ada.space))
-            .and_then(|q| q["reason"].as_str())
-            .filter(|r| r.contains("refused"))
-            .map(str::to_string)
+            .find(|t| t["id"] == json!(ada.space))
+            .map(|t| t["move"].clone())
+            .filter(|m| m["phase"] == json!("refused"))?;
+        assert_eq!(found["from"], json!(from), "{found}");
+        assert_eq!(found["to"], json!(to), "{found}");
+        assert!(
+            !found["reason"].as_str().unwrap_or("").is_empty(),
+            "{found}"
+        );
+        Some(found["line"].as_str().unwrap_or("").to_string())
     });
-    assert!(reason.contains("schema behind"), "{reason}");
-    let (_, _, ready) = d.send("GET", "/health/ready", &[], "");
-    assert!(
-        !ready["quarantined"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|q| q["space"] == json!(bo.space)),
-        "Bo is not closed: {ready}"
+    assert!(line.contains("keeps serving"), "{line}");
+
+    // Ada stays on her version and keeps serving: her notes read, and a
+    // write lands.
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+    let (status, body) = d.op(&ada.space, &ada.token, "GET", "myNotes", json!({}));
+    assert_eq!(status, 200, "Ada is served on her version: {body}");
+    assert_eq!(titles(body["rows"].as_array().expect("rows")).len(), 2);
+    create_note(&d, &ada, "Later", "three");
+    assert_eq!(d.rows(&ada.space, &ada.token, "myNotes").len(), 3);
+
+    // Nobody is held closed.
+    let (_, _, ready) = d.send(
+        "GET",
+        "/health/ready",
+        &[(
+            "Authorization",
+            &format!("Bearer {}", deployment_owner_token()),
+        )],
+        "",
     );
-    // Ada's data is untouched.
-    let ada_db = Pool::connect(cfg(&ada.space))
-        .await
-        .expect("Ada's database");
-    let kept = ada_db
-        .rows("SELECT count(*) FROM \"notes\"")
-        .await
-        .expect("notes");
-    assert_eq!(kept, vec![vec![Some("2".to_string())]]);
+    assert!(
+        ready["quarantined"].as_array().is_none_or(|q| q.is_empty()),
+        "nobody is closed: {ready}"
+    );
     d.stop();
 }
 
@@ -2205,5 +2360,229 @@ async fn my_notes_at_five_thousand_notes_uses_the_access_index() {
     );
     assert!(read_ms < 10.0, "myNotes took {read_ms:.1} ms");
     assert!(sync_ms < 3_000.0, "the sync took {sync_ms:.0} ms");
+    d.stop();
+}
+
+// ── sharing across program versions (plan-versions.md §1.7) ──────────────
+
+/// Notes v3.
+const V3: &str = include_str!("../../../examples/notes-v3/notes.ordo");
+
+/// `source` without its backend functions. Their code files are read by
+/// `ordo apply`, which these tests do not run, and a version whose
+/// functions have no code does not compile for a tenant's move. Sharing
+/// reads no function.
+fn without_functions(source: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        if line.starts_with("function ") {
+            inside = true;
+        } else if inside {
+            inside = line != "}";
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `sharer` shares `note` through `allNotes` with `guest`, who accepts and
+/// opens the window. Answers the window token.
+fn share_note(d: &Deployment, sharer: &Session, guest: &Session, note: &str, name: &str) -> String {
+    let (status, out) = d.op(
+        &sharer.space,
+        &sharer.token,
+        "POST",
+        "std.space.share",
+        json!({
+            "ops": "allNotes",
+            "rows": json!([{"entity": "notes", "id": note, "level": "read"}]).to_string(),
+            "expires": "365d",
+            "label": name,
+        }),
+    );
+    assert_eq!(status, 200, "{out}");
+    let ticket = out["rows"][0]["ticket"].as_str().expect("a ticket");
+    let (status, accepted) = d.auth(
+        "/auth/share/accept",
+        json!({"ticket": ticket, "display_name": name}),
+        Some(&guest.token),
+    );
+    assert_eq!(status, 200, "{accepted}");
+    window_of(d, guest, &sharer.space)
+}
+
+/// The window `guest` holds in `space`, minted now from the grant.
+fn window_of(d: &Deployment, guest: &Session, space: &str) -> String {
+    let (status, w) = d.auth("/auth/window", json!({"space": space}), Some(&guest.token));
+    assert_eq!(status, 200, "{w}");
+    w["token"].as_str().expect("a window token").to_string()
+}
+
+/// `allNotes` read through a window: the status, the version the answer
+/// names, and the body.
+fn read_window(d: &Deployment, space: &str, token: &str) -> (u16, Option<String>, Value) {
+    let bearer = format!("Bearer {token}");
+    let (status, head, body) = d.send(
+        "GET",
+        "/op/allNotes",
+        &[
+            ("X-Ordo-Space", space),
+            ("Authorization", &bearer),
+            ("Origin", PAGE),
+            ("Accept", "application/json"),
+        ],
+        "",
+    );
+    let version = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case("x-ordo-tenant-version")
+            .then(|| v.trim().to_string())
+    });
+    (status, version, body)
+}
+
+/// `plan-versions.md` §1.7, through the notes example. Ada's tenant serves
+/// notes v2 and Bo's notes v3. Ada shares a note with Bo and Bo one with
+/// Ada: each window reads, judged by the version of the tenant that owns
+/// the note, and each answer names that version. Then Bo's tenant moves to
+/// a version whose `allNotes` also reads `starred`. Ada's window into Bo's
+/// tenant, pinned under v3, is refused as `versions_disagree`, naming both
+/// versions and `notes`. Bo's window into Ada's tenant, still on v2, reads.
+///
+/// A regression looks like a share pinned to the active version's shape
+/// whatever the sharer's tenant runs (before 2026-11-23), a window refused
+/// across 2 versions that agree, or the refusal answered as the uniform
+/// `access_denied` with nothing said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_share_between_a_tenant_on_v2_and_one_on_v3_reads_both_ways_and_a_disagreeing_move_is_refused_by_name(
+) {
+    let _shared = shared().await;
+    let blobs = format!(
+        "fs:{}",
+        std::env::temp_dir()
+            .join(format!("ordo-notes-versions-share-{}", std::process::id()))
+            .display()
+    );
+    // The applies below run in this process, and read the reader's role
+    // from its environment as the server does. One process per test.
+    let reader = v2_reader_role();
+    std::env::set_var(reader.0, reader.1);
+    let settings = [
+        ("ORDO_BLOB_STORE", blobs.as_str()),
+        ("ORDO_DEV_UNSAFE_BLOB_STORE", "1"),
+        ("ORDO_TENANT_CATCHUP_SECS", "1"),
+        reader,
+    ];
+    let (v2_source, v3_source) = (without_functions(V2), without_functions(V3));
+    let d = Deployment::boot_program(
+        "ordo_notes_versions_share",
+        &v2_source,
+        Some(PAGE),
+        &settings,
+    )
+    .await;
+    let ada = sign_up(&d, &device(51, "ada"), "Ada");
+    let bo = sign_up(&d, &device(52, "bo"), "Bo");
+    let v2 = d.pin_of(&ada.space).await.expect("Ada is pinned");
+
+    // v3 is applied and both tenants move; Ada's is pinned back to v2.
+    let v3 = d.apply_program(&v3_source, false).await;
+    assert_ne!(v2, v3);
+    assert!(d.moved_to(&bo.space, &v3).await, "Bo moved to v3");
+    assert!(d.moved_to(&ada.space, &v3).await, "Ada moved to v3");
+    let (status, out) = d.op(
+        HOME,
+        &deployment_owner_token(),
+        "POST",
+        "std.deployment.pin",
+        json!({"tenant": ada.space, "version": v2}),
+    );
+    assert_eq!(status, 200, "{out}");
+    eventually("Ada's tenant serves v2 again", || {
+        let (status, version, _) = read_window(&d, &ada.space, &ada.token);
+        (status == 200 && version.as_deref() == Some(v2.as_str())).then_some(())
+    });
+
+    // Ada (v2) shares with Bo (v3), and Bo with Ada.
+    let ada_note = create_note(&d, &ada, "Venue", "on v2");
+    let bo_note = create_note(&d, &bo, "Menu", "on v3");
+    let bo_in_ada = share_note(&d, &ada, &bo, &ada_note, "Bo");
+    let ada_in_bo = share_note(&d, &bo, &ada, &bo_note, "Ada");
+    let (status, version, body) = read_window(&d, &ada.space, &bo_in_ada);
+    assert_eq!(status, 200, "Bo reads Ada's note: {body}");
+    assert_eq!(
+        version.as_deref(),
+        Some(v2.as_str()),
+        "Ada's version decides"
+    );
+    assert_eq!(
+        titles(body["rows"].as_array().expect("rows")),
+        vec!["Venue"]
+    );
+    let (status, version, body) = read_window(&d, &bo.space, &ada_in_bo);
+    assert_eq!(status, 200, "Ada reads Bo's note: {body}");
+    assert_eq!(
+        version.as_deref(),
+        Some(v3.as_str()),
+        "Bo's version decides"
+    );
+    assert_eq!(titles(body["rows"].as_array().expect("rows")), vec!["Menu"]);
+
+    // A version whose `allNotes` also reads `starred`. Bo's tenant moves to
+    // it; Ada's stays pinned to v2.
+    let reads_more = ordo_plan::artifact::with_declared(
+        &v3_source.replace(
+            "notes[id, rev, title, body, tags, created, pinned, archived]\n  sort -created",
+            "notes[id, rev, title, body, tags, created, pinned, archived, starred]\n  sort -created",
+        ),
+        "0.3.0",
+        "0.3.1",
+    )
+    .expect("notes v3 declares @ 0.3.0");
+    assert!(
+        reads_more.contains("archived, starred]"),
+        "the marker moved"
+    );
+    let v31 = d.apply_program(&reads_more, false).await;
+    assert!(d.moved_to(&bo.space, &v31).await, "Bo moved on");
+    if d.pin_of(&ada.space).await.as_deref() != Some(v2.as_str()) {
+        let (status, out) = d.op(
+            HOME,
+            &deployment_owner_token(),
+            "POST",
+            "std.deployment.pin",
+            json!({"tenant": ada.space, "version": v2}),
+        );
+        assert_eq!(status, 200, "{out}");
+    }
+
+    // Ada's window into Bo's tenant was pinned under v3, and the op now
+    // reads a field more: refused by name. A window minted again is the
+    // same grant, so it is refused the same.
+    let (status, _, body) = eventually("Ada's window meets the new version", || {
+        let token = window_of(&d, &ada, &bo.space);
+        let got = read_window(&d, &bo.space, &token);
+        (got.0 != 200).then_some(got)
+    })
+    .0;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], json!("versions_disagree"), "{body}");
+    let said = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains(&v3) && said.contains(&v31) && said.contains("`notes`"),
+        "the refusal names both versions and the entity: {said}"
+    );
+    assert!(
+        said.contains("std.space.share"),
+        "and what fixes it: {said}"
+    );
+
+    // Bo's window into Ada's tenant, still on v2, reads.
+    let (status, version, body) = read_window(&d, &ada.space, &bo_in_ada);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(version.as_deref(), Some(v2.as_str()));
     d.stop();
 }

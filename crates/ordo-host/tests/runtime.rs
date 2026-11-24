@@ -1862,6 +1862,7 @@ async fn a_rewound_space_is_quarantined_and_the_door_stays_up() {
                 at: ordo_commandlog::Timestamp(1_000 + n as u64),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         };
@@ -2014,6 +2015,7 @@ async fn health_ready_names_every_troubled_tenant_from_one_list() {
                 at: ordo_commandlog::Timestamp(1_000 + n as u64),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         };

@@ -292,6 +292,7 @@ mod share_tests {
     fn pin(unguarded: bool) -> OpPin {
         OpPin {
             manifest_hash: ManifestHash::of(b"an op"),
+            version: None,
             unguarded,
             entities: Vec::new(),
         }

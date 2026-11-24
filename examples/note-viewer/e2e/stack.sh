@@ -176,7 +176,9 @@ wait_for "the identity service" "$issuer/health/ready" "$last"
 # ── 4. and 5. The two doors ────────────────────────────────────────────────
 # What both doors share. Each sets its own role, schema, port and client id.
 # A public answer over an external is held 2 seconds here (60 by default), so
-# a note written in notes v2 shows on note_viewer's public list at once.
+# a note written in notes v2 shows on note_viewer's public list at once. The
+# external check runs every 2 seconds (300 by default), so a column notes
+# stops writing holds the viewer at once (tests/orphans).
 door_env() { # role, schema, port, public, page, client id, then the command
   local role=$1 schema=$2 port=$3 public=$4 page=$5 client=$6
   shift 6
@@ -195,7 +197,7 @@ door_env() { # role, schema, port, public, page, client id, then the command
     ORDO_AUTH_PROVIDER_CA_FILE="$ca" ORDO_EGRESS_PRIVATE_HOSTS=localhost \
     ORDO_BLOB_STORE="fs:$state/blobs-$schema" ORDO_DEV_UNSAFE_BLOB_STORE=1 \
     ORDO_READER_NOTE_VIEWER_ROLE=viewer_app ORDO_PEER_NOTES_SCHEMA=notes \
-    ORDO_PUBLIC_CDN_S_MAXAGE=2 \
+    ORDO_PUBLIC_CDN_S_MAXAGE=2 ORDO_EXTERNAL_WATCH_SECS=2 \
     RUST_LOG="${RUST_LOG:-info}" "$@"
 }
 notes_env() { door_env notes_app notes "$notes_port" "$notes_public" "$notes_page" notes "$@"; }
@@ -218,6 +220,9 @@ wait_for "notes v2" "$notes_door/health/live" "$last"
 (notes_env "$ordo" apply "$repo/examples/notes-v2" --as fed-e2e --direct) >"$state/notes-apply.log" 2>&1 ||
   { cat "$state/notes-apply.log" >&2; echo "stack: ordo apply of notes v2 failed" >&2; exit 1; }
 admit notes editor
+# notes v2's environment, for a test that applies another notes program over
+# it with the same `--direct` apply (tests/v3, increment 7a). Test values.
+(notes_env env) >"$state/notes.env"
 
 viewer_env "$host" >"$state/viewer.log" 2>&1 &
 last=$!
@@ -226,6 +231,9 @@ wait_for "note_viewer" "$viewer_door/health/live" "$last"
 (viewer_env "$ordo" apply "$repo/examples/note-viewer" --as fed-e2e --direct) >"$state/viewer-apply.log" 2>&1 ||
   { cat "$state/viewer-apply.log" >&2; echo "stack: ordo apply of note_viewer failed" >&2; exit 1; }
 admit viewer viewer
+# note_viewer's environment, for a test that runs `ordo release-check
+# --direct` as the viewer (tests/api/release.spec.ts, increment 7b).
+(viewer_env env) >"$state/viewer.env"
 
 cat >"$state/stack.json" <<EOF
 {
@@ -234,6 +242,8 @@ cat >"$state/stack.json" <<EOF
   "viewerDoor": "$viewer_door",
   "notesPage": "$notes_page/",
   "viewerPage": "$viewer_page/",
+  "ordo": "$ordo",
+  "programV3": "$repo/examples/notes-v3",
   "pg": { "host": "$pg_host", "port": "$pg_port", "db": "$db", "admin": "$pg_user", "rolePassword": "$role_password" },
   "logs": "$state"
 }

@@ -30,12 +30,15 @@
 //!               ‖ kind:u8 (0 create, 1 converge, 2 delete)
 //!               ‖ opt-image before ‖ opt-image after ‖ u64-BE at
 //! group      := str correlation ‖ str actor-attribution ‖ u64-BE count ‖ command*
-//!               ‖ trailer? ‖ trailer? ‖ trailer?
+//!               ‖ trailer? ‖ trailer? ‖ trailer? ‖ trailer?
 //! trailer    := 0x01                      # owner administration (DL §3 r6)
 //!             | 0x02                      # restored unverified (opslog D7)
 //!             | 0x03 ‖ restore            # restore marker (production-ops R2a)
+//!             | 0x04 ‖ backfill           # backfill record (backfill B3)
 //! restore    := str space ‖ u64-BE idx ‖ hash32
 //!               ‖ opt-head ‖ source ‖ str operator
+//! backfill   := kind:u8 (0 summarised, 1 images) ‖ str space ‖ str step
+//!               ‖ str entity ‖ str field ‖ str mapping ‖ u64-BE rows ‖ hash32
 //! opt-head   := 0x00 | 0x01 ‖ u64-BE idx ‖ hash32
 //! source     := 0x00 ‖ u64-BE at | 0x01 ‖ digest32
 //! hash       := SHA-256( prev-hash (32 bytes) ‖ group )
@@ -140,8 +143,8 @@
 use sha2::{Digest, Sha256};
 
 use crate::command::{
-    Actor, Command, CommandGroup, CommandId, CommandKind, CorrelationId, RestoreMarker,
-    RestoreSource, SpaceId, Timestamp,
+    Actor, BackfillAudit, BackfillRecord, Command, CommandGroup, CommandId, CommandKind,
+    CorrelationId, RestoreMarker, RestoreSource, SpaceId, Timestamp,
 };
 use crate::value::{Image, Value};
 
@@ -299,7 +302,50 @@ pub fn encode_group(group: &CommandGroup) -> Vec<u8> {
         out.push(TRAILER_RESTORE);
         encode_restore(&mut out, marker);
     }
+    if let Some(record) = &group.backfill {
+        out.push(TRAILER_BACKFILL);
+        encode_backfill(&mut out, record);
+    }
     out
+}
+
+/// The backfill record's payload, after its `0x04` tag. Field order is the
+/// grammar's `backfill` production and is frozen with it.
+fn encode_backfill(out: &mut Vec<u8>, r: &BackfillRecord) {
+    out.push(match r.kind {
+        BackfillAudit::Summarised => 0,
+        BackfillAudit::Images => 1,
+    });
+    put_str(out, &r.space.0);
+    put_str(out, &r.step);
+    put_str(out, &r.entity);
+    put_str(out, &r.field);
+    put_str(out, &r.mapping);
+    out.extend_from_slice(&r.rows.to_be_bytes());
+    out.extend_from_slice(&r.content);
+}
+
+/// **The backfill content hash, one row at a time**: `SHA-256(prev ‖ str
+/// space ‖ str id ‖ value)`, where `value` is `0x00` for null or `0x01 ‖
+/// str text` for the new column's Postgres text rendering. Chained over the
+/// rows of one space in `id` order, from 32 zero bytes. The worker folds
+/// each chunk into it and the verifier recomputes it over the whole table,
+/// so the two agree whatever the chunk sizes were.
+pub fn backfill_row_hash(prev: &[u8; 32], space: &str, id: &str, value: Option<&str>) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(prev);
+    let mut buf = Vec::with_capacity(space.len() + id.len() + 32);
+    put_str(&mut buf, space);
+    put_str(&mut buf, id);
+    match value {
+        None => buf.push(0),
+        Some(v) => {
+            buf.push(1);
+            put_str(&mut buf, v);
+        }
+    }
+    h.update(&buf);
+    h.finalize().into()
 }
 
 /// The restore marker's payload, after its `0x03` tag. Field order is the
@@ -344,6 +390,11 @@ const TRAILER_RESTORED_UNVERIFIED: u8 = 0x02;
 /// restore marker, and the tag is followed by its payload. See
 /// [`crate::command::CommandGroup::restore`].
 const TRAILER_RESTORE: u8 = 0x03;
+
+/// The fourth trailer tag (`plan-backfill-dual-writes.md` §5, B3): this
+/// group is a backfill's audit record, and the tag is followed by its
+/// payload. See [`crate::command::CommandGroup::backfill`].
+const TRAILER_BACKFILL: u8 = 0x04;
 
 fn encode_command(out: &mut Vec<u8>, cmd: &Command) {
     put_str(out, &cmd.id.0);
@@ -481,6 +532,7 @@ pub fn decode_group(bytes: &[u8]) -> Result<CommandGroup, DecodeError> {
     let mut owner_administration = false;
     let mut restored_unverified = false;
     let mut restore = None;
+    let mut backfill = None;
     let mut last_tag = 0u8;
     while r.at != r.b.len() {
         let tag = r.byte()?;
@@ -491,6 +543,7 @@ pub fn decode_group(bytes: &[u8]) -> Result<CommandGroup, DecodeError> {
             TRAILER_OWNER_ADMINISTRATION => owner_administration = true,
             TRAILER_RESTORED_UNVERIFIED => restored_unverified = true,
             TRAILER_RESTORE => restore = Some(decode_restore(&mut r)?),
+            TRAILER_BACKFILL => backfill = Some(decode_backfill(&mut r)?),
             _ => return Err(DecodeError::TrailingBytes),
         }
         last_tag = tag;
@@ -502,6 +555,27 @@ pub fn decode_group(bytes: &[u8]) -> Result<CommandGroup, DecodeError> {
         owner_administration,
         restored_unverified,
         restore,
+        backfill,
+    })
+}
+
+/// The inverse of `encode_backfill`. A kind byte other than `0x00` or
+/// `0x01` is `BadTag`, so the payload has one spelling.
+fn decode_backfill(r: &mut Reader<'_>) -> Result<BackfillRecord, DecodeError> {
+    let kind = match r.byte()? {
+        0 => BackfillAudit::Summarised,
+        1 => BackfillAudit::Images,
+        other => return Err(DecodeError::BadTag(other)),
+    };
+    Ok(BackfillRecord {
+        kind,
+        space: SpaceId(r.str()?),
+        step: r.str()?,
+        entity: r.str()?,
+        field: r.str()?,
+        mapping: r.str()?,
+        rows: r.u64()?,
+        content: r.hash32()?,
     })
 }
 

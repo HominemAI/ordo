@@ -573,6 +573,7 @@ pub fn is_system_statement(sql: &str) -> bool {
     s.contains("\"$places\"")
         || s.contains("\"$migrations\"")
         || s.starts_with("CREATE TABLE IF NOT EXISTS \"$")
+        || crate::schema_apply::is_rename_record(s)
 }
 
 /// A removed field or entity: kept as an orphan, never dropped by a step.
@@ -1148,7 +1149,15 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
             // copy back is not mirrored. On any other database the two
             // statements find nothing.
             let sync = q(&format!("{entity}${new}$prev"));
+            // The rename leaves `$renames` first, so writes stop keeping
+            // the new column current before it goes.
             let mut out = vec![
+                format!("{};", ordo_exec::overlay::RENAMES_DDL),
+                format!(
+                    "DELETE FROM \"$renames\" WHERE \"entity\" = '{}' AND \"from\" = '{}';",
+                    entity.replace('\'', "''"),
+                    from.replace('\'', "''")
+                ),
                 format!("DROP TRIGGER IF EXISTS {sync} ON {t};"),
                 format!("DROP FUNCTION IF EXISTS {sync}();"),
                 format!("UPDATE {t} SET {} = {};", q(from), q(&new)),

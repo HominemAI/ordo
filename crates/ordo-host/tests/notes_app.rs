@@ -1425,6 +1425,12 @@ async fn a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keep
         .await
         .expect("$moves");
     assert_eq!(moves[0][0].as_deref(), Some("0"));
+    // The rename left `$renames`: the orphaned `body` is not written again.
+    let renames = theirs
+        .rows("SELECT count(*) FROM \"$renames\"")
+        .await
+        .expect("$renames");
+    assert_eq!(renames[0][0].as_deref(), Some("0"));
     assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(to.as_str()));
     let (rows, _) = eventually("Ada reads every note after the close", || {
         let (status, out) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));

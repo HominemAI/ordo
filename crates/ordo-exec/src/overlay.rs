@@ -34,6 +34,72 @@
 
 use crate::{sql_lit, PoolError, TxConn};
 
+/// **`$renames`**: the field renames a database is in the middle of
+/// (increment 11a). A rename's step writes its row in the transaction that
+/// adds the new column, after `LOCK TABLE "$renames" IN EXCLUSIVE MODE`.
+/// Every write locks and reads the table first ([`renames_in`]), and keeps
+/// both columns current
+/// ([`MoveOverlay::for_renames`]).
+///
+/// Why a write can never miss a rename: the write's `ROW SHARE` lock is
+/// taken before its snapshot, and the rename's `EXCLUSIVE` lock conflicts
+/// with it.
+/// A write that read the table before the rename holds its lock to its
+/// commit, so the rename's new column is added after that row exists, and
+/// the rename's copy reaches it. A write after the rename reads its row.
+/// No node needs to have read anything: the database says.
+///
+/// A row leaves when the rename is reversed, or when its old column is
+/// orphaned at a soak's close.
+pub const RENAMES_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$renames\" ( \
+  \"entity\" text NOT NULL, \
+  \"from\" text NOT NULL, \
+  \"field\" text NOT NULL, \
+  \"column\" text NOT NULL, \
+  \"version\" text NOT NULL, \
+  PRIMARY KEY (\"entity\", \"from\") \
+)";
+
+/// One row of `$renames`: `entity.from` renamed to `entity.field`, whose
+/// column is `column`. `from` is also the old column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    pub entity: String,
+    pub from: String,
+    pub field: String,
+    pub column: String,
+}
+
+/// Read `$renames` under a share lock, as a write's first statements.
+///
+/// The lock is its own statement, `LOCK TABLE`, which takes no snapshot.
+/// A `SELECT … FOR SHARE` would take the transaction's snapshot before it
+/// waited on a rename's lock, and under `SERIALIZABLE` the write would then
+/// not see the rename that committed while it waited, though its insert
+/// would land beside the new column.
+pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
+    tx.rows("LOCK TABLE \"$renames\" IN ROW SHARE MODE").await?;
+    let rows = tx
+        .rows(
+            "SELECT \"entity\", \"from\", \"field\", \"column\" FROM \"$renames\" \
+             ORDER BY \"entity\", \"from\"",
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some(Rename {
+                entity: it.next()??,
+                from: it.next()??,
+                field: it.next()??,
+                column: it.next()??,
+            })
+        })
+        .collect())
+}
+
 /// How many row ids one overlay statement names at most.
 const IDS_PER_STATEMENT: usize = 500;
 
@@ -121,6 +187,51 @@ impl From<PoolError> for OverlayError {
 }
 
 impl MoveOverlay {
+    /// **The overlay a version writes with** for the renames a database is
+    /// in the middle of ([`RENAMES_DDL`]), worked out from the version's own
+    /// schema. `None` when no rename reaches it.
+    ///
+    /// - A version that declares `field` and not `from` (the renaming one)
+    ///   sets the old column from the new one, so the version before reads
+    ///   every row it writes whole, and a rollback loses nothing.
+    /// - A version that declares `from` and not `field` (the one before)
+    ///   sets the new column from the old one.
+    /// - A value this version may leave empty keeps what the other column
+    ///   holds, so the other version's `required` is never broken by a
+    ///   write that is legal here.
+    pub fn for_renames(schema: &ordo_schema::Schema, renames: &[Rename]) -> Option<MoveOverlay> {
+        let mut entities = Vec::new();
+        for r in renames {
+            let Some(e) = schema.native(&r.entity) else {
+                continue;
+            };
+            let copy = |to: &str, src: &str, optional: bool| {
+                let sql = if optional {
+                    format!("coalesce({}, {})", quote(src), quote(to))
+                } else {
+                    quote(src)
+                };
+                (to.to_string(), sql)
+            };
+            let set = match (e.field(&r.from), e.field(&r.field)) {
+                (None, Some(f)) => copy(&r.from, &r.column, f.optional),
+                (Some(old), None) => copy(&r.column, &old.column(), old.optional),
+                _ => continue,
+            };
+            entities.push(OverlayEntity {
+                entity: r.entity.clone(),
+                sets: vec![set],
+                guards: Vec::new(),
+            });
+        }
+        (!entities.is_empty()).then(|| MoveOverlay {
+            step: "prev".into(),
+            serving: String::new(),
+            other: String::new(),
+            entities,
+        })
+    }
+
     /// The entity's part, when the overlay touches it.
     pub fn entity(&self, name: &str) -> Option<&OverlayEntity> {
         self.entities.iter().find(|e| e.entity == name)
@@ -217,6 +328,48 @@ fn quote(ident: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn schema(fields: &str) -> ordo_schema::Schema {
+        ordo_conformance::Fixture::from_source(
+            &format!("entity note {{\n{fields}}}\n\nop allNotes unbounded =\n  note[body]\n"),
+            "",
+        )
+        .expect("compiles")
+        .schema
+    }
+
+    /// The renaming version copies the new column back; a version still on
+    /// the old name copies forward; a version with neither name, or both,
+    /// writes nothing more. An optional source keeps what the other column
+    /// holds.
+    #[test]
+    fn each_version_keeps_the_other_column_of_a_rename_current() {
+        let r = [Rename {
+            entity: "note".into(),
+            from: "title".into(),
+            field: "heading".into(),
+            column: "heading".into(),
+        }];
+        let sets = |fields: &str| {
+            MoveOverlay::for_renames(&schema(fields), &r).map(|o| o.entities[0].sets.clone())
+        };
+        assert_eq!(
+            sets("  heading: text = \"\" prev(title)\n  body: text?\n"),
+            Some(vec![("title".to_string(), "\"heading\"".to_string())])
+        );
+        assert_eq!(
+            sets("  title: text\n  body: text?\n"),
+            Some(vec![("heading".to_string(), "\"title\"".to_string())])
+        );
+        assert_eq!(
+            sets("  title: text?\n  body: text?\n"),
+            Some(vec![(
+                "heading".to_string(),
+                "coalesce(\"title\", \"heading\")".to_string()
+            )])
+        );
+        assert_eq!(sets("  name: text\n  body: text?\n"), None);
+    }
 
     #[test]
     fn a_refusal_names_both_versions_the_field_and_the_row() {

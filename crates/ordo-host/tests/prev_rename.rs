@@ -24,9 +24,8 @@
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`).
 
 use ordo_conformance::Pg;
-use ordo_exec::overlay::MoveOverlay;
+use ordo_exec::overlay::{self, MoveOverlay};
 use ordo_exec::{Pool, PoolConfig};
-use ordo_host::dual_writes;
 use ordo_host::evolve::{self, EvolveRefusal};
 use ordo_host::schema_apply::{self as sa, Choices, Program};
 use ordo_host::versions::Versions;
@@ -84,28 +83,69 @@ fn one(pg: &Pg, sql: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The rename overlay `version` writes with, as a node works it out from
-/// the renames `y` declares ([`dual_writes::rename_overlay`]).
-fn overlay(version: &Program, y: &Program) -> MoveOverlay {
-    let renames = dual_writes::renames_of(&y.version, &y.schema);
-    dual_writes::rename_overlay(&version.version, &version.schema, &renames)
-        .unwrap_or_else(|| panic!("{} has no rename overlay", version.version))
+/// The schema `version` writes with.
+fn overlay(version: &Program, _y: &Program) -> ordo_schema::Schema {
+    version.schema.clone()
 }
 
-/// One write as the host makes it: the statement, then the version's
-/// overlay over the row it wrote, in the same transaction (the executor's
-/// attempt runs the overlay the same way, `ordo_exec::Executor`).
-async fn write(pool: &Pool, overlay: &MoveOverlay, sql: &str, id: &str) -> Result<(), String> {
-    let tx = pool.begin().await.map_err(|e| e.to_string())?;
-    tx.rows(sql).await.map_err(|e| e.to_string())?;
-    if let Err(e) = overlay
-        .apply(&tx, "acme", &[("note".to_string(), id.to_string())])
-        .await
-    {
-        let _ = tx.rollback().await;
-        return Err(format!("{e:?}"));
+/// One write as the executor makes it (`ordo_exec::Executor`'s attempt):
+/// `$renames` read first under its share lock, the statement, then the
+/// dual writes of the renames it read, as the serving version's schema
+/// reads them, all in one SERIALIZABLE transaction. The writer knows
+/// nothing of the rename: the database says.
+async fn write(
+    pool: &Pool,
+    schema: &ordo_schema::Schema,
+    sql: &str,
+    id: &str,
+) -> Result<(), String> {
+    for _ in 0..20 {
+        let tx = pool
+            .begin_for(ordo_exec::OpClass::MultiStatementGroup)
+            .await
+            .map_err(|e| e.to_string())?;
+        let renames = match overlay::renames_in(&tx).await {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                pool.rows(overlay::RENAMES_DDL)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(e.to_string());
+            }
+        };
+        let done = async {
+            tx.rows(sql).await.map_err(|e| format!("{e:?}"))?;
+            if let Some(o) = MoveOverlay::for_renames(schema, &renames) {
+                o.apply(&tx, "acme", &[("note".to_string(), id.to_string())])
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        match done {
+            Ok(()) => match tx.commit().await {
+                Ok(()) => return Ok(()),
+                Err(e) if e.to_string().contains("40001") || e.to_string().contains("serializ") => {
+                    continue
+                }
+                Err(e) => return Err(e.to_string()),
+            },
+            Err(e) => {
+                let _ = tx.rollback().await;
+                if e.contains("Serialization") || e.contains("40001") || e.contains("40P01") {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
     }
-    tx.commit().await.map_err(|e| e.to_string())
+    Err("the write did not land in 20 tries".into())
 }
 
 fn errors(r: Result<evolve::Rendered, EvolveRefusal>) -> Vec<(String, String, String)> {
@@ -579,4 +619,152 @@ async fn a_landed_mark_is_offered_only_in_the_last_environment() {
         .await
         .expect("own set");
     assert!(ordo_host::prev_offer::landed(&pool, &y).await.is_empty());
+}
+
+/// One node: its own pool to the tenant's database and an executor over the
+/// version it serves. It holds no rename state of its own.
+struct Node {
+    exec: ordo_exec::Executor,
+    fixture: std::sync::Arc<ordo_conformance::Fixture>,
+    log: std::sync::Arc<std::sync::Mutex<ordo_conformance::WriteLog>>,
+}
+
+async fn node(db: &str, source: &str, name: &str) -> Node {
+    let f = ordo_conformance::Fixture::from_source(source, "").expect("compiles");
+    let pool = Pool::connect(PoolConfig {
+        db: db.to_string(),
+        size: 3,
+        ..PoolConfig::from_env()
+    })
+    .await
+    .expect("a pool");
+    Node {
+        exec: ordo_exec::Executor {
+            pool,
+            schema: f.schema.clone(),
+            registry: f.registry.clone(),
+            keys: f.keys.clone(),
+            space: ordo_conformance::fixture_space(),
+        },
+        fixture: std::sync::Arc::new(f),
+        // Ids minted under the node's own prefix, as a serving node does.
+        log: std::sync::Arc::new(std::sync::Mutex::new(ordo_conformance::WriteLog::serving(
+            format!("{name}_"),
+            std::sync::Arc::new(|| 1),
+        ))),
+    }
+}
+
+impl Node {
+    async fn write(&self, call: String) -> Result<(), String> {
+        self.exec
+            .write_as(self.fixture.clone(), self.log.clone(), call, "p_ada".into())
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// **Two nodes, and one never reads anything: no write is lost.** Node A
+/// and node B serve 1.0.0 through the real write path. Each has its own
+/// pool and holds nothing about the rename: no node is told of it, and
+/// node B is never told at all, the way a node whose pin stream is slow
+/// would be. Both write without pause while `ordo apply` makes the rename
+/// (`kind` to `mediaType`), and node B keeps writing after it. A third
+/// node serves 1.1.0. Every row holds the same value under both names.
+///
+/// Before increment 11a's `$renames`, a node learned of a rename from the
+/// registry on its pin stream's next read, and a node that had not read it
+/// wrote only the old column. Now every write reads the renames from its
+/// own database, first, under a share lock the rename's step waits on.
+///
+/// A regression looks like a row whose `mediaType` is empty or differs
+/// from its `kind`.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_nodes_one_never_told_lose_no_write_across_a_rename() {
+    let (_reg_pg, _registry) = empty("ordo_prev_nodes_reg").await;
+    let (tenant_pg, tenant) = empty("ordo_prev_nodes_tenant").await;
+    let ops_x = "\nop addNote($kind: text) =\n  set note { kind: $kind }\n";
+    let ops_y = "\nop addNote($kind: text) =\n  set note { mediaType: $kind }\n";
+    let x_src = notes("1.0.0", "  kind: text = \"\"\n") + ops_x;
+    let y_src = notes("1.1.0", "  mediaType: text = \"\" prev(kind)\n") + ops_y;
+    let x = Program::compile(&x_src).expect("1.0.0");
+    let y = Program::compile(&y_src).expect("1.1.0");
+    let (_, created) = sa::apply(&tenant, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    let a = std::sync::Arc::new(node(&tenant_pg.db, &x_src, "a").await);
+    let b = std::sync::Arc::new(node(&tenant_pg.db, &x_src, "b").await);
+    for i in 0..20 {
+        a.write(format!(r#"addNote($kind: "a-before-{i}")"#))
+            .await
+            .expect("a write before");
+    }
+
+    let writer = |n: std::sync::Arc<Node>, tag: &'static str| {
+        tokio::spawn(async move {
+            let mut ok = 0usize;
+            for i in 0..150 {
+                match n.write(format!(r#"addNote($kind: "{tag}-{i}")"#)).await {
+                    Ok(()) => ok += 1,
+                    Err(e) => eprintln!("node {tag}, write {i}: {e}"),
+                }
+            }
+            ok
+        })
+    };
+    let (wa, wb) = (writer(a.clone(), "a"), writer(b.clone(), "b"));
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    // The rename as `ordo apply` makes it on a tenant's database: planned
+    // against 1.0.0, the version it serves.
+    let mut plan = sa::plan_with(&tenant, &y, &Choices::default(), Some(&x.schema))
+        .await
+        .expect("a plan");
+    plan.prior = Some(x.schema.clone());
+    let renamed = sa::apply_planned(&tenant, &plan, "test", "test").await;
+    assert!(
+        matches!(renamed, Ok(sa::Applied::Additive { .. })),
+        "the rename applies: {renamed:?}"
+    );
+    assert_eq!(
+        one(&tenant_pg, "SELECT count(*) FROM \"$renames\""),
+        "1",
+        "the rename is recorded where it was made"
+    );
+    assert_eq!(wa.await.unwrap(), 150, "every write of node A landed");
+    assert_eq!(wb.await.unwrap(), 150, "every write of node B landed");
+
+    // Node B, never told, writes again; a node on 1.1.0 writes too.
+    for i in 0..20 {
+        b.write(format!(r#"addNote($kind: "b-after-{i}")"#))
+            .await
+            .expect("a write after");
+    }
+    let on_y = node(&tenant_pg.db, &y_src, "y").await;
+    on_y.write(r#"addNote($kind: "y-0")"#.into())
+        .await
+        .expect("a write on 1.1.0");
+
+    assert_eq!(
+        one(&tenant_pg, "SELECT count(*) FROM note"),
+        (20 + 150 + 150 + 20 + 1).to_string()
+    );
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT count(*) FROM note WHERE \"mediaType\" IS DISTINCT FROM kind"
+        ),
+        "0",
+        "every row holds its value under both names"
+    );
+    assert_eq!(
+        one(
+            &tenant_pg,
+            "SELECT count(*) FROM note WHERE kind LIKE 'b-%' AND \"mediaType\" = kind"
+        ),
+        "170",
+        "every write of node B reached the new column"
+    );
 }

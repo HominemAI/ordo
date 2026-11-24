@@ -142,6 +142,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
         "evolve" => &["--run", "--list"],
+        "rollout" => &["--clear"],
         _ => &[],
     }
 }
@@ -411,6 +412,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "environments" => rt.block_on(environments_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
+        "rollout" => rt.block_on(crate::rollout::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),

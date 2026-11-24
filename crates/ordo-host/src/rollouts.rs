@@ -1303,7 +1303,6 @@ impl<'a> Rollouts<'a> {
             &format!(", \"failed_base\" = {failed}"),
         )
         .await?;
-        let _ = at;
         self.get(r.id)
             .await?
             .ok_or(RolloutRefusal::NoSuch { id: r.id })

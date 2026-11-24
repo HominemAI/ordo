@@ -85,6 +85,10 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo rollout start|status|resume|skip|retry|abort|finish|hold|settings|set ...\n      \
+         rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
+         stored version, follow it, and control it. `ordo rollout` alone\n      \
+         prints each subcommand.\n  \
          ordo migrate <dir|file.ordo> --apply --direct [--db <db>] [--as <actor>] [--places ...]\n      \
          being replaced by `ordo evolve` (§6 conflict 9 of plan-versions.md).\n      \
          the plan, then the additive apply (schema-evolution increment 2):\n      \
@@ -566,6 +570,7 @@ fn main() {
             | "environments"
             | "promote"
             | "evolve"
+            | "rollout"
             | "prune"
             | "restore"
             | "keys"

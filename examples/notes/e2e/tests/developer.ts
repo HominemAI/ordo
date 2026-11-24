@@ -41,8 +41,12 @@ function env(): NodeJS.ProcessEnv {
 
 /** `ordo <args>`, as the developer. Door commands get `--host` and `--space`. */
 function run(args: readonly string[]): CliRun {
+  const started = Date.now();
   const r = spawnSync(stack().ordo, [...args], { env: env(), encoding: 'utf8', timeout: 240_000 });
-  return { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' };
+  const run = { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' };
+  // In the run's log, so a failure shows what each command answered.
+  console.log(`$ ordo ${args.join(' ')}  (exit ${run.code}, ${Date.now() - started} ms)\n${run.out}${run.err}`);
+  return run;
 }
 
 /** The door flags of every deployment command: the deployment's own space. */

@@ -94,7 +94,7 @@ built it.
 | member | v1 |
 |---|---|
 | `manifest.json` | read: format tag, artifact identity, `sealed`, load order, per-entity columns and counts |
-| `artifact.json`, `schema.sql` | **checked**, not applied. The destination's deployed artifact must already match (§6, `artifact_mismatch`). Applying DDL is `ordo migrate`'s job and another agent's file. |
+| `artifact.json`, `schema.sql` | **checked**, not applied. The destination's deployed artifact must already match (§6, `artifact_mismatch`). Applying DDL is `ordo apply` and `ordo evolve`'s job and another agent's file. |
 | `data/<entity>.jsonl` | the rows, read in file order |
 | `commandlog.jsonl` | **not replayed**, and §3 says why |
 | `blobs/…` | the bytes, bound to their rows through the deployment's blob door after every row exists (§10) |

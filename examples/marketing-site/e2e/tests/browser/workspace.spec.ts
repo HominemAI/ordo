@@ -296,6 +296,8 @@ test('staff publish products, plans and reviews through the editor and remove th
     if (kind === 'Reviews') await page.getByLabel('Quote', { exact: true }).fill(`Updated recommendation ${name}`);
     else await page.getByLabel('Tagline (required)').fill(`Updated launch ${name}`);
     await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    // The editor closes after the write resolves; clicking Save alone does not await it.
+    await expect(page.getByRole('button', { name: 'Save changes', exact: true })).toBeHidden();
     await publicPage.reload();
     await expect(
       publicPage.getByText(kind === 'Reviews' ? `Updated recommendation ${name}` : `Updated launch ${name}`, {

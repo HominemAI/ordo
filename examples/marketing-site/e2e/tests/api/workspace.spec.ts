@@ -174,7 +174,8 @@ test('a campaign keeps its JSON tags, files and reminder, then deletes owned chi
     const download = await request.get(`${stack().door}/blob/${handle}`, { headers });
     expect(download.status()).toBe(200);
     expect(await download.text()).toBe('Launch brief');
-    await refused(await request.get(`${stack().door}/blob/${handle}`), 404, 'not_found');
+    // Private file fields require a bearer token, even with a valid handle.
+    await refused(await request.get(`${stack().door}/blob/${handle}`), 403, 'access_denied');
     await rows(
       await request.post(`${stack().door}/op/setReminder`, {
         headers,

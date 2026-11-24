@@ -141,6 +141,7 @@ pub mod share_accept;
 pub mod share_links;
 pub mod share_ops;
 pub mod spaces;
+pub mod step_door;
 pub mod supervisor;
 pub mod tenant_forward;
 pub mod tenant_identities;

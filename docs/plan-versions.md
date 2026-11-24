@@ -1031,7 +1031,7 @@ Added by the review of 2026-11-23:
 
 - **`ordo promote` goes through the target's door** (§1.8). The target
   fetches the source through the door of the step before.
-- **Proposed (Q11, asked again 2026-11-23):** no key to set up. The owner
+- **Ruled 2026-11-24 (Q11):** no key to set up. The owner
   found a machine key a nuisance (*"Having to provide a key sounds like
   work"*), with GitHub-driven promotion coming. So staging reads dev's
   version as the person promoting, who must be an admin in both and is

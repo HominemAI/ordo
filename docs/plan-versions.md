@@ -1574,7 +1574,53 @@ partners, health by error rate, the alert channel.
   `during_a_rolling_rollout_each_team_is_served_its_own_version`.
 - **Not built:** removing a stored version with `--move-to` (§1.6); the
   console's rollout screen; `rollout.unreachable` as a setting (Q10 fixed
-  it at `wait`); the 10c strategies.
+  it at `wait`); the 10c strategies (built below).
+
+**As built in increment 10c** (2026-11-24, `rollouts.rs`,
+`rollout_strategies.rs`, `ordo-cli/src/rollout.rs`):
+
+- `canary`, `group` and `query` move a **first stage**: a tenant's
+  `$rollout_tenants.stage` is 0. Until `$rollouts.gate` passes, only the
+  first stage moves. A canary or a group moves in one batch; a query's
+  tenants move a batch at a time, in its order.
+- **The gate** passes once the first stage has nothing left to move and
+  `rollout.canary_wait` has run since. The rest then roll a batch every
+  `rollout.batch_interval`. A rollout whose first stage is still judged
+  does not finish, so "active" flips only after it (Q5).
+- **Health.** A fault is an executor answer with a 5xx status
+  (`ObservedCost.faults`). Every node adds what it counted for the moved
+  tenants to `$rollout_health` each tick, from a baseline at first sight.
+  The leader sums every node. Faults at or over `rollout.health_error_rate`
+  of the calls pause the rollout, reason `unhealthy: ...`, naming the
+  setting, `resume` and `abort`. No calls is no signal and reads healthy.
+  `resume` after it passes the gate: the deployment owner moves the rest
+  anyway.
+- **By query**: an Ordo condition (`ordo_syntax::parser::parse_condition`)
+  checked against 9 tenant facts Ordo computes from `$spaces`, `$spacedb`
+  and `members`. It is evaluated in Rust, never run as SQL. Paths,
+  arithmetic, functions, parameters, `matches`, `since`, `under` and
+  `above` are refused naming the facts.
+- **Share partners**: a tenant with an open `$capabilitygrant` to a person,
+  and each tenant that person is a member of. With the option on, a moved
+  tenant's pending partners join its batch, whatever their stage. Read
+  from the deployment's database only.
+- **Told**: pauses and the finish are stream entries, as in 10. With
+  `rollout.alert_channel` `mail:<address>` the same is queued in
+  `$mailoutbox`, kind `rollout.alert`.
+- 8 settings, stored in `$version_settings` (Q15): `canary_count`,
+  `canary_wait`, `health_error_rate`, `alert_channel`, `share_partners`,
+  `group`, `query`, `order`. Each is a `std.deployment.rollout.start`
+  param too.
+- **The default strategy stays unset** (an apply moves every tenant at
+  once). The board's ask `rollouts-the-default-strategy-when-none` is
+  open; this build changes nothing until it is answered.
+- Tests: `crates/ordo-host/tests/rollout_strategies.rs` (6), and the
+  example test `teamspace_app.rs`
+  `a_canary_that_fails_its_health_check_pauses_the_rest`.
+- **Not built:** `members` for a tenant with its own database; usage and
+  rows-of-an-entity facts (the owner's examples "least usage" and "most
+  rows"); partners found in a tenant's own database; alert channels
+  beyond mail.
 
 ---
 
@@ -1602,7 +1648,7 @@ round is about 35 minutes for the full suite.
 | 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. **Session 1 built 2026-11-23** (6d93397c, ef5fe610, 9856f637): `$plans` and `evolve.rs`; the step renders from the 2 stored sources against an empty database of X, so the digest is the same in every environment; `--digest` refuses another; a plan with errors is never stored; the receipt lists each change, class, option, forward and reverse, and leaves out Ordo's own tables; replay walks the stored path, each step checking the recorded version, drift and the digest; `std.deployment.evolve`, `plans`, `replay`; `ordo evolve [<dir>] --from --to [--run]`, `--tenant`, `--list`; F1 and F4's rollback check. Tests: `stored_plans.rs`. **Through the examples, built 2026-11-23** (branch `evo-examples-evolve`): the notes e2e runs the identity service, and its developer signs in with `ordo login` approved by passkey (`tests/developer.ts`); project `evolve` (`tests/evolve/v2-to-v3.spec.ts`) stores v3, runs `ordo evolve --from 0.2.0 --to 0.3.0`, then `--run`, with the v2 page open. `ordo migrate --apply --direct` is removed and refuses naming `ordo evolve` (§6 conflict 9). **Not built:** option expressions beyond `--places`, backfill functions (D16, with 10b). | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
 | 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). **Built 2026-11-23** (f8828906): `precheck.rs`. `ordo evolve` stores the plan, then asks every database (shared or per tenant) the data probes and the external check, and lists every issue with its database, spaces and fix. `--run` refuses while one is open, and `run_step` refuses a tenant's step the same way. A database at another version is listed as not asked. Readers are listed from the render (F1). The sign-in removal check (Q6): a version whose `auth` block drops a method counts the people left with none, and is not stored until `--approve-sign-in-removal <count>` names that count; the approval is act `sign-in-removal-approved` on the stream. Tests: `prechecks.rs`. **Not built:** the `requires` check (the declaration is not in the language; the answer says so), the peer note on a removed shared provider (`plan-evolution-federation.md`), **Through the examples, built 2026-11-23** (branch `evo-examples-evolve`): project `evolve-checks` (`tests/evolve/prechecks.spec.ts`) stores 0.3.1 (`fixtures/notes-v3-1.ordo.fixture`, v3 with `title` unique) over a tenant holding 2 notes with one title; `ordo evolve` lists them with the fix, `--run` is refused, the title is changed on the page, and `--run` passes. | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
 | 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). **Built 2026-11-23** (branch `evo-10-rollouts`, 2d15a71b and after): `rollouts.rs`, `std.deployment.rollout.start\|status\|resume\|skip\|retry\|abort\|finish\|hold`, `ordo rollout ...`, the settings in `$version_settings` (Q15), the one-tenant hotfix skipped (Q3), `retry` of a refused move, `ordo apply` starting a rollout when `rollout.strategy` is set. The backfill settings (`backfill.chunk_rows`, `chunk_timeout`, `max_attempts`, `budget`) are stored in `$version_settings` too, set with `ordo versions set backfill.<name>`, and a stored step's backfill runs with them (`rollouts.rs` `the_backfill_settings_are_stored_and_a_step_runs_with_them`). Tests: `rollouts.rs`, `rollout_cli.rs`, teamspace's rolling rollout. **Not built:** removing a stored version with `--move-to`; the console screen. As built in §3.7. | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
-| 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
+| 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. **Built 2026-11-24** (branch `evo-10c-strategies`): `canary`, `group`, `query` with a first stage and a health gate, `$rollout_health` summed over every node, 9 tenant facts, share partners from grants, `mail:<address>` alerts, 8 settings. Tests: `rollout_strategies.rs`, teamspace's canary. **Not built:** usage and row-count facts; facts and partners from a tenant's own database. As built in §3.7. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. **Built 2026-11-23** (37bba572, 3f931aed, 0d4082f5, f684a30a): a stored plan fills a field it makes required (B2, B5) with `--fill <entity>.<field>=<Ordo expression>` or `=fn <name> [secrets ..] [hosts ..]`; the step expands the column nullable, `backfill.rs` fills it in chunks with its cursor in `$backfills` in the same transaction, verify recomputes each space's count and content hash, then `NOT NULL` lands. Until then the database records the version before the step, so a run again resumes from the cursor. 5 failed chunks mark it `dead`; a run again retries. The audit record is trailer `0x04` on the chain: one summarised group per space, or with `--audit-images` one image group per space per chunk; goldens of every older group kind landed first. Backfill functions run once per chunk with exactly the declared secrets and hosts (Q14), and the receipt marks them not reproducible. Tests: `backfill.rs` (the kill mid-chunk, verify, images, dead, render refusals, functions), `notes_app.rs` (`a_backfill_over_existing_notes_shows_the_new_values_once_it_completes`), the command log's goldens. **Not built:** the Playwright test in `examples/notes-v3` (the harness holds no deployment-owner credential for `ordo evolve`; asked), live writes during the backfill (11a), the move lock and `backfill.concurrency` across tenants (11b), sealed backfills (13), refusing `ordo revert` of a backfill group by name. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
 | 11a | **Dual writes on one tenant** (split from 11, review 2026-11-23). `plan-backfill-dual-writes.md` steps B2, B4: the move overlay in the host write path, both versions' guards, the soak, the reverse writes, soak close into `$orphans`. Research: 2 to 3 tries. | L | 10b | a rename on 1 tenant under live writes loses no write; a revert in the soak keeps every write | 13c (reshaped) |
 | 11b | **Every tenant** (split from 11, review 2026-11-23). Step B5: moves driven by a rollout, shared databases, `ordo rollback` and its `--dry-run`, grants stay killed. | M | 10, 11a | a rename on 3 tenants under live writes loses no write; a rollback in the soak keeps every write | 27c |
@@ -1729,7 +1775,7 @@ to an example's own e2e, beside its host tests:
 | 8 | notes-v2 to notes-v3 | `ordo login`, then `ordo evolve` and `--run` with the page open; every note still shows (project `evolve`) |
 | 9 | notes-v3 to fixture 0.3.1 | a duplicate title is listed with its fix, `--run` refused, fixed on the page, `--run` passes (project `evolve-checks`) |
 | 7b | notes-v2 and note-viewer | the viewer reads through a rename, then is refused naming the fix |
-| 10, 10c | teamspace, 3 tenants | each tenant shows its own version's page during a rolling rollout |
+| 10, 10c | teamspace, 3 tenants | each tenant shows its own version's page during a rolling rollout; a canary that fails on the server pauses the rest (built, `a_canary_that_fails_its_health_check_pauses_the_rest`) |
 | 11a, 11b | notes-v3 | type into a note during the backfill; nothing typed is lost; roll back in the soak |
 | 12 | notes, 2 deployments | staging clones a production tenant through the doors; its version comes down with it; staging's door serves it (project `clone`). The case with notes is `fixme` until acl rows import |
 | 13 | notes-v3 | seal a field on live data; the page reads it and the table holds no plaintext |
@@ -1894,11 +1940,13 @@ day:
 | `rollout.strategy` | rolling (as built: unset, and an apply moves every tenant at once; see §3.7) | environment |
 | `rollout.batch_interval` | 5 minutes | environment |
 | `rollout.window` | 1 hour, a target | environment |
-| `rollout.canary_count` | 1 tenant | environment |
-| `rollout.canary_wait` | 1 hour | environment |
+| `rollout.canary_count` | 1 tenant (built with 10c) | environment |
+| `rollout.canary_wait` | 1 hour (built with 10c; also the wait after a group or query) | environment |
 | `rollout.failure_threshold` | 1 tenant | environment |
-| `rollout.health_error_rate` | 1% | environment |
-| `rollout.alert_channel` | the deployment's stream | environment |
+| `rollout.health_error_rate` | 1% of the moved tenants' calls answered 5xx (built with 10c) | environment |
+| `rollout.alert_channel` | the deployment's stream; `mail:<address>` adds a mail (built with 10c) | environment |
+| `rollout.share_partners` | off (built with 10c) | environment |
+| `rollout.group`, `rollout.query`, `rollout.order` | none: `group` and `query` need them (built with 10c) | environment |
 | `apply.wait` | until the rollout starts; 300 seconds at most | command |
 | `tenant.maintenance_window` | none: no window; set by `ordo windows set` for every tenant, some, or all but some (2b) | deployment, tenant |
 | `promotion.chain` | dev, staging, production | deployment |

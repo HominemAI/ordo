@@ -1101,14 +1101,7 @@ pub async fn execute(
                     .set_setting(setting, value, caller, reason, crate::runtime::now_secs())
                     .await
                     .map_err(|e| e.to_exec_error("the rollout setting was not changed"))?;
-                let value = now.to_json()[match setting {
-                    crate::rollouts::STRATEGY_SETTING => "strategy",
-                    crate::rollouts::BATCH_INTERVAL_SETTING => "batchInterval",
-                    crate::rollouts::WINDOW_SETTING => "window",
-                    crate::rollouts::FAILURE_THRESHOLD_SETTING => "failureThreshold",
-                    _ => "deploymentSpace",
-                }]
-                .clone();
+                let value = now.to_json()[crate::rollouts::json_key(setting)].clone();
                 if changed {
                     ops.record(
                         caller,

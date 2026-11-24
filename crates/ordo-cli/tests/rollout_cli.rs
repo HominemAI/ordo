@@ -38,7 +38,7 @@ fn refusals_before_anything_is_sent() {
     assert_eq!(out.code, 2, "{}", out.report);
     assert!(out.report.contains("--clear"), "{}", out.report);
 
-    let out = run(&["set", "canary_count", "2", "--reason", "x", "--host", HOST]);
+    let out = run(&["set", "seats", "2", "--reason", "x", "--host", HOST]);
     assert_eq!(out.code, 2, "{}", out.report);
     assert!(
         out.report.contains("rollout.batch_interval"),

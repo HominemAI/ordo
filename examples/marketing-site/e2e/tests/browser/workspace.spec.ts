@@ -251,3 +251,52 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
     await rows(await request.delete(`${stack().door}/op/deleteCampaign`, { headers, params: { id } }));
   }
 });
+
+test('staff publish products, plans and reviews through the editor and remove them again', async ({
+  page,
+  context,
+}) => {
+  await signIn(page);
+  const publicPage = await context.newPage();
+  for (const kind of ['Products', 'Plans', 'Reviews']) {
+    const name = `${kind} ${randomUUID()}`;
+    await page.getByRole('button', { name: kind, exact: true }).click();
+    await page.getByRole('button', { name: `Add ${kind.toLowerCase().slice(0, -1)}`, exact: true }).click();
+    if (kind === 'Reviews') {
+      await page.getByLabel('Author (required)').fill(name);
+      await page.getByLabel('Role (required)').fill('Designer');
+      await page.getByLabel('Company (required)').fill('A small studio');
+      await page.getByLabel('Quote', { exact: true }).fill(`A lovely launch ${name}`);
+    } else {
+      if (kind === 'Products') await page.getByLabel('URL name (required)').fill(`product-${randomUUID()}`);
+      await page.getByLabel('Name (required)').fill(name);
+      await page.getByLabel('Tagline (required)').fill('A thoughtful launch');
+      await page.getByLabel('Price (required)').fill('24.50');
+      await page.getByLabel('Features (one per line)').fill('Made for teams\nPersonal support');
+      if (kind === 'Products') await page.getByLabel('Private staff note').fill('Never publish this note');
+      else await page.getByLabel('Billing period (required)').fill('month');
+    }
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    const row = page.getByRole('row').filter({ hasText: name });
+    await expect(row).toBeVisible();
+    await publicPage.goto('/');
+    await expect(publicPage.getByText(kind === 'Reviews' ? `A lovely launch ${name}` : name, { exact: true })).toBeVisible();
+    await expect(publicPage.getByText('Never publish this note')).toBeHidden();
+    await row.getByRole('button', { name: 'Edit', exact: true }).click();
+    if (kind === 'Reviews') await page.getByLabel('Quote', { exact: true }).fill(`Updated recommendation ${name}`);
+    else await page.getByLabel('Tagline (required)').fill(`Updated launch ${name}`);
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await publicPage.reload();
+    await expect(
+      publicPage.getByText(kind === 'Reviews' ? `Updated recommendation ${name}` : `Updated launch ${name}`, {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await row.getByRole('button', { name: 'Delete', exact: true }).click();
+    await row.getByRole('button', { name: 'Confirm delete' }).click();
+    await expect(row).toBeHidden();
+    await publicPage.reload();
+    await expect(publicPage.getByText(name, { exact: kind !== 'Reviews' })).toBeHidden();
+  }
+  await publicPage.close();
+});

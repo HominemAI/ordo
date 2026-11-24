@@ -250,6 +250,12 @@ if [ "${E2E_HUMAN_CHECK:-0}" = 1 ]; then
   export ORDO_AUTH_HUMAN_CHECK=turnstile ORDO_AUTH_HUMAN_CHECK_SECRET_FILE="$state/turnstile-secret"
   export ORDO_AUTH_HUMAN_CHECK_SITE_KEY=1x00000000000000000000AA
 fi
+# One stack runs every project in turn, and each leaves tenants pinned to
+# the versions it made (0.1.0 to 0.6.1). Past `moves` that is 9 versions
+# pinned at once, over versions.max_loaded's default of 8, and the next
+# version a project pins is refused its load. A deployment holds few; the
+# stack holds them all.
+export ORDO_VERSIONS_MAX_LOADED=${ORDO_VERSIONS_MAX_LOADED:-16}
 for v in ORDO_PG_ROUTING ORDO_TENANT_CREDENTIALS ORDO_TENANT_CREDENTIALS_DIR ORDO_DEPLOYMENT_OWNERS; do unset "$v"; done
 # The deployment's people are the identity service's. A person who signed
 # in there with `ordo login` acts on the deployment's own space through

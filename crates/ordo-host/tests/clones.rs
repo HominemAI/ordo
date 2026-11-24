@@ -232,17 +232,31 @@ impl Issuer {
 
     /// `who`'s token for the deployment `handle`, touched a moment ago.
     fn token(&self, who: &str, handle: &str) -> String {
+        self.token_of(who, handle, Kind::Person)
+    }
+
+    /// A machine key's token for `handle`, with the `deployment` grant.
+    fn machine(&self, handle: &str) -> String {
+        self.token_of("m_ci", handle, Kind::Machine)
+    }
+
+    fn token_of(&self, who: &str, handle: &str, kind: Kind) -> String {
         let now = ordo_host::runtime::now_secs();
+        let machine = kind == Kind::Machine;
         let c = DeploymentClaims {
             iss: ISS.into(),
             aud: deployment_token::audience(handle),
             sub: who.into(),
-            kind: Kind::Person,
+            kind,
             role: ROLE_ADMIN.into(),
             client: "cli".into(),
             sid: format!("s_{who}"),
-            touched_at: Some(now.saturating_sub(5)),
-            grants: Vec::new(),
+            touched_at: (!machine).then(|| now.saturating_sub(5)),
+            grants: if machine {
+                vec![deployment_token::GRANT_DEPLOYMENT.into()]
+            } else {
+                Vec::new()
+            },
             iat: now,
             exp: now + 600,
             jti: format!("j_{who}_{handle}_{now}"),
@@ -2166,7 +2180,7 @@ async fn past_staging_an_apply_makes_no_rename_without_a_rehearsal() {
     let p = pair("r3", PROGRAM).await;
     let renamed = PROGRAM
         .replace("@ 0.1.0", "@ 0.2.0")
-        .replace("  title: text\n", "  heading: text prev(title)\n")
+        .replace("  title: text\n", "  heading: text = \"\" prev(title)\n")
         .replace("notes[title, body", "notes[heading, body");
     let apply = |activate: bool| {
         let body = json!({"program": renamed, "activate": activate});
@@ -2218,4 +2232,193 @@ async fn past_staging_an_apply_makes_no_rename_without_a_rehearsal() {
     let (status, body) = apply(true).await;
     assert_eq!(status, 200, "{body}");
     assert!(has_heading().await, "the rename was made");
+}
+
+/// **Break-glass** (§3.2 item 6): when staging does not answer, the
+/// deployment owner lets the stored plan of one step run without a
+/// rehearsal, with a recorded reason, for 1 hour. Each way past without it
+/// is refused: no reason, no stored plan, staging answering, a machine key,
+/// another digest, and an ended break-glass.
+#[tokio::test(flavor = "multi_thread")]
+async fn break_glass_runs_one_step_when_staging_is_down_and_nothing_else() {
+    use ordo_host::rehearsals;
+    let (p, _clone, _) = rehearsal_pair("r4").await;
+    let prod = || p.issuer.token(ADA, "production");
+    let glass = |reason: &str| json!({"from": "0.1.0", "to": "0.2.0", "reason": reason});
+
+    // No reason: refused, naming the flag.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("  "),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("--reason"), "{body}");
+
+    // No plan stored here for the step: refused, naming `ordo evolve`.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("staging is down"),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("break_glass_no_plan"), "{body}");
+    assert!(
+        body.to_string()
+            .contains("ordo evolve --from 0.1.0 --to 0.2.0"),
+        "{body}"
+    );
+
+    // The step is refused, and the refusal names break-glass too.
+    let e = run_on_production(&p).await.unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed", "{e}");
+    assert!(e.to_string().contains("ordo rehearsals break-glass"), "{e}");
+
+    // Staging answers: break-glass is refused, naming the rehearsal and
+    // skip-staging. The try is on the stream.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("staging is slow"),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.to_string().contains("break_glass_staging_answers"),
+        "{body}"
+    );
+    assert!(
+        body.to_string().contains("ordo rehearsals accept"),
+        "{body}"
+    );
+    assert!(body.to_string().contains("skip-staging"), "{body}");
+    let seen = acts(&p.prod_stream);
+    assert!(
+        seen.contains(&"break-glass-refused".to_string()),
+        "{seen:?}"
+    );
+
+    // Staging goes down: its recorded door answers nothing.
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_address = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    Environments::on(&p.prod)
+        .set_door(
+            "staging",
+            Some(Door {
+                address: dead_address,
+                space: HOME.to_string(),
+                handle: Some("staging".to_string()),
+            }),
+            "staging is down",
+        )
+        .await
+        .expect("door");
+
+    // A machine key never breaks glass, even with the `deployment` grant.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("a system tries"),
+        &p.issuer.machine("production"),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+
+    // The deployment owner breaks glass: recorded with the reason, what
+    // staging said and when it ends; the stream marks it.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::BREAK_GLASS,
+        glass("staging's cluster is down; hotfix 0.2.0"),
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let row = &body["rows"][0];
+    assert_eq!(row["env"], "staging");
+    assert_eq!(row["reason"], "staging's cluster is down; hotfix 0.2.0");
+    assert!(
+        row["stagingSaid"]
+            .as_str()
+            .unwrap()
+            .contains("could not be reached"),
+        "{row}"
+    );
+    assert_eq!(
+        row["until"].as_u64().unwrap() - row["at"].as_u64().unwrap(),
+        rehearsals::BREAK_GLASS_SECS
+    );
+    let digest = row["digest"].as_str().unwrap().to_string();
+    let seen = acts(&p.prod_stream);
+    assert!(seen.contains(&"break-glass".to_string()), "{seen:?}");
+
+    // The list shows it, active, with the reason and the person.
+    let (status, listed) = call(
+        &p.prod_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{listed}");
+    let g = &listed["rows"][0]["brokenGlass"][0];
+    assert_eq!(g["digest"], digest.as_str());
+    assert_eq!(g["actor"], ADA);
+    assert_eq!(g["active"], true);
+    assert_eq!(g["reason"], "staging's cluster is down; hotfix 0.2.0");
+
+    // The step's stored plan runs now.
+    let ran = run_on_production(&p)
+        .await
+        .expect("the step runs under break-glass");
+    assert!(
+        matches!(ran, ordo_host::evolve::StepRun::Ran { .. }),
+        "{ran:?}"
+    );
+    assert!(!lacks_mood(&p.prod).await);
+
+    // Another digest for the same step is still refused.
+    let plan = ordo_host::evolve::Plans::on(&p.prod)
+        .latest("0.1.0", "0.2.0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.digest, digest);
+    let other = ordo_host::evolve::StoredPlan {
+        digest: "sha256:0000".into(),
+        ..plan.clone()
+    };
+    let e = rehearsals::require_rehearsed(&p.prod, &other)
+        .await
+        .unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed");
+
+    // Once it ends, the same digest is refused again, and the list says
+    // it ended.
+    p.prod
+        .rows("UPDATE \"$rehearsal_break_glass\" SET \"until\" = 1")
+        .await
+        .unwrap();
+    let e = rehearsals::require_rehearsed(&p.prod, &plan)
+        .await
+        .unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed");
+    let (_, listed) = call(
+        &p.prod_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &prod(),
+    )
+    .await;
+    assert_eq!(listed["rows"][0]["brokenGlass"][0]["active"], false);
 }

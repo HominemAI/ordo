@@ -348,10 +348,19 @@ command after that goes to the door with that session:
   --prune attachments.size` prunes nothing on the first ask, is refused
   without `--confirm-deployment notes`, and removes the column when asked
   with both. The stack serves the exit ops (`ORDO_EXIT_BUNDLE_DIR`).
+- `moves` (`tests/evolve/dual-writes.spec.ts`, after `rehearsal`, before `branch`):
+  the version production serves with `notes.title` renamed to `heading`
+  with `prev`, made from notes v3's file at run time (0.3.6 after
+  `rehearsal`, 0.3.2 run alone). `ordo evolve --tenant <Ada> --budget 1
+  --chunk-rows 2` stops the move in `backfilling`; Ada retitles a note and
+  adds one; the move switches into its soak; she retitles another; `--revert`
+  takes her back and, after a reload, every note holds its new title. The
+  move switches again and `--close-soak` orphans `notes.title` (increment
+  11a).
 
 Each prints every command and its answer in the run's log. Run alone with
-`--project=evolve --no-deps`, `--project=evolve-checks --no-deps` or
-`--project=orphans --no-deps`.
+`--project=evolve --no-deps`, `--project=evolve-checks --no-deps`,
+`--project=orphans --no-deps` or `--project=moves --no-deps`.
 
 ## The console
 

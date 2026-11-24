@@ -14,7 +14,14 @@
 //!   removes a sign-in method some people rely on stops, and goes on only
 //!   with `--approve-sign-in-removal <count>` (ruled 2026-11-23, Q6).
 //! - `ordo evolve --tenant <id> [--to Y]` replays the stored path on the
-//!   tenant's database, then pins it (`std.deployment.replay`).
+//!   tenant's database, then pins it (`std.deployment.replay`). A step that
+//!   rewrites data (a rename, a filled field) moves the tenant with dual
+//!   writes (increment 11a): it keeps writing, the backfill runs (`--budget`
+//!   chunks of `--chunk-rows` at a time; run again to resume), the pin
+//!   switches, and a soak (`--soak`, 7 days by default) keeps the old shape
+//!   current. `--revert` returns it in the soak with every write kept
+//!   (`std.deployment.revertSoak`); `--close-soak` ends the soak now
+//!   (`std.deployment.closeSoak`).
 //! - `ordo evolve --list [--from X] [--to Y]` lists the stored plans
 //!   (`std.deployment.plans`).
 //! - `ordo evolve --orphans` lists what versions left behind in every
@@ -44,9 +51,14 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     an expression over the row's own fields, or a backend function of the new version with
     the secrets and hosts it may use. A backfill runs in chunks and resumes from its cursor.
     Its audit record is one summary per tenant; --audit-images writes every row's images.
-ordo evolve --tenant <id> [--to <version>]  --host <h> ...
+ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
-    (to the active version when --to is absent).
+    (to the active version when --to is absent). A step that rewrites data moves the tenant
+    with dual writes: every write keeps both shapes while the backfill runs and through the
+    soak. --budget stops the backfill after that many chunks; run again to resume.
+ordo evolve --tenant <id> --revert | --close-soak  --host <h> ...
+    in the soak, move the tenant back with every write kept, or close the soak now: the old
+    columns are orphaned and readers lose them.
 ordo evolve --list [--from <version>] [--to <version>]  --host <h> ...
     the stored plans.
 ordo evolve --orphans  --host <h> ...
@@ -73,6 +85,11 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--prune",
         "--confirm",
         "--confirm-deployment",
+        "--budget",
+        "--chunk-rows",
+        "--soak",
+        "--revert",
+        "--close-soak",
     ];
     allowed.extend(crate::operator::DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
@@ -342,15 +359,105 @@ async fn list(host: &crate::wire::Host, flags: &Flags) -> Outcome {
     Outcome::ok(out)
 }
 
+/// A move with dual writes, for a person (increment 11a).
+fn move_lines(mv: &serde_json::Value) -> String {
+    let mut out = String::new();
+    let phase = mv["phase"].as_str().unwrap_or("?");
+    out.push_str(&format!(
+        "move       {} to {}: {phase}\n",
+        mv["from"].as_str().unwrap_or("?"),
+        mv["to"].as_str().unwrap_or("?")
+    ));
+    match phase {
+        "backfilling" => out.push_str(
+            "           every write keeps both shapes; run again to resume the backfill\n",
+        ),
+        "gated" => out.push_str(&format!(
+            "           serving {}, both shapes current; `--tenant <id>` switches it again\n",
+            mv["from"].as_str().unwrap_or("?")
+        )),
+        "soaking" => {
+            if let Some(until) = mv["soakUntil"].as_u64() {
+                out.push_str(&format!(
+                    "soak       until {}; every write keeps {}'s shape too. `--revert` goes \
+                     back with every write kept, `--close-soak` ends it now\n",
+                    ordo_host::versions::utc_minute(until),
+                    mv["from"].as_str().unwrap_or("?")
+                ));
+            }
+        }
+        "closed" => {
+            let gone: Vec<&str> = mv["orphaned"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|o| o.as_str())
+                .collect();
+            out.push_str(&format!(
+                "closed     the soak is over{}\n",
+                if gone.is_empty() {
+                    String::new()
+                } else {
+                    format!("; orphaned: {}", gone.join(", "))
+                }
+            ));
+        }
+        _ => {}
+    }
+    out
+}
+
+async fn soak(host: &crate::wire::Host, flags: &Flags, tenant: &str, op: &str) -> Outcome {
+    let row = match crate::wire::door_op(
+        host,
+        flags,
+        op,
+        serde_json::json!({ "tenant": tenant }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let mut out = format!("tenant     {tenant}\n");
+    if let Some(p) = row["pinned"].as_object() {
+        out.push_str(&format!(
+            "pinned     {} (was {})\n",
+            p.get("to").and_then(|v| v.as_str()).unwrap_or("?"),
+            p.get("from").and_then(|v| v.as_str()).unwrap_or("none")
+        ));
+    }
+    out.push_str(&move_lines(&row));
+    Outcome::ok(out)
+}
+
 async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
     let [tenant] = flags.positional.as_slice() else {
         return Outcome::usage(format!("name one tenant: `--tenant <id>`\n{USAGE}\n"));
     };
+    if flags.has("--revert") && flags.has("--close-soak") {
+        return Outcome::usage(format!(
+            "`--revert` and `--close-soak` are two acts: name one\n{USAGE}\n"
+        ));
+    }
+    if flags.has("--revert") {
+        return soak(host, flags, tenant, ordo_host::deploy_ops::REVERT_SOAK).await;
+    }
+    if flags.has("--close-soak") {
+        return soak(host, flags, tenant, ordo_host::deploy_ops::CLOSE_SOAK).await;
+    }
     let row = match crate::wire::door_op(
         host,
         flags,
         ordo_host::deploy_ops::REPLAY,
-        serde_json::json!({ "tenant": tenant, "to": flags.named_value("--to") }),
+        serde_json::json!({
+            "tenant": tenant,
+            "to": flags.named_value("--to"),
+            "budget": flags.named_value("--budget"),
+            "chunkRows": flags.named_value("--chunk-rows"),
+            "soak": flags.named_value("--soak"),
+        }),
         true,
     )
     .await
@@ -379,7 +486,9 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
             out.push_str(&format!("{}\n", backfill_line(b)));
         }
     }
-    if row["pinned"].is_null() {
+    if row["pinned"].is_null() && row["move"].is_object() {
+        // A move in its soak, run again: nothing moved this time.
+    } else if row["pinned"].is_null() {
         out.push_str("pinned     not yet: a backfill is still running; replay again to resume\n");
     } else {
         out.push_str(&format!(
@@ -387,6 +496,9 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
             row["pinned"]["to"].as_str().unwrap_or("?"),
             row["pinned"]["from"].as_str().unwrap_or("none")
         ));
+    }
+    if row["move"].is_object() {
+        out.push_str(&move_lines(&row["move"]));
     }
     Outcome::ok(out)
 }

@@ -1,7 +1,9 @@
 # The backfill worker and dual writes: how one tenant moves through a transforming step
 
 Status: **B1, B3 and B6 built 2026-11-23** (`plan-versions.md` increment
-10b; `crates/ordo-host/src/backfill.rs`). B2, B4 and B5 are not built.
+10b; `crates/ordo-host/src/backfill.rs`). **B2 and B4 built 2026-11-24**
+(increment 11a, try 1; `crates/ordo-host/src/dual_writes.rs`,
+`crates/ordo-exec/src/overlay.rs`). B5 is not built.
 What was built differs from the text below in the places marked
 "Built". Written by the review
 of the evolution plans (`review-evolution-plans-2026-11-23.md`). It is the
@@ -170,6 +172,54 @@ between them is needed.
 3. Does a write that Y's guard refuses read clearly to the person who made
    it?
 
+**Built (11a, try 1, 2026-11-24).** What the try found:
+
+- The overlay is not a variant of X's `Loaded`. It is data on the tenant's
+  pool handle (`Pool::with_overlay`), run by the write protocol after the
+  op's statements and before the chain append, in the same transaction. It
+  sets the other version's columns on every row the command group wrote,
+  by `(entity, id)`, then checks the guards on those rows. The op's plan is
+  untouched, so every op of X and Y gets it, with no compiler change.
+- 1: the forward `SET` is the backfill's own SQL, the mapping lowered by
+  `render_mapping`. A rename's reverse is the new column. A B5 fill keeps
+  what a row holds (`coalesce`). A backfill function has no per-row
+  mapping, so its step runs as before, with no dual writes (D16).
+- 2: one `MoveOverlay` per move behind an `Arc`, a few hundred bytes: its
+  SQL strings. A tenant's view is cut again when its overlay changes.
+- 3: a refused write answers `check_violation`, naming both versions, the
+  field, the row and the commands that finish or revert the move.
+- The guards are each side's `required` on the moved fields: the database
+  cannot hold them while both versions write, since a `NOT NULL` is
+  checked per statement, before the overlay runs. The expand opens the new
+  column; its `NOT NULL` lands at the soak's close.
+- A rename's old column keeps its `NOT NULL`, so the version before still
+  loads over the database (increment 15's rule). An insert by Y does not
+  name it, so it takes its default first: its own, or the new field's when
+  it has none. A required field renamed with no default is refused
+  (`prev_default_required`). The reverse `SET` keeps the old value when Y
+  leaves the new one empty (`coalesce`), and the guard refuses the write.
+- **Renames outside a move** (merged 2026-11-24, replacing increment 15's
+  sync trigger). A rename `ordo apply` makes, or a stored step runs with
+  `--run`, has both versions serving on one database until the pins move,
+  with no `$moves` row. Each node reads the renames every stored version
+  declares (`read_renames`, with the pins; storing a version nudges the
+  stream) and gives each served version a rename overlay
+  (`rename_overlay`): the renaming version sets the old column from the
+  new one, a version still on the old name sets the new column from the
+  old one. Each is its own statement under a savepoint, skipped on a
+  database without the new column. A move's own overlay takes precedence.
+  A rename's copy in a `--run` step is verified under live writes.
+- The overlay is keyed by version, never by phase: forward for a write on
+  X, reverse on Y. A node that took the new pin before the new move cannot
+  run one version's overlay under the other. The pin stream reads the
+  moves before the pins.
+- A rename in a stored plan is copied by the backfill worker (B4), in
+  chunks, rather than by one `UPDATE` in the step (increment 15's `ordo
+  apply` path keeps its `UPDATE`). Verify under live writes checks the
+  mapping on every row and records the count and hash it reads; the
+  per-chunk hashes are not compared, since live writes change them.
+- No rehearsal against a copy of a real tenant's data was run (§8).
+
 ---
 
 ## 4 · Shared databases
@@ -327,8 +377,8 @@ in one database and 1 in its own.
 | B1 | 10b | M | `$backfills`, the chunk loop, retry and dead-letter, the move lock, phases `expanding` and `backfilling` with no live writes |
 | B3 | 10b | M | Verify; the golden test, then the summarised group and the full-image option |
 | B6 | 10b | S | Backfill functions |
-| B2 | 11a | L, research, 2 to 3 tries | The move overlay: forward dual writes on X, both guards, the phase on the pin stream |
-| B4 | 11a | M | The switch, reverse dual writes on Y, the soak, revert in the soak, soak close into `$orphans` |
+| B2 | 11a | L, research, 2 to 3 tries | The move overlay: forward dual writes on X, both guards, the phase on the pin stream. **Built 2026-11-24, try 1** |
+| B4 | 11a | M | The switch, reverse dual writes on Y, the soak, revert in the soak, soak close into `$orphans`. **Built 2026-11-24** |
 | B5 | 11b | M | Driven by a rollout; shared-database constraints (§4); `ordo rollback` and `--dry-run` |
 
 What sets the pace:
@@ -341,6 +391,31 @@ What sets the pace:
 - Q10 and Q14, and Q3 for B5.
 
 ---
+
+**Built (B4, 2026-11-24).**
+
+- `$moves` gains `step` and `overlay`; phases `backfilling`, `gated`,
+  `soaking` beside increment 7's. `ordo evolve --tenant <id>`
+  (`std.deployment.replay`) opens the move, runs the expand once, the
+  backfill under `--budget` and `--chunk-rows`, verify, and the switch.
+  Run again, it resumes. `--soak` sets `soak.length` for the move: `7d` by
+  default, `0` closes at the switch. It is a run option, not in the plan's
+  digest (asked).
+- Opening, the switch, a revert and the close each raise the tenant's pin
+  epoch in the transaction that changes the move, and the fence in the
+  tenant's database at once.
+- `--revert` (`std.deployment.revertSoak`) moves the pin back in the soak,
+  phase `gated`. `--close-soak` (`std.deployment.closeSoak`) closes it now;
+  the tenant catch-up's tick closes it when `soak_until` passes. The close
+  lands the new columns' `NOT NULL`, records Y, writes the old column to
+  `$orphans` (increment 14's table) and makes the reader grants again.
+- A hand pin, an activation and the catch-up leave a tenant in such a move
+  alone; `ordo versions pin` refuses naming the move's commands.
+- Refused: a tenant on the deployment's own database (shared, 11b); a path
+  whose rewriting step is not the only one left.
+- Tests: `notes_app.rs`,
+  `a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keeps_every_write`;
+  notes e2e project `moves` (`tests/evolve/dual-writes.spec.ts`).
 
 ## 9 · Tests
 

@@ -154,6 +154,10 @@ pub const PLANS: &str = crate::evolve::PLANS;
 pub const REPLAY: &str = crate::evolve::REPLAY;
 /// What a rollback to a version would find: its externals and peers now.
 pub const ROLLBACK_CHECK: &str = crate::evolve::ROLLBACK_CHECK;
+/// A tenant in its soak back on the version it moved from (increment 11a).
+pub const REVERT_SOAK: &str = crate::evolve::REVERT_SOAK;
+/// End a tenant's soak now (increment 11a).
+pub const CLOSE_SOAK: &str = crate::evolve::CLOSE_SOAK;
 /// **Rollouts** (`plan-versions.md` §3.7, increment 10): start one, read
 /// where it stands, resume, skip a tenant, retry one, abort, finish by
 /// hand, and hold a tenant ([`crate::rollouts`]). What `ordo rollout` does.
@@ -171,7 +175,7 @@ pub const ORPHANS: &str = crate::orphan_ops::ORPHANS;
 /// Remove one orphan from every database, once asked twice.
 pub const PRUNE: &str = crate::orphan_ops::PRUNE;
 
-pub const OPS: [&str; 37] = [
+pub const OPS: [&str; 39] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -199,6 +203,8 @@ pub const OPS: [&str; 37] = [
     PLANS,
     REPLAY,
     ROLLBACK_CHECK,
+    REVERT_SOAK,
+    CLOSE_SOAK,
     ROLLOUT_START,
     ROLLOUT_STATUS,
     ROLLOUT_RESUME,
@@ -921,7 +927,7 @@ pub async fn execute(
             }
             row
         }
-        EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK => {
+        EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK | REVERT_SOAK | CLOSE_SOAK => {
             crate::evolve::execute(ops, name, bound, caller).await?
         }
         name if crate::rollouts::OPS.contains(&name) => {

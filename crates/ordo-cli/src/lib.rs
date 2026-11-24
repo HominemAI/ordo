@@ -36,6 +36,7 @@ use ordo_schema::{build_with_keys, FieldTy, KeyTable, Schema};
 use ordo_sema::Registry;
 use ordo_syntax::parse_program;
 
+pub mod branches;
 pub mod deploy_wait;
 pub mod dev;
 pub mod dev_db;
@@ -55,6 +56,7 @@ pub mod rollout;
 pub mod signin;
 pub mod skill;
 pub mod sources;
+pub mod tenant_builds;
 pub mod triggers;
 pub mod windows;
 // 17u: the CLI talking to a deployment rather than to its database.

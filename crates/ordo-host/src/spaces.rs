@@ -662,6 +662,17 @@ impl Spaces {
             Some(e) => pool.with_pin_epoch(e),
             None => pool,
         };
+        // Dual writes (increment 11a): a tenant in a move, or served a
+        // version a rename reaches, runs the overlay of the version it is
+        // served, keeping the other version's columns current in the same
+        // transaction.
+        let pool = match self
+            .deployment
+            .overlay_for(space, &live.version, &live.fixture.schema)
+        {
+            Some(o) => pool.with_overlay(Some(o)),
+            None => pool,
+        };
 
         // A tenant pinned to a version other than the active one: its
         // database must be that version's shape. Asked once per node.
@@ -797,6 +808,11 @@ impl Spaces {
             if pinned != serving && self.deployment.loaded(&pinned).is_some() {
                 return None;
             }
+        }
+        // A move with dual writes (increment 11a): its database records
+        // the move's `from` until the soak closes, and serves both.
+        if self.deployment.move_of(space).is_some() {
+            return None;
         }
         // **A deployment that cannot name its own version has no basis to
         // call anything behind**, and there are two ways to be in that
@@ -1094,6 +1110,16 @@ impl Spaces {
         if self.fits.lock().expect("fit cache").contains(&key) {
             return Ok(());
         }
+        // A move with dual writes (increment 11a) keeps both its versions'
+        // shapes in its database until the soak closes. Not cached: the
+        // close makes the database one version again.
+        if self
+            .deployment
+            .move_of(space)
+            .is_some_and(|(from, to)| live.version == from || live.version == to)
+        {
+            return Ok(());
+        }
         if let Ok(ordo_exec::spacedb::TargetVersion::At(at)) =
             ordo_exec::spacedb::recorded_version(pool).await
         {
@@ -1128,6 +1154,17 @@ impl Spaces {
     /// ([`ordo_exec::PoolError::PinMoved`]). Whether the pin this node
     /// holds changed.
     pub async fn reload_pin(&self, space: &str) -> bool {
+        // The tenant's move with dual writes rides its pin (increment 11a):
+        // read first, so a write under the new pin carries its overlay.
+        match crate::versions::Versions::on(self.witness.pool())
+            .dual_move(space)
+            .await
+        {
+            Ok(m) => self
+                .deployment
+                .set_move(space, m.as_ref().and_then(crate::dual_writes::overlays_of)),
+            Err(e) => eprintln!("space {space}: its move could not be read again ({e})"),
+        }
         match crate::versions::Versions::on(self.witness.pool())
             .pin_of(space)
             .await

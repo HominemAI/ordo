@@ -67,11 +67,16 @@
 //! declares, and the plan shows both ([`BackfillFunctions`] is handed the
 //! declared lists and nothing else).
 //!
-//! # Live writes
+//! # Live writes (increment 11a)
 //!
-//! Not here. This increment runs with no live writes to the filled entity
-//! in mind; the dual writes that keep a running tenant's writes in the new
-//! shape are increment 11a (B2, B4).
+//! A tenant that moves keeps writing while the worker runs. The move
+//! overlay (`ordo_exec::overlay`) sets each written row's new column by the
+//! same mapping in the write's own transaction, so the worker and a write
+//! agree whichever runs second. A rename (B4) copies every row, since its
+//! new column may hold its default. Verify under live writes
+//! ([`Backfill::verify_live_and_close`]) checks the mapping on every row and
+//! records the count and hash it reads, rather than comparing them with the
+//! chunks', which live writes change by design.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -826,8 +831,16 @@ impl<'a> Backfill<'a> {
         };
         match (&self.fill.mapping, &self.fill.sql) {
             (FillMapping::Expr(_), Some(sql)) => {
+                // A rename (B4) copies every row: its new column may hold
+                // the default it was added with. A new or newly required
+                // field fills only what is empty.
+                let only_empty = if self.fill.code == "B4" {
+                    String::new()
+                } else {
+                    format!(" AND {} IS NULL", self.col())
+                };
                 tx.rows(&format!(
-                    "UPDATE {t} SET {c} = ({sql}) WHERE {range} AND {c} IS NULL",
+                    "UPDATE {t} SET {c} = ({sql}) WHERE {range}{only_empty}",
                     t = self.table(),
                     c = self.col(),
                 ))
@@ -1211,7 +1224,22 @@ impl<'a> Backfill<'a> {
     /// beside the plaintext is cleared with the cursor and the space
     /// hashes, so a run again seals each row's plaintext as it is then.
     pub async fn verify_and_close(&self) -> Result<Verified, BackfillRefusal> {
-        let out = self.verify_inner().await;
+        self.verify(false).await
+    }
+
+    /// **Verify under live writes** (increment 11a): the tenant kept
+    /// writing while the worker ran, and the move overlay kept each row's
+    /// new column at the mapping. So a row added, or a value changed behind
+    /// the cursor, is expected, and the per-chunk counts and hashes are not
+    /// compared. What must hold is the plan's verify (§5): no row left null,
+    /// and every row's new column equal to the mapping over its own
+    /// columns. The record then carries the count and hash read now.
+    pub async fn verify_live_and_close(&self) -> Result<Verified, BackfillRefusal> {
+        self.verify(true).await
+    }
+
+    async fn verify(&self, live: bool) -> Result<Verified, BackfillRefusal> {
+        let out = self.verify_inner(live).await;
         if let (Err(BackfillRefusal::Verify { .. }), Some(_)) = (&out, &self.fill.sealing_from) {
             let tx = self.pool.begin_for(OpClass::AddressedWrite).await?;
             tx.rows(&format!(
@@ -1237,7 +1265,7 @@ impl<'a> Backfill<'a> {
         out
     }
 
-    async fn verify_inner(&self) -> Result<Verified, BackfillRefusal> {
+    async fn verify_inner(&self, live: bool) -> Result<Verified, BackfillRefusal> {
         let p = self.progress().await?;
         if p.finished() {
             return Ok(Verified {
@@ -1280,7 +1308,7 @@ impl<'a> Backfill<'a> {
         }
         // A new column (B2) filled by an expression holds the mapping on
         // every row. A B5 field kept what its rows already held.
-        if let (FillMapping::Expr(_), Some(sql), "B2") =
+        if let (FillMapping::Expr(_), Some(sql), "B2" | "B4") =
             (&self.fill.mapping, &self.fill.sql, self.fill.code)
         {
             let off = self
@@ -1400,7 +1428,7 @@ impl<'a> Backfill<'a> {
                 recorded.insert(s, (n, h));
             }
         }
-        for (s, (n, h)) in &got {
+        for (s, (n, h)) in got.iter().filter(|_| !live) {
             match recorded.get(s) {
                 Some((rn, rh)) if rn == n && rh == h => {}
                 Some((rn, _)) if rn != n => {
@@ -1429,7 +1457,7 @@ impl<'a> Backfill<'a> {
                 }
             }
         }
-        if let Some(s) = recorded.keys().find(|s| !got.contains_key(*s)) {
+        if let Some(s) = recorded.keys().find(|s| !live && !got.contains_key(*s)) {
             return Err(fail(
                 None,
                 format!("in space `{s}` lost every row the backfill filled"),

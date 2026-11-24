@@ -143,7 +143,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
-        "evolve" => &["--run", "--list", "--orphans"],
+        "evolve" => &["--run", "--list", "--orphans", "--revert", "--close-soak"],
         "rollout" => &["--clear", "--share-partners"],
         "release-check" => &["--json", "--override"],
         _ => &[],
@@ -412,7 +412,9 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
         "clones" => rt.block_on(clones_cmd(flags)),
+        "branches" => rt.block_on(crate::branches::run(flags)),
         "rehearsals" => rt.block_on(rehearsals_cmd(flags)),
+        "tenant-builds" => rt.block_on(crate::tenant_builds::run(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
         "rollout" => rt.block_on(crate::rollout::run(flags)),
@@ -2013,11 +2015,37 @@ async fn apply_once(flags: &Flags) -> Outcome {
         "--no-wait",
         "--wait-secs",
         "--env",
+        "--branch",
+        "--seed",
         "--host",
         "--token",
         "--space",
     ]) {
         return Outcome::usage(e);
+    }
+    // `--branch` (`plan-versions.md` §3.3): through the door only, never
+    // activated, in dev. `--seed` comes with it.
+    let branch = flags.named_value("--branch").map(str::to_string);
+    if branch.is_none() && flags.named_value("--seed").is_some() {
+        return Outcome::usage(
+            "`--seed <file>` fills a new branch tenant, so it goes with `--branch <name>`\n".into(),
+        );
+    }
+    if branch.is_some() {
+        for clash in ["--no-activate", "--env", "--as", "--bump"] {
+            if flags.has(clash) || flags.named.contains_key(clash) {
+                return Outcome::usage(format!(
+                    "`--branch` takes no `{clash}`: a branch's version is stored in dev and \
+                     never activated, and serves the branch's own tenant alone\n"
+                ));
+            }
+        }
+        if flags.direct || crate::wire::requested(flags).is_none() {
+            return Outcome::usage(
+                "`--branch` goes through the door: drop `--direct` and give `--host <dev>`\n"
+                    .into(),
+            );
+        }
     }
     // How long to wait for the nodes to serve what this activates
     // (`deploy_wait`). Read before anything is applied, so a bad value
@@ -2094,6 +2122,19 @@ async fn apply_once(flags: &Flags) -> Outcome {
             Ok(c) => c,
             Err(e) => return Outcome::failed(format!("REFUSED  {e}\n")),
         };
+        if let Some(branch) = &branch {
+            return crate::branches::apply(
+                &host,
+                flags,
+                branch,
+                src.text(),
+                code,
+                &provenance,
+                &path,
+                &db,
+            )
+            .await;
+        }
         return crate::wire::apply_over_the_wire(
             &host,
             flags,
@@ -2335,6 +2376,9 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
              objects, increment 5 contracts them)\n"
         )),
         SchemaOutcome::Behind { changes } => behind = changes,
+        SchemaOutcome::Untouched => out.push_str(
+            "schema     untouched  (a branch: the deployment's own database is not changed)\n",
+        ),
     }
     let version = numbered(report.ordinal, &report.version);
     out.push_str(&match report.stored {
@@ -2366,6 +2410,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
              --to {} --run --host <h>`, then activate)\n",
             report.version
         )),
+        Activation::Staged if report.schema == SchemaOutcome::Untouched => out.push_str(
+            "activated  no  (a branch's version serves its own tenant; the deployment still \
+             points where it did)\n",
+        ),
         Activation::Staged => out
             .push_str("activated  no  (--no-activate: the deployment still points where it did)\n"),
         Activation::Switched { from, to } => out.push_str(&format!(
@@ -2970,6 +3018,7 @@ const REHEARSALS_USAGE: &str =
      --reason \"<text>\"  --host <staging> ...\n\
      ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>]  \
      --host <production> ...\n\
+     ordo rehearsals break-glass --from <v> --to <v> --reason \"<text>\"  --host <production> ...\n\
      ordo rehearsals list [--from <v>] [--to <v>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
@@ -2977,6 +3026,8 @@ const REHEARSALS_USAGE: &str =
 /// (`plan-versions.md` §3.2, increment 12b), through the door. `rehearse`
 /// runs on staging, over clones; `accept` runs on production, which reads
 /// staging's signed rehearsal as you, with your own token for staging.
+/// `break-glass` runs on production when staging is down: the step's
+/// stored plan runs without a rehearsal for one hour, with your reason.
 async fn rehearsals_cmd(flags: Flags) -> Outcome {
     let Some(sub) = flags.positional.first().cloned() else {
         return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
@@ -2987,10 +3038,11 @@ async fn rehearsals_cmd(flags: Flags) -> Outcome {
         "list" => &["--from", "--to"],
         "rehearse" => &["--from", "--to", "--clone", "--reason"],
         "accept" => &["--from", "--to", "--from-token", "--trust-key"],
+        "break-glass" => &["--from", "--to", "--reason"],
         other => {
             return Outcome::usage(format!(
                 "unknown `ordo rehearsals` subcommand `{other}`; there are `rehearse`, \
-                 `accept` and `list`\n{REHEARSALS_USAGE}\n"
+                 `accept`, `break-glass` and `list`\n{REHEARSALS_USAGE}\n"
             ))
         }
     };
@@ -3049,6 +3101,27 @@ async fn rehearsals_cmd(flags: Flags) -> Outcome {
                 serde_json::json!({
                     "from": from, "to": to, "tenants": tenants, "reason": reason,
                 }),
+                true,
+            )
+            .await
+        }
+        "break-glass" => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let Some(reason) = named("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why staging is passed by, and is kept on the \
+                     deployment's stream\n"
+                        .into(),
+                );
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::BREAK_GLASS,
+                serde_json::json!({ "from": from, "to": to, "reason": reason }),
                 true,
             )
             .await
@@ -3146,6 +3219,18 @@ fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
             }
             out
         }
+        "break-glass" => format!(
+            "broke glass {} to {}: {} is down\ndigest      {}\nstaging     {}\nreason      {}\n\
+             until       {} (1 hour)\nThe step's stored plan runs here until then, without a \
+             rehearsal. The deployment's stream marks it.\n",
+            s(&row["from"]),
+            s(&row["to"]),
+            s(&row["env"]),
+            s(&row["digest"]),
+            s(&row["stagingSaid"]),
+            s(&row["reason"]),
+            row["until"].as_u64().unwrap_or(0),
+        ),
         _ => {
             let mut out = format!(
                 "environment {}\nsigning key {}\nSIGNED\n",
@@ -3173,6 +3258,23 @@ fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
                     s(&x["digest"]),
                     s(&x["env"]),
                     s(&x["actor"]),
+                ));
+            }
+            out.push_str("BREAK-GLASS\n");
+            for x in row["brokenGlass"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {} to {}  {}  by {}  until {} ({})  reason: {}\n",
+                    s(&x["from"]),
+                    s(&x["to"]),
+                    s(&x["digest"]),
+                    s(&x["actor"]),
+                    x["until"].as_u64().unwrap_or(0),
+                    if x["active"].as_bool() == Some(true) {
+                        "active"
+                    } else {
+                        "ended"
+                    },
+                    s(&x["reason"]),
                 ));
             }
             out

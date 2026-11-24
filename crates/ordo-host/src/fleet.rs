@@ -384,6 +384,10 @@ impl TenantListOps {
                         "reason": m.reason,
                         "since": m.started_at,
                         "line": m.line(),
+                        // A move with dual writes (increment 11a): its
+                        // step and the end of its soak.
+                        "step": (!m.step.is_empty()).then_some(&m.step),
+                        "soakUntil": (m.soak_until > 0).then_some(m.soak_until),
                     })),
                 })
             })

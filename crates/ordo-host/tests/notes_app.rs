@@ -1131,6 +1131,438 @@ async fn a_backfill_over_existing_notes_shows_the_new_values_once_it_completes()
     d.stop();
 }
 
+/// The notes program with `body` renamed to `text` with `prev`, as a
+/// version one patch above, the ops still answering `body`. `text` is
+/// optional, so a write on it can leave the old, required `body` empty,
+/// which the move's guard refuses. `texts` reads the new name, and
+/// `bareNote` writes no text.
+fn renamed_body() -> String {
+    let next = raised(
+        &SOURCE
+            .replace("  body:  text = \"\"\n", "  text: text? prev(body)\n")
+            .replace(
+                "set notes { title: $title, body: $body, tags: $tags, created: $created }",
+                "set notes { title: $title, text: $body, tags: $tags, created: $created }",
+            )
+            .replace(
+                "set notes { id: $id, rev: $rev, title: $title, body: $body, tags: $tags }",
+                "set notes { id: $id, rev: $rev, title: $title, text: $body, tags: $tags }",
+            )
+            .replace(
+                "[id, rev, title, body, tags, created]",
+                "[id, rev, title, body: text, tags, created]",
+            ),
+    ) + "\nop texts unbounded =\n  notes[id, text]\n  sort -created\n\
+         \nop bareNote($title: text, $tags: json, $created: datetime) =\n  \
+         set notes { title: $title, tags: $tags, created: $created }\n";
+    assert!(next.contains("prev(body)"), "the marker line moved");
+    next
+}
+
+/// Ada's note `id` as the database holds it: `(body, text)`.
+async fn both_shapes(pool: &Pool, id: &str) -> (Option<String>, Option<String>) {
+    let rows = pool
+        .rows(&format!(
+            "SELECT body, text FROM notes WHERE id::text = '{id}'"
+        ))
+        .await
+        .expect("the note");
+    let r = rows.first().expect("the note is there");
+    (r[0].clone(), r[1].clone())
+}
+
+/// Edit one of Ada's notes through the door: its body becomes `body`.
+fn edit_body(d: &Deployment, s: &Session, id: &str, body: &str) {
+    let (rows, _) = eventually("the note to edit is read", || {
+        let (status, out) = d.op(&s.space, &s.token, "GET", "myNotes", json!({}));
+        (status == 200).then_some(out)
+    });
+    let note = rows["rows"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|n| n["id"] == id)
+        .cloned()
+        .expect("the note is listed");
+    let (status, out) = d.op(
+        &s.space,
+        &s.token,
+        "POST",
+        "editNote",
+        json!({"id": id, "rev": note["rev"], "title": note["title"], "body": body, "tags": []}),
+    );
+    assert_eq!(status, 200, "{out}");
+}
+
+/// Increment 11a (`plan-versions.md`; `plan-backfill-dual-writes.md` B2,
+/// B4): **a rename on one tenant under live writes loses no write, and a
+/// revert in the soak keeps every write.** The next version renames
+/// `notes.body` to `text` with `prev`. The deployment owner replays Ada's
+/// tenant onto it with a budget of one chunk of 10 rows, so the move stops
+/// in `backfilling` with 20 notes still to copy. Ada edits a note behind
+/// the cursor and one ahead of it, and writes a new one: each is in both
+/// columns at once. The move runs on: verify, the switch, the soak. On the
+/// new version Ada edits again, and each edit reaches `body` too. A write
+/// that would leave `body` empty is refused, naming both versions. Ada is
+/// moved back inside the soak and reads every edit on the old version.
+/// The move switches again and its soak is closed: `body` is orphaned and
+/// the database records the new version.
+///
+/// A regression looks like an edit missing from either column, a verify
+/// that fails on rows the tenant wrote, a pin moved by hand during the
+/// move, or a revert that loses what was written on the new version.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keeps_every_write() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_dual_writes", Some(PAGE)).await;
+    let ada = sign_up(&d, &device(24, "ada"), "Ada");
+    for i in 0..30 {
+        create_note(&d, &ada, &format!("Note {i:02}"), &format!("body {i:02}"));
+    }
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let next = renamed_body();
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let program = ordo_host::schema_apply::Program::compile(&next).expect("compiles");
+    let stored = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored");
+    let to = stored.version.clone();
+    let owner = deployment_owner_token();
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.evolve",
+        json!({"from": from, "to": to}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let plan = &body["rows"][0];
+    assert_eq!(plan["receipt"]["backfills"][0]["code"], "B4", "{plan}");
+    assert_eq!(plan["receipt"]["backfills"][0]["mapping"], "body", "{plan}");
+
+    // The move starts: the expand, and one chunk of 10 rows.
+    let replay = |extra: Value| {
+        let mut params = json!({"tenant": ada.space, "to": to});
+        if let (Some(p), Some(e)) = (params.as_object_mut(), extra.as_object()) {
+            p.extend(e.clone());
+        }
+        d.op(HOME, &owner, "POST", "std.deployment.replay", params)
+    };
+    let (status, body) = replay(json!({"budget": "1", "chunkRows": "10"}));
+    assert_eq!(status, 200, "{body}");
+    let r = &body["rows"][0];
+    assert_eq!(r["move"]["phase"], "backfilling", "{r}");
+    assert!(r["pinned"].is_null(), "{r}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // Ada writes while it is half copied: a note behind the cursor, one
+    // ahead of it, and a new one. Each lands in both columns at once.
+    let theirs = Pool::connect(cfg(&ada.space))
+        .await
+        .expect("Ada's database");
+    let cursor = theirs
+        .rows("SELECT cursor_id FROM \"$backfills\"")
+        .await
+        .expect("the cursor")[0][0]
+        .clone()
+        .expect("a cursor after one chunk");
+    let ids: Vec<String> = theirs
+        .rows("SELECT id::text FROM notes ORDER BY \"$space\", id")
+        .await
+        .expect("ids")
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect();
+    let behind = ids
+        .iter()
+        .find(|i| **i <= cursor)
+        .expect("a row behind")
+        .clone();
+    let ahead = ids
+        .iter()
+        .find(|i| **i > cursor)
+        .expect("a row ahead")
+        .clone();
+    edit_body(&d, &ada, &behind, "typed during the backfill, behind");
+    edit_body(&d, &ada, &ahead, "typed during the backfill, ahead");
+    let fresh = create_note(&d, &ada, "During", "written during the backfill");
+    for (id, want) in [
+        (&behind, "typed during the backfill, behind"),
+        (&ahead, "typed during the backfill, ahead"),
+        (&fresh, "written during the backfill"),
+    ] {
+        let (b, t) = both_shapes(&theirs, id).await;
+        assert_eq!(b.as_deref(), Some(want), "body of {id}");
+        assert_eq!(
+            t.as_deref(),
+            Some(want),
+            "text of {id}: the forward dual write"
+        );
+    }
+
+    // A pin by hand is refused while the move is open, naming its commands.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.pin",
+        json!({"tenant": ada.space, "version": to}),
+    );
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("tenant_moving"), "{body}");
+    assert!(body.to_string().contains("--revert"), "{body}");
+
+    // The rest of the backfill, verify under live writes, the switch.
+    let (status, body) = replay(json!({}));
+    assert_eq!(status, 200, "{body}");
+    let r = &body["rows"][0];
+    assert_eq!(r["move"]["phase"], "soaking", "{r}");
+    assert_eq!(r["pinned"]["to"], json!(to), "{r}");
+    assert_eq!(r["steps"][0]["backfills"][0]["verified"]["rows"], 31, "{r}");
+    assert!(r["move"]["soakUntil"].as_u64().unwrap_or(0) > 0, "{r}");
+
+    // On the new version, an edit writes `body` too.
+    eventually("Ada is served the new version", || {
+        let (status, _) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));
+        (status == 200).then_some(())
+    });
+    edit_body(&d, &ada, &behind, "typed in the soak");
+    let (b, t) = both_shapes(&theirs, &behind).await;
+    assert_eq!(t.as_deref(), Some("typed in the soak"));
+    assert_eq!(
+        b.as_deref(),
+        Some("typed in the soak"),
+        "the reverse dual write"
+    );
+
+    // A write that leaves the old version's required `body` empty is
+    // refused, naming both versions.
+    let (status, body) = d.op(
+        &ada.space,
+        &ada.token,
+        "POST",
+        "bareNote",
+        json!({"title": "no text", "tags": [], "created": stamp()}),
+    );
+    assert_ne!(status, 200, "{body}");
+    let text = body.to_string();
+    assert!(text.contains("check_violation"), "{text}");
+    assert!(text.contains(&from) && text.contains(&to), "{text}");
+    assert!(text.contains("`notes.body`"), "{text}");
+
+    // Revert inside the soak: every write is there on the old version.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.revertSoak",
+        json!({"tenant": ada.space}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["phase"], "gated", "{body}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+    eventually("Ada is served her version again", || {
+        let (status, _) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));
+        (status != 200).then_some(())
+    });
+    let bodies: std::collections::BTreeMap<String, Value> = d
+        .rows(&ada.space, &ada.token, "myNotes")
+        .iter()
+        .map(|n| {
+            (
+                n["id"].as_str().unwrap_or("").to_string(),
+                n["body"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(bodies.len(), 31);
+    assert_eq!(bodies[&behind], "typed in the soak");
+    assert_eq!(bodies[&ahead], "typed during the backfill, ahead");
+    assert_eq!(bodies[&fresh], "written during the backfill");
+    edit_body(&d, &ada, &ahead, "typed after the revert");
+    let (b, t) = both_shapes(&theirs, &ahead).await;
+    assert_eq!(b.as_deref(), Some("typed after the revert"));
+    assert_eq!(t.as_deref(), Some("typed after the revert"));
+
+    // Switched again, then the soak closed: `body` is orphaned, and the
+    // database records the new version alone.
+    let (status, body) = replay(json!({}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["move"]["phase"], "soaking", "{body}");
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.closeSoak",
+        json!({"tenant": ada.space}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["phase"], "closed", "{body}");
+    assert!(
+        body.to_string().contains("notes.body"),
+        "the old column is orphaned: {body}"
+    );
+    let orphan = theirs
+        .rows("SELECT entity, field FROM \"$orphans\"")
+        .await
+        .expect("$orphans");
+    assert!(
+        orphan
+            .iter()
+            .any(|r| r[0].as_deref() == Some("notes") && r[1].as_deref() == Some("body")),
+        "{orphan:?}"
+    );
+    let moves = control
+        .rows("SELECT count(*) FROM \"$moves\"")
+        .await
+        .expect("$moves");
+    assert_eq!(moves[0][0].as_deref(), Some("0"));
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(to.as_str()));
+    let (rows, _) = eventually("Ada reads every note after the close", || {
+        let (status, out) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));
+        (status == 200).then(|| out["rows"].as_array().cloned().unwrap_or_default())
+    });
+    assert_eq!(rows.len(), 31);
+    assert!(rows
+        .iter()
+        .any(|n| n["id"] == json!(ahead) && n["text"] == "typed after the revert"));
+    // A revert after the close needs the step's reverse: no soak is open.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.revertSoak",
+        json!({"tenant": ada.space}),
+    );
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("no_move"), "{body}");
+    d.stop();
+}
+
+/// Increment 11a: **what a move with dual writes refuses, each naming its
+/// fix.** A path whose rewriting step is not the only one left names the
+/// version to replay to first. (A shared database and a function fill are
+/// refused in `backfill.rs`.) A soak
+/// length that is not one names the form. A soak that has not started
+/// cannot be reverted or closed, and the refusal names the move's
+/// commands. With `--soak 0`, the move closes at its switch.
+///
+/// A regression looks like a move started on a shared database, a
+/// half-copied tenant switched by a close, or a soak of 0 left open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_with_dual_writes_refuses_what_it_cannot_keep_current() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_dual_refusals", Some(PAGE)).await;
+    let ada = sign_up(&d, &device(25, "ada"), "Ada");
+    for i in 0..3 {
+        create_note(&d, &ada, &format!("Note {i}"), "body");
+    }
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let store = |source: String| {
+        let control = control.clone();
+        async move {
+            let program = ordo_host::schema_apply::Program::compile(&source).expect("compiles");
+            ordo_host::apply_op::run_program(
+                &control,
+                &ordo_exec::route::SinglePool::new(control.clone()),
+                &program,
+                vec![],
+                "notes-test",
+                "ordo apply",
+                false,
+            )
+            .await
+            .expect("stored")
+            .version
+        }
+    };
+    let next = renamed_body();
+    let to = store(next.clone()).await;
+    // One more version after it, adding a field: a path of 2 steps.
+    let after = store(
+        ordo_plan::artifact::with_declared(
+            &next.replace(
+                "  created: datetime
+",
+                "  created: datetime
+  pinned: bool = false
+",
+            ),
+            "0.1.1",
+            "0.1.2",
+        )
+        .expect("declares 0.1.1"),
+    )
+    .await;
+    let owner = deployment_owner_token();
+    for (a, b) in [(&from, &to), (&to, &after)] {
+        let (status, body) = d.op(
+            HOME,
+            &owner,
+            "POST",
+            "std.deployment.evolve",
+            json!({"from": a, "to": b}),
+        );
+        assert_eq!(status, 200, "{body}");
+    }
+    let replay = |tenant: &str, extra: Value| {
+        let mut params = json!({"tenant": tenant, "to": to});
+        if let (Some(p), Some(e)) = (params.as_object_mut(), extra.as_object()) {
+            p.extend(e.clone());
+        }
+        d.op(HOME, &owner, "POST", "std.deployment.replay", params)
+    };
+
+    // The rewriting step is not the last on the path: replay to it first.
+    let (status, body) = replay(&ada.space, json!({"to": after}));
+    assert_ne!(status, 200, "{body}");
+    let text = body.to_string();
+    assert!(text.contains("runs alone"), "{text}");
+    assert!(text.contains(&format!("--to {to}`")), "{text}");
+
+    // A soak length that is not one.
+    let (status, body) = replay(&ada.space, json!({"soak": "soon"}));
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("`7d`"), "{body}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // Half copied: no soak to revert or close yet.
+    let (status, body) = replay(&ada.space, json!({"budget": "1", "chunkRows": "1"}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["move"]["phase"], "backfilling", "{body}");
+    for op in ["std.deployment.revertSoak", "std.deployment.closeSoak"] {
+        let (status, body) = d.op(HOME, &owner, "POST", op, json!({"tenant": ada.space}));
+        assert_ne!(status, 200, "{op}: {body}");
+        let text = body.to_string();
+        assert!(text.contains("tenant_moving"), "{op}: {text}");
+        assert!(text.contains("backfilling"), "{op}: {text}");
+    }
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // `--soak 0`: the move closes at its switch.
+    let (status, body) = replay(&ada.space, json!({"soak": "0"}));
+    assert_eq!(status, 200, "{body}");
+    let mv = &body["rows"][0]["move"];
+    assert_eq!(mv["phase"], "closed", "{mv}");
+    assert_eq!(mv["orphaned"][0], "notes.body", "{mv}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(to.as_str()));
+    let (rows, _) = eventually("Ada reads her notes on the new version", || {
+        let (status, out) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));
+        (status == 200).then(|| out["rows"].as_array().cloned().unwrap_or_default())
+    });
+    assert_eq!(rows.len(), 3);
+    d.stop();
+}
+
 /// Increment 7 (`plan-versions.md` §2.1). A change one tenant's data cannot
 /// take leaves that tenant serving the version it was on, and the deployment
 /// owner sees why. Ada has two notes and the program makes titles unique,

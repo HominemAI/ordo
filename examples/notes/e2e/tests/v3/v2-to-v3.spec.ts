@@ -20,9 +20,9 @@
  *
  * After the `evolve` project, the database already holds v3's columns and
  * v3 is stored, not active: v2 still serves, and the file and the image are
- * attached under v2 after the rename's copy. The sync trigger the rename
- * made carries their media type to `mediaType`, and the apply here
- * activates v3.
+ * attached under v2 after the rename's copy. The host's dual writes
+ * (increment 11a) carry their media type to `mediaType` in the same write,
+ * and the apply here activates v3.
  *
  * It changes the program for the whole stack, so it runs last and alone
  * (the `v3` project depends on `evolve`, playwright.config.ts). Chromium only.

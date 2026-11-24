@@ -2025,15 +2025,18 @@ entity customers (key: cust, prev: clients) {
 - `prev` is contextual: a field may still be named `prev`.
 - A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
   copies every value into it, and keeps the old column with its
-  `NOT NULL`, so the version before still loads over the database. The old
-  column loses its default. The receipt's reverse copies the values back
-  and drops the new column.
-- No write is lost between the copy and the tenant's pin switch. A trigger
-  (`<table>$<column>$prev`), made in the copy's own transaction, copies a
-  write to either column into the other. So a write the serving version
-  makes after the copy reaches the new column, and a row the new version
-  writes reads whole on the old one. The reverse drops the trigger.
+  `NOT NULL`, so the version before still loads over the database. The
+  receipt's reverse copies the values back and drops the new column.
+- No write is lost between the copy and the tenant's pin switch. The
+  host's dual writes (increment 11a) run in each write's own transaction:
+  a write by the version before also sets the new column, and a write by
+  the new version also sets the old one.
+- A required field renamed needs a default (`prev_default_required`). Each
+  version's insert names only its own column, so the other takes its
+  default first, and the dual writes set it in the same write. An old
+  column with no default of its own takes the new field's.
 - `ordo apply` makes a field rename itself, as it makes an additive change.
+  A stored step copies the values with the backfill worker.
 - An entity rename renders as a rename and is refused as
   `rename_entity_not_built` until the backfill worker (increment 10b).
 - A clean `ordo apply` names each mark whose rename has landed in every

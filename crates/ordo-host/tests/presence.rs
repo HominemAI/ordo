@@ -198,6 +198,9 @@ const READS: &[&str] = &[
     // The clones this deployment holds and the clone settings; deployment
     // owner only, home space.
     "std.deployment.clones",
+    // The dev branches and which are idle; deployment owner only, home
+    // space (increment 5).
+    "std.deployment.branches",
     // What the staging clones would have sent (mail, push, egress), held
     // in the sink; deployment owner only, home space (increment 12).
     "std.deployment.sinks",
@@ -205,6 +208,9 @@ const READS: &[&str] = &[
     // rehearsals accepted here; deployment owner only, home space. Read by
     // production as the person accepting (versions increment 12b).
     "std.deployment.rehearsals",
+    // Every tenant build, its version and the tenants it holds;
+    // deployment owner only, home space (versions increment 16).
+    "std.deployment.tenantBuilds",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

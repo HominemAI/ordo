@@ -138,6 +138,36 @@ export function identityCommand(args: readonly string[]): string {
   return r.stdout;
 }
 
+/** A new developer, just signed in, and their token as `ordo login` keeps it. */
+export interface FreshDeveloper extends Developer {
+  readonly token: () => string;
+}
+
+/**
+ * **A new developer, an admin of `main`, signed in now**: invited with the
+ * host command, joined with a passkey, `ordo login` in a folder of its own.
+ * Its touch is fresh, so the door lets it reach a tenant for the next 5
+ * minutes (a dev branch, `tests/branch`).
+ */
+export async function freshDeveloper(browser: Browser, name: string): Promise<FreshDeveloper> {
+  const { context, page } = await person(browser);
+  const link = /https?:\/\/\S+/.exec(identityCommand(['invite', '--label', name]))?.[0] ?? '';
+  expect(link, 'an invite link').not.toBe('');
+  await join(page, link, name);
+  const dir = `${stack().logs}/cli-config-${name}`;
+  mkdirSync(dir, { recursive: true });
+  await login(page, dir);
+  return {
+    ordo: (args) => run(args, dir),
+    token: () => {
+      const m = /"token"\s*:\s*"([^"]+)"/.exec(readFileSync(`${dir}/sessions.json`, 'utf8'));
+      expect(m, 'a token in the session').not.toBeNull();
+      return m![1]!;
+    },
+    close: () => context.close(),
+  };
+}
+
 /** A developer signed in to two deployments at one identity service. */
 export interface TwoDeployments {
   /** `ordo <args>` with a token for the identity service's own deployment. */

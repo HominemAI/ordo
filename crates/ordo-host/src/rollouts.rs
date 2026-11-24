@@ -20,10 +20,13 @@
 //!   a tenant whose newest `$pins` row since the rollout started is a
 //!   person's `pin` is `skipped`.
 //! - **The deployment's own space is a named step** (Q4), `$deployment`. It
-//!   moves first, or last when `rollout.deployment_space` is `last`. Its
-//!   move is the activation ([`Versions::activate_alone`]): every node loads
-//!   the version and swaps, so the deployment's own space, the public path
-//!   and new tenants move, and no tenant does.
+//!   moves first, or last when `rollout.deployment_space` is `last`. It
+//!   moves like a tenant: its pin (`$own_pin`, [`Versions::pin_own`]) names
+//!   the target, and every node serves it there.
+//! - **"Active" flips at the end** (Q5). When the rollout finishes, or is
+//!   finished by hand, the target is activated with no tenant moved
+//!   ([`Versions::activate_alone`]). Until then sign-in (`AuthApp`) and new
+//!   tenants stay on the version that was active.
 //! - **Strategies**: `rolling`, a batch every `rollout.batch_interval`,
 //!   sized to finish within `rollout.window`; `all`, every tenant in one
 //!   batch. Canary, group first, by query and health are increment 10c.
@@ -1407,11 +1410,13 @@ impl<'a> Rollouts<'a> {
     }
 
     /// **Close the open rollout by hand**, every tenant still to move
-    /// skipped. The deployment's own space moves now when it has not, which
-    /// makes the target active. Refused when `versions.served` would leave
-    /// a skipped tenant on a version it no longer serves.
+    /// skipped. The deployment's own space (`home`) moves now when it has
+    /// not, and the target becomes active (Q5). Refused when
+    /// `versions.served` would leave a skipped tenant on a version it no
+    /// longer serves.
     pub async fn finish(
         &self,
+        home: &str,
         actor: &str,
         reason: Option<&str>,
         at: u64,
@@ -1448,7 +1453,8 @@ impl<'a> Rollouts<'a> {
                 sql_lit(DEPLOYMENT_STEP)
             ))
             .await?;
-        self.deployment_step(&r, actor, at).await?;
+        self.deployment_step(&r, home, actor, at).await?;
+        self.activate(&r, actor, at).await?;
         self.set_state(r.id, RolloutState::Finished, &why, at, "")
             .await?;
         self.get(r.id)
@@ -1505,11 +1511,13 @@ impl<'a> Rollouts<'a> {
         }
     }
 
-    /// Move the deployment's own space, when the rollout has that step and
-    /// it has not moved: the activation that makes the target active.
+    /// Move the deployment's own space (`home`), when the rollout has that
+    /// step and it has not moved: its pin names the target (Q4). "Active"
+    /// does not move.
     async fn deployment_step(
         &self,
         r: &Rollout,
+        home: &str,
         actor: &str,
         at: u64,
     ) -> Result<bool, RolloutRefusal> {
@@ -1520,11 +1528,20 @@ impl<'a> Rollouts<'a> {
             return Ok(false);
         }
         Versions::on(self.pool)
-            .activate_alone(&r.target, actor, Timestamp(at))
+            .pin_own(home, &r.target, r.id, actor, at)
             .await?;
         self.set_tenant(r.id, DEPLOYMENT_STEP, TenantState::Moved, "", at)
             .await?;
         Ok(true)
+    }
+
+    /// The end of a rollout: "active" flips to the target, so sign-in and
+    /// new tenants follow it (Q5). No tenant moves.
+    async fn activate(&self, r: &Rollout, actor: &str, at: u64) -> Result<(), RolloutRefusal> {
+        Versions::on(self.pool)
+            .activate_alone(&r.target, actor, Timestamp(at))
+            .await?;
+        Ok(())
     }
 }
 
@@ -1722,7 +1739,7 @@ async fn lead(
     }
 
     if r.deployment_space == DeploymentSpace::First {
-        out.deployment_moved = rollouts.deployment_step(&r, ACTOR, now).await?;
+        out.deployment_moved = rollouts.deployment_step(&r, &ops.home, ACTOR, now).await?;
     }
 
     let due = r.batches == 0
@@ -1779,8 +1796,10 @@ async fn lead(
         .unwrap_or(0);
     if left == 0 {
         if r.deployment_space == DeploymentSpace::Last {
-            out.deployment_moved |= rollouts.deployment_step(&r, ACTOR, now).await?;
+            out.deployment_moved |= rollouts.deployment_step(&r, &ops.home, ACTOR, now).await?;
         }
+        // "Active" flips last (Q5): sign-in and new tenants follow now.
+        rollouts.activate(&r, ACTOR, now).await?;
         let moved = rollouts.count(r.id, TenantState::Moved).await?;
         let failed = rollouts.count(r.id, TenantState::Failed).await?;
         let skipped = rollouts.count(r.id, TenantState::Skipped).await?;
@@ -2361,7 +2380,7 @@ pub async fn execute(
         }
         FINISH => {
             let r = rollouts
-                .finish(caller, text("reason"), now)
+                .finish(&ops.home, caller, text("reason"), now)
                 .await
                 .map_err(|e| e.to_exec_error("the rollout was not finished"))?;
             ops.record(

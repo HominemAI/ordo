@@ -330,7 +330,7 @@ A node can serve more than one version at once. The active version is the one an
   - Follow it: `ordo rollout status`. It names each tenant that waits, failed or was skipped, and why.
   - Control it: `resume`, `skip <tenant>`, `retry <tenant>`, `abort --reason "..."`, `finish`, `hold <tenant> --reason "..."` or `--clear`. Each is a door op, `std.deployment.rollout.*`, with no reauth, and one entry on the security stream.
   - One rollout runs at a time. A second, and an activation, are refused naming `ordo rollout status` and `ordo rollout abort`. One tenant may still move on its own (`ordo versions pin`), and the rollout then skips it.
-  - The deployment's own space moves first, or last with `rollout.deployment_space` `last`. Its move is the activation: new tenants, the public path and sign-in follow it.
+  - The deployment's own space moves first, like a tenant, or last with `rollout.deployment_space` `last`. The active version changes only when the rollout finishes: sign-in and new tenants follow it then.
   - A tenant outside its maintenance window waits, and so does a held one. A tenant whose database cannot be reached waits; it is never failed.
   - `rollout.failure_threshold` failed tenants pause the rollout. A failed tenant serves its old version. `retry` or `skip` it, then `resume`.
   - `abort` stops new moves. Moved tenants stay; `ordo rollback` moves them back.

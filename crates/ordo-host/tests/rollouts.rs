@@ -270,9 +270,30 @@ async fn a_rolling_rollout_moves_a_batch_per_interval_and_the_deployment_first()
     let t = rollouts::tick(&ops, "node-a", t0).await.expect("tick");
     assert!(t.deployment_moved, "{t:?}");
     assert_eq!(t.moved, ["spc_a"]);
-    assert_eq!(v.active_version().await.unwrap().as_deref(), Some("0.2.0"));
     assert_eq!(on(&pool, "spc_a").await.as_deref(), Some("0.2.0"));
     assert_eq!(on(&pool, "spc_b").await.as_deref(), Some("0.1.0"));
+
+    // **Mid-rollout** (Q4, Q5): the deployment's own space serves 0.2.0,
+    // and every node reads that from the pins. "Active" is still 0.1.0, so
+    // sign-in (`AuthApp`, built from the active version) and a new tenant
+    // stay on 0.1.0 until the rollout finishes.
+    assert_eq!(
+        v.own_pin().await.unwrap().map(|(s, v, _)| (s, v)),
+        Some(("home".to_string(), "0.2.0".to_string()))
+    );
+    let (all, _) = v.all_pins().await.unwrap();
+    assert!(
+        all.iter().any(|(s, v, _)| s == "home" && v == "0.2.0"),
+        "{all:?}"
+    );
+    assert_eq!(v.active_version().await.unwrap().as_deref(), Some("0.1.0"));
+    assert_eq!(
+        v.new_tenant_version().await.unwrap().as_deref(),
+        Some("0.1.0")
+    );
+    tenant(&pool, "spc_new").await;
+    v.pin_new_tenant("spc_new", "t", t0 + 1).await.unwrap();
+    assert_eq!(on(&pool, "spc_new").await.as_deref(), Some("0.1.0"));
 
     // Not due again until the interval has passed.
     let t = rollouts::tick(&ops, "node-a", t0 + 30).await.expect("tick");
@@ -283,11 +304,28 @@ async fn a_rolling_rollout_moves_a_batch_per_interval_and_the_deployment_first()
         .await
         .expect("tick");
     assert_eq!(t.moved, ["spc_c"]);
+    assert!(!t.finished, "the tenant made mid-rollout is still to move");
+    assert_eq!(v.active_version().await.unwrap().as_deref(), Some("0.1.0"));
+    let t = rollouts::tick(&ops, "node-a", t0 + 183)
+        .await
+        .expect("tick");
+    assert_eq!(t.moved, ["spc_new"]);
     assert!(t.finished, "{t:?}");
+    // After the finish, all are on 0.2.0: "active", new tenants, the own
+    // space and every tenant.
+    assert_eq!(v.active_version().await.unwrap().as_deref(), Some("0.2.0"));
+    assert_eq!(
+        v.new_tenant_version().await.unwrap().as_deref(),
+        Some("0.2.0")
+    );
+    assert_eq!(v.own_pin().await.unwrap().unwrap().1, "0.2.0");
+    for t in ["spc_a", "spc_b", "spc_c", "spc_new"] {
+        assert_eq!(on(&pool, t).await.as_deref(), Some("0.2.0"), "{t}");
+    }
 
     let status = r.status(Some(id)).await.unwrap().unwrap();
     assert_eq!(status.rollout.state, RolloutState::Finished);
-    assert_eq!(status.counts["moved"], 3);
+    assert_eq!(status.counts["moved"], 4);
     assert_eq!(status.pending(), 0);
     assert_eq!(status.rollout.leader.as_deref(), Some("node-a"));
     let h = v.pin_history("spc_c").await.unwrap();
@@ -302,7 +340,8 @@ async fn a_rolling_rollout_moves_a_batch_per_interval_and_the_deployment_first()
         ))
         .await
         .unwrap();
-    assert_eq!(tagged[0][0].as_deref(), Some("3"));
+    // 4 tenants and the own space.
+    assert_eq!(tagged[0][0].as_deref(), Some("5"));
     assert_eq!(acts(&stream), ["rollout-finished"]);
     // A new rollout may start now the first is closed.
     stage(&pool, V3).await;
@@ -746,7 +785,7 @@ async fn abort_finish_and_the_stranded_refusal() {
         .unwrap();
     rollouts::tick(&ops, "n", NOW + 3).await.unwrap();
     let finished = r
-        .finish(OWNER, Some("the rest can wait"), NOW + 4)
+        .finish("home", OWNER, Some("the rest can wait"), NOW + 4)
         .await
         .unwrap();
     assert_eq!(finished.state, RolloutState::Finished);

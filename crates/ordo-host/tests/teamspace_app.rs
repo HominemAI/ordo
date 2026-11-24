@@ -1302,7 +1302,25 @@ async fn during_a_rolling_rollout_each_team_is_served_its_own_version() {
         }
     }
 
-    // The next batches come due; the worker moves the other two teams.
+    // Mid-rollout (Q4, Q5): the deployment's own space is on 0.2.0, and
+    // "active" is still 0.1.0, so a team founded now starts on 0.1.0.
+    let own = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(ordo_host::versions::Versions::on(&pool).own_pin())
+    })
+    .expect("the own space's pin");
+    assert_eq!(
+        own.map(|(s, v, _)| (s, v)),
+        Some((HOME.to_string(), "0.2.0".to_string()))
+    );
+    let late = found(&d, &device(64, "di"), "Di");
+    let (status, body) = d.op(&late, "GET", "projectNames", json!({}));
+    assert_ne!(
+        status, 200,
+        "a team founded mid-rollout starts on 0.1.0: {body}"
+    );
+
+    // The next batches come due; the worker moves the other teams.
     pool.rows(&format!(
         "UPDATE \"$rollouts\" SET \"batch_interval\" = 1 WHERE \"id\" = {}",
         started.id
@@ -1316,7 +1334,7 @@ async fn during_a_rolling_rollout_each_team_is_served_its_own_version() {
             .expect("the rollout");
         (s.rollout.state == ordo_host::rollouts::RolloutState::Finished).then_some(())
     });
-    for t in &teams {
+    for t in teams.iter().chain([&late]) {
         eventually(&format!("{} serves 0.2.0", t.who), || {
             let (status, _) = d.op(t, "GET", "projectNames", json!({}));
             (status == 200).then_some(())

@@ -1283,10 +1283,14 @@ partners, health by error rate, the alert channel.
   `Versions`, as `Plans` does. A unique index keeps one rollout open.
 - `rolling`: a batch every `rollout.batch_interval`, sized to finish within
   `rollout.window`, or `--batch-size`. `all`: every tenant in one batch.
-- **The deployment's own space** is the row `$deployment`. Its move is an
-  activation that pins no tenant (`Versions::activate_alone`). So "active"
-  flips when that step runs: first by default, last with
-  `rollout.deployment_space` `last`. See the owner question below.
+- **The deployment's own space** is the row `$deployment` (Q4). It moves
+  like a tenant: its pin is `$own_pin` (`Versions::pin_own`), a `$pins`
+  row and the nudge carry it to every node. First by default, last with
+  `rollout.deployment_space` `last`. Every activation moves it too.
+- **"Active" flips at the end** (Q5): when the rollout finishes, or is
+  finished by hand, `Versions::activate_alone` activates the target with no
+  tenant moved. Until then sign-in and new tenants stay on the version that
+  was active. Abort leaves "active" where it was.
 - A tenant on the deployment's database is pinned, cause `rollout`, its
   `$pins.rollout` naming the rollout. A tenant with its own database is
   brought to the target (`bring_forward_from`), gated, then pinned, under

@@ -990,27 +990,9 @@ async fn a_sealed_field_gains_its_blind_index_under_live_writes() {
     }
 }
 
-/// B8 through `ordo apply`, `sealed unique`, and sealing and indexing in one
-/// step are refused by name, each naming what to do.
+/// B8 through `ordo apply` is refused by name, naming what to do.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_blind_index_outside_a_stored_plan_or_unique_is_refused_by_name() {
-    let (_rpg, registry) = empty("ordo_seal_bidx_refused_reg").await;
-    store(&registry, &sealed_v1()).await;
-    store(&registry, &indexed_v2(true)).await;
-    let err = evolve::evolve(
-        &registry,
-        "1.0.0",
-        "1.1.0",
-        &Choices::default(),
-        None,
-        OWNER,
-        1,
-    )
-    .await
-    .expect_err("refused");
-    let text = format!("{err:?}");
-    assert!(text.contains("sealed_unique_backfill_not_built"), "{text}");
-
+async fn a_blind_index_outside_a_stored_plan_is_refused_by_name() {
     let (_tpg, tenant) = empty("ordo_seal_bidx_refused_tenant").await;
     let x = Program::compile(&sealed_v1()).expect("1.0.0");
     let y = Program::compile(&indexed_v2(false)).expect("1.1.0");
@@ -1024,4 +1006,520 @@ async fn a_blind_index_outside_a_stored_plan_or_unique_is_refused_by_name() {
     let text = format!("{plan:?}");
     assert!(text.contains("index_needs_stored_plan"), "{text}");
     assert!(text.contains("ordo evolve"), "names the command: {text}");
+}
+
+// ── part 3: `sealed unique` by backfill, B10, the own space ─────────────
+
+/// The ids of the notes titled `titles`, in that order.
+fn ids_of(pg: &Pg, titles: &[&str]) -> Vec<String> {
+    titles
+        .iter()
+        .map(|t| one(pg, &format!("SELECT id FROM note WHERE title = '{t}'")))
+        .collect()
+}
+
+/// A run of `plan` on `tenant` to its end, or its refusal.
+#[allow(clippy::result_large_err)]
+async fn run_to_end(
+    registry: &Pool,
+    tenant: &Pool,
+    plan: &evolve::StoredPlan,
+    keys: &Arc<dyn KeyProvider>,
+) -> Result<StepRun, EvolveRefusal> {
+    evolve::run_step_with(
+        registry,
+        tenant,
+        "tenant-db",
+        plan,
+        OWNER,
+        &ctx(Some(keys.clone()), 100, None),
+    )
+    .await
+}
+
+/// **`sealed indexed unique` by backfill** (B8 with C1 over the blind
+/// indexes). Two notes of one space hold one body. The step computes every
+/// index, verifies, then reads the duplicates over the indexes and refuses
+/// the end, naming both rows; nothing is dropped and `$seals` keeps the
+/// step, so writes keep the index current. One note is edited by the
+/// version before; the step runs again, ends, and the constraint stands: a
+/// third note with that body is refused.
+///
+/// A regression looks like a refusal naming no rows, a constraint over
+/// duplicates, or a unique the version after does not enforce.
+#[tokio::test(flavor = "multi_thread")]
+async fn sealed_unique_by_backfill_refuses_duplicates_by_row_then_lands() {
+    let (_rpg, registry, tpg, tenant, plan) = setup_with(
+        "ordo_seal_bidx_uq",
+        &sealed_v1(),
+        &indexed_v2(true),
+        &Choices::default(),
+    )
+    .await;
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).expect("json");
+    let bf = &receipt["backfills"][0];
+    assert_eq!(bf["code"], "B8", "{receipt}");
+    assert!(
+        bf["unique"].as_str().unwrap_or_default().contains("refuse"),
+        "the receipt says what a duplicate does: {receipt}"
+    );
+    let keys: Arc<dyn KeyProvider> = Arc::new(TestProvider::new());
+    let a = node(&tpg.db, &sealed_v1(), "a", keys.clone()).await;
+    for (title, body) in [("one", "Same"), ("two", "Same"), ("three", "Other")] {
+        a.write(format!(r#"addNote($title: "{title}", $body: "{body}")"#))
+            .await
+            .expect("a write before");
+    }
+    let ids = ids_of(&tpg, &["one", "two"]);
+
+    let err = run_to_end(&registry, &tenant, &plan, &keys)
+        .await
+        .expect_err("duplicates refuse the end");
+    let text = err.to_string();
+    assert!(text.contains("sealed_unique_duplicates"), "{text}");
+    for id in &ids {
+        assert!(text.contains(id.as_str()), "names row {id}: {text}");
+    }
+    assert!(text.contains("run the step again"), "{text}");
+    assert_eq!(recorded(&tpg), "1.0.0", "the version before is recorded");
+    assert_eq!(one(&tpg, "SELECT kind FROM \"$seals\""), "index");
+
+    a.write(format!(
+        r#"editNote($id: "{}", $rev: 1, $title: "two", $body: "Changed")"#,
+        ids[1]
+    ))
+    .await
+    .expect("the version before edits the duplicate");
+    let ran = run_to_end(&registry, &tenant, &plan, &keys)
+        .await
+        .expect("the step ends");
+    assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+    assert_eq!(recorded(&tpg), "1.1.0");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'note$body$uq'"
+        ),
+        "1",
+        "the unique lands at the end"
+    );
+    // `set` over a unique field is keyed by it: a second `Same` is the
+    // same note, never a second row.
+    let y = node(&tpg.db, &indexed_v2(true), "y", keys.clone()).await;
+    y.write(r#"addNote($title: "four", $body: "Same")"#.into())
+        .await
+        .expect("a write keyed by the unique");
+    assert_eq!(
+        one(&tpg, "SELECT count(*) FROM note"),
+        "3",
+        "no second `Same`"
+    );
+    assert_eq!(
+        one(
+            &tpg,
+            &format!("SELECT title FROM note WHERE id = '{}'", ids[0])
+        ),
+        "four",
+        "the note holding `Same` is the one written"
+    );
+}
+
+fn sealed_indexed_v1(unique: bool) -> String {
+    let u = if unique { " unique" } else { "" };
+    format!(
+        "domain notes @ 1.0.0\n\nentity note {{\n  title: text\n  body: text sealed indexed{u}\n}}\n\n\
+         op allNotes unbounded =\n  note[title]\n"
+    ) + ops()
+}
+
+fn normalized_v2(unique: bool) -> String {
+    let u = if unique { " unique" } else { "" };
+    format!(
+        "domain notes @ 1.1.0\n\nentity note {{\n  title: text\n  \
+         body: text sealed indexed{u} normalize(lower)\n}}\n\n\
+         op allNotes unbounded =\n  note[title]\n"
+    ) + ops()
+}
+
+/// **B10: a new `normalize` computes every blind index again, under live
+/// writes.** The tenant serves 1.0.0, where `body` is sealed and indexed
+/// with no normalization. The step to 1.1.0 adds `normalize(lower)`: it
+/// records a `reindex` in `$seals` with the normalization, adds
+/// `body$bidx$next`, and the worker computes each row's index under it, 2
+/// rows a chunk, while a node on 1.0.0 edits 10 notes and adds 40. Each
+/// write fills the new index under the recorded normalization beside its
+/// own. Verify computes every index again; the end replaces the old index,
+/// and 1.1.0 finds notes by `==` in any case.
+///
+/// A regression looks like a write refused during the backfill, a note
+/// `==` misses (a write that missed the new index, or one computed under
+/// the old normalization), or a working column or `$seals` row left behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_normalize_computes_every_index_again_under_live_writes() {
+    let (_rpg, registry, tpg, tenant, plan) = setup_with(
+        "ordo_seal_renorm",
+        &sealed_indexed_v1(false),
+        &normalized_v2(false),
+        &Choices::default(),
+    )
+    .await;
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).expect("json");
+    let bf = &receipt["backfills"][0];
+    assert_eq!(bf["code"], "B10", "{receipt}");
+    assert_eq!(bf["column"], "body$bidx$next");
+    assert_eq!(bf["indexFrom"], "body");
+    let said = bf["index"].as_str().unwrap_or_default();
+    assert!(said.contains("normalize"), "{said}");
+    assert!(
+        said.contains("version before"),
+        "names the rollback: {said}"
+    );
+
+    let keys: Arc<dyn KeyProvider> = Arc::new(TestProvider::new());
+    let a = Arc::new(node(&tpg.db, &sealed_indexed_v1(false), "a", keys.clone()).await);
+    for i in 0..30 {
+        a.write(format!(r#"addNote($title: "pre-{i}", $body: "Pre-{i}")"#))
+            .await
+            .expect("a write before");
+    }
+    let pre: Vec<String> = tpg
+        .query("SELECT id FROM note ORDER BY id LIMIT 10")
+        .expect("ids")
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+    let step = |budget: Option<u32>| {
+        let (registry, tenant, plan, keys) =
+            (registry.clone(), tenant.clone(), plan.clone(), keys.clone());
+        async move {
+            evolve::run_step_with(
+                &registry,
+                &tenant,
+                "tenant-db",
+                &plan,
+                OWNER,
+                &ctx(Some(keys), 2, budget),
+            )
+            .await
+        }
+    };
+    let first = step(Some(1)).await.expect("the reindex starts");
+    assert!(matches!(first, StepRun::Backfilling { .. }), "{first:?}");
+    assert_eq!(
+        one(&tpg, "SELECT kind || ' ' || normalize FROM \"$seals\""),
+        "reindex lower",
+        "the reindex is recorded where it runs, with its normalization"
+    );
+    let w = {
+        let (a, pre) = (a.clone(), pre.clone());
+        tokio::spawn(async move {
+            let mut bad = Vec::new();
+            for (i, id) in pre.iter().enumerate() {
+                if let Err(e) = a
+                    .write(format!(
+                        r#"editNote($id: "{id}", $rev: 1, $title: "edit-{i}", $body: "Edited-{i}")"#
+                    ))
+                    .await
+                {
+                    bad.push(format!("edit {id}: {e}"));
+                }
+            }
+            for i in 0..40 {
+                if let Err(e) = a
+                    .write(format!(r#"addNote($title: "live-{i}", $body: "Live-{i}")"#))
+                    .await
+                {
+                    bad.push(format!("live-{i}: {e}"));
+                }
+            }
+            bad
+        })
+    };
+    while !w.is_finished() {
+        let r = step(Some(1)).await.expect("a chunk");
+        assert!(matches!(r, StepRun::Backfilling { .. }), "{r:?}");
+    }
+    let bad = w.await.unwrap();
+    assert!(bad.is_empty(), "every write landed: {bad:?}");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT count(*) FROM note WHERE \"body$bidx$next\" IS NOT NULL \
+             AND (title LIKE 'live-%' OR title LIKE 'edit-%')"
+        ),
+        "50",
+        "each write filled the new index, in its own transaction"
+    );
+
+    let ran = step(None).await.expect("the reindex ends");
+    assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+    assert_eq!(recorded(&tpg), "1.1.0");
+    assert_eq!(one(&tpg, "SELECT count(*) FROM \"$seals\""), "0");
+    assert_eq!(
+        column_type(&tpg, "body$bidx$next"),
+        "",
+        "the working column is gone"
+    );
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'note' AND column_name = 'body$bidx'"
+        ),
+        "NO"
+    );
+    let y = node(&tpg.db, &normalized_v2(false), "y", keys.clone()).await;
+    for (body, title) in [
+        ("pre-29", "pre-29"),
+        ("EDITED-3", "edit-3"),
+        ("live-17", "live-17"),
+    ] {
+        let rows = y
+            .exec
+            .read_as(&format!("note(body == \"{body}\")[title]"), Some("p_ada"))
+            .await
+            .expect("reads");
+        assert_eq!(
+            rows.len(),
+            1,
+            "`{body}` finds its note in any case: {rows:?}"
+        );
+        assert_eq!(rows[0]["title"], title);
+    }
+}
+
+/// **B10 under `unique`: values that collide under the new normalization
+/// refuse the end, naming the rows** (C4, found over the indexes since the
+/// values are sealed). `Ada` and `ada` are distinct under 1.0.0. The step
+/// to `normalize(lower)` computes their indexes, finds them equal and
+/// refuses; the old index and its constraint stay. One is edited; the step
+/// ends, the constraint stands over the new index, and `ADA` is refused.
+///
+/// A regression looks like a probe that runs `lower()` over ciphertext, a
+/// constraint lost with the old index, or two rows the new `==` cannot
+/// tell apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_normalize_under_unique_refuses_collisions_naming_the_rows() {
+    let (_rpg, registry, tpg, tenant, plan) = setup_with(
+        "ordo_seal_renorm_uq",
+        &sealed_indexed_v1(true),
+        &normalized_v2(true),
+        &Choices::default(),
+    )
+    .await;
+    let keys: Arc<dyn KeyProvider> = Arc::new(TestProvider::new());
+    let a = node(&tpg.db, &sealed_indexed_v1(true), "a", keys.clone()).await;
+    for (title, body) in [("first", "Ada"), ("second", "ada"), ("third", "Bob")] {
+        a.write(format!(r#"addNote($title: "{title}", $body: "{body}")"#))
+            .await
+            .expect("distinct under 1.0.0");
+    }
+    let ids = ids_of(&tpg, &["first", "second"]);
+    let err = run_to_end(&registry, &tenant, &plan, &keys)
+        .await
+        .expect_err("a collision refuses the end");
+    let text = err.to_string();
+    assert!(text.contains("sealed_unique_duplicates"), "{text}");
+    assert!(text.contains("new `normalize`"), "{text}");
+    for id in &ids {
+        assert!(text.contains(id.as_str()), "names row {id}: {text}");
+    }
+    assert_eq!(recorded(&tpg), "1.0.0");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'note$body$uq'"
+        ),
+        "1",
+        "the old constraint stands"
+    );
+
+    a.write(format!(
+        r#"editNote($id: "{}", $rev: 1, $title: "second", $body: "Cy")"#,
+        ids[1]
+    ))
+    .await
+    .expect("one is changed");
+    let ran = run_to_end(&registry, &tenant, &plan, &keys)
+        .await
+        .expect("the step ends");
+    assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'note$body$uq'"
+        ),
+        "UNIQUE (\"$space\", \"body$bidx\")",
+        "the constraint stands over the new index"
+    );
+    // `set` over a unique field is keyed by it: `ADA` is `Ada`'s note now.
+    let y = node(&tpg.db, &normalized_v2(true), "y", keys.clone()).await;
+    y.write(r#"addNote($title: "fourth", $body: "ADA")"#.into())
+        .await
+        .expect("a write keyed by the unique");
+    assert_eq!(
+        one(&tpg, "SELECT count(*) FROM note"),
+        "3",
+        "no second `Ada`"
+    );
+    assert_eq!(
+        one(
+            &tpg,
+            &format!("SELECT title FROM note WHERE id = '{}'", ids[0])
+        ),
+        "fourth",
+        "`ADA` is the note that held `Ada`"
+    );
+    let rows = y
+        .exec
+        .read_as("note(body == \"cY\")[title]", Some("p_ada"))
+        .await
+        .expect("reads");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["title"], "second");
+}
+
+/// **B10 through `ordo apply` is refused by name**, naming `ordo evolve`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_normalize_outside_a_stored_plan_is_refused_by_name() {
+    let (_tpg, tenant) = empty("ordo_seal_renorm_apply").await;
+    let x = Program::compile(&sealed_indexed_v1(false)).expect("1.0.0");
+    let y = Program::compile(&normalized_v2(false)).expect("1.1.0");
+    let (_, created) = sa::apply(&tenant, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    // Planned as `ordo apply` plans it, against the version written.
+    let plan = sa::plan_with(&tenant, &y, &Choices::default(), Some(&x.schema))
+        .await
+        .expect("plans");
+    let text = plan.refusals.join("; ");
+    assert!(text.contains("reindex_needs_stored_plan"), "{text}");
+    let why = format!("{:?}", plan.assessed);
+    assert!(why.contains("ordo evolve"), "names the command: {why}");
+}
+
+/// One node serving `source` for the deployment's own space (`home`),
+/// under pin `epoch`, as `Spaces::resolve` hands it a handle.
+async fn own_node(db: &str, source: &str, keys: Arc<dyn KeyProvider>, epoch: i64) -> Node {
+    let mut n = node(db, source, &format!("own{epoch}"), keys).await;
+    let home = SpaceId("home".into());
+    n.exec.pool = n.exec.pool.for_space(&home).with_pin_epoch(epoch);
+    n.exec.space = home;
+    n.fixture = Arc::new(n.fixture.in_space("home"));
+    n
+}
+
+/// **The deployment's own space through a seal on its database**
+/// (`ordo evolve --run`). Before the step, the own space is given a pin at
+/// the active version, so its writes carry an epoch. The seal's end raises
+/// its pin fence in the end's transaction, and the own space then moves to
+/// the version the database holds, first, as a rollout moves it (Q4).
+/// "Active" stays until the activation. A node still on the version before
+/// is told the pin moved, never a type error on the sealed column; a node
+/// on the new version writes, and the value lands sealed.
+///
+/// A regression looks like a write by the version before failing on the
+/// column, an own space left on the version before, or "active" moved by
+/// the run.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_own_space_moves_with_a_seal_on_its_database_and_its_writes_land_sealed() {
+    let (pg, pool) = empty("ordo_seal_own").await;
+    ordo_host::tenants::ensure_table(&pool)
+        .await
+        .expect("$spaces");
+    let x = Program::compile(&v1_writes()).expect("1.0.0");
+    ordo_host::apply_op::run_program(
+        &pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &x,
+        vec![],
+        "dev:ada",
+        "t",
+        true,
+    )
+    .await
+    .expect("1.0.0 is active");
+    store(&pool, &v2_writes()).await;
+    let keys: Arc<dyn KeyProvider> = Arc::new(TestProvider::new());
+    let before = own_node(&pg.db, &v1_writes(), keys.clone(), 0).await;
+    for i in 0..5 {
+        before
+            .write(format!(
+                r#"addNote($title: "own-{i}", $body: "own body {i}")"#
+            ))
+            .await
+            .expect("the own space writes before the seal");
+    }
+
+    let ops = ordo_host::apply_op::ApplyOps::recording(
+        pool.clone(),
+        Arc::new(ordo_exec::route::SinglePool::new(pool.clone())),
+        "home",
+        None,
+    );
+    let _ = ops.backfill_keys.set(keys.clone());
+    let b = ordo_api::BoundParams(
+        serde_json::json!({ "from": "1.0.0", "to": "1.1.0", "run": true })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let done =
+        ordo_host::deploy_ops::execute(&ops, ordo_host::deploy_ops::EVOLVE, "home", &b, OWNER)
+            .await
+            .expect("the step runs");
+    let row = &done.rows[0];
+    assert_eq!(row["ran"]["ownSpace"]["version"], "1.1.0", "{row}");
+    assert_eq!(column_type(&pg, "body"), "bytea");
+
+    let v = Versions::on(&pool);
+    assert_eq!(
+        v.own_pin().await.unwrap(),
+        Some(("home".into(), "1.1.0".into(), 1)),
+        "the own space follows the data"
+    );
+    assert_eq!(
+        v.active_version().await.unwrap().as_deref(),
+        Some("1.0.0"),
+        "active waits for the activation"
+    );
+    assert_eq!(
+        one(&pg, "SELECT epoch FROM \"$pin_fence\" WHERE space = 'home'"),
+        "1",
+        "the end fenced the version before"
+    );
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT string_agg(coalesce(\"from\", '-') || '>' || \"to\" || '@' || epoch, ' ' \
+             ORDER BY seq) FROM \"$pins\" WHERE space = 'home'"
+        ),
+        "->1.0.0@0 1.0.0>1.1.0@1",
+        "every node is told each pin"
+    );
+
+    let err = before
+        .write(r#"addNote($title: "late", $body: "late body")"#.into())
+        .await
+        .expect_err("the version before writes nothing more");
+    assert!(err.contains("pin_moved"), "told the pin moved: {err}");
+    let after = own_node(&pg.db, &v2_writes(), keys.clone(), 1).await;
+    after
+        .write(r#"addNote($title: "after", $body: "sealed after")"#.into())
+        .await
+        .expect("the own space writes on the new version");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT string_agg(DISTINCT \"$space\", ',') FROM note WHERE title IN ('after', 'own-3')"
+        ),
+        "home",
+        "the writes are the own space's"
+    );
+    let id = one(&pg, "SELECT id FROM note WHERE title = 'own-3'");
+    assert_eq!(open(&keys, &pg, "home", &id), "own body 3");
+    let id = one(&pg, "SELECT id FROM note WHERE title = 'after'");
+    assert_eq!(open(&keys, &pg, "home", &id), "sealed after");
 }

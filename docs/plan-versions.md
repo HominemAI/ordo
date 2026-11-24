@@ -433,7 +433,8 @@ switch.
 - **Device copies** (review 2026-11-23). The SDK's local replica
   (`clients/ordo-sdk/src/replica`) orders rows by log position. It records
   no program version, so a row of X's shape can outlive a move to Y.
-  **Ruled 2026-11-23 (Q7):** on the "version changed" event the SDK drops the
+  **Ruled (Q7, owner, 2026-11-23), built in increment 3, session 3:** on
+  the feed's `version_changed` frame the sync manager drops the
   device copy of that tenant and fills it again. One rule, the same one
   the public cache uses on a deploy.
 - Offline writes (`plan-offline.md`) are filed for after the first
@@ -461,10 +462,13 @@ ruled 2026-10-31; `plan-backend-functions.md` §4.3):
 - Code is stored by hash in `$code`, so each version keeps its own code and
   a rollback brings the old code back. This is built.
 - A call at `/fn/<name>` runs the function the tenant's version declares,
-  as `function:<name>@<that version>`. Today `functions.reload` serves the
-  active version's table alone. Increment 3, session 3 makes it one table
-  per loaded version.
-- A function's `uses` ops resolve in the same version as the function.
+  as `function:<name>@<that version>`. Built in increment 3, session 3:
+  one table per loaded version, read when the version loads and dropped
+  when it is no longer served (`HostFunctions::sync`). A function the
+  tenant's version does not declare answers as an unknown one, whatever
+  another version declares.
+- A function's `uses` ops resolve in the same version as the function
+  (built in session 3: `CallerDoor::spec` asks the tenant's version).
 - A call in flight at a pin switch finishes on the version it started on.
   Its writes meet the pin fence like any write: refused as `PinMoved`, and
   made again only when the new version declares the op the same way.
@@ -673,8 +677,9 @@ every install of a version a node drops the whole public cache
 - The version in the key is the version that serves the deployment's own
   space. Until rollouts that is the active version, as built.
 - A tenant's pin switch changes no public answer, so it drops nothing.
-  Loading a version beside the active one must not call `after_deploy`
-  (check in increment 3, session 3).
+  Loading a version beside the active one must not call `after_deploy`.
+  Checked in increment 3, session 3: only the active version's swap calls
+  it, and `versions_loaded.rs` tries a pin beside it.
 - When the deployment's own space changes version, every node drops the
   public cache and the read layer rebuilds its entity index, as today.
 - The CDN purge hook is called once for that change. An answer of the old
@@ -1277,7 +1282,7 @@ round is about 35 minutes for the full suite.
 | 16 | **Tenant builds.** After first deployment. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
 | 17 | **Restore and import across versions** (new, review 2026-11-23; design in §2.9). | M | 3, 8 | a snapshot taken on X restores beside tenants on Y and serves X | 11-10b (`snapshot-restore`) |
 
-**Increment 3, what remains after session 2:**
+**Increment 3, what remains after session 3** (session 3: 2026-11-23):
 
 - Session 2 built the revoked-version moves (§1.11): in the window, on
   demand, by the tenant when granted, each to the developer's target.
@@ -1285,12 +1290,14 @@ round is about 35 minutes for the full suite.
   and `versions.memory_budget` set from it; views evicted per space.
 - Load guards: `versions.min_residency`, `versions.idle_evict_after`,
   `versions.max_concurrent_loads` as settings.
-- Digest at load: recompute the source fingerprint, refuse a mismatch
-  (§6 conflict 4).
-- Per-version catalog and generated interface; functions per version
-  (`functions.reload` serves the active version's only).
+- Session 3 built digest at load (9acbc2cf): every load of a stored
+  version recomputes its source fingerprint and refuses a mismatch,
+  naming the version (`LoadRefusal::Digest`, §6 conflict 4).
+- Session 3 built functions per version (9acbc2cf): one table per
+  served version, and a function's `uses` resolve in its version (§1.10).
+  Left: the per-version catalog and generated interface.
 - Schedules and listeners as the union over served versions; cursor
-  hand-over at a switch.
+  hand-over at a switch. Not started in session 3.
 - Session 2 built `versions.served` and `versions.minimum` (§1.6). Left:
   the refusal of a rollout that strands a tenant (with rollouts), and a
   command that removes a stored version (`--move-to`).
@@ -1298,12 +1305,30 @@ round is about 35 minutes for the full suite.
 - Client contract (§1.9): version on every answer, the distinct refusal for
   an op the version lacks, the SDK's version-changed event, idempotency
   across one switch, the tenant admin's label.
-- Stream close on a pin switch.
+- Session 3 built stream close on a pin switch (9acbc2cf). A feed
+  (`?live=1`, a sync, a read on `/live`) records the version its tenant
+  was served when it opened. When a pin moves or the active version
+  swaps, the node asks every feed's door at once
+  (`LiveStreams::recheck_now`). A moved tenant's feed ends with
+  `event: version_changed`, class `space_unavailable`, naming no version.
+  The SDK's sync manager and ordo-react's live hub know the frame by its
+  name and reconnect at once on the normal backoff. The sync manager
+  drops the tenant's device copy and fills it again (Q7, ruled
+  2026-11-23).
 - **Added by the review of 2026-11-23:** one function table per loaded
-  version (§1.10); loading a version beside the active one drops no public
-  cache (§1.14); the SDK drops its device copy on "version changed" (§1.9,
-  Q7); the external check and the peer links run for every loaded version,
-  not the active one alone (`plan-evolution-federation.md`, step F3).
+  version (§1.10, built in session 3); loading a version beside the active
+  one drops no public cache (§1.14, checked in session 3); the SDK drops
+  its device copy on "version changed" (§1.9, Q7); the external check and
+  the peer links run for every loaded version, not the active one alone
+  (`plan-evolution-federation.md`, step F3).
+- Session 3 built F3's first two parts (9acbc2cf): the external
+  timer reads every served version's externals, and a hold holds only the
+  tenants of the version it was found for. Peer links were already read
+  for every loaded version, at load and each minute. Left: the timer over
+  tenant databases.
+- Session 3's tests: `versions_loaded.rs` (a running node: functions per
+  pin and the negative, digest, public cache, feed close) and
+  `external_review.rs` (a hold per version).
 - Session 2 built per-node health on `/health/deploy`. Left: a version
   still loading is not shown apart from one that loaded.
 - Session 2 built provisioning on the tenant's own version (§1.3).
@@ -1403,7 +1428,9 @@ Still open:
    a version is named by its declared `@` version, not a digest. The full
    SHA-256 fingerprint is kept as a check for promotion.
 4. **A load does not check the version.** `deploy.rs:466-505` passes
-   `stored.version` through as a label. Increment 3 recomputes it.
+   `stored.version` through as a label. Resolved in increment 3, session
+   3: every load of a stored version recomputes its source fingerprint and
+   refuses a mismatch (`LoadRefusal::Digest`, naming the version).
 5. **`plan-environments.md` gates on activation.** Its §2.1 refuses
    staging "until dev runs this version". The 2026-11-02 ruling (D2) adds a
    signed rehearsal.
@@ -1429,6 +1456,8 @@ Still open:
 11. **The public cache drops on every install** (review 2026-11-23).
     `public::after_deploy` is right while one version serves. With many, it
     must fire only when the deployment's own space changes version (§1.14).
+    Checked in increment 3, session 3: it fires on the active version's
+    swap alone. Rollouts must keep it so.
 12. **Reader grants and `AuthApp` follow "active"** (review 2026-11-23).
     Both were designed when an activation moved every tenant at once. With
     rollouts, "active" flips at the end. Q2 and Q5 ask whether that is the

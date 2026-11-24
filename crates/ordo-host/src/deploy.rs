@@ -1082,6 +1082,9 @@ pub struct Deployment {
     /// the pins ([`crate::pin_stream`]), so a node that has a tenant's new
     /// pin has its overlays too.
     moves: RwLock<std::collections::HashMap<String, MoveOverlays>>,
+    /// The grants a move with dual writes killed (`crate::grant_kills`),
+    /// read with the moves, so the door refuses them after a revert.
+    grant_kills: RwLock<crate::grant_kills::Kills>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -1164,6 +1167,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            grant_kills: RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -1193,6 +1197,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            grant_kills: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1334,6 +1339,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            grant_kills: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1375,6 +1381,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            grant_kills: RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -1401,6 +1408,7 @@ impl Deployment {
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
             moves: RwLock::new(std::collections::HashMap::new()),
+            grant_kills: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1831,6 +1839,20 @@ impl Deployment {
     /// Take every open move with dual writes, whole.
     pub fn set_moves(&self, moves: std::collections::HashMap<String, MoveOverlays>) {
         *self.moves.write().expect("move lock") = moves;
+    }
+
+    /// Take every grant a move killed, whole (`crate::grant_kills`).
+    pub fn set_grant_kills(&self, kills: crate::grant_kills::Kills) {
+        *self.grant_kills.write().expect("grant kill lock") = kills;
+    }
+
+    /// The move that killed a grant in `space`, as `(from, to)`.
+    pub fn grant_killed(&self, space: &str, grant: &str) -> Option<(String, String)> {
+        self.grant_kills
+            .read()
+            .expect("grant kill lock")
+            .get(&(space.to_string(), grant.to_string()))
+            .cloned()
     }
 
     /// Take one tenant's move, or its absence.

@@ -3326,3 +3326,153 @@ async fn a_share_between_a_tenant_on_v2_and_one_on_v3_reads_both_ways_and_a_disa
     assert_eq!(version.as_deref(), Some(v2.as_str()));
     d.stop();
 }
+
+/// `myNotes` read through a window: the status and the body.
+fn read_my_notes_window(d: &Deployment, space: &str, token: &str) -> (u16, Value) {
+    let bearer = format!("Bearer {token}");
+    let (status, _, body) = d.send(
+        "GET",
+        "/op/myNotes",
+        &[
+            ("X-Ordo-Space", space),
+            ("Authorization", &bearer),
+            ("Origin", PAGE),
+            ("Accept", "application/json"),
+        ],
+        "",
+    );
+    (status, body)
+}
+
+/// Increment 11b part 2 (`plan-versions.md` §2.5, review V-53): **a grant
+/// a move killed stays killed after a revert.** Ada shares a note with Bo,
+/// and Bo's window reads it. Ada's tenant moves to a version that renames
+/// `notes.body` to `text`, so `myNotes` reads another field: at the switch
+/// the window is refused. Ada is moved back in the soak, and the pins agree
+/// again, but the window stays refused, naming both versions and the fix.
+/// A share Ada makes again reads.
+///
+/// A regression looks like Bo's window reading again after the revert: a
+/// grant revived by a pin switch, with nobody consenting again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_grant_kills", Some(PAGE)).await;
+    let ada = sign_up(&d, &device(38, "ada"), "Ada");
+    let bo = sign_up(&d, &device(39, "bo"), "Bo");
+    let note = create_note(&d, &ada, "Venue", "the old hall");
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let program = ordo_host::schema_apply::Program::compile(&renamed_body()).expect("compiles");
+    let to = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored")
+    .version;
+    let owner = deployment_owner_token();
+    let door = |op: &str, params: Value| {
+        let (status, body) = d.op(HOME, &owner, "POST", op, params);
+        assert_eq!(status, 200, "{op}: {body}");
+        body["rows"][0].clone()
+    };
+    door("std.deployment.evolve", json!({"from": from, "to": to}));
+
+    // Bo's window into Ada's tenant reads, on the version before.
+    let (status, out) = d.op(
+        &ada.space,
+        &ada.token,
+        "POST",
+        "std.space.share",
+        json!({
+            "ops": "myNotes",
+            "rows": json!([{"entity": "notes", "id": note, "level": "read"}]).to_string(),
+            "expires": "365d",
+            "label": "Bo",
+        }),
+    );
+    assert_eq!(status, 200, "{out}");
+    let ticket = out["rows"][0]["ticket"].as_str().expect("a ticket");
+    let (status, accepted) = d.auth(
+        "/auth/share/accept",
+        json!({"ticket": ticket, "display_name": "Bo"}),
+        Some(&bo.token),
+    );
+    assert_eq!(status, 200, "{accepted}");
+    let window = window_of(&d, &bo, &ada.space);
+    let (status, body) = read_my_notes_window(&d, &ada.space, &window);
+    assert_eq!(status, 200, "Bo reads Ada's note: {body}");
+
+    // The move switches Ada's tenant: `myNotes` now reads `text`.
+    let moved = door(
+        "std.deployment.replay",
+        json!({"tenant": ada.space, "to": to}),
+    );
+    assert_eq!(moved["move"]["phase"], "soaking", "{moved}");
+    let (status, body) = eventually("the window meets the new version", || {
+        let got = read_my_notes_window(&d, &ada.space, &window);
+        (got.0 != 200).then_some(got)
+    })
+    .0;
+    assert_eq!(status, 409, "{body}");
+    let kills = control
+        .rows("SELECT grant_id, \"from\", \"to\" FROM \"$grant_kills\"")
+        .await
+        .expect("$grant_kills");
+    assert_eq!(kills.len(), 1, "the switch recorded the grant: {kills:?}");
+    assert_eq!(kills[0][1].as_deref(), Some(from.as_str()));
+    assert_eq!(kills[0][2].as_deref(), Some(to.as_str()));
+
+    // Back in the soak: the pins agree again, and the window stays dead.
+    let back = door("std.deployment.revertSoak", json!({"tenant": ada.space}));
+    assert_eq!(back["phase"], "gated", "{back}");
+    eventually("Ada is served her version again", || {
+        let (status, _) = d.op(&ada.space, &ada.token, "GET", "texts", json!({}));
+        (status != 200).then_some(())
+    });
+    let window = window_of(&d, &bo, &ada.space);
+    let (status, body) = read_my_notes_window(&d, &ada.space, &window);
+    assert_eq!(status, 409, "the window stays refused: {body}");
+    assert_eq!(body["error"]["code"], json!("versions_disagree"), "{body}");
+    let said = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains(&from) && said.contains(&to) && said.contains("std.space.share"),
+        "the refusal names both versions and the fix: {said}"
+    );
+
+    // Ada shares again: the new grant was never killed, and reads.
+    let (status, out) = d.op(
+        &ada.space,
+        &ada.token,
+        "POST",
+        "std.space.share",
+        json!({
+            "ops": "myNotes",
+            "rows": json!([{"entity": "notes", "id": note, "level": "read"}]).to_string(),
+            "expires": "365d",
+            "label": "Bo again",
+        }),
+    );
+    assert_eq!(status, 200, "{out}");
+    let ticket = out["rows"][0]["ticket"].as_str().expect("a ticket");
+    let (status, accepted) = d.auth(
+        "/auth/share/accept",
+        json!({"ticket": ticket, "display_name": "Bo"}),
+        Some(&bo.token),
+    );
+    assert_eq!(status, 200, "{accepted}");
+    let (status, body) = eventually("the new share reads", || {
+        let window = window_of(&d, &bo, &ada.space);
+        let got = read_my_notes_window(&d, &ada.space, &window);
+        (got.0 == 200).then_some(got)
+    })
+    .0;
+    assert_eq!(status, 200, "{body}");
+    d.stop();
+}

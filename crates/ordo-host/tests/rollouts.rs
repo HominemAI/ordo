@@ -1149,3 +1149,130 @@ async fn retry_reopens_a_refused_move() {
     let e = r.retry("spc_a", NOW).await.unwrap_err();
     assert!(e.to_string().contains("no refused move"), "{e}");
 }
+
+// ── backfill.concurrency and backfill.per_database (11b part 2) ─────────
+
+/// Increment 11b part 2 (`plan-versions.md` §7;
+/// `plan-backfill-dual-writes.md` §2): **a rollout's turn moves tenants with
+/// a database of their own at once, up to `backfill.concurrency`, and at
+/// most `backfill.per_database` in one database.** 5 tenants: 3 with a
+/// database each, and 2 sharing one. At concurrency 1 the turn moves them
+/// one at a time. At 8 with 1 per database, the 2 that share a database
+/// wait for each other, so at most 4 run at once. Every tenant moves both
+/// times. A value out of range is refused, naming the setting.
+///
+/// A regression looks like a turn that moves its tenants one after another
+/// whatever the setting, or 2 moves in one database past its limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_moves_tenants_at_once_up_to_backfill_concurrency_and_per_database() {
+    use ordo_host::backfill::{set_setting, CONCURRENCY_SETTING, PER_DATABASE_SETTING};
+    let _serial = SERIAL.lock().await;
+    let control = empty_db("ordo_ro_conc_control").await;
+    tenants::ensure_table(&control).await.unwrap();
+    ordo_exec::spacedb::ensure_table(&control).await.unwrap();
+    let v1 = Program::compile(V1).unwrap();
+    for db in [
+        "ordo_ro_conc_a",
+        "ordo_ro_conc_b",
+        "ordo_ro_conc_c",
+        "ordo_ro_conc_d",
+    ] {
+        tenant_db_at(db, &v1).await;
+    }
+    let placed = [
+        ("spc_a", "ordo_ro_conc_a"),
+        ("spc_b", "ordo_ro_conc_b"),
+        ("spc_c", "ordo_ro_conc_c"),
+        ("spc_d1", "ordo_ro_conc_d"),
+        ("spc_d2", "ordo_ro_conc_d"),
+    ];
+    for (space, db) in placed {
+        tenant(&control, space).await;
+        ordo_exec::spacedb::attach(&control, &SpaceId(space.into()), &attach_row(db))
+            .await
+            .expect("attached");
+    }
+    let pools: Arc<dyn PoolResolver> = Arc::new(AttachedPools::new(
+        control.clone(),
+        control.clone(),
+        cfg("unused"),
+        Arc::new(Installed::new().as_configured("tf")),
+    ));
+    apply_op::run_program(&control, pools.as_ref(), &v1, vec![], "t", "t", true)
+        .await
+        .expect("v1");
+    let (ops, _) = ops_on(&control, pools.clone());
+    let r = Rollouts::on(&control);
+    let all = StartOptions {
+        strategy: Some(Strategy::All),
+        ..Default::default()
+    };
+
+    // Out of range: refused, naming the setting.
+    for bad in ["0", "65", "many"] {
+        let err = set_setting(&control, CONCURRENCY_SETTING, Some(bad), OWNER, "t", NOW)
+            .await
+            .expect_err("refused");
+        assert!(err.to_string().contains(CONCURRENCY_SETTING), "{err}");
+    }
+
+    // One at a time.
+    set_setting(&control, CONCURRENCY_SETTING, Some("1"), OWNER, "t", NOW)
+        .await
+        .expect("set");
+    let v2 = Program::compile(V2).unwrap();
+    apply_op::run_program(&control, pools.as_ref(), &v2, vec![], "t", "t", false)
+        .await
+        .expect("v2 stored");
+    r.start("0.2.0", &all, OWNER, NOW).await.expect("started");
+    let t = rollouts::tick(&ops, "n", NOW).await.expect("tick");
+    assert_eq!(t.moved.len(), 5, "{t:?}");
+    assert_eq!(t.at_once, 1, "{t:?}");
+    assert!(t.finished, "{t:?}");
+
+    // 8 at once, 1 per database: the 2 sharing a database wait in turn.
+    set_setting(
+        &control,
+        CONCURRENCY_SETTING,
+        Some("8"),
+        OWNER,
+        "t",
+        NOW + 1,
+    )
+    .await
+    .expect("set");
+    set_setting(
+        &control,
+        PER_DATABASE_SETTING,
+        Some("1"),
+        OWNER,
+        "t",
+        NOW + 1,
+    )
+    .await
+    .expect("set");
+    let v3 = Program::compile(V3).unwrap();
+    apply_op::run_program(&control, pools.as_ref(), &v3, vec![], "t", "t", false)
+        .await
+        .expect("v3 stored");
+    r.start("0.3.0", &all, OWNER, NOW + 2)
+        .await
+        .expect("started");
+    let t = rollouts::tick(&ops, "n", NOW + 2).await.expect("tick");
+    assert_eq!(t.moved.len(), 5, "{t:?}");
+    assert_eq!(t.at_once, 4, "{t:?}");
+    assert!(
+        t.log_lines()
+            .iter()
+            .any(|l| l.contains("at most 4 tenant moves ran at once")),
+        "{:?}",
+        t.log_lines()
+    );
+    for (space, _) in placed {
+        assert_eq!(
+            on(&control, space).await.as_deref(),
+            Some("0.3.0"),
+            "{space}"
+        );
+    }
+}

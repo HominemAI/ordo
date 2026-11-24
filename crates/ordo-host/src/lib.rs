@@ -86,6 +86,7 @@ pub mod federation;
 pub mod fleet;
 pub mod fn_runs;
 pub mod functions;
+pub mod grant_kills;
 pub mod grants;
 pub mod guess_limits;
 pub mod identity_keys;
@@ -2532,17 +2533,24 @@ impl AccessChecker for IdentityAccess {
         let claims = ordo_identity::verify(&self.key, token, now).ok()?;
         claims.capability.as_ref()?;
         let ispace = ordo_identity::principal::SpaceId(space.to_string());
-        let Decision::Deny {
-            reason:
-                DenyReason::VersionsDisagree {
-                    pinned,
-                    serving,
-                    op: listed,
-                    entity,
-                    detail,
-                },
-            ..
-        } = self.engine.check(&claims, &ispace, op, now)
+        let reason = match self.engine.check(&claims, &ispace, op, now) {
+            Decision::Deny { reason, .. } => reason,
+            _ => return None,
+        };
+        if let DenyReason::GrantKilledByMove { from, to } = &reason {
+            return Some(format!(
+                "`{op}`: this share or grant was refused when the space moved from version \
+                 {from} of the program to {to}, and it stays refused now the space is back on \
+                 {from}. Ask the person who shared it to share it again (std.space.share)"
+            ));
+        }
+        let DenyReason::VersionsDisagree {
+            pinned,
+            serving,
+            op: listed,
+            entity,
+            detail,
+        } = reason
         else {
             return None;
         };

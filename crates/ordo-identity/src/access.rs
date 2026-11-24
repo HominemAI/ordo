@@ -199,12 +199,30 @@ pub enum DenyReason {
         /// What differs, in one line.
         detail: String,
     },
+    /// A move with dual writes switched the tenant to a version that
+    /// refused this grant, and the tenant was then moved back
+    /// (`plan-versions.md` §2.5, V-53: grants a move killed stay killed
+    /// after a revert). The pins agree again, but the grant died at the
+    /// switch, as a redeploy that widened an op kills it: dead until the
+    /// person consents again.
+    GrantKilledByMove {
+        /// The version the tenant moved from, and serves again.
+        from: String,
+        /// The version whose switch killed the grant.
+        to: String,
+    },
 }
 
 /// A tenant's program version, as the deployment serving it answers
 /// (`plan-versions.md` §1.4). Reads in-memory state only: the engine does
 /// no I/O.
 pub type TenantVersions = std::sync::Arc<dyn Fn(&SpaceId) -> Option<String> + Send + Sync>;
+
+/// The grants a move killed in a tenant (`plan-versions.md` §2.5): `(from,
+/// to)` of the move whose switch killed the grant, or `None`. Reads
+/// in-memory state only, as [`TenantVersions`] does.
+pub type KilledGrants =
+    std::sync::Arc<dyn Fn(&SpaceId, &GrantId) -> Option<(String, String)> + Send + Sync>;
 
 /// The outcome of the one check. Denials always name the attempted op.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,6 +523,9 @@ pub struct AccessEngine {
     /// by the node that knows the pins. Unset, every tenant is answered from
     /// `deployed`.
     tenant_versions: std::sync::OnceLock<TenantVersions>,
+    /// The grants a move killed (`plan-versions.md` §2.5). Set once, as
+    /// `tenant_versions` is. Unset, no grant is killed this way.
+    killed_grants: std::sync::OnceLock<KilledGrants>,
 }
 
 impl Default for AccessEngine {
@@ -515,6 +536,7 @@ impl Default for AccessEngine {
             profiles: BTreeMap::new(),
             by_version: BTreeMap::new(),
             tenant_versions: std::sync::OnceLock::new(),
+            killed_grants: std::sync::OnceLock::new(),
             deployed: BTreeMap::new(),
             op_step_up: BTreeMap::new(),
             client_step_up: BTreeMap::new(),
@@ -780,6 +802,12 @@ impl AccessEngine {
     /// [`AccessEngine::deployed`].
     pub fn set_tenant_versions(&self, versions: TenantVersions) {
         let _ = self.tenant_versions.set(versions);
+    }
+
+    /// Tell the engine which grants a move killed. Once, as
+    /// [`AccessEngine::set_tenant_versions`].
+    pub fn set_killed_grants(&self, killed: KilledGrants) {
+        let _ = self.killed_grants.set(killed);
     }
 
     /// The version serving `space`, when the engine knows versions.
@@ -1067,6 +1095,11 @@ impl AccessEngine {
             // reading, and that is a security property, not a convenience.
             if self.no_capability.contains(op) {
                 return Decision::deny(op, DenyReason::OpNotDelegable);
+            }
+            // A grant a move killed stays killed after the move back
+            // (§2.5), though the pins agree again.
+            if let Some((from, to)) = self.killed_grants.get().and_then(|k| k(space, grant.id())) {
+                return Decision::deny(op, DenyReason::GrantKilledByMove { from, to });
             }
             // Across 2 versions the sharing rule decides instead
             // ([`AccessEngine::pin_refusal`], `plan-versions.md` §1.7).

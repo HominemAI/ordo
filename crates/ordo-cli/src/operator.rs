@@ -2579,9 +2579,10 @@ const CLONES_USAGE: &str = "ordo clones key  --host <h> ...\n\
      --reason \"<text>\"  --host <h> ...\n\
      ordo clones list  --host <h> ...\n\
      ordo clones set mask|readers <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones sink [<tenant>] [--limit <n>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
-/// `ordo clones key|set-key|clone|list|set`: staging clones named
+/// `ordo clones key|set-key|clone|list|set|sink`: staging clones named
 /// production tenants (`plan-versions.md` §3.4, increment 12), through the
 /// door. `clone` runs on staging: staging asks production for the tenant as
 /// you, with your own token for production, and production masks it before
@@ -2594,12 +2595,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
     flags.positional.remove(0);
     let own: &[&str] = match sub.as_str() {
         "key" | "list" => &[],
+        "sink" => &["--limit"],
         "set-key" | "set" => &["--reason"],
         "clone" => &["--from", "--name", "--from-token", "--reason"],
         other => {
             return Outcome::usage(format!(
                 "unknown `ordo clones` subcommand `{other}`; there are `key`, `set-key`, \
-                 `clone`, `list` and `set`\n{CLONES_USAGE}\n"
+                 `clone`, `list`, `set` and `sink`\n{CLONES_USAGE}\n"
             ))
         }
     };
@@ -2622,6 +2624,23 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         ("list", []) => {
             crate::wire::door_op(&host, &flags, c::CLONES, serde_json::json!({}), false).await
+        }
+        ("sink", rest) if rest.len() <= 1 => {
+            let limit = match flags.named_value("--limit").map(str::parse::<u32>) {
+                None => None,
+                Some(Ok(n)) => Some(n),
+                Some(Err(_)) => {
+                    return Outcome::usage("`--limit <n>` takes a whole number\n".into())
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::SINKS,
+                serde_json::json!({ "tenant": rest.first(), "limit": limit }),
+                false,
+            )
+            .await
         }
         ("set-key", [env, key]) => {
             let Some(reason) = reason else {
@@ -2696,6 +2715,26 @@ async fn clones_cmd(flags: Flags) -> Outcome {
             row["env"].as_str().unwrap_or("?"),
             row["key"].as_str().unwrap_or("?"),
         ),
+        "sink" => {
+            let entries = row["entries"].as_array().cloned().unwrap_or_default();
+            if entries.is_empty() {
+                "SINK  empty: no clone has sent anything\n".to_string()
+            } else {
+                let mut out = String::from("SINK  what the clones would have sent, newest first\n");
+                for e in entries {
+                    out.push_str(&format!(
+                        "  {}  {}  {}  to {}  \"{}\"  {} bytes\n",
+                        e["at"].as_u64().unwrap_or(0),
+                        e["space"].as_str().unwrap_or("?"),
+                        e["kind"].as_str().unwrap_or("?"),
+                        e["target"].as_str().unwrap_or("?"),
+                        e["summary"].as_str().unwrap_or(""),
+                        e["bytes"].as_u64().unwrap_or(0),
+                    ));
+                }
+                out
+            }
+        }
         "set-key" => format!(
             "recorded    the clone key of {}\n",
             row["env"].as_str().unwrap_or("?")
@@ -2726,6 +2765,12 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 masked,
                 cl["opensAs"].as_str().unwrap_or("?"),
             );
+            if let Some(v) = row["arrived"].as_str() {
+                out.push_str(&format!(
+                    "arrived     {v} came down with the clone, through the promotion gate: \
+                     stored, not activated\n"
+                ));
+            }
             if let Some(n) = row["notCloned"].as_array().filter(|a| !a.is_empty()) {
                 out.push_str(&format!(
                     "not cloned  {} (foreign tables: staging needs its own copy and peer)\n",

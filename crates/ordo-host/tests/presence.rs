@@ -192,6 +192,9 @@ const READS: &[&str] = &[
     // The clones this deployment holds and the clone settings; deployment
     // owner only, home space.
     "std.deployment.clones",
+    // What the staging clones would have sent (mail, push, egress), held
+    // in the sink; deployment owner only, home space (increment 12).
+    "std.deployment.sinks",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

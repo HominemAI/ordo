@@ -58,6 +58,9 @@ use crate::step_door::{StepDoor, StepDoorError};
 
 /// The op string recorded for a promotion.
 pub const OP_LABEL: &str = "std.deployment.promote";
+/// The op string recorded for a version that came down with a staging
+/// clone ([`arrive_with_clone`]).
+pub const CLONE_OP_LABEL: &str = "std.deployment.cloneIn";
 
 const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS \"$promotions\" ( \
@@ -69,7 +72,8 @@ CREATE TABLE IF NOT EXISTS \"$promotions\" ( \
   \"actor\" text NOT NULL, \
   \"reason\" text NOT NULL, \
   \"at\" bigint NOT NULL \
-)";
+); \
+ALTER TABLE \"$promotions\" ADD COLUMN IF NOT EXISTS \"via\" text NOT NULL DEFAULT 'promotion'";
 
 /// **Who reads the version from the step before.** The one seam between
 /// the gate and the credential it reads with.
@@ -153,6 +157,9 @@ pub struct Promotion {
     pub actor: String,
     pub reason: String,
     pub at: u64,
+    /// `promotion`, or `clone` for a version that came down with a staging
+    /// clone ([`Via`]).
+    pub via: String,
 }
 
 /// Why a promotion or a pin was refused, and what the caller can do.
@@ -455,6 +462,7 @@ async fn missing_secrets(pool: &Pool, program: &Program) -> Result<Vec<String>, 
 /// What a promotion did.
 #[derive(Debug)]
 pub struct Promoted {
+    pub via: Via,
     pub from: String,
     pub to: String,
     pub source_id: String,
@@ -511,6 +519,80 @@ pub async fn promote(
             skip_hint,
         });
     }
+    land(
+        pool,
+        pools,
+        src,
+        &own,
+        Via::Promotion,
+        reason,
+        activate,
+        actor,
+        at,
+    )
+    .await
+}
+
+/// How a version arrived: what `$promotions` records beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// `ordo promote`, from the step before.
+    Promotion,
+    /// With a staging clone, from the environment the tenant was cloned
+    /// from (`plan-versions.md` §3.4): "a version staging never saw comes
+    /// down with the clone, recompiled, gated and recorded as a clone".
+    Clone,
+}
+
+impl Via {
+    pub fn word(self) -> &'static str {
+        match self {
+            Via::Promotion => "promotion",
+            Via::Clone => "clone",
+        }
+    }
+}
+
+/// **A version that comes down with a staging clone** (`plan-versions.md`
+/// §3.4). Read from `from`, the environment the tenant is cloned from, as
+/// the person cloning, then every gate a promotion passes: the files match
+/// what `from` recorded, the program compiles here to the same identity,
+/// and this deployment's own checks (secrets, externals, readers) pass.
+/// Stored, never activated, and recorded in `$promotions` as a clone.
+///
+/// `from` need not be the step before: a clone comes from production,
+/// after staging. Nor need the version be active there: the tenant is
+/// pinned to it, which production's clone answer said.
+#[allow(clippy::too_many_arguments)]
+pub async fn arrive_with_clone(
+    pool: &Pool,
+    pools: &dyn PoolResolver,
+    from: &Environment,
+    version: &str,
+    credential: &SourceCredential,
+    reason: &str,
+    actor: &str,
+    at: u64,
+) -> Result<Promoted, PromotionRefusal> {
+    let own = Environments::on(pool).own().await?;
+    let src = fetch_source(from, version, credential, actor, false).await?;
+    land(pool, pools, src, &own, Via::Clone, reason, false, actor, at).await
+}
+
+/// The gate's checks on a version read from another environment, then the
+/// store, the record and, when asked, the activation.
+#[allow(clippy::too_many_arguments)]
+async fn land(
+    pool: &Pool,
+    pools: &dyn PoolResolver,
+    src: SourceVersion,
+    own: &Environment,
+    via: Via,
+    reason: &str,
+    activate: bool,
+    actor: &str,
+    at: u64,
+) -> Result<Promoted, PromotionRefusal> {
     check_files(&src)?;
 
     let (mut program, broken, notes) =
@@ -557,9 +639,11 @@ pub async fn promote(
         .map_err(|e| PromotionRefusal::Apply(ApplyRefused::Internal(e.to_string())))?;
     // The version's name here, so its record is written before the
     // activation that reads it, and taken back when the apply fails.
-    let named = crate::schema_apply::name_version(pool, &program)
-        .await
-        .map_err(|e| PromotionRefusal::Apply(ApplyRefused::Internal(format!("{e:?}"))))?;
+    let named = match via {
+        Via::Promotion => crate::schema_apply::name_version(pool, &program).await,
+        Via::Clone => crate::schema_apply::name_arrival(pool, &program).await,
+    }
+    .map_err(|e| PromotionRefusal::Apply(ApplyRefused::Internal(format!("{e:?}"))))?;
     pool.rows(DDL).await?;
     let seq = record(
         pool,
@@ -571,6 +655,7 @@ pub async fn promote(
             actor: actor.to_string(),
             reason: reason.trim().to_string(),
             at,
+            via: via.word().to_string(),
         },
     )
     .await?;
@@ -580,15 +665,19 @@ pub async fn promote(
         &program,
         notes,
         actor,
-        OP_LABEL,
+        match via {
+            Via::Promotion => OP_LABEL,
+            Via::Clone => CLONE_OP_LABEL,
+        },
         activate,
         &crate::versions::Provenance::default(),
     )
     .await
     {
         Ok(report) => Ok(Promoted {
+            via,
             from: src.env,
-            to: own.name,
+            to: own.name.clone(),
             source_id: src.source_id,
             report,
         }),
@@ -607,14 +696,16 @@ async fn record(pool: &Pool, p: &Promotion) -> Result<i64, PoolError> {
     let rows = pool
         .rows(&format!(
             "INSERT INTO \"$promotions\" (\"version\", \"from_env\", \"to_env\", \"source_id\", \
-             \"actor\", \"reason\", \"at\") VALUES ({}, {}, {}, {}, {}, {}, {}) RETURNING \"seq\"::text",
+             \"actor\", \"reason\", \"at\", \"via\") VALUES ({}, {}, {}, {}, {}, {}, {}, {}) \
+             RETURNING \"seq\"::text",
             sql_lit(&p.version),
             sql_lit(&p.from_env),
             sql_lit(&p.to_env),
             sql_lit(&p.source_id),
             sql_lit(&p.actor),
             sql_lit(&p.reason),
-            p.at
+            p.at,
+            sql_lit(&p.via)
         ))
         .await?;
     Ok(rows
@@ -626,9 +717,12 @@ async fn record(pool: &Pool, p: &Promotion) -> Result<i64, PoolError> {
 
 /// Every stored promotion, newest first.
 pub async fn promotions(pool: &Pool, limit: usize) -> Result<Vec<Promotion>, PoolError> {
+    // An older table gains its `via` column here, so a read before the
+    // next promotion still finds it.
+    pool.rows(DDL).await?;
     let sql = format!(
         "SELECT \"version\", \"from_env\", \"to_env\", \"source_id\", \"actor\", \"reason\", \
-         \"at\"::text FROM \"$promotions\" ORDER BY \"seq\" DESC LIMIT {}",
+         \"at\"::text, \"via\" FROM \"$promotions\" ORDER BY \"seq\" DESC LIMIT {}",
         limit.clamp(1, 500)
     );
     match pool.rows(&sql).await {
@@ -644,6 +738,7 @@ pub async fn promotions(pool: &Pool, limit: usize) -> Result<Vec<Promotion>, Poo
                     actor: g(4)?,
                     reason: g(5)?,
                     at: g(6)?.parse().ok()?,
+                    via: g(7).unwrap_or_else(|| Via::Promotion.word().to_string()),
                 })
             })
             .collect()),

@@ -1149,6 +1149,35 @@ pub async fn queue_notices(
     Ok(queued)
 }
 
+/// A clone's notices, one sink entry per person who would have been
+/// mailed, with the subject and body [`RoutineNotice`] would have written. Answers how many were recorded.
+pub async fn sink_notices(
+    control: &Pool,
+    space: &str,
+    principals: &[String],
+    text: &str,
+    now: u64,
+) -> usize {
+    let mut k = 0;
+    for p in principals {
+        match crate::sinks::record(
+            control,
+            space,
+            crate::sinks::SinkKind::Mail,
+            p,
+            text.trim(),
+            format!("{}\n\n{NOTICE_FOOTER}\n", text.trim()).as_bytes(),
+            now,
+        )
+        .await
+        {
+            Ok(()) => k += 1,
+            Err(e) => eprintln!("a notice in tenant {space} was not recorded in its sink: {e}"),
+        }
+    }
+    k
+}
+
 // ── the run handler ──────────────────────────────────────────────────────
 
 /// What a routine's run comes to when nothing needed changing. The write
@@ -1169,33 +1198,59 @@ pub struct RoutineRunner {
     pub mail: bool,
 }
 
-impl RoutineRunner {
-    /// Queue a committed run's notices. A failure here is logged and not
-    /// retried: the run's writes stand, and a second run would tell twice.
-    async fn tell(
-        &self,
-        control: &Pool,
-        name: &str,
-        space: &str,
-        who: &[String],
-        text: &str,
-        now: u64,
-    ) {
-        if !self.mail {
+/// **Tell the people a committed run names**: queue each a notice, or, in a
+/// staging clone, record each in the sink (`crate::sinks`, D17) and send
+/// nothing. `mail` is whether the deployment sends mail. A failure here is
+/// logged and not retried: the run's writes stand, and a second run would
+/// tell twice. Answers how many were queued or sunk.
+pub async fn tell(
+    control: &Pool,
+    mail: bool,
+    name: &str,
+    space: &str,
+    who: &[String],
+    text: &str,
+    now: u64,
+) -> usize {
+    // A read that fails sends nothing.
+    match crate::sinks::is_clone(control, space).await {
+        Ok(false) => {}
+        Ok(true) => {
+            let k = sink_notices(control, space, who, text, now).await;
             eprintln!(
-                "routine {name}: {} people to tell in tenant {space}, and the deployment sends \
-                 no mail. Set {} to send it",
-                who.len(),
-                crate::mail::KIND_ENV
+                "routine {name}: {k} notices for tenant {space}, a staging clone, went to its \
+                 sink. Read them: `ordo clones sink {space}`"
             );
-            return;
+            return k;
         }
-        match queue_notices(control, who, text, now).await {
-            Ok(k) => eprintln!(
+        Err(e) => {
+            eprintln!(
+                "routine {name}: in tenant {space}, no notice was queued: whether it is a \
+                 staging clone could not be read: {e}"
+            );
+            return 0;
+        }
+    }
+    if !mail {
+        eprintln!(
+            "routine {name}: {} people to tell in tenant {space}, and the deployment sends no \
+             mail. Set {} to send it",
+            who.len(),
+            crate::mail::KIND_ENV
+        );
+        return 0;
+    }
+    match queue_notices(control, who, text, now).await {
+        Ok(k) => {
+            eprintln!(
                 "routine {name}: queued {k} notices for {} people in tenant {space}",
                 who.len()
-            ),
-            Err(e) => eprintln!("routine {name}: in tenant {space}, no notice was queued: {e}"),
+            );
+            k
+        }
+        Err(e) => {
+            eprintln!("routine {name}: in tenant {space}, no notice was queued: {e}");
+            0
         }
     }
 }
@@ -1329,8 +1384,16 @@ impl RunHandler for RoutineRunner {
                     // crash between the commit and the queue loses it.
                     let who = std::mem::take(&mut *told.lock().expect("told is not poisoned"));
                     if let Some(n) = notify.as_ref().filter(|_| !who.is_empty()) {
-                        self.tell(&ctx.pool, &name, &run.space.0, &who, &n.text, ctx.now())
-                            .await;
+                        tell(
+                            &ctx.pool,
+                            self.mail,
+                            &name,
+                            &run.space.0,
+                            &who,
+                            &n.text,
+                            ctx.now(),
+                        )
+                        .await;
                     }
                 }
                 Err(ordo_exec::ExecFail::Compile(m)) if m == NOTHING_CHANGED => {}

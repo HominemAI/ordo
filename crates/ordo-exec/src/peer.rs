@@ -1092,6 +1092,26 @@ pub async fn grant_readers_with(
 
     // What each role should hold.
     let present = tables_in(pool, &pg).await?;
+    // **A reader reads only columns the read app still writes** (owner
+    // ruling 2026-11-23, Q1; `plan-evolution-federation.md` §2). A column
+    // a version left behind (`$orphans`) and `schema` does not declare
+    // again is never written, so a table holding one is granted by column,
+    // without it. The reader's check then names the column it lost.
+    let mut orphaned: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for o in crate::orphans::live(pool)
+        .await
+        .map_err(SchemaRefusal::Database)?
+    {
+        let declared = schema
+            .native(&o.entity)
+            .is_some_and(|e| e.field(&o.field).is_some());
+        if !o.is_entity() && !declared {
+            orphaned
+                .entry(o.entity.clone())
+                .or_default()
+                .extend(o.columns.iter().cloned());
+        }
+    }
     let mut want: std::collections::BTreeMap<String, (String, Held)> = Default::default();
     let mut out = Vec::new();
     for (r, (reader, role)) in schema.readers.iter().zip(&roles) {
@@ -1106,7 +1126,16 @@ pub async fn grant_readers_with(
             .entry(role.clone())
             .or_insert_with(|| (reader.clone(), Held::new()));
         for t in r.tables.iter().filter(|t| present.contains_key(*t)) {
-            entry.1.insert((t.clone(), String::new(), "SELECT".into()));
+            match (orphaned.get(t), present.get(t)) {
+                (Some(gone), Some(cols)) => {
+                    for c in cols.iter().filter(|c| !gone.contains(*c)) {
+                        entry.1.insert((t.clone(), c.clone(), "SELECT".into()));
+                    }
+                }
+                _ => {
+                    entry.1.insert((t.clone(), String::new(), "SELECT".into()));
+                }
+            }
         }
         out.push(format!(
             "reader      {reader}: role `{role}` reads {}",
@@ -1478,7 +1507,11 @@ async fn can_select(
     columns: &[&str],
 ) -> Result<bool, SchemaRefusal> {
     let test = if columns.is_empty() {
-        "has_table_privilege(c.oid, 'SELECT')".to_string()
+        // Granted whole, or by column: a read app grants a table by column
+        // once a column of it is orphaned (`crate::orphans`). Which mapped
+        // columns are readable is the external check's to say, by name.
+        "(has_table_privilege(c.oid, 'SELECT') OR has_any_column_privilege(c.oid, 'SELECT'))"
+            .to_string()
     } else {
         columns
             .iter()

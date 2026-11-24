@@ -57,6 +57,23 @@ pub fn door_command(name: &str) -> String {
 /// The one promotion setting, off by default (`plan-versions.md` §3.1, §7).
 pub const SKIP_STAGING: &str = "promotion.skip_staging";
 
+/// `prune.enabled` (`plan-versions.md` §2.7, §7): whether `ordo evolve
+/// --prune` may remove an orphaned column here. Off in production and on
+/// in every other environment unless set.
+pub const PRUNE_ENABLED: &str = "prune.enabled";
+
+/// The command that sets it, for a refusal to name.
+pub const PRUNE_COMMAND: &str = "ordo environments set prune on --reason \"...\"";
+
+/// Whether a setting name given to `ordo environments set` is
+/// `prune.enabled`.
+pub fn is_prune_setting(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "prune" | "prune.enabled" | "prune_enabled" | "prune-enabled"
+    )
+}
+
 /// The environment `promotion.skip_staging` skips.
 pub const STAGING: &str = "staging";
 
@@ -494,7 +511,8 @@ impl<'a> Environments<'a> {
         let named = setting.strip_prefix("promotion.").unwrap_or(setting);
         if !matches!(named, "skip_staging" | "skip-staging") {
             return Err(EnvironmentRefusal::Setting(format!(
-                "`{setting}` is not a promotion setting. There is {SKIP_STAGING}"
+                "`{setting}` is not a promotion setting. There are {SKIP_STAGING} and \
+                 {PRUNE_ENABLED}"
             )));
         }
         let on = match value.trim() {
@@ -524,6 +542,63 @@ impl<'a> Environments<'a> {
             ))
             .await?;
         Ok((PromotionSettings { skip_staging: on }, true))
+    }
+
+    /// `prune.enabled`: its latest value, or off in production and on
+    /// elsewhere when never set. Answers the value and whether it was set.
+    pub async fn prune_enabled(&self) -> Result<(bool, bool), EnvironmentRefusal> {
+        let sql = format!(
+            "SELECT \"value\" FROM \"$promotion_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(PRUNE_ENABLED)
+        );
+        let set = match self.pool.rows(&sql).await {
+            Ok(rows) => rows.first().and_then(|r| r.first().cloned().flatten()),
+            Err(e) if e.is_missing_table() => None,
+            Err(e) => return Err(e.into()),
+        };
+        Ok(match set {
+            Some(v) => (v == "on", true),
+            None => (self.own().await?.name != DEFAULT_OWN, false),
+        })
+    }
+
+    /// **Set `prune.enabled`**, `on` or `off`, with a reason. Answers the
+    /// value and whether anything changed.
+    pub async fn set_prune_enabled(
+        &self,
+        value: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, bool), EnvironmentRefusal> {
+        let on = match value.trim() {
+            "on" => true,
+            "off" => false,
+            other => {
+                return Err(EnvironmentRefusal::Setting(format!(
+                    "{PRUNE_ENABLED} takes `on` or `off`, not `{other}`"
+                )))
+            }
+        };
+        let reason = crate::versions::check_reason(reason)
+            .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+        let (now, set) = self.prune_enabled().await?;
+        if set && now == on {
+            return Ok((on, false));
+        }
+        self.pool.rows(SETTINGS_DDL).await?;
+        self.pool
+            .rows(&format!(
+                "INSERT INTO \"$promotion_settings\" (\"setting\", \"value\", \"actor\", \
+                 \"reason\", \"at\") VALUES ({}, {}, {}, {}, {at})",
+                sql_lit(PRUNE_ENABLED),
+                sql_lit(if on { "on" } else { "off" }),
+                sql_lit(actor),
+                sql_lit(&reason)
+            ))
+            .await?;
+        Ok((on, now != on))
     }
 
     /// **Record where an environment's door is**, or clear it with `None`.

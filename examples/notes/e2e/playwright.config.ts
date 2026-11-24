@@ -121,6 +121,14 @@ export default defineConfig({
       dependencies: ['v3'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // attachments.size, orphaned by v3: exported, erased, then pruned
+    // (plan-versions.md, increment 14). It prunes a column, so it runs last.
+    {
+      name: 'orphans',
+      testMatch: /orphans\/.*\.spec\.ts/,
+      dependencies: ['evolve-checks'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

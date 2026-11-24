@@ -186,6 +186,9 @@ const READS: &[&str] = &[
     "std.deployment.plans",
     // Whether a rollback's version still reads its externals and peers.
     "std.deployment.rollbackCheck",
+    // What versions left behind in every database, and the tombstones;
+    // deployment owner only, home space (versions increment 14).
+    "std.deployment.orphans",
     // Staging's public clone key, which production seals a clone to. Public
     // by design; made on first read (versions increment 12).
     "std.deployment.cloneKey",

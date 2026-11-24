@@ -98,6 +98,7 @@ pub mod metrics;
 pub mod node_status;
 pub mod observed_cost;
 pub mod oidc;
+pub mod orphan_ops;
 pub mod own_download;
 pub mod passkeys;
 pub mod pause;

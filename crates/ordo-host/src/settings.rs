@@ -1519,6 +1519,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_ORPHANS_PERSONAL_DROP_AFTER",
+        "Databases and pools",
+        r#"30 days"#,
+        r#"a whole number of days"#,
+    ),
+    s(
         "ORDO_VERSIONS_TENANT_MOVE_ROLES",
         "Databases and pools",
         r#"none"#,

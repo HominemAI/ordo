@@ -103,6 +103,7 @@ pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
 pub mod platform_ops;
+pub mod precheck;
 pub mod presence;
 pub mod principal_directory;
 pub mod profile_ops;

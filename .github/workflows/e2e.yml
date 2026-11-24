@@ -181,9 +181,9 @@ jobs:
         if: env.REACHED == 'true'
         run: bash scripts/ci-pg-fast-commits.sh
 
-      - name: Build ordo-host and ordo
+      - name: Build ordo-host, ordo and the identity service
         if: env.REACHED == 'true'
-        run: cargo build -p ordo-host -p ordo-cli
+        run: cargo build -p ordo-host -p ordo-cli -p ordo-identity-service
 
       - name: Install the page and the tests
         if: env.REACHED == 'true'

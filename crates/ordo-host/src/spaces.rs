@@ -1163,6 +1163,10 @@ impl Spaces {
                 .set_move(space, m.as_ref().and_then(crate::dual_writes::overlays_of)),
             Err(e) => eprintln!("space {space}: its move could not be read again ({e})"),
         }
+        match crate::grant_kills::read_all(self.witness.pool()).await {
+            Ok(k) => self.deployment.set_grant_kills(k),
+            Err(e) => eprintln!("space {space}: the grants moves killed were not read ({e})"),
+        }
         match crate::versions::Versions::on(self.witness.pool())
             .pin_of(space)
             .await

@@ -134,13 +134,25 @@ pub const CHUNK_ROWS_SETTING: &str = "backfill.chunk_rows";
 pub const CHUNK_TIMEOUT_SETTING: &str = "backfill.chunk_timeout";
 pub const MAX_ATTEMPTS_SETTING: &str = "backfill.max_attempts";
 pub const BUDGET_SETTING: &str = "backfill.budget";
+/// How many tenants' moves a rollout's turn runs at once (increment 11b
+/// part 2; `plan-versions.md` §7, default 8).
+pub const CONCURRENCY_SETTING: &str = "backfill.concurrency";
+/// How many of those share one database at most (proposed in
+/// `plan-backfill-dual-writes.md` §2, default 2), so the tenants of one
+/// database do not take its whole pool.
+pub const PER_DATABASE_SETTING: &str = "backfill.per_database";
 
-pub const SETTINGS: [&str; 4] = [
+pub const SETTINGS: [&str; 6] = [
     CHUNK_ROWS_SETTING,
     CHUNK_TIMEOUT_SETTING,
     MAX_ATTEMPTS_SETTING,
     BUDGET_SETTING,
+    CONCURRENCY_SETTING,
+    PER_DATABASE_SETTING,
 ];
+
+/// The most moves a turn runs at once, and the most in one database.
+pub const MAX_CONCURRENCY: u32 = 64;
 
 /// The most rows one chunk may take. A chunk is one transaction.
 pub const MAX_CHUNK_ROWS: u32 = 100_000;
@@ -181,6 +193,13 @@ pub fn check_setting(
         MAX_ATTEMPTS_SETTING => count(1, 100)
             .map(Some)
             .ok_or_else(|| bad("it is a whole number of chunks, 1 to 100")),
+        CONCURRENCY_SETTING | PER_DATABASE_SETTING => {
+            count(1, MAX_CONCURRENCY).map(Some).ok_or_else(|| {
+                bad(&format!(
+                    "it is a whole number of moves at once, 1 to {MAX_CONCURRENCY}"
+                ))
+            })
+        }
         BUDGET_SETTING if v == "none" => Ok(None),
         BUDGET_SETTING => count(1, u32::MAX)
             .map(Some)
@@ -212,6 +231,10 @@ pub struct BackfillSettings {
     /// `backfill.budget`: chunks one run may take before it pauses. `None`
     /// runs to the end. A paused backfill resumes from its cursor.
     pub budget: Option<u32>,
+    /// `backfill.concurrency`: tenants a rollout's turn moves at once.
+    pub concurrency: u32,
+    /// `backfill.per_database`: of those, the most in one database.
+    pub per_database: u32,
 }
 
 impl Default for BackfillSettings {
@@ -221,6 +244,8 @@ impl Default for BackfillSettings {
             chunk_timeout: Duration::from_secs(20),
             max_attempts: 5,
             budget: None,
+            concurrency: 8,
+            per_database: 2,
         }
     }
 }
@@ -233,6 +258,8 @@ impl BackfillSettings {
             "chunkTimeout": self.chunk_timeout.as_secs(),
             "maxAttempts": self.max_attempts,
             "budget": self.budget,
+            "concurrency": self.concurrency,
+            "perDatabase": self.per_database,
         })
     }
 
@@ -257,6 +284,16 @@ impl BackfillSettings {
             }
             MAX_ATTEMPTS_SETTING => self.max_attempts = n(value).unwrap_or(d.max_attempts),
             BUDGET_SETTING => self.budget = n(value),
+            CONCURRENCY_SETTING => {
+                self.concurrency = n(value)
+                    .map(|n| n.min(MAX_CONCURRENCY))
+                    .unwrap_or(d.concurrency)
+            }
+            PER_DATABASE_SETTING => {
+                self.per_database = n(value)
+                    .map(|n| n.min(MAX_CONCURRENCY))
+                    .unwrap_or(d.per_database)
+            }
             _ => {}
         }
     }

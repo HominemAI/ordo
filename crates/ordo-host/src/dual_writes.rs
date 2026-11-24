@@ -49,16 +49,34 @@
 //! by a column grant (owner ruling 2026-11-23, Q1;
 //! `plan-evolution-federation.md` F2). Then the move leaves `$moves`.
 //!
+//! # The deployment's own database (increment 11b part 2, §4)
+//!
+//! A tenant with no database of its own keeps its rows there, beside the
+//! deployment's own space and other such tenants. Its move is the same
+//! move, with three differences:
+//!
+//! - The expand and the copy run once for the database, at the first
+//!   tenant's move. Later tenants find them done. `$renames` keeps both
+//!   columns current for every space there, whatever version it serves.
+//! - A step that fills a field is refused (`shared_fill_not_built`): only a
+//!   move's own writes run its mapping, and the other spaces would write
+//!   rows it misses.
+//! - The soaks of one step there close together ([`close`], [`close_due`]):
+//!   when the last is due, and only once no space there serves the version
+//!   before ([`still_on`]). The close lands the new shape's constraints,
+//!   records the version, orphans the old column and remakes the reader
+//!   grants once, for the whole database. A reader of a table there reads
+//!   the old column until then (Q1). `ordo evolve --run` of the step there
+//!   is refused while such a move is open (`moves_open`).
+//!
 //! # What waits
 //!
-//! - A tenant on the deployment's own database shares it with every tenant
-//!   there; its move is increment 11b.
 //! - A step filled by a backfill function has no per-row mapping for the
 //!   write path, so it runs as before, with no dual writes (D16's one-way
 //!   step).
-//! - A rollout drives these moves and `ordo rollback` reverts their soaks
-//!   (increment 11b, part 1, `crate::every_tenant`). The constraints of a
-//!   shared database are 11b's part 2.
+//! - A rollout drives moves of tenants with a database of their own
+//!   (`crate::every_tenant`); a tenant on the deployment's own database
+//!   is still pinned by the rollout once that database holds the target.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -305,6 +323,9 @@ pub struct Moved {
     pub closed: bool,
     /// What the close recorded in `$orphans`.
     pub orphaned: Vec<String>,
+    /// The other tenants whose soaks closed with this one: on the
+    /// deployment's own database the soaks of one step close together.
+    pub together: Vec<String>,
 }
 
 impl Moved {
@@ -322,6 +343,7 @@ impl Moved {
             "soakUntil": (self.soak_until > 0).then_some(self.soak_until),
             "closed": self.closed,
             "orphaned": self.orphaned,
+            "closedWith": self.together,
         })
     }
 }
@@ -356,33 +378,22 @@ impl MoveContext<'_> {
         }
     }
 
-    /// The tenant's own database. A tenant on the deployment's own
-    /// database shares it with every tenant there, and its move is
-    /// increment 11b's.
-    async fn target(&self, tenant: &str, from: &str, to: &str) -> Result<Pool, EvolveRefusal> {
+    /// The tenant's database, and whether it is the deployment's own,
+    /// shared with every space there (§4, increment 11b part 2).
+    async fn target(
+        &self,
+        tenant: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(Pool, bool), EvolveRefusal> {
         let space = ordo_crypto::SpaceId(tenant.to_string());
         let target = self
             .pools
             .resolve(&space)
             .await
             .map_err(|e| self.err(tenant, from, to, "unreachable", e.to_string(), true))?;
-        let (a, b) = (target.config(), self.control.config());
-        if a.host == b.host && a.port == b.port && a.db == b.db {
-            return Err(self.err(
-                tenant,
-                from,
-                to,
-                "shared_database",
-                "the tenant's rows are in the deployment's own database, beside other \
-                 tenants' that would not write both shapes. A move with dual writes needs a \
-                 database of its own (increment 11b moves a shared one). Run the step there \
-                 with `ordo evolve --from <x> --to <y> --run`, or give the tenant a database of \
-                 its own first"
-                    .into(),
-                false,
-            ));
-        }
-        Ok(target)
+        let shared = same_database(&target, self.control);
+        Ok((target, shared))
     }
 
     /// Take the tenant's new pin and move on this node now, and wait (up to
@@ -415,7 +426,10 @@ pub async fn run(
     actor: &str,
 ) -> Result<Moved, EvolveRefusal> {
     let v = Versions::on(cx.control);
-    let target = cx.target(tenant, &plan.from, &plan.to).await?;
+    let (target, shared) = cx.target(tenant, &plan.from, &plan.to).await?;
+    if shared {
+        shared_step_only_renames(cx, tenant, plan)?;
+    }
     let mut statements = 0usize;
     let mut m = match v.dual_move(tenant).await? {
         Some(m) if m.step != plan.digest => {
@@ -565,6 +579,7 @@ pub async fn run(
                     soak_until: 0,
                     closed: false,
                     orphaned: Vec::new(),
+                    together: Vec::new(),
                 });
             }
             let verified = match Box::pin(worker.verify_live_and_close()).await {
@@ -593,6 +608,12 @@ pub async fn run(
         // The switch (§2.1 step 5).
         let at = crate::runtime::now_secs();
         let until = at.saturating_add(soak).max(at);
+        // The grants Y refuses die at the switch, and stay dead after a
+        // revert (§2.5). Recorded before the pin moves, so a node that reads
+        // the new pin reads them too.
+        crate::grant_kills::record_at_switch(cx.control, tenant, &m.from, &m.to, at)
+            .await
+            .map_err(EvolveRefusal::Store)?;
         let change = v.switch_dual_move(tenant, actor, at, until).await?;
         raise_fence(&target, tenant, change.epoch).await?;
         cx.take(tenant).await;
@@ -620,6 +641,7 @@ pub async fn run(
         soak_until: m.soak_until,
         closed: false,
         orphaned: Vec::new(),
+        together: Vec::new(),
     })
 }
 
@@ -638,7 +660,7 @@ pub async fn revert(
         }
         .into());
     };
-    let target = cx.target(tenant, &m.from, &m.to).await?;
+    let (target, _) = cx.target(tenant, &m.from, &m.to).await?;
     let change = v
         .revert_dual_move(tenant, actor, crate::runtime::now_secs())
         .await?;
@@ -655,6 +677,7 @@ pub async fn revert(
         soak_until: 0,
         closed: false,
         orphaned: Vec::new(),
+        together: Vec::new(),
     })
 }
 
@@ -684,7 +707,37 @@ pub async fn close(
         }
         .into());
     }
-    let target = cx.target(tenant, &m.from, &m.to).await?;
+    let (target, shared) = cx.target(tenant, &m.from, &m.to).await?;
+    // On the deployment's own database the soaks of one step close
+    // together, once no space there serves the version before (§4, Q1).
+    let together: Vec<String> = if shared {
+        let on_x = still_on(cx.control, &m).await?;
+        if !on_x.is_empty() {
+            return Err(cx.err(
+                tenant,
+                &m.from,
+                &m.to,
+                "soak_shared",
+                format!(
+                    "the tenant's rows are in the deployment's own database, beside {} still \
+                     serving `{}`: {}. The new shape's constraints land, and the soaks of this \
+                     step there close together, once every space there serves `{}`. Move them \
+                     first (`ordo evolve --tenant <id> --to {}`, or a rollout to `{}`, which \
+                     moves the deployment's own space too)",
+                    spaces_count(on_x.len()),
+                    m.from,
+                    on_x.join(", "),
+                    m.to,
+                    m.to,
+                    m.to,
+                ),
+                true,
+            ));
+        }
+        soaks_together(cx.control, &m).await?
+    } else {
+        vec![tenant.to_string()]
+    };
     let run_err =
         |class: &'static str, why: String| cx.err(tenant, &m.from, &m.to, class, why, false);
     let overlay: Value = serde_json::from_str(&m.overlay)
@@ -799,9 +852,11 @@ pub async fn close(
     ordo_exec::peer::grant_readers(&target, &y.schema)
         .await
         .map_err(|e| run_err("reader_grants", e.to_string()))?;
-    let epoch = v.close_dual_move(tenant, actor, at).await?;
-    raise_fence(&target, tenant, epoch).await?;
-    cx.take(tenant).await;
+    for t in &together {
+        let epoch = v.close_dual_move(t, actor, at).await?;
+        raise_fence(&target, t, epoch).await?;
+        cx.take(t).await;
+    }
     Ok(Moved {
         tenant: tenant.to_string(),
         from: m.from,
@@ -813,7 +868,135 @@ pub async fn close(
         soak_until: m.soak_until,
         closed: true,
         orphaned,
+        together: together.into_iter().filter(|t| t != tenant).collect(),
     })
+}
+
+fn spaces_count(n: usize) -> String {
+    if n == 1 {
+        "1 space".to_string()
+    } else {
+        format!("{n} spaces")
+    }
+}
+
+/// Whether two pools reach one database.
+pub fn same_database(a: &Pool, b: &Pool) -> bool {
+    let (a, b) = (a.config(), b.config());
+    a.host == b.host && a.port == b.port && a.db == b.db
+}
+
+/// **A move on the deployment's own database copies a rename only.** Every
+/// version writing there keeps both columns of a rename current
+/// (`$renames`, increment 11a), so the spaces still on the version before
+/// write the new column too. A fill has no such dual write outside a move:
+/// a space still on X would write rows the new column misses.
+fn shared_step_only_renames(
+    cx: &MoveContext<'_>,
+    tenant: &str,
+    plan: &StoredPlan,
+) -> Result<(), EvolveRefusal> {
+    let receipt: Value = serde_json::from_str(&plan.receipt).unwrap_or(Value::Null);
+    let fills: Vec<String> = receipt["backfills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["code"] != "B4")
+        .map(|b| {
+            format!(
+                "{}.{}",
+                b["entity"].as_str().unwrap_or("?"),
+                b["field"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    if fills.is_empty() {
+        return Ok(());
+    }
+    Err(cx.err(
+        tenant,
+        &plan.from,
+        &plan.to,
+        "shared_fill_not_built",
+        format!(
+            "the tenant's rows are in the deployment's own database, and the step fills {} by \
+             a mapping only a move's own writes run, so the other spaces there would write rows \
+             it misses. Run the step on that database for every space at once with `ordo \
+             evolve --from {} --to {} --run`, or give the tenant a database of its own first",
+            fills.join(", "),
+            plan.from,
+            plan.to,
+        ),
+        false,
+    ))
+}
+
+/// The tenants in the deployment's own database, with their versions:
+/// every pinned tenant with no database of its own.
+pub(crate) async fn shared_spaces(control: &Pool) -> Result<Vec<(String, String)>, EvolveRefusal> {
+    let own: std::collections::BTreeSet<String> = match ordo_exec::spacedb::all(control).await {
+        Ok(a) => a.into_iter().map(|(s, _)| s.0).collect(),
+        Err(e) if e.is_missing_table() => Default::default(),
+        Err(e) => return Err(EvolveRefusal::Store(e.to_string())),
+    };
+    let (pins, _) = Versions::on(control).all_pins().await?;
+    Ok(pins
+        .into_iter()
+        .filter(|(s, _, _)| !own.contains(s))
+        .map(|(s, v, _)| (s, v))
+        .collect())
+}
+
+/// Every soak of `m`'s step on the deployment's own database: they close
+/// together.
+async fn soaks_together(control: &Pool, m: &Move) -> Result<Vec<String>, EvolveRefusal> {
+    let shared: std::collections::BTreeSet<String> = shared_spaces(control)
+        .await?
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect();
+    let mut out: Vec<String> = Versions::on(control)
+        .dual_moves()
+        .await?
+        .into_iter()
+        .filter(|o| o.step == m.step && o.phase == MovePhase::Soaking)
+        .filter(|o| o.space == m.space || shared.contains(&o.space))
+        .map(|o| o.space)
+        .collect();
+    if !out.contains(&m.space) {
+        out.push(m.space.clone());
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// **Who on the deployment's own database still writes `m.from`**: a
+/// tenant pinned there outside a soak of this step, and the deployment's
+/// own space while it serves it.
+pub async fn still_on(control: &Pool, m: &Move) -> Result<Vec<String>, EvolveRefusal> {
+    let v = Versions::on(control);
+    let soaking: std::collections::BTreeSet<String> = v
+        .dual_moves()
+        .await?
+        .into_iter()
+        .filter(|o| o.step == m.step && o.phase == MovePhase::Soaking)
+        .map(|o| o.space)
+        .collect();
+    let mut out: Vec<String> = shared_spaces(control)
+        .await?
+        .into_iter()
+        .filter(|(s, version)| *version == m.from && !soaking.contains(s))
+        .map(|(s, _)| s)
+        .collect();
+    let own = match v.own_pin().await? {
+        Some((space, version, _)) => (version == m.from).then_some(space),
+        None => (v.active_version().await?.as_deref() == Some(m.from.as_str()))
+            .then(|| "the deployment's own space".to_string()),
+    };
+    out.extend(own);
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// **Close every soak whose time has passed**, under the apply lock so two
@@ -821,10 +1004,10 @@ pub async fn close(
 /// close that fails is said and tried again on the next tick.
 pub async fn close_due(cx: &MoveContext<'_>) -> Vec<String> {
     let now = crate::runtime::now_secs();
-    let due: Vec<Move> = match Versions::on(cx.control).dual_moves().await {
+    let open: Vec<Move> = match Versions::on(cx.control).dual_moves().await {
         Ok(m) => m
             .into_iter()
-            .filter(|m| m.phase == MovePhase::Soaking && m.soak_until <= now)
+            .filter(|m| m.phase == MovePhase::Soaking)
             .collect(),
         Err(e) if e.is_missing_table() => return Vec::new(),
         Err(e) => {
@@ -832,6 +1015,32 @@ pub async fn close_due(cx: &MoveContext<'_>) -> Vec<String> {
             return Vec::new();
         }
     };
+    if !open.iter().any(|m| m.soak_until <= now) {
+        return Vec::new();
+    }
+    // On the deployment's own database the soaks of one step close
+    // together, when the last is due (Q1): a reader of a table there reads
+    // the old column until then.
+    let shared: std::collections::BTreeSet<String> = match shared_spaces(cx.control).await {
+        Ok(s) => s.into_iter().map(|(s, _)| s).collect(),
+        Err(e) => {
+            eprintln!(
+                "soaks: the tenants on the deployment's own database could not be read ({e})"
+            );
+            return Vec::new();
+        }
+    };
+    let due: Vec<&Move> = open
+        .iter()
+        .filter(|m| m.soak_until <= now)
+        .filter(|m| {
+            !shared.contains(&m.space)
+                || open
+                    .iter()
+                    .filter(|o| o.step == m.step && shared.contains(&o.space))
+                    .all(|o| o.soak_until <= now)
+        })
+        .collect();
     if due.is_empty() {
         return Vec::new();
     }
@@ -839,15 +1048,26 @@ pub async fn close_due(cx: &MoveContext<'_>) -> Vec<String> {
         Ok(Some(l)) => l,
         _ => return Vec::new(),
     };
-    let mut closed = Vec::new();
+    let mut closed: Vec<String> = Vec::new();
     for m in due {
+        if closed.contains(&m.space) {
+            continue;
+        }
         match close(cx, &m.space, SOAK_ACTOR).await {
-            Ok(_) => {
+            Ok(done) => {
                 println!(
-                    "soaks: tenant {}'s soak on {} closed; {}'s columns are orphaned",
-                    m.space, m.to, m.from
+                    "soaks: tenant {}'s soak on {} closed{}; {}'s columns are orphaned",
+                    m.space,
+                    m.to,
+                    if done.together.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", with {}", done.together.join(", "))
+                    },
+                    m.from
                 );
-                closed.push(m.space);
+                closed.push(m.space.clone());
+                closed.extend(done.together);
             }
             Err(e) => eprintln!(
                 "soaks: tenant {}'s soak did not close ({e}); tried again",

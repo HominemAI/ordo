@@ -2124,6 +2124,7 @@ impl ApplyOps {
             functions: self.backfill_functions.get().cloned(),
             keys: self.backfill_keys.get().cloned(),
             fence: None,
+            fences: Vec::new(),
         })
     }
 

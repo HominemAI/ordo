@@ -402,6 +402,9 @@ pub enum RecordedDecision {
     /// `versions_disagree`; this record keeps it apart from a redeploy that
     /// widened an op (`ManifestChanged`).
     VersionsDisagree,
+    /// A grant a move with dual writes killed, called after the tenant was
+    /// moved back (`plan-versions.md` §2.5): dead until consented again.
+    GrantKilledByMove,
 }
 
 impl RecordedDecision {
@@ -442,6 +445,7 @@ impl RecordedDecision {
             RecordedDecision::OutsideDeploymentRealm => "OutsideDeploymentRealm",
             RecordedDecision::ConsoleKeyClosed => "ConsoleKeyClosed",
             RecordedDecision::VersionsDisagree => "VersionsDisagree",
+            RecordedDecision::GrantKilledByMove => "GrantKilledByMove",
         }
     }
 
@@ -490,6 +494,7 @@ impl RecordedDecision {
             RecordedDecision::ConsoleKeyClosed => 55,
             // Program versions at the door, clear of 55.
             RecordedDecision::VersionsDisagree => 60,
+            RecordedDecision::GrantKilledByMove => 61,
         }
     }
 
@@ -530,6 +535,7 @@ impl RecordedDecision {
             54 => RecordedDecision::OutsideDeploymentRealm,
             55 => RecordedDecision::ConsoleKeyClosed,
             60 => RecordedDecision::VersionsDisagree,
+            61 => RecordedDecision::GrantKilledByMove,
             _ => return None,
         })
     }
@@ -558,6 +564,7 @@ impl From<&DenyReason> for RecordedDecision {
             DenyReason::DelegationNotLive => RecordedDecision::DelegationNotLive,
             DenyReason::OpNotDelegable => RecordedDecision::OpNotDelegable,
             DenyReason::VersionsDisagree { .. } => RecordedDecision::VersionsDisagree,
+            DenyReason::GrantKilledByMove { .. } => RecordedDecision::GrantKilledByMove,
         }
     }
 }

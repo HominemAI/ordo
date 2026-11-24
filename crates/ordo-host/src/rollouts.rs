@@ -2112,6 +2112,9 @@ pub struct Ticked {
     pub gate_passed: bool,
     /// What the alert channel could not do, when it failed.
     pub alert_failed: Option<String>,
+    /// The most tenants' moves that ran at once in this tick
+    /// (`backfill.concurrency`, `backfill.per_database`).
+    pub at_once: usize,
 }
 
 impl Ticked {
@@ -2128,6 +2131,14 @@ impl Ticked {
         }
         for t in &self.moved {
             out.push(format!("rollout {id}: tenant {t} moved"));
+        }
+        if self.at_once > 0 {
+            out.push(format!(
+                "rollout {id}: at most {} tenant moves ran at once ({} and {})",
+                self.at_once,
+                crate::backfill::CONCURRENCY_SETTING,
+                crate::backfill::PER_DATABASE_SETTING
+            ));
         }
         for (t, why) in &self.waiting {
             out.push(format!("rollout {id}: tenant {t} waits: {why}"));
@@ -2591,23 +2602,73 @@ async fn batch(
             .map(|(w, _, _)| w)
             .collect()
     };
-    let own: BTreeSet<String> = match ordo_exec::spacedb::all(pool).await {
-        Ok(a) => a.into_iter().map(|(s, _)| s.0).collect(),
-        Err(e) if e.is_missing_table() => BTreeSet::new(),
+    // Each tenant with a database of its own, and that database.
+    let own: BTreeMap<String, String> = match ordo_exec::spacedb::all(pool).await {
+        Ok(a) => a
+            .into_iter()
+            .map(|(s, a)| (s.0, ordo_exec::route::target_label(&a.host, a.port, &a.db)))
+            .collect(),
+        Err(e) if e.is_missing_table() => BTreeMap::new(),
         Err(e) => return Err(e.into()),
     };
+    // `backfill.concurrency` moves at once, at most `backfill.per_database`
+    // of them in one database (increment 11b part 2).
+    let limits = crate::backfill::stored_settings(pool)
+        .await
+        .unwrap_or_default();
+    let at_once = limits.concurrency.max(1) as usize;
+    let per_database = limits.per_database.max(1) as usize;
     let mut program: Option<Program> = None;
     let mut apply_lock: Option<Option<crate::apply_op::ApplyLock>> = None;
     let mut tried = 0i64;
     let mut work: std::collections::VecDeque<(RolloutTenant, bool)> =
         candidates.into_iter().map(|t| (t, false)).collect();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    while let Some((t, partner)) = work.pop_front() {
+    let mut wave: Vec<RolloutTenant> = Vec::new();
+    let mut s = Settle {
+        rollouts: &rollouts,
+        r,
+        now,
+        partners: &partners,
+        by_space: &by_space,
+    };
+    loop {
+        let next = if wave.len() >= at_once {
+            None
+        } else {
+            work.pop_front()
+        };
+        let Some((t, partner)) = next else {
+            if wave.is_empty() {
+                break;
+            }
+            let program = program
+                .as_ref()
+                .expect("compiled before a move joins a wave");
+            let (moved, peak) = Box::pin(wave_of(
+                ops,
+                r,
+                program,
+                std::mem::take(&mut wave),
+                &own,
+                per_database,
+                now,
+            ))
+            .await;
+            out.at_once = out.at_once.max(peak);
+            for (t, outcome) in moved {
+                s.settle(t, outcome?, &seen, &mut work, out).await?;
+            }
+            continue;
+        };
         if !seen.insert(t.space.clone()) {
             continue;
         }
         if !partner && tried >= batch_size {
-            break;
+            // The batch is full: what is queued waits for the next turn,
+            // and the partners of the moves still running join this one.
+            work.retain(|(_, p)| *p);
+            continue;
         }
         if let Some(h) = holds.get(&t.space) {
             let why = format!(
@@ -2646,7 +2707,7 @@ async fn batch(
         rollouts
             .set_tenant(r.id, &t.space, TenantState::Moving, "", now)
             .await?;
-        let outcome = if own.contains(&t.space) {
+        let outcome = if own.contains_key(&t.space) {
             if program.is_none() {
                 let artifact = Versions::on(pool)
                     .get(&r.target)
@@ -2668,58 +2729,16 @@ async fn batch(
                     "an apply holds the apply lock; it is tried again on the next turn".into(),
                 ),
                 Some(_) => {
-                    move_own(
-                        ops,
-                        r,
-                        &t.space,
-                        program.as_ref().expect("compiled above"),
-                        now,
-                    )
-                    .await?
+                    // It joins the wave, which runs once full or once the
+                    // queue is empty.
+                    wave.push(t);
+                    continue;
                 }
             }
         } else {
             pin(pool, r, &t.space, now).await?
         };
-        if matches!(outcome, Outcome::Moved) {
-            for p in partners.get(&t.space).into_iter().flatten().rev() {
-                if let Some(row) = by_space.get(p).filter(|_| !seen.contains(p)) {
-                    work.push_front((row.clone(), true));
-                }
-            }
-        }
-        match outcome {
-            Outcome::Moved => {
-                rollouts
-                    .set_tenant(r.id, &t.space, TenantState::Moved, "", now)
-                    .await?;
-                out.moved.push(t.space);
-            }
-            Outcome::Moving(why) => {
-                rollouts
-                    .set_tenant(r.id, &t.space, TenantState::Moving, &why, now)
-                    .await?;
-                out.waiting.push((t.space, why));
-            }
-            Outcome::Waiting(why) => {
-                rollouts
-                    .set_tenant(r.id, &t.space, TenantState::Waiting, &why, now)
-                    .await?;
-                out.waiting.push((t.space, why));
-            }
-            Outcome::Failed(why) => {
-                rollouts
-                    .set_tenant(r.id, &t.space, TenantState::Failed, &why, now)
-                    .await?;
-                out.failed.push((t.space, why));
-            }
-            Outcome::Gone(why) => {
-                rollouts
-                    .set_tenant(r.id, &t.space, TenantState::Skipped, &why, now)
-                    .await?;
-                out.skipped.push((t.space, why));
-            }
-        }
+        s.settle(t, outcome, &seen, &mut work, out).await?;
     }
     if let Some(Some(l)) = apply_lock {
         l.release().await;
@@ -2733,6 +2752,115 @@ async fn batch(
         .await?;
     }
     Ok(())
+}
+
+/// What a turn does with each tenant's outcome: its state, the lists the
+/// tick reports, and a moved tenant's share partners into the turn.
+struct Settle<'a> {
+    rollouts: &'a Rollouts<'a>,
+    r: &'a Rollout,
+    now: u64,
+    partners: &'a BTreeMap<String, BTreeSet<String>>,
+    by_space: &'a BTreeMap<String, RolloutTenant>,
+}
+
+impl Settle<'_> {
+    async fn settle(
+        &mut self,
+        t: RolloutTenant,
+        outcome: Outcome,
+        seen: &BTreeSet<String>,
+        work: &mut std::collections::VecDeque<(RolloutTenant, bool)>,
+        out: &mut Ticked,
+    ) -> Result<(), RolloutRefusal> {
+        let (r, now) = (self.r, self.now);
+        if matches!(outcome, Outcome::Moved) {
+            for p in self.partners.get(&t.space).into_iter().flatten().rev() {
+                if let Some(row) = self.by_space.get(p).filter(|_| !seen.contains(p)) {
+                    work.push_front((row.clone(), true));
+                }
+            }
+        }
+        match outcome {
+            Outcome::Moved => {
+                self.rollouts
+                    .set_tenant(r.id, &t.space, TenantState::Moved, "", now)
+                    .await?;
+                out.moved.push(t.space);
+            }
+            Outcome::Moving(why) => {
+                self.rollouts
+                    .set_tenant(r.id, &t.space, TenantState::Moving, &why, now)
+                    .await?;
+                out.waiting.push((t.space, why));
+            }
+            Outcome::Waiting(why) => {
+                self.rollouts
+                    .set_tenant(r.id, &t.space, TenantState::Waiting, &why, now)
+                    .await?;
+                out.waiting.push((t.space, why));
+            }
+            Outcome::Failed(why) => {
+                self.rollouts
+                    .set_tenant(r.id, &t.space, TenantState::Failed, &why, now)
+                    .await?;
+                out.failed.push((t.space, why));
+            }
+            Outcome::Gone(why) => {
+                self.rollouts
+                    .set_tenant(r.id, &t.space, TenantState::Skipped, &why, now)
+                    .await?;
+                out.skipped.push((t.space, why));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// **One wave of moves, at once** (`backfill.concurrency`, increment 11b
+/// part 2): each tenant with a database of its own in `wave` moves as
+/// [`move_own`] moves it, all together, with at most `per_database` in one
+/// database (`backfill.per_database`). Each tenant's outcome, in the order
+/// given, and the most that ran at once.
+async fn wave_of(
+    ops: &ApplyOps,
+    r: &Rollout,
+    program: &Program,
+    wave: Vec<RolloutTenant>,
+    own: &BTreeMap<String, String>,
+    per_database: usize,
+    now: u64,
+) -> (Vec<(RolloutTenant, Result<Outcome, RolloutRefusal>)>, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let gates: BTreeMap<String, std::sync::Arc<tokio::sync::Semaphore>> = wave
+        .iter()
+        .filter_map(|t| own.get(&t.space))
+        .map(|db| {
+            (
+                db.clone(),
+                std::sync::Arc::new(tokio::sync::Semaphore::new(per_database)),
+            )
+        })
+        .collect();
+    let running = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+    let moved = futures::future::join_all(wave.into_iter().map(|t| {
+        let gate = own.get(&t.space).and_then(|db| gates.get(db)).cloned();
+        let (running, peak) = (&running, &peak);
+        async move {
+            let _held = match &gate {
+                Some(g) => g.clone().acquire_owned().await.ok(),
+                None => None,
+            };
+            let n = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(n, Ordering::SeqCst);
+            let outcome = Box::pin(move_own(ops, r, &t.space, program, now)).await;
+            running.fetch_sub(1, Ordering::SeqCst);
+            (t, outcome)
+        }
+    }))
+    .await;
+    (moved, peak.load(Ordering::SeqCst))
 }
 
 /// Pin one tenant on the deployment's own database: that database holds

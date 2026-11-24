@@ -4393,11 +4393,14 @@ fn backfill_lines(b: &serde_json::Value) -> String {
     }
     let n = |k: &str| b[k].as_u64().map(|n| n.to_string());
     format!(
-        "BACKFILL\n  chunk rows    {}\n  chunk timeout {}s\n  max attempts  {}\n  budget        {}\n",
+        "BACKFILL\n  chunk rows    {}\n  chunk timeout {}s\n  max attempts  {}\n  budget        {}\n  \
+         concurrency   {}\n  per database  {}\n",
         n("chunkRows").unwrap_or_else(|| "?".into()),
         n("chunkTimeout").unwrap_or_else(|| "?".into()),
         n("maxAttempts").unwrap_or_else(|| "?".into()),
         n("budget").map(|b| format!("{b} chunks")).unwrap_or_else(|| "none".into()),
+        n("concurrency").map(|b| format!("{b} moves")).unwrap_or_else(|| "?".into()),
+        n("perDatabase").map(|b| format!("{b} moves")).unwrap_or_else(|| "?".into()),
     )
 }
 

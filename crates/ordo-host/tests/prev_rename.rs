@@ -768,3 +768,222 @@ async fn two_nodes_one_never_told_lose_no_write_across_a_rename() {
         "every write of node B reached the new column"
     );
 }
+
+/// A real write node over `db` serving `source`, writing as `space`.
+async fn node_in(db: &str, source: &str, name: &str, space: &str) -> Node {
+    let mut n = node(db, source, name).await;
+    n.exec.space = ordo_crypto::SpaceId(space.to_string());
+    n.fixture = std::sync::Arc::new(n.fixture.in_space(space));
+    n
+}
+
+fn is_nullable(pg: &Pg, column: &str) -> String {
+    one(
+        pg,
+        &format!(
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'note' AND column_name = '{column}'"
+        ),
+    )
+}
+
+/// Increment 11b part 2 (`plan-backfill-dual-writes.md` §4; Q1): **tenants
+/// on the deployment's own database move one by one, and their soaks close
+/// together once no space there serves the version before.** `acme` and
+/// `beta` keep their rows in the deployment's own database, beside its own
+/// space. 1.1.0 renames `kind` to `mediaType`, a required field. `acme`
+/// moves: the expand runs once for the database, the copy covers every
+/// space's rows, and its pin switches. `beta`, still on 1.0.0, writes through
+/// the real write path, and so does `acme` on 1.1.0: every row holds the
+/// same value under both names. `beta` moves; its expand and copy are found
+/// done. The new column's `NOT NULL` waits. A close is refused while the
+/// deployment's own space serves 1.0.0, naming it, and so is `ordo evolve
+/// --run` of the step over the open moves. Once the own space moves, a due
+/// soak waits for the other soak of its step there, then both close
+/// together: the `NOT NULL` lands, the database records 1.1.0, `kind` is
+/// orphaned and leaves `$renames`.
+///
+/// A regression looks like the `NOT NULL` landing while a space there still
+/// inserts as 1.0.0 (its insert would fail), a row whose two columns differ,
+/// or one soak closing alone and orphaning the column the other tenants
+/// still read and write.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenants_on_the_deployments_own_database_move_and_their_soaks_close_together() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let (pg, pool) = empty("ordo_prev_shared").await;
+    ordo_host::tenants::ensure_table(&pool)
+        .await
+        .expect("$spaces");
+    for t in ["acme", "beta"] {
+        assert!(
+            ordo_host::tenants::reserve(&pool, t, t, "dev:ada", 10, None)
+                .await
+                .expect("reserved")
+        );
+        ordo_host::tenants::activate(&pool, t, 11)
+            .await
+            .expect("active");
+    }
+    let ops_x = "\nop addNote($kind: text) =\n  set note { kind: $kind }\n";
+    let ops_y = "\nop addNote($kind: text) =\n  set note { mediaType: $kind }\n";
+    let x_src = notes("1.0.0", "  kind: text = \"\"\n") + ops_x;
+    let y_src = notes("1.1.0", "  mediaType: text = \"\" prev(kind)\n") + ops_y;
+    let run = |source: String, activate: bool| {
+        let pool = pool.clone();
+        async move {
+            let program = Program::compile(&source).expect("compiles");
+            ordo_host::apply_op::run_program(
+                &pool,
+                &ordo_exec::route::SinglePool::new(pool.clone()),
+                &program,
+                vec![],
+                OWNER,
+                "t",
+                activate,
+            )
+            .await
+            .expect("applies")
+        }
+    };
+    run(x_src.clone(), true).await;
+    // Stored, not applied: the move brings the database to it.
+    store(&pool, &y_src).await;
+    let plan = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+    let v = Versions::on(&pool);
+    for t in ["acme", "beta"] {
+        assert_eq!(
+            v.pin_of(t).await.expect("read").and_then(|p| p.version),
+            Some("1.0.0".to_string()),
+            "{t}"
+        );
+    }
+    for s in ["acme", "beta", "home"] {
+        pg.exec(&format!(
+            "INSERT INTO note (\"$space\", id, rev, kind) \
+             SELECT '{s}', '{s}' || i, 1, '{s} ' || i FROM generate_series(1, 30) i"
+        ))
+        .expect("rows");
+    }
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let ctx = evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 25,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let week = 7 * 86_400;
+
+    // `acme` moves: one expand and one copy for the whole database.
+    let moved = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE \"mediaType\" IS DISTINCT FROM kind"
+        ),
+        "0",
+        "every space's rows are copied"
+    );
+    assert_eq!(is_nullable(&pg, "mediaType"), "YES", "the NOT NULL waits");
+
+    // `beta` on 1.0.0 and `acme` on 1.1.0 write through the real path.
+    let on_x = node_in(&pg.db, &x_src, "b", "beta").await;
+    let on_y = node_in(&pg.db, &y_src, "a", "acme").await;
+    for i in 0..10 {
+        on_x.write(format!(r#"addNote($kind: "beta wrote {i}")"#))
+            .await
+            .expect("beta writes as 1.0.0");
+        on_y.write(format!(r#"addNote($kind: "acme wrote {i}")"#))
+            .await
+            .expect("acme writes as 1.1.0");
+    }
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE \"mediaType\" IS DISTINCT FROM kind"
+        ),
+        "0",
+        "each write reached both columns"
+    );
+    assert_eq!(one(&pg, "SELECT count(*) FROM note"), "110");
+
+    // `beta` moves: its expand and copy are found done.
+    let moved = dual_writes::run(&cx, "beta", &plan, &ctx, week, OWNER)
+        .await
+        .expect("beta moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(moved.statements, 0, "no second expand");
+
+    // The deployment's own space still serves 1.0.0: no close, no `--run`.
+    let err = dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect_err("the own space is on 1.0.0");
+    assert_eq!(err.class(), "soak_shared", "{err}");
+    let text = err.to_string();
+    assert!(text.contains("the deployment's own space"), "{text}");
+    assert!(text.contains("1.1.0"), "{text}");
+    let err = evolve::run_step(&pool, &pool, "deployment", &plan, OWNER)
+        .await
+        .expect_err("moves are open");
+    assert_eq!(err.class(), "moves_open", "{err}");
+    assert!(err.to_string().contains("acme, beta"), "{err}");
+    assert_eq!(is_nullable(&pg, "mediaType"), "YES");
+
+    // The own space moves. `acme`'s soak is due and `beta`'s is not: on
+    // this database they close together, so neither closes yet.
+    v.pin_own("home", "1.1.0", 0, OWNER, 20)
+        .await
+        .expect("the own space moves");
+    pg.exec("UPDATE \"$moves\" SET soak_until = 1 WHERE space = 'acme'")
+        .expect("acme due");
+    assert!(dual_writes::close_due(&cx).await.is_empty());
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM \"$moves\" WHERE phase = 'soaking'"
+        ),
+        "2"
+    );
+    pg.exec("UPDATE \"$moves\" SET soak_until = 1 WHERE space = 'beta'")
+        .expect("beta due");
+    let mut closed = dual_writes::close_due(&cx).await;
+    closed.sort();
+    assert_eq!(closed, vec!["acme".to_string(), "beta".to_string()]);
+
+    // Closed together: the constraint, the record, the orphan, `$renames`.
+    assert_eq!(is_nullable(&pg, "mediaType"), "NO");
+    assert_eq!(
+        ordo_exec::spacedb::recorded_version(&pool)
+            .await
+            .expect("recorded"),
+        ordo_exec::spacedb::TargetVersion::At("1.1.0".into())
+    );
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM \"$orphans\" WHERE entity = 'note' AND field = 'kind'"
+        ),
+        "1"
+    );
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$renames\""), "0");
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$moves\""), "0");
+    for t in ["acme", "beta"] {
+        assert_eq!(
+            v.pin_of(t).await.expect("read").and_then(|p| p.version),
+            Some("1.1.0".to_string()),
+            "{t}"
+        );
+    }
+}

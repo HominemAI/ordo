@@ -4,7 +4,8 @@ Status: **B1, B3 and B6 built 2026-11-23** (`plan-versions.md` increment
 10b; `crates/ordo-host/src/backfill.rs`). **B2 and B4 built 2026-11-24**
 (increment 11a, try 1; `crates/ordo-host/src/dual_writes.rs`,
 `crates/ordo-exec/src/overlay.rs`). **B5 part 1 built 2026-11-24** (increment
-11b; `crates/ordo-host/src/every_tenant.rs`); shared databases wait.
+11b; `crates/ordo-host/src/every_tenant.rs`). **B5 part 2 built 2026-11-24**: §4 on
+the deployment's own database, `backfill.concurrency`, grants that stay killed.
 What was built differs from the text below in the places marked
 "Built". Written by the review
 of the evolution plans (`review-evolution-plans-2026-11-23.md`). It is the
@@ -252,6 +253,61 @@ DDL is per table, so it is per database, not per tenant.
 This is research too: one try, on the conformance cluster with 3 tenants
 in one database and 1 in its own.
 
+**Built (B5 part 2, 2026-11-24).** One try, as said. What it found:
+
+- Since 2026-10-06 every new tenant gets a database of its own. The
+  deployment's own database holds the deployment's own space and tenants
+  made before then. A database a tenant attached may hold several spaces.
+- **Expand once.** The first tenant's move there runs the expand and the
+  copy for every space's rows. A later tenant finds the columns there and
+  the cursor at its end; verify runs again under live writes.
+- **No per-tenant forward overlay is needed for a rename.** The expand
+  records it in `$renames`, so every space there, on either version, keeps
+  both columns current. A fill has no such record: only a move's own
+  writes run its mapping. A fill there is refused as
+  `shared_fill_not_built`, naming `ordo evolve --run`.
+- **The close is per database, not per tenant.** A soak there closes only
+  once no space there serves X: no tenant pinned to X outside a soak of
+  this step, and the deployment's own space past X. Until then `--close-soak`
+  and the soak's end say `soak_shared`, naming who. Then every soak of the
+  step there closes together, and the `NOT NULL`, the record of Y, the
+  orphan, the `$renames` row and the reader grants happen once. The
+  catch-up's tick waits for the last soak there to be due (Q1). A required
+  renamed field always has a default (`prev_default_required`), so an
+  insert by X never fails on the new column meanwhile.
+- `ordo evolve --run` of the step on that database is refused while a move
+  through it is open there (`moves_open`): it would land the constraints
+  under the soaks.
+- **A seal** on a database several tenants share: the end raises every
+  one's pin fence in its transaction, to the epoch the catch-up pins each
+  with next (`StepContext::fences`). Part 1 refused it.
+- **Concurrency.** `backfill.concurrency` (default 8) and
+  `backfill.per_database` (default 2) are stored settings, set with `ordo
+  versions set`. A rollout's turn gathers its tenants with a database of
+  their own into waves of `concurrency` and runs each wave at once, a
+  semaphore per database. The tick reports the most that ran at once.
+- Tests: `prev_rename.rs`
+  (`tenants_on_the_deployments_own_database_move_and_their_soaks_close_together`,
+  2 tenants and the own space, writes through the real write path),
+  `sealed_backfill.rs`
+  (`a_seal_on_a_database_3_tenants_share_fences_each_of_them`),
+  `rollouts.rs`
+  (`a_turn_moves_tenants_at_once_up_to_backfill_concurrency_and_per_database`).
+- Not built: a rollout moving a tenant on the deployment's own database
+  with dual writes (it pins it once that database holds the target); a
+  unique index or a check held to the close (no step on the menu adds one
+  with dual writes yet); dropping an orphaned column per tenant.
+
+**Grants a move killed stay killed (V-53, built 2026-11-24).** The door
+decides from the token, so a grant Y refuses would read again after a
+revert to X. At the switch, every live grant in the tenant that Y refuses,
+judged as the door judges it, is recorded in `$grant_kills` (control
+database). Every node reads it with the moves, and the door refuses the
+grant as `GrantKilledByMove`, answered `versions_disagree` naming both
+versions and `std.space.share`. A grant made after the switch is never
+recorded, so sharing again reads. Test: `notes_app.rs`
+(`a_grant_a_move_killed_stays_killed_after_the_revert`).
+
 ---
 
 ## 5 · Verify and the audit record
@@ -437,7 +493,7 @@ in one database and 1 in its own.
 | B6 | 10b | S | Backfill functions |
 | B2 | 11a | L, research, 2 to 3 tries | The move overlay: forward dual writes on X, both guards, the phase on the pin stream. **Built 2026-11-24, try 1** |
 | B4 | 11a | M | The switch, reverse dual writes on Y, the soak, revert in the soak, soak close into `$orphans`. **Built 2026-11-24** |
-| B5 | 11b | M | Driven by a rollout; shared-database constraints (§4); `ordo rollback` and `--dry-run`. **Part 1 built 2026-11-24**: the rollout, the activation, `ordo rollback` and `--dry-run`; §4 waits |
+| B5 | 11b | M | Driven by a rollout; shared-database constraints (§4); `ordo rollback` and `--dry-run`. **Part 1 built 2026-11-24**: the rollout, the activation, `ordo rollback` and `--dry-run`. **Part 2 built 2026-11-24**: §4, concurrency, grants stay killed |
 
 What sets the pace:
 
@@ -506,10 +562,10 @@ What sets the pace:
   (`a_rollout_moves_3_tenants_through_a_rename_under_live_writes_and_a_rollback_in_the_soak_keeps_every_write`,
   `an_activation_runs_each_tenant_stored_step_a_seal_included`); notes e2e
   project `rollout-moves` (`tests/evolve/every-tenant.spec.ts`).
-- Not built: §4 (a tenant on a shared database in a move of its own, the
-  new shape's constraints at the last tenant's close, soaks on a read
-  table closing together); `backfill.concurrency` and
-  `backfill.per_database`; grants a move killed staying killed after a
+- Not built in part 1, built in part 2 (§4): a tenant on a shared
+  database in a move of its own, the new shape's constraints at the
+  close, soaks on a read table closing together; `backfill.concurrency`
+  and `backfill.per_database`; grants a move killed staying killed after a
   revert.
 
 ## 9 · Tests

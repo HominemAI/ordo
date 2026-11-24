@@ -160,6 +160,7 @@ fn settings(chunk_rows: u32, budget: Option<u32>) -> StepContext {
         functions: None,
         keys: None,
         fence: None,
+        fences: Vec::new(),
     }
 }
 
@@ -450,6 +451,7 @@ async fn five_failed_chunks_mark_the_cursor_dead_and_a_run_again_finishes() {
         functions: None,
         keys: None,
         fence: None,
+        fences: Vec::new(),
     };
     let err = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &quick)
         .await
@@ -633,6 +635,7 @@ async fn a_backfill_function_runs_per_chunk_with_only_what_the_plan_declares() {
         functions: Some(upper.clone()),
         keys: None,
         fence: None,
+        fences: Vec::new(),
     };
     let ran = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &ctx)
         .await
@@ -734,10 +737,11 @@ async fn a_second_worker_is_busy_and_a_done_backfill_does_nothing() {
 }
 
 /// Increment 11a: **a move with dual writes is refused where it cannot keep
-/// both shapes current**, each refusal naming the fix. A tenant whose rows
-/// are in the deployment's own database shares it with tenants that would
-/// not write both shapes (11b). A step filled by a backend function has no
-/// per-row mapping for the write path (D16's one-way step).
+/// both shapes current**, each refusal naming the fix. On the deployment's
+/// own database a move copies a rename only (11b part 2): a fill there has
+/// no dual write for the other spaces, which would write rows it misses. A
+/// step filled by a backend function has no per-row mapping for the write
+/// path (D16's one-way step).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_with_dual_writes_is_refused_where_it_cannot_keep_both_shapes() {
     let choices = fills(
@@ -757,9 +761,9 @@ async fn a_move_with_dual_writes_is_refused_where_it_cannot_keep_both_shapes() {
     };
     let err = ordo_host::dual_writes::run(&cx, "acme", &plan, &ctx, 0, OWNER)
         .await
-        .expect_err("a shared database");
+        .expect_err("a fill on a shared database");
     let text = err.to_string();
-    assert!(text.starts_with("shared_database"), "{text}");
+    assert!(text.starts_with("shared_fill_not_built"), "{text}");
     assert!(text.contains("--run"), "{text}");
 
     // A database of its own, and a function fill: one way.

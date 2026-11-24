@@ -101,9 +101,21 @@ sign-ins are never carried.
 - A staging admin opens it as its founding owner. `ordo clones set readers
   <person>` lets others in. A cloned member cannot sign in.
 
-Not built yet: sinks for mail, push and egress; a version staging does not
-hold arriving with the clone; a tenant's own database or bucket recreated.
-Details in `plan-versions.md` §3.4.
+**Built, session 2 (2026-11-24).**
+
+- In staging, a routine's mail and a function's calls go to a sink, read
+  with `ordo clones sink`. `clone.sinks` is `on` by default: every staging
+  tenant and every clone. `clones` narrows it to the clones. Whether D17's
+  "in staging" means clones only is an open owner question.
+- A version staging does not hold comes down with the clone through the
+  promotion gate, stored and not activated, recorded as a clone.
+- A tenant with a database of its own gets one on staging, made by
+  staging and brought to the clone's version.
+- The notes e2e clones a tenant into a second deployment through the doors.
+
+Not built yet: a tenant with `acl` rows (the import refuses its access
+rows); the clone's default name carries production's tenant name; a
+tenant's own bucket; push. Details in `plan-versions.md` §3.4.
 
 ### 2.4 Blue/green per tenant (g33)
 

@@ -51,6 +51,7 @@ pub mod ops;
 pub mod people;
 pub mod prev;
 pub mod release_check;
+pub mod rollout;
 pub mod signin;
 pub mod skill;
 pub mod sources;

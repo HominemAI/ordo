@@ -121,11 +121,82 @@ pub const BACKFILL_LOCK_NS: i32 = 0x424B_464C;
 
 // ── settings ─────────────────────────────────────────────────────────────
 
-/// The worker's settings (`plan-versions.md` §7). Increment 10 stores the
-/// rollout and backfill settings in Ordo (ruled 2026-11-23, Q15); until
-/// then the caller passes these, and [`BackfillSettings::default`] holds the
-/// plan's defaults.
-#[derive(Debug, Clone)]
+/// The backfill settings (`plan-versions.md` §7), stored in
+/// `$version_settings` beside the version and rollout settings (ruled
+/// 2026-11-23, Q15) and set with `ordo versions set backfill.<name> <value>
+/// --reason "..."` (`std.deployment.setVersionSetting`).
+pub const CHUNK_ROWS_SETTING: &str = "backfill.chunk_rows";
+pub const CHUNK_TIMEOUT_SETTING: &str = "backfill.chunk_timeout";
+pub const MAX_ATTEMPTS_SETTING: &str = "backfill.max_attempts";
+pub const BUDGET_SETTING: &str = "backfill.budget";
+
+pub const SETTINGS: [&str; 4] = [
+    CHUNK_ROWS_SETTING,
+    CHUNK_TIMEOUT_SETTING,
+    MAX_ATTEMPTS_SETTING,
+    BUDGET_SETTING,
+];
+
+/// The most rows one chunk may take. A chunk is one transaction.
+pub const MAX_CHUNK_ROWS: u32 = 100_000;
+
+/// The full name of a backfill setting from what a person typed:
+/// `backfill.chunk_rows`, `chunk_rows` or `chunk-rows`.
+pub fn setting_name(text: &str) -> Option<&'static str> {
+    let t = text.trim();
+    let t = t.strip_prefix("backfill.").unwrap_or(t).replace('-', "_");
+    SETTINGS
+        .into_iter()
+        .find(|s| s.strip_prefix("backfill.") == Some(t.as_str()))
+}
+
+/// Check a value for `setting` and answer it as stored. `None` clears it.
+pub fn check_setting(
+    setting: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, BackfillRefusal> {
+    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let bad = |why: &str| BackfillRefusal::Setting {
+        setting: setting.to_string(),
+        value: v.chars().take(40).collect(),
+        why: why.to_string(),
+    };
+    let count = |lo: u32, hi: u32| match v.parse::<u32>() {
+        Ok(n) if (lo..=hi).contains(&n) => Some(n.to_string()),
+        _ => None,
+    };
+    match setting {
+        CHUNK_ROWS_SETTING => count(1, MAX_CHUNK_ROWS).map(Some).ok_or_else(|| {
+            bad(&format!(
+                "it is a whole number of rows, 1 to {MAX_CHUNK_ROWS}"
+            ))
+        }),
+        MAX_ATTEMPTS_SETTING => count(1, 100)
+            .map(Some)
+            .ok_or_else(|| bad("it is a whole number of chunks, 1 to 100")),
+        BUDGET_SETTING if v == "none" => Ok(None),
+        BUDGET_SETTING => count(1, u32::MAX)
+            .map(Some)
+            .ok_or_else(|| bad("it is a whole number of chunks, 1 or more, or `none`")),
+        CHUNK_TIMEOUT_SETTING => match crate::windows::parse_length(v) {
+            Ok(n) if (1..=3_600).contains(&n) => Ok(Some(n.to_string())),
+            _ => Err(bad(
+                "it is a length from 1 second to 1 hour, like `20s` or `2m`",
+            )),
+        },
+        _ => Err(bad(&format!(
+            "there is no such backfill setting; there are {}",
+            SETTINGS.join(", ")
+        ))),
+    }
+}
+
+/// The worker's settings (`plan-versions.md` §7). A stored step reads them
+/// from `$version_settings` ([`stored_settings`]); unset ones are
+/// [`BackfillSettings::default`], the plan's defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackfillSettings {
     /// `backfill.chunk_rows`: rows per chunk.
     pub chunk_rows: u32,
@@ -142,11 +213,130 @@ impl Default for BackfillSettings {
     fn default() -> Self {
         BackfillSettings {
             chunk_rows: 1000,
-            chunk_timeout: Duration::from_secs(30),
+            chunk_timeout: Duration::from_secs(20),
             max_attempts: 5,
             budget: None,
         }
     }
+}
+
+impl BackfillSettings {
+    /// As the settings op answers them.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "chunkRows": self.chunk_rows,
+            "chunkTimeout": self.chunk_timeout.as_secs(),
+            "maxAttempts": self.max_attempts,
+            "budget": self.budget,
+        })
+    }
+
+    /// One stored value over the default. A value the checks would refuse
+    /// (written by hand) reads as the default.
+    fn with(&mut self, setting: &str, value: Option<&str>) {
+        let d = BackfillSettings::default();
+        let n = |v: Option<&str>| {
+            v.and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|n| *n >= 1)
+        };
+        match setting {
+            CHUNK_ROWS_SETTING => {
+                self.chunk_rows = n(value)
+                    .map(|n| n.min(MAX_CHUNK_ROWS))
+                    .unwrap_or(d.chunk_rows)
+            }
+            CHUNK_TIMEOUT_SETTING => {
+                self.chunk_timeout = n(value)
+                    .map(|s| Duration::from_secs(u64::from(s)))
+                    .unwrap_or(d.chunk_timeout)
+            }
+            MAX_ATTEMPTS_SETTING => self.max_attempts = n(value).unwrap_or(d.max_attempts),
+            BUDGET_SETTING => self.budget = n(value),
+            _ => {}
+        }
+    }
+}
+
+/// The backfill settings as stored in `$version_settings`. Unset ones read
+/// as their defaults; so does a database with no settings table yet.
+pub async fn stored_settings(pool: &Pool) -> Result<BackfillSettings, BackfillRefusal> {
+    let rows = match pool
+        .rows(
+            "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" \
+             FROM \"$version_settings\" WHERE \"setting\" LIKE 'backfill.%' \
+             ORDER BY \"setting\", \"seq\" DESC",
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_missing_table() => return Ok(BackfillSettings::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = BackfillSettings::default();
+    for r in rows {
+        let (Some(Some(name)), value) = (r.first().cloned(), r.get(1).cloned().flatten()) else {
+            continue;
+        };
+        out.with(&name, value.as_deref());
+    }
+    Ok(out)
+}
+
+/// **Change one backfill setting**, or clear it with `None`, with who and
+/// why (Q15). Checked first ([`check_setting`]); written beside the version
+/// settings under the pin lock. `true` when it changed.
+pub async fn set_setting(
+    pool: &Pool,
+    setting: &str,
+    value: Option<&str>,
+    actor: &str,
+    reason: &str,
+    at: u64,
+) -> Result<(bool, BackfillSettings), BackfillRefusal> {
+    let reason = crate::versions::check_reason(reason)
+        .map_err(|e| BackfillRefusal::Reason(e.to_string()))?;
+    let Some(name) = setting_name(setting) else {
+        return Err(BackfillRefusal::Setting {
+            setting: setting.chars().take(60).collect(),
+            value: value.unwrap_or_default().chars().take(40).collect(),
+            why: format!(
+                "there is no such backfill setting; there are {}",
+                SETTINGS.join(", ")
+            ),
+        });
+    };
+    let value = check_setting(name, value)?;
+    pool.rows(crate::versions::SETTINGS_DDL).await?;
+    let tx = pool.begin().await?;
+    tx.rows(&format!(
+        "SELECT pg_advisory_xact_lock({}, 0)",
+        crate::versions::PIN_LOCK_NS
+    ))
+    .await?;
+    let now = tx
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        ))
+        .await?;
+    let current = now.first().and_then(|r| r.first().cloned().flatten());
+    // Unchanged: the same value, or clearing what was never set.
+    if current == value {
+        tx.rollback().await?;
+        return Ok((false, stored_settings(pool).await?));
+    }
+    tx.rows(&format!(
+        "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+         VALUES ({}, {}, {}, {}, {at})",
+        sql_lit(name),
+        value.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        sql_lit(actor),
+        sql_lit(&reason),
+    ))
+    .await?;
+    tx.commit().await?;
+    Ok((true, stored_settings(pool).await?))
 }
 
 // ── the typed error ──────────────────────────────────────────────────────
@@ -180,6 +370,14 @@ pub enum BackfillRefusal {
     Seal { space: String, why: String },
     /// A database fault outside a chunk.
     Store(String),
+    /// A backfill setting's value is not one it takes.
+    Setting {
+        setting: String,
+        value: String,
+        why: String,
+    },
+    /// A setting change without a usable reason.
+    Reason(String),
 }
 
 impl BackfillRefusal {
@@ -191,6 +389,19 @@ impl BackfillRefusal {
             BackfillRefusal::Function { .. } => "backfill_function_failed",
             BackfillRefusal::Seal { .. } => "backfill_seal_failed",
             BackfillRefusal::Store(_) => "store_failed",
+            BackfillRefusal::Setting { .. } | BackfillRefusal::Reason(_) => "invalid_param",
+        }
+    }
+
+    /// As the door answers it, `what` saying what did not happen.
+    pub fn to_exec_error(&self, what: &str) -> ordo_api::ExecError {
+        use ordo_api::ErrorCode;
+        let message = format!("{what}: {self}");
+        match self {
+            BackfillRefusal::Setting { .. } | BackfillRefusal::Reason(_) => {
+                ordo_api::ExecError::new(ErrorCode::InvalidParam, message)
+            }
+            _ => ordo_api::ExecError::new(ErrorCode::SpaceUnavailable, message),
         }
     }
 
@@ -251,6 +462,16 @@ impl std::fmt::Display for BackfillRefusal {
                  the deployment's key custody; it resumes from its cursor"
             ),
             BackfillRefusal::Store(e) => write!(f, "store_failed: {e}"),
+            BackfillRefusal::Setting {
+                setting,
+                value,
+                why,
+            } => write!(
+                f,
+                "{setting} `{value}` is not one: {why}. `ordo versions set {setting} <value> \
+                 --reason \"...\"` sets it"
+            ),
+            BackfillRefusal::Reason(why) => write!(f, "{why}"),
         }
     }
 }

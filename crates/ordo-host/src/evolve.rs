@@ -2267,7 +2267,7 @@ pub async fn execute(
                     "default",
                     &done.plan,
                     caller,
-                    &ops.step_context(),
+                    &ops.step_context().await?,
                 )
                 .await
                 .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
@@ -2349,9 +2349,16 @@ pub async fn execute(
                 .to_exec_error(WHAT)
             })?;
             let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;
-            let done = replay_with(pool, &target, tenant, &to, caller, &ops.step_context())
-                .await
-                .map_err(|e| e.to_exec_error(WHAT))?;
+            let done = replay_with(
+                pool,
+                &target,
+                tenant,
+                &to,
+                caller,
+                &ops.step_context().await?,
+            )
+            .await
+            .map_err(|e| e.to_exec_error(WHAT))?;
             if done.backfilling() {
                 // A backfill stopped at its budget: the tenant stays on its
                 // version, and the next replay resumes from the cursor.

@@ -231,6 +231,9 @@ wait_for "note_viewer" "$viewer_door/health/live" "$last"
 (viewer_env "$ordo" apply "$repo/examples/note-viewer" --as fed-e2e --direct) >"$state/viewer-apply.log" 2>&1 ||
   { cat "$state/viewer-apply.log" >&2; echo "stack: ordo apply of note_viewer failed" >&2; exit 1; }
 admit viewer viewer
+# note_viewer's environment, for a test that runs `ordo release-check
+# --direct` as the viewer (tests/api/release.spec.ts, increment 7b).
+(viewer_env env) >"$state/viewer.env"
 
 cat >"$state/stack.json" <<EOF
 {

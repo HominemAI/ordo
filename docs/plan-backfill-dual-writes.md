@@ -119,7 +119,7 @@ shared database do not take its whole pool.
   `backfill.concurrency` across tenants wait for 11b.
 - A failed chunk is retried with half the rows; 5 in a row mark it
   `dead`. An explicit run again retries a dead cursor.
-- Settings: `chunk_rows` 1000, `chunk_timeout` 30 s, 5 attempts, and a
+- Settings: `chunk_rows` 1000, `chunk_timeout` 20 s, 5 attempts, and a
   `budget` of chunks per run. They are defaults until increment 10 stores
   them in Ordo (Q15).
 

@@ -1,6 +1,7 @@
 # Fixture for note_viewer's e2e (plan-versions.md increment 14): notes v3
-# with `notes.tags` no longer declared, at 0.3.2. The note viewer maps
-# `tags`. Once this version serves, `notes.tags` is an orphan: kept, never
+# with `notes.tags` no longer declared, at 0.3.2. It keeps 0.3.1's rename
+# of `title` to `heading` (notes-heading.ordo.fixture), which runs
+# before it. The note viewer maps `tags`. Once this version serves, `notes.tags` is an orphan: kept, never
 # written, and taken out of the viewer's grant (owner ruling 2026-11-23,
 # Q1). The viewer is held with `external_changed`, naming the column.
 #
@@ -71,7 +72,9 @@ domain notes @ 0.3.2
 reader note_viewer reads notes, notesAccess
 
 entity notes {
-  title: text
+  # 0.3.1: was `title`. The old column is kept and written while a
+  # version that reads it is served.
+  heading: text = "" prev(title)
   body:  text = ""
   created: datetime
   pinned: bool = false
@@ -97,10 +100,10 @@ entity attachments {
 }
 
 op createNote($title: text, $body: text, $created: datetime) =
-  set notes { title: $title, body: $body, created: $created }
+  set notes { heading: $title, body: $body, created: $created }
 
 op editNote($id: id, $rev: int, $title: text, $body: text) =
-  set notes { id: $id, rev: $rev, title: $title, body: $body }
+  set notes { id: $id, rev: $rev, heading: $title, body: $body }
 
 op deleteNote($id: id) =
   del notes { id: $id }
@@ -121,7 +124,7 @@ op starNote($id: id, $rev: int, $starred: bool) =
 # v3: the starred notes. A new op, so no share made under v2 lists it, and
 # `allNotes` keeps the columns v2's shares pinned.
 op starredNotes unbounded =
-  notes(starred == true)[id, rev, title, created]
+  notes(starred == true)[id, rev, title: heading, created]
   sort -created
 
 # Take one note back from one guest. `revokeNotesAccess` is the derived form;
@@ -178,7 +181,7 @@ routine fireReminders in notes {
 # share that lists it until the sharer shares again. So the shares people
 # accepted under v1 keep working because this op does not change.
 op myNotes unbounded =
-  notes[id, rev, title, body, created]
+  notes[id, rev, title: heading, body, created]
   sort -created
 
 # Every note with its pin and archive state, archived ones too. The page
@@ -189,7 +192,7 @@ op myNotes unbounded =
 # "Download all my notes"): `notes.json` holds every note this person may
 # read, with these fields. Reminders are not marked, so they stay out.
 op allNotes unbounded download =
-  notes[id, rev, title, body, created, pinned, archived]
+  notes[id, rev, title: heading, body, created, pinned, archived]
   sort -created
 
 # A file's row, made before its bytes are sent. `$size` is taken and not
@@ -229,11 +232,11 @@ function suggestTitle in notes {
 # One note, by id, for `titleNote`. The note's guard applies: a person
 # reads only a note they may read.
 op oneNote($id: id) =
-  notes(id == $id)[id, rev, title, body]
+  notes(id == $id)[id, rev, title: heading, body]
 
 # A new title for a note, and nothing else.
 op retitleNote($id: id, $rev: int, $title: text) =
-  set notes { id: $id, rev: $rev, title: $title }
+  set notes { id: $id, rev: $rev, heading: $title }
 
 # Give a saved note a title from a language model, and save it. It reads
 # the note with `oneNote` and writes the title with `retitleNote`, both as

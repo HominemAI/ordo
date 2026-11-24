@@ -1199,6 +1199,10 @@ impl ErrorCode {
     }
 }
 
+/// The frame name a live feed ends with when its tenant's version changed
+/// ([`ApiError::version_changed`]).
+pub const VERSION_CHANGED_EVENT: &str = "version_changed";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiError {
     pub code: ErrorCode,
@@ -1214,6 +1218,10 @@ pub struct ApiError {
     /// `Retry-After`, in seconds, for a refusal whose wait is a setting
     /// rather than the class's own (`tenant_not_ready`).
     pub retry_after: Option<u64>,
+    /// The tenant's program version moved under a live feed: the feed
+    /// ends with a [`VERSION_CHANGED_EVENT`] frame rather than `error`.
+    /// Set only by [`ApiError::version_changed`].
+    pub version_moved: bool,
 }
 
 impl ApiError {
@@ -1226,6 +1234,7 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
     }
 
@@ -1238,7 +1247,23 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
+    }
+
+    /// **A live feed's tenant moved to another version** (`plan-versions.md`
+    /// §1.4: a pin switch closes the tenant's streams with a reconnect
+    /// signal). The feed ends with an `event: version_changed` frame. The
+    /// class is `space_unavailable`, retryable: the client opens the feed
+    /// again and is served the new version. No version is named, so an end
+    /// user learns nothing about the deployment's versions.
+    pub fn version_changed() -> Self {
+        let mut e = ApiError::new(
+            ErrorCode::SpaceUnavailable,
+            "this tenant's program version changed while the feed was open; open it again",
+        );
+        e.version_moved = true;
+        e
     }
 
     /// Name the op on an error built without a spec — the door's denial for
@@ -1273,6 +1298,7 @@ impl ApiError {
             allow: None,
             status: None,
             retry_after: None,
+            version_moved: false,
         }
     }
 

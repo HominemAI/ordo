@@ -228,6 +228,7 @@ cat >"$state/stack.json" <<EOF
   "page": "$page",
   "pageV2": "$page/v2/",
   "programV2": "$repo/examples/notes-v2",
+  "programV3": "$repo/examples/notes-v3",
   "provider": "$public",
   "mail": "http://localhost:$mail_http_port",
   "program": "$program",

@@ -139,6 +139,15 @@ export default defineConfig({
       dependencies: ['orphans'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // notes.body sealed on live data (plan-versions.md increment 13), from
+    // v3 to 0.3.2 (fixtures/notes-v3-2). It seals a field for the whole
+    // stack, so it runs after `clone`, last. Locally, `--project=seal --no-deps`.
+    {
+      name: 'seal',
+      testMatch: /seal\/.*\.spec\.ts/,
+      dependencies: ['clone'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

@@ -33,8 +33,9 @@ use ordo_host::versions::Versions;
 const OWNER: &str = "deployment-owner:ada";
 const SPACES: [&str; 3] = ["acme", "beta", "gamma"];
 
+/// `body` has a default, as notes' does: a sealed field's column has none.
 fn v1() -> String {
-    "domain notes @ 1.0.0\n\nentity note {\n  title: text\n  body: text\n}\n\n\
+    "domain notes @ 1.0.0\n\nentity note {\n  title: text\n  body: text = \"\"\n}\n\n\
      op allNotes unbounded =\n  note[title]\n"
         .into()
 }

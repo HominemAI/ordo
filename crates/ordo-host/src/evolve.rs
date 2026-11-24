@@ -1956,6 +1956,9 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         if let Some(n) = b["oldValues"].as_str() {
             out.push(format!("    old values: {n}"));
         }
+        if let Some(n) = b["plaintext"].as_str() {
+            out.push(format!("    plaintext: {n}"));
+        }
     }
     for s in receipt["after"].as_array().into_iter().flatten() {
         out.push(format!(

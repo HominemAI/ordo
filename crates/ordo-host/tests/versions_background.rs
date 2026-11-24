@@ -342,20 +342,6 @@ async fn call(
     call_keyed(node, method, uri, space, who, body, None).await
 }
 
-/// [`call`], sent again on `server_busy` as the SDK does, for up to 30
-/// seconds. Just after boot the node is still loading its other version
-/// and running schedules, and its 8 connections can all be in use.
-async fn call_retrying(node: &Node, method: &str, uri: &str, space: &str, who: &str) -> Answer {
-    let until = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let a = call(node, method, uri, space, who, None).await;
-        if a.code() != "server_busy" || std::time::Instant::now() >= until {
-            return a;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
 async fn call_keyed(
     node: &Node,
     method: &str,
@@ -660,7 +646,7 @@ async fn the_tenant_admin_reads_its_versions_label() {
         .set_label("0.1.0", Some("spring release"))
         .await
         .expect("labelled");
-    let a = call_retrying(&node, "GET", "/op/std.space.version", SPC_A, "ada").await;
+    let a = call(&node, "GET", "/op/std.space.version", SPC_A, "ada", None).await;
     assert_eq!(a.status, 200, "{}", a.body);
     let row = &a.body["rows"][0];
     assert_eq!(row["version"], "0.1.0", "{row}");
@@ -668,7 +654,7 @@ async fn the_tenant_admin_reads_its_versions_label() {
     assert_eq!(row["label"], "spring release", "{row}");
     assert_eq!(row["revoked"], false, "{row}");
     // The refusal: no member of the tenant.
-    let b = call_retrying(&node, "GET", "/op/std.space.version", SPC_A, "bo").await;
+    let b = call(&node, "GET", "/op/std.space.version", SPC_A, "bo", None).await;
     assert_eq!(b.code(), "access_denied", "{}", b.body);
 }
 

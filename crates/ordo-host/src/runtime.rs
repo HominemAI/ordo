@@ -6759,6 +6759,7 @@ async fn spawn_deploy_listener(
         let node_status = node_status.clone();
         let functions = functions.clone();
         let live_streams = live_streams.clone();
+        let routines = routines.clone();
         move |read: crate::pin_stream::Read| {
             let deployment = deployment.clone();
             let pool = pool.clone();
@@ -6769,6 +6770,7 @@ async fn spawn_deploy_listener(
             let node_status = node_status.clone();
             let functions = functions.clone();
             let live_streams = live_streams.clone();
+            let routines = routines.clone();
             async move {
                 for line in crate::pin_stream::log_lines(&read) {
                     println!("{line}");
@@ -6794,6 +6796,12 @@ async fn spawn_deploy_listener(
                 // the active version calls its own (§1.10).
                 for line in functions.sync(&pool, &deployment).await {
                     println!("{line}");
+                }
+                // Schedules and listeners are the union over served
+                // versions; each tenant runs what its own declares (§1.10).
+                match routines.switch_served(&pool, &deployment).await {
+                    Ok(line) => println!("{line}"),
+                    Err(e) => eprintln!("versions: the routines were not switched ({e})"),
                 }
                 // The door knows every served version's ops.
                 if let Err(e) = refresh_access(
@@ -7065,10 +7073,7 @@ async fn spawn_deploy_listener(
                     // ones start, removed ones stop, retimed ones move.
                     // Before the row below, so an apply that waited sees
                     // them running.
-                    match routines
-                        .switch(&pool, &deployment.current().fixture.schema, &to)
-                        .await
-                    {
+                    match routines.switch_served(&pool, &deployment).await {
                         Ok(line) => println!("{line}"),
                         Err(e) => eprintln!(
                             "deploy {to}: the routines were not switched ({e}); the previous \

@@ -453,8 +453,22 @@ Routines, schedules, functions, mail and webhooks:
 As built in increment 3, session 1: each run resolves its tenant first and
 runs the routine as the tenant's version declares it, named
 `<routine>@<that version>`. A routine the tenant's version does not
-declare is skipped and recorded `undeclared`. The schedules and listeners
-are still the active version's alone (session 2).
+declare is skipped and recorded `undeclared`.
+
+Built in the increment 3 remainder (`routines.rs`, `workers.rs`):
+
+- The schedules and listeners are the union over served versions,
+  rebuilt when a version loads or drops (`LiveRoutines::switch_served`).
+- Each tenant is drained and fired only what its own version declares. A
+  tenant on a version this node has not loaded keeps its cursors still.
+- Two versions declaring one routine share one schedule row. Where their
+  timings differ, the active version's timing wins.
+- The hand-over at a switch: a routine both versions declare keeps its
+  cursor, so no change runs twice and none is missed. A routine the new
+  version adds starts at the head. A listener the new version lacks has
+  its cursor retired. A switch made while a node was down retires nothing
+  on that node.
+- Tests: `versions_background.rs`.
 
 **Backend functions under a pin** (review 2026-11-23; functions are V1,
 ruled 2026-10-31; `plan-backend-functions.md` §4.3):
@@ -1297,7 +1311,7 @@ round is about 35 minutes for the full suite.
   served version, and a function's `uses` resolve in its version (§1.10).
   Left: the per-version catalog and generated interface.
 - Schedules and listeners as the union over served versions; cursor
-  hand-over at a switch. Not started in session 3.
+  hand-over at a switch. Built in the remainder (§1.10).
 - Session 2 built `versions.served` and `versions.minimum` (§1.6). Left:
   the refusal of a rollout that strands a tenant (with rollouts), and a
   command that removes a stored version (`--move-to`).

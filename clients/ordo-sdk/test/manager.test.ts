@@ -58,11 +58,11 @@ class LiveDoor {
   /** While set, each call waits for it before it answers. */
   gate: Promise<void> | null = null;
   readonly feeds: Feed[] = [];
+  /** The `x-ordo-tenant-version` every feed answer carries; `null` sends none. */
+  version: string | null = null;
   /** For each call, how many feeds were still open when it was made. */
   readonly openAtCall: number[] = [];
   readonly waits: number[] = [];
-  /** The `x-ordo-tenant-version` every answer names; none when null. */
-  version: string | null = null;
   #refusals: ({ status: number; json: unknown; retryAfter?: string } | null)[] = [];
   #waiting: (() => void)[] = [];
 
@@ -1495,6 +1495,33 @@ describe('a version change under the feeds (plan-versions.md §1.4, owner ruling
     ]);
     expect(shown.length).toBeGreaterThan(0);
     obs.stop();
+    await manager.stop();
+  });
+
+  it('an answer naming another version does what the version_changed frame does; the first answer is the baseline', async () => {
+    const door = new LiveDoor();
+    door.version = 'ver_a';
+    const r = await replica();
+    const manager = start(door, r, [{ spec: tasks }]);
+    (await door.nth(0)).push(load([task(1)], 5, true, 'h-old'));
+    await when(manager, (v) => v.complete);
+    // The first answer named ver_a and dropped nothing.
+    expect(await rows(r)).toHaveLength(1);
+    expect(await r.resultHash('std.tasks.list', tasks.version)).toBe('h-old');
+
+    // The door now serves the tenant on ver_b. The next answer shows it.
+    door.version = 'ver_b';
+    manager.sync(mine);
+    // Both feeds reopen, the old one and the new one, with no resume hash.
+    const a = await door.nth(2);
+    const b = await door.nth(3);
+    expect(door.feeds[0]!.ended).toBe(true);
+    expect(await rows(r)).toEqual([]);
+    expect(await r.resultHash('std.tasks.list', tasks.version)).toBeUndefined();
+    a.push(load([{ ...task(1), due: 3 }], 9));
+    b.push(load([{ ...task(3), due: 4 }], 9));
+    await when(manager, (v) => v.complete && v.position === 9);
+    expect((await r.scan('tasks')).map((x) => x.id).sort()).toEqual(['task_1', 'task_3']);
     await manager.stop();
   });
 

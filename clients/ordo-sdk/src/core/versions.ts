@@ -10,8 +10,9 @@
  * `version_changed` frame (owner ruling Q7, 2026-11-23).
  */
 
-/** The header every answer past the door carries. */
-export const TENANT_VERSION_HEADER = 'x-ordo-tenant-version';
+import { TENANT_VERSION_HEADER } from './version.js';
+
+export { TENANT_VERSION_HEADER };
 
 /** A tenant moved from one program version to another. */
 export interface VersionChange {

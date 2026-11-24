@@ -599,6 +599,8 @@ these three (2026-09-29); the other kinds wait for 18z.
 | `ORDO_INTERFACE_PATH` | Set by `ordo dev` for the `--gen` command. Not a setting to write | none | built | | | | | cli/dev.rs:531-539 |
 | `ORDO_UPDATE_GOLDEN`, `ORDO_TEST_DB_SUFFIX`, `ORDO_PSQL`, `ORDO_AUTHZ_KEEP`, `ORDO_BLESS_AI_GUIDE`, `ORDO_SHARED_INSTANCE`, `ORDO_REFINE_AUDIT_FULL`, `ORDO_UPGRADE_FUNCTIONS`, `ORDO_BLOB_S3_SPACE` | Test harness switches. Only tests read the last 6 | none | built | | | | | conformance/src/golden.rs:16; conformance/src/lib.rs:97,114 |
 | `ORDO_TEST_UNCOMPILABLE` | Test builds only: versions, comma-separated, the build refuses to compile, as a release that changed the language would (`plan-versions.md` §2.8). A release build never reads it | none | built | | | | | host/release_check.rs |
+| `ORDO_TEST_EDITION_2_SINCE` | Test builds only: the date (`YYYY-MM-DD`) language edition 2 became current, so edition 1 is an old edition (`plan-versions.md` §2.8). A release build never reads it | none | built | | | | | plan/edition.rs |
+| `ORDO_TEST_RELEASE_DATE` | Test builds only: this build's release date (`YYYY-MM-DD`), which the editions' load window is measured against. A release build never reads it | none | built | | | | | plan/edition.rs |
 | Console | Editing deployment settings in a browser: version settings (Deploys screen) and reauths tenants may choose (Deploys screen) | none | built | sets | | | | dashboard-plan.md |
 
 ## 15 · The console and the identity service

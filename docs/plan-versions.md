@@ -1410,11 +1410,14 @@ set with `ordo clones set mask|readers <value>`.
    level, nobody's words. Masked, every level became `read`.
 3. **A neutral default name**: `clone-` and the last 8 characters of the
    clone's id. A given name still wins.
+4. **No production tenant name in staging.** `$clones` records the
+   tenant's id and version, never its name, and production no longer
+   sends it. Records written before are migrated on first use: a clone
+   named by the old default gets the neutral name, in `$spaces` too, and
+   the `from_name` column is dropped.
 
 Not built yet:
 
-- `$clones` records production's tenant name (`fromName`) as the person
-  typed it.
 - A tenant's own bucket is not recreated: files are never cloned, and the
   clone's new files go to staging's store.
 - Push sinks: Ordo sends no push. `SinkKind::Push` is where one records.

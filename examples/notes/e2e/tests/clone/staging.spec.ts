@@ -169,7 +169,9 @@ test("a clone of Ada's notes serves them in staging, masked, with none of her wo
     const { space, out } = cloneOf(d, name);
     // Its name is neutral: Ada's tenant is named after her.
     expect(out).toMatch(/^cloned .* into clone-\S+ \(/m);
-    expect(out.slice(out.indexOf(' into '))).not.toContain(name);
+    // Nor does staging keep her tenant's name anywhere it answers.
+    expect(out).not.toContain(name);
+    expect(ok(d.other(['clones', 'list', ...staging()]))).not.toContain(name);
     const served = await cloneNotes(d, space);
     expect(served.rows).toHaveLength(3);
     for (const r of served.rows) {

@@ -2820,11 +2820,10 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 .map(|a| a.len())
                 .unwrap_or(0);
             let mut out = format!(
-                "cloned      {} from {} on {} into {} ({})\nversion     {}\nrows        {}, \
+                "cloned      {} from {} into {} ({})\nversion     {}\nrows        {}, \
                  {} field(s) masked\nopens as    {} for a staging admin\n",
-                cl["fromName"].as_str().unwrap_or("?"),
-                cl["fromEnv"].as_str().unwrap_or("?"),
                 cl["fromTenant"].as_str().unwrap_or("?"),
+                cl["fromEnv"].as_str().unwrap_or("?"),
                 cl["name"].as_str().unwrap_or("?"),
                 cl["space"].as_str().unwrap_or("?"),
                 cl["version"].as_str().unwrap_or("?"),

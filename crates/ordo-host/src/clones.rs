@@ -138,7 +138,6 @@ CREATE TABLE IF NOT EXISTS \"$clones\" ( \
   \"name\" text NOT NULL, \
   \"from_env\" text NOT NULL, \
   \"from_tenant\" text NOT NULL, \
-  \"from_name\" text NOT NULL, \
   \"version\" text NOT NULL, \
   \"source_id\" text NOT NULL, \
   \"opens_as\" text NOT NULL, \
@@ -147,6 +146,34 @@ CREATE TABLE IF NOT EXISTS \"$clones\" ( \
   \"reason\" text NOT NULL, \
   \"at\" bigint NOT NULL \
 )";
+
+/// **No production tenant name stays in staging** (2026-11-24). Records
+/// written before kept it in `from_name`, and a clone named by the old
+/// default was `<that name>-clone`, here and in `$spaces`. Each such clone
+/// gets the neutral name ([`default_name`]: `clone-` and its id's last 8),
+/// then the column is dropped, so the names are gone, not hidden. A clone
+/// the person named keeps its name. Run before every read and write of
+/// `$clones`; once the column is gone it does nothing.
+const FROM_NAME_MIGRATION: &str = "\
+DO $mig$ BEGIN \
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() \
+             AND table_name = '$clones' AND column_name = 'from_name') THEN \
+    IF to_regclass('\"$spaces\"') IS NOT NULL THEN \
+      UPDATE \"$spaces\" s SET \"name\" = 'clone-' || right(c.\"space\", 8) FROM \"$clones\" c \
+       WHERE s.\"$space\" = c.\"space\" AND s.\"name\" = c.\"from_name\" || '-clone'; \
+    END IF; \
+    UPDATE \"$clones\" SET \"name\" = 'clone-' || right(\"space\", 8) \
+     WHERE \"name\" = \"from_name\" || '-clone'; \
+    ALTER TABLE \"$clones\" DROP COLUMN \"from_name\"; \
+  END IF; \
+END $mig$";
+
+/// `$clones`, made or brought up to date.
+async fn ensure_clones(pool: &Pool) -> Result<(), PoolError> {
+    pool.rows(CLONES_DDL).await?;
+    pool.rows(FROM_NAME_MIGRATION).await?;
+    Ok(())
+}
 
 // ── refusals ─────────────────────────────────────────────────────────────
 
@@ -988,8 +1015,9 @@ fn unpack(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, CloneRefusal> {
 pub struct CloneOut {
     /// This deployment's environment, as it names itself.
     pub env: String,
+    /// The tenant's id. Never its name: a self-serve tenant is named after
+    /// its person.
     pub tenant: String,
-    pub name: String,
     pub version: String,
     pub source_id: String,
     /// The masked bundle, sealed to the environment's clone key.
@@ -1009,7 +1037,7 @@ pub struct CloneOut {
 impl CloneOut {
     pub fn to_json(&self) -> Value {
         json!({
-            "env": self.env, "tenant": self.tenant, "name": self.name,
+            "env": self.env, "tenant": self.tenant,
             "version": self.version, "sourceId": self.source_id,
             "sealed": base64::engine::general_purpose::STANDARD.encode(&self.sealed),
             "report": self.report.to_json(), "notCloned": self.not_cloned,
@@ -1027,7 +1055,6 @@ impl CloneOut {
         Ok(CloneOut {
             env: text("env")?,
             tenant: text("tenant")?,
-            name: text("name")?,
             version: text("version")?,
             source_id: text("sourceId")?,
             sealed: base64::engine::general_purpose::STANDARD
@@ -1186,7 +1213,6 @@ pub async fn clone_out(
     Ok(CloneOut {
         env: own.name,
         tenant: t.id,
-        name: t.name,
         version,
         source_id,
         sealed,
@@ -1226,7 +1252,6 @@ pub struct CloneRecord {
     pub name: String,
     pub from_env: String,
     pub from_tenant: String,
-    pub from_name: String,
     pub version: String,
     pub source_id: String,
     /// The cloned member a staging admin acts as.
@@ -1241,7 +1266,7 @@ impl CloneRecord {
     pub fn to_json(&self) -> Value {
         json!({
             "space": self.space, "name": self.name, "fromEnv": self.from_env,
-            "fromTenant": self.from_tenant, "fromName": self.from_name,
+            "fromTenant": self.from_tenant,
             "version": self.version, "sourceId": self.source_id,
             "opensAs": self.opens_as, "rows": self.rows, "actor": self.actor,
             "reason": self.reason, "at": self.at,
@@ -1359,12 +1384,12 @@ pub async fn clone_in(
     let reason = reason_of(req.reason)?;
     let envs = Environments::on(pool);
     let own = envs.own().await?;
-    let from_name = if req.from.trim().is_empty() {
+    let from_env = if req.from.trim().is_empty() {
         crate::environments::DEFAULT_OWN
     } else {
         req.from.trim()
     };
-    let from = envs.require(from_name).await?;
+    let from = envs.require(from_env).await?;
     if from.own {
         return Err(CloneRefusal::OwnEnv { env: from.name });
     }
@@ -1504,7 +1529,6 @@ pub async fn clone_in(
                 name: tenant_name,
                 from_env: from.name,
                 from_tenant: out.tenant,
-                from_name: out.name,
                 version: local,
                 source_id: out.source_id,
                 opens_as,
@@ -1513,16 +1537,15 @@ pub async fn clone_in(
                 reason,
                 at,
             };
-            pool.rows(CLONES_DDL).await?;
+            ensure_clones(pool).await?;
             pool.rows(&format!(
                 "INSERT INTO \"$clones\" (\"space\", \"name\", \"from_env\", \"from_tenant\", \
-                 \"from_name\", \"version\", \"source_id\", \"opens_as\", \"rows\", \"actor\", \
-                 \"reason\", \"at\") VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+                 \"version\", \"source_id\", \"opens_as\", \"rows\", \"actor\", \
+                 \"reason\", \"at\") VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
                 sql_lit(&record.space),
                 sql_lit(&record.name),
                 sql_lit(&record.from_env),
                 sql_lit(&record.from_tenant),
-                sql_lit(&record.from_name),
                 sql_lit(&record.version),
                 sql_lit(&record.source_id),
                 sql_lit(&record.opens_as),
@@ -1701,7 +1724,12 @@ async fn land(
 
 /// Every clone this deployment holds, newest first.
 pub async fn clones(pool: &Pool) -> Result<Vec<CloneRecord>, CloneRefusal> {
-    let sql = "SELECT \"space\", \"name\", \"from_env\", \"from_tenant\", \"from_name\", \
+    match pool.rows(FROM_NAME_MIGRATION).await {
+        Ok(_) => {}
+        Err(e) if e.is_missing_table() => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    }
+    let sql = "SELECT \"space\", \"name\", \"from_env\", \"from_tenant\", \
                \"version\", \"source_id\", \"opens_as\", \"rows\"::text, \"actor\", \"reason\", \
                \"at\"::text FROM \"$clones\" ORDER BY \"at\" DESC, \"space\"";
     let rows = match pool.rows(sql).await {
@@ -1718,14 +1746,13 @@ pub async fn clones(pool: &Pool) -> Result<Vec<CloneRecord>, CloneRefusal> {
                 name: g(1)?,
                 from_env: g(2)?,
                 from_tenant: g(3)?,
-                from_name: g(4)?,
-                version: g(5)?,
-                source_id: g(6)?,
-                opens_as: g(7)?,
-                rows: g(8)?.parse().ok()?,
-                actor: g(9)?,
-                reason: g(10)?,
-                at: g(11)?.parse().ok()?,
+                version: g(4)?,
+                source_id: g(5)?,
+                opens_as: g(6)?,
+                rows: g(7)?.parse().ok()?,
+                actor: g(8)?,
+                reason: g(9)?,
+                at: g(10)?.parse().ok()?,
             })
         })
         .collect())
@@ -1860,7 +1887,6 @@ pub fn specs() -> Vec<OpSpec> {
             &[
                 "env",
                 "tenant",
-                "name",
                 "version",
                 "sourceId",
                 "sealed",

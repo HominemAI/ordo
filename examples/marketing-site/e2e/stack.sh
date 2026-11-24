@@ -13,7 +13,7 @@ door_b_port=${E2E_DOOR_B_PORT:-4851}
 door_b="http://localhost:$door_b_port"
 door="http://localhost:$door_port"
 page="http://localhost:$page_port"
-bootstrap_port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
+bootstrap_port=$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close()})')
 bootstrap_page="http://localhost:$bootstrap_port"
 for bin in "$ordo" "$host"; do
   [ -x "$bin" ] || { echo "Missing binary $bin" >&2; exit 1; }

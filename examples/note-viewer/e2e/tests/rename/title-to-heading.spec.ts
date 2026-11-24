@@ -1,6 +1,6 @@
 /**
  * notes renames a column note_viewer reads (plan-versions.md increment 7b;
- * plan-evolution-federation.md §7, test 1).
+ * plan-evolution-federation.md §7, tests 1, 3, 4 and 6).
  *
  * notes moves from 0.3.0 to 0.3.1 (fixtures/notes-heading), which renames
  * `notes.title` to `heading` with `prev(title)`. note_viewer maps `title`.
@@ -9,20 +9,33 @@
  * written in notes after the rename. The viewer's role still reads `title`,
  * and Postgres holds the same value under both names.
  *
- * A regression looks like the viewer held or empty after the rename, a
- * note shown with no title, or a note written after the rename missing at
- * the viewer.
+ * Then notes lands the rename: 0.3.2 drops the `prev` mark, so nothing
+ * writes `title` any more. It is an orphan, notes takes it out of the
+ * viewer's grant (owner ruling 2026-11-23, Q1), and the viewer's page names
+ * the column, its new name and the fix. The viewer maps `heading` (0.1.1)
+ * and shows every note again.
  *
- * It changes notes' program for the whole stack, so it runs after `v3` and
- * before `orphans` (playwright.config.ts).
+ * A regression looks like the viewer held or empty after the rename, a
+ * note shown with no title, a note written after the rename missing at
+ * the viewer, or, once the rename lands, the viewer still listing notes
+ * from a column nobody writes.
+ *
+ * The steps share the stack's state, so they run in order. They change
+ * notes' program for the whole stack, so they run after `v3` and before
+ * `orphans` (playwright.config.ts).
  */
 
-import { copyFileSync, cpSync, mkdtempSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
-import { addNote, applyNotes, joinNotes, list, person, shows, sqlAs, stack, unique } from '../support.js';
+import { addNote, applyNotes, joinNotes, list, ordoAs, person, shows, sqlAs, stack, unique } from '../support.js';
+
+test.describe.configure({ mode: 'serial' });
+
+/** The note written before the rename, shown at every step. */
+let before = '';
 
 /** The 0.3.1 program: the fixture as `notes.ordo`, beside notes v3's `fn`. */
 function withHeading(): string {
@@ -35,6 +48,37 @@ function withHeading(): string {
   return dir;
 }
 
+/**
+ * The 0.3.2 program: 0.3.1 with its `prev` mark cut, as `ordo apply
+ * --remove-landed-prev` cuts it. Nothing writes `title` from here.
+ */
+function landed(): string {
+  const dir = withHeading();
+  const source = readFileSync(join(dir, 'notes.ordo'), 'utf8');
+  const mark = 'heading: text = "" prev(title)';
+  expect(source).toContain(mark);
+  const cut = source.replace('domain notes @ 0.3.1', 'domain notes @ 0.3.2').replace(mark, 'heading: text = ""');
+  writeFileSync(join(dir, 'notes.ordo'), cut);
+  return dir;
+}
+
+/** note_viewer at 0.1.1: both translations read `title` from `heading`. */
+function viewerOnHeading(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'viewer-heading-'));
+  const source = readFileSync(fileURLToPath(new URL('../../../viewer.ordo', import.meta.url)), 'utf8');
+  const mapped = source
+    .replace('domain noteviewer @ 0.1.0', 'domain noteviewer @ 0.1.1')
+    .replaceAll('title: text <- title', 'title: text <- heading');
+  expect(mapped.match(/<- heading/g)).toHaveLength(2);
+  writeFileSync(join(dir, 'viewer.ordo'), mapped);
+  return dir;
+}
+
+/** What the viewer's door logged so far. */
+function viewerLog(): string {
+  return readFileSync(`${stack().logs}/viewer.log`, 'utf8');
+}
+
 test('notes renames `title` to `heading`: the viewer reads every note through it, with its title', async ({
   browser,
 }) => {
@@ -42,7 +86,7 @@ test('notes renames `title` to `heading`: the viewer reads every note through it
   const di = await person(browser);
   const notes = di.page;
   await joinNotes(notes, 'Di');
-  const before = unique('Public before the rename');
+  before = unique('Public before the rename');
   await addNote(notes, before, 'Written under 0.3.0.', 'public');
 
   const viewer = await di.context.newPage();
@@ -67,12 +111,47 @@ test('notes renames `title` to `heading`: the viewer reads every note through it
   await addNote(notes, after, 'Written under 0.3.1.', 'public');
   await shows(viewer, 'Public notes', after);
   await expect(list(viewer, 'Public notes').getByRole('heading', { name: after })).toBeVisible();
+
+  // The viewer is told while it can still switch (§3.3): its watcher logs
+  // the column as changing, with the new name, and holds nothing.
+  await expect
+    .poll(viewerLog, { timeout: 30_000 })
+    .toMatch(/changing: `notes\.notes\.title`, which `published` reads as `title`, is renamed to `heading` by `notes`/);
   await di.context.close();
 });
 
-// plan-evolution-federation.md §7, test 3: when the last soak on `notes`
-// closes, the viewer's grant on `title` is revoked (owner ruling
+// plan-evolution-federation.md §7, test 3: the rename lands. Nothing writes
+// `title`, so the viewer loses it by a column revoke (owner ruling
 // 2026-11-23, Q1), and its page shows `external_changed` naming `heading`.
-// Soaks and their close are increment 11a; with no soak, a rename's old
-// column is never orphaned, so there is nothing to close yet.
-test.fixme('the soak closes: the viewer is refused naming `heading` and the fix', () => {});
+test('the rename lands: the viewer is refused naming `heading` and the fix', async ({ page }) => {
+  test.setTimeout(300_000);
+  const applied = applyNotes(landed());
+  expect(applied).toContain('0.3.2');
+  expect(applied).toContain('orphaned    `notes.title`');
+
+  // Postgres is the control: `title` is refused, `heading` reads.
+  expect(() => sqlAs('viewer_app', 'SELECT title FROM notes.notes LIMIT 1')).toThrow(/permission denied/);
+  expect(sqlAs('viewer_app', `SELECT heading FROM notes.notes WHERE heading = '${before}'`)).toBe(before);
+
+  // The page names the column, its new name and the fix.
+  await page.goto(stack().viewerPage);
+  await expect(async () => {
+    await page.reload();
+    const alert = page.getByRole('alert');
+    await expect(alert).toBeVisible({ timeout: 3_000 });
+    await expect(alert).toContainText('external_changed');
+    await expect(alert).toContainText('column `title` (it is now `heading`) is no longer written by `notes`');
+    await expect(alert).toContainText('ordo introspect --external');
+  }).toPass({ timeout: 90_000 });
+});
+
+// §7, test 4: the viewer maps `heading` and applies. Every note shows again.
+test('the viewer maps `heading`: every note shows again, with its title', async ({ page }) => {
+  test.setTimeout(300_000);
+  const r = ordoAs('viewer', ['apply', viewerOnHeading(), '--direct', '--as', 'fed-e2e', '--wait-secs', '240']);
+  expect(r.code, `${r.out}\n${r.err}`).toBe(0);
+  expect(r.out).toContain('0.1.1');
+  await page.goto(stack().viewerPage);
+  await shows(page, 'Public notes', before);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});

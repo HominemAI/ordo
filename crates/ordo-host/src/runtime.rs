@@ -5255,7 +5255,36 @@ async fn assemble_program(
             }),
         )
     };
-    crate::external_check::spawn_watch(external_gate.clone(), pool.clone(), external_every);
+    // The tenants with a database of their own are read on the same tick,
+    // each in its own database (step F3).
+    let tenants: crate::external_check::Tenants = {
+        let (control, spaces) = (pool.clone(), spaces.clone());
+        Arc::new(move || {
+            let (control, spaces) = (control.clone(), spaces.clone());
+            Box::pin(async move {
+                let all = match ordo_exec::spacedb::all(&control).await {
+                    Ok(a) => a,
+                    Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+                    Err(e) => return Err(e.to_string()),
+                };
+                let mut out = Vec::new();
+                for (space, _) in all {
+                    // A tenant whose database cannot be routed now is the
+                    // resolver's to report; it is read on a later tick.
+                    if let Ok(p) = spaces.pool_of(&space.0).await {
+                        out.push((space.0, p));
+                    }
+                }
+                Ok(out)
+            })
+        })
+    };
+    crate::external_check::spawn_watch(
+        external_gate.clone(),
+        pool.clone(),
+        external_every,
+        Some(tenants),
+    );
     let api = ApiState {
         registry: deployment.handle(),
         // Metered outside, platform ops inside, so a platform op's duration

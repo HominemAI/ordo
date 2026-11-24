@@ -310,6 +310,11 @@ pub async fn disclose(
     let cutoff = now.saturating_sub(policy.undo_horizon.as_secs());
     let horizon = crate::prune::horizon_position(pool, &sid, cutoff).await?;
 
+    // A tenant's own database may never have registered a consumer, and so
+    // never made `$logconsumers`. Found by the notes e2e (increment 14): an
+    // erasure of a tenant with a database of its own failed on the missing
+    // table. Made here, empty, so the answer is "no consumers".
+    crate::prune::ensure_tables(pool).await?;
     let mut pinned = Vec::new();
     let mut stranded = Vec::new();
     for c in crate::prune::consumers(pool, &sid).await? {

@@ -51,7 +51,9 @@ function watchSession(page: Page): () => { token: string; space: string } {
     const h = r.headers();
     const auth = h['authorization'] ?? '';
     const space = h['x-ordo-space'] ?? '';
-    if (r.url().startsWith(stack().door) && auth.startsWith('Bearer ') && space && space !== 'system') {
+    // The page reaches the door by `localhost`, the test by `127.0.0.1`.
+    const toDoor = new URL(r.url()).port === new URL(stack().door).port;
+    if (toDoor && auth.startsWith('Bearer ') && space && space !== 'system') {
       seen = { token: auth.slice('Bearer '.length), space };
     }
   });
@@ -61,10 +63,76 @@ function watchSession(page: Page): () => { token: string; space: string } {
   };
 }
 
+/**
+ * A passkey touch in the page, as the SDK's `stepUp` makes it: the door
+ * re-mints the session with presence from now. Answers the new token.
+ * Export and erasure ask for a touch, and the page has no button for them.
+ */
+async function touch(page: Page, token: string): Promise<string> {
+  const door = new URL(page.url()).origin.replace(/:\d+$/, `:${new URL(stack().door).port}`);
+  return page.evaluate(
+    async ({ door, token }) => {
+      const b64u = (b: ArrayBuffer) =>
+        btoa(String.fromCharCode(...new Uint8Array(b)))
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+      const bytes = (s: string) =>
+        Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), (c) =>
+          c.charCodeAt(0),
+        );
+      const post = async (path: string, body: unknown) => {
+        const r = await fetch(`${door}${path}`, {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          credentials: 'include',
+          body: body === null ? undefined : JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(`${path}: ${r.status} ${await r.text()}`);
+        return (await r.json()) as Record<string, unknown>;
+      };
+      const o = await post('/auth/step-up/begin', null);
+      const challenge = String(o['challenge']);
+      const pk = (await navigator.credentials.get({
+        publicKey: {
+          challenge: bytes(challenge),
+          rpId: String(o['rp_id']),
+          userVerification: String(o['user_verification']) as UserVerificationRequirement,
+          allowCredentials: ((o['allow_credentials'] as string[]) ?? []).map((id) => ({
+            type: 'public-key' as const,
+            id: bytes(id),
+          })),
+        },
+      })) as PublicKeyCredential;
+      const a = pk.response as AuthenticatorAssertionResponse;
+      const done = await post('/auth/step-up', {
+        method: 'passkey',
+        kind: 'passkey_assertion',
+        challenge,
+        credential_id: b64u(pk.rawId),
+        client_data_json: b64u(a.clientDataJSON),
+        authenticator_data: b64u(a.authenticatorData),
+        signature: b64u(a.signature),
+      });
+      return String(done['token']);
+    },
+    { door, token },
+  );
+}
+
 /** An op in the person's own tenant, as the page calls it. */
-async function op(request: APIRequestContext, who: { token: string; space: string }, name: string, body: object) {
-  const r = await request.post(`${stack().door}/op/${name}`, {
-    data: body,
+async function op(
+  request: APIRequestContext,
+  who: { token: string; space: string },
+  name: string,
+  body: object,
+  method: 'POST' | 'DELETE' = 'POST',
+) {
+  // A delete op takes its parameters in the query, as a read does.
+  const query = method === 'DELETE' ? `?${new URLSearchParams(body as Record<string, string>)}` : '';
+  const r = await request.fetch(`${stack().door}/op/${name}${query}`, {
+    method,
+    data: method === 'DELETE' ? undefined : body,
     headers: {
       'X-Ordo-Space': who.space,
       Authorization: `Bearer ${who.token}`,
@@ -77,11 +145,14 @@ async function op(request: APIRequestContext, who: { token: string; space: strin
   return (JSON.parse(text) as { rows: Record<string, unknown>[] }).rows[0]!;
 }
 
-/** How many rows hold a value in the orphan, from the prune's first ask. */
+/**
+ * How many rows hold a value in the orphan, in every database, from the
+ * prune's first ask. Each person's tenant has a database of its own here.
+ */
 function holding(out: string): number {
-  const m = /^WOULD PRUNE {2}attachments\.size {2}database `default` {2}(\d+) row\(s\) hold a value$/m.exec(out);
-  expect(m, out).not.toBeNull();
-  return Number(m![1]);
+  const counts = [...out.matchAll(/^WOULD PRUNE {2}attachments\.size {2}database `[^`]+` {2}(\d+) row\(s\) hold a value$/gm)];
+  expect(counts.length, out).toBeGreaterThan(0);
+  return counts.reduce((sum, m) => sum + Number(m[1]), 0);
 }
 
 test('attachments.size is orphaned by v3: exported and erased with Ada, then pruned when asked twice', async ({
@@ -97,8 +168,8 @@ test('attachments.size is orphaned by v3: exported and erased with Ada, then pru
     const session = watchSession(page);
     await openV2(page);
 
+    const withFile = unique('orphan-file-');
     await test.step('under v2, Ada adds a file: its row holds a size', async () => {
-      const withFile = unique('orphan-file-');
       await addNote(page, withFile, 'A note with a file.');
       const file = `${unique('list-')}.txt`;
       await noteInList(page, withFile).click();
@@ -125,16 +196,19 @@ test('attachments.size is orphaned by v3: exported and erased with Ada, then pru
     const held = holding(before.out);
     expect(held).toBeGreaterThanOrEqual(1);
 
+    // Export and erasure ask for a fresh passkey touch.
+    const seen = session();
+    const fresh = { token: await touch(page, seen.token), space: seen.space };
+
     await test.step("Ada's export carries her orphaned size", async () => {
-      const done = await op(request, session(), 'std.space.export', {});
+      const done = await op(request, fresh, 'std.space.export', {});
       const bundle = String(done['bundle']);
       const size = readFileSync(join(bundle, 'orphans', 'attachments.size.jsonl'), 'utf8');
       expect(size).toContain('"size": 11');
     });
 
     await test.step("Ada's erasure removes her orphaned size", async () => {
-      const who = session();
-      const done = await op(request, who, 'std.space.delete', { confirm: who.space });
+      const done = await op(request, fresh, 'std.space.delete', { confirm: fresh.space }, 'DELETE');
       expect(done['orphans']).toContain('attachments.size');
       const after = dev.ordo(['evolve', '--prune', 'attachments.size', ...door()]);
       expect(after.code, `${after.out}\n${after.err}`).toBe(0);

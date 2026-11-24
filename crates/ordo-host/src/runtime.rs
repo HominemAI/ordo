@@ -1317,6 +1317,19 @@ impl RuntimeConfig {
                 });
             }
         }
+        // `orphans.personal_drop_after`: an orphan's drop date, in days.
+        if let Ok(v) = std::env::var(ordo_exec::orphans::DROP_AFTER_ENV) {
+            if ordo_exec::orphans::drop_after_value(Some(&v)).is_none() {
+                return Err(BootRefusal::Invalid {
+                    var: ordo_exec::orphans::DROP_AFTER_ENV,
+                    detail: format!(
+                        "`{v}` is not a number of days, such as `30` or `30d`; unset it for \
+                         the default, {}",
+                        ordo_exec::orphans::DROP_AFTER_DEFAULT_DAYS
+                    ),
+                });
+            }
+        }
         // The shared live stream's idle window and read cap (27s), read by
         // `ordo_api::LiveSettings::from_env` where the door is built.
         // Refused here for the reason above, and a cap of zero refuses too:

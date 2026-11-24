@@ -54,8 +54,8 @@ function wouldWords(w: Would, p: Preview): string {
       return `The database is behind by safe changes only. Applying makes them for you (${p.safeChangesSetting} is on), then serves this version.`;
     case 'held':
       return p.safeChanges
-        ? 'The database is behind by changes that need your say. Applying can store this version but not make it serve: run ordo migrate --apply first.'
-        : `The database is behind. ${p.safeChangesSetting} is off, so applying can store this version but not make it serve. Set ${p.safeChangesSetting}=on, or run ordo migrate --apply first.`;
+        ? 'The database is behind by changes that need your say. Applying can store this version but not make it serve: run ordo evolve --run first.'
+        : `The database is behind. ${p.safeChangesSetting} is off, so applying can store this version but not make it serve. Set ${p.safeChangesSetting}=on, or run ordo evolve --run first.`;
     case 'refused':
       return `The deployment would refuse it: ${w.message}`;
   }

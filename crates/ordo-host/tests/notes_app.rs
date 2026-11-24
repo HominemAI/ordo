@@ -411,7 +411,7 @@ fn spawn_host_with(
 
 impl Deployment {
     /// What `serve.sh` does when the program changes, against the
-    /// deployment's own database: `ordo migrate --apply` when `migrate_first`,
+    /// deployment's own database: the schema apply `ordo evolve --run` makes when `migrate_first`,
     /// then `ordo apply`, which by its contract touches one database and so
     /// reaches no tenant's. The running server learns of the new version from
     /// the notification the activation sends.

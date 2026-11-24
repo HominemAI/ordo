@@ -62,7 +62,9 @@ export const CLIENT_JOBS = ['ordo-sdk', 'ordo-cdk', 'ordo-react'];
 export const EXAMPLE_JOBS = ['notes', 'notes-v2', 'note-viewer', 'teamspace', 'shopfront'];
 
 // What each e2e suite builds (its `cargo build -p` line).
-const NOTES_E2E_BUILDS = ['ordo-host', 'ordo-cli'];
+// The notes e2e runs the identity service too: its developer signs in with
+// `ordo login` (tests/evolve).
+const NOTES_E2E_BUILDS = ['ordo-host', 'ordo-cli', 'ordo-identity-service'];
 const CONSOLE_E2E_BUILDS = ['ordo-console', 'ordo-cli', 'ordo-identity-service', 'ordo-supervisor'];
 const IDENTITY_E2E_BUILDS = ['ordo-identity-service'];
 // The federation e2e (examples/note-viewer/e2e): two doors, the CLI, and the

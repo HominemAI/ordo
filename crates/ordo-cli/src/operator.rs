@@ -1,6 +1,7 @@
 //! `ordo apply`, `ordo rollback`, `ordo deploys`, `ordo prune`,
-//! `ordo verify`, `ordo checkpoint`, `ordo revert`, `ordo migrate` — the
-//! operator surface (8i, 5f, 13b).
+//! `ordo verify`, `ordo checkpoint`, `ordo revert` — the operator surface
+//! (8i, 5f, 13b). `ordo migrate` is removed and only refuses, naming `ordo
+//! evolve` (`crate::migrate::removed`).
 //!
 //! `check` and `plan` are deploy-time commands: they read `.ordo` files and
 //! answer from the compiler alone. These three are the other half of the
@@ -320,6 +321,11 @@ pub fn run_with_input(cmd: &str, args: &[String], input: &[u8]) -> Outcome {
 }
 
 fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
+    // `ordo migrate` is removed; whatever follows it, it refuses naming
+    // `ordo evolve` (`crate::migrate::removed`).
+    if cmd == "migrate" {
+        return crate::migrate::removed();
+    }
     let mut flags = match parse_flags_for(cmd, args) {
         Ok(f) => f,
         Err(e) => return Outcome::usage(e),
@@ -351,17 +357,6 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         };
         drop(rt);
         return crate::migrate::run(&path, flags);
-    }
-    // `migrate --apply` is the plan plus execution, and builds its runtime
-    // the same way and for the same reason.
-    if cmd == "migrate" {
-        let Some(path) = flags.positional.first().cloned() else {
-            return Outcome::usage(
-                "migrate --apply needs a program (a `.ordo` file or a directory)".into(),
-            );
-        };
-        drop(rt);
-        return crate::migrate::run_migrate(&path, flags);
     }
     // `keys` builds its own runtime per subcommand — `seal-master` needs
     // none at all (it is a file and an argon2 derivation), and the two that
@@ -1823,11 +1818,11 @@ fn floor_report(f: &ordo_exec::prune::Floor, policy: &ordo_exec::cadence::LogPol
 /// - **Behind** — the live schema lacks something the artifact asserts, so
 ///   the load gate would refuse it. The artifact is stored (the staged case
 ///   `--no-activate` exists for) and activation is **refused**, naming
-///   `ordo migrate --apply` as the command that moves the schema. Refusing
+///   `ordo evolve --run` as the command that moves the schema. Refusing
 ///   here rather than at the node is the difference between an operator
 ///   reading the reason and a fleet logging it.
 ///
-/// It does not run a migration. That is `ordo migrate --apply`'s job, and
+/// It does not run a migration. That is `ordo evolve --run`'s job, and
 /// `migration.md` owns the sequence: three deploys, not a side effect of
 /// one. Drops are the other way round (artifact first, then the DDL) and
 /// the gate tolerates them, so a program that only drops is a match.
@@ -2171,7 +2166,7 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
 /// `path` and `db` are the caller's own facts rather than the report's —
 /// the server does not know what the operator called the file or the
 /// database — so the remedies that name a command are built here.
-pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db: &str) -> String {
+pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, _path: &str, _db: &str) -> String {
     use ordo_host::apply_op::{Activation, SchemaOutcome, Stored};
 
     let mut out = String::new();
@@ -2232,8 +2227,9 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
     }
     match &report.activation {
         Activation::Staged if !behind.is_empty() => out.push_str(&format!(
-            "activated  no  (--no-activate: staged; run `ordo migrate --apply {path} \
-             --db {db}`, then activate)\n"
+            "activated  no  (--no-activate: staged; run `ordo evolve --from <serving> \
+             --to {} --run --host <h>`, then activate)\n",
+            report.version
         )),
         Activation::Staged => out
             .push_str("activated  no  (--no-activate: the deployment still points where it did)\n"),
@@ -2309,7 +2305,7 @@ fn provenance_inline(p: Option<&ordo_host::versions::Provenance>) -> String {
 pub(crate) fn render_refusal(
     refusal: &ordo_host::apply_op::ApplyRefused,
     path: &str,
-    db: &str,
+    _db: &str,
 ) -> String {
     use ordo_host::apply_op::ApplyRefused;
     match refusal {
@@ -2324,7 +2320,8 @@ pub(crate) fn render_refusal(
             out.push_str(&format!(
                 "REFUSED  not activated: no node could load {version} over this database. \
                  These changes need your say, so they are not applied for you. Run\n         \
-                 `ordo migrate --apply {path} --db {db}` to move the schema, \
+                 `ordo apply {path} --no-activate`, then `ordo evolve --from <serving> \
+                 --to {version} --run --host <h>` to move the schema, \
                  then `ordo apply` again.\n         \
                  (Safe additive changes are applied by `ordo apply` itself; \
                  {} off would stop that too.)\n",

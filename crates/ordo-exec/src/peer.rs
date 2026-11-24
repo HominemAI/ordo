@@ -103,18 +103,28 @@ pub const SHARED_ROLE_ENV: &str = "ORDO_PEER_SHARED_ROLE";
 /// removed or narrowed is revoked on the next apply or start, and only
 /// what Ordo granted is revoked (`plan-evolution-federation.md` §3.1). A
 /// row from a release before 2026-11-24 has no `grants`; its role is
-/// revoked everything in the schema, as then.
+/// revoked every table in the schema, as then.
+///
+/// `usage` says who gave the role `USAGE` on the schema: `ordo` when Ordo
+/// granted it, `held` when the role had it before Ordo's first grant (a
+/// deployment owner's own grant). Ordo revokes it only when it is `ordo`
+/// and the role's line is gone, so a table granted by hand stays readable.
 pub const READER_TABLE: &str = "$readergrant";
 
 const READER_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$readergrant" (
   "role"   text PRIMARY KEY,
   "reader" text NOT NULL,
-  "grants" text
+  "grants" text,
+  "usage"  text
 )"#;
 
-/// The column a table made before 2026-11-24 lacks.
-const READER_GRANTS_COLUMN: &str =
-    r#"ALTER TABLE "$readergrant" ADD COLUMN IF NOT EXISTS "grants" text"#;
+/// The columns a table made before 2026-11-24 lacks.
+const READER_GRANTS_COLUMN: &str = r#"ALTER TABLE "$readergrant" ADD COLUMN IF NOT EXISTS "grants" text, ADD COLUMN IF NOT EXISTS "usage" text"#;
+
+/// [`READER_TABLE`]'s `usage` when Ordo granted it.
+const USAGE_ORDO: &str = "ordo";
+/// [`READER_TABLE`]'s `usage` when the role held it before Ordo's grant.
+const USAGE_HELD: &str = "held";
 
 /// Why a program's external schemas cannot be resolved: a peer's setting, or
 /// a plain external's swap. Each names the setting.
@@ -1255,14 +1265,17 @@ pub async fn grant_readers_with(
 
     // What each role was granted, as recorded. `None`: a row from before
     // grants were recorded, whose role is revoked everything, as then.
-    let mut recorded_grants: std::collections::BTreeMap<String, (String, Option<Held>)> =
-        Default::default();
+    #[allow(clippy::type_complexity)]
+    let mut recorded_grants: std::collections::BTreeMap<
+        String,
+        (String, Option<Held>, Option<String>),
+    > = Default::default();
     if recorded {
         pool.rows(READER_GRANTS_COLUMN)
             .await
             .map_err(SchemaRefusal::Database)?;
         let rows = pool
-            .rows(r#"SELECT "role", "reader", "grants" FROM "$readergrant" ORDER BY 1"#)
+            .rows(r#"SELECT "role", "reader", "grants", "usage" FROM "$readergrant" ORDER BY 1"#)
             .await
             .map_err(SchemaRefusal::Database)?;
         for r in rows {
@@ -1271,7 +1284,7 @@ pub async fn grant_readers_with(
                 continue;
             };
             let grants = at(2).map(|g| held_from_json(&g));
-            recorded_grants.insert(role, (at(1).unwrap_or_default(), grants));
+            recorded_grants.insert(role, (at(1).unwrap_or_default(), grants, at(3)));
         }
     }
     // Roles granted before whose line is gone.
@@ -1287,8 +1300,26 @@ pub async fn grant_readers_with(
     let mut sql = rename_comments_sql(pool, &pg, schema, &present).await?;
     for role in &gone {
         let r = quote(role);
-        sql += &revoke_sql(&pg, role, recorded_grants[role].1.as_ref(), &Held::new());
-        sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+        let (_, grants, usage) = &recorded_grants[role];
+        sql += &revoke_sql(&pg, role, grants.as_ref(), &Held::new());
+        // Usage only when Ordo gave it: a role that held it before keeps
+        // it, and with it every table a person granted by hand.
+        if usage.as_deref() == Some(USAGE_ORDO) {
+            sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+        }
+    }
+    // Who gave each wanted role its usage: as recorded; for a row from an
+    // earlier release, not known, so never Ordo's to take back; for a role
+    // not recorded yet, Ordo's unless the role already holds it.
+    let mut usage_by: std::collections::BTreeMap<&String, &'static str> = Default::default();
+    for role in want.keys() {
+        let by = match recorded_grants.get(role) {
+            Some((_, _, Some(u))) if u == USAGE_ORDO => USAGE_ORDO,
+            Some(_) => USAGE_HELD,
+            None if has_usage(pool, &pg, role).await? => USAGE_HELD,
+            None => USAGE_ORDO,
+        };
+        usage_by.insert(role, by);
     }
     let mut changed: Vec<&String> = Vec::new();
     let none_yet = Held::new();
@@ -1296,7 +1327,7 @@ pub async fn grant_readers_with(
         // A role not recorded yet holds nothing Ordo granted.
         let before = match recorded_grants.get(role) {
             None => Some(&none_yet),
-            Some((_, g)) => g.as_ref(),
+            Some((_, g, _)) => g.as_ref(),
         };
         let now = held_by(pool, &pg, role).await?;
         if before == Some(held) && now.is_superset(held) && has_usage(pool, &pg, role).await? {
@@ -1306,13 +1337,28 @@ pub async fn grant_readers_with(
         sql += &revoke_sql(&pg, role, before, held);
         sql += &grant_sql(&pg, role, held);
     }
-    let then: Vec<(String, String, Option<String>)> = want
+    #[allow(clippy::type_complexity)]
+    let then: Vec<(String, String, Option<String>, Option<String>)> = want
         .iter()
-        .map(|(role, (reader, held))| (role.clone(), reader.clone(), Some(held_to_json(held))))
+        .map(|(role, (reader, held))| {
+            (
+                role.clone(),
+                reader.clone(),
+                Some(held_to_json(held)),
+                Some(usage_by[role].to_string()),
+            )
+        })
         .collect();
     let record_changed = recorded_grants
         .iter()
-        .map(|(role, (reader, g))| (role.clone(), reader.clone(), g.as_ref().map(held_to_json)))
+        .map(|(role, (reader, g, u))| {
+            (
+                role.clone(),
+                reader.clone(),
+                g.as_ref().map(held_to_json),
+                u.clone(),
+            )
+        })
         .collect::<Vec<_>>()
         != then;
     if sql.is_empty() && !record_changed {
@@ -1328,18 +1374,19 @@ pub async fn grant_readers_with(
     if !then.is_empty() {
         let values = then
             .iter()
-            .map(|(role, reader, grants)| {
+            .map(|(role, reader, grants, usage)| {
                 format!(
-                    "({}, {}, {})",
+                    "({}, {}, {}, {})",
                     sql_lit(role),
                     sql_lit(reader),
-                    sql_lit(grants.as_deref().unwrap_or("[]"))
+                    sql_lit(grants.as_deref().unwrap_or("[]")),
+                    sql_lit(usage.as_deref().unwrap_or(USAGE_HELD))
                 )
             })
             .collect::<Vec<_>>()
             .join(", ");
         sql += &format!(
-            r#" INSERT INTO "$readergrant" ("role", "reader", "grants") VALUES {values};"#
+            r#" INSERT INTO "$readergrant" ("role", "reader", "grants", "usage") VALUES {values};"#
         );
     }
     // One implicit transaction. Two replicas starting at once may race on

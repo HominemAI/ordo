@@ -311,11 +311,13 @@ async fn removing_a_table_or_the_line_revokes() {
 
 /// **`$readergrant` records each column it granted**
 /// (`plan-evolution-federation.md` §3.1). The line grants `notes` by
-/// column (one is orphaned) and the sign-in contract by column; a person
-/// grants `secrets` to the same role by hand. The record lists exactly what
-/// Ordo granted. With the line gone, every recorded table and column is
-/// revoked, and the hand grant is left as it was. A row from before grants
-/// were recorded still revokes everything, as it did.
+/// column (one is orphaned) and the sign-in contract by column. Before
+/// that, the deployment owner granted the role the schema's usage and
+/// `secrets` by hand. The record lists exactly what Ordo granted, and that
+/// the usage was there before it. With the line gone, every recorded table
+/// and column is revoked, the usage stays, and the role still reads
+/// `secrets`. A row from before grants were recorded still revokes every
+/// table, as it did.
 ///
 /// A regression looks like a hand grant taken by Ordo, a recorded column
 /// left granted after its line is gone, or a record that does not match
@@ -340,11 +342,13 @@ async fn a_removed_line_revokes_what_it_recorded_and_nothing_granted_by_hand() {
     )
     .await
     .expect("orphaned");
+    w.pg.exec(&format!(
+        "GRANT USAGE ON SCHEMA alpha TO {READER}; GRANT SELECT ON alpha.secrets TO {READER}"
+    ))
+    .expect("granted by hand, before any reader line");
     peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
         .await
         .expect("granted by column");
-    w.pg.exec(&format!("GRANT SELECT ON alpha.secrets TO {READER}"))
-        .expect("granted by hand");
     // A start with nothing changed writes nothing, hand grants and all.
     peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
         .await
@@ -364,6 +368,14 @@ async fn a_removed_line_revokes_what_it_recorded_and_nothing_granted_by_hand() {
     assert!(
         !grants.contains("secrets"),
         "a hand grant is not Ordo's: {grants}"
+    );
+    let usage =
+        w.pg.query("SELECT \"usage\" FROM alpha.\"$readergrant\"")
+            .expect("record");
+    assert_eq!(
+        usage,
+        [[Some("held".to_string())]],
+        "the usage was there before Ordo"
     );
     w.b.rows("SELECT body FROM alpha.secrets")
         .await
@@ -390,19 +402,14 @@ async fn a_removed_line_revokes_what_it_recorded_and_nothing_granted_by_hand() {
     assert_eq!(
         privilege(
             &w,
-            &format!("has_table_privilege('{READER}', 'alpha.secrets', 'SELECT')")
-        ),
-        "true",
-        "the hand grant is left"
-    );
-    assert_eq!(
-        privilege(
-            &w,
             &format!("has_schema_privilege('{READER}', 'alpha', 'USAGE')")
         ),
-        "false",
-        "Ordo's usage is revoked"
+        "true",
+        "a usage Ordo did not give is left"
     );
+    w.b.rows("SELECT body FROM alpha.secrets")
+        .await
+        .expect("the table granted by hand still reads");
 
     // A row from a release before grants were recorded: everything goes.
     peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
@@ -419,7 +426,7 @@ async fn a_removed_line_revokes_what_it_recorded_and_nothing_granted_by_hand() {
             &format!("has_table_privilege('{READER}', 'alpha.secrets', 'SELECT')")
         ),
         "false",
-        "with no record, everything in the schema is revoked, as before"
+        "with no record, every table in the schema is revoked, as before"
     );
 }
 

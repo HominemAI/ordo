@@ -176,7 +176,9 @@ wait_for "the identity service" "$issuer/health/ready" "$last"
 # ── 4. and 5. The two doors ────────────────────────────────────────────────
 # What both doors share. Each sets its own role, schema, port and client id.
 # A public answer over an external is held 2 seconds here (60 by default), so
-# a note written in notes v2 shows on note_viewer's public list at once.
+# a note written in notes v2 shows on note_viewer's public list at once. The
+# external check runs every 2 seconds (300 by default), so a column notes
+# stops writing holds the viewer at once (tests/orphans).
 door_env() { # role, schema, port, public, page, client id, then the command
   local role=$1 schema=$2 port=$3 public=$4 page=$5 client=$6
   shift 6
@@ -195,7 +197,7 @@ door_env() { # role, schema, port, public, page, client id, then the command
     ORDO_AUTH_PROVIDER_CA_FILE="$ca" ORDO_EGRESS_PRIVATE_HOSTS=localhost \
     ORDO_BLOB_STORE="fs:$state/blobs-$schema" ORDO_DEV_UNSAFE_BLOB_STORE=1 \
     ORDO_READER_NOTE_VIEWER_ROLE=viewer_app ORDO_PEER_NOTES_SCHEMA=notes \
-    ORDO_PUBLIC_CDN_S_MAXAGE=2 \
+    ORDO_PUBLIC_CDN_S_MAXAGE=2 ORDO_EXTERNAL_WATCH_SECS=2 \
     RUST_LOG="${RUST_LOG:-info}" "$@"
 }
 notes_env() { door_env notes_app notes "$notes_port" "$notes_public" "$notes_page" notes "$@"; }

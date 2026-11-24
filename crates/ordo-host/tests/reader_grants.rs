@@ -479,3 +479,86 @@ async fn a_version_the_gate_refuses_leaves_the_grants_as_they_were() {
         .await
         .expect("still reads");
 }
+
+/// The reader program, mapping `extra` beside `id` and `title`.
+fn reader_of(extra: &str) -> ordo_schema::Schema {
+    let mut f = Fixture::from_source(
+        &format!(
+            "peer journal\n\n\
+             external entries from journal.notes shared {{\n  id: text <- id\n  \
+             title: text <- title\n{extra}  access read open\n}}\n"
+        ),
+        SEED,
+    )
+    .expect("the reader compiles");
+    peer::resolve_with(&mut f.schema, "beta", |v| {
+        (v == "ORDO_PEER_JOURNAL_SCHEMA").then(|| "alpha".to_string())
+    })
+    .expect("resolves");
+    f.schema
+}
+
+/// **A reader reads only columns the read app still writes** (owner ruling
+/// 2026-11-23, Q1; `plan-versions.md` §2.7). The writer's `notes.mood` is
+/// orphaned by a version that stopped declaring it. The grant becomes one
+/// by column, without `mood`: Postgres refuses the reader that column and
+/// still serves the rest. The reader's start check passes, and its external
+/// check holds the entity with `external_changed`, naming `mood`, the peer
+/// and the fix. A reader that does not map `mood` reads on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_loses_an_orphaned_column_with_a_named_error() {
+    let w = world("ordo_rgrant_orphan").await;
+    w.pg.exec("ALTER TABLE alpha.notes ADD COLUMN mood text; UPDATE alpha.notes SET mood = 'calm'")
+        .expect("the column v1 wrote");
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted whole");
+    w.b.rows("SELECT mood FROM alpha.notes")
+        .await
+        .expect("read while written");
+
+    ordo_exec::orphans::record(
+        &w.a,
+        &[ordo_exec::orphans::Left {
+            entity: "notes".into(),
+            field: Some("mood".into()),
+            columns: vec!["mood".into()],
+            sealed: false,
+        }],
+        Some("1.0.0"),
+        "2.0.0",
+        "t",
+        1_900_000_000,
+    )
+    .await
+    .expect("orphaned");
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted by column");
+    assert!(denied(&w.b, "SELECT mood FROM alpha.notes").await);
+    w.b.rows("SELECT id, title FROM alpha.notes")
+        .await
+        .expect("the rest still reads");
+
+    let maps = reader_of("  mood: text? <- mood\n");
+    peer::check_access(&w.b, &maps, &BTreeSet::new(), false)
+        .await
+        .expect("a table granted by column is still granted");
+    let lines = ordo_host::external_check::check(&w.b, &maps)
+        .await
+        .expect("checks")
+        .refusals();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("external_changed on `entries`")
+            && lines[0].contains("column `mood` is no longer written by `journal`")
+            && lines[0].contains("ordo introspect --external"),
+        "{lines:?}"
+    );
+
+    let lines = ordo_host::external_check::check(&w.b, &reader_of(""))
+        .await
+        .expect("checks")
+        .refusals();
+    assert!(lines.is_empty(), "{lines:?}");
+}

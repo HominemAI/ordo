@@ -1671,4 +1671,17 @@
 {"seq": 1673, "item": "evolution-review-rollouts-records-and-backfills", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "Correct all tenants should not be broken because one is.", "source": "record", "read": true}
 {"seq": 1674, "item": "evolution-review-rollouts-records-and-backfills", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1675, "item": "evolution-review-rollouts-records-and-backfills", "ask": 5, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
-{"seq": 1676, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24T00:51:32Z", "status": "open", "text": "Having to provide a key sounds like work. Given in the future", "source": "page", "read": false}
+{"seq": 1676, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24T00:51:58Z", "status": "open", "text": "Having to provide a key sounds like work. Given in the future it will be able to work with github in terms of versions and tiers \"having to give a key\" seems like a nuisance. Thoughts?", "source": "page", "read": true}
+{"seq": 1677, "item": "evolution-review-rollouts-records-and-backfills", "ask": 6, "at": "2026-11-24T00:52:14Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1678, "item": "evolution-review-rollouts-records-and-backfills", "ask": 1, "at": "2026-11-24T00:52:24Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1679, "item": "evolution-review-release-check-promotion-staging", "ask": 0, "at": "2026-11-24T00:52:35Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1680, "item": "evolution-review-rollouts-records-and-backfills", "ask": 0, "at": "2026-11-24T00:52:46Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1681, "item": "versions-increment-4a-three-small-choices", "ask": 1, "at": "2026-11-24T00:53:17Z", "status": "open", "text": "We can do this for know.", "source": "page", "read": true}
+{"seq": 1682, "item": "versions-increment-4a-three-small-choices", "ask": 2, "at": "2026-11-24T00:53:41Z", "status": "open", "text": "just bring 4b into 4a - no need to dupe work", "source": "page", "read": true}
+{"seq": 1683, "item": "versions-increment-4a-three-small-choices", "ask": 3, "at": "2026-11-24T00:54:00Z", "status": "open", "text": "bring in to this work, not later. It's all part of the same plan.", "source": "page", "read": true}
+{"seq": 1684, "item": "versions-increment-4a-three-small-choices", "ask": 0, "at": "2026-11-24T00:54:03Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1685, "item": "evolution-review-rollouts-records-and-backfills", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1686, "item": "evolution-review-rollouts-records-and-backfills", "ask": 6, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1687, "item": "versions-increment-4a-three-small-choices", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "We can do this for know.", "source": "record", "read": true}
+{"seq": 1688, "item": "versions-increment-4a-three-small-choices", "ask": 2, "at": "2026-11-23", "status": "decided", "text": "just bring 4b into 4a - no need to dupe work", "source": "record", "read": true}
+{"seq": 1689, "item": "versions-increment-4a-three-small-choices", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "bring in to this work, not later. It's all part of the same plan.", "source": "record", "read": true}

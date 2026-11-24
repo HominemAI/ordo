@@ -3880,6 +3880,13 @@ async fn assemble_program(
         }
     }
 
+    // The Ordo release this deployment runs, for a reader's release check
+    // (`plan-evolution-federation.md` §5, Q16). Before the program loads,
+    // so the reader grants the load makes cover it.
+    ordo_exec::sign_in_contract::record_release(&pool, crate::release_check::release(), now_secs())
+        .await
+        .map_err(|e| BootRefusal::Database(e.to_string()))?;
+
     // A connection keeps its endpoints for life under its name (§3.5): a
     // boot that finds them changed refuses. Recorded before the program
     // loads, with the subject claim, because a `peer` line matches people

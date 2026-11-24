@@ -140,7 +140,7 @@ jobs:
           done
           node scripts/coverage-crates.mjs --label unit --out coverage-out/unit.json coverage-out/lcov-unit.info > coverage-out/unit.md
           node scripts/coverage-crates.mjs --label examples --out coverage-out/examples.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-site.info > coverage-out/examples.md
-          node scripts/coverage-crates.mjs --label baseline --out coverage-out/baseline.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-public.info > coverage-out/baseline.md
+          node scripts/coverage-crates.mjs --label examples --out coverage-out/baseline.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-public.info > coverage-out/baseline.md
           # shellcheck disable=SC2016
           node --input-type=module -e '
             import { readFileSync } from "node:fs";

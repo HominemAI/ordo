@@ -515,3 +515,35 @@ Check the accounting without a Rust build:
 node --test scripts/coverage-crates.test.mjs
 node scripts/coverage-crates.mjs --label examples --check coverage/floor.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info
 ```
+
+## Tenant isolation in notes v2 and teamspace
+
+Notes v2's `tests/v2/isolation.spec.ts` tries reads, refinements, live feeds,
+files, downloads, exports, search and writes across 2 tenants. It also signs
+2 people into the same browser and checks the stored device records after
+sign-out. The live test waits for the owner's sentinel write on the same
+feed before checking that the other tenant's write never arrived.
+
+Teamspace has its own stack under `examples/teamspace/e2e`. It follows the
+development settings, with passkey and emailed-code sign-in and a local mail
+catcher. Each founder gets a separate tenant. The API tests try another
+team's board, team and report, then compare forbidden and undeclared ops.
+The browser project is ready for the X3 click-and-expect suite.
+
+```
+cargo build -p ordo-host -p ordo-cli
+(cd examples/teamspace/web && npm ci)
+cd examples/teamspace/e2e && npm ci && npx playwright test
+```
+
+Use `ORDO_PG_HOST`, `_PORT`, `_USER` and `_PASSWORD` for an existing test
+Postgres. Otherwise the stack creates its own cluster. The database name
+and local socket are unique per run. The default ports are 4840 (door),
+5390 (page), 4843 (stand-in), 4825 (SMTP) and 4826 (mail API). Override them
+with `E2E_DOOR_PORT`, `E2E_PAGE_PORT`, `E2E_PROVIDER_PORT`,
+`E2E_MAIL_SMTP_PORT` and `E2E_MAIL_HTTP_PORT`.
+
+New example stacks share `examples/e2e-common/stack-lib.sh`. They stop each
+child with SIGTERM and wait before stopping their own Postgres. The workflow
+is `.github/workflows/examples-e2e.yml`, with a `teamspace e2e` job. Its
+coverage mode uses increment 0's coverage tooling.

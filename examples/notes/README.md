@@ -776,3 +776,9 @@ from a provider, the emailed code, the guest) and additions to
 The end-to-end workflow also accepts `coverage: true`. It runs instrumented
 Rust binaries and uploads LCOV data for the example coverage ratchet. See
 `docs/howto-e2e.md`, "Coverage through the examples".
+
+The v2 isolation suite tries another tenant's reads, refinements, feeds,
+files, downloads, exports, search and writes. It also checks the device
+records after sign-out and after a second person signs in to the same
+browser. Run `npx playwright test tests/v2/isolation.spec.ts --project=v2
+--no-deps` from `e2e/`.

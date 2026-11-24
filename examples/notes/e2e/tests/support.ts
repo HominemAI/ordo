@@ -232,3 +232,80 @@ export function applyProgram(dir: string): string {
     encoding: 'utf8',
   });
 }
+
+/** Record the page's actual live responses. Install before navigating to it. */
+export async function liveEvents(page: Page): Promise<() => Promise<string[]>> {
+  await page.addInitScript(() => {
+    const observed = window as unknown as { __e2eLiveEvents: string[]; __e2eLiveErrors: string[] };
+    observed.__e2eLiveEvents = [];
+    observed.__e2eLiveErrors = [];
+    const original = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const response = await original(input, init);
+      const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+      if (url.searchParams.get('live') === '1' && response.ok && response.body) {
+        const reader = response.clone().body!.getReader();
+        void (async () => {
+          const decoder = new TextDecoder();
+          let pending = '';
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
+              const frames = pending.split(/\r?\n\r?\n/);
+              pending = frames.pop()!;
+              observed.__e2eLiveEvents.push(...frames);
+              if (done) break;
+            }
+          } catch (error) {
+            if (!(error instanceof DOMException && error.name === 'AbortError')) {
+              observed.__e2eLiveErrors.push(String(error));
+            }
+          } finally { reader.releaseLock(); }
+        })();
+      }
+      return response;
+    };
+  });
+  return async () => page.evaluate(() => {
+    const observed = window as unknown as { __e2eLiveEvents: string[]; __e2eLiveErrors: string[] };
+    if (observed.__e2eLiveErrors.length) throw new Error(observed.__e2eLiveErrors.join('\n'));
+    return observed.__e2eLiveEvents;
+  });
+}
+
+/** Read the sealed replica using its origin-local keys, without changing it. */
+export async function idbRows(page: Page, store: string): Promise<unknown[]> {
+  return page.evaluate(async (name) => {
+    // Do not create an empty database and accidentally pass a purge assertion.
+    const databases = await indexedDB.databases();
+    if (!databases.some(db => db.name === name)) throw new Error(`Device database ${name} does not exist`);
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const snapshot = await new Promise<{ names: IDBValidKey[]; values: Uint8Array[]; keyNames: IDBValidKey[]; keys: { seal: CryptoKey }[] }>((resolve, reject) => {
+        const tx = db.transaction(['records', 'keys'], 'readonly');
+        const names = tx.objectStore('records').getAllKeys();
+        const values = tx.objectStore('records').getAll();
+        const keyNames = tx.objectStore('keys').getAllKeys();
+        const keys = tx.objectStore('keys').getAll();
+        tx.oncomplete = () => resolve({ names: names.result, values: values.result, keyNames: keyNames.result, keys: keys.result });
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+      return await Promise.all(snapshot.values.map(async (sealed, index) => {
+        const namespace = String(snapshot.names[index]).split('/')[0];
+        const keys = snapshot.keys[snapshot.keyNames.indexOf(namespace)];
+        if (!keys) throw new Error('A device record survived without its key');
+        const plain = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: new Uint8Array(sealed.slice(0, 12)) },
+          keys.seal, new Uint8Array(sealed.slice(12)),
+        );
+        return JSON.parse(new TextDecoder().decode(plain)) as unknown;
+      }));
+    } finally { db.close(); }
+  }, store);
+}

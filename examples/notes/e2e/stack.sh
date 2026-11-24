@@ -177,6 +177,8 @@ export ORDO_READER_NOTE_VIEWER_ROLE=note_viewer
 # the stack's own folder. `fs:` is for tests and development only, so the
 # door refuses to boot on it without the unsafe switch beside it. A real
 # deployment sets ORDO_BLOB_STORE=s3 and the ORDO_BLOB_S3_* settings.
+# Enable the real tenant export path for the isolation test.
+export ORDO_EXIT_BUNDLE_DIR="$state/exports"
 export ORDO_BLOB_STORE="fs:$state/blobs" ORDO_DEV_UNSAFE_BLOB_STORE=1
 # Emailed codes go to the mail catcher, in the clear, on loopback.
 export ORDO_MAIL_KIND=smtp ORDO_MAIL_FROM=notes@example.com ORDO_MAIL_HOST=localhost

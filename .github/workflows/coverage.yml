@@ -100,10 +100,14 @@ jobs:
     with:
       coverage: true
 
-  # S1 adds examples-e2e.yml and its job here when the first new suite exists.
+  examples:
+    uses: ./.github/workflows/examples-e2e.yml
+    with:
+      coverage: true
+
   ratchet:
     name: coverage ratchet
-    needs: [unit, notes, federation]
+    needs: [unit, notes, federation, examples]
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
@@ -121,11 +125,11 @@ jobs:
       - name: Measure and check the floors
         run: |
           # Missing inputs must fail, rather than silently lower the denominator.
-          for suite in unit notes federation; do
+          for suite in unit notes federation teamspace marketing-site; do
             test -s "coverage-out/lcov-$suite.info"
           done
           node scripts/coverage-crates.mjs --label unit --out coverage-out/unit.json coverage-out/lcov-unit.info > coverage-out/unit.md
-          node scripts/coverage-crates.mjs --label examples --out coverage-out/examples.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info > coverage-out/examples.md
+          node scripts/coverage-crates.mjs --label examples --out coverage-out/examples.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-site.info > coverage-out/examples.md
           # shellcheck disable=SC2016
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
@@ -135,7 +139,7 @@ jobs:
           cat coverage-out/unit.md coverage-out/examples.md >> "$GITHUB_STEP_SUMMARY"
           status=0
           node scripts/coverage-crates.mjs --label unit --check coverage/floor.json coverage-out/lcov-unit.info || status=1
-          node scripts/coverage-crates.mjs --label examples --check coverage/floor.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info || status=1
+          node scripts/coverage-crates.mjs --label examples --check coverage/floor.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info coverage-out/lcov-teamspace.info coverage-out/lcov-marketing-site.info || status=1
           exit "$status"
       - name: Every coverage suite must pass
         if: always()

@@ -39,8 +39,13 @@ async function cached(response: APIResponse, cache: string) {
   return result;
 }
 async function warm(request: APIRequestContext, door: string) {
-  await rows(await pricing(request, door));
-  return cached(await pricing(request, door), 'hit');
+  let answer: Record<string, any>[] = [];
+  await expect.poll(async () => {
+    const response = await pricing(request, door);
+    answer = await rows(response);
+    return response.headers()['x-ordo-cache'];
+  }, { intervals: [100], message: `Warm pricing on ${door}` }).toBe('hit');
+  return answer;
 }
 
 test('a cache hit reads nothing from the database', async ({ request, plans }) => {

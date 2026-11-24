@@ -620,6 +620,7 @@ person. It is hash-chained, so it is not a place for bulk rows.
 | A version setting changed | `$version_settings` | built |
 | A `--direct` use | the security log, at the next boot | built |
 | A plan stored by `ordo evolve` | `$plans`, with its actor; act `plan-stored` (and `plan-run`, `replayed`) on the deployment's stream | built (increment 8) |
+| The deployment owner's approval of a sign-in method removal (Q6) | the deployment's stream, act `sign-in-removal-approved`, with the methods and the count | built (increment 9) |
 | A backfill on one tenant | that tenant's command chain, one summarised group (ruled 2026-09-08, 2026-09-20) | increment 10b |
 | A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b |
 | Rollout start, pause, resume, skip, retry, abort, finish | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | increment 10 |
@@ -659,6 +660,9 @@ it yet (step 1b).
   explicit approval (a confirmation, recorded on the stream). The warning
   gives the migration steps: ask those people to add another method first,
   or keep the method one more version and tell them.
+  **Built in increment 9:** the approval is `ordo evolve
+  --approve-sign-in-removal <count>`. It must name the count the check
+  finds now, so it never covers more people than it named.
 - Ceilings and provider credentials are the instance's (owner, 2026-11-14).
   They are bound at the target like every per-environment value (§1.1, D6).
   A value the target's ceiling cuts is held at the ceiling, and the report
@@ -805,6 +809,10 @@ Ruled 2026-11-02: D3, D5, D16, plan ask 3.
 - **`prev` cleanup** (ask 3) waits for every environment to pass the rename.
   A lagging tenant replays the stored rename without the `prev` line.
 - Pre-checks run on every tenant and report every issue at once (27w).
+  **Built in increment 9** (`precheck.rs`): every database the deployment
+  serves from is asked, shared or per tenant, and each issue names the
+  database, the space and the fix. A database at another version is listed
+  as not asked; its own step checks it when its path reaches it.
 
 Added by the review of 2026-11-23:
 
@@ -1274,7 +1282,7 @@ round is about 35 minutes for the full suite.
 | 7a | **Evolution through the examples** (new, review 2026-11-23; owner, 2026-11-23). `examples/notes-v3`: one additive change, one rename with `prev`, one removed field. The harness applies it over a running notes v2 with a browser open, and note-viewer reads through it. Later increments add cases to it. | M | 7 | the notes page keeps every note across v2 to v3 with no reload error; the test is in the example's own e2e | none |
 | 7b | **Federation under versions** (new, review 2026-11-23). `plan-evolution-federation.md`, steps F1 to F6: readers named in a plan, column grants that follow the served fields, every loaded version checked against its peers, the checks in rollback and promotion. | M, in 2 parts: F1, F3, F4 with 8; F2, F5, F6 with 11a | 7, 8, 11a | note-viewer never reads a stale column: it reads through the soak, then is refused naming the fix | none |
 | 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. **Session 1 built 2026-11-23** (6d93397c, ef5fe610, 9856f637): `$plans` and `evolve.rs`; the step renders from the 2 stored sources against an empty database of X, so the digest is the same in every environment; `--digest` refuses another; a plan with errors is never stored; the receipt lists each change, class, option, forward and reverse, and leaves out Ordo's own tables; replay walks the stored path, each step checking the recorded version, drift and the digest; `std.deployment.evolve`, `plans`, `replay`; `ordo evolve [<dir>] --from --to [--run]`, `--tenant`, `--list`; F1 and F4's rollback check. Tests: `stored_plans.rs`. **Not built:** removing `ordo migrate --apply --direct` (asked), a test through an example (the notes harness holds no door credential), option expressions beyond `--places`, backfill functions (D16, with 10b). | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |
-| 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
+| 9 | **Pre-checks on every tenant.** With the external, `requires` and reader checks (§2.3, review 2026-11-23). **Built 2026-11-23** (f8828906): `precheck.rs`. `ordo evolve` stores the plan, then asks every database (shared or per tenant) the data probes and the external check, and lists every issue with its database, spaces and fix. `--run` refuses while one is open, and `run_step` refuses a tenant's step the same way. A database at another version is listed as not asked. Readers are listed from the render (F1). The sign-in removal check (Q6): a version whose `auth` block drops a method counts the people left with none, and is not stored until `--approve-sign-in-removal <count>` names that count; the approval is act `sign-in-removal-approved` on the stream. Tests: `prechecks.rs`. **Not built:** the `requires` check (the declaration is not in the language; the answer says so), the peer note on a removed shared provider (`plan-evolution-federation.md`), a test through an example (no door credential in the notes harness). | M | 8 | a plan over 3 tenants with 2 bad lists both issues with their fixes | 27w |
 | 10 | **Rollouts, the core** (split, review 2026-11-23; design in §3.7). `$rollouts`, the leading worker, `rolling` and `all`, windows and holds, controls as door ops, the failure threshold, the stranded-tenant refusal, minimum version moves, `--move-to`, the deployment's own space, the acts recorded (§1.12). | L | 7 | a failed batch pauses; a tenant outside its window waits; a second node finishes a rollout whose leader died | 27h (strategies, first half) |
 | 10c | **Rollout strategies** (split from 10, review 2026-11-23). Canary, group first, by query over tenant facts, share partners together, health by error rate, the alert channel. | M | 10 | a canary that fails its health check pauses the rest | 27h (strategies, rest) |
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |

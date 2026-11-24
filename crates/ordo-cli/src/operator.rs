@@ -3028,7 +3028,7 @@ async fn tenant_version(flags: &Flags, tenant: &str) -> Outcome {
             c["to"].as_str().unwrap_or("?"),
             c["cause"].as_str().unwrap_or("?"),
             c["actor"].as_str().unwrap_or("?"),
-            c["at"].as_u64().unwrap_or(0),
+            ordo_host::versions::utc_minute(c["at"].as_u64().unwrap_or(0)),
         ));
     }
     Outcome::ok(out)
@@ -3544,7 +3544,7 @@ async fn versions_show(flags: Flags) -> Outcome {
     );
     out.push_str(&format!(
         "applied    {} by {}\n",
-        v["appliedAt"].as_u64().unwrap_or(0),
+        ordo_host::versions::utc_minute(v["appliedAt"].as_u64().unwrap_or(0)),
         v["actor"].as_str().unwrap_or("?")
     ));
     if let Some(l) = v["label"].as_str() {
@@ -3574,7 +3574,7 @@ async fn versions_show(flags: Flags) -> Outcome {
         out.push_str(&format!(
             "  {}.  at {} by {}\n",
             a["seq"].as_u64().unwrap_or(0),
-            a["at"].as_u64().unwrap_or(0),
+            ordo_host::versions::utc_minute(a["at"].as_u64().unwrap_or(0)),
             a["actor"].as_str().unwrap_or("?")
         ));
     }

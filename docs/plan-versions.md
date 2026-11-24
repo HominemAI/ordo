@@ -1391,7 +1391,10 @@ round is about 35 minutes for the full suite.
   console has no screen to move a tenant, set its target, or name a
   revoke's `--move-to` for a version that is not active.
 - Audit leftovers not taken by the CLI-output fixes: times as UTC, window
-  caps as settings or recorded as fixed.
+  caps as settings or recorded as fixed. Done in the remainder: `ordo
+  versions show` (applied, activations) and `ordo versions tenant` (pin
+  history) print times as `2026-11-05 14:02 UTC`, as revoke times
+  already did. The window caps are recorded as fixed (§7, "Fixed caps").
 
 What sets the pace:
 
@@ -1599,6 +1602,20 @@ day:
 
 Defaults not set by a ruling are proposals, checked in the increment that
 builds them.
+
+**Fixed caps** (recorded in the increment 3 remainder, not settings). Each
+bounds input or the cost of one answer, like every other text and list
+bound in Ordo. None is a policy a deployment would tune.
+
+| Cap | Value | Why fixed |
+|---|---|---|
+| A window's message | 2,000 characters | an input bound |
+| A skip's reason | 500 characters | an input bound |
+| A window or skip id | 64 characters | an input bound |
+| Tenants one window lists | 1,000 | more is `all` or `all except`; bounds one write |
+| The window list's reach | 12 months back and ahead | the 24-month list the owner ruled (asks 22, 24) |
+| Times one cron window gives in the list | 20,000 | about once an hour; bounds the list's cost |
+| Times one list answers | 100,000 | the list is cut and says so |
 
 Added by the review of 2026-11-23:
 

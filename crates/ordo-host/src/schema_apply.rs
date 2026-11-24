@@ -831,6 +831,18 @@ pub async fn plan_with_external(
         None => crate::external_check::check(pool, &program.schema).await?,
     };
     let mut refusals = external.refusals();
+    // The `prev` marks against the version the data was written under
+    // (`plan-syntax-additions.md` §5): one the step cannot make refuses it.
+    for i in ordo_schema::prev::check(prior.as_ref().or(written), &program.schema).errors {
+        refusals.push(format!(
+            "{} on `{}` — `{}`: {}. Fix: {}",
+            i.class,
+            i.mark.entity,
+            i.mark.text(),
+            i.message,
+            i.fix
+        ));
+    }
     let mut destructive = 0usize;
     for a in &mut assessed {
         // §5 D3, which only a deployed artifact can raise: a drop of
@@ -2142,7 +2154,8 @@ pub fn triage_counted(
                 }
             }
             Change::AddOptionalField { entity, field }
-            | Change::AddConstantField { entity, field, .. } => {
+            | Change::AddConstantField { entity, field, .. }
+            | Change::RenameField { entity, field, .. } => {
                 if let Some(f) = schema.native(entity).and_then(|e| e.field(field)) {
                     arriving.insert((entity.clone(), f.column()));
                     if f.indexed {
@@ -2351,6 +2364,26 @@ pub fn triage_counted(
                     steps.extend(places_steps(c, e, choice, version)?.into_iter().map(alter));
                 }
             },
+            Change::RenameField { from, field, .. } => {
+                steps.extend(
+                    rename_field_steps(e, live, from, field)?
+                        .into_iter()
+                        .map(alter),
+                );
+            }
+            Change::RenameEntity { from, .. } => refused.push(Refused {
+                change: c.clone(),
+                class: "rename_entity_not_built",
+                why: format!(
+                    "`{}` is declared `(prev: {from})`. Copying a table to a new name moves \
+                     every typed id, every ref into it and every grant on it, which is the \
+                     backfill worker's (increment 10b). Until then, keep the name `{from}`, or \
+                     add `{}` beside it, copy the rows with an op, and remove `{from}` in a \
+                     later version",
+                    e.name, e.name
+                ),
+                run: None,
+            }),
             Change::AddCheck { object, .. } => {
                 let Some(chk) = e.checks.iter().find(|k| k.name == *object) else {
                     return Err(format!("`{object}` is not a check `{}` declares", e.name));
@@ -2407,6 +2440,122 @@ pub fn triage_counted(
         backfills,
         after,
     })
+}
+
+/// The statements of a declared rename (§5 B4, `plan-syntax-additions.md`
+/// §5): the new column, open to nulls; the sync trigger; the old column's
+/// values copied into the new one; then the new column's `NOT NULL`. The
+/// old column is kept with its `NOT NULL`, so the version before still
+/// loads over this database and a rollback by `ordo apply` is not refused.
+/// It loses its `DEFAULT`, so an insert by the new version, which no longer
+/// writes it, leaves it empty and the trigger fills it before the `NOT
+/// NULL` is checked. The serving version still reads it until its tenants
+/// move. Never `ALTER … RENAME`, which would drift the serving version the
+/// instant it landed. The new column's unique, reference and value set are
+/// their own changes in the same step.
+///
+/// **No write is lost between the copy and the pin switch.** The switch is
+/// in the control database and each tenant's data may be in a database of
+/// its own, so the copy and the switch cannot share a transaction. The
+/// trigger ([`rename_sync_steps`]) is created in the copy's own
+/// transaction, before the copy, so from the copy on every write the
+/// serving version makes to the old column reaches the new one, and every
+/// write the new version makes to the new one reaches the old one. The
+/// `ADD COLUMN` holds the table's lock to the commit, so no write lands
+/// between the copy and the trigger. The reverse drops the trigger.
+pub fn rename_field_steps(
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    field: &str,
+) -> Result<Vec<String>, String> {
+    let Some(f) = e.field(field) else {
+        return Err(format!("`{}.{field}` is not declared", e.name));
+    };
+    let mut open = e.clone();
+    for g in open.fields.iter_mut().filter(|g| g.name == field) {
+        g.optional = true;
+    }
+    let of = open
+        .field(field)
+        .ok_or_else(|| format!("`{}.{field}` is not declared", e.name))?;
+    let mut out = ordo_schema::ddl::add_column(&open, of)
+        .map_err(|x| format!("{}: {}", x.code, x.message))?;
+    let t = ordo_schema::ddl::q(&e.name);
+    let new = ordo_schema::ddl::q(&f.column());
+    let old = ordo_schema::ddl::q(from);
+    let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
+    if old_live.is_some_and(|c| c.has_default) {
+        out.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {old} DROP DEFAULT;\n"
+        ));
+    }
+    out.extend(rename_sync_steps(&e.name, from, &f.column()));
+    out.push(format!("UPDATE {t} SET {new} = {old};\n"));
+    if !f.optional {
+        out.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {new} SET NOT NULL;\n"
+        ));
+    }
+    Ok(out)
+}
+
+/// The name of a rename's sync trigger and of its function:
+/// `<table>$<new column>$prev`, after the way [`ordo_schema::ddl`] names
+/// every object it emits.
+pub fn rename_sync_name(table: &str, new: &str) -> String {
+    format!("{table}${new}$prev")
+}
+
+/// The sync trigger of a field rename, as two statements: its function and
+/// the trigger. Until increment 11a's dual writes, this is what keeps the
+/// old column and the new one equal while both versions may write.
+///
+/// - An insert that fills the old column came from the version that still
+///   writes it (the old column has no default any more), so its value is
+///   copied into the new one. An insert that leaves it empty came from the
+///   new version, and the new column's value is copied back into it, so a
+///   tenant still on the old version reads the row whole.
+/// - An update that changes one column and not the other copies the
+///   change across.
+///
+/// Either column dropped by a later version leaves the trigger a no-op
+/// rather than an error, because it first asks the row whether both
+/// columns are still on it.
+pub fn rename_sync_steps(table: &str, old: &str, new: &str) -> Vec<String> {
+    use ordo_schema::ddl::q;
+    let name = q(&rename_sync_name(table, new));
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let (o, n) = (q(old), q(new));
+    let (ok, nk) = (lit(old), lit(new));
+    vec![
+        format!(
+            "CREATE OR REPLACE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $ordo_prev$
+BEGIN
+  IF NOT (to_jsonb(NEW) ? {ok} AND to_jsonb(NEW) ? {nk}) THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.{o} IS NOT NULL THEN
+      NEW.{n} := NEW.{o};
+    ELSE
+      NEW.{o} := NEW.{n};
+    END IF;
+  ELSIF NEW.{o} IS DISTINCT FROM OLD.{o} AND NEW.{n} IS NOT DISTINCT FROM OLD.{n} THEN
+    NEW.{n} := NEW.{o};
+  ELSIF NEW.{n} IS DISTINCT FROM OLD.{n} AND NEW.{o} IS NOT DISTINCT FROM OLD.{o} THEN
+    NEW.{o} := NEW.{n};
+  END IF;
+  RETURN NEW;
+END
+$ordo_prev$;\n"
+        ),
+        format!("DROP TRIGGER IF EXISTS {name} ON {t};\n", t = q(table)),
+        format!(
+            "CREATE TRIGGER {name} BEFORE INSERT OR UPDATE ON {t} FOR EACH ROW EXECUTE FUNCTION {name}();\n",
+            t = q(table)
+        ),
+    ]
 }
 
 /// The two steps a foreign key, an enum pin or a check takes onto a table
@@ -3227,10 +3376,14 @@ pub fn safe_changes_value(v: Option<&str>) -> Option<bool> {
     }
 }
 
-/// A change that cannot lose or reject data: class A, or a foreign key
-/// that arrives on a table this same plan creates (so it holds no rows).
+/// A change that cannot lose or reject data: class A, a foreign key
+/// that arrives on a table this same plan creates (so it holds no rows), or
+/// a field rename the program declares with `prev` (§5 B4,
+/// `plan-syntax-additions.md` §5): the values are copied and the old column
+/// is kept, so nothing is lost and a revert reads it again.
 fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
     match c {
+        Change::RenameField { .. } => true,
         Change::AddForeignKey { entity, .. } => all
             .iter()
             .any(|o| matches!(o, Change::AddEntity { entity: e } if e == entity)),

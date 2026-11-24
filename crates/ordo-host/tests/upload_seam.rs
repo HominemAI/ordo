@@ -155,7 +155,16 @@ fn only_the_write_protocol_updates_entity_rows() {
              `--places <entity>.<field>=rescale` (25aa): one statement multiplies or divides \
              every stored amount so each keeps its value in the new unit. Like the re-seal \
              pass, no value changes meaning, so no group is appended; it runs inside the \
-             migration's own transaction and is refused when a division would lose digits",
+             migration's own transaction and is refused when a division would lose digits. \
+             And a field rename declared with `prev` (§5 B4, increment 15): one statement \
+             copies the old column into the new one inside the migration's transaction. The \
+             value keeps its meaning under a new name, so no group is appended",
+        ),
+        (
+            "ordo-host/src/evolve.rs",
+            "the reverse of a declared rename, rendered into a stored plan's receipt as a \
+             record for the deployment owner. It is text in the receipt and is never sent \
+             to a database",
         ),
         (
             "ordo-host/src/evolve.rs",

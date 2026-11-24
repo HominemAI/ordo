@@ -409,6 +409,10 @@ pub struct Report {
     pub activation: Activation,
     /// What the apply did to each tenant's own database.
     pub tenants: TenantsReport,
+    /// The program's `prev` marks whose rename has landed in every
+    /// environment (`crate::prev_offer`), as written: the CLI offers to
+    /// remove them. Empty from an older host.
+    pub landed_prev: Vec<String>,
 }
 
 /// What an apply did to the databases tenants are served from, apart from
@@ -1084,6 +1088,17 @@ async fn sequence(
         }
     };
 
+    // A clean apply ends by offering to remove the `prev` marks that have
+    // landed in every environment (ruled 2026-10-04).
+    let landed_prev = if activate {
+        crate::prev_offer::landed(pool, program)
+            .await
+            .iter()
+            .map(|m| m.text())
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Report {
         version: program.version.clone(),
         ordinal,
@@ -1093,6 +1108,7 @@ async fn sequence(
         stored,
         activation,
         tenants,
+        landed_prev,
     })
 }
 
@@ -1681,6 +1697,7 @@ impl Report {
                 Stored::EditionMoved => "editionMoved",
             },
             "activation": activation,
+            "landedPrev": self.landed_prev,
             "tenants": {
                 "advanced": self.tenants.advanced,
                 "current": self.tenants.current,
@@ -1794,6 +1811,12 @@ impl Report {
             schema,
             stored,
             activation,
+            landed_prev: v["landedPrev"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(str::to_string))
+                .collect(),
             // Absent from an older host's answer, which walked no tenants
             // in this shape: read as none rather than refused, because the
             // rest of the report is still true.
@@ -2107,6 +2130,7 @@ mod tests {
                         "not_class_a: it adds a required field".into(),
                     )],
                 },
+                landed_prev: vec!["notes.heading prev(title)".into()],
             },
             Report {
                 version: "v_2".into(),
@@ -2119,6 +2143,7 @@ mod tests {
                     version: "v_2".into(),
                 },
                 tenants: TenantsReport::default(),
+                landed_prev: vec![],
             },
             Report {
                 version: "v_3".into(),
@@ -2131,6 +2156,7 @@ mod tests {
                 stored: Stored::Written,
                 activation: Activation::Staged,
                 tenants: TenantsReport::default(),
+                landed_prev: vec![],
             },
         ] {
             let back = Report::from_json(&report.to_json()).expect("round trip");

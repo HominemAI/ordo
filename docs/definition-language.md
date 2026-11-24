@@ -2006,6 +2006,64 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `prev`: renames across versions [ruled 2026-10-04, built 2026-11-23, increment 15]
+
+A `prev` mark says a field or an entity is the same thing as a name in the
+version serving now. The plan then renders a rename, never a drop and an
+add (`plan-syntax-additions.md` §5).
+
+```
+entity customers (key: cust, prev: clients) {
+  fullName: text prev(name)
+  note:     text? prev(orders.shippingNote)
+}
+```
+
+- A field takes `prev(<old>)` in its modifier tail. An entity takes
+  `prev: <old>` in its header's parenthesis, beside `key:`, in either order.
+- `prev` reaches one version back only.
+- `prev` is contextual: a field may still be named `prev`.
+- A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
+  copies every value into it, and keeps the old column with its
+  `NOT NULL`, so the version before still loads over the database. The old
+  column loses its default. The receipt's reverse copies the values back
+  and drops the new column.
+- No write is lost between the copy and the tenant's pin switch. A trigger
+  (`<table>$<column>$prev`), made in the copy's own transaction, copies a
+  write to either column into the other. So a write the serving version
+  makes after the copy reaches the new column, and a row the new version
+  writes reads whole on the old one. The reverse drops the trigger.
+- `ordo apply` makes a field rename itself, as it makes an additive change.
+- An entity rename renders as a rename and is refused as
+  `rename_entity_not_built` until the backfill worker (increment 10b).
+- A clean `ordo apply` names each mark whose rename has landed in every
+  environment. `ordo apply --remove-landed-prev` cuts those marks from the
+  source. A mark has landed when this deployment is the last environment of
+  its chain and every tenant is on a version with the new name. The stored
+  plan keeps the rename for any tenant still behind.
+
+Checked at compile time (the parser):
+
+| Class | Refused |
+|---|---|
+| `prev_self` | `prev` naming the field's or entity's own name |
+| `prev_still_declared` | `prev(name)` while `name` is still a field of the entity |
+| `prev_duplicate` | two fields of one entity with the same `prev`, or one name twice |
+| `external_unsupported` | `prev` on an external's field or in its header |
+
+Checked at plan time, against the version serving now. With nothing
+serving, nothing is checked and the program is created as declared:
+
+| Class | Refused |
+|---|---|
+| `prev_unresolved` | the old name is not in the version serving now |
+| `prev_type` | the old and new fields' types differ; no cast option exists yet |
+| `prev_mapping_required` | a merge `prev(first, last)` or a move `prev(orders.note)`; no mapping option exists yet |
+| `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
+| `prev_stale` | a warning, never a refusal: the version serving now already has the new name, so the mark can go |
+
+The CDK spells it `t.text().prev('name')` and `entity(…, { prev: 'clients' })`.
+
 ### `external`: a table another system owns [ruled 2026-11-15, built slices A, B and C]
 
 Another system can keep its own table in the database where Ordo's SQL runs:

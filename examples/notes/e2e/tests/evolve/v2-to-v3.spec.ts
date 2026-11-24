@@ -15,7 +15,7 @@
  *
  * A regression looks like `ordo login` failing, a door refusing the
  * developer's token, a plan with no digest, a pre-check issue on a v2 to
- * v3 step (v3 only adds), a refused run, or a note missing from the page.
+ * v3 step (v3 adds, stops declaring and renames), a refused run, or a note missing from the page.
  *
  * It stores v3 on the stack, so it runs after `v2` and before `v3`
  * (playwright.config.ts). Chromium only.
@@ -24,7 +24,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, noteInList, signIn, signedIn, stack, unique } from '../support.js';
+import { addNote, ensureServing, noteInList, signIn, signedIn, stack, unique } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -42,8 +42,10 @@ test('ordo evolve from v2 to v3 through the door, with the page open: the plan, 
   browser,
 }, testInfo) => {
   testInfo.setTimeout(300_000);
-  // Run alone (`--project=evolve --no-deps`), v2 is not applied yet.
-  applyProgram(stack().programV2);
+  // v2 serves after the `v2` project. Run alone (`--no-deps`), it is
+  // applied here. Never applied again over v3's schema, which `evolve`
+  // leaves in place: v3 renames a column v2 requires, so that is refused.
+  ensureServing(stack().programV2, '0.2.0');
   const ada = await owner('Ada');
   const dev = await developer(browser);
   try {
@@ -79,7 +81,8 @@ test('ordo evolve from v2 to v3 through the door, with the page open: the plan, 
       expect(digest, plan.out).not.toBe('');
       // What v3 adds, in the receipt.
       expect(plan.out).toContain('starred');
-      // v3 only adds: every database asked, none with an issue.
+      // v3 adds, stops declaring and renames with `prev`: every database
+      // asked, none with an issue.
       expect(plan.out).toMatch(/^prechecks +\d+ database\(s\) asked, 0 issue\(s\)$/m);
       expect(plan.out).not.toContain('ISSUE');
     });

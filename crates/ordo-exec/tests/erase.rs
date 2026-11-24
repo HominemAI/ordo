@@ -157,6 +157,7 @@ async fn log_a_group(pool: &Pool, space: &str, i: u64) {
                 at: ordo_commandlog::Timestamp(NOW - 10),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })

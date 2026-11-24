@@ -1159,12 +1159,14 @@ fn import_ops(schema: &Schema) -> ordo_syntax::decl::Program {
     }
     ordo_syntax::decl::Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
@@ -1546,7 +1548,14 @@ pub async fn import_space(
             })
             .collect();
         for (k, chunk) in rows.chunks(batch_size).enumerate() {
-            let key = format!("import/{}/{}/{}", req.name, name, k);
+            // `$replay` is one table for the whole database, so the key
+            // names the space: two imports under one name into two spaces
+            // are two imports. Keyed by the name alone, the second space's
+            // batches were skipped as resumed and it got no rows (found by
+            // staging clones, 2026-11-24). A run begun before this change
+            // and resumed after it re-runs its committed batches, and
+            // `$importmap`'s key refuses each row it already wrote.
+            let key = format!("import/{}/{}/{}/{}", space.0, req.name, name, k);
             let fingerprint = batch_fingerprint(chunk);
             let applied = run_batch(
                 exec,
@@ -1883,7 +1892,8 @@ async fn restore_profile(
     let caller = req.caller.to_string();
     let import = req.name.to_string();
     let space = exec.space.0.clone();
-    let key = format!("import/{}/{}/0", req.name, PROFILE_MARKER);
+    // The space is in the key, as for every batch.
+    let key = format!("import/{}/{}/{}/0", space, req.name, PROFILE_MARKER);
     let correlation = format!("cg_import_{}", crate::export::bundle_digest(key.as_bytes()));
     let log = Arc::new(Mutex::new(import_log(&correlation)));
     let fingerprint = plan.fingerprint.clone();

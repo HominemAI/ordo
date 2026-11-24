@@ -44,9 +44,10 @@
 //! # What a live shape cannot see, stated rather than discovered
 //!
 //! - **A rename** (§5 B4) is a drop and an add to anything that reads
-//!   columns, and it stays that way here. Distinguishing them needs a
-//!   declared mapping, which is what B4 requires; guessing from a type match
-//!   would silently propose copying one column into another.
+//!   columns. It is told apart only by a declared `prev` mark
+//!   (`plan-syntax-additions.md` §5, [`crate::prev`]), never guessed from a
+//!   type match, which would silently propose copying one column into
+//!   another.
 //! - **`normalize(lower)`** (§5 B10) touches no column and no constraint —
 //!   it changes the plaintext that is HMACed into a blind index. It is
 //!   invisible to `information_schema` and is found in the `prior`
@@ -282,6 +283,21 @@ pub enum Change {
         from: u8,
         to: u8,
     },
+    /// A field declared `prev(from)` (§5 B4): a new column, the old one's
+    /// values copied into it, the old column kept. Never `ALTER … RENAME`,
+    /// which would drift the serving version the instant it landed.
+    RenameField {
+        entity: String,
+        /// The field's name in the version serving now.
+        from: String,
+        /// Its name in the program.
+        field: String,
+    },
+    /// An entity declared `(prev: from)` (§5 B4).
+    RenameEntity {
+        entity: String,
+        from: String,
+    },
     // ── C ──
     AddUnique {
         entity: String,
@@ -393,6 +409,7 @@ impl Change {
             Change::MakeTree { .. } => "B9",
             Change::Normalize { .. } => "B10",
             Change::ChangePlaces { .. } => "B11",
+            Change::RenameField { .. } | Change::RenameEntity { .. } => "B4",
             Change::AddUnique { .. } => "C1",
             Change::AddCompositeUnique { .. } => "C2",
             Change::AddEnum { .. } => "C3",
@@ -440,6 +457,8 @@ impl Change {
             | Change::MakeTree { entity }
             | Change::Normalize { entity, .. }
             | Change::ChangePlaces { entity, .. }
+            | Change::RenameField { entity, .. }
+            | Change::RenameEntity { entity, .. }
             | Change::AddUnique { entity, .. }
             | Change::AddCompositeUnique { entity, .. }
             | Change::AddEnum { entity, .. }
@@ -473,6 +492,7 @@ impl Change {
             | Change::IndexSealedField { field, .. }
             | Change::Normalize { field, .. }
             | Change::ChangePlaces { field, .. }
+            | Change::RenameField { field, .. }
             | Change::AddUnique { field, .. }
             | Change::AddEnum { field, .. }
             | Change::AddForeignKey { field, .. }
@@ -533,6 +553,8 @@ impl Change {
             // The serving program reads the stored amounts at its places;
             // a program at other places must wait until they are moved.
             | Change::ChangePlaces { .. }
+            | Change::RenameField { .. }
+            | Change::RenameEntity { .. }
             | Change::AddUnique { .. }
             | Change::AddCompositeUnique { .. }
             | Change::AddEnum { .. }
@@ -618,6 +640,14 @@ impl std::fmt::Display for Change {
                     "`{e}.{field}` changes places: the stored amounts are held at {ty}({from}), \
                      the program declares {ty}({to})"
                 )
+            }
+            Change::RenameField { from, field, .. } => write!(
+                f,
+                "`{e}.{from}` is renamed to `{e}.{field}`: copied into the new column, the \
+                 old one kept"
+            ),
+            Change::RenameEntity { from, .. } => {
+                write!(f, "entity `{from}` is renamed to `{e}`")
             }
             Change::AddUnique { field, .. } => write!(f, "`{e}.{field}` becomes unique"),
             Change::AddCompositeUnique { key, .. } => {
@@ -773,9 +803,21 @@ pub fn diff_with(
     declared: &Schema,
 ) -> Vec<Change> {
     let mut out = Vec::new();
+    // The renames a `prev` mark declares, against the version serving now
+    // (or, on a tenant's database, the version its data was written under).
+    let renames = crate::prev::renames(prior.or(written), declared);
 
     for e in &declared.entities {
         let Some(t) = live.table(&e.name) else {
+            if let Some(from) = renames.entity_from(&e.name) {
+                if live.table(from).is_some() {
+                    out.push(Change::RenameEntity {
+                        entity: e.name.clone(),
+                        from: from.to_string(),
+                    });
+                    continue;
+                }
+            }
             // The whole table is missing: one line, not one per column.
             // An operator reading "new entity `invoices`" does not also
             // need seventeen "new field" lines about a table that does not
@@ -786,7 +828,7 @@ pub fn diff_with(
             continue;
         };
         let written_as = written.and_then(|w| w.native(&e.name));
-        entity_columns(e, t, written_as, &live.places, &mut out);
+        entity_columns(e, t, written_as, &live.places, &renames, &mut out);
         entity_objects(declared, e, t, &mut out);
         if let Some(p) = prior.and_then(|p| p.native(&e.name)) {
             declaration_only(p, e, &mut out);
@@ -804,6 +846,9 @@ pub fn diff_with(
             if declared.entity(&p.name).is_some() {
                 continue;
             }
+            if renames.entities.contains_key(&p.name) {
+                continue;
+            }
             if live.table(&p.name).is_some() {
                 out.push(Change::DropEntity {
                     entity: p.name.clone(),
@@ -819,6 +864,8 @@ pub fn diff_with(
             };
             for f in p.declared() {
                 match d.field(&f.name) {
+                    // Renamed: the old column is kept, and nothing drops.
+                    None if renames.field_to(&p.name, &f.name).is_some() => {}
                     None => {
                         if t.columns.contains_key(&f.column()) {
                             out.push(Change::DropField {
@@ -881,11 +928,19 @@ fn entity_columns(
     t: &LiveTable,
     written: Option<&Entity>,
     held: &BTreeMap<(String, String), u8>,
+    renames: &crate::prev::Renames,
     out: &mut Vec<Change>,
 ) {
     for f in e.declared() {
         match t.columns.get(&f.column()) {
-            None => out.push(added_field(e, f)),
+            None => match renames.field_from(&e.name, &f.name) {
+                Some(from) if t.columns.contains_key(from) => out.push(Change::RenameField {
+                    entity: e.name.clone(),
+                    from: from.to_string(),
+                    field: f.name.clone(),
+                }),
+                _ => out.push(added_field(e, f)),
+            },
             Some(c) => {
                 let declared_ty = ddl::column_ty(f);
                 if same_type(&declared_ty, &c.ty) {

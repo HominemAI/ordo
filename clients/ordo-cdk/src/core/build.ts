@@ -73,6 +73,7 @@ export class TypeSpec {
   inlineFlag = false;
   privateFlag = false;
   normalizeName: string | null = null;
+  prevNames: string[] | null = null;
   defaultValue: ExprNode | null = null;
   maxValue: ExprNode | null = null;
 
@@ -165,6 +166,22 @@ export class TypeSpec {
     return this;
   }
 
+  /**
+   * `prev(old)` or `prev(first, last)` — the name(s) this field had in the
+   * previous version. `entity.field` names a field that moved from another
+   * entity. Two names are a merge.
+   */
+  prev(...names: string[]): this {
+    if (names.length === 0) throw new Error('`prev` needs at least one previous field name');
+    for (const n of names) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(n)) {
+        throw new Error(`\`prev('${n}')\`: a previous name is \`field\` or \`entity.field\``);
+      }
+    }
+    this.prevNames = names;
+    return this;
+  }
+
   default(v: Value): this {
     this.defaultValue = v.node;
     return this;
@@ -203,6 +220,13 @@ export class TypeSpec {
     }
     if (this.normalizeName !== null) {
       refuse('external_unsupported', 'normalize', 'the other system owns the column');
+    }
+    if (this.prevNames !== null) {
+      refuse(
+        'external_unsupported',
+        'prev',
+        'a translation is re-imported on every apply; to follow a renamed column, change the column name',
+      );
     }
     if (this.defaultValue !== null) {
       refuse('external_unsupported', 'default', 'Ordo never writes the row');
@@ -299,6 +323,7 @@ function fieldNode(name: string, s: TypeSpec): FieldNode {
     inline: s.inlineFlag,
     private: s.privateFlag,
     normalize: s.normalizeName,
+    prev: s.prevNames,
   };
 }
 
@@ -315,6 +340,7 @@ export function paramNode(name: string, s: TypeSpec): ParamNode {
     [s.inlineFlag, 'inline'],
     [s.privateFlag, 'private'],
     [s.normalizeName !== null, 'normalize'],
+    [s.prevNames !== null, 'prev'],
   ] as const) {
     if (flag) throw new Error(`\`$${name}\`: \`${word}\` is a field modifier, not a parameter one`);
   }
@@ -686,6 +712,8 @@ export function domain(name: string, version?: string): DomainNode {
 export interface EntityOptions {
   /** `entity projects (key: proj)` — the typed-id prefix override. */
   readonly key?: string;
+  /** `entity customers (prev: clients)` — the entity's name in the previous version. */
+  readonly prev?: string;
 }
 
 /** An entity declaration, usable as a source wherever one is wanted. */
@@ -693,6 +721,7 @@ export class Entity implements Sourceable {
   readonly kind = 'entity' as const;
   readonly name: string;
   readonly key: string | null;
+  readonly prev: string | null;
   readonly fields: FieldNode[];
   accessReadClause: GuardClauseNode | null = null;
   accessWriteClause: GuardClauseNode | null = null;
@@ -705,6 +734,10 @@ export class Entity implements Sourceable {
   constructor(name: string, fields: Record<string, TypeSpec>, options?: EntityOptions) {
     this.name = name;
     this.key = options?.key ?? null;
+    if (options?.prev !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(options.prev)) {
+      throw new Error(`\`${name}\`: \`prev\` is the previous entity name, one bare name`);
+    }
+    this.prev = options?.prev ?? null;
     this.fields = Object.entries(fields).map(([n, s]) => fieldNode(n, s));
   }
 
@@ -786,6 +819,7 @@ export class Entity implements Sourceable {
       kind: 'entity',
       name: this.name,
       key: this.key,
+      prev: this.prev,
       fields: this.fields,
       accessRead: this.accessReadClause,
       accessWrite: this.accessWriteClause,
@@ -887,6 +921,8 @@ type ExternalWhere =
 export type ExternalOptions = ExternalWhere & {
   /** `external projects (key: proj)`: the typed-id prefix override. */
   readonly key?: string;
+  /** Refused: an external's name follows the other system's table. */
+  readonly prev?: never;
   readonly table: string;
   /** Required, and only ever `true`: every space reads every row. */
   readonly shared: true;
@@ -915,6 +951,12 @@ export class External implements Sourceable {
       throw new Error(`external_not_shared: \`${name}\` needs \`shared: true\``);
     }
     this.name = name;
+    if ((options as { prev?: unknown }).prev !== undefined) {
+      throw new Error(
+        'external_unsupported: `prev` cannot rename an external: a translation is ' +
+          're-imported on every apply; to follow a renamed table, change `table`',
+      );
+    }
     this.key = options.key ?? null;
     if (options.peer !== undefined && options.schema !== undefined) {
       throw new Error(`external ${name}: name a \`schema\` or a \`peer\`, not both`);

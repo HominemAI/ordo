@@ -90,15 +90,15 @@ function watchTenant(page: Page): () => string {
 /** Open a note, type its text, save. A saved note closes its editor. */
 async function typeInto(page: Page, title: string, text: string): Promise<void> {
   await noteInList(page, title).click();
-  await page.getByLabel('Note', { exact: true }).fill(text);
+  await page.getByRole('textbox', { name: 'Note', exact: true }).fill(text);
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByLabel('Note', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveCount(0);
 }
 
 /** After a reload, the note holds `text`. */
 async function holds(page: Page, title: string, text: string): Promise<void> {
   await noteInList(page, title).click();
-  await expect(page.getByLabel('Note', { exact: true })).toHaveValue(text);
+  await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveValue(text);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 

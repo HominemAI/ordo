@@ -22,6 +22,7 @@ import type { OpDescriptor, ParamDescriptor } from './descriptor.js';
 import type { OrdoInterface } from './load.js';
 import { OrdoLocalRefusal, type RefusalClass } from '@hominemai/ordo-sdk/core/refusal.js';
 import { busyRetryOf, conflictRetryOf } from '@hominemai/ordo-sdk/core/busy.js';
+import { VersionWatch } from '@hominemai/ordo-sdk/core/version.js';
 import type {
   OnRetry,
   ResolvedBusyRetry,
@@ -113,8 +114,7 @@ export class DescriptorClient {
   readonly #newKey: () => string;
   readonly #busyRetry: ResolvedBusyRetry;
   readonly #conflictRetry: ResolvedConflictRetry;
-  #tenantVersion: string | null = null;
-  readonly #versionListeners = new Set<(from: string, to: string) => void>();
+  readonly #versions = new VersionWatch();
 
   constructor(options: DescriptorClientOptions) {
     this.iface = options.iface;
@@ -393,7 +393,7 @@ export class DescriptorClient {
    * answer carried one.
    */
   get tenantVersion(): string | null {
-    return this.#tenantVersion;
+    return this.#versions.current;
   }
 
   /**
@@ -402,20 +402,13 @@ export class DescriptorClient {
    * Returns the stop function.
    */
   onVersionChange(listener: (from: string, to: string) => void): () => void {
-    this.#versionListeners.add(listener);
-    return () => this.#versionListeners.delete(listener);
+    return this.#versions.onChange(listener);
   }
 
   /** One call through the SDK's request helper; reads the version header off the answer. */
   async #send(url: string, init: RequestInit, retry: RetryPolicy, onRetry?: OnRetry): Promise<Response> {
     const response = await doorRequest(this.#site, url, init, { retry, onRetry });
-    const seen = response.headers.get('x-ordo-tenant-version');
-    if (seen !== null && seen !== this.#tenantVersion) {
-      const from = this.#tenantVersion;
-      this.#tenantVersion = seen;
-      if (from !== null) for (const l of [...this.#versionListeners]) l(from, seen);
-    }
-    return response;
+    return this.#versions.observe(response);
   }
 
   async #call<R>(op: OpDescriptor, options: DescriptorCallOptions): Promise<OpResponse<R>> {

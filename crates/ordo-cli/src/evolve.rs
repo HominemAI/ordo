@@ -337,34 +337,6 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
     Outcome::ok(out)
 }
 
-#[cfg(test)]
-mod tests {
-    /// Each issue prints with its database, its spaces and its fix; a
-    /// database not asked and a check not run are printed too, so a clean
-    /// answer never hides them.
-    #[test]
-    fn the_prechecks_print_each_issue_with_its_fix() {
-        let p = serde_json::json!({
-            "checked": ["default", "acme"],
-            "issues": [{
-                "database": "acme", "code": "C1", "what": "duplicates over `note`.`title`",
-                "lines": ["space `acme`  value first  2 row(s)"],
-                "fix": "make `note`.`title` distinct",
-            }],
-            "notProbed": [{ "database": "globex", "why": "it records `0.9.0`" }],
-            "notRun": ["the `requires` check did not run"],
-        });
-        let out = super::precheck_lines(&p);
-        assert!(out.contains("2 database(s) asked, 1 issue(s)"), "{out}");
-        assert!(out.contains("ISSUE      database `acme`: C1"), "{out}");
-        assert!(out.contains("space `acme`"), "{out}");
-        assert!(out.contains("fix      make"), "{out}");
-        assert!(out.contains("not asked  database `globex`"), "{out}");
-        assert!(out.contains("not run    the `requires`"), "{out}");
-        assert_eq!(super::precheck_lines(&serde_json::Value::Null), "");
-    }
-}
-
 async fn orphans(host: &crate::wire::Host, flags: &Flags) -> Outcome {
     let row = match crate::wire::door_op(
         host,
@@ -517,4 +489,32 @@ fn prune_lines(row: &serde_json::Value) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    /// Each issue prints with its database, its spaces and its fix; a
+    /// database not asked and a check not run are printed too, so a clean
+    /// answer never hides them.
+    #[test]
+    fn the_prechecks_print_each_issue_with_its_fix() {
+        let p = serde_json::json!({
+            "checked": ["default", "acme"],
+            "issues": [{
+                "database": "acme", "code": "C1", "what": "duplicates over `note`.`title`",
+                "lines": ["space `acme`  value first  2 row(s)"],
+                "fix": "make `note`.`title` distinct",
+            }],
+            "notProbed": [{ "database": "globex", "why": "it records `0.9.0`" }],
+            "notRun": ["the `requires` check did not run"],
+        });
+        let out = super::precheck_lines(&p);
+        assert!(out.contains("2 database(s) asked, 1 issue(s)"), "{out}");
+        assert!(out.contains("ISSUE      database `acme`: C1"), "{out}");
+        assert!(out.contains("space `acme`"), "{out}");
+        assert!(out.contains("fix      make"), "{out}");
+        assert!(out.contains("not asked  database `globex`"), "{out}");
+        assert!(out.contains("not run    the `requires`"), "{out}");
+        assert_eq!(super::precheck_lines(&serde_json::Value::Null), "");
+    }
 }

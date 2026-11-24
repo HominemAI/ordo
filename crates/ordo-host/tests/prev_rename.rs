@@ -129,10 +129,8 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         lines.contains("forward: ALTER TABLE \"note\" ALTER COLUMN \"heading\" SET NOT NULL;"),
         "{lines}"
     );
-    assert!(
-        lines.contains("forward: ALTER TABLE \"note\" ALTER COLUMN \"title\" DROP NOT NULL;"),
-        "{lines}"
-    );
+    // The old column keeps its `NOT NULL`: 1.0.0 still loads over it.
+    assert!(!lines.contains("DROP NOT NULL"), "{lines}");
     assert!(
         lines.contains("reverse: UPDATE \"note\" SET \"title\" = \"heading\";"),
         "{lines}"
@@ -175,7 +173,8 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         one(&tenant_pg, "SELECT heading FROM note WHERE id = 'n1'"),
         "first"
     );
-    // The old column is kept, with its value, and no longer required.
+    // The old column is kept, with its value, and still required, so
+    // 1.0.0 still loads over this database.
     assert_eq!(
         one(&tenant_pg, "SELECT title FROM note WHERE id = 'n1'"),
         "first"
@@ -186,7 +185,7 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
             "SELECT is_nullable FROM information_schema.columns \
              WHERE table_name = 'note' AND column_name = 'title'"
         ),
-        "YES"
+        "NO"
     );
     assert_eq!(
         one(
@@ -196,7 +195,8 @@ async fn a_declared_rename_renders_as_a_rename_and_keeps_every_value() {
         ),
         "NO"
     );
-    // A row written under the new version needs no `title`.
+    // A row written under the new version needs no `title`: the trigger
+    // fills it before the `NOT NULL` is checked.
     tenant_pg
         .exec("INSERT INTO note (\"$space\", id, rev, heading) VALUES ('acme', 'n2', 1, 'second')")
         .expect("a row under 1.1.0");
@@ -325,6 +325,14 @@ async fn writes_during_the_rename_reach_the_new_column() {
     assert_eq!(
         one(&tenant_pg, "SELECT kind FROM note WHERE id = 'after'"),
         "image/gif"
+    );
+
+    // 1.0.0 still loads over the renamed database: nothing it requires was
+    // relaxed, so applying it again (a rollback) is not refused.
+    let state = sa::schema_state(&tenant, &x.schema).await.expect("a state");
+    assert!(
+        !matches!(state, sa::SchemaState::Behind(_)),
+        "1.0.0 is behind: {state:?}"
     );
 
     // The reverse removes the trigger before it copies back.

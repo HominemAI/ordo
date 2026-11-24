@@ -2024,10 +2024,10 @@ entity customers (key: cust, prev: clients) {
 - `prev` reaches one version back only.
 - `prev` is contextual: a field may still be named `prev`.
 - A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
-  copies every value into it, and keeps the old column. The old column
-  loses its `NOT NULL` and its default, so the new version's inserts are
-  not refused. The receipt's reverse copies the values back and drops the
-  new column.
+  copies every value into it, and keeps the old column with its
+  `NOT NULL`, so the version before still loads over the database. The old
+  column loses its default. The receipt's reverse copies the values back
+  and drops the new column.
 - No write is lost between the copy and the tenant's pin switch. A trigger
   (`<table>$<column>$prev`), made in the copy's own transaction, copies a
   write to either column into the other. So a write the serving version

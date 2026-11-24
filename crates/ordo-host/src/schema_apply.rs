@@ -2445,9 +2445,11 @@ pub fn triage_counted(
 /// The statements of a declared rename (§5 B4, `plan-syntax-additions.md`
 /// §5): the new column, open to nulls; the sync trigger; the old column's
 /// values copied into the new one; then the new column's `NOT NULL`. The
-/// old column is kept, and loses its `NOT NULL` and its `DEFAULT` so the
-/// new version's inserts, which no longer write it, are not refused and
-/// leave it empty. The serving version still reads it until its tenants
+/// old column is kept with its `NOT NULL`, so the version before still
+/// loads over this database and a rollback by `ordo apply` is not refused.
+/// It loses its `DEFAULT`, so an insert by the new version, which no longer
+/// writes it, leaves it empty and the trigger fills it before the `NOT
+/// NULL` is checked. The serving version still reads it until its tenants
 /// move. Never `ALTER … RENAME`, which would drift the serving version the
 /// instant it landed. The new column's unique, reference and value set are
 /// their own changes in the same step.
@@ -2455,7 +2457,7 @@ pub fn triage_counted(
 /// **No write is lost between the copy and the pin switch.** The switch is
 /// in the control database and each tenant's data may be in a database of
 /// its own, so the copy and the switch cannot share a transaction. The
-/// trigger ([`rename_sync_function`]) is created in the copy's own
+/// trigger ([`rename_sync_steps`]) is created in the copy's own
 /// transaction, before the copy, so from the copy on every write the
 /// serving version makes to the old column reaches the new one, and every
 /// write the new version makes to the new one reaches the old one. The
@@ -2483,11 +2485,6 @@ pub fn rename_field_steps(
     let new = ordo_schema::ddl::q(&f.column());
     let old = ordo_schema::ddl::q(from);
     let old_live = live.table(&e.name).and_then(|lt| lt.columns.get(from));
-    if old_live.is_some_and(|c| !c.nullable) {
-        out.push(format!(
-            "ALTER TABLE {t} ALTER COLUMN {old} DROP NOT NULL;\n"
-        ));
-    }
     if old_live.is_some_and(|c| c.has_default) {
         out.push(format!(
             "ALTER TABLE {t} ALTER COLUMN {old} DROP DEFAULT;\n"

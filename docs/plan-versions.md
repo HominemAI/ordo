@@ -433,7 +433,7 @@ switch.
 - **Device copies** (review 2026-11-23). The SDK's local replica
   (`clients/ordo-sdk/src/replica`) orders rows by log position. It records
   no program version, so a row of X's shape can outlive a move to Y.
-  **Proposed (Q7):** on the "version changed" event the SDK drops the
+  **Ruled 2026-11-23 (Q7):** on the "version changed" event the SDK drops the
   device copy of that tenant and fills it again. One rule, the same one
   the public cache uses on a deploy.
 - Offline writes (`plan-offline.md`) are filed for after the first
@@ -612,8 +612,8 @@ person. It is hash-chained, so it is not a place for bulk rows.
 | A plan stored by `ordo evolve` | `$plans`, with its actor | increment 8 |
 | A backfill on one tenant | that tenant's command chain, one summarised group (ruled 2026-09-08, 2026-09-20) | increment 10b |
 | A promotion, and a break-glass promotion | the deployment's stream (§3.1, §3.2) | increments 4b, 12b |
-| Rollout start, pause, resume, skip, retry, abort, finish | `$rollouts`, and **proposed (Q9)** one entry each on the deployment's stream | increment 10 |
-| A one-way confirmation, a prune, a `--move-to` | **proposed (Q9):** the deployment's stream, naming the person | increments 11a, 14 |
+| Rollout start, pause, resume, skip, retry, abort, finish | `$rollouts`, and **ruled 2026-11-23 (Q9)** one entry each on the deployment's stream | increment 10 |
+| A one-way confirmation, a prune, a `--move-to` | **ruled 2026-11-23 (Q9):** the deployment's stream, naming the person | increments 11a, 14 |
 | A release check and its override | `$release_checks` | increment 6 |
 
 - A rollout's per-tenant moves stay in `$pins` and `$rollout_tenants` only.
@@ -638,14 +638,17 @@ it yet (step 1b).
 - So a tenant pinned to X is signed in under the active version's `auth`
   block. A branch tenant's or a beta build's `auth` block changes nothing,
   and the apply report says so.
-- **Proposed (Q5):** `AuthApp` follows "active" (§1.3). It swaps when a
+- **Ruled 2026-11-23 (Q5):** `AuthApp` follows "active" (§1.3). It swaps when a
   rollout finishes, and a rollback swaps it back.
 - A swap ends no session (standard behaviour: people stay signed in). The
   relying party id is set on the instance alone (owner, 2026-11-14), so no
   version change can orphan a passkey.
 - A version that removes a sign-in method can leave people with no way back
-  in. **Proposed (Q6):** the pre-check counts them and `ordo evolve` shows
-  the count as a warning.
+  in. **Ruled 2026-11-23 (Q6):** the pre-check counts them and `ordo
+  evolve` stops on the warning. It goes on only with the deployment owner's
+  explicit approval (a confirmation, recorded on the stream). The warning
+  gives the migration steps: ask those people to add another method first,
+  or keep the method one more version and tell them.
 - Ceilings and provider credentials are the instance's (owner, 2026-11-14).
   They are bound at the target like every per-environment value (§1.1, D6).
   A value the target's ceiling cuts is held at the ceiling, and the report
@@ -676,7 +679,7 @@ every install of a version a node drops the whole public cache
   public cache and the read layer rebuilds its entity index, as today.
 - The CDN purge hook is called once for that change. An answer of the old
   shape must not outlive the move in a CDN.
-- **Proposed (Q4):** the deployment's own space is a named step of a
+- **Ruled 2026-11-23 (Q4):** the deployment's own space is a named step of a
   rollout and moves first.
 
 ### 1.15 Externals, peers and readers (review 2026-11-23)
@@ -730,7 +733,7 @@ Added by the review of 2026-11-23:
   land while a tenant in that database still writes as X
   (`plan-backfill-dual-writes.md` §4).
 - **A tenant's own database and bucket.** A database that cannot be reached
-  leaves the tenant on X. **Proposed (Q10):** it counts as waiting, never
+  leaves the tenant on X. **Ruled 2026-11-23 (Q10):** it counts as waiting, never
   as failed. Blob objects are keyed `<space>/<handle>`, so a renamed blob
   field moves no object in any bucket.
 - **A version move and a database move never overlap.** Each refuses while
@@ -906,7 +909,7 @@ release serves anyone.
 and the running host is the old one. There is one image (owner,
 2026-11-09).
 
-- **Proposed (Q8):** a mode of the new image, `ordo release-check`. It
+- **Ruled 2026-11-23 (Q8):** a mode of the new image, `ordo release-check`. It
   reads the control database and writes one `$release_checks` row. The
   deployment owner runs it before changing the image tag.
 - It serves nothing and changes no pin. It is a `--direct` use and is
@@ -984,7 +987,8 @@ V2 (S): the same for `ordo import` of an exit bundle.
 snapshot on v2, moves to v3, restores, and the page shows the v2 notes
 under the v2 shape, then moves again.
 
-**Open (Q13):** may a restore pin a tenant below `versions.minimum`?
+**Ruled 2026-11-23 (Q13):** a restore may pin a tenant below
+`versions.minimum`. The tenant waits closed for its move.
 
 ---
 
@@ -1016,9 +1020,12 @@ Added by the review of 2026-11-23:
 
 - **`ordo promote` goes through the target's door** (§1.8). The target
   fetches the source through the door of the step before.
-- **Proposed (Q11):** the target holds a machine key for the step before.
-  Its grant reads stored versions and plans and nothing else (grants on
-  machine keys, ruled 2026-11-05).
+- **Proposed (Q11, asked again 2026-11-23):** no key to set up. The owner
+  found a machine key a nuisance (*"Having to provide a key sounds like
+  work"*), with GitHub-driven promotion coming. So staging reads dev's
+  version as the person promoting, who must be an admin in both and is
+  one subject at the identity service. Later a GitHub workflow does the
+  same with GitHub's own token.
 - **The gate runs the target's own checks before it stores anything:** the
   `requires` check (§1.13), each function's secrets (§1.10), and the
   external and reader checks (§1.15). Each refusal names the setting to
@@ -1110,10 +1117,11 @@ Added by the review of 2026-11-23:
   settings. Without them the external check fails the rehearsal, naming
   the table.
 - **People.** With the identity service, a person's sign-in lives outside
-  the deployment. A clone carries members and no sign-in link. **Proposed
-  (Q12):** staging registers with the identity service as its own
-  deployment, and a cloned member is opened only by a staging deployment
-  owner.
+  the deployment. A clone carries members and no sign-in link. **Ruled
+  2026-11-23 (Q12):** staging registers with the identity service as its
+  own deployment. A cloned tenant is opened by any staging deployment admin
+  or a person the staging deployment allows. Cloned members' own sign-ins
+  are never carried.
 
 ### 3.5 Rollout is which pins move when
 
@@ -1202,8 +1210,10 @@ starts a rollout with the environment's `rollout.strategy`. The strategy
   `plan-backfill-dual-writes.md` for a transforming one.
 - "Active" flips when no tenant is `queued`, `waiting` or `moving`, or
   when the deployment owner finishes it by hand with the rest skipped.
-- **Proposed (Q3):** one open rollout per deployment. A second apply is
-  refused, naming `ordo rollout status` and `ordo rollout abort`.
+- **Ruled 2026-11-23 (Q3):** one open deployment-wide rollout per
+  deployment. A second is refused, naming `ordo rollout status` and `ordo
+  rollout abort`. One tenant may always be moved on its own to a hotfix
+  version, during a rollout or not, and the rollout then skips that tenant.
 - `abort` stops new moves. Moved tenants stay. `ordo rollback` is what
   moves them back.
 
@@ -1244,6 +1254,7 @@ round is about 35 minutes for the full suite.
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
 | 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. **Built 2026-11-23, commit 0c62ff1a:** `$environments`, `std.deployment.environments` and `registerEnvironment`, `ordo environments list\|register`. | S | 1 | a missing environment is refused with the command that creates it | none |
+| | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waits on Q11.* | | | | |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
 | 6 | **Release check.** Designed in §2.8 (review 2026-11-23), steps R1 to R3: the checked set, digests, functions under the new runtime, `auth` ranges, the `ordo release-check` mode of the one image, the boot-time run, the override. | M | 3 | an upgrade with an uncompilable version names it and its tenants, and every other tenant serves; the notes upgrade test passes through it | none |
@@ -1365,10 +1376,11 @@ task `program-versions-the-core-under-schema`:
   ...). A program with no `@` is still named by the 16-hex digest of what
   it compiles to.
 
-**Open after the review of 2026-11-23:** 16 questions, Q1 to Q16, each
-with a recommendation, in `review-evolution-plans-2026-11-23.md`. None is
-on the board yet. Nothing marked **Proposed** in this plan is built
-before its question is answered.
+**After the review of 2026-11-23:** 16 questions, Q1 to Q16, in
+`review-evolution-plans-2026-11-23.md`. 13 were ruled 2026-11-23 on the
+board. Q3 (tenant hotfixes beside a rollout), Q11 (how promotion reads the
+step before) and Q14 (backfill functions calling out) are asked again.
+Nothing marked **Proposed** is built before its question is answered.
 
 ---
 
@@ -1510,10 +1522,10 @@ Added by the review of 2026-11-23:
 
 | Setting | Default | Layer |
 |---|---|---|
-| `rollout.deployment_space` | `first` (proposed, Q4) | environment |
-| `rollout.unreachable` | `wait` (proposed, Q10) | environment |
+| `rollout.deployment_space` | `first` (ruled 2026-11-23, Q4) | environment |
+| `rollout.unreachable` | `wait` (ruled 2026-11-23, Q10) | environment |
 | `backfill.per_database` | 2 moves at once in one database (proposed) | environment |
-| `backfill.function_egress` | off (proposed, Q14) | plan |
+| `backfill.function_egress` | off unless the backfill declares it (ruled 2026-11-23, Q14) | plan |
 
 - **Where these settings live.** The owner ruled 2 things. Version
   settings live in Ordo, because they depend on what is applied
@@ -1522,8 +1534,7 @@ Added by the review of 2026-11-23:
 - Every `rollout.*`, `backfill.*`, `soak.*`, `promotion.*`, `clone.*`,
   `orphans.*`, `prune.*` and `branch.*` setting differs per environment
   (D6), so none belongs in the file.
-- **Proposed:** they are stored in Ordo beside the 3 version settings, in
+- **Ruled 2026-11-23 (Q15):** they are stored in Ordo beside the 3 version settings, in
   `$version_settings`, set through the door with who, when and why. The
   "plan" layer is the option recorded in the stored plan. This follows the
-  2026-11-05 ruling's reason. It is Q15, because the owner ruled on 3
-  settings, not on these.
+  2026-11-05 ruling's reason.

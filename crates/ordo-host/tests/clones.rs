@@ -27,6 +27,8 @@
 //!   and a routine's mail land in the sink, which the door reads back;
 //!   with `clone.sinks` on (the default) so does every staging tenant's,
 //!   `clones` narrows it, and production sinks nothing;
+//! - a staging database without the clone version's tables is refused,
+//!   naming `ordo promote`;
 //! - a tenant with a database of its own is cloned onto a database of its
 //!   own in staging, made by staging.
 //!
@@ -1045,6 +1047,37 @@ async fn a_version_edited_after_it_was_stored_is_refused_on_its_way_down() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_database_without_the_versions_tables_is_refused_naming_promote() {
+    // Staging serves a program with no `notes`. The first clone brings
+    // 0.1.0 down through the gate, which gives the shared database its
+    // tables. Then the table is gone (restored from an older backup, say):
+    // a clone never changes the shared database, so the next is refused,
+    // naming the commands that apply the version.
+    let p = pair(
+        "c8",
+        "domain notes @ 0.2.0\n\nentity pages {\n  title: text\n}\n\n\
+         op allPages unbounded =\n  pages[title]\n",
+    )
+    .await;
+    clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("the first clone");
+    p.staging
+        .rows("DROP TABLE \"notes\"")
+        .await
+        .expect("dropped");
+    let e = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .unwrap_err();
+    let text = e.to_string();
+    assert!(text.contains("does not hold the tables of 0.1.0"), "{text}");
+    assert!(text.contains("ordo promote 0.1.0"), "{text}");
+    assert!(text.contains("ordo evolve --to 0.1.0 --run"), "{text}");
+    // Only the first clone is recorded.
+    assert_eq!(clones::clones(&p.staging).await.unwrap().len(), 1);
 }
 
 // ── sinks ────────────────────────────────────────────────────────────────

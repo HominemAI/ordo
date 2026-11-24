@@ -121,6 +121,16 @@ export default defineConfig({
       dependencies: ['v3'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A staging clone of a production tenant (plan-versions.md increment 12),
+    // into the stack's second deployment. It puts staging in production's
+    // chain while it runs, and `ordo apply` goes to a chain's first step, so
+    // it runs after `evolve-checks`, last. Locally, `--project=clone --no-deps`.
+    {
+      name: 'clone',
+      testMatch: /clone\/.*\.spec\.ts/,
+      dependencies: ['evolve-checks'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

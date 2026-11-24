@@ -1554,6 +1554,40 @@ async fn land(
         .await
         .map_err(|e| CloneRefusal::Data(format!("the new tenant's database: {e}")))?;
 
+    // **The clone's database holds its version's schema** before a row is
+    // written. A database of its own was made empty, or on whatever this
+    // deployment serves, so it is brought to the clone's version as a
+    // tenant's database is. The deployment's shared database is never
+    // changed here (the promotion gate is what applies a version to it),
+    // so one that lacks the version's tables is refused, naming the fix.
+    let mut program = crate::schema_apply::Program::compile(&artifact.source)
+        .map_err(|e| CloneRefusal::Data(format!("{version} does not compile here: {e}")))?;
+    program.version = version.to_string();
+    if custody_made {
+        crate::schema_apply::bring_forward_from(&space_pool, Some(pool), &program, actor, CLONE_IN)
+            .await
+            .map_err(|e| {
+                CloneRefusal::Data(format!(
+                    "the clone's own database could not be brought to {version}: {e}"
+                ))
+            })?;
+    } else {
+        match crate::schema_apply::schema_state(&space_pool, &program.schema)
+            .await
+            .map_err(CloneRefusal::Data)?
+        {
+            crate::schema_apply::SchemaState::Matches { .. } => {}
+            _ => {
+                return Err(CloneRefusal::Data(format!(
+                    "this deployment's database does not hold the tables of {version}, the \
+                     clone's version, and a clone never changes it. Apply {version} here \
+                     first: `ordo promote {version} --reason \"...\"`, or `ordo evolve --to \
+                     {version} --run`, then clone again"
+                )))
+            }
+        }
+    }
+
     // The members: kept ids and roles, masked names, no sign-in link.
     let body = members
         .get("data/members.jsonl")

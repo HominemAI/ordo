@@ -10,6 +10,8 @@ import { chromium, expect, type Browser, type BrowserContext, type Page } from '
 
 export interface Stack {
   readonly door: string;
+  /** Staging's door: a second deployment, its identity handle `staging` (tests/clone). */
+  readonly staging: string;
   readonly page: string;
   readonly pageV2: string;
   readonly programV2: string;
@@ -21,6 +23,10 @@ export interface Stack {
   readonly identity: string;
   /** Its data folder; its first start writes `first-invite` there. */
   readonly identityData: string;
+  /** The identity service's binary, for its host commands (`deployment add`, `member add`). */
+  readonly identityBin: string;
+  /** Its database, as ORDO_IDENTITY_DATABASE_URL. */
+  readonly identityDb: string;
   readonly program: string;
   readonly pg: { readonly host: string; readonly port: string; readonly user: string; readonly db: string };
   readonly ordo: string;

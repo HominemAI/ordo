@@ -1713,6 +1713,36 @@ pub async fn triage_with(
     choices: &Choices,
     version: &str,
 ) -> Result<Triaged, String> {
+    // Rows in each live table a change touches, read once per entity. A
+    // table this apply creates holds none.
+    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
+    for a in assessed.iter().filter(|a| a.refused.is_empty()) {
+        let Some(e) = schema.native(a.change.entity()) else {
+            continue;
+        };
+        if live.table(&e.name).is_some() && !rows.contains_key(&e.name) {
+            let n = migrate::extent(pool, &e.name)
+                .await
+                .map_err(|x| format!("counting `{}`: {x}", e.name))?
+                .rows;
+            rows.insert(e.name.clone(), n);
+        }
+    }
+    triage_counted(schema, live, assessed, choices, version, &rows)
+}
+
+/// [`triage_with`], given the rows each live table holds (`rows`; a table
+/// not named holds none). Reads nothing. A stored plan renders its step
+/// with this against an empty database of the version it starts from
+/// (`crate::evolve`), so the rendering is the same in every environment.
+pub fn triage_counted(
+    schema: &Schema,
+    live: &LiveShape,
+    assessed: &[Assessed],
+    choices: &Choices,
+    version: &str,
+    rows: &BTreeMap<String, i64>,
+) -> Result<Triaged, String> {
     // The columns this apply brings into existence, `(entity, column)`.
     // A constraint over only these constrains no existing data.
     let mut arriving: BTreeSet<(String, String)> = BTreeSet::new();
@@ -1737,7 +1767,6 @@ pub async fn triage_with(
             _ => {}
         }
     }
-    let mut rows: BTreeMap<String, i64> = BTreeMap::new();
     let mut steps = Vec::new();
     let mut refused = Vec::new();
     let ddl_err = |x: ordo_schema::SchemaError| format!("{}: {}", x.code, x.message);
@@ -1759,20 +1788,9 @@ pub async fn triage_with(
             refused.push(not_built(c));
             continue;
         };
-        // Rows in the live table, read once per entity. A table this apply
-        // creates holds none.
+        // Rows in the live table. A table this apply creates holds none.
         let live_rows = if live.table(&e.name).is_some() {
-            match rows.get(&e.name) {
-                Some(n) => *n,
-                None => {
-                    let n = migrate::extent(pool, &e.name)
-                        .await
-                        .map_err(|x| format!("counting `{}`: {x}", e.name))?
-                        .rows;
-                    rows.insert(e.name.clone(), n);
-                    n
-                }
-            }
+            rows.get(&e.name).copied().unwrap_or(0)
         } else {
             0
         };
@@ -2793,11 +2811,47 @@ fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
 /// refused, and every change is safe. `std.deployment.plan` asks the same
 /// question [`apply_safe`] does, so a preview and an apply cannot disagree.
 pub fn all_safe(plan: &Plan) -> bool {
+    let plan = without_drops(plan);
     let all: Vec<&Change> = plan.changes().collect();
     plan.present() > 0
         && plan.refusals.is_empty()
         && !all.is_empty()
         && all.iter().all(|c| is_safe_change(c, &all))
+}
+
+/// The plan without its dropped fields and entities, and without the
+/// refusals they raised.
+///
+/// A drop is never executed by an apply: its column or table stays, and the
+/// gate tolerates it (§8.2, "A dropped field"). A program that only drops
+/// applies as `Matches { pending }`. Before 2026-11-23 a program that added
+/// a field and dropped another was refused whole, because the drop's
+/// `drop_read_by_active_op` (the serving version still reads it) counted
+/// against the addition. Found by notes v3 (`plan-versions.md`, increment
+/// 7a). The safe additions are judged and applied alone now, and the drop
+/// stays pending as a drop alone does.
+fn without_drops(plan: &Plan) -> std::borrow::Cow<'_, Plan> {
+    let is_drop = |c: &Change| matches!(c, Change::DropField { .. } | Change::DropEntity { .. });
+    if !plan.assessed.iter().any(|a| is_drop(&a.change)) {
+        return std::borrow::Cow::Borrowed(plan);
+    }
+    let mut out = plan.clone();
+    let (drops, kept): (Vec<Assessed>, Vec<Assessed>) =
+        out.assessed.into_iter().partition(|a| is_drop(&a.change));
+    out.assessed = kept;
+    for a in &drops {
+        if a.change.refusal().is_none() && a.change.class() == Class::D {
+            out.destructive = out.destructive.saturating_sub(1);
+        }
+        for r in &a.refused {
+            let class = r.split(" — ").next().unwrap_or(r);
+            let line = format!("{class} on `{}`", a.change.entity());
+            if let Some(at) = out.refusals.iter().position(|x| *x == line) {
+                out.refusals.remove(at);
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// What [`apply_safe`] did.
@@ -2832,6 +2886,8 @@ pub async fn apply_safe(
     if !all_safe(&plan) {
         return Ok(SafeApply::NotSafe);
     }
+    // A drop beside the additions is left pending, as a drop alone is.
+    let plan = without_drops(&plan).into_owned();
     let all: Vec<&Change> = plan.changes().collect();
     let changes: Vec<(String, String)> = all
         .iter()
@@ -2860,7 +2916,7 @@ pub async fn apply_safe(
 /// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
 /// table this apply creates is granted in the same apply, and a table taken
 /// off a line is revoked.
-async fn apply_planned(
+pub(crate) async fn apply_planned(
     pool: &Pool,
     plan: &Plan,
     actor: &str,
@@ -3193,6 +3249,8 @@ pub async fn bring_forward_from(
     let plan = self::plan_with(pool, program, &choices, written.as_ref())
         .await
         .map_err(internal)?;
+    // A drop is left pending here as on the deployment's own database.
+    let plan = without_drops(&plan).into_owned();
     let statements = match apply_planned(pool, &plan, actor, op).await {
         Ok(Applied::Additive { steps, .. }) => steps.len(),
         Ok(Applied::Created(c)) => c.tables,

@@ -351,9 +351,11 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
     if ((m = f.match(/^examples\/([^/]+)\//))) {
       const app = m[1];
       if (EXAMPLE_JOBS.includes(app)) examples.add(app);
-      if (app === 'notes' || app === 'notes-v2') flags.notesE2e = true;
+      // notes v3 has no page and no job of its own: both e2e suites apply it
+      // over a running notes v2 (plan-versions.md, increment 7a).
+      if (app === 'notes' || app === 'notes-v2' || app === 'notes-v3') flags.notesE2e = true;
       // The federation e2e runs notes v2 beside note_viewer.
-      if (app === 'notes-v2' || app === 'note-viewer') flags.federationE2e = true;
+      if (app === 'notes-v2' || app === 'notes-v3' || app === 'note-viewer') flags.federationE2e = true;
       reader(f);
       continue;
     }

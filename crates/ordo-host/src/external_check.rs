@@ -29,9 +29,11 @@
 //! the table comes back unchanged, the next tick lifts the hold.
 //!
 //! Tenant databases are checked when a program is applied to them. The
-//! timer watches the deployment's own database.
+//! timer watches the deployment's own database, for every version the node
+//! serves (`plan-evolution-federation.md` step F3): a hold found for one
+//! version holds only the tenants that version serves.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -448,22 +450,33 @@ pub async fn present_not_ordos(pool: &Pool, schema: &Schema) -> Result<Vec<Strin
 /// While an entity is held, every op that reads it answers
 /// `external_changed`, naming the table, the column and the fix. The hold is
 /// lifted by the first pass that finds the table as the program says.
+///
+/// **Every served version is checked** (`plan-evolution-federation.md`
+/// step F3, `plan-versions.md` §1.15): each pass reads the externals of
+/// every version the node serves, and a hold found for one version holds
+/// only the tenants that version serves.
 pub struct ExternalGate {
-    hold: RwLock<Hold>,
-    source: Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>,
-    reads: RwLock<Option<Reads>>,
+    /// What each served fixture's last pass found, by the fixture's
+    /// identity. A hold is never applied to another fixture: applying a
+    /// program checks its translation against the tables (`plan_with`), so
+    /// a newly served fixture starts with no hold and the next pass reads
+    /// it again.
+    holds: RwLock<HashMap<usize, BTreeMap<String, String>>>,
+    /// The active version's fixture.
+    active: Source,
+    /// Every fixture this node serves, the active one first.
+    served: Served,
+    /// The fixture that serves one tenant.
+    for_space: ForSpace,
+    reads: RwLock<HashMap<usize, Reads>>,
 }
 
-/// What the timer last found, and the fixture it found it for.
-#[derive(Default)]
-struct Hold {
-    down: BTreeMap<String, String>,
-    /// The identity of the fixture the hold was read for. A hold is not
-    /// applied to another one: applying a program checks its translation
-    /// against the tables (`plan_with`), so a newly served fixture starts
-    /// with no hold and the next pass reads it again.
-    for_fixture: usize,
-}
+/// The fixture the deployment serves now.
+pub type Source = Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>;
+/// Every version a node serves, by name, the active one first.
+pub type Served = Arc<dyn Fn() -> Vec<(String, Arc<ordo_conformance::Fixture>)> + Send + Sync>;
+/// The fixture that serves one tenant.
+pub type ForSpace = Arc<dyn Fn(&str) -> Arc<ordo_conformance::Fixture> + Send + Sync>;
 
 /// The externals each op of one fixture reads, worked out once.
 struct Reads {
@@ -572,31 +585,55 @@ fn reads_of(f: &ordo_conformance::Fixture, op: &str) -> Vec<String> {
 }
 
 impl ExternalGate {
-    /// `source` returns the fixture the deployment serves now.
-    pub fn new(
-        source: Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>,
-    ) -> Arc<ExternalGate> {
+    /// One program for every tenant: `source` returns the fixture the
+    /// deployment serves now.
+    pub fn new(source: Source) -> Arc<ExternalGate> {
+        let served = source.clone();
+        let for_space = source.clone();
         Arc::new(ExternalGate {
-            hold: RwLock::new(Hold::default()),
-            source,
-            reads: RwLock::new(None),
+            holds: RwLock::new(HashMap::new()),
+            active: source,
+            served: Arc::new(move || vec![(String::new(), served())]),
+            for_space: Arc::new(move |_| for_space()),
+            reads: RwLock::new(HashMap::new()),
         })
     }
 
-    /// The entities held now, with the line that says why.
-    pub fn down(&self) -> BTreeMap<String, String> {
-        self.hold
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .down
-            .clone()
+    /// **Every served version** (step F3): `active` returns the active
+    /// version's fixture, `served` every fixture this node serves, and
+    /// `for_space` the one that serves a tenant.
+    pub fn per_version(active: Source, served: Served, for_space: ForSpace) -> Arc<ExternalGate> {
+        Arc::new(ExternalGate {
+            holds: RwLock::new(HashMap::new()),
+            active,
+            served,
+            for_space,
+            reads: RwLock::new(HashMap::new()),
+        })
     }
 
-    fn set_hold(&self, down: BTreeMap<String, String>, f: &Arc<ordo_conformance::Fixture>) {
-        *self.hold.write().unwrap_or_else(|e| e.into_inner()) = Hold {
-            down,
-            for_fixture: identity(f),
-        };
+    /// The entities held now in any served version, with the line that
+    /// says why.
+    pub fn down(&self) -> BTreeMap<String, String> {
+        let holds = self.holds.read().unwrap_or_else(|e| e.into_inner());
+        let mut out = BTreeMap::new();
+        for down in holds.values() {
+            for (k, v) in down {
+                out.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        out
+    }
+
+    /// The entities held for the version that serves `space`.
+    pub fn down_in(&self, space: &str) -> BTreeMap<String, String> {
+        let f = (self.for_space)(space);
+        self.holds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&identity(&f))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The externals each op reads, once per fixture (keyed by the fixture's
@@ -606,7 +643,7 @@ impl ExternalGate {
             .reads
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
+            .get(&identity(f))
         {
             if Arc::ptr_eq(&r.fixture, f) {
                 return r.by_op.clone();
@@ -619,54 +656,85 @@ impl ExternalGate {
             .filter(|(_, v)| !v.is_empty())
             .collect();
         let by_op = Arc::new(by_op);
-        *self.reads.write().unwrap_or_else(|e| e.into_inner()) = Some(Reads {
-            fixture: f.clone(),
-            by_op: by_op.clone(),
-        });
+        self.reads
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                identity(f),
+                Reads {
+                    fixture: f.clone(),
+                    by_op: by_op.clone(),
+                },
+            );
         by_op
     }
 
-    /// One pass: read the tables the served program declares and set the
-    /// hold to what is wrong with them. Returns the lines now held.
+    /// One pass: read the tables every served version declares and set
+    /// each version's hold to what is wrong with them. Returns the lines
+    /// now held, each version's once, naming the version when more than
+    /// one is served.
     pub async fn watch_once(&self, pool: &Pool) -> Result<Vec<String>, String> {
-        let fixture = (self.source)();
-        if fixture.schema.externals.is_empty() {
-            self.set_hold(BTreeMap::new(), &fixture);
-            return Ok(Vec::new());
-        }
-        // The catalog read only: the present list is for a plan.
-        let mut report = ExternalReport::default();
-        for e in &fixture.schema.externals {
-            check_one(pool, e, &fixture.schema, &mut report).await?;
-        }
-        let lines = report.refusals();
-        self.set_hold(
-            report
+        let served = (self.served)();
+        let many = served.len() > 1;
+        let mut holds: HashMap<usize, BTreeMap<String, String>> = HashMap::new();
+        let mut lines = Vec::new();
+        for (version, fixture) in &served {
+            if fixture.schema.externals.is_empty() || holds.contains_key(&identity(fixture)) {
+                continue;
+            }
+            // The catalog read only: the present list is for a plan.
+            let mut report = ExternalReport::default();
+            for e in &fixture.schema.externals {
+                check_one(pool, e, &fixture.schema, &mut report).await?;
+            }
+            for l in report.refusals() {
+                lines.push(if many { format!("{version}: {l}") } else { l });
+            }
+            let down: BTreeMap<String, String> = report
                 .problems
                 .into_iter()
                 .map(|p| (p.entity.clone(), p.line()))
-                .collect(),
-            &fixture,
-        );
+                .collect();
+            if !down.is_empty() {
+                holds.insert(identity(fixture), down);
+            }
+        }
+        *self.holds.write().unwrap_or_else(|e| e.into_inner()) = holds;
+        // A version no longer served keeps nothing here.
+        let keep: std::collections::HashSet<usize> =
+            served.iter().map(|(_, f)| identity(f)).collect();
+        self.reads
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| keep.contains(k));
         Ok(lines)
     }
 
-    /// The refusal for `op`, when it reads a held entity.
+    /// The refusal for `op` in the active version, when it reads a held
+    /// entity.
     pub fn refusal(&self, op: &str) -> Option<ExecError> {
-        let (down, for_fixture) = {
-            let h = self.hold.read().unwrap_or_else(|e| e.into_inner());
-            if h.down.is_empty() {
-                return None;
-            }
-            (h.down.clone(), h.for_fixture)
-        };
-        let fixture = (self.source)();
-        // A program applied since the pass: it was checked against the
-        // tables when it was applied, and the next pass reads it again.
-        if identity(&fixture) != for_fixture {
-            return None;
-        }
-        let reads = self.reads_for(&fixture);
+        self.refusal_for(op, &(self.active)())
+    }
+
+    /// The refusal for `op` in the version that serves `space`, when it
+    /// reads an entity held for that version. A hold found for another
+    /// version holds nothing here.
+    pub fn refusal_in(&self, op: &str, space: &str) -> Option<ExecError> {
+        self.refusal_for(op, &(self.for_space)(space))
+    }
+
+    fn refusal_for(&self, op: &str, fixture: &Arc<ordo_conformance::Fixture>) -> Option<ExecError> {
+        // A program applied since the pass has no hold: it was checked
+        // against the tables when it was applied, and the next pass reads
+        // it again.
+        let down = self
+            .holds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&identity(fixture))
+            .filter(|d| !d.is_empty())
+            .cloned()?;
+        let reads = self.reads_for(fixture);
         let first = reads.get(op)?.iter().find(|e| down.contains_key(*e))?;
         Some(ExecError::new(
             ErrorCode::ExternalChanged,
@@ -726,7 +794,7 @@ impl ExternalGated {
 impl OpExecutor for ExternalGated {
     fn held(&self, op: &OpSpec, space: &str) -> Option<ExecError> {
         self.gate
-            .refusal(&op.name)
+            .refusal_in(&op.name, space)
             .or_else(|| self.inner.held(op, space))
     }
 
@@ -753,7 +821,7 @@ impl OpExecutor for ExternalGated {
         lease: Option<ordo_api::ReplayLease>,
         page_rows: Option<usize>,
     ) -> BoxFuture<'a, Result<ExecOutcome, ExecError>> {
-        if let Some(e) = self.gate.refusal(&op.name) {
+        if let Some(e) = self.gate.refusal_in(&op.name, space) {
             return Box::pin(async move { Err(e) });
         }
         self.inner

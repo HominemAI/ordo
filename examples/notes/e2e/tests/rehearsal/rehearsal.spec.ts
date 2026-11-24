@@ -138,7 +138,7 @@ test('production refuses a plan digest staging did not sign, and accepts the one
       space = /^cloned .* into \S+ \((\S+)\)$/m.exec(out)?.[1] ?? '';
       expect(space, out).not.toBe('');
       // Her tenant's id in production, which the clone names.
-      tenant = /^cloned (\S+) from production into/m.exec(out)?.[1] ?? '';
+      tenant = /^cloned +(\S+) from production into/m.exec(out)?.[1] ?? '';
       expect(tenant, out).not.toBe('');
       expect(out).toMatch(/^version +0\.3\.0$/m);
     });

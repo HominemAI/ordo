@@ -97,14 +97,34 @@ pub fn reader_role_env(reader: &str) -> String {
 /// unless this is on.
 pub const SHARED_ROLE_ENV: &str = "ORDO_PEER_SHARED_ROLE";
 
-/// The table that remembers which roles this deployment granted to, so a
-/// reader line removed from the file is revoked on the next apply or start.
+/// The table that remembers which roles this deployment granted to, and
+/// each table or column it granted them (`grants`, a JSON array of
+/// `[table, column]`, the column empty for a whole table). A reader line
+/// removed or narrowed is revoked on the next apply or start, and only
+/// what Ordo granted is revoked (`plan-evolution-federation.md` §3.1). A
+/// row from a release before 2026-11-24 has no `grants`; its role is
+/// revoked every table in the schema, as then.
+///
+/// `usage` says who gave the role `USAGE` on the schema: `ordo` when Ordo
+/// granted it, `held` when the role had it before Ordo's first grant (a
+/// deployment owner's own grant). Ordo revokes it only when it is `ordo`
+/// and the role's line is gone, so a table granted by hand stays readable.
 pub const READER_TABLE: &str = "$readergrant";
 
 const READER_DDL: &str = r#"CREATE TABLE IF NOT EXISTS "$readergrant" (
   "role"   text PRIMARY KEY,
-  "reader" text NOT NULL
+  "reader" text NOT NULL,
+  "grants" text,
+  "usage"  text
 )"#;
+
+/// The columns a table made before 2026-11-24 lacks.
+const READER_GRANTS_COLUMN: &str = r#"ALTER TABLE "$readergrant" ADD COLUMN IF NOT EXISTS "grants" text, ADD COLUMN IF NOT EXISTS "usage" text"#;
+
+/// [`READER_TABLE`]'s `usage` when Ordo granted it.
+const USAGE_ORDO: &str = "ordo";
+/// [`READER_TABLE`]'s `usage` when the role held it before Ordo's grant.
+const USAGE_HELD: &str = "held";
 
 /// Why a program's external schemas cannot be resolved: a peer's setting, or
 /// a plain external's swap. Each names the setting.
@@ -1243,20 +1263,35 @@ pub async fn grant_readers_with(
         }
     }
 
-    // Roles granted before whose line is gone.
-    let mut gone: Vec<String> = Vec::new();
+    // What each role was granted, as recorded. `None`: a row from before
+    // grants were recorded, whose role is revoked everything, as then.
+    #[allow(clippy::type_complexity)]
+    let mut recorded_grants: std::collections::BTreeMap<
+        String,
+        (String, Option<Held>, Option<String>),
+    > = Default::default();
     if recorded {
+        pool.rows(READER_GRANTS_COLUMN)
+            .await
+            .map_err(SchemaRefusal::Database)?;
         let rows = pool
-            .rows(r#"SELECT "role" FROM "$readergrant" ORDER BY 1"#)
+            .rows(r#"SELECT "role", "reader", "grants", "usage" FROM "$readergrant" ORDER BY 1"#)
             .await
             .map_err(SchemaRefusal::Database)?;
         for r in rows {
-            let Some(role) = r.into_iter().next().flatten() else {
+            let at = |i: usize| r.get(i).cloned().flatten();
+            let Some(role) = at(0) else {
                 continue;
             };
-            if !want.contains_key(&role) && role != own && role_exists(pool, &role).await? {
-                gone.push(role);
-            }
+            let grants = at(2).map(|g| held_from_json(&g));
+            recorded_grants.insert(role, (at(1).unwrap_or_default(), grants, at(3)));
+        }
+    }
+    // Roles granted before whose line is gone.
+    let mut gone: Vec<String> = Vec::new();
+    for role in recorded_grants.keys() {
+        if !want.contains_key(role) && *role != own && role_exists(pool, role).await? {
+            gone.push(role.clone());
         }
     }
 
@@ -1265,40 +1300,67 @@ pub async fn grant_readers_with(
     let mut sql = rename_comments_sql(pool, &pg, schema, &present).await?;
     for role in &gone {
         let r = quote(role);
-        sql += &format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; ");
-        sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+        let (_, grants, usage) = &recorded_grants[role];
+        sql += &revoke_sql(&pg, role, grants.as_ref(), &Held::new());
+        // Usage only when Ordo gave it: a role that held it before keeps
+        // it, and with it every table a person granted by hand.
+        if usage.as_deref() == Some(USAGE_ORDO) {
+            sql += &format!("REVOKE USAGE ON SCHEMA {s} FROM {r}; ");
+        }
+    }
+    // Who gave each wanted role its usage: as recorded; for a row from an
+    // earlier release, not known, so never Ordo's to take back; for a role
+    // not recorded yet, Ordo's unless the role already holds it.
+    let mut usage_by: std::collections::BTreeMap<&String, &'static str> = Default::default();
+    for role in want.keys() {
+        let by = match recorded_grants.get(role) {
+            Some((_, _, Some(u))) if u == USAGE_ORDO => USAGE_ORDO,
+            Some(_) => USAGE_HELD,
+            None if has_usage(pool, &pg, role).await? => USAGE_HELD,
+            None => USAGE_ORDO,
+        };
+        usage_by.insert(role, by);
     }
     let mut changed: Vec<&String> = Vec::new();
+    let none_yet = Held::new();
     for (role, (_, held)) in &want {
+        // A role not recorded yet holds nothing Ordo granted.
+        let before = match recorded_grants.get(role) {
+            None => Some(&none_yet),
+            Some((_, g, _)) => g.as_ref(),
+        };
         let now = held_by(pool, &pg, role).await?;
-        if now == *held && has_usage(pool, &pg, role).await? {
+        if before == Some(held) && now.is_superset(held) && has_usage(pool, &pg, role).await? {
             continue;
         }
         changed.push(role);
+        sql += &revoke_sql(&pg, role, before, held);
         sql += &grant_sql(&pg, role, held);
     }
-    let record_changed = if recorded {
-        let rows = pool
-            .rows(r#"SELECT "role", "reader" FROM "$readergrant" ORDER BY 1"#)
-            .await
-            .map_err(SchemaRefusal::Database)?;
-        let now: Vec<(String, String)> = rows
-            .into_iter()
-            .map(|r| {
-                (
-                    r.first().cloned().flatten().unwrap_or_default(),
-                    r.get(1).cloned().flatten().unwrap_or_default(),
-                )
-            })
-            .collect();
-        let then: Vec<(String, String)> = want
-            .iter()
-            .map(|(role, (reader, _))| (role.clone(), reader.clone()))
-            .collect();
-        now != then
-    } else {
-        true
-    };
+    #[allow(clippy::type_complexity)]
+    let then: Vec<(String, String, Option<String>, Option<String>)> = want
+        .iter()
+        .map(|(role, (reader, held))| {
+            (
+                role.clone(),
+                reader.clone(),
+                Some(held_to_json(held)),
+                Some(usage_by[role].to_string()),
+            )
+        })
+        .collect();
+    let record_changed = recorded_grants
+        .iter()
+        .map(|(role, (reader, g, u))| {
+            (
+                role.clone(),
+                reader.clone(),
+                g.as_ref().map(held_to_json),
+                u.clone(),
+            )
+        })
+        .collect::<Vec<_>>()
+        != then;
     if sql.is_empty() && !record_changed {
         return Ok(out);
     }
@@ -1309,13 +1371,23 @@ pub async fn grant_readers_with(
     }
     // The table by its literal name: a platform table, never an entity's.
     sql += r#"DELETE FROM "$readergrant";"#;
-    if !want.is_empty() {
-        let values = want
+    if !then.is_empty() {
+        let values = then
             .iter()
-            .map(|(role, (reader, _))| format!("({}, {})", sql_lit(role), sql_lit(reader)))
+            .map(|(role, reader, grants, usage)| {
+                format!(
+                    "({}, {}, {}, {})",
+                    sql_lit(role),
+                    sql_lit(reader),
+                    sql_lit(grants.as_deref().unwrap_or("[]")),
+                    sql_lit(usage.as_deref().unwrap_or(USAGE_HELD))
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
-        sql += &format!(r#" INSERT INTO "$readergrant" ("role", "reader") VALUES {values};"#);
+        sql += &format!(
+            r#" INSERT INTO "$readergrant" ("role", "reader", "grants", "usage") VALUES {values};"#
+        );
     }
     // One implicit transaction. Two replicas starting at once may race on
     // the catalog row; the loser checks the result below, which is what
@@ -1324,7 +1396,7 @@ pub async fn grant_readers_with(
     for role in &changed {
         let (_, held) = &want[*role];
         let now = held_by(pool, &pg, role).await?;
-        if now != *held || !has_usage(pool, &pg, role).await? {
+        if !now.is_superset(held) || !has_usage(pool, &pg, role).await? {
             if let Err(e) = sent {
                 return Err(SchemaRefusal::Database(e));
             }
@@ -1343,13 +1415,55 @@ pub async fn grant_readers_with(
     Ok(out)
 }
 
-/// The statements that set one role's grants in schema `pg` to `held`:
-/// everything revoked, then usage and each grant, in one batch.
+/// `[[table, column], …]`, the column empty for a whole table.
+fn held_to_json(held: &Held) -> String {
+    let list: Vec<[&str; 2]> = held
+        .iter()
+        .map(|(t, c, _)| [t.as_str(), c.as_str()])
+        .collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
+}
+
+fn held_from_json(text: &str) -> Held {
+    serde_json::from_str::<Vec<[String; 2]>>(text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|[t, c]| (t, c, "SELECT".to_string()))
+        .collect()
+}
+
+/// The statements that take back what Ordo granted `role` and `keep` does
+/// not hold: each recorded table or column, and nothing a person granted
+/// by hand. With no record (a row from before 2026-11-24), everything in
+/// the schema, as then.
+fn revoke_sql(pg: &str, role: &str, recorded: Option<&Held>, keep: &Held) -> String {
+    let (s, r) = (quote(pg), quote(role));
+    let Some(recorded) = recorded else {
+        return format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; ");
+    };
+    let mut sql = String::new();
+    for g in recorded.difference(keep) {
+        let (t, c, _) = g;
+        if c.is_empty() {
+            // A table revoke takes its column grants too, so what `keep`
+            // holds by column there is granted again after it.
+            sql += &format!("REVOKE SELECT ON {s}.{} FROM {r}; ", quote(t));
+        } else {
+            sql += &format!(
+                "REVOKE SELECT ({}) ON {s}.{} FROM {r}; ",
+                quote(c),
+                quote(t)
+            );
+        }
+    }
+    sql
+}
+
+/// The statements that give one role usage and each grant in `held`, in
+/// one batch, after [`revoke_sql`] took back what it no longer holds.
 fn grant_sql(pg: &str, role: &str, held: &Held) -> String {
     let (s, r) = (quote(pg), quote(role));
-    let mut sql = format!(
-        "REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; GRANT USAGE ON SCHEMA {s} TO {r}; "
-    );
+    let mut sql = format!("GRANT USAGE ON SCHEMA {s} TO {r}; ");
     let mut columns: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
     for (t, c, _) in held {
         if c.is_empty() {

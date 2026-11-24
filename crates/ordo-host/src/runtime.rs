@@ -5285,6 +5285,7 @@ async fn assemble_program(
         external_every,
         Some(tenants),
     );
+    let external_for_health = external_gate.clone();
     let api = ApiState {
         registry: deployment.handle(),
         // Metered outside, platform ops inside, so a platform op's duration
@@ -5338,6 +5339,8 @@ async fn assemble_program(
     // a space the boot held closed is named in the body rather than left
     // for a customer to report.
     .with_spaces(spaces.clone())
+    // §3.3: the peer columns being renamed, and what is held.
+    .with_external(external_for_health)
     // 7d(b): `/security/events` reads a space's stream from **that space's**
     // database, because S4 routes it there. `spaces.pools()` is the door's
     // own resolver, which is the point: a second resolver here could route a

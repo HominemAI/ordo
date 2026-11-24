@@ -226,7 +226,9 @@ Ruled 2026-10-01, in `corpus-rulings.md`. In short:
 
 - **Refuse, with the options in the error.** Decisions happen on paper.
 - **Pre-checks run every check against every tenant** and report all issues
-  at once, each with its Ordo-level remediation (27w).
+  at once, each with its Ordo-level remediation (27w). Built 2026-11-23 in
+  `plan-versions.md` increment 9: `ordo evolve` lists every issue from
+  every database, and `--run` refuses while one is open.
 - **`prev` declares renames and correspondence:** `entity b (prev a) {}`,
   `field x (prev c)`, one version back only (27x). Source or plan: ask 23.
 - **Orphan instead of drop.** Undeclared fields and entities are kept and

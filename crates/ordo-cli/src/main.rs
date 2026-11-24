@@ -78,8 +78,11 @@ fn usage() -> ! {
          refuse it with its errors, store it, and print its receipt and\n      \
          digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
          written to <dir>/receipts/<from>-to-<to>.json. --digest refuses a\n      \
-         deployment that renders another digest. --run runs the stored\n      \
-         plan on the deployment's own database.\n  \
+         deployment that renders another digest. The pre-checks run on\n      \
+         every database and list each issue with its fix. --run runs the\n      \
+         stored plan on the deployment's own database, and refuses while an\n      \
+         issue is open. A step that removes a sign-in method some people\n      \
+         rely on stops until --approve-sign-in-removal <count>.\n  \
          ordo evolve --tenant <id> [--to <version>]\n      \
          replay the stored path on the tenant's database, one step at a\n      \
          time, then pin it (`std.deployment.replay`).\n  \

@@ -299,6 +299,16 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
+         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         staging clones of named production tenants. `key` prints this\n      \
+         deployment's clone key; `set-key` records it on production, which\n      \
+         seals each clone to it. clone.mask names the fields that leave\n      \
+         production unmasked (deny by default, `off` to opt out);\n      \
+         clone.readers names who besides staging's admins opens a clone.\n  \
+         ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
+         on staging: production masks the tenant, seals it to staging's key,\n      \
+         and staging imports it under its own keys, pinned to its version.\n      \
+         Members come without their sign-in; a staging admin opens it.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \
@@ -580,6 +590,7 @@ fn main() {
             | "versions"
             | "windows"
             | "environments"
+            | "clones"
             | "promote"
             | "evolve"
             | "prune"

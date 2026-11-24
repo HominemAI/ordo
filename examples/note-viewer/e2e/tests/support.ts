@@ -11,6 +11,8 @@ export interface Stack {
   readonly viewerPage: string;
   /** The `ordo` CLI stack.sh used. */
   readonly ordo: string;
+  /** The `ordo-host` binary both doors run. */
+  readonly host: string;
   /** examples/notes-v3, applied over notes v2 by tests/v3 (increment 7a). */
   readonly programV3: string;
   readonly pg: {
@@ -132,7 +134,7 @@ export function applyNotes(dir: string): string {
 }
 
 /** One app's environment as stack.sh started it (`notes.env`, `viewer.env`). */
-function envOf(app: 'notes' | 'viewer'): Record<string, string> {
+export function envOf(app: 'notes' | 'viewer'): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of readFileSync(`${stack().logs}/${app}.env`, 'utf8').split('\n')) {
     const at = line.indexOf('=');

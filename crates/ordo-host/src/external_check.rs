@@ -28,10 +28,17 @@
 //! entity is down every op that reads it answers `external_changed`. When
 //! the table comes back unchanged, the next tick lifts the hold.
 //!
-//! Tenant databases are checked when a program is applied to them. The
-//! timer watches the deployment's own database, for every version the node
-//! serves (`plan-evolution-federation.md` step F3): a hold found for one
-//! version holds only the tenants that version serves.
+//! The timer watches the deployment's own database, for every version the
+//! node serves (`plan-evolution-federation.md` step F3): a hold found for
+//! one version holds only the tenants that version serves. It reads each
+//! tenant with a database of its own too, in that database, for the
+//! version serving it ([`ExternalGate::watch_tenants`]): a hold found there
+//! holds that tenant only. A program applied to a tenant's database is
+//! checked there as well.
+//!
+//! A peer column its read app renamed is noted as [`CHANGING`] while it is
+//! still written, and named with its new column once it is not
+//! (`ordo_exec::peer::Renamed`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
@@ -48,6 +55,10 @@ use ordo_syntax::{ExternalKeyTy, ScalarTy};
 pub const WATCH_ENV: &str = "ORDO_EXTERNAL_WATCH_SECS";
 /// Five minutes.
 pub const WATCH_DEFAULT_SECS: u64 = 300;
+
+/// How a note about a peer column that is being renamed starts
+/// (`plan-evolution-federation.md` §3.3). The watcher logs these lines.
+pub const CHANGING: &str = "changing:";
 
 /// [`WATCH_ENV`], or the default when unset. A value that is not a whole
 /// number of seconds from 1 is refused at boot, naming the setting.
@@ -271,9 +282,22 @@ async fn check_one(
                 .map_err(|err| db("the column grants", err))?;
             column_granted = lost.is_empty();
             if !lost.is_empty() && lost.len() < mapped.len() {
+                // A renamed field's old column names the new one
+                // (`ordo_exec::peer::Renamed`).
+                let comments = migrate::column_comments(pool, &pg, &src.table)
+                    .await
+                    .map_err(|err| db("the column comments", err))?;
                 let named = lost
                     .iter()
-                    .map(|c| format!("column `{c}`"))
+                    .map(|c| {
+                        match comments
+                            .get(c)
+                            .and_then(|t| ordo_exec::peer::Renamed::new_column(t))
+                        {
+                            Some(new) => format!("column `{c}` (it is now `{new}`)"),
+                            None => format!("column `{c}`"),
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let (is, it) = if lost.len() == 1 {
@@ -388,6 +412,30 @@ async fn check_one(
             detail: format!("{}. {regenerate}", wrong.join("; ")),
         });
         return Ok(());
+    }
+    // **Changing** (`plan-evolution-federation.md` §3.3): a mapped column
+    // its peer renamed is still written and granted, until the version that
+    // stops writing it. Said now, while the reader can still switch; it
+    // holds nothing.
+    if let Some(p) = &src.peer {
+        let comments = migrate::column_comments(pool, &pg, &src.table)
+            .await
+            .map_err(|err| db("the column comments", err))?;
+        for (field, column) in &src.columns {
+            let Some(new) = comments
+                .get(column)
+                .and_then(|t| ordo_exec::peer::Renamed::new_column(t))
+            else {
+                continue;
+            };
+            report.notes.push(format!(
+                "{CHANGING} `{table}.{column}`, which `{}` reads as `{field}`, is renamed \
+                 to `{new}` by `{}`. It is written until a version of `{}` stops \
+                 declaring the rename; then this deployment loses it. Map `{field}` to \
+                 `{new}`. {regenerate}",
+                e.name, p.name, p.name,
+            ));
+        }
     }
     let unused: Vec<String> = live
         .keys()
@@ -509,7 +557,17 @@ pub struct ExternalGate {
     /// The fixture that serves one tenant.
     for_space: ForSpace,
     reads: RwLock<HashMap<usize, Reads>>,
+    /// The last pass's [`CHANGING`] notes: peer columns being renamed.
+    changing: RwLock<Vec<String>>,
+    /// What the last pass over the tenants' own databases found, by
+    /// tenant: the identity of the fixture it was found for, and the held
+    /// entities.
+    tenant_holds: RwLock<HashMap<String, TenantHold>>,
 }
+
+/// One tenant's hold: the identity of the fixture it was found for, and the
+/// held entities with the line that says why.
+type TenantHold = (usize, BTreeMap<String, String>);
 
 /// The fixture the deployment serves now.
 pub type Source = Arc<dyn Fn() -> Arc<ordo_conformance::Fixture> + Send + Sync>;
@@ -636,6 +694,8 @@ impl ExternalGate {
             served: Arc::new(move || vec![(String::new(), served())]),
             for_space: Arc::new(move |_| for_space()),
             reads: RwLock::new(HashMap::new()),
+            changing: RwLock::new(Vec::new()),
+            tenant_holds: RwLock::new(HashMap::new()),
         })
     }
 
@@ -649,6 +709,8 @@ impl ExternalGate {
             served,
             for_space,
             reads: RwLock::new(HashMap::new()),
+            changing: RwLock::new(Vec::new()),
+            tenant_holds: RwLock::new(HashMap::new()),
         })
     }
 
@@ -663,6 +725,15 @@ impl ExternalGate {
             }
         }
         out
+    }
+
+    /// The last pass's notes on peer columns being renamed
+    /// ([`CHANGING`]), each version's once.
+    pub fn changing(&self) -> Vec<String> {
+        self.changing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The entities held for the version that serves `space`.
@@ -718,6 +789,7 @@ impl ExternalGate {
         let many = served.len() > 1;
         let mut holds: HashMap<usize, BTreeMap<String, String>> = HashMap::new();
         let mut lines = Vec::new();
+        let mut changing: Vec<String> = Vec::new();
         for (version, fixture) in &served {
             if fixture.schema.externals.is_empty() || holds.contains_key(&identity(fixture)) {
                 continue;
@@ -730,6 +802,13 @@ impl ExternalGate {
             for l in report.refusals() {
                 lines.push(if many { format!("{version}: {l}") } else { l });
             }
+            for n in report.notes.iter().filter(|n| n.starts_with(CHANGING)) {
+                changing.push(if many {
+                    format!("{version}: {n}")
+                } else {
+                    n.clone()
+                });
+            }
             let down: BTreeMap<String, String> = report
                 .problems
                 .into_iter()
@@ -740,6 +819,7 @@ impl ExternalGate {
             }
         }
         *self.holds.write().unwrap_or_else(|e| e.into_inner()) = holds;
+        *self.changing.write().unwrap_or_else(|e| e.into_inner()) = changing;
         // A version no longer served keeps nothing here.
         let keep: std::collections::HashSet<usize> =
             served.iter().map(|(_, f)| identity(f)).collect();
@@ -757,10 +837,21 @@ impl ExternalGate {
     }
 
     /// The refusal for `op` in the version that serves `space`, when it
-    /// reads an entity held for that version. A hold found for another
-    /// version holds nothing here.
+    /// reads an entity held for that version, or held in the tenant's own
+    /// database ([`ExternalGate::watch_tenants`]). A hold found for another
+    /// version or another tenant holds nothing here.
     pub fn refusal_in(&self, op: &str, space: &str) -> Option<ExecError> {
-        self.refusal_for(op, &(self.for_space)(space))
+        let fixture = (self.for_space)(space);
+        self.refusal_for(op, &fixture).or_else(|| {
+            let down = self
+                .tenant_holds
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(space)
+                .filter(|(id, d)| *id == identity(&fixture) && !d.is_empty())
+                .map(|(_, d)| d.clone())?;
+            self.refusal_from(op, &fixture, &down)
+        })
     }
 
     fn refusal_for(&self, op: &str, fixture: &Arc<ordo_conformance::Fixture>) -> Option<ExecError> {
@@ -774,6 +865,15 @@ impl ExternalGate {
             .get(&identity(fixture))
             .filter(|d| !d.is_empty())
             .cloned()?;
+        self.refusal_from(op, fixture, &down)
+    }
+
+    fn refusal_from(
+        &self,
+        op: &str,
+        fixture: &Arc<ordo_conformance::Fixture>,
+        down: &BTreeMap<String, String>,
+    ) -> Option<ExecError> {
         let reads = self.reads_for(fixture);
         let first = reads.get(op)?.iter().find(|e| down.contains_key(*e))?;
         Some(ExecError::new(
@@ -784,22 +884,93 @@ impl ExternalGate {
             ),
         ))
     }
+
+    /// **The tenants' own databases** (step F3): one pass over each tenant
+    /// with a database of its own, reading the externals of the version
+    /// that serves it in that database. A hold found there holds that
+    /// tenant only. A database that cannot be read keeps its tenant's last
+    /// answer, and is said. Returns the lines now held, each naming its
+    /// tenant.
+    pub async fn watch_tenants(&self, tenants: &[(String, Pool)]) -> Vec<String> {
+        let before = self
+            .tenant_holds
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut holds: HashMap<String, TenantHold> = HashMap::new();
+        let mut lines = Vec::new();
+        for (space, pool) in tenants {
+            let fixture = (self.for_space)(space);
+            if fixture.schema.externals.is_empty() {
+                continue;
+            }
+            let mut report = ExternalReport::default();
+            let mut read = Ok(());
+            for e in &fixture.schema.externals {
+                read = check_one(pool, e, &fixture.schema, &mut report).await;
+                if read.is_err() {
+                    break;
+                }
+            }
+            if let Err(e) = read {
+                lines.push(format!(
+                    "tenant {space}: its database was not read ({e}); its hold is unchanged"
+                ));
+                if let Some(h) = before.get(space) {
+                    holds.insert(space.clone(), h.clone());
+                }
+                continue;
+            }
+            for l in report.refusals() {
+                lines.push(format!("tenant {space}: {l}"));
+            }
+            let down: BTreeMap<String, String> = report
+                .problems
+                .into_iter()
+                .map(|p| (p.entity.clone(), p.line()))
+                .collect();
+            if !down.is_empty() {
+                holds.insert(space.clone(), (identity(&fixture), down));
+            }
+        }
+        *self.tenant_holds.write().unwrap_or_else(|e| e.into_inner()) = holds;
+        lines
+    }
 }
 
+/// The tenants with a database of their own, each with the pool that
+/// reaches it, for [`ExternalGate::watch_tenants`].
+pub type Tenants =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<(String, Pool)>, String>> + Send + Sync>;
+
 /// Run [`ExternalGate::watch_once`] on a timer, until the process ends.
+///
+/// With `tenants`, each tick reads the tenants' own databases too
+/// ([`ExternalGate::watch_tenants`]).
 pub fn spawn_watch(
     gate: Arc<ExternalGate>,
     pool: Pool,
     every: Duration,
+    tenants: Option<Tenants>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut held = false;
+        let mut said: Vec<String> = Vec::new();
+        let mut tenant_said: Vec<String> = Vec::new();
         loop {
             tick.tick().await;
             match gate.watch_once(&pool).await {
                 Ok(lines) => {
+                    // A rename is said once each time the set changes.
+                    let changing = gate.changing();
+                    if changing != said {
+                        for c in &changing {
+                            println!("external: {c}");
+                        }
+                        said = changing;
+                    }
                     for l in &lines {
                         eprintln!("external: {l}");
                     }
@@ -812,6 +983,28 @@ pub fn spawn_watch(
                 // answer holds until it can.
                 Err(e) => {
                     eprintln!("external: the tables were not read ({e}); the hold is unchanged")
+                }
+            }
+            // Listing the tenants costs a read per tenant, so it is skipped
+            // while no served version declares an external.
+            let reads_any = (gate.served)()
+                .iter()
+                .any(|(_, f)| !f.schema.externals.is_empty());
+            if let Some(list) = tenants.as_ref().filter(|_| reads_any) {
+                match list().await {
+                    Ok(t) => {
+                        let lines = gate.watch_tenants(&t).await;
+                        if lines != tenant_said {
+                            for l in &lines {
+                                eprintln!("external: {l}");
+                            }
+                            tenant_said = lines;
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "external: the tenant databases could not be listed ({e}); their holds \
+                         are unchanged"
+                    ),
                 }
             }
         }

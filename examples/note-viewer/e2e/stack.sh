@@ -243,6 +243,7 @@ cat >"$state/stack.json" <<EOF
   "notesPage": "$notes_page/",
   "viewerPage": "$viewer_page/",
   "ordo": "$ordo",
+  "host": "$host",
   "programV3": "$repo/examples/notes-v3",
   "pg": { "host": "$pg_host", "port": "$pg_port", "db": "$db", "admin": "$pg_user", "rolePassword": "$role_password" },
   "logs": "$state"

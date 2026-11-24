@@ -517,6 +517,44 @@ pub async fn record_orphans(
             _ => {}
         }
     }
+    // **A rename that has landed** (`plan-evolution-federation.md` §2): a
+    // rename's old column is written while a version declares the `prev`
+    // mark (`crate::dual_writes::rename_overlay`). A version that drops the
+    // mark stops writing it, so it is an orphan from here, and a reader
+    // loses it (Q1) instead of reading it frozen. A move's soak records
+    // its own at the close; this is the same column on the apply path.
+    for m in &prior.prev {
+        let (Some(_), [old]) = (m.field.as_deref(), m.prev.as_slice()) else {
+            continue;
+        };
+        let still = program
+            .schema
+            .prev
+            .iter()
+            .any(|n| n.entity == m.entity && n.prev.as_slice() == [old.clone()]);
+        let declared = program
+            .schema
+            .native(&m.entity)
+            .is_some_and(|e| e.field(old).is_some() || e.fields.iter().any(|f| f.column() == *old));
+        let held = live
+            .table(&m.entity)
+            .is_some_and(|t| t.columns.contains_key(old.as_str()));
+        if still || declared || !held || old.contains('.') {
+            continue;
+        }
+        if left
+            .iter()
+            .any(|l| l.entity == m.entity && l.field.as_deref() == Some(old.as_str()))
+        {
+            continue;
+        }
+        left.push(ordo_exec::orphans::Left {
+            entity: m.entity.clone(),
+            field: Some(old.clone()),
+            columns: vec![old.clone()],
+            sealed: false,
+        });
+    }
     let schema = &program.schema;
     ordo_exec::orphans::revive(pool, &|entity: &str, field: &str| {
         schema

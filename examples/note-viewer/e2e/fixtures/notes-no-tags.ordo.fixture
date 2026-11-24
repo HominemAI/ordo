@@ -1,9 +1,11 @@
 # Fixture for note_viewer's e2e (plan-versions.md increment 14): notes v3
-# with `notes.tags` no longer declared, at 0.3.2. It keeps 0.3.1's rename
-# of `title` to `heading` (notes-heading.ordo.fixture), which runs
-# before it. The note viewer maps `tags`. Once this version serves, `notes.tags` is an orphan: kept, never
-# written, and taken out of the viewer's grant (owner ruling 2026-11-23,
-# Q1). The viewer is held with `external_changed`, naming the column.
+# with `notes.tags` no longer declared, at 0.3.3. It keeps the field
+# `heading` that 0.3.1 renamed from `title` (notes-heading.ordo.fixture),
+# with the rename landed in 0.3.2, both of which run before it. The note
+# viewer maps `tags`. Once this version serves, `notes.tags` is an orphan:
+# kept, never written, and taken out of the viewer's grant (owner ruling
+# 2026-11-23, Q1). The viewer is held with `external_changed`, naming the
+# column.
 #
 # Not an example to copy: the notes page reads `tags` and is not used
 # after this is applied.
@@ -59,7 +61,7 @@
 # All four are additive, so `ordo apply` makes them itself
 # (ORDO_APPLY_SAFE_CHANGES, on by default) and no v1 row is touched.
 
-domain notes @ 0.3.2
+domain notes @ 0.3.3
 
 # note_viewer (examples/note-viewer) is a second deployment that reads these
 # notes. v3 changes nothing it reads, so it reads through the move. This
@@ -72,9 +74,8 @@ domain notes @ 0.3.2
 reader note_viewer reads notes, notesAccess
 
 entity notes {
-  # 0.3.1: was `title`. The old column is kept and written while a
-  # version that reads it is served.
-  heading: text = "" prev(title)
+  # 0.3.1: was `title`. The rename landed in 0.3.2.
+  heading: text = ""
   body:  text = ""
   created: datetime
   pinned: bool = false

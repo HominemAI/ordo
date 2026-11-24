@@ -79,6 +79,13 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
+    // notes takes a table off its `reader` line (plan-evolution-federation.md
+    // §7, test 5). The viewer cannot start after it, so it runs last.
+    {
+      name: 'reader-line',
+      testMatch: /reader-line\/.*\.spec\.ts/,
+      dependencies: ['orphans'],
+    },
   ],
   webServer: {
     command: 'bash stack.sh',

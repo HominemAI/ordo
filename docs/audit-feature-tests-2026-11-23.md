@@ -42,7 +42,7 @@ What Ordo promises, stated as guarantees a person relies on, and the strongest t
 - **Every console browser test runs against a stand-in door and a fake child**, not `ordo-host`. They are E* here.
 - **Nothing starts the real `ordo dev` binary**, and the first-deployment path (make-secrets, compose, invite, apply) is never run whole.
 - **`crates/ordo-host/tests/two_instances.rs` is `#[ignore]`**, so a session ended on one server and refused on another never runs in CI.
-- **Few examples use the harder language**: no example declares money, a tree or a multi-statement op, and no test checks that a failed second write undoes the first.
+- **Few example tests reach the harder language.** Shopfront declares money and a multi-statement op (`examples/shopfront/shopfront.ordo`), but has no browser tests; no example declares a tree. No test checks that a failed second write undoes the first.
 
 ## The 16 guarantees with no test
 

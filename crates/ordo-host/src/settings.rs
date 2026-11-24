@@ -1519,6 +1519,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_BRANCH_IDLE_LIST_AFTER",
+        "Databases and pools",
+        r#"30d"#,
+        r#"<n>d, <n>h, <n>m or <n>s, from 1"#,
+    ),
+    s(
         "ORDO_EXTERNAL_WATCH_SECS",
         "Databases and pools",
         r#"300 s"#,

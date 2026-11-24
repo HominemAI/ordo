@@ -57,6 +57,7 @@ pub mod auth;
 pub mod backfill;
 pub mod blob;
 pub mod boot_record;
+pub mod branches;
 pub mod bucket_ops;
 pub mod ceremonies;
 pub mod clones;

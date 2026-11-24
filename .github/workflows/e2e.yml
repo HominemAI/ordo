@@ -137,7 +137,7 @@ jobs:
       ORDO_PG_PASSWORD: ordo
       ORDO_PSQL: psql
       # The screenshot projects run in their own step below, never here.
-      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2 --project=evolve --project=v3 --project=evolve-checks --project=orphans --project=clone --project=seal' }}
+      PROJECTS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && '--project=api' || '--project=api --project=browser --project=phone --project=firefox --project=webkit --project=upgrade --project=v2 --project=evolve --project=v3 --project=evolve-checks --project=orphans --project=clone --project=seal --project=branch' }}
       BROWSERS: ${{ (github.event_name == 'workflow_dispatch' && !inputs.browser) && 'off' || 'on' }}
 
     steps:

@@ -49,6 +49,13 @@ function run(args: readonly string[], dir = configDir(), input?: string): CliRun
   return run;
 }
 
+/** The developer's token, as `ordo login` keeps it, for calling a tenant's ops directly. */
+export function developerToken(): string {
+  const m = /"token"\s*:\s*"([^"]+)"/.exec(readFileSync(`${configDir()}/sessions.json`, 'utf8'));
+  expect(m, 'a token in the developer session').not.toBeNull();
+  return m![1]!;
+}
+
 /** The door flags of every deployment command: the deployment's own space. */
 export function door(): string[] {
   return ['--host', stack().door, '--space', 'system'];

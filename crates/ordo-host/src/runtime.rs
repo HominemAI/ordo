@@ -2120,6 +2120,9 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             // Staging clones (versions increment 12), wired with
             // `APPLY`'s state and the deployment's keys.
             name if crate::clones::OPS.contains(&name) => true,
+            // Dev branches (versions increment 5), wired with `APPLY`'s
+            // state, the tenant ops and reap.
+            name if crate::branches::OPS.contains(&name) => true,
             // Maintenance windows, wired with the same state.
             name if crate::window_ops::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.

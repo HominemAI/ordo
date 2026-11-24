@@ -148,6 +148,16 @@ export default defineConfig({
       dependencies: ['clone'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // Dev branches as tenants on their own version (plan-versions.md
+    // increment 5): 2 branches served side by side while the stack serves
+    // its own. It applies programs, so it runs after `seal`, last. Locally,
+    // `--project=branch --no-deps`.
+    {
+      name: 'branch',
+      testMatch: /branch\/.*\.spec\.ts/,
+      dependencies: ['seal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

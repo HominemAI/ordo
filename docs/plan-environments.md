@@ -113,9 +113,10 @@ sign-ins are never carried.
   staging and brought to the clone's version.
 - The notes e2e clones a tenant into a second deployment through the doors.
 
-Not built yet: a tenant with `acl` rows (the import refuses its access
-rows); the clone's default name carries production's tenant name; a
-tenant's own bucket; push. Details in `plan-versions.md` §3.4.
+Fixed after it: a tenant with `acl` rows clones whole, its access rows
+restored as the owner; a clone's default name is neutral (`clone-...`).
+
+Not built yet: a tenant's own bucket; push. Details in `plan-versions.md` §3.4.
 
 ### 2.4 Blue/green per tenant (g33)
 

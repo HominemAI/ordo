@@ -274,9 +274,11 @@ fn app_token(principal: &str) -> String {
 // ── a deployment's door ──────────────────────────────────────────────────
 
 /// The deployment over `pool`, its door on a loopback port, trusting the
-/// issuer's tokens for `handle`, serving the notes program. Answers the
-/// address and its stream.
+/// issuer's tokens for `handle`, serving `source` (the notes program).
+/// Answers the address and its stream.
+#[allow(clippy::too_many_arguments)]
 async fn serve(
+    source: &str,
     db: &Pg,
     pool: &Pool,
     handle: &str,
@@ -286,7 +288,7 @@ async fn serve(
 ) -> (String, Arc<ordo_secevent::Recorder>) {
     // The app's ops read the deployment's own database, under its own keys,
     // so what the door answers in a clone is what staging holds.
-    let mut program = Fixture::from_source(PROGRAM, "").expect("the program");
+    let mut program = Fixture::from_source(source, "").expect("the program");
     keys.create_space(&ordo_conformance::fixture_space())
         .expect("fixture custody");
     program.keys = keys.clone();
@@ -491,17 +493,22 @@ struct Pair {
 }
 
 async fn pair(stem: &str, staging_source: &str) -> Pair {
+    pair_with(stem, PROGRAM, staging_source).await
+}
+
+async fn pair_with(stem: &str, prod_source: &str, staging_source: &str) -> Pair {
     let issuer = Issuer::start().await;
     let (prod, prod_pg) = deployment(
         &format!("ordo_clone_{stem}_p"),
         &["staging"],
         "production",
-        PROGRAM,
+        prod_source,
     )
     .await;
     let prod_keys = keys_for(b"production master key");
     let tenant = seed_tenant(&prod, &prod_keys).await;
     let (prod_address, prod_stream) = serve(
+        prod_source,
         &prod_pg,
         &prod,
         "production",
@@ -533,6 +540,10 @@ async fn pair(stem: &str, staging_source: &str) -> Pair {
     let staging_keys = keys_for(b"staging master key");
     let access = CloneAccess::new();
     let (staging_address, staging_stream) = serve(
+        // The program staging's door serves: production's, so a clone of
+        // it is served (a staging that applied another serves that one's
+        // ops only for its own tenants, which these tests do not read).
+        prod_source,
         &staging_pg,
         &staging,
         "staging",
@@ -621,7 +632,11 @@ async fn a_clone_serves_in_staging_on_its_version_with_no_real_personal_data() {
     let row = &body["rows"][0];
     let space = row["clone"]["space"].as_str().expect("a space").to_string();
     assert_ne!(space, p.tenant, "a new tenant, not production's id");
-    assert_eq!(row["clone"]["name"], "acme-clone");
+    // Its name is neutral: production's tenant name is never carried, since
+    // a self-serve tenant is named after its person.
+    assert_eq!(row["clone"]["name"], clones::default_name(&space).as_str());
+    assert!(clones::default_name(&space).starts_with("clone-"));
+    assert!(!row["clone"]["name"].as_str().unwrap().contains("acme"));
     assert_eq!(row["clone"]["fromTenant"], p.tenant.as_str());
     assert_eq!(row["clone"]["version"], "0.1.0");
     assert_eq!(row["clone"]["opensAs"], "mem_ada");
@@ -1080,6 +1095,107 @@ async fn a_shared_database_without_the_versions_tables_is_refused_naming_promote
     assert_eq!(clones::clones(&p.staging).await.unwrap().len(), 1);
 }
 
+/// [`PROGRAM`] with `acl` on notes: each note carries access rows.
+fn acl_program() -> String {
+    PROGRAM.replace(
+        "  author -> members\n}",
+        "  author -> members\n  acl (read, write, admin)\n}",
+    )
+}
+
+/// **A tenant whose notes carry acl rows clones whole** (Reported fix,
+/// 2026-11-24). Before the fix the import minted its caller an access row
+/// on each note, then refused the bundle's own row for the same note as
+/// `expected_absent`, and nothing was cloned. Now staging holds exactly
+/// production's access rows, and the staging admin, opening the clone as
+/// its founding owner, reads what that owner may read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_whose_notes_carry_acl_rows_clones_every_row() {
+    let program = acl_program();
+    assert!(program.contains("acl ("), "the program has acl");
+    let p = pair_with("c9", &program, &program).await;
+    // Ada administers her note, Charles his, and Ada shared hers with
+    // Charles to read.
+    p.prod
+        .rows(&format!(
+            "INSERT INTO \"notesAccess\" (\"$space\", \"id\", \"rev\", \"note\", \"member\", \
+             \"level\") VALUES \
+             ('{t}', 'nac_1', 1, 'not_1', 'mem_ada', 'admin'), \
+             ('{t}', 'nac_2', 1, 'not_2', 'mem_charles', 'admin'), \
+             ('{t}', 'nac_3', 1, 'not_1', 'mem_charles', 'read')",
+            t = p.tenant
+        ))
+        .await
+        .expect("access rows");
+    let done = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("an acl tenant clones");
+    let space = done.record.space.clone();
+    let access = |pool: Pool, space: String| async move {
+        let mut rows: Vec<String> = pool
+            .rows(&format!(
+                "SELECT n.\"author\", a.\"member\", a.\"level\" FROM \"notesAccess\" a \
+                 JOIN \"notes\" n ON n.\"$space\" = a.\"$space\" AND n.\"id\" = a.\"note\" \
+                 WHERE a.\"$space\" = '{space}'"
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| format!("{:?}", r))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let before = access(p.prod.clone(), p.tenant.clone()).await;
+    assert_eq!(before.len(), 3);
+    assert_eq!(
+        access(p.staging.clone(), space.clone()).await,
+        before,
+        "exactly production's access rows, none minted for the importer"
+    );
+    // The staging admin opens it as Ada, and reads what Ada may read: her
+    // own note, not Charles's.
+    // Cloned here without the door, so the door's view is refreshed as the
+    // op does after a clone.
+    p.access.refresh(&p.staging).await.expect("refreshed");
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        "allNotes",
+        &space,
+        None,
+        &p.issuer.token(BOB, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1, "{body}");
+}
+
+/// A name the person gives wins over the neutral default.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_given_name_wins_over_the_neutral_default() {
+    let p = pair("c10", PROGRAM).await;
+    let done = clones::clone_in(
+        &p.staging,
+        &SinglePool::new(p.staging.clone()),
+        &p.staging_keys,
+        HOME,
+        None,
+        CloneInRequest {
+            from: "production",
+            tenant: "acme",
+            token: &p.issuer.token(ADA, "production"),
+            name: Some("qa-copy"),
+            reason: "rehearse on a named copy",
+        },
+        ADA,
+        2_000,
+    )
+    .await
+    .expect("cloned");
+    assert_eq!(done.record.name, "qa-copy");
+}
+
 // ── sinks ────────────────────────────────────────────────────────────────
 
 /// The secret store a function's egress reads. Opening a value fails, so a
@@ -1320,7 +1436,7 @@ async fn nothing_a_clone_sends_leaves_staging_and_the_sink_shows_it() {
     let (status, body) = call(
         &p.staging_address,
         "GET",
-        &format!("{}?tenant=acme-clone", clones::SINKS),
+        &format!("{}?tenant={}", clones::SINKS, clones::default_name(&space)),
         HOME,
         None,
         &p.issuer.token(ADA, "staging"),

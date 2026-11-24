@@ -771,6 +771,41 @@ impl Fixture {
         }
     }
 
+    /// **A row of an import, restored as the space's owner.**
+    ///
+    /// An import loads a whole space from its bundle, and the bundle carries
+    /// every acl access row. Run as an ordinary write, it met two walls
+    /// (found by staging clones, 2026-11-24): each root row it created
+    /// minted the caller an access row (the bootstrap), so the bundle's own
+    /// row for the same pair was refused as `expected_absent`; and a caller
+    /// with no access row of its own was refused the bundle's access rows,
+    /// and every ref into an acl root, as `not_found`.
+    ///
+    /// So an import runs as the space's **owner**, under rule 6's view (the
+    /// acl link entities' and roots' guards cleared), flagged as owner
+    /// administration, and with no bootstrap row. It widens nothing: rule 6
+    /// already lets the owner grant themselves any acl level, so every row
+    /// restored here is one the owner could write by hand. Every other
+    /// guard is evaluated as for any caller. `owner` is a member id, and a
+    /// member who is not the space's owner is refused.
+    pub fn run_restore_on(
+        &self,
+        db: &dyn WriteDb,
+        log: &mut WriteLog,
+        call: &str,
+        owner: &str,
+    ) -> Result<Value, String> {
+        if !self.is_space_owner(db, owner)? {
+            return Err(format!(
+                "not_owner: an import restores acl rows as the space's owner, and `{owner}` is \
+                 not its owner"
+            ));
+        }
+        let mut view = self.with_acl_guards_cleared();
+        view.restoring = true;
+        view.run_write_body(db, log, call, Some(owner), true)
+    }
+
     /// Does rule 6 apply to this call? Answered once, before planning.
     ///
     /// Both halves must hold: the caller is a space **owner**, and every
@@ -2457,7 +2492,13 @@ impl Fixture {
         // OWNER the repair path for every acl row in their space, checked
         // at the door once per call, so no arrangement of data can leave a
         // row nobody can administer.
-        let acl_root = e.acl_levels.as_ref().filter(|_| converging.is_none());
+        // Nor does an import's create: the bundle carries the access rows
+        // (`run_restore_on`), and minting the caller's too made the
+        // bundle's own row for the same pair a duplicate.
+        let acl_root = e
+            .acl_levels
+            .as_ref()
+            .filter(|_| converging.is_none() && !self.restoring);
         let grants = match acl_root {
             None => false,
             Some(_) => self.caller_is_space_member(db, caller)?,

@@ -727,6 +727,12 @@ Per tenant, ruled seamless (27c):
 
 This replaces 25i's hold-closed for every case where X is still served.
 
+**Built 2026-11-23 (increment 7)** for additive steps, on a tenant with a
+database of its own. A tenant on the deployment's own database moves with
+the activation, since that database was gated first. The hold-closed stays
+for a tenant already pinned to the active version whose database is
+behind. Step 3 (backfill) is increment 10b.
+
 Added by the review of 2026-11-23:
 
 - **The gate in step 4 includes the external check.** It is in `plan_with`
@@ -1264,7 +1270,7 @@ round is about 35 minutes for the full suite.
 | 5 | **Branch tenants.** `--branch`, name mapping, seed step, ephemeral dev saves, explicit delete. | M | 3, 4a | 2 branches served side by side in dev | 27g (first half) |
 | 6 | **Release check.** Designed in §2.8 (review 2026-11-23), steps R1 to R3: the checked set, digests, functions under the new runtime, `auth` ranges, the `ordo release-check` mode of the one image, the boot-time run, the override. | M | 3 | an upgrade with an uncompilable version names it and its tenants, and every other tenant serves; the notes upgrade test passes through it | none |
 | 6b | **Language editions and `ordo fix`.** §2.8, step R4. | M | 6 | an old edition loads within its window and `ordo fix` rewrites it | none |
-| 7 | **Seamless additive move.** Expand, gate, supported set, switch pin. | M | 3 | a refused change leaves the tenant serving X, and the deployment owner sees why | 27c (additive) |
+| 7 | **Seamless additive move.** Expand, gate, supported set, switch pin. **Built 2026-11-23:** an activation pins a tenant with a database of its own only when the apply's walk brought that database to Y; every other one keeps its pin on X and gets an open move in `$moves` (`Versions::activate_with`, phase `expanding`, `waiting` or `refused`, with `reason`). The catch-up's sweep expands the database (`bring_forward`), whose gate is `schema_state` over Y; the supported set is the database's `$migrations` `version` row for Y beside X's shape, which `Spaces::fits` checks for a tenant on X. Then `Versions::finish_moves` switches the pin, cause `move`, in one transaction with its `$pins` row. Unreachable is `waiting` and swept again (Q10); a refusal by name is `refused` and not retried for Y. The owner reads each move on `std.deployment.tenants` (`move`), in the apply's report and in `ordo apply`'s wait. `Versions::pin` closes a tenant's open move. Test: `notes_app.rs`, `a_change_one_tenants_data_cannot_take_leaves_that_tenant_serving_its_version`. Not built: a command to retry a refused move (a new version retries it); the console does not show moves. | M | 3 | a refused change leaves the tenant serving X, and the deployment owner sees why | 27c (additive) |
 | 7a | **Evolution through the examples** (new, review 2026-11-23; owner, 2026-11-23). `examples/notes-v3`: one additive change, one rename with `prev`, one removed field. The harness applies it over a running notes v2 with a browser open, and note-viewer reads through it. Later increments add cases to it. | M | 7 | the notes page keeps every note across v2 to v3 with no reload error; the test is in the example's own e2e | none |
 | 7b | **Federation under versions** (new, review 2026-11-23). `plan-evolution-federation.md`, steps F1 to F6: readers named in a plan, column grants that follow the served fields, every loaded version checked against its peers, the checks in rollback and promotion. | M, in 2 parts: F1, F3, F4 with 8; F2, F5, F6 with 11a | 7, 8, 11a | note-viewer never reads a stale column: it reads through the soak, then is refused naming the fix | none |
 | 8 | **Stored plans.** Graph, `ordo evolve --from --to` as the door op `std.deployment.evolve` that replaces `ordo migrate --apply --direct` (review 2026-11-23), re-render and plan digest, per-tenant stale check, system SQL at run time, receipt, replay. | L | 2 | a plan re-rendered in staging matches dev's digest; a tenant 3 behind replays 3 steps | 27a, 27b, 27an (hint) |

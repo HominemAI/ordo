@@ -872,6 +872,13 @@ Increment 3 grows the same table into the state machine of §7.1.
 
 > **Current behaviour that 27c replaces.** A tenant behind is held closed
 > (`SchemaBehind`, 15-second catch-up). See `plan-versions.md`.
+>
+> **Replaced for class A on 2026-11-23** (`plan-versions.md` §2.1,
+> increment 7). A tenant with a database of its own keeps its pin on the
+> version it serves until its database takes the new one and is gated.
+> Then its pin moves. A refused change leaves it serving, with the reason
+> on its move in `$moves` (`std.deployment.tenants`). What follows is how
+> the catch-up brings a database forward, which the move still uses.
 
 **What was seen.** The notes program lost its `gone` field. `serve.sh`
 applied the new version, the deployment's database moved, and the owner's

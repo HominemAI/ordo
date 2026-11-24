@@ -14,13 +14,14 @@
  * 2. Staging clones Ada's tenant (on 0.3.0), stores 0.3.3 and the plan,
  *    and rehearses it on the clone: green, signed with a key staging made
  *    itself (Q11: nothing to set up).
- * 3. Production stores its own plan for the step and `--run` is refused:
- *    staging's signature was not accepted here. The refusal names
+ * 3. Production stores its own plan for the step, and running it on Ada's
+ *    tenant (`ordo evolve --tenant`) is refused: staging's signature was
+ *    not accepted here. The refusal names
  *    `ordo rehearsals rehearse` and `accept`.
  * 4. Production accepts the rehearsal, read from staging as the developer:
  *    the signature checks and production renders the same digest.
  *
- * A regression looks like a `--run` that is not refused, a rehearsal that
+ * A regression looks like a step that runs unrefused, a rehearsal that
  * is not signed, or an acceptance whose digest is not staging's.
  *
  * It puts staging in production's chain and takes it out at the end, so it
@@ -119,6 +120,7 @@ test('production refuses a plan digest staging did not sign, and accepts the one
   const name = unique('Ada');
   const ada = await owner(name);
   let space = '';
+  let tenant = '';
   try {
     await addNote(ada.page, unique('Rehearsed '), 'A note the rehearsal carries, masked.');
     await test.step("staging clones Ada's tenant on 0.3.0", () => {
@@ -135,6 +137,9 @@ test('production refuses a plan digest staging did not sign, and accepts the one
       const out = ok(r);
       space = /^cloned .* into \S+ \((\S+)\)$/m.exec(out)?.[1] ?? '';
       expect(space, out).not.toBe('');
+      // Her tenant's id in production, which the clone names.
+      tenant = /^cloned (\S+) from production into/m.exec(out)?.[1] ?? '';
+      expect(tenant, out).not.toBe('');
       expect(out).toMatch(/^version +0\.3\.0$/m);
     });
   } finally {
@@ -157,8 +162,12 @@ test('production refuses a plan digest staging did not sign, and accepts the one
     expect(signed).toMatch(/^sha256:/);
   });
 
-  await test.step('production refuses to run the step: staging signed nothing it accepted', () => {
-    const r = d.main(['evolve', '--from', '0.3.0', '--to', '0.3.3', '--run', ...prod()]);
+  await test.step("production refuses to run the step on Ada's tenant: staging signed nothing it accepted", () => {
+    // Production's own plan for the step. Its own database already records
+    // 0.3.3 (the apply above changed no table), so the step that would run
+    // is on Ada's tenant database, still on 0.3.0.
+    ok(d.main(['evolve', '--from', '0.3.0', '--to', '0.3.3', ...prod()]));
+    const r = d.main(['evolve', '--tenant', tenant, '--to', '0.3.3', ...prod()]);
     expect(r.code, r.out).not.toBe(0);
     const said = `${r.out}${r.err}`;
     expect(said).toContain('plan_not_rehearsed');

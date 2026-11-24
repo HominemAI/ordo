@@ -1332,7 +1332,7 @@ an edited attestation, another person, too old, another key, a clone
 reader, a non-clone, no plan, no staging), unit tests in `rehearsals.rs`
 (signature, Q14 marking, the age setting), and the notes e2e project
 `rehearsal` (v3 to 0.3.3 rehearsed on a clone of Ada's tenant; production's
-`--run` refused, then the rehearsal accepted with the same digest).
+its step on her tenant (`ordo evolve --tenant`) refused, then the rehearsal accepted with the same digest).
 
 Not built yet:
 
@@ -1805,7 +1805,7 @@ to an example's own e2e, beside its host tests:
 | 10, 10c | teamspace, 3 tenants | each tenant shows its own version's page during a rolling rollout |
 | 11a, 11b | notes-v3 | type into a note during the backfill; nothing typed is lost; roll back in the soak |
 | 12 | notes, 2 deployments | staging clones a production tenant through the doors; its version comes down with it; staging's door serves it, 3 notes masked, under a neutral name (project `clone`) |
-| 12b | notes, 2 deployments | staging rehearses v3 to 0.3.3 on a clone and signs it; production's `--run` is refused until it accepts the rehearsal, with the same digest (project `rehearsal`) |
+| 12b | notes, 2 deployments | staging rehearses v3 to 0.3.3 on a clone and signs it; production refuses the step on a tenant (`ordo evolve --tenant`) until it accepts the rehearsal, with the same digest (project `rehearsal`) |
 | 13 | notes-v3 | seal a field on live data; the page reads it and the table holds no plaintext |
 | 17 | notes-v3 | snapshot on v2, move, restore, read the v2 notes |
 | CLI | one example, start to end | `ordo dev`, `apply`, `evolve`, `rollout status`, `rollback`, each through the door (owner, 2026-11-23, ask 5) |

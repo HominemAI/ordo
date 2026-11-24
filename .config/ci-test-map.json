@@ -168,6 +168,7 @@
     "crates/ordo-host/src/boot_record.rs": "all",
     "crates/ordo-host/src/bucket_ops.rs": "all",
     "crates/ordo-host/src/ceremonies.rs": "all",
+    "crates/ordo-host/src/clones.rs": "all",
     "crates/ordo-host/src/consent.rs": "all",
     "crates/ordo-host/src/console_keys.rs": "all",
     "crates/ordo-host/src/contact_email.rs": [

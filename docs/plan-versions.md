@@ -1290,6 +1290,50 @@ Added by the review of 2026-11-23:
   or a person the staging deployment allows. Cloned members' own sign-ins
   are never carried.
 
+**Built, session 1 (2026-11-24, increment 12).** `crates/ordo-host/src/clones.rs`:
+
+1. On staging, `ordo clones clone <tenant> --reason "..."`
+   (`std.deployment.cloneIn`) asks production's door for the tenant as the
+   person, with their own token for production (`step_door.rs`,
+   `clone_out`). Production must answer as `production` and for the same
+   person.
+2. Production (`std.deployment.cloneOut`) exports the tenant at its pinned
+   version and masks it there (`mask_bundle`). Masked values keep their
+   type: text becomes `masked-<tag>`, unique per row; numbers 0; dates
+   2000-01-01; a JSON document keeps its shape with every leaf replaced;
+   an optional field null. Refs keep their ids.
+3. Always dropped, masking off included: files, the command log (its
+   images hold the old values), each member's name and sign-in link.
+4. The bundle is sealed to staging's clone key (`ordo_crypto::recipient`:
+   X25519, then XChaCha20-Poly1305, bound to the tenant, the source
+   identity and the environment). Staging prints its key with `ordo clones
+   key`; production records it with `ordo clones set-key staging <key>`.
+   The secret is sealed under staging's own keys.
+5. Staging finds the version it holds with the same source identity, makes
+   a new tenant pinned to it, writes the members with principal
+   `$clone:<id>`, and imports the rows through the write protocol, so every
+   value is sealed again under staging's keys. Recorded in `$clones` and on
+   both deployments' streams.
+6. Q12: a staging deployment admin opens a clone's app ops as its founding
+   owner, recorded as the agent beside it. `clone.readers` names others
+   signed in to staging. The door never maps a `$clone:` principal, so a
+   cloned member cannot sign in.
+7. Foreign tables are not exported, and the answer names them.
+
+`clone.mask` and `clone.readers` are stored in `$version_settings` (Q15),
+set with `ordo clones set mask|readers <value>`.
+
+Not built yet:
+
+- Sinks for mail, push and egress in staging.
+- A version staging does not hold coming down with the clone. It is
+  refused, naming `ordo promote <version>`.
+- A tenant with its own database or bucket: the clone lands in staging's
+  shared database, and no production credential is carried, but its
+  attachment is not recreated.
+- The clone travels in one answer, at most 64 MiB.
+- The notes example test.
+
 ### 3.5 Rollout is which pins move when
 
 Ruled 2026-10-01 (27h). Ruled 2026-11-02 (D15). The maintenance window was
@@ -1436,7 +1480,7 @@ round is about 35 minutes for the full suite.
 | 10b | **Backfill worker.** `plan-backfill-dual-writes.md` steps B1, B3, B6 (review 2026-11-23): `$backfills`, the chunk loop, verify, the summarised audit group, backfill functions. **Built 2026-11-23** (37bba572, 3f931aed, 0d4082f5, f684a30a): a stored plan fills a field it makes required (B2, B5) with `--fill <entity>.<field>=<Ordo expression>` or `=fn <name> [secrets ..] [hosts ..]`; the step expands the column nullable, `backfill.rs` fills it in chunks with its cursor in `$backfills` in the same transaction, verify recomputes each space's count and content hash, then `NOT NULL` lands. Until then the database records the version before the step, so a run again resumes from the cursor. 5 failed chunks mark it `dead`; a run again retries. The audit record is trailer `0x04` on the chain: one summarised group per space, or with `--audit-images` one image group per space per chunk; goldens of every older group kind landed first. Backfill functions run once per chunk with exactly the declared secrets and hosts (Q14), and the receipt marks them not reproducible. Tests: `backfill.rs` (the kill mid-chunk, verify, images, dead, render refusals, functions), `notes_app.rs` (`a_backfill_over_existing_notes_shows_the_new_values_once_it_completes`), the command log's goldens. **Not built:** the Playwright test in `examples/notes-v3` (the harness holds no deployment-owner credential for `ordo evolve`; asked), live writes during the backfill (11a), the settings stored in Ordo (`backfill.chunk_rows` and the rest are defaults until 10 stores them, Q15), the move lock and `backfill.concurrency` across tenants (11b), sealed backfills (13), refusing `ordo revert` of a backfill group by name. | L | 7, 8 | a backfill killed midway resumes from its cursor; the chain's goldens hold | 13c (backfill half) |
 | 11a | **Dual writes on one tenant** (split from 11, review 2026-11-23). `plan-backfill-dual-writes.md` steps B2, B4: the move overlay in the host write path, both versions' guards, the soak, the reverse writes, soak close into `$orphans`. Research: 2 to 3 tries. **Built 2026-11-24, try 1 (branch `evo-11a-dual-writes`, on increments 14 and 15):** the move overlay (`ordo_exec::overlay`) runs in the write's own transaction after the op's statements: the forward mapping while the tenant serves X, the reverse while it soaks on Y, each side's `required` as a guard; a refused write is `check_violation` naming both versions. A stored rename (`prev`) is copied by the backfill worker; verify under live writes checks the mapping on every row. `$moves` holds the step and its overlays; opening, the switch, a revert and the close each raise the pin epoch and the fence. `ordo evolve --tenant <id> [--budget n] [--chunk-rows n] [--soak 7d]` runs the move (`std.deployment.replay`); `--revert` and `--close-soak` (`std.deployment.revertSoak`, `closeSoak`); the catch-up closes a soak at `soak_until`. The close lands the `NOT NULL`, records Y, writes `$orphans` and makes the reader grants again (Q1, F2). Design and findings: `plan-backfill-dual-writes.md` §3, §8. Tests: `notes_app.rs` (`a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keeps_every_write`), notes e2e project `moves`. **Not built:** a tenant on the deployment's own database (shared, 11b); dual writes for a backfill function (one-way, D16); the rehearsal on a copy of real data; the "changing" notice and F5, F6. | L | 10b | a rename on 1 tenant under live writes loses no write; a revert in the soak keeps every write | 13c (reshaped) |
 | 11b | **Every tenant** (split from 11, review 2026-11-23). Step B5: moves driven by a rollout, shared databases, `ordo rollback` and its `--dry-run`, grants stay killed. | M | 10, 11a | a rename on 3 tenants under live writes loses no write; a rollback in the soak keeps every write | 27c |
-| 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
+| 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. **Session 1 built 2026-11-24** (branch `evo-12-clones`, §3.4 "Built"): `clones.rs`; production masks before export (deny by default, `clone.mask`, `off` opt-in), drops files, the command log and every member's name and sign-in link; the bundle is sealed to staging's clone key (`ordo_crypto::recipient`) recorded with `ordo clones set-key`; staging reads it from production's door as the person, pins a new tenant to the version with the same source identity and imports it under its own keys; Q12 built: a staging admin or a `clone.readers` person opens it as its founding owner, and a cloned member's `$clone:` principal is never mapped. Door ops `std.deployment.cloneKey`, `setCloneKey`, `cloneOut`, `cloneIn`, `clones`, `setCloneSetting`; `ordo clones key\|set-key\|clone\|list\|set`. Tests: `ordo-host/tests/clones.rs` (2 real doors: the clone serves masked notes through staging's door, no production value anywhere in staging's database, a cloned member refused, each refusal), `ordo-cli/tests/clones_cli.rs`. **Not built:** sinks, a version staging does not hold (refused naming `ordo promote`), a tenant's own database or bucket recreated, the notes example test. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
 | 12b | **Signed rehearsal (provisional, §3.2).** | M | 8, 12 | production refuses a plan digest staging did not sign | 27f (rest) |
 | 13 | **Sealed backfills.** No plaintext dual write, plaintext dropped on verify, `Purpose::Migration`. | L | 11b | sealing on 3 tenants under live writes verifies by count and hash, and no plaintext column remains | 13d |
 | 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). **Built 2026-11-23** (239afd67, 525a781d, aefe7a8a): `$orphans` in each database (`ordo_exec::orphans`), written wherever a database is brought to a version that stops declaring a field or an entity: the deployment's own apply, each tenant's database brought forward, each stored step run (`schema_apply::record_orphans`). Each row has its columns, a sealed flag, a drop date and, once pruned, a tombstone. A version that declares the field again removes its row. Erasure deletes a space's rows from an orphaned table too, and names the orphans it reached (`std.space.delete`, `orphans`). Export writes each orphan under `orphans/` with the row's id. `std.deployment.orphans` and `ordo evolve --orphans` list them. `std.deployment.prune` and `ordo evolve --prune <entity.field>`: the first ask prunes nothing and says what would go; `--confirm <name>` prunes; in production `--confirm-deployment <domain>` too. Refused when `prune.enabled` is off (off in production; `ordo environments set prune on`), for a name no database records, and for a field the active version or a pinned one still declares. The reader rule (Q1): a table on a `reader` line that holds an orphaned column is granted by column, without it. The reader's check holds the entity with `external_changed`, naming the column, the read app and the fix. Tests: `orphans.rs`, `reader_grants.rs` (`a_reader_loses_an_orphaned_column_with_a_named_error`); notes e2e project `orphans` (`tests/orphans/orphans.spec.ts`); note-viewer e2e project `orphans` (`tests/orphans/orphaned-column.spec.ts`, fixture `notes-no-tags`). **Found by it:** `std.space.delete` failed on a tenant with a database of its own, which had no `$logconsumers`; erasure now makes it. **Not built:** soaks (11a), so an orphan is recorded when the database moves, not at a soak's close; nothing drops at the drop date by itself; the language cannot mark a field personal, so every orphan gets a drop date; restorable versions (17) are not yet checked by pruning; an orphaned `public` field (§1.14) is not handled apart. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |

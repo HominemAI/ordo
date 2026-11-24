@@ -898,7 +898,7 @@ fn sealed_under_readers(
     for bf in backfills.iter().filter(|b| b.sealing_from.is_some()) {
         let mut names = BTreeSet::new();
         for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
-            if r.tables.iter().any(|t| *t == bf.entity) && names.insert(r.name.clone()) {
+            if r.tables.contains(&bf.entity) && names.insert(r.name.clone()) {
                 out.push(PlanError {
                     code: bf.code.into(),
                     change: format!("`{}.{}` becomes sealed", bf.entity, bf.field),

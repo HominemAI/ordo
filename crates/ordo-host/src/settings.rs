@@ -1530,6 +1530,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"none"#,
         r#""#,
     ),
+    s(
+        "ORDO_PROMOTION_PLAIN_HTTP",
+        "Databases and pools",
+        r#"off"#,
+        r#"on or off"#,
+    ),
     s("ORDO_BLOB_STORE", "Storage and blobs", r#"none"#, r#""#),
     s(
         "ORDO_BLOB_S3_ENDPOINT",

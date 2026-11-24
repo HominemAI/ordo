@@ -43,11 +43,18 @@
 //! - `std.deployment.setOwnEnvironment($name, $reason)`, `removeEnvironment`
 //!   and `renameEnvironment($name, $to, $reason)`: which environment this
 //!   deployment is, and removing or renaming one. Each is recorded.
+//! - `std.deployment.setEnvironmentDoor($name, $address?, $space?,
+//!   $handle?, $reason)`: where an environment's deployment answers, or
+//!   clear it. What `ordo environments door` does.
+//! - `std.deployment.setPromotionSetting($setting, $value, $reason)`:
+//!   `promotion.skip_staging`. What `ordo environments set` does.
 //! - `std.deployment.versionSource($version)`: a stored version as a
-//!   promotion's source, with its identity and whether it was activated.
-//!   What `ordo promote` reads from the step before.
-//! - `std.deployment.promote(...)`: the promotion gate on this deployment
-//!   ([`crate::promotion`]). What `ordo promote` does.
+//!   promotion's source, with its identity, whether it was activated and
+//!   who read it. What the next step's gate reads from this one.
+//! - `std.deployment.promote($version, $fromToken, $reason, $activate?)`:
+//!   the promotion gate on this deployment ([`crate::promotion`]). It reads
+//!   the version from the step before itself, with the caller's own token
+//!   for it. What `ordo promote` does.
 //! - `std.deployment.evolve`, `std.deployment.plans` and
 //!   `std.deployment.replay`: stored plans ([`crate::evolve`]). What `ordo
 //!   evolve` does.
@@ -132,6 +139,11 @@ pub const RENAME_ENVIRONMENT: &str = "std.deployment.renameEnvironment";
 pub const VERSION_SOURCE: &str = "std.deployment.versionSource";
 /// **Promote a version into this deployment**, through the gate.
 pub const PROMOTE: &str = "std.deployment.promote";
+/// Where an environment's deployment answers.
+pub const SET_ENVIRONMENT_DOOR: &str = "std.deployment.setEnvironmentDoor";
+/// Set a promotion setting (`promotion.skip_staging`).
+pub const SET_PROMOTION_SETTING: &str = "std.deployment.setPromotionSetting";
+
 /// **Render, check and store a plan** from one stored version to another
 /// (`plan-versions.md` §2.3), and run it on the deployment's own database
 /// when asked. What `ordo evolve --from --to` does.
@@ -154,7 +166,7 @@ pub const ROLLOUT_ABORT: &str = crate::rollouts::ABORT;
 pub const ROLLOUT_FINISH: &str = crate::rollouts::FINISH;
 pub const ROLLOUT_HOLD: &str = crate::rollouts::HOLD;
 
-pub const OPS: [&str; 33] = [
+pub const OPS: [&str; 35] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -176,6 +188,8 @@ pub const OPS: [&str; 33] = [
     RENAME_ENVIRONMENT,
     VERSION_SOURCE,
     PROMOTE,
+    SET_ENVIRONMENT_DOOR,
+    SET_PROMOTION_SETTING,
     EVOLVE,
     PLANS,
     REPLAY,
@@ -458,7 +472,7 @@ pub fn specs() -> Vec<OpSpec> {
                 required: false,
                 bounds: None,
             }],
-            &["own", "chain", "environment"],
+            &["own", "chain", "environment", "skipStaging"],
         ),
         spec(
             REGISTER_ENVIRONMENT,
@@ -481,6 +495,9 @@ pub fn specs() -> Vec<OpSpec> {
                         max: Some("64".to_string()),
                     }),
                 },
+                optional_text("address", 256),
+                optional_text("space", 64),
+                optional_text("handle", 63),
                 reason_param(),
             ],
             &["registered", "own", "chain"],
@@ -524,62 +541,93 @@ pub fn specs() -> Vec<OpSpec> {
                 "codeHashes",
                 "code",
                 "activated",
+                "readBy",
             ],
         ),
         spec(
             PROMOTE,
             OpKind::Write,
             vec![
-                ParamSpec {
-                    name: "sourceEnv".to_string(),
-                    ty: ParamTy::Text { max_len: Some(128) },
-                    required: true,
-                    bounds: None,
-                },
                 version_param("version"),
                 ParamSpec {
-                    name: "source".to_string(),
+                    // The caller's own token for the step before, from the
+                    // same sign-in. Sent there once, never stored.
+                    name: "fromToken".to_string(),
                     ty: ParamTy::Text {
-                        max_len: Some(1024 * 1024),
+                        max_len: Some(8 * 1024),
                     },
                     required: true,
                     bounds: None,
                 },
-                ParamSpec {
-                    name: "sourceId".to_string(),
-                    ty: ParamTy::Text { max_len: Some(128) },
-                    required: true,
-                    bounds: None,
-                },
-                ParamSpec {
-                    // A JSON object, code path to hash.
-                    name: "codeHashes".to_string(),
-                    ty: ParamTy::Text {
-                        max_len: Some(64 * 1024),
-                    },
-                    required: false,
-                    bounds: None,
-                },
-                ParamSpec {
-                    // As `std.deployment.apply`'s `code`.
-                    name: "code".to_string(),
-                    ty: ParamTy::Text {
-                        max_len: Some(apply_op::MAX_DOOR_CODE as u32),
-                    },
-                    required: false,
-                    bounds: None,
-                },
-                flag_param("activated"),
                 flag_param("activate"),
                 reason_param(),
             ],
             &["promoted", "from", "to", "sourceId", "report"],
+        ),
+        spec(
+            SET_ENVIRONMENT_DOOR,
+            OpKind::Write,
+            vec![
+                name_param(),
+                optional_text("address", 256),
+                optional_text("space", 64),
+                optional_text("handle", 63),
+                reason_param(),
+            ],
+            &["name", "door", "own", "chain"],
+        ),
+        spec(
+            SET_PROMOTION_SETTING,
+            OpKind::Write,
+            vec![
+                ParamSpec {
+                    name: "setting".to_string(),
+                    ty: ParamTy::Text { max_len: Some(64) },
+                    required: true,
+                    bounds: None,
+                },
+                ParamSpec {
+                    name: "value".to_string(),
+                    ty: ParamTy::Text { max_len: Some(8) },
+                    required: true,
+                    bounds: None,
+                },
+                reason_param(),
+            ],
+            &["setting", "value", "changed", "skipStaging"],
         ),
     ]
     .into_iter()
     .chain(crate::evolve::specs())
     .chain(crate::rollouts::specs())
     .collect()
+}
+
+fn optional_text(name: &str, max: u32) -> ParamSpec {
+    ParamSpec {
+        name: name.to_string(),
+        ty: ParamTy::Text { max_len: Some(max) },
+        required: false,
+        bounds: None,
+    }
+}
+
+/// The door the params name: `None` when `address` is absent or empty, and
+/// a refusal when an address comes without a space.
+fn door_of(
+    bound: &BoundParams,
+) -> Result<Option<crate::environments::Door>, crate::environments::EnvironmentRefusal> {
+    let Some(address) = text(bound, "address").filter(|a| !a.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let Some(space) = text(bound, "space").filter(|s| !s.trim().is_empty()) else {
+        return Err(crate::environments::EnvironmentRefusal::Door(
+            "an address needs the space that deployment answers its deploy ops in: \
+             `--space <its ORDO_SPACE>`"
+                .to_string(),
+        ));
+    };
+    crate::environments::Door::checked(address, space, text(bound, "handle")).map(Some)
 }
 
 fn name_param() -> ParamSpec {
@@ -596,7 +644,42 @@ fn environment_json(e: &crate::environments::Environment) -> serde_json::Value {
     json!({
         "name": e.name, "position": e.position, "own": e.own,
         "actor": e.actor, "reason": e.reason, "at": e.at,
+        "door": e.door.as_ref().map(|d| json!({
+            "address": d.address, "space": d.space, "handle": d.handle,
+        })),
     })
+}
+
+/// One environment of `std.deployment.environments`' answer, read back: what
+/// the CLI uses to work out where `ordo apply` and `ordo promote` go, with
+/// the host's own rules ([`crate::environments::check_apply_target`],
+/// [`crate::environments::promotion_source`]).
+pub fn environment_from_json(v: &serde_json::Value) -> Option<crate::environments::Environment> {
+    let door = match (v["door"]["address"].as_str(), v["door"]["space"].as_str()) {
+        (Some(address), Some(space)) => Some(crate::environments::Door {
+            address: address.to_string(),
+            space: space.to_string(),
+            handle: v["door"]["handle"].as_str().map(str::to_string),
+        }),
+        _ => None,
+    };
+    Some(crate::environments::Environment {
+        name: v["name"].as_str()?.to_string(),
+        position: u32::try_from(v["position"].as_u64()?).ok()?,
+        own: v["own"].as_bool()?,
+        actor: v["actor"].as_str().unwrap_or_default().to_string(),
+        reason: v["reason"].as_str().unwrap_or_default().to_string(),
+        at: v["at"].as_u64().unwrap_or(0),
+        door,
+    })
+}
+
+/// The chain in `std.deployment.environments`' answer.
+pub fn chain_from_json(row: &serde_json::Value) -> Vec<crate::environments::Environment> {
+    row["chain"]
+        .as_array()
+        .map(|a| a.iter().filter_map(environment_from_json).collect())
+        .unwrap_or_default()
 }
 
 /// The three settings, as both ops answer them. Unset reads as `null`.
@@ -1074,10 +1157,12 @@ pub async fn execute(
                 Some(n) => Some(envs.require(n).await.map_err(read)?),
                 None => None,
             };
+            let settings = envs.promotion_settings().await.map_err(read)?;
             json!({
                 "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
                 "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
                 "environment": named.as_ref().map(environment_json),
+                "skipStaging": settings.skip_staging,
             })
         }
         REGISTER_ENVIRONMENT => {
@@ -1088,10 +1173,21 @@ pub async fn execute(
                 .and_then(|v| v.as_u64())
                 .and_then(|n| u32::try_from(n).ok());
             let reason = text(bound, "reason").unwrap_or_default();
+            let refused = |e: crate::environments::EnvironmentRefusal| {
+                e.to_exec_error("the environment was not registered")
+            };
+            let door = door_of(bound).map_err(refused)?;
             let chain = crate::environments::Environments::on(&ops.pool)
-                .register(name, position, caller, reason, crate::runtime::now_secs())
+                .register_with_door(
+                    name,
+                    position,
+                    door,
+                    caller,
+                    reason,
+                    crate::runtime::now_secs(),
+                )
                 .await
-                .map_err(|e| e.to_exec_error("the environment was not registered"))?;
+                .map_err(refused)?;
             ops.record(
                 caller,
                 REGISTER_ENVIRONMENT,
@@ -1210,47 +1306,31 @@ pub async fn execute(
                 "env": env.name, "version": version, "source": stored.source,
                 "sourceId": source_id, "codeHashes": hashes,
                 "code": apply_op::code_text(&files), "activated": activated,
+                "readBy": caller,
             })
         }
         PROMOTE => {
             let get = |k: &str| text(bound, k).unwrap_or_default().to_string();
-            let flag = |k: &str, default: bool| {
-                bound.0.get(k).and_then(|v| v.as_bool()).unwrap_or(default)
-            };
-            let code = apply_op::parse_code(bound.0.get("code").and_then(|v| v.as_str()))
-                .map_err(|r| ExecError::new(r.code(), r.to_string()))?;
-            let code_hashes: std::collections::BTreeMap<String, String> =
-                match bound.0.get("codeHashes").and_then(|v| v.as_str()) {
-                    None => Default::default(),
-                    Some(raw) => serde_json::from_str(raw).map_err(|_| {
-                        ExecError::new(
-                            ordo_api::ErrorCode::InvalidParam,
-                            "`codeHashes` is not a JSON object from code path to hash",
-                        )
-                    })?,
-                };
-            let supplied = crate::promotion::SourceVersion {
-                env: get("sourceEnv"),
-                version: get("version"),
-                source: bound
-                    .0
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                source_id: get("sourceId"),
-                code_hashes,
-                code,
-                activated: flag("activated", false),
-            };
+            let activate = bound
+                .0
+                .get("activate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let reason = get("reason");
+            let version = get("version");
+            let credential = crate::promotion::SourceCredential::Person {
+                token: get("fromToken"),
+            };
             let done = crate::promotion::promote(
                 &ops.pool,
                 ops.pools.as_ref(),
-                supplied,
+                crate::promotion::PromoteRequest {
+                    version: &version,
+                    credential: &credential,
+                    reason: &reason,
+                    activate,
+                },
                 caller,
-                &reason,
-                flag("activate", true),
                 crate::runtime::now_secs(),
             )
             .await
@@ -1271,6 +1351,61 @@ pub async fn execute(
             json!({
                 "promoted": done.report.version, "from": done.from, "to": done.to,
                 "sourceId": done.source_id, "report": done.report.to_json(),
+            })
+        }
+        SET_ENVIRONMENT_DOOR => {
+            let name = text(bound, "name").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let refused = |e: crate::environments::EnvironmentRefusal| {
+                e.to_exec_error("the environment's door was not recorded")
+            };
+            let door = door_of(bound).map_err(refused)?;
+            let chain = crate::environments::Environments::on(&ops.pool)
+                .set_door(name, door.clone(), reason)
+                .await
+                .map_err(refused)?;
+            ops.record(
+                caller,
+                SET_ENVIRONMENT_DOOR,
+                "environment-door",
+                format!(
+                    "environment={name} address={} by={caller} reason={}",
+                    door.as_ref().map_or("cleared", |d| d.address.as_str()),
+                    reason.trim()
+                ),
+            );
+            let row = chain.iter().find(|e| e.name == name.trim());
+            json!({
+                "name": name.trim(),
+                "door": row.map(environment_json).map(|e| e["door"].clone()),
+                "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
+                "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
+        }
+        SET_PROMOTION_SETTING => {
+            let setting = text(bound, "setting").unwrap_or_default();
+            let value = text(bound, "value").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let (settings, changed) = crate::environments::Environments::on(&ops.pool)
+                .set_promotion_setting(setting, value, caller, reason, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the promotion setting was not changed"))?;
+            let shown = if settings.skip_staging { "on" } else { "off" };
+            if changed {
+                ops.record(
+                    caller,
+                    SET_PROMOTION_SETTING,
+                    "promotion-setting",
+                    format!(
+                        "setting={} value={shown} by={caller} reason={}",
+                        crate::environments::SKIP_STAGING,
+                        reason.trim()
+                    ),
+                );
+            }
+            json!({
+                "setting": crate::environments::SKIP_STAGING, "value": shown,
+                "changed": changed, "skipStaging": settings.skip_staging,
             })
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),

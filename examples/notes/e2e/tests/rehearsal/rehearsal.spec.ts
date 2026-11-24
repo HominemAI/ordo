@@ -24,9 +24,8 @@
  * 4. Break-glass (§3.2 item 6) is refused while staging answers. Then
  *    production's record of staging's door names a port nothing answers
  *    on, the developer breaks glass with a reason, `ordo rehearsals list`
- *    shows it active, and the step runs on Ada's tenant database (her pin
- *    then meets the promotion gate, as the version was applied here, not
- *    promoted). The door is put back.
+ *    shows it active, and the step runs on Ada's tenant database (run
+ *    alone, her pin then meets the promotion gate). The door is put back.
  * 5. Production accepts the rehearsal, read from staging as the developer:
  *    the signature checks and production renders the same digest.
  *
@@ -222,12 +221,13 @@ test('production refuses a plan digest staging did not sign, and accepts the one
     const list = ok(d.main(['rehearsals', 'list', ...prod()]));
     expect(list).toMatch(new RegExp(`^BREAK-GLASS\\n  ${from.replace(/\./g, '\\.')} to ${to.replace(/\./g, '\\.')} .*\\(active\\)  reason: ${reason}$`, 'm'));
     // The rehearsal gate lets the step run: her tenant's database is
-    // replayed. Production then refuses the pin by its other gate: here
-    // the version was applied to production, not promoted from staging.
+    // replayed. After `seal` she is pinned too; run alone, production
+    // refuses the pin by its other gate (the version was applied to
+    // production, not promoted), after the replay.
     const run = d.main(['evolve', '--tenant', tenant, '--to', to, ...prod()]);
     const ran = `${run.out}${run.err}`;
     expect(ran).not.toContain('plan_not_rehearsed');
-    expect(ran).toContain("the tenant's database was replayed");
+    expect(ran).toMatch(new RegExp(`replayed +${from.replace(/\./g, '\\.')} to |the tenant's database was replayed`));
     // Staging is back: production records its door again.
     ok(
       d.main([

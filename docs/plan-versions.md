@@ -1369,8 +1369,7 @@ another digest and an ended break-glass are refused; the step runs while it
 lasts), a unit test in `deployment_access.rs`, and the e2e project
 `rehearsal` (refused while staging answers; with staging's door dead, broken
 with a reason, listed active, and the step replays Ada's tenant database;
-her pin then meets the promotion gate, as the e2e applies the version to
-production rather than promoting it).
+run alone, without `seal`, her pin then meets the promotion gate).
 
 Not built yet:
 

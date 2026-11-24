@@ -195,6 +195,46 @@ describe('live: the hub and the stream it shares', () => {
   });
 });
 
+describe('the version header', () => {
+  const V = (v: string) => ({ 'x-ordo-tenant-version': v });
+
+  it('a read hook refetches when an answer names another version, with no live feed', async () => {
+    const client = new LiveDoor()
+      .reply(
+        { ...rowsOf('old shape'), headers: V('ver_a') },
+        { ...rowsOf('new shape'), headers: V('ver_b') },
+        { ...rowsOf('new shape'), headers: V('ver_b') },
+      )
+      .client();
+    const heard: [string, string][] = [];
+    client.onVersionChange((from, to) => heard.push([from, to]));
+    const m = await mount(() => useOpQuery(TASKS), { client });
+    mounted = m;
+    await until(() => m.result.current.rows.length === 1, 'the first rows');
+    expect(title(m.result.current.rows[0])).toBe('old shape');
+    // The first answer is the baseline: nothing fired.
+    expect(client.tenantVersion).toBe('ver_a');
+    expect(heard).toEqual([]);
+
+    // Any other call to the door shows the move.
+    await client.fetchOp(TASKS);
+    expect(heard).toEqual([['ver_a', 'ver_b']]);
+    await until(() => title(m.result.current.rows[0]) === 'new shape', 'the hook to read the new version');
+    // The refetch carries the same version: no loop.
+    await settle(30);
+    expect(heard).toHaveLength(1);
+  });
+
+  it('the same version again fires nothing', async () => {
+    const client = new LiveDoor().reply({ ...rowsOf('x'), headers: V('ver_a') }).client();
+    let fired = 0;
+    client.onVersionChange(() => (fired += 1));
+    await client.fetchOp(TASKS);
+    await client.fetchOp(TASKS);
+    expect(fired).toBe(0);
+  });
+});
+
 describe('live: a read hook follows the feed', () => {
   it('refetches on an invalidate event and not otherwise', async () => {
     const door = new LiveDoor().reply(rowsOf('one'), rowsOf('one'), rowsOf('one', 'two'));

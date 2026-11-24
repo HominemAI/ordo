@@ -860,6 +860,9 @@ impl<'a> Backfill<'a> {
             (FillMapping::Seal, _) => {
                 self.seal_chunk(&tx, &range).await?;
             }
+            (FillMapping::BlindIndex, _) => {
+                self.index_chunk(&tx, &range).await?;
+            }
             (FillMapping::Expr(src), None) => {
                 return Err(BackfillRefusal::Store(format!(
                     "the mapping `{src}` was stored without its SQL; render the plan again"
@@ -1132,6 +1135,114 @@ impl<'a> Backfill<'a> {
         Ok(())
     }
 
+    /// The sealed column a blind-index backfill (B8) reads.
+    fn sealed_col(&self) -> Option<String> {
+        self.fill.indexing_from.as_deref().map(q)
+    }
+
+    /// B8: one row's blind index, from its sealed value as stored, under
+    /// `lease` for its space. A null value indexes the null sentinel, as
+    /// the write path does.
+    fn index_of(
+        &self,
+        lease: &ordo_crypto::KeyLease,
+        space: &str,
+        id: &str,
+        sealed: Option<&str>,
+    ) -> Result<[u8; 32], BackfillRefusal> {
+        let keys = self.keys.as_ref().ok_or_else(|| BackfillRefusal::Seal {
+            space: space.to_string(),
+            why: "this node holds no key custody".into(),
+        })?;
+        let plain = match sealed {
+            None => None,
+            Some(hexed) => {
+                let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(hexed));
+                let open = keys
+                    .open_at(
+                        lease,
+                        &self.fill.entity,
+                        &self.fill.field,
+                        ordo_crypto::Anchor::Row(id),
+                        &bytes,
+                    )
+                    .map_err(|e| BackfillRefusal::Seal {
+                        space: space.to_string(),
+                        why: format!("row `{id}` does not open: {e}"),
+                    })?;
+                Some(String::from_utf8_lossy(&open).into_owned())
+            }
+        };
+        let normalize = self
+            .entity
+            .field(&self.fill.field)
+            .and_then(|f| f.normalize.clone());
+        let normalized = plain.map(|v| match normalize.as_deref() {
+            Some("lower") => v.to_lowercase(),
+            _ => v,
+        });
+        keys.blind_index(
+            &ordo_crypto::SpaceId(space.to_string()),
+            &self.fill.entity,
+            &self.fill.field,
+            normalized.as_deref().into(),
+        )
+        .map_err(|e| BackfillRefusal::Seal {
+            space: space.to_string(),
+            why: format!("blind index: {e}"),
+        })
+    }
+
+    /// Increment 13, B8: each row's sealed value opened under its space's
+    /// key and its blind index written. One lease per space per chunk.
+    async fn index_chunk(
+        &self,
+        tx: &ordo_exec::TxConn,
+        range: &str,
+    ) -> Result<(), BackfillRefusal> {
+        let Some(sealed) = self.sealed_col() else {
+            return Err(BackfillRefusal::Store(
+                "a blind-index backfill was stored without its sealed column; render the plan \
+                 again"
+                    .into(),
+            ));
+        };
+        let rows = tx
+            .rows(&format!(
+                "SELECT {sp}, \"id\", {sealed}::text FROM {t} WHERE {range} AND {c} IS NULL \
+                 ORDER BY {sp}, \"id\" FOR UPDATE",
+                sp = q(SPACE),
+                t = self.table(),
+                c = self.col(),
+            ))
+            .await?;
+        let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
+        for r in rows {
+            let (Some(space), Some(id)) =
+                (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+            else {
+                continue;
+            };
+            let value = r.get(2).cloned().flatten();
+            if lease.as_ref().is_none_or(|(s, _)| *s != space) {
+                lease = Some((space.clone(), self.lease(&space)?));
+            }
+            let (_, l) = lease.as_ref().expect("taken just above");
+            let digest = self.index_of(l, &space, &id, value.as_deref())?;
+            tx.rows(&format!(
+                "UPDATE {t} SET {c} = '\\x{}'::bytea WHERE {sp} = {} AND \"id\" = {} AND {c} IS NULL",
+                hex(&digest),
+                sql_lit(&space),
+                sql_lit(&id),
+                t = self.table(),
+                c = self.col(),
+                sp = q(SPACE),
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
     /// B6: the function computes the chunk's values, one call per space.
     async fn function_chunk(
         &self,
@@ -1240,7 +1351,8 @@ impl<'a> Backfill<'a> {
 
     async fn verify(&self, live: bool) -> Result<Verified, BackfillRefusal> {
         let out = self.verify_inner(live).await;
-        if let (Err(BackfillRefusal::Verify { .. }), Some(_)) = (&out, &self.fill.sealing_from) {
+        let sealed_kind = self.fill.sealing_from.is_some() || self.fill.indexing_from.is_some();
+        if let (Err(BackfillRefusal::Verify { .. }), true) = (&out, sealed_kind) {
             let tx = self.pool.begin_for(OpClass::AddressedWrite).await?;
             tx.rows(&format!(
                 "UPDATE {t} SET {c} = NULL WHERE {c} IS NOT NULL",
@@ -1291,6 +1403,7 @@ impl<'a> Backfill<'a> {
         };
         // No row left null. A sealed backfill leaves a null plaintext null.
         let plain = self.plain_col();
+        let sealed_src = self.sealed_col();
         let unfilled = match &plain {
             Some(p) => format!("{} IS NULL AND {p} IS NOT NULL", self.col()),
             None => format!("{} IS NULL", self.col()),
@@ -1340,18 +1453,22 @@ impl<'a> Backfill<'a> {
         let mut cursor: Option<(String, String)> = None;
         let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
         loop {
-            let page =
-                self.pool
-                    .rows(&format!(
+            let page = self
+                .pool
+                .rows(&format!(
                     "SELECT {sp}, \"id\", {c}::text{p} FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
                      LIMIT 5000",
                     sp = q(SPACE),
                     c = self.col(),
-                    p = plain.as_deref().map(|p| format!(", {p}")).unwrap_or_default(),
+                    p = plain
+                        .as_deref()
+                        .map(|p| format!(", {p}"))
+                        .or_else(|| sealed_src.as_deref().map(|p| format!(", {p}::text")))
+                        .unwrap_or_default(),
                     t = self.table(),
                     a = Self::after(&cursor),
                 ))
-                    .await?;
+                .await?;
             if plain.is_some() {
                 for r in &page {
                     let (Some(s), Some(id)) =
@@ -1389,6 +1506,31 @@ impl<'a> Backfill<'a> {
                             Some(format!("{s}/{id}")),
                             "holds a sealed value other than the row's plaintext: it changed \
                              after its chunk"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            // A blind-index backfill (B8) computes every row's index again
+            // from its sealed value and compares.
+            if sealed_src.is_some() {
+                for r in &page {
+                    let (Some(s), Some(id)) =
+                        (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+                    else {
+                        continue;
+                    };
+                    if lease.as_ref().is_none_or(|(x, _)| *x != s) {
+                        lease = Some((s.clone(), self.lease(&s)?));
+                    }
+                    let (_, l) = lease.as_ref().expect("taken just above");
+                    let want = self.index_of(l, &s, &id, r.get(3).cloned().flatten().as_deref())?;
+                    let held = r.get(2).cloned().flatten().unwrap_or_default();
+                    if held.strip_prefix("\\x").unwrap_or(&held) != hex(&want) {
+                        return Err(fail(
+                            Some(format!("{s}/{id}")),
+                            "holds a blind index other than its sealed value's: the value \
+                             changed after its chunk"
                                 .into(),
                         ));
                     }

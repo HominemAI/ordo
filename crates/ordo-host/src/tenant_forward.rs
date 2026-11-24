@@ -194,6 +194,7 @@ impl CatchUp {
     async fn forward_target(
         &self,
         t: ordo_exec::route::Target,
+        tenants: &[String],
         program: &Program,
         ctx: &crate::evolve::StepContext,
     ) -> sa::TenantApply {
@@ -202,6 +203,7 @@ impl CatchUp {
                 &self.control,
                 pool,
                 &t.label,
+                tenants,
                 program,
                 ACTOR,
                 ctx,
@@ -337,6 +339,9 @@ impl CatchUp {
             &self.control,
             &pool,
             space,
+            // Already pinned to the serving version: no pin follows, so a
+            // seal raises no fence.
+            &[],
             &program,
             ACTOR,
             &ctx,
@@ -691,7 +696,8 @@ impl CatchUp {
             let forwarded = futures::future::join_all(behind.into_iter().map(|t| async {
                 let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(now, Ordering::SeqCst);
-                let d = self.forward_target(t, &program, &ctx).await;
+                let tenants = movers.get(&t.label).cloned().unwrap_or_default();
+                let d = self.forward_target(t, &tenants, &program, &ctx).await;
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 d
             }))

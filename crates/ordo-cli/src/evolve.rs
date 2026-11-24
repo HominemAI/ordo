@@ -39,7 +39,8 @@ use crate::operator::{door_only, Flags, Outcome};
 pub(crate) const USAGE: &str = "\
 ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=rescale|keep[,...]]
             [--fill <entity>.<field>=<expression>|fn <name> [secrets a,b] [hosts h,i][;...]]
-            [--audit-images <entity>.<field>[,...]] [--digest <sha256:...>] [--run]
+            [--audit-images <entity>.<field>[,...]] [--keep-plaintext <entity>.<field>[,...]]
+            [--digest <sha256:...>] [--run]
             [--approve-sign-in-removal <count>]  --host <h> ...
     render the step, refuse it if it has errors, store it; print the receipt and its digest,
     then the pre-checks on every database, each issue with its fix.
@@ -51,6 +52,9 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     an expression over the row's own fields, or a backend function of the new version with
     the secrets and hosts it may use. A backfill runs in chunks and resumes from its cursor.
     Its audit record is one summary per tenant; --audit-images writes every row's images.
+    A step that seals a field drops its plaintext column once every row is sealed;
+    --keep-plaintext keeps it, orphaned, until pruned. Its values stay readable until then,
+    and in WAL and backups for good.
 ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent). A step that rewrites data moves the tenant
@@ -76,6 +80,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--places",
         "--fill",
         "--audit-images",
+        "--keep-plaintext",
         "--digest",
         "--run",
         "--list",
@@ -129,6 +134,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "places": flags.named_value("--places"),
             "fill": flags.named_value("--fill"),
             "auditImages": flags.named_value("--audit-images"),
+            "keepPlaintext": flags.named_value("--keep-plaintext"),
             "expectDigest": flags.named_value("--digest"),
             "run": flags.has("--run"),
             "approveSignInRemoval": flags.named_value("--approve-sign-in-removal"),

@@ -623,6 +623,11 @@ pub struct Choices {
     /// The apply path leaves it `false`, and B7 stays refused there. Not
     /// part of the stored options: every stored plan has it.
     pub stored: bool,
+    /// `seal.keep_plaintext` (`plan-versions.md` §2.2, D9): the fields
+    /// whose plaintext column a seal keeps, renamed
+    /// `<column>$plaintext` and orphaned, instead of dropping it. Off by
+    /// default; stated by name with `--keep-plaintext <entity>.<field>`.
+    pub keep_plaintext: std::collections::BTreeSet<(String, String)>,
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -652,6 +657,9 @@ pub enum FillMapping {
     /// under its space's key, at its row. No mapping: the value is the
     /// same, only its custody changes.
     Seal,
+    /// A blind-index backfill (B8, increment 13): each row's sealed value
+    /// opened under its space's key and its blind index written.
+    BlindIndex,
 }
 
 impl FillMapping {
@@ -674,6 +682,7 @@ impl FillMapping {
                 s
             }
             FillMapping::Seal => "seal".into(),
+            FillMapping::BlindIndex => "blind index".into(),
         }
     }
 
@@ -760,6 +769,23 @@ impl Choices {
             fill.audit = ordo_commandlog::BackfillAudit::Images;
         }
         Ok(())
+    }
+
+    /// Parse `notes.body,notes.title` into [`Choices::keep_plaintext`].
+    pub fn parse_keep_plaintext(&mut self, spec: &str) -> Result<(), String> {
+        for target in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (e, f) = target
+                .split_once('.')
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            self.keep_plaintext
+                .insert((e.trim().to_string(), f.trim().to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn keeps_plaintext(&self, entity: &str, field: &str) -> bool {
+        self.keep_plaintext
+            .contains(&(entity.to_string(), field.to_string()))
     }
 
     pub fn fill_for(&self, entity: &str, field: &str) -> Option<&Fill> {
@@ -1037,6 +1063,34 @@ pub async fn assess_with(
                 out.push(a);
                 continue;
             }
+        }
+        // B8 in a stored plan (increment 13): the worker opens every sealed
+        // value under custody, so a destroyed epoch refuses the backfill
+        // naming its row, rather than the plan, which holds no keys.
+        if let (Change::IndexSealedField { .. }, false) = (&a.change, choices.stored) {
+            a.refused.push(
+                "index_needs_stored_plan — a blind index is computed for every row by the \
+                 backfill worker; store the version with `ordo apply --no-activate`, then run \
+                 the step with `ordo evolve --from <version> --to <version> --run`"
+                    .into(),
+            );
+        }
+        if let (Change::IndexSealedField { entity, field }, true) = (&a.change, choices.stored) {
+            let extent = migrate::extent(pool, entity).await;
+            a.probe = Some(match extent {
+                Ok(x) => Ok(Probe::Clean(format!(
+                    "sealed `{entity}`.`{field}` to index: {} row(s) in {} space(s), one key \
+                     lease per space; a value under a destroyed epoch stops the backfill, \
+                     naming its row",
+                    x.rows, x.spaces
+                ))),
+                Err(e) => {
+                    a.refused.push(format!("probe_unavailable — {e}"));
+                    Err(e.to_string())
+                }
+            });
+            out.push(a);
+            continue;
         }
         let probed = probe(pool, schema, live, &a.change).await;
         match &probed {
@@ -2080,6 +2134,13 @@ pub struct BackfillStep {
     /// filled `column` is a new `bytea` beside it; once verified, the
     /// plaintext column is dropped and the sealed one takes its name.
     pub sealing_from: Option<String>,
+    /// A blind-index backfill (B8): the sealed column each row's index is
+    /// computed from. The filled `column` is `<field>$bidx`, made
+    /// `NOT NULL` once verified.
+    pub indexing_from: Option<String>,
+    /// `seal.keep_plaintext`: the name the plaintext column is kept under,
+    /// orphaned, instead of being dropped.
+    pub kept_plaintext: Option<String>,
 }
 
 impl BackfillStep {
@@ -2099,6 +2160,12 @@ impl BackfillStep {
         if let Some(plain) = &self.sealing_from {
             j["sealFrom"] = serde_json::json!(plain);
         }
+        if let Some(kept) = &self.kept_plaintext {
+            j["keptAs"] = serde_json::json!(kept);
+        }
+        if let Some(from) = &self.indexing_from {
+            j["indexFrom"] = serde_json::json!(from);
+        }
         j
     }
 
@@ -2109,6 +2176,7 @@ impl BackfillStep {
             "B4" => "B4",
             "B5" => "B5",
             "B7" => "B7",
+            "B8" => "B8",
             _ => return None,
         };
         Some(BackfillStep {
@@ -2117,13 +2185,22 @@ impl BackfillStep {
             field: v["field"].as_str()?.to_string(),
             column: v["column"].as_str()?.to_string(),
             column_ty: v["type"].as_str()?.to_string(),
-            mapping: FillMapping::parse(v["mapping"].as_str()?).ok()?,
+            // A seal's mapping is `seal`, which reads back as no expression.
+            mapping: if v["sealFrom"].is_string() {
+                FillMapping::Seal
+            } else if v["indexFrom"].is_string() {
+                FillMapping::BlindIndex
+            } else {
+                FillMapping::parse(v["mapping"].as_str()?).ok()?
+            },
             sql: v["sql"].as_str().map(String::from),
             audit: match v["audit"].as_str()? {
                 "images" => ordo_commandlog::BackfillAudit::Images,
                 _ => ordo_commandlog::BackfillAudit::Summarised,
             },
             sealing_from: v["sealFrom"].as_str().map(String::from),
+            kept_plaintext: v["keptAs"].as_str().map(String::from),
+            indexing_from: v["indexFrom"].as_str().map(String::from),
         })
     }
 }
@@ -2142,7 +2219,9 @@ fn seal_step(
     e: &ordo_schema::Entity,
     live: &LiveShape,
     field: &str,
-) -> Result<(BackfillStep, Vec<String>), Box<Refused>> {
+    version: &str,
+    keep_plaintext: bool,
+) -> Result<SealStep, Box<Refused>> {
     let refuse = |class: &'static str, why: String| -> Box<Refused> {
         Box::new(Refused {
             change: c.clone(),
@@ -2159,11 +2238,11 @@ fn seal_step(
     };
     if f.indexed || f.unique {
         return Err(refuse(
-            "sealed_index_backfill_not_built",
+            "seal_then_index",
             format!(
-                "`{}.{field}` becomes `sealed indexed` or `sealed unique`: its blind index must \
-                 be computed for every row in every space (§7.3, B8), which is not built. Seal \
-                 it plain in one version, then add `indexed` in a later one",
+                "`{}.{field}` becomes `sealed indexed` or `sealed unique` in one step. Its \
+                 blind index is computed from the sealed value, so seal it plain in one version, \
+                 then add `indexed` in a later one (B8, §5 D5)",
                 e.name
             ),
         ));
@@ -2199,18 +2278,63 @@ fn seal_step(
     let not_null = ordo_schema::ddl::physical_columns(e)
         .iter()
         .any(|pc| pc.name == f.column() && pc.not_null);
-    let mut after = vec![format!(
-        "ALTER TABLE {table} DROP COLUMN {plain};\n\
-         ALTER TABLE {table} RENAME COLUMN {} TO {plain};\n",
-        ordo_schema::ddl::q(&sealed)
-    )];
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let kept = keep_plaintext.then(|| kept_plaintext_column(f));
+    // **The seal recorded where it runs** (`$seals`, live writes during
+    // the seal): the expand takes `"$renames"` exclusively, as a rename's
+    // does, so every write after it reads the row and seals what it wrote,
+    // and every write before it has committed.
+    let record = vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        format!("{};\n", ordo_exec::overlay::SEALS_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+             \"version\") VALUES ({}, {}, 'seal', {}, {}, {}) ON CONFLICT (\"entity\", \"field\", \
+             \"kind\") DO UPDATE SET \"source\" = EXCLUDED.\"source\", \"target\" = \
+             EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\";\n",
+            lit(&e.name),
+            lit(field),
+            lit(&f.column()),
+            lit(&sealed),
+            lit(version),
+        ),
+    ];
+    // **The end, in one transaction under the same lock**: no write lands
+    // between its seal and the plaintext's drop. A row written outside the
+    // write path after verify, and left unsealed, refuses the end.
+    let gone = match &kept {
+        None => format!("ALTER TABLE {table} DROP COLUMN {plain};\n"),
+        Some(k) => format!(
+            "ALTER TABLE {table} RENAME COLUMN {plain} TO {};\n",
+            ordo_schema::ddl::q(k)
+        ),
+    };
+    let mut end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {sq} IS NULL AND {plain} IS NOT \
+         NULL) THEN RAISE EXCEPTION 'seal_unfinished: a row of {name}.{field} was written \
+         outside the write path after verify and is not sealed; run the step again'; END IF; \
+         END $ordo$;\n\
+         {gone}\
+         ALTER TABLE {table} RENAME COLUMN {sq} TO {plain};\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        sq = ordo_schema::ddl::q(&sealed),
+        name = e.name,
+    );
     if not_null {
-        after.push(format!(
+        end.push_str(&format!(
             "ALTER TABLE {table} ALTER COLUMN {plain} SET NOT NULL;\n"
         ));
     }
-    Ok((
-        BackfillStep {
+    end.push_str(&format!(
+        "DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = 'seal';\n",
+        lit(&e.name),
+        lit(field)
+    ));
+    Ok(SealStep {
+        backfill: BackfillStep {
             code: c.code(),
             entity: e.name.clone(),
             field: field.to_string(),
@@ -2220,9 +2344,131 @@ fn seal_step(
             sql: None,
             audit: ordo_commandlog::BackfillAudit::Summarised,
             sealing_from: Some(f.column()),
+            kept_plaintext: kept,
+            indexing_from: None,
         },
-        after,
-    ))
+        record,
+        after: vec![end],
+    })
+}
+
+/// The blind-index backfill for a sealed field that gains `indexed` (B8),
+/// and the end that lands once it verifies: the index made `NOT NULL`.
+/// Recorded in `$seals` as kind `index`, so a write by the version before,
+/// which seals the field and computes no index, writes the index too.
+fn index_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    field: &str,
+    version: &str,
+) -> Result<SealStep, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    let live_ty = live
+        .table(&e.name)
+        .and_then(|t| t.columns.get(&f.column()))
+        .map(|col| col.ty.clone())
+        .unwrap_or_default();
+    if live_ty != "bytea" {
+        return Err(refuse(
+            "seal_then_index",
+            format!(
+                "`{}.{field}` is not sealed before the step. Its blind index is computed from the \
+                 sealed value, so seal it plain in one version, then add `indexed` in a later \
+                 one (B8, §5 D5)",
+                e.name
+            ),
+        ));
+    }
+    if f.unique {
+        return Err(refuse(
+            "sealed_unique_backfill_not_built",
+            format!(
+                "`{}.{field}` becomes `sealed indexed unique`. Its duplicates can only be found \
+                 over the blind indexes the backfill computes, which is not built (§7.3, C1). \
+                 Add `indexed` in one version, then `unique` in a later one, which is not built \
+                 either",
+                e.name
+            ),
+        ));
+    }
+    let table = ordo_schema::ddl::q(&e.name);
+    let bidx = f.index_column();
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let record = vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        format!("{};\n", ordo_exec::overlay::SEALS_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+             \"version\") VALUES ({}, {}, 'index', {}, {}, {}) ON CONFLICT (\"entity\", \"field\", \
+             \"kind\") DO UPDATE SET \"source\" = EXCLUDED.\"source\", \"target\" = \
+             EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\";\n",
+            lit(&e.name),
+            lit(field),
+            lit(&f.column()),
+            lit(&bidx),
+            lit(version),
+        ),
+    ];
+    let end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {b} IS NULL) THEN RAISE \
+         EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
+         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n\
+         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n\
+         DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = 'index';\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        lit(&e.name),
+        lit(field),
+        b = ordo_schema::ddl::q(&bidx),
+        name = e.name,
+    );
+    Ok(SealStep {
+        backfill: BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: bidx,
+            column_ty: "bytea".into(),
+            mapping: FillMapping::BlindIndex,
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: Some(f.column()),
+        },
+        record,
+        after: vec![end],
+    })
+}
+
+/// A seal's statements (increment 13): its record in `$seals`, the
+/// backfill, and the end that lands once it verifies.
+struct SealStep {
+    backfill: BackfillStep,
+    record: Vec<String>,
+    after: Vec<String>,
+}
+
+/// The name `seal.keep_plaintext` keeps a sealed field's plaintext column
+/// under, orphaned.
+pub fn kept_plaintext_column(field: &ordo_schema::Field) -> String {
+    format!("{}$plaintext", field.column())
 }
 
 /// The backfill for a B2 or B5 change the plan fills, or the refusal.
@@ -2289,7 +2535,7 @@ fn backfill_step(
             )
         }
         FillMapping::Function { .. } => None,
-        FillMapping::Seal => {
+        FillMapping::Seal | FillMapping::BlindIndex => {
             return Err(refuse(
                 "mapping_invalid",
                 format!("`seal` is not a fill: a stored plan seals `{}.{field}` when the version declares it `sealed`", e.name),
@@ -2319,6 +2565,8 @@ fn backfill_step(
         sql,
         audit: fill.audit,
         sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
     })
 }
 
@@ -2686,9 +2934,15 @@ pub fn triage_counted(
             // through the worker, then drop the plaintext once it verifies
             // (D9). No plaintext dual write.
             Change::SealField { field, .. } if choices.stored => {
-                match seal_step(c, e, live, field) {
+                let keep = choices.keeps_plaintext(&e.name, field);
+                match seal_step(c, e, live, field, version, keep) {
                     Err(r) => refused.push(*r),
-                    Ok((b, contract)) => {
+                    Ok(SealStep {
+                        backfill: b,
+                        record,
+                        after: contract,
+                    }) => {
+                        steps.extend(record.into_iter().map(alter));
                         steps.push(alter(format!(
                             "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
                             ordo_schema::ddl::q(&e.name),
@@ -2706,6 +2960,48 @@ pub fn triage_counted(
                     }
                 }
             }
+            // A sealed field that gains its blind index, in a stored plan
+            // (B8, increment 13): expand the index column open to nulls,
+            // compute every row's index through the worker, then make it
+            // required once it verifies.
+            Change::IndexSealedField { field, .. } if choices.stored => {
+                match index_step(c, e, live, field, version) {
+                    Err(r) => refused.push(*r),
+                    Ok(SealStep {
+                        backfill: b,
+                        record,
+                        after: contract,
+                    }) => {
+                        steps.extend(record.into_iter().map(alter));
+                        steps.push(alter(format!(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
+                            ordo_schema::ddl::q(&e.name),
+                            ordo_schema::ddl::q(&b.column),
+                        )));
+                        after.extend(contract.into_iter().map(|sql| Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        }));
+                        backfills.push(b);
+                    }
+                }
+            }
+            Change::IndexSealedField { entity, field } => refused.push(Refused {
+                change: c.clone(),
+                class: "index_needs_stored_plan",
+                why: format!(
+                    "sealed `{entity}.{field}` gains a blind index. Every row's sealed value is \
+                     opened under its space's key and its index written by the backfill worker \
+                     (plan-versions.md increment 13). `ordo apply` does not run that. Store the \
+                     version with `ordo apply --no-activate`, then run the step with \
+                     `ordo evolve --from <version> --to <version> --run`"
+                ),
+                run: None,
+            }),
             Change::SealField { entity, field } => refused.push(Refused {
                 change: c.clone(),
                 class: "seal_needs_stored_plan",
@@ -2815,9 +3111,11 @@ fn rename_recorded(
     ]
 }
 
-/// Whether a step's statement is one of a rename's records in `$renames`.
+/// Whether a step's statement is one of a rename's records in `$renames`,
+/// or a seal's in `$seals`: each runs first in its transaction, the order
+/// every write takes the lock in.
 pub fn is_rename_record(sql: &str) -> bool {
-    sql.contains("\"$renames\"")
+    sql.contains("\"$renames\"") || sql.contains("\"$seals\"")
 }
 
 /// The old column of a rename keeps its `NOT NULL`, so an insert by the
@@ -2935,6 +3233,8 @@ fn rename_backfill(
             sql: Some(ordo_schema::ddl::q(from)),
             audit: ordo_commandlog::BackfillAudit::Summarised,
             sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: None,
         },
         close,
     ))

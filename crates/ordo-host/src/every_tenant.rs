@@ -191,8 +191,10 @@ pub async fn forward_tenant(
         Some(0) if steps.len() == 1 => run_move(cx, ctx, tenant, &steps[0], soak, actor).await,
         Some(i) => Err(runs_alone(tenant, &from, to, &steps, i)),
         None => {
+            let mut ctx = ctx.clone();
+            ctx.fence = seal_fence(cx.control, &steps, &[tenant.to_string()], &from, to).await?;
             let done = Box::pin(crate::evolve::replay_with(
-                cx.control, &target, tenant, to, actor, ctx,
+                cx.control, &target, tenant, to, actor, &ctx,
             ))
             .await?;
             if done.backfilling() {
@@ -207,6 +209,55 @@ pub async fn forward_tenant(
             Ok(Forward::Ready)
         }
     }
+}
+
+/// **A seal on the path** (increment 13 under live writes): its end drops
+/// the plaintext and raises the tenant's pin fence to the epoch of the pin
+/// that follows, so a node still on the version before writes nothing more
+/// there. So a seal is the last step before the pin, and its database is
+/// one tenant's. `None` when the path seals nothing.
+async fn seal_fence(
+    control: &Pool,
+    steps: &[StoredPlan],
+    tenants: &[String],
+    from: &str,
+    to: &str,
+) -> Result<Option<(String, i64)>, EvolveRefusal> {
+    let Some(i) = steps.iter().position(crate::evolve::sealing_step) else {
+        return Ok(None);
+    };
+    let stop = &steps[i].to;
+    if i + 1 < steps.len() {
+        return Err(EvolveRefusal::Options(format!(
+            "the stored path from `{from}` to `{to}` seals a field in the step from `{}` to \
+             `{stop}`, and a seal ends with the tenant's pin. Replay the tenant to `{stop}` \
+             first (`ordo evolve --tenant <id> --to {stop}`), then on to `{to}`",
+            steps[i].from,
+        )));
+    }
+    if tenants.is_empty() {
+        return Ok(None);
+    }
+    let [tenant] = tenants else {
+        return Err(EvolveRefusal::Run {
+            database: tenants.join(", "),
+            from: from.to_string(),
+            to: to.to_string(),
+            class: "seal_shared_database",
+            why: format!(
+                "the step to `{stop}` seals a field, and a seal ends with its tenant's pin, but \
+                 {} tenants share this database. Replay each with `ordo evolve --tenant <id>`",
+                tenants.len()
+            ),
+            transient: false,
+        });
+    };
+    let epoch = Versions::on(control)
+        .pin_of(tenant)
+        .await?
+        .map(|p| p.epoch)
+        .unwrap_or(0);
+    Ok(Some((tenant.clone(), epoch + 1)))
 }
 
 /// One move with dual writes, as far as this try goes.
@@ -255,11 +306,14 @@ async fn gate(
 /// activation's catch-up. `None` when no stored path leads there, and the
 /// apply path does it as before. A rewriting step is replayed as `ordo
 /// evolve --run` runs it on the deployment's own database: `$renames` keeps
-/// both columns of a rename current for every version writing there.
+/// both columns of a rename current for every version writing there. A
+/// seal raises the pin fence of `tenants`, the tenants moving on this
+/// database, to the pin the catch-up gives each next ([`seal_fence`]).
 pub async fn forward_database(
     control: &Pool,
     target: &Pool,
     label: &str,
+    tenants: &[String],
     program: &sa::Program,
     actor: &str,
     ctx: &StepContext,
@@ -268,14 +322,19 @@ pub async fn forward_database(
         Ok(ordo_exec::spacedb::TargetVersion::At(v)) if v != program.version => v,
         _ => return None,
     };
-    match crate::evolve::path(control, &from, &program.version).await {
-        Ok(s) if !s.is_empty() => {}
+    let steps = match crate::evolve::path(control, &from, &program.version).await {
+        Ok(s) if !s.is_empty() => s,
         _ => return None,
-    }
+    };
     let refused = |e: EvolveRefusal| sa::ForwardRefused {
         class: e.class(),
         why: e.to_string(),
         transient: e.transient(),
+    };
+    let mut ctx = ctx.clone();
+    ctx.fence = match seal_fence(control, &steps, tenants, &from, &program.version).await {
+        Ok(f) => f,
+        Err(e) => return Some(Err(refused(e))),
     };
     let done = match Box::pin(crate::evolve::replay_with(
         control,
@@ -283,7 +342,7 @@ pub async fn forward_database(
         label,
         &program.version,
         actor,
-        ctx,
+        &ctx,
     ))
     .await
     {

@@ -10,16 +10,19 @@
  * tenant's count and hash and that every sealed value opens to its
  * plaintext, then drops the plaintext column: `--run` on the deployment's
  * database, `--tenant` on each tenant's, which pins that tenant to 0.3.4.
- * 0.3.4 is activated. The page reads Ada's note, and a note written after
- * the seal, and the table holds no plaintext.
+ * Ada's seal stops at its budget after 1 note; with the page open she edits
+ * a note's body and writes a new one while it runs, and each write lands
+ * sealed beside its plaintext (`$seals`, increment 13 under live writes).
+ * The seal then runs to its end. 0.3.4 is activated. The page reads Ada's
+ * notes as last written, and a note written after the seal, and the table
+ * holds no plaintext.
  *
  * A regression looks like a seal under a reader that is not refused, a plan
- * with no sealed backfill, a refused run, a page that shows ciphertext or
- * nothing, or a body readable in the table.
+ * with no sealed backfill, a refused run, a write during the seal that is
+ * refused or lands unsealed, a page that shows ciphertext, nothing or an
+ * old body, or a body readable in the table.
  *
- * Not built here: live writes during the seal (increment 11a), and a
- * rollout that runs every tenant's step (11b). Nothing is written while a
- * seal runs here.
+ * Not built here: a rollout that runs every tenant's step (11b).
  *
  * It seals a field for the whole stack, so it runs after `clone`, before
  * `rehearsal`.
@@ -96,6 +99,10 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
     const title = unique('sealed-');
     const marker = unique('kept-under-key-');
     await addNote(page, title, `${marker} and more`);
+    // A second note, so Ada's seal can stop with one left.
+    const second = unique('sealed-second-');
+    const secondBody = unique('second-body-');
+    await addNote(page, second, secondBody);
     // Every person is a tenant with a database of their own (stack.sh).
     // Ada's is the one that holds her note.
     const dbs = sql(stack().pg.db, `SELECT DISTINCT db FROM "$spacedb"`).split('\n').filter(Boolean);
@@ -154,12 +161,44 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
       const ada = sql(stack().pg.db, `SELECT "$space" FROM "$spacedb" WHERE db = '${adaDb}'`);
       expect(spaces).toContain(ada);
       for (const space of spaces) {
-        const replayed = dev.ordo(['evolve', '--tenant', space, '--to', '0.3.4', ...door()]);
-        if (space !== ada) continue;
-        expect(replayed.code, `${replayed.out}\n${replayed.err}`).toBe(0);
-        expect(replayed.out).toContain('notes.body = seal');
-        expect(replayed.out).toMatch(/verified 1 row\(s\) in 1 space\(s\)/);
+        if (space === ada) continue;
+        dev.ordo(['evolve', '--tenant', space, '--to', '0.3.4', ...door()]);
       }
+      // Ada's seal stops at its budget: 1 chunk of 1 note.
+      const started = dev.ordo(['evolve', '--tenant', ada, '--to', '0.3.4', '--budget', '1', '--chunk-rows', '1', ...door()]);
+      expect(started.code, `${started.out}\n${started.err}`).toBe(0);
+      expect(started.out).toContain('stopped at its budget');
+      expect(sql(adaDb, `SELECT kind FROM "$seals"`), 'the seal is recorded in her database').toBe('seal');
+    });
+
+    const edited = unique('edited-while-sealing-');
+    const during = unique('written-while-sealing-');
+    const duringBody = unique('during-body-');
+    await test.step('while the seal runs, Ada edits a note and writes one: each lands sealed', async () => {
+      expect(servingVersion()).toBe('0.3.3');
+      await page.reload();
+      await signedIn(page);
+      await noteInList(page, title).click();
+      await page.getByRole('textbox', { name: 'Note', exact: true }).fill(`${edited} ${marker}`);
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveCount(0);
+      await addNote(page, during, duringBody);
+      await page.reload();
+      await signedIn(page);
+      await expect(noteInList(page, title)).toContainText(edited);
+      await expect(noteInList(page, during)).toContainText(duringBody);
+      // Both writes went through the seal overlay: sealed beside the
+      // plaintext, in their own transactions.
+      expect(sql(adaDb, `SELECT count(*) FROM notes WHERE title IN ('${title}', '${during}') AND "body$seal" IS NOT NULL`)).toBe('2');
+    });
+
+    await test.step("Ada's seal runs to its end and pins her", () => {
+      const ada = sql(stack().pg.db, `SELECT "$space" FROM "$spacedb" WHERE db = '${adaDb}'`);
+      const ended = dev.ordo(['evolve', '--tenant', ada, '--to', '0.3.4', ...door()]);
+      expect(ended.code, `${ended.out}\n${ended.err}`).toBe(0);
+      expect(ended.out).toContain('notes.body = seal');
+      expect(ended.out).toMatch(/verified 3 row\(s\) in 1 space\(s\)/);
+      expect(sql(adaDb, `SELECT count(*) FROM "$seals"`), 'the seal left `$seals`').toBe('0');
     });
 
     await test.step('0.3.4 is activated', () => {
@@ -172,16 +211,20 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
     await test.step('the table holds no plaintext', () => {
       expect(sql(adaDb, `SELECT data_type FROM information_schema.columns WHERE table_name = 'notes' AND column_name = 'body'`)).toBe('bytea');
       expect(sql(adaDb, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'notes' AND column_name LIKE 'body$%'`)).toBe('0');
-      expect(sql(adaDb, `SELECT count(*) FROM notes WHERE position(convert_to('${marker}', 'UTF8') in body) > 0`)).toBe('0');
+      for (const m of [marker, edited, secondBody, duringBody]) {
+        expect(sql(adaDb, `SELECT count(*) FROM notes WHERE position(convert_to('${m}', 'UTF8') in body) > 0`), m).toBe('0');
+      }
     });
 
-    await test.step('the page reads the sealed note, and one written after', async () => {
+    await test.step('the page reads the sealed notes as last written, and one written after', async () => {
       await page.reload();
       await signedIn(page);
       await expect(noteInList(page, title)).toContainText(marker);
       await noteInList(page, title).click();
-      await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveValue(`${marker} and more`);
+      await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveValue(`${edited} ${marker}`);
       await page.getByRole('button', { name: 'Close', exact: true }).click();
+      await expect(noteInList(page, during)).toContainText(duringBody);
+      await expect(noteInList(page, second)).toContainText(secondBody);
       const later = unique('after-seal-');
       const laterBody = unique('also-sealed-');
       await addNote(page, later, laterBody);

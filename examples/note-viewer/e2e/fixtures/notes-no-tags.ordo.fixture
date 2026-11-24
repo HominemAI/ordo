@@ -19,14 +19,18 @@
 #                        wrote in it, and nothing reads or writes it. A drop is
 #                        never applied by `ordo apply` (plan-schema-evolution.md
 #                        §8.2); pruning it is increment 14.
+#   attachments.mediaType  B4  renamed from `kind` with `prev(kind)`: a new
+#                        column, every v2 value copied into it, the `kind`
+#                        column kept. The ops still answer `kind`, so the v2
+#                        page reads the same rows (plan-syntax-additions.md §5).
 #
 # `addAttachment` still takes `$size`, and does not store it, so a page
 # built for v2 that sends it can still add a file. `myFiles` no longer
 # answers `size`; the v2 page reads a missing size as 0.
 #
-# Not here: a rename. `prev(old)` (plan-syntax-additions.md §5) is ruled
-# but does not parse yet. It arrives with increment 15, and notes v3 gains
-# its rename then.
+# Once v3 has landed in every environment, `ordo apply` offers to remove
+# the `prev(kind)` mark (`--remove-landed-prev`). The stored plan keeps the
+# rename for any tenant still behind.
 #
 # What follows is notes v2's own description.
 #
@@ -86,7 +90,8 @@ entity notes {
 entity attachments {
   note -> notes owned
   name: text
-  kind: text = ""
+  # v3: was `kind`. The media type of the file.
+  mediaType: text = "" prev(kind)
   created: datetime
   file: blob?
 }
@@ -190,7 +195,7 @@ op allNotes unbounded download =
 # A file's row, made before its bytes are sent. `$size` is taken and not
 # stored (v3), so a page built for v2 still adds a file.
 op addAttachment($note: id, $name: text, $kind: text, $size: int, $created: datetime) =
-  set attachments { note: $note, name: $name, kind: $kind, created: $created }
+  set attachments { note: $note, name: $name, mediaType: $kind, created: $created }
 
 # Taking a file off a note. Its bytes are collected once no row names them.
 op removeAttachment($id: id) =
@@ -202,7 +207,7 @@ op removeAttachment($id: id) =
 # `download`: `attachments.json` in a person's own download, and because
 # `file` is a blob field, each file's bytes under `files/attachments/`.
 op myFiles unbounded download =
-  attachments[id, rev, note, name, kind, created, file]
+  attachments[id, rev, note, name, kind: mediaType, created, file]
   sort created
 
 # A title for a note, suggested by a language model. The page sends the

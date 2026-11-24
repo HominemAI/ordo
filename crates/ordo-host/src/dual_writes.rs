@@ -630,8 +630,10 @@ pub async fn run(
         // check would read the old column the expand opened to nulls as X's
         // drift.
         if m.phase == MovePhase::Expanding && !expanded(&target, &overlay).await? {
-            if let Some(e) =
-                crate::evolve::expand_step(cx.control, &target, tenant, plan, actor).await?
+            if let Some(e) = Box::pin(crate::evolve::expand_step(
+                cx.control, &target, tenant, plan, actor,
+            ))
+            .await?
             {
                 statements = e.statements;
             }
@@ -671,7 +673,7 @@ pub async fn run(
                     e.transient(),
                 )
             };
-            let progress = match worker.run().await {
+            let progress = match Box::pin(worker.run()).await {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = v
@@ -699,7 +701,7 @@ pub async fn run(
                     orphaned: Vec::new(),
                 });
             }
-            let verified = match worker.verify_live_and_close().await {
+            let verified = match Box::pin(worker.verify_live_and_close()).await {
                 Ok(v) => v,
                 Err(e) => {
                     let _ = v
@@ -732,7 +734,7 @@ pub async fn run(
         m.soak_until = until;
         pinned = Some(change);
         if soak == 0 {
-            let closed = close(cx, tenant, actor).await?;
+            let closed = Box::pin(close(cx, tenant, actor)).await?;
             return Ok(Moved {
                 statements,
                 backfills: reports,

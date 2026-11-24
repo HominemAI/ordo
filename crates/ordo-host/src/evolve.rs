@@ -1688,7 +1688,14 @@ pub(crate) async fn expand_step(
     // renders it.
     options.renames_backfill = true;
     // The stored digest against this release's rendering (D3).
-    let again = render_stored(registry, &a, &b, &options, crate::runtime::now_secs()).await?;
+    let again = Box::pin(render_stored(
+        registry,
+        &a,
+        &b,
+        &options,
+        crate::runtime::now_secs(),
+    ))
+    .await?;
     if again.digest != plan.digest {
         return Err(EvolveRefusal::DigestMismatch {
             from: plan.from.clone(),
@@ -1739,48 +1746,49 @@ pub(crate) async fn expand_step(
             issues,
         });
     }
-    let (statements, backfills, after) = match sa::apply_planned(target, &p, actor, OP).await {
-        Ok(sa::Applied::Additive {
-            steps,
-            backfills,
-            after,
-            ..
-        }) => (steps.len(), backfills, after),
-        Ok(sa::Applied::Nothing) => (0, Vec::new(), Vec::new()),
-        Ok(sa::Applied::Created(c)) => (c.tables, Vec::new(), Vec::new()),
-        Err(sa::ApplyRefusal::ServingDrifted { serving, drift }) => {
-            return Err(EvolveRefusal::Drifted {
-                database: label.to_string(),
-                version: serving,
-                drift: drift.iter().map(|c| format!("{} {c}", c.code())).collect(),
-            })
-        }
-        Err(sa::ApplyRefusal::Ghost { serving }) => {
-            return Err(EvolveRefusal::Drifted {
-                database: label.to_string(),
-                version: serving,
-                drift: vec!["none of its tables exist".into()],
-            })
-        }
-        Err(sa::ApplyRefusal::Plan) => {
-            return Err(run_err("plan_refused", p.refusals.join("; "), false))
-        }
-        Err(sa::ApplyRefusal::NotApplied(t)) => {
-            return Err(run_err(
-                "not_applied",
-                t.refused
-                    .iter()
-                    .map(|r| format!("{} ({}): {}", r.class, r.change, r.why))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                false,
-            ))
-        }
-        Err(sa::ApplyRefusal::ExecFailed(f)) => {
-            return Err(run_err("execute_failed", f.failure.to_string(), false))
-        }
-        Err(other) => return Err(run_err(other.class(), format!("{other:?}"), true)),
-    };
+    let (statements, backfills, after) =
+        match Box::pin(sa::apply_planned(target, &p, actor, OP)).await {
+            Ok(sa::Applied::Additive {
+                steps,
+                backfills,
+                after,
+                ..
+            }) => (steps.len(), backfills, after),
+            Ok(sa::Applied::Nothing) => (0, Vec::new(), Vec::new()),
+            Ok(sa::Applied::Created(c)) => (c.tables, Vec::new(), Vec::new()),
+            Err(sa::ApplyRefusal::ServingDrifted { serving, drift }) => {
+                return Err(EvolveRefusal::Drifted {
+                    database: label.to_string(),
+                    version: serving,
+                    drift: drift.iter().map(|c| format!("{} {c}", c.code())).collect(),
+                })
+            }
+            Err(sa::ApplyRefusal::Ghost { serving }) => {
+                return Err(EvolveRefusal::Drifted {
+                    database: label.to_string(),
+                    version: serving,
+                    drift: vec!["none of its tables exist".into()],
+                })
+            }
+            Err(sa::ApplyRefusal::Plan) => {
+                return Err(run_err("plan_refused", p.refusals.join("; "), false))
+            }
+            Err(sa::ApplyRefusal::NotApplied(t)) => {
+                return Err(run_err(
+                    "not_applied",
+                    t.refused
+                        .iter()
+                        .map(|r| format!("{} ({}): {}", r.class, r.change, r.why))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    false,
+                ))
+            }
+            Err(sa::ApplyRefusal::ExecFailed(f)) => {
+                return Err(run_err("execute_failed", f.failure.to_string(), false))
+            }
+            Err(other) => return Err(run_err(other.class(), format!("{other:?}"), true)),
+        };
     // A step run again after its expand finds its new columns there, so
     // the triage on this database no longer names their backfills or what
     // lands after them. The stored receipt does (increment 11a).

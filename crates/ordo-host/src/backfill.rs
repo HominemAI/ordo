@@ -365,6 +365,9 @@ pub enum BackfillRefusal {
     },
     /// The backfill function refused or failed.
     Function { name: String, why: String },
+    /// A sealed backfill (increment 13) could not take a key lease, seal
+    /// or open a value. Names the space, never a value.
+    Seal { space: String, why: String },
     /// A database fault outside a chunk.
     Store(String),
     /// A backfill setting's value is not one it takes.
@@ -384,6 +387,7 @@ impl BackfillRefusal {
             BackfillRefusal::Dead { .. } => "backfill_dead",
             BackfillRefusal::Verify { .. } => "backfill_verify_failed",
             BackfillRefusal::Function { .. } => "backfill_function_failed",
+            BackfillRefusal::Seal { .. } => "backfill_seal_failed",
             BackfillRefusal::Store(_) => "store_failed",
             BackfillRefusal::Setting { .. } | BackfillRefusal::Reason(_) => "invalid_param",
         }
@@ -451,6 +455,12 @@ impl std::fmt::Display for BackfillRefusal {
                 f,
                 "backfill_function_failed: backfill function `{name}`: {why}"
             ),
+            BackfillRefusal::Seal { space, why } => write!(
+                f,
+                "backfill_seal_failed: space `{space}`: {why}. Nothing in the chunk was \
+                 sealed, and the plaintext column is kept. Run the step again on a node with \
+                 the deployment's key custody; it resumes from its cursor"
+            ),
             BackfillRefusal::Store(e) => write!(f, "store_failed: {e}"),
             BackfillRefusal::Setting {
                 setting,
@@ -508,6 +518,9 @@ pub struct Backfill<'a> {
     pub entity: &'a ordo_schema::Entity,
     pub settings: &'a BackfillSettings,
     pub functions: Option<Arc<dyn BackfillFunctions>>,
+    /// Key custody, for a sealed backfill (increment 13): one lease per
+    /// space, `Purpose::Migration`. `None` refuses a seal.
+    pub keys: Option<Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 /// Where a backfill stands.
@@ -556,6 +569,13 @@ fn now() -> u64 {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .filter_map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 fn unhex32(s: &str) -> Option<[u8; 32]> {
@@ -824,6 +844,9 @@ impl<'a> Backfill<'a> {
                 self.function_chunk(&tx, &range, name, secrets, hosts)
                     .await?;
             }
+            (FillMapping::Seal, _) => {
+                self.seal_chunk(&tx, &range).await?;
+            }
             (FillMapping::Expr(src), None) => {
                 return Err(BackfillRefusal::Store(format!(
                     "the mapping `{src}` was stored without its SQL; render the plan again"
@@ -1013,6 +1036,89 @@ impl<'a> Backfill<'a> {
         Ok(())
     }
 
+    /// The plaintext column a sealed backfill reads.
+    fn plain_col(&self) -> Option<String> {
+        self.fill.sealing_from.as_deref().map(q)
+    }
+
+    /// One key lease for `space`, for this step (increment 13).
+    fn lease(&self, space: &str) -> Result<ordo_crypto::KeyLease, BackfillRefusal> {
+        let Some(keys) = &self.keys else {
+            return Err(BackfillRefusal::Seal {
+                space: space.to_string(),
+                why: "this node holds no key custody".into(),
+            });
+        };
+        keys.release(
+            &ordo_crypto::SpaceId(space.to_string()),
+            ordo_crypto::Purpose::Migration,
+            &format!("seal:{}", self.step),
+        )
+        .map_err(|e| BackfillRefusal::Seal {
+            space: space.to_string(),
+            why: format!("key release: {e}"),
+        })
+    }
+
+    /// Increment 13: each row's plaintext sealed under its space's key, at
+    /// its row, into the column beside it. One lease per space per chunk.
+    /// The plaintext column is never written: no plaintext dual write (D9).
+    async fn seal_chunk(&self, tx: &ordo_exec::TxConn, range: &str) -> Result<(), BackfillRefusal> {
+        let Some(plain) = self.plain_col() else {
+            return Err(BackfillRefusal::Store(
+                "a sealed backfill was stored without its plaintext column; render the plan again"
+                    .into(),
+            ));
+        };
+        let rows = tx
+            .rows(&format!(
+                "SELECT {sp}, \"id\", {plain} FROM {t} WHERE {range} AND {c} IS NULL \
+                 AND {plain} IS NOT NULL ORDER BY {sp}, \"id\" FOR UPDATE",
+                sp = q(SPACE),
+                t = self.table(),
+                c = self.col(),
+            ))
+            .await?;
+        let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
+        for r in rows {
+            let (Some(space), Some(id), Some(text)) = (
+                r.first().cloned().flatten(),
+                r.get(1).cloned().flatten(),
+                r.get(2).cloned().flatten(),
+            ) else {
+                continue;
+            };
+            if lease.as_ref().is_none_or(|(s, _)| *s != space) {
+                lease = Some((space.clone(), self.lease(&space)?));
+            }
+            let (_, l) = lease.as_ref().expect("taken just above");
+            let keys = self.keys.as_ref().expect("a lease was taken");
+            let sealed = keys
+                .seal_at(
+                    l,
+                    &self.fill.entity,
+                    &self.fill.field,
+                    ordo_crypto::Anchor::Row(&id),
+                    text.as_bytes(),
+                )
+                .map_err(|e| BackfillRefusal::Seal {
+                    space: space.clone(),
+                    why: format!("seal: {e}"),
+                })?;
+            tx.rows(&format!(
+                "UPDATE {t} SET {c} = '\\x{}'::bytea WHERE {sp} = {} AND \"id\" = {} AND {c} IS NULL",
+                hex(&sealed),
+                sql_lit(&space),
+                sql_lit(&id),
+                t = self.table(),
+                c = self.col(),
+                sp = q(SPACE),
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+
     /// B6: the function computes the chunk's values, one call per space.
     async fn function_chunk(
         &self,
@@ -1100,7 +1206,38 @@ impl<'a> Backfill<'a> {
 
     /// **Verify** (B3): the whole table, read once. Then the summarised
     /// record, and `done`, in one transaction.
+    ///
+    /// A sealed backfill that fails verify starts over: every sealed value
+    /// beside the plaintext is cleared with the cursor and the space
+    /// hashes, so a run again seals each row's plaintext as it is then.
     pub async fn verify_and_close(&self) -> Result<Verified, BackfillRefusal> {
+        let out = self.verify_inner().await;
+        if let (Err(BackfillRefusal::Verify { .. }), Some(_)) = (&out, &self.fill.sealing_from) {
+            let tx = self.pool.begin_for(OpClass::AddressedWrite).await?;
+            tx.rows(&format!(
+                "UPDATE {t} SET {c} = NULL WHERE {c} IS NOT NULL",
+                t = self.table(),
+                c = self.col()
+            ))
+            .await?;
+            tx.rows(&format!(
+                "DELETE FROM \"$backfill_spaces\" WHERE {}",
+                self.key()
+            ))
+            .await?;
+            tx.rows(&format!(
+                "UPDATE \"$backfills\" SET \"cursor_space\" = NULL, \"cursor_id\" = NULL, \
+                 \"rows_done\" = 0, \"state\" = 'running', \"updated_at\" = {} WHERE {}",
+                now(),
+                self.key()
+            ))
+            .await?;
+            tx.commit().await?;
+        }
+        out
+    }
+
+    async fn verify_inner(&self) -> Result<Verified, BackfillRefusal> {
         let p = self.progress().await?;
         if p.finished() {
             return Ok(Verified {
@@ -1124,14 +1261,18 @@ impl<'a> Backfill<'a> {
                 )
             })
         };
-        // No row left null.
+        // No row left null. A sealed backfill leaves a null plaintext null.
+        let plain = self.plain_col();
+        let unfilled = match &plain {
+            Some(p) => format!("{} IS NULL AND {p} IS NOT NULL", self.col()),
+            None => format!("{} IS NULL", self.col()),
+        };
         let nulls = self
             .pool
             .rows(&format!(
-                "SELECT {sp}, \"id\" FROM {t} WHERE {c} IS NULL ORDER BY {sp}, \"id\" LIMIT 1",
+                "SELECT {sp}, \"id\" FROM {t} WHERE {unfilled} ORDER BY {sp}, \"id\" LIMIT 1",
                 sp = q(SPACE),
                 t = self.table(),
-                c = self.col()
             ))
             .await?;
         if let Some(row) = first(nulls) {
@@ -1164,20 +1305,67 @@ impl<'a> Backfill<'a> {
         }
         // Each space's count and content hash, recomputed over the table
         // in `($space, id)` pages.
+        // A sealed backfill also opens every value, in memory, and compares
+        // it with the row's plaintext: a value written after its chunk, or a
+        // seal at the wrong row, fails here.
         let mut got: BTreeMap<String, (i64, [u8; 32])> = BTreeMap::new();
         let mut cursor: Option<(String, String)> = None;
+        let mut lease: Option<(String, ordo_crypto::KeyLease)> = None;
         loop {
-            let page = self
-                .pool
-                .rows(&format!(
-                    "SELECT {sp}, \"id\", {c}::text FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
+            let page =
+                self.pool
+                    .rows(&format!(
+                    "SELECT {sp}, \"id\", {c}::text{p} FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
                      LIMIT 5000",
                     sp = q(SPACE),
                     c = self.col(),
+                    p = plain.as_deref().map(|p| format!(", {p}")).unwrap_or_default(),
                     t = self.table(),
                     a = Self::after(&cursor),
                 ))
-                .await?;
+                    .await?;
+            if plain.is_some() {
+                for r in &page {
+                    let (Some(s), Some(id)) =
+                        (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+                    else {
+                        continue;
+                    };
+                    let sealed = r.get(2).cloned().flatten();
+                    let text = r.get(3).cloned().flatten();
+                    let opened = match &sealed {
+                        None => None,
+                        Some(hexed) => {
+                            if lease.as_ref().is_none_or(|(x, _)| *x != s) {
+                                lease = Some((s.clone(), self.lease(&s)?));
+                            }
+                            let (_, l) = lease.as_ref().expect("taken just above");
+                            let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(hexed));
+                            let keys = self.keys.as_ref().expect("a lease was taken");
+                            let open = keys
+                                .open_at(
+                                    l,
+                                    &self.fill.entity,
+                                    &self.fill.field,
+                                    ordo_crypto::Anchor::Row(&id),
+                                    &bytes,
+                                )
+                                .map_err(|e| {
+                                    fail(Some(format!("{s}/{id}")), format!("does not open: {e}"))
+                                })?;
+                            Some(String::from_utf8_lossy(&open).into_owned())
+                        }
+                    };
+                    if opened != text {
+                        return Err(fail(
+                            Some(format!("{s}/{id}")),
+                            "holds a sealed value other than the row's plaintext: it changed \
+                             after its chunk"
+                                .into(),
+                        ));
+                    }
+                }
+            }
             if page.is_empty() {
                 break;
             }

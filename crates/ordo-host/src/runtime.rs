@@ -5137,6 +5137,11 @@ async fn assemble_program(
     // A stored step's backfill functions run on this node's backend
     // functions (10b, B6), handed over once they are built below.
     let apply_for_backfills = platform_ops.apply.clone();
+    // A stored step that seals a field (increment 13) takes its leases
+    // from the deployment's custody.
+    if let Some(apply) = &apply_for_backfills {
+        let _ = apply.backfill_keys.set(keys.clone());
+    }
     // Tenant-owned sign-in providers (`plan-tenant-providers.md`): one state
     // for the four ops and the sign-in routes. Wired whenever there is
     // authentication, so the ops answer, off, with the setting to change.

@@ -446,6 +446,9 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
         Choices::parse_places(places)
             .map_err(|e| EvolveRefusal::Options(format!("--places {e}")))?
     };
+    // A stored plan's options: a field that becomes sealed is sealed by
+    // the step (increment 13).
+    c.stored = true;
     for line in lines.map(str::trim).filter(|l| !l.is_empty()) {
         let bad = || EvolveRefusal::Options(format!("a stored fill does not read back: `{line}`"));
         let rest = line.strip_prefix("fill ").ok_or_else(bad)?;
@@ -584,6 +587,12 @@ pub async fn render_stored(
 ) -> Result<Rendered, EvolveRefusal> {
     let x = compiled(a)?;
     let y = compiled(b)?;
+    // A stored step seals a field that becomes sealed (increment 13).
+    let stored = Choices {
+        stored: true,
+        ..options.clone()
+    };
+    let options = &stored;
     // The `prev` marks against X (`plan-syntax-additions.md` §5): a mark the
     // step cannot make refuses the render; a landed one is a warning.
     let prev = ordo_schema::prev::check(Some(&x.schema), &y.schema);
@@ -689,6 +698,7 @@ pub async fn render_stored(
     }
 
     let mut errors = mapping_errors(pool, &a.ddl, &triaged.backfills).await?;
+    errors.extend(sealed_under_readers(&x, &y, &triaged.backfills));
     let mut functions = Vec::new();
     for bf in &triaged.backfills {
         match function_of(bf, &y, b) {
@@ -741,6 +751,14 @@ pub async fn render_stored(
                     // give staging and production different values.
                     j["reproducible"] =
                         json!(f.is_none_or(|f| f.secrets.is_empty() && f.hosts.is_empty()));
+                    // D9: what a sealed backfill does with the plaintext.
+                    if bf.sealing_from.is_some() {
+                        j["plaintext"] = json!(
+                            "no plaintext dual write; the plaintext column is dropped once \
+                             every row's seal opens to it and each space's count and hash \
+                             verify. Its old values stay in earlier backups and WAL"
+                        );
+                    }
                     j["oldValues"] = json!(match bf.audit {
                         ordo_commandlog::BackfillAudit::Summarised =>
                             "summarised: the rows' old values are not in the command log; \
@@ -866,6 +884,41 @@ async fn mapping_errors(
             ),
         })
         .collect())
+}
+
+/// A seal (increment 13) of a field a reader app reads. A reader holds a
+/// grant on the whole table, so it would read ciphertext where it read
+/// text. Refused until the reader can read the sealed field (7b).
+fn sealed_under_readers(
+    x: &Program,
+    y: &Program,
+    backfills: &[sa::BackfillStep],
+) -> Vec<PlanError> {
+    let mut out = Vec::new();
+    for bf in backfills.iter().filter(|b| b.sealing_from.is_some()) {
+        let mut names = BTreeSet::new();
+        for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
+            if r.tables.contains(&bf.entity) && names.insert(r.name.clone()) {
+                out.push(PlanError {
+                    code: bf.code.into(),
+                    change: format!("`{}.{}` becomes sealed", bf.entity, bf.field),
+                    class: "seal_read_by_reader".into(),
+                    why: format!(
+                        "reader `{}` reads `{}`, so it would read `{}` as ciphertext once it is \
+                         sealed",
+                        r.name, bf.entity, bf.field
+                    ),
+                    fix: format!(
+                        "move `{}` to a version that reads the sealed `{}.{}` \
+                         (plan-evolution-federation.md, increment 7b, not built yet), or take \
+                         `{}` off the `reader {}` line in a version before this one, then seal",
+                        r.name, bf.entity, bf.field, bf.entity, r.name
+                    ),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A backfill function as the plan names it (D16, Q14).
@@ -1498,6 +1551,9 @@ pub struct StepContext {
     pub settings: crate::backfill::BackfillSettings,
     /// Runs backfill functions (B6). `None` refuses a function fill.
     pub functions: Option<std::sync::Arc<dyn crate::backfill::BackfillFunctions>>,
+    /// Key custody, for a step that seals a field (increment 13). `None`
+    /// refuses the seal, naming why.
+    pub keys: Option<std::sync::Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 /// The database's recorded version.
@@ -1715,6 +1771,7 @@ pub async fn run_step_with(
             entity,
             settings: &ctx.settings,
             functions: ctx.functions.clone(),
+            keys: ctx.keys.clone(),
         };
         let bf_err =
             |e: crate::backfill::BackfillRefusal| run_err(e.class(), e.to_string(), e.transient());
@@ -1934,6 +1991,9 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         out.push(line);
         if let Some(n) = b["oldValues"].as_str() {
             out.push(format!("    old values: {n}"));
+        }
+        if let Some(n) = b["plaintext"].as_str() {
+            out.push(format!("    plaintext: {n}"));
         }
     }
     for s in receipt["after"].as_array().into_iter().flatten() {

@@ -396,6 +396,12 @@ pub enum RecordedDecision {
     /// signs people in there, so a console key reaches nothing
     /// (`plan-identity-service.md` 6, G14).
     ConsoleKeyClosed,
+    /// A grant pinned under one program version was called in a tenant
+    /// now on another, and the two disagree on what a listed op reads or on
+    /// its guards (`plan-versions.md` §1.7). Its holder is told
+    /// `versions_disagree`; this record keeps it apart from a redeploy that
+    /// widened an op (`ManifestChanged`).
+    VersionsDisagree,
 }
 
 impl RecordedDecision {
@@ -435,6 +441,7 @@ impl RecordedDecision {
             RecordedDecision::DeploymentTokenExpired => "DeploymentTokenExpired",
             RecordedDecision::OutsideDeploymentRealm => "OutsideDeploymentRealm",
             RecordedDecision::ConsoleKeyClosed => "ConsoleKeyClosed",
+            RecordedDecision::VersionsDisagree => "VersionsDisagree",
         }
     }
 
@@ -481,6 +488,8 @@ impl RecordedDecision {
             RecordedDecision::DeploymentTokenExpired => 53,
             RecordedDecision::OutsideDeploymentRealm => 54,
             RecordedDecision::ConsoleKeyClosed => 55,
+            // Program versions at the door, clear of 55.
+            RecordedDecision::VersionsDisagree => 60,
         }
     }
 
@@ -520,6 +529,7 @@ impl RecordedDecision {
             53 => RecordedDecision::DeploymentTokenExpired,
             54 => RecordedDecision::OutsideDeploymentRealm,
             55 => RecordedDecision::ConsoleKeyClosed,
+            60 => RecordedDecision::VersionsDisagree,
             _ => return None,
         })
     }
@@ -547,6 +557,7 @@ impl From<&DenyReason> for RecordedDecision {
             DenyReason::DelegationBeyondDelegator => RecordedDecision::DelegationBeyondDelegator,
             DenyReason::DelegationNotLive => RecordedDecision::DelegationNotLive,
             DenyReason::OpNotDelegable => RecordedDecision::OpNotDelegable,
+            DenyReason::VersionsDisagree { .. } => RecordedDecision::VersionsDisagree,
         }
     }
 }

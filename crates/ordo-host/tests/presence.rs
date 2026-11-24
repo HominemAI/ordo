@@ -186,6 +186,9 @@ const READS: &[&str] = &[
     "std.deployment.plans",
     // Whether a rollback's version still reads its externals and peers.
     "std.deployment.rollbackCheck",
+    // Where the open or newest rollout stands, and its tenants; deployment
+    // owner only, home space (versions increment 10).
+    "std.deployment.rollout.status",
     // What versions left behind in every database, and the tombstones;
     // deployment owner only, home space (versions increment 14).
     "std.deployment.orphans",
@@ -195,6 +198,13 @@ const READS: &[&str] = &[
     // The clones this deployment holds and the clone settings; deployment
     // owner only, home space.
     "std.deployment.clones",
+    // What the staging clones would have sent (mail, push, egress), held
+    // in the sink; deployment owner only, home space (increment 12).
+    "std.deployment.sinks",
+    // Staging's signed rehearsals, its public signing key and the
+    // rehearsals accepted here; deployment owner only, home space. Read by
+    // production as the person accepting (versions increment 12b).
+    "std.deployment.rehearsals",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

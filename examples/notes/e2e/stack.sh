@@ -20,6 +20,10 @@
 #      auto-onboard; a tenant of one's own on sign-up; CORS for the page.
 #      It verifies the identity service's tokens (ORDO_IDENTITY_URL).
 #   5. `ordo apply` of the program ($E2E_PROGRAM, examples/notes by default).
+#   5b. A second `ordo-host`, staging: its own database and keys, the
+#      identity service's handle `staging`, no program. tests/clone
+#      registers it with the identity service and clones a tenant into it
+#      (plan-versions.md increment 12). It serves nothing until then.
 #   6. The notes page, built with Vite and served by `vite preview`. The
 #      notes v2 page (examples/notes-v2/web) has its own build step and is
 #      served by the same server under /v2/, so it is the same origin and a
@@ -53,8 +57,10 @@ provider_port=${E2E_PROVIDER_PORT:-4643}
 smtp_port=${E2E_MAIL_SMTP_PORT:-4625}
 mail_http_port=${E2E_MAIL_HTTP_PORT:-4626}
 id_port=${E2E_ID_PORT:-4644}
+staging_port=${E2E_STAGING_PORT:-4645}
 
 door="http://127.0.0.1:$door_port"
+staging="http://127.0.0.1:$staging_port"
 # The page reaches the door by `localhost`, the page's own site, so the
 # renewal cookie (SameSite=Strict) is sent and a reload stays signed in.
 # `localhost` and `127.0.0.1` are two sites to a browser.
@@ -73,7 +79,7 @@ done
 # A stack still stopping (or another one) would answer the health checks
 # below in this one's place and then vanish. Wait up to 20 seconds for each
 # port to be free, then refuse by name.
-for port in "$door_port" "$page_port" "$provider_port" "$smtp_port" "$mail_http_port" "$id_port"; do
+for port in "$door_port" "$page_port" "$provider_port" "$smtp_port" "$mail_http_port" "$id_port" "$staging_port"; do
   tries=0
   while (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
     tries=$((tries + 1))
@@ -142,6 +148,8 @@ psql_bin=${ORDO_PSQL:-$( [ -n "${ORDO_PGBIN:-}" ] && echo "$ORDO_PGBIN/psql" || 
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"$db\""
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "drop database if exists \"${db}_identity\" with (force)"
 "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"${db}_identity\""
+"$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "drop database if exists \"${db}_staging\" with (force)"
+"$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -qc "create database \"${db}_staging\""
 # Notes v2 names a reader, note_viewer (examples/note-viewer), and grants its
 # role two tables. No note_viewer runs here, so the role logs in nowhere; it
 # only has to exist. The federation stack (examples/note-viewer/e2e) runs both.
@@ -173,6 +181,9 @@ mkdir -p "$state/id-data"
   export ORDO_IDENTITY_LISTEN="127.0.0.1:$id_port"
   export ORDO_IDENTITY_DATA_DIR="$state/id-data"
   export ORDO_IDENTITY_DEPLOYMENT=main
+  # Staging (step 5b) signs in here as a deployment of its own (Q12). Made
+  # before the service starts, which reads its registry each minute.
+  "$idsvc" deployment add staging --origin "http://localhost:$staging_port" >"$state/identity-staging.log" 2>&1
   exec "$idsvc"
 ) >"$state/identity.log" 2>&1 &
 last=$!
@@ -255,6 +266,27 @@ wait_for "ordo-host" "$door/health/live" "$last"
 "$ordo" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
   { cat "$state/apply.log" >&2; echo "stack: ordo apply failed" >&2; exit 1; }
 
+# ── 5b. Staging ────────────────────────────────────────────────────────────
+# The door's settings, with its own database, keys, port and identity
+# handle. Sign-in is passkey alone and makes no tenant: the people who open
+# staging are the deployment's, through the identity service. It reads
+# production's door over plain http on loopback, which only a test allows.
+(
+  export ORDO_PG_DB="${db}_staging" ORDO_HOST_ADDR="127.0.0.1:$staging_port"
+  export ORDO_MASTER_KEY=notes-e2e-staging-master
+  export ORDO_TOKEN_KEY=3333333333333333333333333333333333333333333333333333333333333333
+  export ORDO_PAGE_KEY=4444444444444444444444444444444444444444444444444444444444444444
+  export ORDO_AUTH_METHODS=passkey ORDO_IDENTITY_DEPLOYMENT=staging
+  export ORDO_BLOB_STORE="fs:$state/staging-blobs"
+  export ORDO_PROMOTION_PLAIN_HTTP=on
+  for v in ORDO_AUTH_PROVISIONING ORDO_PROVISION_SELF_SERVE ORDO_AUTH_GUEST ORDO_PUBLIC_URL \
+    $(compgen -e | grep '^ORDO_AUTH_DISCORD_' || true); do unset "$v"; done
+  RUST_LOG=${RUST_LOG:-info} exec "$host"
+) >"$state/staging.log" 2>&1 &
+last=$!
+pids="$pids $last"
+wait_for "staging's ordo-host" "$staging/health/live" "$last"
+
 # ── 6. The page ────────────────────────────────────────────────────────────
 (cd "$web" && VITE_ORDO_URL="$page_door" node_modules/.bin/vite build --outDir "$state/page" --emptyOutDir) >"$state/page-build.log" 2>&1 ||
   { cat "$state/page-build.log" >&2; echo "stack: the page did not build" >&2; exit 1; }
@@ -272,6 +304,7 @@ pids="$pids $last"
 cat >"$state/stack.json" <<EOF
 {
   "door": "$door",
+  "staging": "$staging",
   "page": "$page",
   "pageV2": "$page/v2/",
   "programV2": "$repo/examples/notes-v2",
@@ -280,6 +313,8 @@ cat >"$state/stack.json" <<EOF
   "mail": "http://localhost:$mail_http_port",
   "identity": "$id_origin",
   "identityData": "$state/id-data",
+  "identityBin": "$idsvc",
+  "identityDb": "$id_url",
   "program": "$program",
   "pg": { "host": "$pg_host", "port": "$pg_port", "user": "$pg_user", "db": "$db" },
   "ordo": "$ordo",

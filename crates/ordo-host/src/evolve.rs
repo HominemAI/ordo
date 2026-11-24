@@ -202,6 +202,16 @@ pub enum EvolveRefusal {
     Busy,
     /// A database fault outside the version store.
     Store(String),
+    /// Staging comes before this deployment, and it accepted no rehearsal
+    /// of this step with this digest (§3.2, increment 12b). Rehearse it on
+    /// staging and accept it here.
+    NotRehearsed {
+        from: String,
+        to: String,
+        digest: String,
+        /// The digests accepted here for the same step.
+        signed: Vec<String>,
+    },
 }
 
 impl From<VersionRefusal> for EvolveRefusal {
@@ -234,6 +244,7 @@ impl EvolveRefusal {
             EvolveRefusal::PreChecks { .. } => "precheck_failed",
             EvolveRefusal::Busy => "apply_in_progress",
             EvolveRefusal::Store(_) => "store_failed",
+            EvolveRefusal::NotRehearsed { .. } => "plan_not_rehearsed",
         }
     }
 
@@ -409,6 +420,27 @@ impl std::fmt::Display for EvolveRefusal {
                  when it ends"
             ),
             EvolveRefusal::Store(e) => write!(f, "store_failed: {e}"),
+            EvolveRefusal::NotRehearsed {
+                from,
+                to,
+                digest,
+                signed,
+            } => write!(
+                f,
+                "plan_not_rehearsed: staging comes before this deployment, and it runs only a \
+                 plan staging rehearsed on a clone and signed. No rehearsal of the step from \
+                 `{from}` to `{to}` with digest {digest} was accepted here{}. Rehearse it on \
+                 staging: `ordo rehearsals rehearse --from {from} --to {to} --clone <clone> \
+                 --reason \"...\" --host <staging>`; then accept it here: `ordo rehearsals \
+                 accept --from {from} --to {to}`. To promote from dev with no staging, set \
+                 promotion.skip_staging: `ordo environments set skip-staging on --reason \
+                 \"...\"`",
+                if signed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (accepted: {})", signed.join(", "))
+                }
+            ),
         }
     }
 }
@@ -446,6 +478,9 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
         Choices::parse_places(places)
             .map_err(|e| EvolveRefusal::Options(format!("--places {e}")))?
     };
+    // A stored plan's options: a field that becomes sealed is sealed by
+    // the step (increment 13).
+    c.stored = true;
     for line in lines.map(str::trim).filter(|l| !l.is_empty()) {
         let bad = || EvolveRefusal::Options(format!("a stored fill does not read back: `{line}`"));
         let rest = line.strip_prefix("fill ").ok_or_else(bad)?;
@@ -584,6 +619,12 @@ pub async fn render_stored(
 ) -> Result<Rendered, EvolveRefusal> {
     let x = compiled(a)?;
     let y = compiled(b)?;
+    // A stored step seals a field that becomes sealed (increment 13).
+    let stored = Choices {
+        stored: true,
+        ..options.clone()
+    };
+    let options = &stored;
     // The `prev` marks against X (`plan-syntax-additions.md` §5): a mark the
     // step cannot make refuses the render; a landed one is a warning.
     let prev = ordo_schema::prev::check(Some(&x.schema), &y.schema);
@@ -695,6 +736,7 @@ pub async fn render_stored(
     }
 
     let mut errors = mapping_errors(pool, &a.ddl, &triaged.backfills).await?;
+    errors.extend(sealed_under_readers(&x, &y, &triaged.backfills));
     let mut functions = Vec::new();
     for bf in &triaged.backfills {
         match function_of(bf, &y, b) {
@@ -747,6 +789,14 @@ pub async fn render_stored(
                     // give staging and production different values.
                     j["reproducible"] =
                         json!(f.is_none_or(|f| f.secrets.is_empty() && f.hosts.is_empty()));
+                    // D9: what a sealed backfill does with the plaintext.
+                    if bf.sealing_from.is_some() {
+                        j["plaintext"] = json!(
+                            "no plaintext dual write; the plaintext column is dropped once \
+                             every row's seal opens to it and each space's count and hash \
+                             verify. Its old values stay in earlier backups and WAL"
+                        );
+                    }
                     j["oldValues"] = json!(match bf.audit {
                         ordo_commandlog::BackfillAudit::Summarised =>
                             "summarised: the rows' old values are not in the command log; \
@@ -872,6 +922,41 @@ async fn mapping_errors(
             ),
         })
         .collect())
+}
+
+/// A seal (increment 13) of a field a reader app reads. A reader holds a
+/// grant on the whole table, so it would read ciphertext where it read
+/// text. Refused until the reader can read the sealed field (7b).
+fn sealed_under_readers(
+    x: &Program,
+    y: &Program,
+    backfills: &[sa::BackfillStep],
+) -> Vec<PlanError> {
+    let mut out = Vec::new();
+    for bf in backfills.iter().filter(|b| b.sealing_from.is_some()) {
+        let mut names = BTreeSet::new();
+        for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
+            if r.tables.contains(&bf.entity) && names.insert(r.name.clone()) {
+                out.push(PlanError {
+                    code: bf.code.into(),
+                    change: format!("`{}.{}` becomes sealed", bf.entity, bf.field),
+                    class: "seal_read_by_reader".into(),
+                    why: format!(
+                        "reader `{}` reads `{}`, so it would read `{}` as ciphertext once it is \
+                         sealed",
+                        r.name, bf.entity, bf.field
+                    ),
+                    fix: format!(
+                        "move `{}` to a version that reads the sealed `{}.{}` \
+                         (plan-evolution-federation.md, increment 7b, not built yet), or take \
+                         `{}` off the `reader {}` line in a version before this one, then seal",
+                        r.name, bf.entity, bf.field, bf.entity, r.name
+                    ),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A backfill function as the plan names it (D16, Q14).
@@ -1513,6 +1598,9 @@ pub struct StepContext {
     pub settings: crate::backfill::BackfillSettings,
     /// Runs backfill functions (B6). `None` refuses a function fill.
     pub functions: Option<std::sync::Arc<dyn crate::backfill::BackfillFunctions>>,
+    /// Key custody, for a step that seals a field (increment 13). `None`
+    /// refuses the seal, naming why.
+    pub keys: Option<std::sync::Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 /// The database's recorded version.
@@ -1609,6 +1697,8 @@ pub(crate) async fn expand_step(
             rendered: again.digest,
         });
     }
+    // Past staging, only a digest staging signed runs (§3.2, 12b).
+    crate::rehearsals::require_rehearsed(registry, plan).await?;
     let x = compiled(&a)?;
     let y = compiled(&b)?;
     let run_err = |class: &'static str, why: String, transient: bool| EvolveRefusal::Run {
@@ -1823,6 +1913,7 @@ pub async fn run_step_with(
             entity,
             settings: &ctx.settings,
             functions: ctx.functions.clone(),
+            keys: ctx.keys.clone(),
         };
         let bf_err =
             |e: crate::backfill::BackfillRefusal| run_err(e.class(), e.to_string(), e.transient());
@@ -2052,6 +2143,9 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         if let Some(n) = b["oldValues"].as_str() {
             out.push(format!("    old values: {n}"));
         }
+        if let Some(n) = b["plaintext"].as_str() {
+            out.push(format!("    plaintext: {n}"));
+        }
     }
     for s in receipt["after"].as_array().into_iter().flatten() {
         out.push(format!(
@@ -2094,11 +2188,12 @@ fn dual_writes_step(p: &StoredPlan) -> bool {
 
 /// What a move command runs its backfills with: the step's settings, with
 /// the caller's `budget` and `chunkRows` when given.
-fn move_context(
+async fn move_context(
     ops: &crate::apply_op::ApplyOps,
     bound: &ordo_api::BoundParams,
-) -> Result<StepContext, EvolveRefusal> {
-    let mut ctx = ops.step_context();
+) -> Result<StepContext, ExecError> {
+    const WHAT: &str = "the move was not run";
+    let mut ctx = ops.step_context().await?;
     let count = |k: &str| -> Result<Option<u32>, EvolveRefusal> {
         match bound.0.get(k).and_then(|v| v.as_str()).map(str::trim) {
             None | Some("") => Ok(None),
@@ -2112,10 +2207,10 @@ fn move_context(
                 }),
         }
     };
-    if let Some(b) = count("budget")? {
+    if let Some(b) = count("budget").map_err(|e| e.to_exec_error(WHAT))? {
         ctx.settings.budget = Some(b);
     }
-    if let Some(n) = count("chunkRows")? {
+    if let Some(n) = count("chunkRows").map_err(|e| e.to_exec_error(WHAT))? {
         ctx.settings.chunk_rows = n;
     }
     Ok(ctx)
@@ -2386,7 +2481,7 @@ pub async fn execute(
                     "default",
                     &done.plan,
                     caller,
-                    &ops.step_context(),
+                    &ops.step_context().await?,
                 )
                 .await
                 .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
@@ -2544,16 +2639,20 @@ pub async fn execute(
                     }
                     None => crate::dual_writes::SOAK_DEFAULT_SECS,
                 };
-                let ctx = move_context(ops, bound).map_err(|e| e.to_exec_error(WHAT))?;
+                let ctx = move_context(ops, bound).await?;
                 let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;
                 let cx = crate::dual_writes::MoveContext {
                     control: pool,
                     pools: ops.pools.as_ref(),
                     spaces: ops.spaces.get().map(|s| s.as_ref()),
                 };
-                let moved = crate::dual_writes::run(&cx, tenant, &plan, &ctx, soak, caller)
-                    .await
-                    .map_err(|e| e.to_exec_error(WHAT))?;
+                // Boxed: the move's future is large, and the door's task
+                // stack is not.
+                let moved = Box::pin(crate::dual_writes::run(
+                    &cx, tenant, &plan, &ctx, soak, caller,
+                ))
+                .await
+                .map_err(|e| e.to_exec_error(WHAT))?;
                 drop(lock);
                 ops.record(
                     caller,
@@ -2614,7 +2713,8 @@ pub async fn execute(
                 .to_exec_error(WHAT)
             })?;
             let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;
-            let done = replay_with(pool, &target, tenant, &to, caller, &ops.step_context())
+            let ctx = ops.step_context().await?;
+            let done = Box::pin(replay_with(pool, &target, tenant, &to, caller, &ctx))
                 .await
                 .map_err(|e| e.to_exec_error(WHAT))?;
             if done.backfilling() {

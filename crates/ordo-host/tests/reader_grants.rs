@@ -562,3 +562,115 @@ async fn a_reader_loses_an_orphaned_column_with_a_named_error() {
         .refusals();
     assert!(lines.is_empty(), "{lines:?}");
 }
+
+/// **The sign-in contract** (owner ruling 2026-11-23, Q16;
+/// `plan-evolution-federation.md` §5, step F6). Every column of
+/// `ordo_exec::sign_in_contract::CONTRACT` is in the tables a deployment
+/// makes, and the reader is granted it. The writer's release is granted to
+/// the reader too, and the reader's release check names the writer as a
+/// peer on another release; the writer's names the reader by its role.
+///
+/// A regression looks like a contract column missing from a fresh
+/// deployment (a release dropped it instead of retiring it), the release
+/// not granted, or a peer on another release not named.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sign_in_contract_is_granted_and_the_release_check_names_the_peer_on_another_release() {
+    use ordo_exec::sign_in_contract::{self as contract, PeerRelease};
+    use ordo_host::release_check;
+
+    let w = world("ordo_rgrant_contract").await;
+    let alpha = alpha_with("reader viewer reads notes");
+    peer::grant_readers_with(&w.a, &alpha, lookup)
+        .await
+        .expect("granted");
+    let (beta, _) = beta();
+    let at_alpha = |v: &str| (v == "ORDO_PEER_JOURNAL_SCHEMA").then(|| "alpha".to_string());
+
+    // Every contract column is there and the reader reads it.
+    for (t, cols) in contract::columns() {
+        let list = cols
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        w.b.rows(&format!("SELECT {list} FROM alpha.\"{t}\" LIMIT 1"))
+            .await
+            .unwrap_or_else(|e| panic!("contract columns of {t}: {e}"));
+    }
+
+    // A writer from before the release table records none.
+    assert_eq!(
+        contract::release_of(&w.b, "alpha").await.expect("reads"),
+        PeerRelease::Unrecorded
+    );
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), at_alpha)
+        .await
+        .expect("reads");
+    assert!(
+        n[0].line(release_check::release()).contains("records none"),
+        "{n:?}"
+    );
+
+    // The writer starts under another release. Until its grants are made
+    // again, the reader is not granted the table.
+    contract::record_release(&w.a, "0.4.0", 10)
+        .await
+        .expect("recorded");
+    assert_eq!(
+        contract::release_of(&w.b, "alpha").await.expect("reads"),
+        PeerRelease::NotGranted
+    );
+    peer::grant_readers_with(&w.a, &alpha, lookup)
+        .await
+        .expect("granted again");
+    assert_eq!(
+        contract::release_of(&w.b, "alpha").await.expect("reads"),
+        PeerRelease::Known("0.4.0".into())
+    );
+    // The release, and nothing else of the row.
+    assert!(denied(&w.b, "SELECT started_at FROM alpha.\"$ordorelease\"").await);
+
+    // The reader's release check names the peer on another release.
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), at_alpha)
+        .await
+        .expect("reads");
+    assert_eq!(n.len(), 1, "{n:?}");
+    let line = n[0].line(release_check::release());
+    assert!(
+        line == "peer journal (schema `alpha`): Ordo 0.4.0, ANOTHER RELEASE",
+        "{line}"
+    );
+    // Unset, the setting is named.
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), |_| None)
+        .await
+        .expect("reads");
+    assert!(
+        n[0].line(release_check::release())
+            .contains("`ORDO_PEER_JOURNAL_SCHEMA` is not set"),
+        "{n:?}"
+    );
+
+    // The same release reads as this one.
+    contract::record_release(&w.a, release_check::release(), 20)
+        .await
+        .expect("recorded");
+    let n = release_check::neighbours(&w.b, std::slice::from_ref(&beta), at_alpha)
+        .await
+        .expect("reads");
+    assert!(
+        n[0].line(release_check::release())
+            .ends_with("this release"),
+        "{n:?}"
+    );
+
+    // The writer's release check names its reader by role.
+    let n = release_check::neighbours(&w.a, &[alpha], |_| None)
+        .await
+        .expect("reads");
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert_eq!(
+        (n[0].kind, n[0].name.as_str(), n[0].at.as_str()),
+        ("reader", "viewer", READER)
+    );
+    let _ = &w.pg;
+}

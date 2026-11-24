@@ -431,6 +431,12 @@ pub enum ImportError {
         class: &'static str,
         detail: String,
     },
+    /// The bundle carries acl access rows, and the caller is not the
+    /// destination space's owner. Access rows are restored as the owner
+    /// (`Fixture::run_restore_on`), so the owner runs the import.
+    NotOwner {
+        caller: String,
+    },
     /// The bundle's JSON did not parse, or did not have the shape the
     /// format promises.
     Bundle(String),
@@ -440,6 +446,12 @@ pub enum ImportError {
 impl std::fmt::Display for ImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ImportError::NotOwner { caller } => write!(
+                f,
+                "not_owner: the bundle carries access rows, which an import restores as the \
+                 space's owner, and `{caller}` is not the owner of this space. Run the import \
+                 as its owner"
+            ),
             ImportError::FormatUnknown { found } => write!(
                 f,
                 "format_unknown: this reads `{FORMAT}` bundles and the manifest says `{found}`"
@@ -1515,6 +1527,9 @@ pub async fn import_space(
     // a line the program cannot honour, or a member the map cannot place,
     // refuses while the destination is still empty.
     let profile = plan_profile(exec, req, src, &mf, &fixture, &mapping).await?;
+    // Who the rows are written as: the space's owner when the bundle carries
+    // acl access rows (`restorer`), the caller as given otherwise.
+    let restorer = restorer(exec, req, &planned).await?;
     let batch_size = req.batch.max(1);
     let mut report = ImportReport {
         space: space.0.clone(),
@@ -1548,11 +1563,19 @@ pub async fn import_space(
             })
             .collect();
         for (k, chunk) in rows.chunks(batch_size).enumerate() {
-            let key = format!("import/{}/{}/{}", req.name, name, k);
+            // `$replay` is one table for the whole database, so the key
+            // names the space: two imports under one name into two spaces
+            // are two imports. Keyed by the name alone, the second space's
+            // batches were skipped as resumed and it got no rows (found by
+            // staging clones, 2026-11-24). A run begun before this change
+            // and resumed after it re-runs its committed batches, and
+            // `$importmap`'s key refuses each row it already wrote.
+            let key = format!("import/{}/{}/{}/{}", space.0, req.name, name, k);
             let fingerprint = batch_fingerprint(chunk);
             let applied = run_batch(
                 exec,
                 req,
+                restorer.clone(),
                 fixture.clone(),
                 name,
                 &fields,
@@ -1885,7 +1908,8 @@ async fn restore_profile(
     let caller = req.caller.to_string();
     let import = req.name.to_string();
     let space = exec.space.0.clone();
-    let key = format!("import/{}/{}/0", req.name, PROFILE_MARKER);
+    // The space is in the key, as for every batch.
+    let key = format!("import/{}/{}/{}/0", space, req.name, PROFILE_MARKER);
     let correlation = format!("cg_import_{}", crate::export::bundle_digest(key.as_bytes()));
     let log = Arc::new(Mutex::new(import_log(&correlation)));
     let fingerprint = plan.fingerprint.clone();
@@ -2009,6 +2033,7 @@ fn batch_fingerprint(rows: &[Row]) -> String {
 async fn run_batch(
     exec: &Executor,
     req: &ImportRequest<'_>,
+    restorer: Option<String>,
     fixture: Arc<Fixture>,
     entity: &str,
     fields: &[FieldPlan],
@@ -2045,7 +2070,10 @@ async fn run_batch(
                 let mut summaries: Vec<Value> = Vec::new();
                 for row in &rows {
                     let call = build_call(&entity_owned, &fields, row, &map)?;
-                    let out = fixture.run_write_on(db, wlog, &call, Some(&caller))?;
+                    let out = match &restorer {
+                        Some(owner) => fixture.run_restore_on(db, wlog, &call, owner)?,
+                        None => fixture.run_write_on(db, wlog, &call, Some(&caller))?,
+                    };
                     let minted = created_id(&out).ok_or_else(|| {
                         format!(
                             "the protocol accepted `{}` source row `{}` and reported no created \
@@ -2645,6 +2673,39 @@ async fn count_mapped(
         .and_then(|r| r.first().cloned().flatten())
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0))
+}
+
+/// **Who an import writes its rows as.** `None` when no entity the bundle
+/// carries is an acl link entity: the caller, as given. Otherwise the
+/// destination space's owner, which the caller must be, named by member id
+/// or by principal: access rows are restored as the owner
+/// (`Fixture::run_restore_on`), never minted for whoever ran the import.
+async fn restorer(
+    exec: &Executor,
+    req: &ImportRequest<'_>,
+    planned: &[(String, Vec<Row>)],
+) -> Result<Option<String>, ImportError> {
+    let carries_acl = planned.iter().any(|(name, rows)| {
+        !rows.is_empty() && ordo_schema::acl_link_root(&exec.schema, name).is_some()
+    });
+    if !carries_acl {
+        return Ok(None);
+    }
+    let rows = exec
+        .pool
+        .rows(&format!(
+            "SELECT \"id\" FROM \"members\" WHERE \"$space\" = {} AND \"role\" = 'owner' \
+             AND (\"id\" = {caller} OR \"principal\" = {caller}) ORDER BY \"id\" LIMIT 1",
+            crate::sql_lit(&exec.space.0),
+            caller = crate::sql_lit(req.caller),
+        ))
+        .await?;
+    match rows.first().and_then(|r| r.first().cloned().flatten()) {
+        Some(id) => Ok(Some(id)),
+        None => Err(ImportError::NotOwner {
+            caller: req.caller.to_string(),
+        }),
+    }
 }
 
 async fn count_rows(pool: &Pool, space: &SpaceId, entity: &str) -> Result<i64, ImportError> {

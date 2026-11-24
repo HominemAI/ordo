@@ -1528,6 +1528,17 @@ impl Deployment {
     /// pin this node did not hold, or no longer serves, is [`Unserved`]
     /// until the swap lands.
     pub fn for_space(&self, space: &str) -> Result<(Arc<Loaded>, Option<i64>), Unserved> {
+        self.resolve(space, true)
+    }
+
+    /// Whether [`Self::for_space`] would serve `space` now, without
+    /// counting it as a use of its version (the door asks this of a
+    /// refused caller, who keeps no version loaded).
+    pub fn serves(&self, space: &str) -> bool {
+        self.resolve(space, false).is_ok()
+    }
+
+    fn resolve(&self, space: &str, touch: bool) -> Result<(Arc<Loaded>, Option<i64>), Unserved> {
         let active = self.current();
         let (version, epoch, prior) = {
             let pins = self.pins.read().expect("pin lock");
@@ -1540,7 +1551,9 @@ impl Deployment {
             return Ok((active, Some(epoch)));
         }
         if let Some(l) = self.loaded(&version) {
-            l.clock.touch(crate::runtime::now_secs());
+            if touch {
+                l.clock.touch(crate::runtime::now_secs());
+            }
             return Ok((l, Some(epoch)));
         }
         let following = self.following.read().expect("pin lock").as_deref() == Some(&version);

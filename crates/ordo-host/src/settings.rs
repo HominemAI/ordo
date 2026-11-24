@@ -1513,6 +1513,12 @@ pub static REGISTRY: &[Setting] = &[
         r#"1 or more"#,
     ),
     s(
+        "ORDO_ROLLOUT_TICK_SECS",
+        "Databases and pools",
+        r#"5 s"#,
+        r#"1 or more"#,
+    ),
+    s(
         "ORDO_EXTERNAL_WATCH_SECS",
         "Databases and pools",
         r#"300 s"#,

@@ -2381,6 +2381,11 @@ holds in this deployment's schema are made equal to the line:
   `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
   `fingerprint`, `subject_claim`). Naming `members` on the line grants the
   whole table.
+- These columns are a contract between Ordo releases (owner, 2026-11-23).
+  A release that changes one keeps it granted for `editions.load_window`
+  (12 months), so a reader on an older release keeps matching `$caller`.
+- `SELECT` on `$ordorelease` (`release`): the Ordo release this deployment
+  last started under. `ordo release-check` on the reader names it.
 
 A table taken off the line is revoked at the next apply or start. So is
 everything, when the whole line is removed: `$readergrant` remembers which

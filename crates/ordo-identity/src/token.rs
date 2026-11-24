@@ -637,6 +637,7 @@ mod tests {
                 "orders.get".to_string(),
                 OpPin {
                     manifest_hash: crate::ManifestHash([7u8; 32]),
+                    version: None,
                     unguarded: false,
                     entities: vec![listed.clone()],
                 },
@@ -645,6 +646,7 @@ mod tests {
                 "orders.list".to_string(),
                 OpPin {
                     manifest_hash: crate::ManifestHash([9u8; 32]),
+                    version: None,
                     unguarded: true,
                     entities: Vec::new(),
                 },

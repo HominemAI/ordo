@@ -140,12 +140,99 @@ pub struct OpPin {
     /// Entity-sorted. Sorted rather than a map so the encoding has one order
     /// and the comparison has no iteration-order question.
     pub entities: Vec<EntityPin>,
+    /// The program version whose manifest this pin was read from
+    /// (`plan-versions.md` §1.7). `None` for a pin made before versions
+    /// were recorded, or by an engine that serves one version. A grant
+    /// called in a tenant now on another version is judged by
+    /// [`disagreement`], not by [`compare`].
+    pub version: Option<String>,
 }
 
 impl OpPin {
     fn entity(&self, name: &str) -> Option<&EntityPin> {
         self.entities.iter().find(|e| e.entity == name)
     }
+
+    /// The same manifest, whichever version it was read from.
+    fn same_shape(&self, other: &OpPin) -> bool {
+        self.manifest_hash == other.manifest_hash
+            && self.unguarded == other.unguarded
+            && self.entities == other.entities
+    }
+}
+
+/// Where a pin made under one program version and the op as another
+/// version declares it disagree (`plan-versions.md` §1.7, ruled D7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disagreement {
+    /// The entity the two disagree on, or `None` when the op itself differs
+    /// (its `unguarded` mark).
+    pub entity: Option<String>,
+    /// One line for the refusal and the record.
+    pub detail: String,
+}
+
+/// Compare a pin made under one version with the op as the version now
+/// serving the tenant declares it (ruled D7, 2026-11-02): "the data owner's
+/// version and guards decide shared reads. Shape is compared on the fields
+/// read, so additive changes keep sharing. Differing guards refuse."
+///
+/// - Fewer fields read, or an entity no longer reached, keeps sharing.
+/// - A field read or written that the pin did not name, an entity newly
+///   reached, or a tree walk newly made disagrees.
+/// - **Any** difference in a guard on an entity both reach disagrees, a
+///   tighter one included. That is stricter than [`compare`], which lets a
+///   narrowing apply silently between one deployment's redeploys: across
+///   versions the ruling asks the guards to match.
+/// - So does a different `$caller` restriction or `unguarded` mark.
+///
+/// `None` when they agree.
+pub fn disagreement(pinned: &OpPin, serving: &OpPin) -> Option<Disagreement> {
+    if pinned.same_shape(serving) {
+        return None;
+    }
+    if pinned.unguarded != serving.unguarded {
+        return Some(Disagreement {
+            entity: None,
+            detail: "the op's `unguarded` mark differs".into(),
+        });
+    }
+    for now in &serving.entities {
+        let entity = now.entity.clone();
+        let Some(then) = pinned.entity(&now.entity) else {
+            return Some(Disagreement {
+                detail: format!("`{entity}` is newly reached"),
+                entity: Some(entity),
+            });
+        };
+        let differs = |what: &str| {
+            Some(Disagreement {
+                detail: format!("`{entity}`: {what}"),
+                entity: Some(entity.clone()),
+            })
+        };
+        if then.read_guard != now.read_guard {
+            return differs("the read guard differs");
+        }
+        if then.write_guard != now.write_guard {
+            return differs("the write guard differs");
+        }
+        if then.caller_restricted != now.caller_restricted {
+            return differs("the `$caller` restriction differs");
+        }
+        let read: Vec<&String> = now.read.difference(&then.read).collect();
+        if !read.is_empty() {
+            return differs(&format!("now reads {}", join(&read)));
+        }
+        let written: Vec<&String> = now.written.difference(&then.written).collect();
+        if !written.is_empty() {
+            return differs(&format!("now writes {}", join(&written)));
+        }
+        if now.structure && !then.structure {
+            return differs("is now walked as a tree");
+        }
+    }
+    None
 }
 
 /// What changed between the manifest a person consented to and the one
@@ -203,7 +290,7 @@ impl PinDrift {
 /// widening, so the two halves are not weighed against each other: expansion
 /// on either side is expansion.
 pub fn compare(consented: &OpPin, current: &OpPin) -> PinDrift {
-    if consented == current {
+    if consented.same_shape(current) {
         return PinDrift::Unchanged;
     }
     let mut reasons: Vec<String> = Vec::new();
@@ -339,6 +426,10 @@ fn join(items: &[&String]) -> String {
 // parser can — the same reason `token.rs` gives for its own format.
 
 const VERSION: &str = "pins.v1";
+/// `pins.v1` with each op's program version after its manifest hash
+/// (`plan-versions.md` §1.7). Written only when some pin names a version, so
+/// a pin made without one encodes exactly as before.
+const VERSION_2: &str = "pins.v2";
 
 fn put(out: &mut String, s: &str) {
     out.push_str(&s.len().to_string());
@@ -350,11 +441,16 @@ fn put(out: &mut String, s: &str) {
 /// `BTreeSet` iteration order, entity-sorted lists, and a fixed field order.
 pub fn encode_pins(pins: &BTreeMap<String, OpPin>) -> String {
     let mut out = String::new();
-    put(&mut out, VERSION);
+    let versioned = pins.values().any(|p| p.version.is_some());
+    put(&mut out, if versioned { VERSION_2 } else { VERSION });
     put(&mut out, &pins.len().to_string());
     for (op, pin) in pins {
         put(&mut out, op);
         put(&mut out, &hex(&pin.manifest_hash.0));
+        if versioned {
+            // `""` is no version: a declared version is never empty.
+            put(&mut out, pin.version.as_deref().unwrap_or(""));
+        }
         put(&mut out, if pin.unguarded { "1" } else { "0" });
         put(&mut out, &pin.entities.len().to_string());
         for e in &pin.entities {
@@ -376,14 +472,21 @@ pub fn encode_pins(pins: &BTreeMap<String, OpPin>) -> String {
 /// the token.
 pub fn decode_pins(text: &str) -> Option<BTreeMap<String, OpPin>> {
     let mut r = Reader { s: text, i: 0 };
-    if r.take()? != VERSION {
-        return None;
-    }
+    let versioned = match r.take()? {
+        VERSION => false,
+        VERSION_2 => true,
+        _ => return None,
+    };
     let n: usize = r.take()?.parse().ok()?;
     let mut out = BTreeMap::new();
     for _ in 0..n {
         let op = r.take()?.to_string();
         let manifest_hash = ManifestHash(unhex(r.take()?)?);
+        let version = if versioned {
+            Some(r.take()?.to_string()).filter(|v| !v.is_empty())
+        } else {
+            None
+        };
         let unguarded = flag(r.take()?)?;
         let en: usize = r.take()?.parse().ok()?;
         let mut entities = Vec::with_capacity(en);
@@ -410,6 +513,7 @@ pub fn decode_pins(text: &str) -> Option<BTreeMap<String, OpPin>> {
                 manifest_hash,
                 unguarded,
                 entities,
+                version,
             },
         );
     }

@@ -98,6 +98,10 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo rollout start|status|resume|skip|retry|abort|finish|hold|settings|set ...\n      \
+         rollouts through the door (`std.deployment.rollout.*`): start one of a\n      \
+         stored version, follow it, and control it. `ordo rollout` alone\n      \
+         prints each subcommand.\n  \
          ordo evolve --orphans\n      \
          what versions left behind in every database (`std.deployment.orphans`).\n  \
          ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
@@ -309,16 +313,27 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
-         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         ordo environments set release-mismatch refuse|warn | attestation-max-age <n>d --reason \"<text>\"\n      \
+         what production accepts of a signed rehearsal (default refuse, 7d).\n  \
+         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
          seals each clone to it. clone.mask names the fields that leave\n      \
          production unmasked (deny by default, `off` to opt out);\n      \
-         clone.readers names who besides staging's admins opens a clone.\n  \
+         clone.readers names who besides staging's admins opens a clone.\n      \
+         clone.sinks: `on` (default) sends every staging tenant's mail and\n      \
+         function calls to the sink, `clones` only the clones'; `sink` reads it.\n  \
          ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \
          Members come without their sign-in; a staging admin opens it.\n  \
+         ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] --reason \"<text>\"\n      \
+         on staging: run the stored plan on clones and sign it when green.\n      \
+         Staging makes its own signing key; nothing to set up.\n  \
+         ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>] | list\n      \
+         on production: read staging's signed rehearsal as you, check it,\n      \
+         and render the plan to the same digest. Production runs only an\n      \
+         accepted digest while staging is in its chain.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \
@@ -601,8 +616,10 @@ fn main() {
             | "windows"
             | "environments"
             | "clones"
+            | "rehearsals"
             | "promote"
             | "evolve"
+            | "rollout"
             | "prune"
             | "restore"
             | "keys"

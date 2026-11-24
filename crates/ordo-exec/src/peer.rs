@@ -41,8 +41,8 @@
 //! [`grant_readers`] makes the grants that role holds in this deployment's
 //! schema equal what the file says: `USAGE` on the schema, `SELECT` on the
 //! named tables, and `SELECT` on the sign-in columns a `$caller` guard reads
-//! ([`SIGN_IN_COLUMNS`]). It runs at every apply and every start, so a table
-//! taken off the line is revoked, and a table a migration creates is granted
+//! ([`crate::sign_in_contract`], a contract between Ordo releases). It runs
+//! at every apply and every start, so a table taken off the line is revoked, and a table a migration creates is granted
 //! in the same apply. On the reader's side, [`check_access`] refuses a start
 //! whose role lacks a grant, quoting the line to add, and refuses a role that
 //! reads the peer without a grant at all (its owner, a superuser), unless
@@ -96,21 +96,6 @@ pub fn reader_role_env(reader: &str) -> String {
 /// one role, grants decide nothing, so a reader refuses to start that way
 /// unless this is on.
 pub const SHARED_ROLE_ENV: &str = "ORDO_PEER_SHARED_ROLE";
-
-/// What a reader's `$caller` guard and [`link`] read in a peer, table by
-/// table: the only columns of the sign-in tables a reader role is granted.
-pub const SIGN_IN_COLUMNS: [(&str, &[&str]); 4] = [
-    ("members", &["id", "principal", "kind", "status"]),
-    ("$principal", &["id", "deleted_at"]),
-    (
-        "$authenticator",
-        &["authenticator", "principal", "retired_case"],
-    ),
-    (
-        CONNECTIONS,
-        &["name", "kind", "fingerprint", "subject_claim"],
-    ),
-];
 
 /// The table that remembers which roles this deployment granted to, so a
 /// reader line removed from the file is revoked on the next apply or start.
@@ -895,7 +880,7 @@ async fn connections(pool: &Pool, pg: Option<&str>) -> Result<Vec<Connection>, S
         None => quote(CONNECTIONS),
     };
     // The subject claim by its column, never through the whole row: a
-    // reader is granted these four columns only (`SIGN_IN_COLUMNS`).
+    // reader is granted the contract's columns only (`sign_in_contract`).
     let has_claim = first_is_true(
         &pool
             .rows(&format!(
@@ -1072,8 +1057,9 @@ pub async fn grant_readers(pool: &Pool, schema: &Schema) -> Result<Vec<String>, 
 /// whose line is gone. Returns one line per reader for the start log.
 ///
 /// Each role gets `USAGE` on the schema, `SELECT` on its tables, and
-/// `SELECT` on the [`SIGN_IN_COLUMNS`] of each sign-in table it does not
-/// name whole. A table not created yet is granted by the apply that creates
+/// `SELECT` on the sign-in contract's columns ([`crate::sign_in_contract`])
+/// of each sign-in table it does not name whole, and on the release this
+/// deployment runs. A table not created yet is granted by the apply that creates
 /// it. Nothing is sent when the catalog already agrees, so a start of an
 /// unchanged deployment writes nothing.
 pub async fn grant_readers_with(
@@ -1142,10 +1128,18 @@ pub async fn grant_readers_with(
             r.tables.join(", ")
         ));
     }
+    // The sign-in contract (owner ruling 2026-11-23, Q16): the columns a
+    // `$caller` guard reads, retired ones kept for the load window, and the
+    // release this deployment runs, for the reader's release check.
+    let mut contract = crate::sign_in_contract::columns();
+    contract.push((
+        crate::sign_in_contract::RELEASE_TABLE,
+        vec![crate::sign_in_contract::RELEASE_COLUMN],
+    ));
     for (_, held) in want.values_mut() {
-        for (t, cols) in SIGN_IN_COLUMNS {
+        for (t, cols) in &contract {
             let whole = held.contains(&(t.to_string(), String::new(), "SELECT".into()));
-            let Some(have) = present.get(t) else {
+            let Some(have) = present.get(*t) else {
                 continue;
             };
             if whole {
@@ -1381,7 +1375,7 @@ pub async fn check_access_env(
 
 /// The reader's side, before the peer is read at all: this deployment's
 /// role must hold `USAGE` on each peer schema and `SELECT` on every peer
-/// table an external reads, and on the [`SIGN_IN_COLUMNS`] when `$caller`
+/// table an external reads, and on the sign-in contract's columns when `$caller`
 /// is used on that peer (`callers`, [`callers`]). A missing grant refuses
 /// the start and quotes the `reader` line to add to the peer's file.
 ///
@@ -1474,7 +1468,7 @@ pub async fn check_access(
             }
         }
         if callers.contains(peer) {
-            for (t, cols) in SIGN_IN_COLUMNS {
+            for (t, cols) in crate::sign_in_contract::columns() {
                 let Some(have) = present.get(t) else {
                     continue;
                 };

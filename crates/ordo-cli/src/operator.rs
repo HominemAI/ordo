@@ -144,6 +144,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
         "evolve" => &["--run", "--list", "--orphans", "--revert", "--close-soak"],
+        "rollout" => &["--clear", "--share-partners"],
         "release-check" => &["--json", "--override"],
         _ => &[],
     }
@@ -411,8 +412,10 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
         "clones" => rt.block_on(clones_cmd(flags)),
+        "rehearsals" => rt.block_on(rehearsals_cmd(flags)),
         "promote" => rt.block_on(promote_cmd(flags)),
         "evolve" => rt.block_on(crate::evolve::run(flags)),
+        "rollout" => rt.block_on(crate::rollout::run(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -2192,7 +2195,9 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
     match &report.activation {
         Activation::Switched { to, .. } => Some(to.clone()),
         Activation::AlreadyActive { version } => Some(version.clone()),
-        Activation::Staged => None,
+        // `ordo apply` returns when the rollout starts (§3.5); the rollout
+        // moves the deployment, and `ordo rollout status` follows it.
+        Activation::Staged | Activation::RolloutStarted { .. } => None,
     }
 }
 
@@ -2284,6 +2289,17 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
         )),
         Activation::AlreadyActive { version } => out.push_str(&format!(
             "activated  {version}  (already active; nothing re-pointed)\n"
+        )),
+        Activation::RolloutStarted {
+            id,
+            strategy,
+            from,
+            to,
+        } => out.push_str(&format!(
+            "activated  not yet: rollout {id} to {to} started ({strategy}, from {}; \
+             rollout.strategy is set)\nrollout    `ordo rollout status` follows it; `ordo \
+             rollout abort` stops it\n",
+            from.as_deref().unwrap_or("nothing"),
         )),
     }
     let t = &report.tenants;
@@ -2489,7 +2505,9 @@ async fn rollback(flags: Flags) -> Outcome {
         Ok(Activation::AlreadyActive { version }) => {
             Outcome::ok(format!("UNCHANGED  {version} is already active\n"))
         }
-        Ok(Activation::Staged) => Outcome::failed("REFUSED an activation answered staged\n".into()),
+        Ok(Activation::Staged) | Ok(Activation::RolloutStarted { .. }) => {
+            Outcome::failed("REFUSED an activation answered staged\n".into())
+        }
         Err(e) => Outcome::failed(format!("REFUSED {e}\n")),
     }
 }
@@ -2628,10 +2646,11 @@ const CLONES_USAGE: &str = "ordo clones key  --host <h> ...\n\
      ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] \
      --reason \"<text>\"  --host <h> ...\n\
      ordo clones list  --host <h> ...\n\
-     ordo clones set mask|readers <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones set mask|readers|sinks <value> --reason \"<text>\"  --host <h> ...\n\
+     ordo clones sink [<tenant>] [--limit <n>]  --host <h> ...\n\
      each goes through the door (`--host <h>` or ORDO_HOST)";
 
-/// `ordo clones key|set-key|clone|list|set`: staging clones named
+/// `ordo clones key|set-key|clone|list|set|sink`: staging clones named
 /// production tenants (`plan-versions.md` §3.4, increment 12), through the
 /// door. `clone` runs on staging: staging asks production for the tenant as
 /// you, with your own token for production, and production masks it before
@@ -2644,12 +2663,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
     flags.positional.remove(0);
     let own: &[&str] = match sub.as_str() {
         "key" | "list" => &[],
+        "sink" => &["--limit"],
         "set-key" | "set" => &["--reason"],
         "clone" => &["--from", "--name", "--from-token", "--reason"],
         other => {
             return Outcome::usage(format!(
                 "unknown `ordo clones` subcommand `{other}`; there are `key`, `set-key`, \
-                 `clone`, `list` and `set`\n{CLONES_USAGE}\n"
+                 `clone`, `list`, `set` and `sink`\n{CLONES_USAGE}\n"
             ))
         }
     };
@@ -2672,6 +2692,23 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         ("list", []) => {
             crate::wire::door_op(&host, &flags, c::CLONES, serde_json::json!({}), false).await
+        }
+        ("sink", rest) if rest.len() <= 1 => {
+            let limit = match flags.named_value("--limit").map(str::parse::<u32>) {
+                None => None,
+                Some(Ok(n)) => Some(n),
+                Some(Err(_)) => {
+                    return Outcome::usage("`--limit <n>` takes a whole number\n".into())
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                c::SINKS,
+                serde_json::json!({ "tenant": rest.first(), "limit": limit }),
+                false,
+            )
+            .await
         }
         ("set-key", [env, key]) => {
             let Some(reason) = reason else {
@@ -2746,6 +2783,26 @@ async fn clones_cmd(flags: Flags) -> Outcome {
             row["env"].as_str().unwrap_or("?"),
             row["key"].as_str().unwrap_or("?"),
         ),
+        "sink" => {
+            let entries = row["entries"].as_array().cloned().unwrap_or_default();
+            if entries.is_empty() {
+                "SINK  empty: nothing in staging has sent anything\n".to_string()
+            } else {
+                let mut out = String::from("SINK  what staging would have sent, newest first\n");
+                for e in entries {
+                    out.push_str(&format!(
+                        "  {}  {}  {}  to {}  \"{}\"  {} bytes\n",
+                        e["at"].as_u64().unwrap_or(0),
+                        e["space"].as_str().unwrap_or("?"),
+                        e["kind"].as_str().unwrap_or("?"),
+                        e["target"].as_str().unwrap_or("?"),
+                        e["summary"].as_str().unwrap_or(""),
+                        e["bytes"].as_u64().unwrap_or(0),
+                    ));
+                }
+                out
+            }
+        }
         "set-key" => format!(
             "recorded    the clone key of {}\n",
             row["env"].as_str().unwrap_or("?")
@@ -2764,11 +2821,10 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 .map(|a| a.len())
                 .unwrap_or(0);
             let mut out = format!(
-                "cloned      {} from {} on {} into {} ({})\nversion     {}\nrows        {}, \
+                "cloned      {} from {} into {} ({})\nversion     {}\nrows        {}, \
                  {} field(s) masked\nopens as    {} for a staging admin\n",
-                cl["fromName"].as_str().unwrap_or("?"),
-                cl["fromEnv"].as_str().unwrap_or("?"),
                 cl["fromTenant"].as_str().unwrap_or("?"),
+                cl["fromEnv"].as_str().unwrap_or("?"),
                 cl["name"].as_str().unwrap_or("?"),
                 cl["space"].as_str().unwrap_or("?"),
                 cl["version"].as_str().unwrap_or("?"),
@@ -2776,6 +2832,12 @@ async fn clones_cmd(flags: Flags) -> Outcome {
                 masked,
                 cl["opensAs"].as_str().unwrap_or("?"),
             );
+            if let Some(v) = row["arrived"].as_str() {
+                out.push_str(&format!(
+                    "arrived     {v} came down with the clone, through the promotion gate: \
+                     stored, not activated\n"
+                ));
+            }
             if let Some(n) = row["notCloned"].as_array().filter(|a| !a.is_empty()) {
                 out.push_str(&format!(
                     "not cloned  {} (foreign tables: staging needs its own copy and peer)\n",
@@ -2789,11 +2851,13 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
         _ => {
             let mut out = format!(
-                "{} {}\n{} {}\nCLONES\n",
+                "{} {}\n{} {}\n{} {}\nCLONES\n",
                 c::MASK_SETTING,
                 row["mask"].as_str().unwrap_or("?"),
                 c::READERS_SETTING,
                 readers_line(&row["readers"]),
+                c::SINKS_SETTING,
+                row["sinks"].as_str().unwrap_or("on"),
             );
             for cl in row["clones"].as_array().cloned().unwrap_or_default() {
                 out.push_str(&format!(
@@ -2811,6 +2875,223 @@ async fn clones_cmd(flags: Flags) -> Outcome {
         }
     };
     Outcome::ok(out)
+}
+
+// ── rehearsals ───────────────────────────────────────────────────────────
+
+const REHEARSALS_USAGE: &str =
+    "ordo rehearsals rehearse --from <v> --to <v> --clone <clone>[,<clone>] \
+     --reason \"<text>\"  --host <staging> ...\n\
+     ordo rehearsals accept --from <v> --to <v> [--from-token <t>] [--trust-key <k>]  \
+     --host <production> ...\n\
+     ordo rehearsals list [--from <v>] [--to <v>]  --host <h> ...\n\
+     each goes through the door (`--host <h>` or ORDO_HOST)";
+
+/// `ordo rehearsals rehearse|accept|list`: the signed rehearsal
+/// (`plan-versions.md` §3.2, increment 12b), through the door. `rehearse`
+/// runs on staging, over clones; `accept` runs on production, which reads
+/// staging's signed rehearsal as you, with your own token for staging.
+async fn rehearsals_cmd(flags: Flags) -> Outcome {
+    let Some(sub) = flags.positional.first().cloned() else {
+        return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
+    };
+    let mut flags = flags;
+    flags.positional.remove(0);
+    let own: &[&str] = match sub.as_str() {
+        "list" => &["--from", "--to"],
+        "rehearse" => &["--from", "--to", "--clone", "--reason"],
+        "accept" => &["--from", "--to", "--from-token", "--trust-key"],
+        other => {
+            return Outcome::usage(format!(
+                "unknown `ordo rehearsals` subcommand `{other}`; there are `rehearse`, \
+                 `accept` and `list`\n{REHEARSALS_USAGE}\n"
+            ))
+        }
+    };
+    let mut allowed = own.to_vec();
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    if !flags.positional.is_empty() {
+        return Outcome::usage(format!("{REHEARSALS_USAGE}\n"));
+    }
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    use ordo_host::rehearsals as r;
+    let named = |k: &str| flags.named_value(k).map(str::to_string);
+    let step = || match (named("--from"), named("--to")) {
+        (Some(f), Some(t)) => Ok((f, t)),
+        _ => Err(Outcome::usage(
+            "`--from <version> --to <version>` name the step\n".into(),
+        )),
+    };
+    let row = match sub.as_str() {
+        "list" => {
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::REHEARSALS,
+                serde_json::json!({ "from": named("--from"), "to": named("--to") }),
+                false,
+            )
+            .await
+        }
+        "rehearse" => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let Some(tenants) = named("--clone") else {
+                return Outcome::usage(
+                    "`--clone <clone>` names the clones to rehearse on; `ordo clones list` \
+                     names them\n"
+                        .into(),
+                );
+            };
+            let Some(reason) = named("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why, and is kept with the rehearsal\n".into(),
+                );
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::REHEARSE,
+                serde_json::json!({
+                    "from": from, "to": to, "tenants": tenants, "reason": reason,
+                }),
+                true,
+            )
+            .await
+        }
+        _ => {
+            let (from, to) = match step() {
+                Ok(s) => s,
+                Err(o) => return o,
+            };
+            let token = match named("--from-token") {
+                Some(t) => t,
+                None => {
+                    match clone_source_token(&host, &flags, ordo_host::environments::STAGING).await
+                    {
+                        Ok(t) => t,
+                        Err(o) => return o,
+                    }
+                }
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                r::ACCEPT,
+                serde_json::json!({
+                    "from": from, "to": to, "fromToken": token,
+                    "trustKey": named("--trust-key"),
+                }),
+                true,
+            )
+            .await
+        }
+    };
+    let row = match row {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    Outcome::ok(rehearsal_lines(&sub, &row))
+}
+
+/// What `ordo rehearsals <sub>` prints for the door's answer.
+fn rehearsal_lines(sub: &str, row: &serde_json::Value) -> String {
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or("?").to_string();
+    let count = |v: &serde_json::Value| v.as_array().map(|c| c.len()).unwrap_or(0);
+    match sub {
+        "rehearse" => {
+            let a = &row["rehearsal"]["attestation"];
+            let mut out = format!(
+                "rehearsed   {} to {} on {} clone(s), green\ndigest      {}\nsigned by   {} \
+                 (key {})\nrelease     {}\n",
+                s(&a["from"]),
+                s(&a["to"]),
+                count(&a["clones"]),
+                s(&a["digest"]),
+                s(&a["env"]),
+                s(&a["key"]),
+                s(&a["release"]),
+            );
+            for nr in a["notReproducible"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "not reproducible  {}.{} by function {}: it declares secrets or hosts\n",
+                    s(&nr["entity"]),
+                    s(&nr["field"]),
+                    s(&nr["function"]),
+                ));
+            }
+            out.push_str(&format!(
+                "Accept it on production: `ordo rehearsals accept --from {} --to {}`\n",
+                s(&a["from"]),
+                s(&a["to"])
+            ));
+            out
+        }
+        "accept" => {
+            let mut out = format!(
+                "accepted    {} to {}, rehearsed on {}\ndigest      {}\nkey         {}{}\n\
+                 plan        {}\n",
+                s(&row["from"]),
+                s(&row["to"]),
+                s(&row["env"]),
+                s(&row["digest"]),
+                s(&row["key"]),
+                if row["keyRecorded"].as_bool() == Some(true) {
+                    " (recorded)"
+                } else {
+                    ""
+                },
+                if row["planStored"].as_bool() == Some(true) {
+                    "stored here"
+                } else {
+                    "already stored here"
+                },
+            );
+            for w in row["warnings"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!("warning     {}\n", s(&w)));
+            }
+            out
+        }
+        _ => {
+            let mut out = format!(
+                "environment {}\nsigning key {}\nSIGNED\n",
+                s(&row["env"]),
+                row["key"].as_str().unwrap_or("none yet"),
+            );
+            for x in row["rehearsals"].as_array().cloned().unwrap_or_default() {
+                let a = &x["attestation"];
+                out.push_str(&format!(
+                    "  {} to {}  {}  {} clone(s)  by {}  at {}\n",
+                    s(&a["from"]),
+                    s(&a["to"]),
+                    s(&a["digest"]),
+                    count(&a["clones"]),
+                    s(&a["actor"]),
+                    a["at"].as_u64().unwrap_or(0),
+                ));
+            }
+            out.push_str("ACCEPTED\n");
+            for x in row["accepted"].as_array().cloned().unwrap_or_default() {
+                out.push_str(&format!(
+                    "  {} to {}  {}  from {}  by {}\n",
+                    s(&x["from"]),
+                    s(&x["to"]),
+                    s(&x["digest"]),
+                    s(&x["env"]),
+                    s(&x["actor"]),
+                ));
+            }
+            out
+        }
+    }
 }
 
 fn readers_line(v: &serde_json::Value) -> String {
@@ -2874,6 +3155,8 @@ const ENVIRONMENTS_USAGE: &str = "ordo environments list [<name>]  --host <h> ..
      --host <h> ...\n\
      ordo environments door <name> --clear --reason \"<text>\"  --host <h> ...\n\
      ordo environments set skip-staging on|off --reason \"<text>\"  --host <h> ...\n\
+     ordo environments set release-mismatch refuse|warn --reason \"<text>\"  --host <h> ...\n\
+     ordo environments set attestation-max-age <n>d --reason \"<text>\"  --host <h> ...\n\
      ordo environments set-own <name> --reason \"<text>\"  --host <h> ...\n\
      ordo environments remove <name> --reason \"<text>\"  --host <h> ...\n\
      ordo environments rename <name> <new-name> --reason \"<text>\"  --host <h> ...\n\
@@ -3263,6 +3546,8 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...
      ordo versions revoked  --host <h> ...\n\
      ordo versions settings [--limit <n>]  --host <h> ...\n\
      ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear  --reason \"<text>\"  \
+     --host <h> ...\n\
+     ordo versions set backfill.<chunk_rows|chunk_timeout|max_attempts|budget> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
      every `versions` command goes through the door (`--host <h>` or ORDO_HOST)\n\
      a version is its name or its order number, `#4`";
@@ -3737,7 +4022,11 @@ async fn versions_settings(flags: Flags) -> Outcome {
         Ok(r) => r,
         Err(o) => return o,
     };
-    let mut out = format!("VERSION SETTINGS\n{}", settings_lines(&row));
+    let mut out = format!(
+        "VERSION SETTINGS\n{}{}",
+        settings_lines(&row),
+        backfill_lines(&row["backfill"])
+    );
     let history = row["history"].as_array().cloned().unwrap_or_default();
     out.push_str(&format!("CHANGES ({})\n", history.len()));
     if history.is_empty() {
@@ -3772,16 +4061,29 @@ async fn versions_set(flags: Flags) -> Outcome {
         ([s], true) => (s.clone(), None),
         _ => return Outcome::usage(format!("{VERSIONS_USAGE}\n")),
     };
-    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
-        return Outcome::usage(format!(
-            "`{name}` is not a version setting; there are `served`, `minimum`, \
-             `new-tenant`, `min-residency` and `idle-evict-after`\n"
-        ));
-    };
     let Some(reason) = flags.named_value("--reason") else {
         return Outcome::usage(
             "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
         );
+    };
+    // The backfill settings are stored beside these and set the same way
+    // (Q15): `ordo versions set backfill.chunk_rows 500 --reason "..."`.
+    if name.trim().starts_with("backfill.") {
+        let Some(setting) = ordo_host::backfill::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not a backfill setting; there are {}\n",
+                ordo_host::backfill::SETTINGS.join(", ")
+            ));
+        };
+        return backfill_set(&flags, setting, value, reason).await;
+    }
+    let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
+        return Outcome::usage(format!(
+            "`{name}` is not a version setting; there are `served`, `minimum`, \
+             `new-tenant`, `min-residency` and `idle-evict-after`, and the backfill \
+             settings {}\n",
+            ordo_host::backfill::SETTINGS.join(", ")
+        ));
     };
     let host = match door_only(&flags) {
         Ok(h) => h,
@@ -3809,6 +4111,57 @@ async fn versions_set(flags: Flags) -> Outcome {
         format!("unchanged  {} is already {now}\n", setting.name())
     };
     Outcome::ok(format!("{head}{}", settings_lines(&row)))
+}
+
+/// `ordo versions set backfill.<name> <value> | --clear --reason "..."`:
+/// one backfill setting through the same door op.
+async fn backfill_set(
+    flags: &Flags,
+    setting: &'static str,
+    value: Option<String>,
+    reason: &str,
+) -> Outcome {
+    let host = match door_only(flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        flags,
+        ordo_host::deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({ "setting": setting, "value": value, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let now = match &row["value"] {
+        serde_json::Value::Null => "none".to_string(),
+        v => v.to_string(),
+    };
+    let head = if row["changed"].as_bool() == Some(true) {
+        format!("set        {setting} = {now}\n")
+    } else {
+        format!("unchanged  {setting} is already {now}\n")
+    };
+    Outcome::ok(format!("{head}{}", backfill_lines(&row["backfill"])))
+}
+
+/// The backfill settings as the settings op answers them.
+fn backfill_lines(b: &serde_json::Value) -> String {
+    if b.is_null() {
+        return String::new();
+    }
+    let n = |k: &str| b[k].as_u64().map(|n| n.to_string());
+    format!(
+        "BACKFILL\n  chunk rows    {}\n  chunk timeout {}s\n  max attempts  {}\n  budget        {}\n",
+        n("chunkRows").unwrap_or_else(|| "?".into()),
+        n("chunkTimeout").unwrap_or_else(|| "?".into()),
+        n("maxAttempts").unwrap_or_else(|| "?".into()),
+        n("budget").map(|b| format!("{b} chunks")).unwrap_or_else(|| "none".into()),
+    )
 }
 
 /// What `ordo versions revoked` prints, on both paths.

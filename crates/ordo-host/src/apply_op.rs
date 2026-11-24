@@ -369,6 +369,16 @@ pub enum Activation {
     /// `--no-activate`: stored, and the deployment still points where it
     /// did.
     Staged,
+    /// `rollout.strategy` is set, so the apply stored the version and
+    /// started a rollout to it (`plan-versions.md` §3.7, increment 10). The
+    /// deployment points where it did until the rollout moves its own
+    /// space.
+    RolloutStarted {
+        id: i64,
+        strategy: String,
+        from: Option<String>,
+        to: String,
+    },
 }
 
 /// Whether the artifact was written, was already there byte-identical, or
@@ -495,11 +505,19 @@ pub enum ApplyRefused {
     /// A production deployment takes only a version that arrived through
     /// the promotion gate (`crate::promotion`). The text names the command.
     NotPromoted(String),
+    /// A rollout is open, and one deployment-wide rollout runs at a time
+    /// (ruled 2026-11-23, Q3). The text names `ordo rollout status` and
+    /// `ordo rollout abort`.
+    RolloutOpen(String),
     /// An external entity's table is gone, changed or unreadable in this
     /// database (slice C, `external-entities`). One line per entity, each
     /// leading with its class (`external_missing`, `external_changed`,
     /// `external_no_grant`) and ending with the fix. Nothing was applied.
     External(Vec<String>),
+    /// Staging comes before this deployment, and the version renames a
+    /// field or an entity: a change only a stored plan staging rehearsed
+    /// makes here (`crate::rehearsals`, §3.2). The text names the commands.
+    NotRehearsed(String),
 }
 
 impl ApplyRefused {
@@ -519,7 +537,9 @@ impl ApplyRefused {
             ApplyRefused::Provenance(_) => "provenance_refused",
             ApplyRefused::Revoked(_) => "version_revoked",
             ApplyRefused::NotPromoted(_) => "not_promoted",
+            ApplyRefused::RolloutOpen(_) => "rollout_open",
             ApplyRefused::External(_) => "external_refused",
+            ApplyRefused::NotRehearsed(_) => "plan_not_rehearsed",
         }
     }
 
@@ -537,7 +557,9 @@ impl ApplyRefused {
             | ApplyRefused::VersionBehind { .. }
             | ApplyRefused::Revoked(_)
             | ApplyRefused::NotPromoted(_)
-            | ApplyRefused::External(_) => ErrorCode::ApplyRefused,
+            | ApplyRefused::RolloutOpen(_)
+            | ApplyRefused::External(_)
+            | ApplyRefused::NotRehearsed(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -596,7 +618,10 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Code(e) => write!(f, "function_code_refused: {e}"),
             ApplyRefused::Provenance(e) => write!(f, "provenance_refused: {e}"),
             // Its text leads with the class already.
-            ApplyRefused::Revoked(e) | ApplyRefused::NotPromoted(e) => write!(f, "{e}"),
+            ApplyRefused::Revoked(e)
+            | ApplyRefused::NotPromoted(e)
+            | ApplyRefused::RolloutOpen(e) => write!(f, "{e}"),
+            ApplyRefused::NotRehearsed(e) => write!(f, "plan_not_rehearsed: {e}"),
             ApplyRefused::External(lines) => write!(
                 f,
                 "external_refused: {} external entit{} cannot be read, so nothing was \
@@ -806,7 +831,14 @@ async fn sequence(
     // below writes the name into `$migrations`, so an unchanged program
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
-    let naming = sa::name_version(pool, program).await.map_err(refused)?;
+    // A version that arrives with a staging clone keeps the number it was
+    // applied under, lower than this deployment's highest or not.
+    let naming = if op == crate::promotion::CLONE_OP_LABEL {
+        sa::name_arrival(pool, program).await
+    } else {
+        sa::name_version(pool, program).await
+    }
+    .map_err(refused)?;
     // **A production deployment takes only what arrived through the gate**,
     // refused before anything is stored (`crate::promotion`).
     if activate {
@@ -878,10 +910,39 @@ async fn sequence(
             SchemaOutcome::Matches { pending }
         }
         SchemaState::Behind(changes) => {
-            match sa::apply_safe(pool, program, actor, op, Some(external.clone()))
-                .await
-                .map_err(ApplyRefused::Internal)?
-            {
+            // **Past staging, an apply makes no rename** (§3.2, 12b): the
+            // one change the safe apply makes that a stored step makes too.
+            // It is stored and left behind, and an activation is refused,
+            // naming the rehearsal.
+            let renames: Vec<String> = changes
+                .iter()
+                .filter(|c| matches!(c, Change::RenameField { .. } | Change::RenameEntity { .. }))
+                .map(|c| c.to_string())
+                .collect();
+            let unrehearsed = !renames.is_empty()
+                && crate::rehearsals::required(pool)
+                    .await
+                    .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
+            if unrehearsed && activate {
+                return Err(ApplyRefused::NotRehearsed(format!(
+                    "staging comes before this deployment, and {} renames {}: a change this \
+                     deployment makes only through a stored plan staging rehearsed. Store it \
+                     without activating (`--no-activate`), render the step (`ordo evolve \
+                     --from <serving> --to {}`), rehearse it on staging (`ordo rehearsals \
+                     rehearse`), accept it here (`ordo rehearsals accept`), then run it",
+                    program.version,
+                    renames.join(", "),
+                    program.version
+                )));
+            }
+            let safe = if unrehearsed {
+                sa::SafeApply::NotSafe
+            } else {
+                sa::apply_safe(pool, program, actor, op, Some(external.clone()))
+                    .await
+                    .map_err(ApplyRefused::Internal)?
+            };
+            match safe {
                 sa::SafeApply::Applied {
                     changes,
                     migration,
@@ -1060,8 +1121,56 @@ async fn sequence(
             changes: behind,
         });
     }
+    // **A rollout instead of an activation** when `rollout.strategy` is set
+    // (`plan-versions.md` §3.7, increment 10). Unset, every tenant moves at
+    // once, as before rollouts.
+    let strategy = if activate {
+        match crate::rollouts::Rollouts::on(pool).settings().await {
+            Ok(s) => s.strategy,
+            Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
+        }
+    } else {
+        None
+    };
+    let active_now = if strategy.is_some() {
+        Versions::on(pool)
+            .active_version()
+            .await
+            .map_err(|e| ApplyRefused::Internal(e.to_string()))?
+    } else {
+        None
+    };
     let activation = if !activate {
         Activation::Staged
+    } else if let Some(strategy) = strategy
+        .filter(|_| active_now.is_some() && active_now.as_deref() != Some(program.version.as_str()))
+    {
+        let opts = crate::rollouts::StartOptions {
+            strategy: Some(strategy),
+            ..Default::default()
+        };
+        match crate::rollouts::Rollouts::on(pool)
+            .reaching(pools)
+            .start(&program.version, &opts, actor, now_secs())
+            .await
+        {
+            Ok(r) => Activation::RolloutStarted {
+                id: r.id,
+                strategy: r.strategy.as_str().to_string(),
+                from: r.from,
+                to: r.target,
+            },
+            Err(e @ crate::rollouts::RolloutRefusal::Open { .. }) => {
+                return Err(ApplyRefused::RolloutOpen(e.to_string()))
+            }
+            Err(crate::rollouts::RolloutRefusal::Version(
+                e @ versions::VersionRefusal::Revoked { .. },
+            )) => return Err(ApplyRefused::Revoked(e.to_string())),
+            Err(crate::rollouts::RolloutRefusal::Version(
+                e @ versions::VersionRefusal::NotPromoted(_),
+            )) => return Err(ApplyRefused::NotPromoted(e.to_string())),
+            Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
+        }
     } else {
         // Every tenant whose database holds it is re-pinned to it in the
         // same transaction (`plan-versions.md` §1.3, §2.1).
@@ -1083,6 +1192,9 @@ async fn sequence(
             }
             Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
                 return Err(ApplyRefused::NotPromoted(e.to_string()))
+            }
+            Err(e @ versions::VersionRefusal::RolloutOpen { .. }) => {
+                return Err(ApplyRefused::RolloutOpen(e.to_string()))
             }
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
         }
@@ -1270,6 +1382,9 @@ async fn activate_locked(
         }
         Err(e @ versions::VersionRefusal::NotPromoted(_)) => {
             Err(ApplyRefused::NotPromoted(e.to_string()))
+        }
+        Err(e @ versions::VersionRefusal::RolloutOpen { .. }) => {
+            Err(ApplyRefused::RolloutOpen(e.to_string()))
         }
         Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }
@@ -1682,6 +1797,15 @@ impl Report {
                 "state": "alreadyActive", "version": version,
             }),
             Activation::Staged => json!({ "state": "staged" }),
+            Activation::RolloutStarted {
+                id,
+                strategy,
+                from,
+                to,
+            } => json!({
+                "state": "rolloutStarted", "rollout": id, "strategy": strategy,
+                "from": from, "to": to,
+            }),
         };
         json!({
             "version": self.version,
@@ -1776,6 +1900,12 @@ impl Report {
                 version: a["version"].as_str().unwrap_or_default().to_string(),
             },
             Some("staged") => Activation::Staged,
+            Some("rolloutStarted") => Activation::RolloutStarted {
+                id: a["rollout"].as_i64().unwrap_or(0),
+                strategy: a["strategy"].as_str().unwrap_or_default().to_string(),
+                from: a["from"].as_str().map(str::to_string),
+                to: a["to"].as_str().unwrap_or_default().to_string(),
+            },
             other => {
                 return Err(format!(
                     "the apply's result named activation state {other:?}, which this client \
@@ -1884,6 +2014,9 @@ pub struct ApplyOps {
     /// once, rather than on the pin stream's next read. Unset, the stream
     /// takes them.
     pub spaces: std::sync::OnceLock<Arc<crate::spaces::Spaces>>,
+    /// Key custody for a step that seals a field (increment 13), set by the
+    /// runtime. Unset, such a step is refused naming why.
+    pub backfill_keys: std::sync::OnceLock<Arc<dyn ordo_crypto::KeyProvider>>,
 }
 
 impl ApplyOps {
@@ -1909,17 +2042,25 @@ impl ApplyOps {
             stream,
             backfill_functions: std::sync::OnceLock::new(),
             spaces: std::sync::OnceLock::new(),
+            backfill_keys: std::sync::OnceLock::new(),
         })
     }
 
-    /// What a stored step runs its backfills with (10b): the plan's default
-    /// settings, and this node's backend functions when the runtime gave
-    /// them ([`ApplyOps::backfill_functions`]).
-    pub fn step_context(&self) -> crate::evolve::StepContext {
-        crate::evolve::StepContext {
-            settings: crate::backfill::BackfillSettings::default(),
+    /// What a stored step runs its backfills with (10b): the backfill
+    /// settings as stored in `$version_settings` (Q15; unset ones are the
+    /// plan's defaults), and this node's backend functions when the runtime
+    /// gave them ([`ApplyOps::backfill_functions`]).
+    pub async fn step_context(&self) -> Result<crate::evolve::StepContext, ExecError> {
+        let settings = crate::backfill::stored_settings(&self.pool)
+            .await
+            .map_err(|e| {
+                e.to_exec_error("the step was not run: the backfill settings could not be read")
+            })?;
+        Ok(crate::evolve::StepContext {
+            settings,
             functions: self.backfill_functions.get().cloned(),
-        }
+            keys: self.backfill_keys.get().cloned(),
+        })
     }
 
     /// Check 3 of the gate (see the module doc), for every deploy op.
@@ -2024,6 +2165,12 @@ impl ApplyOps {
                     ),
                     Activation::AlreadyActive { .. } => "activation=already-active".to_string(),
                     Activation::Staged => "activation=staged".to_string(),
+                    Activation::RolloutStarted {
+                        id, strategy, from, ..
+                    } => format!(
+                        "activation=rollout rollout={id} strategy={strategy} was={}",
+                        from.as_deref().unwrap_or("none")
+                    ),
                 };
                 self.record(
                     caller,

@@ -129,14 +129,43 @@ export default defineConfig({
       dependencies: ['evolve-checks'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A staging clone of a production tenant (plan-versions.md increment 12),
+    // into the stack's second deployment. It puts staging in production's
+    // chain while it runs, and `ordo apply` goes to a chain's first step, so
+    // it runs after `orphans`, last. Locally, `--project=clone --no-deps`.
+    {
+      name: 'clone',
+      testMatch: /clone\/.*\.spec\.ts/,
+      dependencies: ['orphans'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // notes.body sealed on live data (plan-versions.md increment 13), from
+    // v3 to 0.3.4 (versions written by the spec). It seals a field for the whole
+    // stack, so it runs after `clone`. Locally, `--project=seal --no-deps`.
+    {
+      name: 'seal',
+      testMatch: /seal\/.*\.spec\.ts/,
+      dependencies: ['clone'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The signed rehearsal (plan-versions.md increment 12b): staging
+    // rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses
+    // the step until it accepts that. Version numbers only rise, so it runs
+    // after `seal`, last. Locally, `--project=rehearsal --no-deps`.
+    {
+      name: 'rehearsal',
+      testMatch: /rehearsal\/.*\.spec\.ts/,
+      dependencies: ['seal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // A rename on one tenant under live writes (plan-versions.md, increment
     // 11a): the move with dual writes, the soak, a revert and the close, with
-    // the page open. It moves one tenant onto 0.3.2, so it runs after
-    // `orphans`, last. Locally, `--project=moves --no-deps`.
+    // the page open. It stores a version above the
+    // rest, so it runs after `rehearsal`, last. Locally, `--project=moves --no-deps`.
     {
       name: 'moves',
       testMatch: /evolve\/dual-writes\.spec\.ts/,
-      dependencies: ['orphans'],
+      dependencies: ['rehearsal'],
       use: { ...devices['Desktop Chrome'] },
     },
     {

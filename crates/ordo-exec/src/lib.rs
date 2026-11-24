@@ -68,6 +68,7 @@ pub mod route;
 pub mod sealed;
 pub mod secevent;
 pub mod shape;
+pub mod sign_in_contract;
 pub mod spacedb;
 pub mod triggers;
 pub mod undo;

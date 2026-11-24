@@ -2,27 +2,30 @@
  * A rename on one tenant under live writes, through the door, with the page
  * open (plan-versions.md increment 11a; plan-backfill-dual-writes.md §9).
  *
- * 0.3.2 is notes v3 with `notes.body` renamed to `text` with `prev(body)`.
- * Its ops still answer `body`, so the v2 page reads the same notes. The
+ * The new version is the one production serves with `notes.title` renamed
+ * to `heading` with `prev(title)`. Its ops still answer `title`, so the v2
+ * page reads the same notes. After `rehearsal`, production serves 0.3.4
+ * (notes.body sealed, notes off the reader line) and the new version is
+ * 0.3.6. Run alone (`--no-deps`), v3 is applied and it is 0.3.2. The
  * developer, signed in with `ordo login` (tests/developer.ts), stores it and
  * its step, then moves Ada's tenant onto it:
  *
  * 1. `ordo evolve --tenant <Ada> --budget 1 --chunk-rows 2`: the expand and
  *    one chunk of the copy. The move stops in `backfilling`, Ada still on
- *    0.3.0, and every write she makes keeps both columns.
- * 2. Ada types into a note and adds one, on the page.
+ *    the version before, and every write she makes keeps both columns.
+ * 2. Ada retitles a note and adds one, on the page.
  * 3. `ordo evolve --tenant <Ada>`: the rest of the copy, verify, the switch.
- *    Ada is on 0.3.2 in a 7-day soak. She types into another note.
- * 4. `ordo evolve --tenant <Ada> --revert`: back on 0.3.0 inside the soak.
- *    After a reload, every note holds what she typed in steps 2 and 3.
- * 5. The move switches again and `--close-soak` ends it: `notes.body` is
- *    orphaned, and the note still holds what she typed.
+ *    Ada is on the new version in a 7-day soak. She retitles another note.
+ * 4. `ordo evolve --tenant <Ada> --revert`: back inside the soak. After a
+ *    reload, every note holds the title she typed in steps 2 and 3.
+ * 5. The move switches again and `--close-soak` ends it: `notes.title` is
+ *    orphaned, and the notes still hold what she typed.
  *
- * A regression looks like a typed text missing after a reload, a refused
+ * A regression looks like a typed title missing after a reload, a refused
  * step, a move that does not stop at its budget, or a revert that loses
- * what was typed on 0.3.2.
+ * what was typed on the new version.
  *
- * It applies v2 and v3 and moves one tenant, so it runs after `orphans`,
+ * It stores a version above every other, so it runs after `rehearsal`,
  * last. Chromium only.
  */
 
@@ -32,32 +35,34 @@ import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { owner } from '../people.js';
-import { addNote, applyProgram, noteInList, signIn, signedIn, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, servingVersion, signIn, signedIn, stack, unique } from '../support.js';
 
 test.describe.configure({ mode: 'serial' });
 
 /**
- * The 0.3.2 program: notes v3 with `body` renamed to `text`, made from
- * notes v3's own file so the two never drift, beside v3's `fn` code.
+ * The program the move goes to: notes v3 at `version`, as `seal` and
+ * `rehearsal` write it when `sealed` (notes.body sealed), always off the
+ * reader line, with `title` renamed to `heading`. Made from notes v3's own
+ * file so the two never drift, beside v3's `fn` code.
  */
-function renamedBody(): string {
+function renamedTitle(version: string, sealed: boolean): string {
   const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swaps: [string, string][] = [
-    ['domain notes @ 0.3.0', 'domain notes @ 0.3.2'],
-    ['  body:  text = ""', '  text:  text = "" prev(body)'],
-    ['set notes { title: $title, body: $body,', 'set notes { title: $title, text: $body,'],
-    ['set notes { id: $id, rev: $rev, title: $title, body: $body,', 'set notes { id: $id, rev: $rev, title: $title, text: $body,'],
-    ['[id, rev, title, body, tags, created, pinned, archived]', '[id, rev, title, body: text, tags, created, pinned, archived]'],
-    ['[id, rev, title, body, tags, created]', '[id, rev, title, body: text, tags, created]'],
-    ['[id, rev, title, body]', '[id, rev, title, body: text]'],
+    ['domain notes @ 0.3.0', `domain notes @ ${version}`],
+    ['reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess'],
+    ['  title: text\n', '  heading: text = "" prev(title)\n'],
+    ['set notes { title: $title,', 'set notes { heading: $title,'],
+    ['set notes { id: $id, rev: $rev, title: $title', 'set notes { id: $id, rev: $rev, heading: $title'],
+    ['[id, rev, title,', '[id, rev, title: heading,'],
   ];
+  if (sealed) swaps.push(['  body:  text = ""\n', '  body:  text sealed\n']);
   let source = v3;
   for (const [from, to] of swaps) {
     expect(source, `notes v3 still holds \`${from}\``).toContain(from);
     source = source.split(from).join(to);
   }
-  expect(source).not.toMatch(/\bbody: \$body\b/);
-  const dir = mkdtempSync(join(tmpdir(), 'notes-v3-2-'));
+  expect(source).not.toMatch(/\btitle: \$title\b/);
+  const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
   writeFileSync(join(dir, 'notes.ordo'), source);
   cpSync(join(stack().programV3, 'fn'), join(dir, 'fn'), { recursive: true });
   return dir;
@@ -87,28 +92,32 @@ function watchTenant(page: Page): () => string {
   };
 }
 
-/** Open a note, type its text, save. A saved note closes its editor. */
-async function typeInto(page: Page, title: string, text: string): Promise<void> {
+/** Open a note, retitle it, save. A saved note closes its editor. */
+async function retitle(page: Page, title: string, next: string): Promise<void> {
   await noteInList(page, title).click();
-  await page.getByRole('textbox', { name: 'Note', exact: true }).fill(text);
+  await page.getByRole('textbox', { name: 'Title', exact: true }).fill(next);
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Title', exact: true })).toHaveCount(0);
+  await expect(noteInList(page, next)).toBeVisible();
 }
 
-/** After a reload, the note holds `text`. */
-async function holds(page: Page, title: string, text: string): Promise<void> {
-  await noteInList(page, title).click();
-  await expect(page.getByRole('textbox', { name: 'Note', exact: true })).toHaveValue(text);
-  await page.getByRole('button', { name: 'Close', exact: true }).click();
+/** After a reload, a note with this title is listed. */
+async function holds(page: Page, title: string): Promise<void> {
+  await expect(noteInList(page, title)).toBeVisible();
 }
 
 test('a rename on one tenant under live writes: nothing typed is lost, and a revert in the soak keeps it', async ({
   browser,
 }, testInfo) => {
   testInfo.setTimeout(420_000);
-  // Run alone (`--project=moves --no-deps`), v3 is not applied yet.
-  applyProgram(stack().programV2);
-  applyProgram(stack().programV3);
+  // After `rehearsal`, production serves 0.3.4. Run alone, v3 is applied.
+  if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
+    ensureServing(stack().programV2, '0.2.0');
+    applyProgram(stack().programV3);
+  }
+  const from = servingVersion() ?? '';
+  const sealed = from === '0.3.4';
+  const to = sealed ? '0.3.6' : '0.3.2';
   const ada = await owner('Ada');
   const dev = await developer(browser);
   try {
@@ -119,74 +128,75 @@ test('a rename on one tenant under live writes: nothing typed is lost, and a rev
     for (const t of titles) await addNote(page, t, `Written before the move: ${t}.`);
     const space = tenant();
 
-    await test.step('0.3.2 is stored beside 0.3.0, and its step with the rename', () => {
-      const stored = dev.ordo(['apply', renamedBody(), '--no-activate', ...door()]);
+    await test.step(`${to} is stored beside ${from}, and its step with the rename`, () => {
+      const stored = dev.ordo(['apply', renamedTitle(to, sealed), '--no-activate', ...door()]);
       expect(stored.code, `${stored.out}\n${stored.err}`).toBe(0);
-      expect(stored.out).toContain('0.3.2');
-      const plan = dev.ordo(['evolve', '--from', '0.3.0', '--to', '0.3.2', ...door()]);
+      expect(stored.out).toContain(to);
+      const plan = dev.ordo(['evolve', '--from', from, '--to', to, ...door()]);
       expect(plan.code, `${plan.out}\n${plan.err}`).toBe(0);
       expect(plan.out).toContain('B4');
-      expect(plan.out).toMatch(/notes\.body.*notes\.text/);
+      expect(plan.out).toMatch(/notes\.title.*notes\.heading/);
     });
 
-    await test.step('the move starts and stops at its budget, Ada still on 0.3.0', () => {
-      const ran = dev.ordo(['evolve', '--tenant', space, '--to', '0.3.2', '--budget', '1', '--chunk-rows', '2', ...door()]);
+    await test.step(`the move starts and stops at its budget, Ada still on ${from}`, () => {
+      const ran = dev.ordo(['evolve', '--tenant', space, '--to', to, '--budget', '1', '--chunk-rows', '2', ...door()]);
       expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
-      expect(ran.out).toContain('move       0.3.0 to 0.3.2: backfilling');
+      expect(ran.out).toContain(`move       ${from} to ${to}: backfilling`);
       expect(ran.out).toContain('every write keeps both shapes');
     });
 
-    const during = 'Typed while the backfill ran.';
+    const during = unique('retitled-during-');
     const added = unique('added-during-');
-    await test.step('Ada types into a note and adds one during the backfill', async () => {
-      await typeInto(page, titles[5]!, during);
+    await test.step('Ada retitles a note and adds one during the backfill', async () => {
+      await retitle(page, titles[5]!, during);
       await addNote(page, added, 'Added while the backfill ran.');
     });
 
     await test.step('the move finishes: verify, the switch, a 7-day soak', () => {
-      const ran = dev.ordo(['evolve', '--tenant', space, '--to', '0.3.2', ...door()]);
+      const ran = dev.ordo(['evolve', '--tenant', space, '--to', to, ...door()]);
       expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
-      expect(ran.out).toContain('pinned     0.3.2 (was 0.3.0)');
-      expect(ran.out).toContain('move       0.3.0 to 0.3.2: soaking');
+      expect(ran.out).toContain(`pinned     ${to} (was ${from})`);
+      expect(ran.out).toContain(`move       ${from} to ${to}: soaking`);
       expect(ran.out).toMatch(/^soak +until /m);
     });
 
-    const soaked = 'Typed on 0.3.2, in the soak.';
-    await test.step('on 0.3.2, Ada reads every note and types into another', async () => {
+    const soaked = unique('retitled-in-soak-');
+    await test.step(`on ${to}, Ada reads every note and retitles another`, async () => {
       await page.reload();
       await signedIn(page);
-      for (const t of titles) await expect(noteInList(page, t)).toBeVisible();
-      await holds(page, titles[5]!, during);
-      await typeInto(page, titles[0]!, soaked);
+      for (const t of titles.slice(0, 5)) await holds(page, t);
+      await holds(page, during);
+      await holds(page, added);
+      await retitle(page, titles[0]!, soaked);
     });
 
-    await test.step('reverted inside the soak: back on 0.3.0', () => {
+    await test.step('reverted inside the soak', () => {
       const back = dev.ordo(['evolve', '--tenant', space, '--revert', ...door()]);
       expect(back.code, `${back.out}\n${back.err}`).toBe(0);
-      expect(back.out).toContain('pinned     0.3.0 (was 0.3.2)');
+      expect(back.out).toContain(`pinned     ${from} (was ${to})`);
       expect(back.out).toContain('gated');
     });
 
-    await test.step('after a reload on 0.3.0, every note holds what Ada typed', async () => {
+    await test.step(`after a reload on ${from}, every note holds what Ada typed`, async () => {
       await page.reload();
       await signedIn(page);
-      await expect(noteInList(page, added)).toBeVisible();
-      await holds(page, titles[5]!, during);
-      await holds(page, titles[0]!, soaked);
+      await holds(page, added);
+      await holds(page, during);
+      await holds(page, soaked);
       await expect(page.getByRole('alert')).toHaveCount(0);
     });
 
-    await test.step('switched again and the soak closed: body is orphaned, the text kept', async () => {
-      const again = dev.ordo(['evolve', '--tenant', space, '--to', '0.3.2', ...door()]);
+    await test.step('switched again and the soak closed: title is orphaned, the text kept', async () => {
+      const again = dev.ordo(['evolve', '--tenant', space, '--to', to, ...door()]);
       expect(again.code, `${again.out}\n${again.err}`).toBe(0);
       expect(again.out).toContain('soaking');
       const closed = dev.ordo(['evolve', '--tenant', space, '--close-soak', ...door()]);
       expect(closed.code, `${closed.out}\n${closed.err}`).toBe(0);
-      expect(closed.out).toContain('closed     the soak is over; orphaned: notes.body');
+      expect(closed.out).toContain('closed     the soak is over; orphaned: notes.title');
       await page.reload();
       await signedIn(page);
-      await holds(page, titles[0]!, soaked);
-      await holds(page, titles[5]!, during);
+      await holds(page, soaked);
+      await holds(page, during);
     });
   } finally {
     await dev.close();

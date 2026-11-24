@@ -647,6 +647,7 @@ pub async fn run(
                 entity,
                 settings: &ctx.settings,
                 functions: ctx.functions.clone(),
+                keys: ctx.keys.clone(),
             };
             let fail = |e: crate::backfill::BackfillRefusal| {
                 cx.err(
@@ -981,7 +982,10 @@ mod tests {
     #[test]
     fn each_version_keeps_the_other_column_of_a_rename_current() {
         let x = schema("1.0.0", "  title: text\n  body: text?\n");
-        let y = schema("1.1.0", "  heading: text = \"\" prev(title)\n  body: text?\n");
+        let y = schema(
+            "1.1.0",
+            "  heading: text = \"\" prev(title)\n  body: text?\n",
+        );
         let z = schema("1.2.0", "  heading: text\n  body: text?\n");
         let r = renames_of("1.1.0", &y);
         assert_eq!(r.len(), 1, "{r:?}");

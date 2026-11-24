@@ -158,12 +158,24 @@ pub const ROLLBACK_CHECK: &str = crate::evolve::ROLLBACK_CHECK;
 pub const REVERT_SOAK: &str = crate::evolve::REVERT_SOAK;
 /// End a tenant's soak now (increment 11a).
 pub const CLOSE_SOAK: &str = crate::evolve::CLOSE_SOAK;
+/// **Rollouts** (`plan-versions.md` §3.7, increment 10): start one, read
+/// where it stands, resume, skip a tenant, retry one, abort, finish by
+/// hand, and hold a tenant ([`crate::rollouts`]). What `ordo rollout` does.
+pub const ROLLOUT_START: &str = crate::rollouts::START;
+pub const ROLLOUT_STATUS: &str = crate::rollouts::STATUS;
+pub const ROLLOUT_RESUME: &str = crate::rollouts::RESUME;
+pub const ROLLOUT_SKIP: &str = crate::rollouts::SKIP;
+pub const ROLLOUT_RETRY: &str = crate::rollouts::RETRY;
+pub const ROLLOUT_ABORT: &str = crate::rollouts::ABORT;
+pub const ROLLOUT_FINISH: &str = crate::rollouts::FINISH;
+pub const ROLLOUT_HOLD: &str = crate::rollouts::HOLD;
+
 /// What versions left behind in every database (`$orphans`).
 pub const ORPHANS: &str = crate::orphan_ops::ORPHANS;
 /// Remove one orphan from every database, once asked twice.
 pub const PRUNE: &str = crate::orphan_ops::PRUNE;
 
-pub const OPS: [&str; 31] = [
+pub const OPS: [&str; 39] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -193,6 +205,14 @@ pub const OPS: [&str; 31] = [
     ROLLBACK_CHECK,
     REVERT_SOAK,
     CLOSE_SOAK,
+    ROLLOUT_START,
+    ROLLOUT_STATUS,
+    ROLLOUT_RESUME,
+    ROLLOUT_SKIP,
+    ROLLOUT_RETRY,
+    ROLLOUT_ABORT,
+    ROLLOUT_FINISH,
+    ROLLOUT_HOLD,
     ORPHANS,
     PRUNE,
 ];
@@ -208,11 +228,20 @@ pub const OPS: [&str; 31] = [
 /// The moves off a revoked version and their target are moves too
 /// (2026-11-05), and so is the tenant's own move when the app developer
 /// grants it: the grant is the control.
-pub const NO_PRESENCE: [&str; 4] = [
+///
+/// A rollout's controls are moves too: no reauth (§3.7, owner 2026-11-05).
+pub const NO_PRESENCE: [&str; 11] = [
     PIN,
     MOVE_OFF_REVOKED,
     SET_MOVE_TARGET,
     crate::revoked_moves::MOVE_SELF,
+    ROLLOUT_START,
+    ROLLOUT_RESUME,
+    ROLLOUT_SKIP,
+    ROLLOUT_RETRY,
+    ROLLOUT_ABORT,
+    ROLLOUT_FINISH,
+    ROLLOUT_HOLD,
 ];
 
 /// The activation log's length when the caller names none.
@@ -593,6 +622,7 @@ pub fn specs() -> Vec<OpSpec> {
     ]
     .into_iter()
     .chain(crate::evolve::specs())
+    .chain(crate::rollouts::specs())
     .chain(crate::orphan_ops::specs())
     .collect()
 }
@@ -796,7 +826,7 @@ pub async fn execute(
                 Ok(Activation::AlreadyActive { version }) => {
                     json!({ "state": "alreadyActive", "version": version, "from": version })
                 }
-                Ok(Activation::Staged) => {
+                Ok(Activation::Staged) | Ok(Activation::RolloutStarted { .. }) => {
                     return Err(ExecError::internal("an activation answered staged"))
                 }
                 Err(refusal) => return Err(ExecError::new(refusal.code(), refusal.to_string())),
@@ -899,6 +929,9 @@ pub async fn execute(
         }
         EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK | REVERT_SOAK | CLOSE_SOAK => {
             crate::evolve::execute(ops, name, bound, caller).await?
+        }
+        name if crate::rollouts::OPS.contains(&name) => {
+            crate::rollouts::execute(ops, name, bound, caller).await?
         }
         ORPHANS | PRUNE => crate::orphan_ops::execute(ops, name, bound, caller).await?,
         PIN => {
@@ -1042,6 +1075,15 @@ pub async fn execute(
                 .await
                 .map_err(read)?;
             let mut row = settings_json(&settings);
+            row["rollout"] = crate::rollouts::Rollouts::on(&ops.pool)
+                .settings()
+                .await
+                .map_err(|e| e.to_exec_error("the rollout settings could not be read"))?
+                .to_json();
+            row["backfill"] = crate::backfill::stored_settings(&ops.pool)
+                .await
+                .map_err(|e| e.to_exec_error("the backfill settings could not be read"))?
+                .to_json();
             row["waiting"] = waiting_json(&ops.pool).await;
             row["history"] = json!(history
                 .iter()
@@ -1054,12 +1096,100 @@ pub async fn execute(
         }
         SET_VERSION_SETTING => {
             let named = text(bound, "setting").unwrap_or_default();
+            // The rollout settings are stored beside the version settings
+            // and set through the same op (ruled 2026-11-23, Q15).
+            if let Some(setting) = crate::rollouts::setting_name(named)
+                .filter(|_| named.trim().starts_with("rollout."))
+            {
+                let value = text(bound, "value").filter(|v| !v.is_empty());
+                let reason = text(bound, "reason").unwrap_or_default();
+                let (changed, now) = crate::rollouts::Rollouts::on(&ops.pool)
+                    .set_setting(setting, value, caller, reason, crate::runtime::now_secs())
+                    .await
+                    .map_err(|e| e.to_exec_error("the rollout setting was not changed"))?;
+                let value = now.to_json()[crate::rollouts::json_key(setting)].clone();
+                if changed {
+                    ops.record(
+                        caller,
+                        SET_VERSION_SETTING,
+                        "version-setting",
+                        format!("setting={setting} value={value} by={caller}"),
+                    );
+                }
+                let v = crate::versions::Versions::on(&ops.pool);
+                let mut row = settings_json(
+                    &v.settings()
+                        .await
+                        .map_err(|e| e.to_exec_error("the version settings could not be read"))?,
+                );
+                row["rollout"] = now.to_json();
+                row["setting"] = json!(setting);
+                row["value"] = value;
+                row["changed"] = json!(changed);
+                row["waiting"] = waiting_json(&ops.pool).await;
+                return Ok(ExecResult {
+                    position: None,
+                    rows: vec![row],
+                    next_cursor: None,
+                });
+            }
+            // So are the backfill settings (Q15): what a stored step's
+            // backfill runs with.
+            if named.trim().starts_with("backfill.") {
+                let value = text(bound, "value").filter(|v| !v.is_empty());
+                let reason = text(bound, "reason").unwrap_or_default();
+                let (changed, now) = crate::backfill::set_setting(
+                    &ops.pool,
+                    named,
+                    value,
+                    caller,
+                    reason,
+                    crate::runtime::now_secs(),
+                )
+                .await
+                .map_err(|e| e.to_exec_error("the backfill setting was not changed"))?;
+                let setting = crate::backfill::setting_name(named).unwrap_or_default();
+                let value = now.to_json()[match setting {
+                    crate::backfill::CHUNK_ROWS_SETTING => "chunkRows",
+                    crate::backfill::CHUNK_TIMEOUT_SETTING => "chunkTimeout",
+                    crate::backfill::MAX_ATTEMPTS_SETTING => "maxAttempts",
+                    _ => "budget",
+                }]
+                .clone();
+                if changed {
+                    ops.record(
+                        caller,
+                        SET_VERSION_SETTING,
+                        "version-setting",
+                        format!("setting={setting} value={value} by={caller}"),
+                    );
+                }
+                let v = crate::versions::Versions::on(&ops.pool);
+                let mut row = settings_json(
+                    &v.settings()
+                        .await
+                        .map_err(|e| e.to_exec_error("the version settings could not be read"))?,
+                );
+                row["backfill"] = now.to_json();
+                row["setting"] = json!(setting);
+                row["value"] = value;
+                row["changed"] = json!(changed);
+                row["waiting"] = waiting_json(&ops.pool).await;
+                return Ok(ExecResult {
+                    position: None,
+                    rows: vec![row],
+                    next_cursor: None,
+                });
+            }
             let Some(setting) = crate::versions::VersionSetting::parse(named) else {
                 return Err(ExecError::new(
                     ordo_api::ErrorCode::InvalidParam,
                     format!(
                         "the version setting was not changed: `{named}` is not one. There are \
-                         versions.served, versions.minimum and versions.new_tenant"
+                         versions.served, versions.minimum, versions.new_tenant, the \
+                         rollout settings {}, and the backfill settings {}",
+                        crate::rollouts::SETTINGS.join(", "),
+                        crate::backfill::SETTINGS.join(", ")
                     ),
                 ));
             };
@@ -1367,21 +1497,26 @@ pub async fn execute(
                 .set_promotion_setting(setting, value, caller, reason, crate::runtime::now_secs())
                 .await
                 .map_err(|e| e.to_exec_error("the promotion setting was not changed"))?;
-            let shown = if settings.skip_staging { "on" } else { "off" };
+            let (name, shown) = match crate::environments::rehearsal_setting(setting) {
+                Some(name) => (name, value.trim()),
+                None => (
+                    crate::environments::SKIP_STAGING,
+                    if settings.skip_staging { "on" } else { "off" },
+                ),
+            };
             if changed {
                 ops.record(
                     caller,
                     SET_PROMOTION_SETTING,
                     "promotion-setting",
                     format!(
-                        "setting={} value={shown} by={caller} reason={}",
-                        crate::environments::SKIP_STAGING,
+                        "setting={name} value={shown} by={caller} reason={}",
                         reason.trim()
                     ),
                 );
             }
             json!({
-                "setting": crate::environments::SKIP_STAGING, "value": shown,
+                "setting": name, "value": shown,
                 "changed": changed, "skipStaging": settings.skip_staging,
             })
         }

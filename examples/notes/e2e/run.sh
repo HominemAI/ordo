@@ -13,7 +13,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../../.." && pwd)
 
 if [ "${E2E_SKIP_BUILD:-0}" != 1 ]; then
-  (cd "$repo" && cargo build -p ordo-cli -p ordo-host)
+  (cd "$repo" && cargo build -p ordo-cli -p ordo-host -p ordo-identity-service)
 fi
 [ -d "$repo/examples/notes/web/node_modules" ] || (cd "$repo/examples/notes/web" && npm ci)
 [ -d "$here/node_modules" ] || (cd "$here" && npm ci)

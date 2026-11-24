@@ -30,6 +30,7 @@
 {"file": "f7-vault-plan.md", "kind": "plan", "what": "The client-first vault protocol, F7."}
 {"file": "plan-auth-federated.md", "kind": "plan", "what": "Signing in by emailed code, Discord and other OAuth2, Google and company OIDC, and guest sign-in; steps in denizens' order. SAML last."}
 {"file": "plan-backend-functions.md", "kind": "plan", "what": "Backend functions: what a function is (WASM in the deployment), declaring, secrets, egress, triggers, identity, limits, migration of ellanor and denizens, increments, owner questions"}
+{"file": "plan-backfill-dual-writes.md", "kind": "plan", "what": "Backfills and transforming migrations under live writes: the backfill worker, dual writes, soaks and rollback (plan-versions increments 10b, 11a, 11b)"}
 {"file": "plan-blob-chain.md", "kind": "plan", "what": "Blob uploads through the write protocol, and the digest in the chain."}
 {"file": "plan-blob.md", "kind": "plan", "what": "Blob and content custody."}
 {"file": "plan-ci-images.md", "kind": "plan", "what": "CI and container images."}
@@ -42,7 +43,9 @@
 {"file": "plan-editor-tooling.md", "kind": "plan", "what": "Editor tooling."}
 {"file": "plan-enrolment.md", "kind": "plan", "what": "How a person gets a credential and becomes a member."}
 {"file": "plan-environments.md", "kind": "plan", "what": "Dev, staging and production as things Ordo supports: apply promotion, dev branches as tenants, staging clones, per-tenant rollout, seeding"}
+{"file": "plan-evolution-federation.md", "kind": "plan", "what": "Version changes across federated deployments: externals, peer and reader lines, grants and renamed columns under a rollout (plan-versions increment 7b)"}
 {"file": "plan-evolution-plans.md", "kind": "plan", "what": "How a schema change is made today, and the proposal to render, store, apply and undo it as a plan per step; answers the owner's grief notes on migrations"}
+{"file": "plan-example-tests.md", "kind": "plan", "what": "The plan for testing Ordo through its example apps, written for an implementing agent with no context: coverage of the example tests and the ratchet, system guarantees, the untested 16, click-and-expect suites per example, the CLI's whole life, proof verification in shopfront"}
 {"file": "plan-export.md", "kind": "plan", "what": "Full space export and space deletion."}
 {"file": "plan-external-entities.md", "kind": "plan", "what": "External entities: Ordo apps reading tables another system owns in the same database; ruled 2026-10-01 and 2026-11-15"}
 {"file": "plan-first-program.md", "kind": "plan", "what": "The first program: a notes app signed in to with a passkey, its program, page, deployment and measurements (17ae)."}
@@ -125,6 +128,7 @@
 {"file": "audit-configuration-syntax.md", "kind": "audit", "what": "Audit of the configuration a deployment owner sets outside the .ordo file, with a per-setting recommendation on what the syntax should express, 2026-11-13"}
 {"file": "audit-coverage-2026-09-07.md", "kind": "audit", "what": "The coverage audit re-run on 2026-09-07."}
 {"file": "audit-doc-contradictions.md", "kind": "audit", "what": "Where design documents contradict each other, and what the code decided."}
+{"file": "audit-feature-tests-2026-11-23.md", "kind": "audit", "what": "Every guarantee Ordo promises, as concepts not mechanisms, graded by its strongest test (example app, integration, unit, none): 413 graded, 32 through an example app, 16 untested"}
 {"file": "audit-one-way-gaps.md", "kind": "audit", "what": "Capabilities that work one way only (write without read-back, create without delete, record without a reader): 12 findings, with evidence and what tracks each"}
 {"file": "audit-security-trace.md", "kind": "audit", "what": "Which earlier security findings can be traced to an answer, and which cannot."}
 {"file": "audit-service-interfaces.md", "kind": "audit", "what": "Rule 9 audit: each service (database, mail, file storage, sign-in providers, key custody, drains, SDK door) against one client and one typed error; bugs first, fixes, sizes, order"}
@@ -136,6 +140,7 @@
 {"file": "critique-consolidated-5.md", "kind": "review", "what": "Critique round 5: the usability findings re-run against the docs."}
 {"file": "critique-consolidated.md", "kind": "review", "what": "Adversarial critique, round 1: five reviews merged."}
 {"file": "critique-round-5.html", "kind": "review", "what": "Critique round 5 as a page."}
+{"file": "review-evolution-plans-2026-11-23.md", "kind": "review", "what": "The evolution plans checked against everything landed since 2026-11-02 (federation, auth block, functions, per-tenant stores, public cache, device copies): what changed in them, new plans, 16 open questions"}
 {"file": "security-hardening-review-2.md", "kind": "review", "what": "Security hardening review, round 2: a re-read after the round 1 fixes."}
 {"file": "security-hardening-review-3.md", "kind": "review", "what": "Security hardening review 3: architecture and trust boundaries. Proposed."}
 {"file": "security-hardening-review-4.md", "kind": "review", "what": "Security hardening review 4: boundary guarantees. Proposed."}

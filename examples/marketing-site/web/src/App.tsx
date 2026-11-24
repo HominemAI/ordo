@@ -37,7 +37,7 @@ function usePublicRead(op: string): Read {
 
 /**
  * The landing page. It reads four public ops with no token and sends the
- * contact form to one public write. There is no sign-in anywhere in this app.
+ * contact form to one public write. Staff sign in through the separate studio workspace.
  */
 export function App() {
   return (
@@ -55,7 +55,7 @@ export function App() {
         <Testimonials />
         <Contact />
       </main>
-      <footer>Synthesized demo content. No account needed to read it.</footer>
+      <footer>Synthesized demo content. No account needed to read it. <a href="/studio">Studio sign-in</a></footer>
     </>
   );
 }

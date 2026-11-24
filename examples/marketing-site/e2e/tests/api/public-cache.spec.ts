@@ -118,8 +118,8 @@ test('a comment-only apply drops every cached answer as the plan requires', asyn
 test('a new version drops every cached answer on both nodes', async ({ request }, testInfo) => {
   test.setTimeout(420_000);
   const source = await readFile(stack().program, 'utf8');
-  expect(source).toContain('domain marketing @ 0.2.1');
-  await withDeployment(request, testInfo, s => checkApply(request, testInfo, source.replace('domain marketing @ 0.2.1', 'domain marketing @ 0.2.2'), s));
+  expect(source).toContain('domain marketing @ 0.3.0');
+  await withDeployment(request, testInfo, s => checkApply(request, testInfo, source.replace('domain marketing @ 0.3.0', 'domain marketing @ 0.3.1'), s));
 });
 
 test('two members never share one cached answer', async ({ request }) => {

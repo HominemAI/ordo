@@ -143,7 +143,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
     match cmd {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
-        "evolve" => &["--run", "--list", "--orphans"],
+        "evolve" => &["--run", "--list", "--orphans", "--revert", "--close-soak"],
         "release-check" => &["--json", "--override"],
         _ => &[],
     }

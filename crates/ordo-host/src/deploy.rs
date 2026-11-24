@@ -1065,6 +1065,11 @@ pub struct Deployment {
     /// Evicted versions a request woke, while they load. A request for one
     /// of their tenants waits for the load ([`Deployment::waking`]).
     waking: RwLock<std::collections::BTreeSet<String>>,
+    /// Tenants in a move with dual writes (increment 11a), and the overlay
+    /// each of its two versions writes with. Filled by the pin stream with
+    /// the pins ([`crate::pin_stream`]), so a node that has a tenant's new
+    /// pin has its overlays too.
+    moves: RwLock<std::collections::HashMap<String, MoveOverlays>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -1074,6 +1079,18 @@ pub struct Deployment {
     /// artifact's. Putting it in `Loaded` would make it *look* swappable,
     /// and something that looks swappable eventually gets swapped.
     platform: Vec<OpSpec>,
+}
+
+/// A tenant's move with dual writes, as a node serves it (increment 11a,
+/// [`ordo_exec::overlay`]).
+#[derive(Debug, Clone)]
+pub struct MoveOverlays {
+    pub from: String,
+    pub to: String,
+    /// What a write on `from` also writes: the new shape.
+    pub forward: Arc<ordo_exec::overlay::MoveOverlay>,
+    /// What a write on `to` also writes: the old shape.
+    pub reverse: Arc<ordo_exec::overlay::MoveOverlay>,
 }
 
 /// The pins a node holds. See [`Deployment`]'s `pins`.
@@ -1134,6 +1151,7 @@ impl Deployment {
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
+            moves: RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -1162,6 +1180,7 @@ impl Deployment {
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
+            moves: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1302,6 +1321,7 @@ impl Deployment {
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
+            moves: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1342,6 +1362,7 @@ impl Deployment {
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
+            moves: RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -1367,6 +1388,7 @@ impl Deployment {
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
             waking: RwLock::new(std::collections::BTreeSet::new()),
+            moves: RwLock::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -1747,6 +1769,56 @@ impl Deployment {
             .by_space
             .get(space)
             .cloned()
+    }
+
+    /// **The overlay a tenant's write runs**, by the version it is served
+    /// (increment 11a): the forward overlay for a write on the move's
+    /// `from`, the reverse one on its `to`, none outside a move. Keyed by
+    /// the version, never by the phase, so a node that took the new pin
+    /// before the new phase never writes one version's overlay under the
+    /// other.
+    pub fn overlay_for(
+        &self,
+        space: &str,
+        version: &str,
+    ) -> Option<Arc<ordo_exec::overlay::MoveOverlay>> {
+        let moves = self.moves.read().expect("move lock");
+        let m = moves.get(space)?;
+        if version == m.from {
+            Some(m.forward.clone())
+        } else if version == m.to {
+            Some(m.reverse.clone())
+        } else {
+            None
+        }
+    }
+
+    /// The two versions a tenant's move with dual writes serves, if any.
+    /// Its database holds both shapes while it is open.
+    pub fn move_of(&self, space: &str) -> Option<(String, String)> {
+        self.moves
+            .read()
+            .expect("move lock")
+            .get(space)
+            .map(|m| (m.from.clone(), m.to.clone()))
+    }
+
+    /// Take every open move with dual writes, whole.
+    pub fn set_moves(&self, moves: std::collections::HashMap<String, MoveOverlays>) {
+        *self.moves.write().expect("move lock") = moves;
+    }
+
+    /// Take one tenant's move, or its absence.
+    pub fn set_move(&self, space: &str, m: Option<MoveOverlays>) {
+        let mut moves = self.moves.write().expect("move lock");
+        match m {
+            Some(m) => {
+                moves.insert(space.to_string(), m);
+            }
+            None => {
+                moves.remove(space);
+            }
+        }
     }
 
     /// Every pin this node holds, and the `$pins` row read up to.

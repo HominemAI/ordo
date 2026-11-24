@@ -247,6 +247,7 @@ impl PinStream {
 
     /// Read every pin again and take them whole, then load what they name.
     pub async fn reload(&self) -> Result<Read, VersionRefusal> {
+        self.read_moves().await;
         let before = self.deployment.pins();
         let (pins, seq) = Versions::on(&self.control).all_pins().await?;
         let mut map = PinMap {
@@ -270,6 +271,7 @@ impl PinStream {
     /// Read the stream from the last row this node read, and take each
     /// change. Then load what the pins name.
     pub async fn tail(&self) -> Result<Read, VersionRefusal> {
+        self.read_moves().await;
         let mut read = Read::default();
         loop {
             let from = self.deployment.pins().seq;
@@ -288,6 +290,17 @@ impl PinStream {
         }
         self.settle(&mut read).await;
         Ok(read)
+    }
+
+    /// **The moves with dual writes** (increment 11a), read before the
+    /// pins they ride: a pin taken after them carries the overlays its
+    /// version writes with. Keyed by version, so overlays taken early are
+    /// never run under the wrong one.
+    async fn read_moves(&self) {
+        match crate::dual_writes::read_all(&self.control).await {
+            Ok(m) => self.deployment.set_moves(m),
+            Err(e) => eprintln!("pins: the moves with dual writes were not read ({e})"),
+        }
     }
 
     /// Load what the pins name and drop what they no longer do.

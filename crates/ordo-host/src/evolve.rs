@@ -640,11 +640,17 @@ pub async fn render_stored(
             extent: None,
         })
         .collect();
+    // A declared rename is copied by the backfill worker (increment 11a),
+    // so a tenant keeps writing while it moves.
+    let moving = Choices {
+        renames_backfill: true,
+        ..options.clone()
+    };
     let triaged = sa::triage_counted(
         &y.schema,
         &live,
         &assessed,
-        options,
+        &moving,
         &b.version,
         &BTreeMap::new(),
     )
@@ -1530,21 +1536,16 @@ pub async fn run_step(
     .await
 }
 
-/// [`run_step`], with the backfills' settings and function runner.
-///
-/// A step that fills a field (10b) runs in three parts: the expand with the
-/// rest of the step, each backfill to its end and verified, then the
-/// `NOT NULL` each filled field declares. A kill at any point leaves the
-/// database recording the version before the step, and running the step
-/// again resumes each backfill from its cursor.
-pub async fn run_step_with(
+/// **The first part of a stored step** on one database: the stale check,
+/// the digest re-rendered, the pre-checks, and the expand. `None` when the
+/// database already records the step's to-version.
+pub(crate) async fn expand_step(
     registry: &Pool,
     target: &Pool,
     label: &str,
     plan: &StoredPlan,
     actor: &str,
-    ctx: &StepContext,
-) -> Result<StepRun, EvolveRefusal> {
+) -> Result<Option<Expanded>, EvolveRefusal> {
     let with_label = |mut e: EvolveRefusal| {
         if let EvolveRefusal::Run {
             database, from, to, ..
@@ -1558,7 +1559,7 @@ pub async fn run_step_with(
     };
     let now = recorded(target).await.map_err(with_label)?;
     if now.as_deref() == Some(plan.to.as_str()) {
-        return Ok(StepRun::Current);
+        return Ok(None);
     }
     if now.as_deref() != Some(plan.from.as_str()) {
         return Err(EvolveRefusal::Stale {
@@ -1571,7 +1572,10 @@ pub async fn run_step_with(
     let (Some(a), Some(b)) = (v.get(&plan.from).await?, v.get(&plan.to).await?) else {
         return Err(VersionRefusal::UnknownVersion(plan.from.clone()).into());
     };
-    let options = parse_options(&plan.options)?;
+    let mut options = parse_options(&plan.options)?;
+    // A rename is copied by the worker (increment 11a), as `render_stored`
+    // renders it.
+    options.renames_backfill = true;
     // The stored digest against this release's rendering (D3).
     let again = render_stored(registry, &a, &b, &options, crate::runtime::now_secs()).await?;
     if again.digest != plan.digest {
@@ -1664,6 +1668,101 @@ pub async fn run_step_with(
         }
         Err(other) => return Err(run_err(other.class(), format!("{other:?}"), true)),
     };
+    // A step run again after its expand finds its new columns there, so
+    // the triage on this database no longer names their backfills or what
+    // lands after them. The stored receipt does (increment 11a).
+    let mut backfills = backfills;
+    for r in again.receipt["backfills"].as_array().into_iter().flatten() {
+        if let Some(bf) = sa::BackfillStep::from_json(r) {
+            if !backfills
+                .iter()
+                .any(|b| b.entity == bf.entity && b.field == bf.field)
+            {
+                backfills.push(bf);
+            }
+        }
+    }
+    let mut after = after;
+    for r in again.receipt["after"].as_array().into_iter().flatten() {
+        let Some(sql) = r.as_str() else { continue };
+        if !after.iter().any(|s| s.sql.trim_end() == sql) {
+            after.push(sa::Step {
+                code: "B",
+                phase: sa::Phase::Alter,
+                sql: format!("{sql}\n"),
+                index: None,
+                constraint: None,
+                table: String::new(),
+            });
+        }
+    }
+    Ok(Some(Expanded {
+        statements,
+        backfills,
+        after,
+        x,
+        y,
+        receipt: again.receipt,
+    }))
+}
+
+/// What a step's expand left to do (`expand_step`): the backfills, what
+/// lands after them, and both programs.
+pub(crate) struct Expanded {
+    pub statements: usize,
+    pub backfills: Vec<sa::BackfillStep>,
+    pub after: Vec<sa::Step>,
+    pub x: Program,
+    pub y: Program,
+    /// The stored step's receipt, as this release renders it.
+    pub receipt: Value,
+}
+
+/// [`run_step`], with the backfills' settings and function runner.
+///
+/// A step that fills a field (10b) runs in three parts: the expand with the
+/// rest of the step, each backfill to its end and verified, then the
+/// `NOT NULL` each filled field declares. A kill at any point leaves the
+/// database recording the version before the step, and running the step
+/// again resumes each backfill from its cursor.
+pub async fn run_step_with(
+    registry: &Pool,
+    target: &Pool,
+    label: &str,
+    plan: &StoredPlan,
+    actor: &str,
+    ctx: &StepContext,
+) -> Result<StepRun, EvolveRefusal> {
+    let with_label = |mut e: EvolveRefusal| {
+        if let EvolveRefusal::Run {
+            database, from, to, ..
+        } = &mut e
+        {
+            *database = label.to_string();
+            *from = plan.from.clone();
+            *to = plan.to.clone();
+        }
+        e
+    };
+    let Some(Expanded {
+        statements,
+        backfills,
+        after,
+        x,
+        y,
+        receipt,
+    }) = expand_step(registry, target, label, plan, actor).await?
+    else {
+        return Ok(StepRun::Current);
+    };
+    let run_err = |class: &'static str, why: String, transient: bool| EvolveRefusal::Run {
+        database: label.to_string(),
+        from: plan.from.clone(),
+        to: plan.to.clone(),
+        class,
+        why,
+        transient,
+    };
     // The backfills (10b), each to its end and verified, then what lands
     // after them. A budget that stops one leaves the step for a run again.
     let mut reports = Vec::new();
@@ -1673,7 +1772,7 @@ pub async fn run_step_with(
         // step still added it (B2), so verify still checks every row holds
         // the mapping.
         let mut bf = bf.clone();
-        let rendered_new = again.receipt["backfills"]
+        let rendered_new = receipt["backfills"]
             .as_array()
             .into_iter()
             .flatten()
@@ -1944,6 +2043,51 @@ pub const REPLAY: &str = "std.deployment.replay";
 /// `ordo rollback --dry-run`: whether the version a rollback would return
 /// to can still read its externals and peers here (F4).
 pub const ROLLBACK_CHECK: &str = "std.deployment.rollbackCheck";
+/// `ordo evolve --tenant T --revert`: a tenant in its soak back on the
+/// version it moved from, every write kept (increment 11a).
+pub const REVERT_SOAK: &str = "std.deployment.revertSoak";
+/// `ordo evolve --tenant T --close-soak`: end a tenant's soak now
+/// (increment 11a). The old columns are orphaned.
+pub const CLOSE_SOAK: &str = "std.deployment.closeSoak";
+
+/// A stored step a tenant moves through with dual writes (increment 11a):
+/// one that backfills, each by a per-row mapping.
+fn dual_writes_step(p: &StoredPlan) -> bool {
+    let Ok(receipt) = serde_json::from_str::<Value>(&p.receipt) else {
+        return false;
+    };
+    let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
+    !fills.is_empty() && fills.iter().all(|b| b["sql"].is_string())
+}
+
+/// What a move command runs its backfills with: the step's settings, with
+/// the caller's `budget` and `chunkRows` when given.
+fn move_context(
+    ops: &crate::apply_op::ApplyOps,
+    bound: &ordo_api::BoundParams,
+) -> Result<StepContext, EvolveRefusal> {
+    let mut ctx = ops.step_context();
+    let count = |k: &str| -> Result<Option<u32>, EvolveRefusal> {
+        match bound.0.get(k).and_then(|v| v.as_str()).map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(n) => n
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+                .map(Some)
+                .ok_or_else(|| {
+                    EvolveRefusal::Options(format!("`{k}` is a count above 0, not `{n}`"))
+                }),
+        }
+    };
+    if let Some(b) = count("budget")? {
+        ctx.settings.budget = Some(b);
+    }
+    if let Some(n) = count("chunkRows")? {
+        ctx.settings.chunk_rows = n;
+    }
+    Ok(ctx)
+}
 
 /// What [`rollback_check`] found.
 #[derive(Debug, Clone)]
@@ -2080,8 +2224,25 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 text("tenant", 128, true),
                 // Absent: the active version.
                 text("to", 128, false),
+                // A move with dual writes (increment 11a): chunks this run
+                // may take, rows per chunk, and `soak.length` (`7d`, `0`).
+                text("budget", 12, false),
+                text("chunkRows", 12, false),
+                text("soak", 16, false),
             ],
-            &["tenant", "from", "to", "steps", "pinned"],
+            &["tenant", "from", "to", "steps", "pinned", "move"],
+        ),
+        spec(
+            REVERT_SOAK,
+            OpKind::Write,
+            vec![text("tenant", 128, true)],
+            &["tenant", "from", "to", "phase", "pinned"],
+        ),
+        spec(
+            CLOSE_SOAK,
+            OpKind::Write,
+            vec![text("tenant", 128, true)],
+            &["tenant", "from", "to", "phase", "closed", "orphaned"],
         ),
     ]
 }
@@ -2239,10 +2400,155 @@ pub async fn execute(
                 .collect();
             Ok(json!({ "plans": plans }))
         }
+        REVERT_SOAK | CLOSE_SOAK => {
+            let what = if name == REVERT_SOAK {
+                "the tenant was not reverted"
+            } else {
+                "the soak was not closed"
+            };
+            let tenant = text("tenant").unwrap_or_default();
+            let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(what))?;
+            let cx = crate::dual_writes::MoveContext {
+                control: pool,
+                pools: ops.pools.as_ref(),
+                spaces: ops.spaces.get().map(|s| s.as_ref()),
+            };
+            let done = if name == REVERT_SOAK {
+                crate::dual_writes::revert(&cx, tenant, caller).await
+            } else {
+                crate::dual_writes::close(&cx, tenant, caller).await
+            }
+            .map_err(|e| e.to_exec_error(what))?;
+            drop(lock);
+            ops.record(
+                caller,
+                name,
+                if name == REVERT_SOAK {
+                    "soak-reverted"
+                } else {
+                    "soak-closed"
+                },
+                format!(
+                    "tenant={tenant} from={} to={} by={caller}",
+                    done.from, done.to
+                ),
+            );
+            Ok(done.to_json())
+        }
         REPLAY => {
             const WHAT: &str = "the tenant was not replayed";
             let tenant = text("tenant").unwrap_or_default();
             let v = Versions::on(pool);
+            // **A move with dual writes** (increment 11a): a tenant with
+            // one open continues it; a tenant whose next stored step
+            // rewrites data starts one.
+            let open = v
+                .dual_move(tenant)
+                .await
+                .map_err(|e| e.to_exec_error(WHAT))?;
+            let step = match &open {
+                Some(m) => Some(
+                    Plans::on(pool)
+                        .all()
+                        .await
+                        .map_err(|e| e.to_exec_error(WHAT))?
+                        .into_iter()
+                        .find(|p| p.digest == m.step)
+                        .ok_or_else(|| {
+                            EvolveRefusal::Store(format!(
+                                "the stored plan {} of tenant `{tenant}`'s move is gone",
+                                m.step
+                            ))
+                            .to_exec_error(WHAT)
+                        })?,
+                ),
+                None => {
+                    let from = v
+                        .pin_of(tenant)
+                        .await
+                        .map_err(|e| e.to_exec_error(WHAT))?
+                        .and_then(|p| p.version);
+                    let to = match text("to") {
+                        Some(t) => Some(v.resolve(t).await.map_err(|e| e.to_exec_error(WHAT))?),
+                        None => v
+                            .active_version()
+                            .await
+                            .map_err(|e| e.to_exec_error(WHAT))?,
+                    };
+                    match (from, to) {
+                        (Some(from), Some(to)) if from != to => {
+                            let steps = path(pool, &from, &to)
+                                .await
+                                .map_err(|e| e.to_exec_error(WHAT))?;
+                            match steps.iter().position(dual_writes_step) {
+                                Some(0) if steps.len() == 1 => steps.into_iter().next(),
+                                Some(i) => {
+                                    let before = &steps[i].from;
+                                    return Err(EvolveRefusal::Options(format!(
+                                        "the stored path from `{from}` to `{to}` holds {} \
+                                         steps, and the step from `{before}` to `{}` rewrites \
+                                         data with live writes beside it. That step runs \
+                                         alone: replay the tenant to `{before}` first \
+                                         (`ordo evolve --tenant {tenant} --to {before}`), then \
+                                         to `{}`",
+                                        steps.len(),
+                                        steps[i].to,
+                                        steps[i].to
+                                    ))
+                                    .to_exec_error(WHAT));
+                                }
+                                None => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(plan) = step {
+                let soak = match text("soak") {
+                    Some(s) => {
+                        crate::dual_writes::soak_secs(s).map_err(|e| e.to_exec_error(WHAT))?
+                    }
+                    None => crate::dual_writes::SOAK_DEFAULT_SECS,
+                };
+                let ctx = move_context(ops, bound).map_err(|e| e.to_exec_error(WHAT))?;
+                let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;
+                let cx = crate::dual_writes::MoveContext {
+                    control: pool,
+                    pools: ops.pools.as_ref(),
+                    spaces: ops.spaces.get().map(|s| s.as_ref()),
+                };
+                let moved = crate::dual_writes::run(&cx, tenant, &plan, &ctx, soak, caller)
+                    .await
+                    .map_err(|e| e.to_exec_error(WHAT))?;
+                drop(lock);
+                ops.record(
+                    caller,
+                    REPLAY,
+                    "moved",
+                    format!(
+                        "tenant={tenant} from={} to={} phase={} by={caller}",
+                        moved.from,
+                        moved.to,
+                        moved.to_json()["phase"].as_str().unwrap_or("")
+                    ),
+                );
+                let mv = moved.to_json();
+                return Ok(json!({
+                    "tenant": tenant,
+                    "from": moved.from,
+                    "to": moved.to,
+                    "steps": [{
+                        "from": plan.from, "to": plan.to, "seq": plan.seq, "digest": plan.digest,
+                        "statements": moved.statements as i64,
+                        "ran": moved.phase != crate::versions::MovePhase::Backfilling,
+                        "backfilling": moved.phase == crate::versions::MovePhase::Backfilling,
+                        "backfills": moved.backfills,
+                    }],
+                    "pinned": mv["pinned"],
+                    "move": mv,
+                }));
+            }
             let Some(pin) = v.pin_of(tenant).await.map_err(|e| e.to_exec_error(WHAT))? else {
                 return Err(VersionRefusal::NoTenant {
                     space: tenant.to_string(),

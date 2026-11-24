@@ -542,6 +542,13 @@ pub struct Choices {
     /// (`crate::evolve`); the apply path never states one, so there B2 and
     /// B5 stay refused as before.
     pub fills: BTreeMap<(String, String), Fill>,
+    /// A declared rename (`prev`, §5 B4) is copied by the backfill worker,
+    /// in chunks, rather than by one `UPDATE` in the step (increment 11a).
+    /// Set by a stored plan (`crate::evolve`), whose step can run with live
+    /// writes beside it: the new column lands open to nulls, the worker
+    /// fills it, and its `NOT NULL` waits for the move's close. Never
+    /// stated by a person, so outside the options text.
+    pub renames_backfill: bool,
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -1995,6 +2002,29 @@ impl BackfillStep {
             "audit": self.audit.as_str(),
         })
     }
+
+    /// Read one back from a stored receipt ([`BackfillStep::to_json`]).
+    pub fn from_json(v: &serde_json::Value) -> Option<BackfillStep> {
+        let code = match v["code"].as_str()? {
+            "B2" => "B2",
+            "B4" => "B4",
+            "B5" => "B5",
+            _ => return None,
+        };
+        Some(BackfillStep {
+            code,
+            entity: v["entity"].as_str()?.to_string(),
+            field: v["field"].as_str()?.to_string(),
+            column: v["column"].as_str()?.to_string(),
+            column_ty: v["type"].as_str()?.to_string(),
+            mapping: FillMapping::parse(v["mapping"].as_str()?).ok()?,
+            sql: v["sql"].as_str().map(String::from),
+            audit: match v["audit"].as_str()? {
+                "images" => ordo_commandlog::BackfillAudit::Images,
+                _ => ordo_commandlog::BackfillAudit::Summarised,
+            },
+        })
+    }
 }
 
 /// The backfill for a B2 or B5 change the plan fills, or the refusal.
@@ -2361,6 +2391,25 @@ pub fn triage_counted(
                     steps.extend(places_steps(c, e, choice, version)?.into_iter().map(alter));
                 }
             },
+            Change::RenameField { from, field, .. } if choices.renames_backfill => {
+                match rename_backfill(c, e, live, from, field) {
+                    Err(r) => refused.push(*r),
+                    Ok((expand, b, close)) => {
+                        steps.extend(expand.into_iter().map(alter));
+                        if let Some(sql) = close {
+                            after.push(Step {
+                                code: c.code(),
+                                phase: Phase::Alter,
+                                sql,
+                                index: None,
+                                constraint: None,
+                                table: e.name.clone(),
+                            });
+                        }
+                        backfills.push(b);
+                    }
+                }
+            }
             Change::RenameField { from, field, .. } => {
                 steps.extend(
                     rename_field_steps(e, live, from, field)?
@@ -2492,6 +2541,90 @@ pub fn rename_field_steps(
         ));
     }
     Ok(out)
+}
+
+/// A declared rename in a stored plan (increment 11a): the statements of
+/// the expand, the backfill that copies the old column into the new one,
+/// and the new column's `NOT NULL`, which lands when the move closes.
+///
+/// The expand adds the new column open to nulls (with its default, if it
+/// has one) and drops the old column's `NOT NULL`, so the new version's
+/// inserts, which do not write it, are taken. Until the move closes, each
+/// side's `required` is held by the host's guards on every write
+/// (`ordo_exec::overlay`). A sealed or file field is not copied this way:
+/// its copy needs the write path's custody.
+type RenameParts = (Vec<String>, BackfillStep, Option<String>);
+
+fn rename_backfill(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    field: &str,
+) -> Result<RenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let Some(f) = e.field(field) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("`{}.{field}` is not declared", e.name),
+        ));
+    };
+    if f.sealed || f.indexed || f.is_content() {
+        return Err(refuse(
+            "rename_backfill_not_built",
+            format!(
+                "`{}.{field}` is sealed or a file, and the backfill worker copies neither: a                  sealed copy needs a key lease (increment 13), a file's handle the upload's                  custody. Apply the rename with `ordo apply`, which copies it in the step",
+                e.name
+            ),
+        ));
+    }
+    let mut open = e.clone();
+    for g in open.fields.iter_mut().filter(|g| g.name == field) {
+        g.optional = true;
+    }
+    let of = open
+        .field(field)
+        .ok_or_else(|| refuse("mapping_invalid", format!("`{}.{field}`", e.name)))?;
+    let mut expand = ordo_schema::ddl::add_column(&open, of)
+        .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+    let t = ordo_schema::ddl::q(&e.name);
+    let old_required = live
+        .table(&e.name)
+        .and_then(|lt| lt.columns.get(from))
+        .is_some_and(|c| !c.nullable);
+    if old_required {
+        expand.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {} DROP NOT NULL;\n",
+            ordo_schema::ddl::q(from)
+        ));
+    }
+    let close = (!f.optional).then(|| {
+        format!(
+            "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+            ordo_schema::ddl::q(&f.column())
+        )
+    });
+    Ok((
+        expand,
+        BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: f.column(),
+            column_ty: ordo_schema::ddl::column_ty(f),
+            mapping: FillMapping::Expr(from.to_string()),
+            sql: Some(ordo_schema::ddl::q(from)),
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+        },
+        close,
+    ))
 }
 
 /// The two steps a foreign key, an enum pin or a check takes onto a table

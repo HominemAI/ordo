@@ -72,6 +72,7 @@ pub mod deploy_ops;
 pub mod deployment_access;
 pub mod direct_uses;
 pub mod directory;
+pub mod dual_writes;
 pub mod email_code;
 pub mod enrolment;
 pub mod environments;

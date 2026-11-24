@@ -3892,6 +3892,7 @@ async fn assemble_program(
         .backfill(crate::versions::SYSTEM_ACTOR, now_secs())
         .await
         .map_err(|e| BootRefusal::Database(e.to_string()))?;
+    let from_registry = matches!(program, ProgramSource::Registry);
     let deployment = match program {
         ProgramSource::Registry => {
             match deploy::load_active(&pool, &cfg.pg, keys.clone(), cfg.space.clone()).await {
@@ -3915,6 +3916,29 @@ async fn assemble_program(
                     platform,
                 )
                 .map_err(BootRefusal::Load)?,
+                // **A release that no longer loads the active version**
+                // (`plan-versions.md` §2.8, increment 6). The boot goes on
+                // with no program serving: the active version's tenants
+                // are closed until they move, every tenant pinned to
+                // another version is served it, and the control plane
+                // serves (owner, 2026-11-06: an upgrade must not stop a
+                // running deployment). The release check names them.
+                Err(e) if crate::release_check::closes_only_its_tenants(&e) => {
+                    eprintln!(
+                        "ordo-host: the active version is not served under Ordo {}, so its \
+                         tenants are closed until they move; every other tenant serves: {e}",
+                        crate::release_check::release()
+                    );
+                    let d = Deployment::empty_with_platform_ops(
+                        cfg.space.clone(),
+                        pool.clone(),
+                        keys.clone(),
+                        platform,
+                    )
+                    .map_err(BootRefusal::Load)?;
+                    d.follow(versions.active_version().await.ok().flatten());
+                    d
+                }
                 Err(other) => return Err(BootRefusal::Load(other)),
             }
         }
@@ -3943,6 +3967,18 @@ async fn assemble_program(
             Deployment::boot_with_platform_ops(verified, platform).map_err(BootRefusal::Load)?
         }
     };
+
+    // **The release check at the first boot of a release** (§2.8, R3). In
+    // the background: it only logs and records, and never holds the boot.
+    // A failing version's tenants are closed by its own load refusal.
+    if from_registry {
+        let (check_pool, check_cfg) = (pool.clone(), cfg.pg.clone());
+        tokio::spawn(async move {
+            for line in crate::release_check::at_boot(&check_pool, &check_cfg, now_secs()).await {
+                eprintln!("{line}");
+            }
+        });
+    }
 
     // **The resolver, built here and built once** (18d T2).
     //
@@ -6227,6 +6263,29 @@ struct AccessRebuild<'a> {
     credentials: &'a Arc<dyn ordo_exec::route::DbCredentials>,
 }
 
+/// Every pinned tenant this node does not serve, with why: its version is
+/// not loaded here, and it is not waiting for a swap that would serve it.
+fn unserved_spaces(d: &Deployment) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = d
+        .pins()
+        .by_space
+        .keys()
+        .filter_map(|space| match d.for_space(space) {
+            Ok(_) => None,
+            Err(u) => Some((
+                space.clone(),
+                format!(
+                    "it is pinned to version {}, which this node does not serve; it is closed \
+                     until it moves",
+                    u.version
+                ),
+            )),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// One rebuild. The dials happen first, with no lock held. The cache is
 /// then locked until the new door is installed, so two rebuilds install in
 /// the order they built and the later one holds every newer read. The
@@ -6286,6 +6345,11 @@ async fn rebuild_access(
         w.access.revocations.clone(),
     );
     w.access.install(door);
+    // A tenant pinned to a version this node does not serve (one a release
+    // no longer loads, §2.8) is closed: its verified callers are answered
+    // `server_busy`, never `access_denied`, and `/health/ready` names it.
+    let mut unread = unread;
+    unread.extend(unserved_spaces(w.deployment));
     // Together with the door they describe, so the two can never be one
     // rebuild apart.
     w.access.note_unread(unread);

@@ -29,6 +29,7 @@ export type {
 export { compareDecimal } from './core/client.js';
 export type { FunctionCallOptions, FunctionResponse } from './core/function.js';
 export type { BusyRetryOptions, ConflictRetryOptions, OnRetry, RetryReason } from './core/busy.js';
+export { OrdoVersionChanged, VERSION_CHANGED_EVENT } from './core/busy.js';
 export { ReadCall, SingleReadCall, WriteCall } from './core/call.js';
 export type { CallOptions, Page } from './core/call.js';
 export {

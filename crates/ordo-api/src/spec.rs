@@ -625,6 +625,15 @@ pub trait OpRegistry: Send + Sync {
         let _ = space;
         self.get(name)
     }
+
+    /// The program version that serves `space` now, when the registry
+    /// serves versions per tenant. A live feed records it when it opens and
+    /// ends with `version_changed` when it moves (`plan-versions.md` §1.4).
+    /// `None`: one program for every space, and no feed ever ends for it.
+    fn version_in(&self, space: &str) -> Option<String> {
+        let _ = space;
+        None
+    }
 }
 
 /// Parameters that passed type + bounds validation, keyed by declared name.

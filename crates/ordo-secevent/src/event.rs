@@ -629,7 +629,7 @@ pub enum EventKind {
         lost: u64,
     },
     /// A schema migration moved phase: the DDL of an `ordo apply` against
-    /// an empty target, or of an `ordo migrate --apply`, was applied or
+    /// an empty target, or of an `ordo evolve --run`, was applied or
     /// failed. Deployment-scoped by construction: one set of tables holds
     /// every space, so a schema change is nobody's tenant record
     /// (`plan-schema-evolution.md` §7.1). `migration` is the `$migrations`

@@ -40,6 +40,10 @@ pub struct Program {
     /// sets, and the hosts a function may send it to
     /// (`plan-backend-functions.md` §5).
     pub secrets: Vec<SecretDecl>,
+    /// `auth { … }`: how people sign in to the app
+    /// (`plan-configuration-in-the-file.md` §2). At most one per program.
+    /// Absent, the deployment's settings decide, as before the block.
+    pub auth: Option<crate::auth::AuthDecl>,
     /// `external customers from crm.customers shared { … }`: a table
     /// another system owns, read through a translation inside Ordo's SQL
     /// (ruled 2026-11-15, `external-entities`). Never an entity: the schema

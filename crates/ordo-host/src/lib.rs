@@ -73,6 +73,8 @@ pub mod direct_uses;
 pub mod directory;
 pub mod email_code;
 pub mod enrolment;
+pub mod environments;
+pub mod evolve;
 pub mod exit_ops;
 pub mod external_check;
 pub mod federation;
@@ -101,9 +103,11 @@ pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
 pub mod platform_ops;
+pub mod precheck;
 pub mod presence;
 pub mod principal_directory;
 pub mod profile_ops;
+pub mod promotion;
 pub mod provision;
 pub mod proxy;
 pub mod public;
@@ -139,6 +143,7 @@ pub mod share_accept;
 pub mod share_links;
 pub mod share_ops;
 pub mod spaces;
+pub mod step_door;
 pub mod supervisor;
 pub mod tenant_forward;
 pub mod tenant_identities;
@@ -1524,6 +1529,9 @@ pub fn interface_for(
             conditions: limits.max_conditions,
             in_values: limits.max_in_values,
         },
+        // The program's sign-in facts: the same for every asker, and the
+        // file's values, which the deployment's ceilings may narrow.
+        ordo_plan::artifact::auth_artifact(&f.schema).as_ref(),
     )
 }
 

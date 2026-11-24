@@ -15,8 +15,11 @@
 //! |---|---|---|
 //! | [`Route::Door`] | `versions`, `windows`, `fleet`, `quota`, `touches`, `plan` | refused; names `--host` |
 //! | [`Route::Either`] | `apply`, `rollback` | refused; names `--host` and `--direct` |
-//! | [`Route::Direct`] | `keys`, `verify`, `restore`, `identity recover`, `migrate --apply` | refused; names `--direct` and `--host` |
+//! | [`Route::Direct`] | `keys`, `verify`, `restore`, `identity recover` | refused; names `--direct` and `--host` |
 //! | [`Route::Open`] | the rest | unchanged (session 2 moves them) |
+//!
+//! `migrate` is in no row: it is removed, and refuses before this gate,
+//! naming `ordo evolve` (`crate::migrate::removed`).
 
 use crate::operator::{Flags, Outcome};
 
@@ -40,13 +43,17 @@ pub enum Route {
 pub fn policy(cmd: &str, sub: Option<&str>, flags: &Flags) -> Route {
     match cmd {
         // No subcommand prints the usage and touches nothing.
-        "versions" | "windows" | "quota" | "keys" | "identity" if sub.is_none() => Route::Open,
-        "versions" | "windows" | "fleet" | "quota" | "touches" => Route::Door,
+        "versions" | "windows" | "environments" | "quota" | "keys" | "identity"
+            if sub.is_none() =>
+        {
+            Route::Open
+        }
+        "versions" | "windows" | "environments" | "promote" | "evolve" | "fleet" | "quota"
+        | "touches" => Route::Door,
         // `plan <dir>` alone only compiles. With `--against` or `--host` it
         // is the deployment's plan, which is the door's.
         "plan" => Route::Door,
         "apply" | "rollback" => Route::Either,
-        "migrate" => Route::Direct,
         "restore" => Route::Direct,
         // `verify --proof <file>` reads a file and no database.
         "verify" if flags.named_value("--proof").is_some() => Route::Open,
@@ -71,7 +78,12 @@ pub enum Via {
 
 fn display(cmd: &str, sub: Option<&str>) -> String {
     match sub {
-        Some(s) if matches!(cmd, "versions" | "windows" | "quota" | "keys" | "identity") => {
+        Some(s)
+            if matches!(
+                cmd,
+                "versions" | "windows" | "environments" | "quota" | "keys" | "identity"
+            ) =>
+        {
             format!("ordo {cmd} {s}")
         }
         _ => format!("ordo {cmd}"),

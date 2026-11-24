@@ -1999,14 +1999,20 @@ impl ApplyOps {
         })
     }
 
-    /// What a stored step runs its backfills with (10b): the plan's default
-    /// settings, and this node's backend functions when the runtime gave
-    /// them ([`ApplyOps::backfill_functions`]).
-    pub fn step_context(&self) -> crate::evolve::StepContext {
-        crate::evolve::StepContext {
-            settings: crate::backfill::BackfillSettings::default(),
+    /// What a stored step runs its backfills with (10b): the backfill
+    /// settings as stored in `$version_settings` (Q15; unset ones are the
+    /// plan's defaults), and this node's backend functions when the runtime
+    /// gave them ([`ApplyOps::backfill_functions`]).
+    pub async fn step_context(&self) -> Result<crate::evolve::StepContext, ExecError> {
+        let settings = crate::backfill::stored_settings(&self.pool)
+            .await
+            .map_err(|e| {
+                e.to_exec_error("the step was not run: the backfill settings could not be read")
+            })?;
+        Ok(crate::evolve::StepContext {
+            settings,
             functions: self.backfill_functions.get().cloned(),
-        }
+        })
     }
 
     /// Check 3 of the gate (see the module doc), for every deploy op.

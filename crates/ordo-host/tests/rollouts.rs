@@ -873,6 +873,111 @@ async fn a_rollout_with_nothing_to_move_or_a_database_behind_is_refused() {
 
 // ── the door ────────────────────────────────────────────────────────────
 
+/// **The backfill settings are stored in Ordo** (Q15): set and cleared
+/// through `setVersionSetting` with a reason, read back by
+/// `versionSettings`, refused by name when a value is not one, and what a
+/// stored step's backfill runs with.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backfill_settings_are_stored_and_a_step_runs_with_them() {
+    let pool = three("ordo_ro_backfill_settings").await;
+    let (ops, _stream) = shared_ops(&pool);
+    let run = |name: &'static str, v: serde_json::Value| {
+        let ops = &ops;
+        let b = BoundParams(v.as_object().unwrap().clone());
+        async move { deploy_ops::execute(ops, name, "home", &b, "sys:updater").await }
+    };
+    let defaults = ops.step_context().await.expect("reads").settings;
+    assert_eq!(defaults, ordo_host::backfill::BackfillSettings::default());
+
+    let set = run(
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({"setting": "backfill.chunk_rows", "value": "250", "reason": "small"}),
+    )
+    .await
+    .expect("a backfill setting through the door");
+    assert_eq!(set.rows[0]["backfill"]["chunkRows"], 250);
+    assert_eq!(set.rows[0]["changed"], true);
+    run(
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({"setting": "backfill.chunk-timeout", "value": "2m", "reason": "slow"}),
+    )
+    .await
+    .expect("the short form of a name");
+    run(
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({"setting": "backfill.budget", "value": "40", "reason": "pace"}),
+    )
+    .await
+    .expect("a budget");
+    let again = run(
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({"setting": "backfill.chunk_rows", "value": "250", "reason": "same"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.rows[0]["changed"], false);
+
+    // Refusals name the setting and the command that sets it.
+    for (setting, value) in [
+        ("backfill.chunk_rows", "0"),
+        ("backfill.chunk_rows", "many"),
+        ("backfill.chunk_timeout", "2d"),
+        ("backfill.max_attempts", "0"),
+        ("backfill.nope", "1"),
+    ] {
+        let e = run(
+            deploy_ops::SET_VERSION_SETTING,
+            serde_json::json!({"setting": setting, "value": value, "reason": "x"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            e.code,
+            ordo_api::ErrorCode::InvalidParam,
+            "{setting}={value}"
+        );
+        assert!(e.message.contains("ordo versions set"), "{}", e.message);
+    }
+    let e = run(
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({"setting": "backfill.chunk_rows", "value": "9", "reason": ""}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, ordo_api::ErrorCode::InvalidParam);
+
+    let read = run(deploy_ops::VERSION_SETTINGS, serde_json::json!({}))
+        .await
+        .unwrap();
+    let b = &read.rows[0]["backfill"];
+    assert_eq!(b["chunkRows"], 250);
+    assert_eq!(b["chunkTimeout"], 120);
+    assert_eq!(b["maxAttempts"], 5);
+    assert_eq!(b["budget"], 40);
+    let history = read.rows[0]["history"].as_array().unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|c| c["setting"] == "backfill.chunk_rows" && c["reason"] == "small"),
+        "{history:?}"
+    );
+
+    // A stored step runs its backfill with them.
+    let ctx = ops.step_context().await.expect("reads").settings;
+    assert_eq!(ctx.chunk_rows, 250);
+    assert_eq!(ctx.chunk_timeout, std::time::Duration::from_secs(120));
+    assert_eq!(ctx.budget, Some(40));
+
+    // Cleared, a setting reads as its default again.
+    run(
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({"setting": "backfill.budget", "reason": "no pause"}),
+    )
+    .await
+    .expect("cleared");
+    assert_eq!(ops.step_context().await.unwrap().settings.budget, None);
+}
+
 /// **The door**: start, status, skip, retry, hold, abort, the settings
 /// through `setVersionSetting`, refusals as their codes, no reauth, and one
 /// stream entry per act by a person (Q9).

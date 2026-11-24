@@ -85,3 +85,43 @@ fn each_subcommand_goes_to_the_door() {
         );
     }
 }
+
+/// The backfill settings are set with `ordo versions set` beside the
+/// version settings (Q15). A name that is not one is refused before
+/// anything is sent and lists the four; a good one goes to the door.
+#[test]
+fn ordo_versions_set_takes_the_backfill_settings() {
+    let versions = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        operator::run("versions", &args)
+    };
+    let out = versions(&[
+        "set",
+        "backfill.chunks",
+        "5",
+        "--reason",
+        "x",
+        "--host",
+        HOST,
+    ]);
+    assert_eq!(out.code, 2, "{}", out.report);
+    assert!(
+        out.report.contains("backfill.chunk_rows") && out.report.contains("backfill.budget"),
+        "{}",
+        out.report
+    );
+    for args in [
+        vec!["set", "backfill.chunk_rows", "500", "--reason", "x"],
+        vec!["set", "backfill.budget", "--clear", "--reason", "x"],
+    ] {
+        let mut all = args.clone();
+        all.extend(["--host", HOST, "--token", "t", "--space", "system"]);
+        let out = versions(&all);
+        assert_eq!(out.code, 1, "{args:?}: {}", out.report);
+        assert!(
+            out.report.contains("127.0.0.1:9"),
+            "{args:?}: {}",
+            out.report
+        );
+    }
+}

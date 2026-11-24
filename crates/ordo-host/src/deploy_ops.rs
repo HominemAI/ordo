@@ -1074,6 +1074,10 @@ pub async fn execute(
                 .await
                 .map_err(|e| e.to_exec_error("the rollout settings could not be read"))?
                 .to_json();
+            row["backfill"] = crate::backfill::stored_settings(&ops.pool)
+                .await
+                .map_err(|e| e.to_exec_error("the backfill settings could not be read"))?
+                .to_json();
             row["waiting"] = waiting_json(&ops.pool).await;
             row["history"] = json!(history
                 .iter()
@@ -1130,14 +1134,63 @@ pub async fn execute(
                     next_cursor: None,
                 });
             }
+            // So are the backfill settings (Q15): what a stored step's
+            // backfill runs with.
+            if named.trim().starts_with("backfill.") {
+                let value = text(bound, "value").filter(|v| !v.is_empty());
+                let reason = text(bound, "reason").unwrap_or_default();
+                let (changed, now) = crate::backfill::set_setting(
+                    &ops.pool,
+                    named,
+                    value,
+                    caller,
+                    reason,
+                    crate::runtime::now_secs(),
+                )
+                .await
+                .map_err(|e| e.to_exec_error("the backfill setting was not changed"))?;
+                let setting = crate::backfill::setting_name(named).unwrap_or_default();
+                let value = now.to_json()[match setting {
+                    crate::backfill::CHUNK_ROWS_SETTING => "chunkRows",
+                    crate::backfill::CHUNK_TIMEOUT_SETTING => "chunkTimeout",
+                    crate::backfill::MAX_ATTEMPTS_SETTING => "maxAttempts",
+                    _ => "budget",
+                }]
+                .clone();
+                if changed {
+                    ops.record(
+                        caller,
+                        SET_VERSION_SETTING,
+                        "version-setting",
+                        format!("setting={setting} value={value} by={caller}"),
+                    );
+                }
+                let v = crate::versions::Versions::on(&ops.pool);
+                let mut row = settings_json(
+                    &v.settings()
+                        .await
+                        .map_err(|e| e.to_exec_error("the version settings could not be read"))?,
+                );
+                row["backfill"] = now.to_json();
+                row["setting"] = json!(setting);
+                row["value"] = value;
+                row["changed"] = json!(changed);
+                row["waiting"] = waiting_json(&ops.pool).await;
+                return Ok(ExecResult {
+                    position: None,
+                    rows: vec![row],
+                    next_cursor: None,
+                });
+            }
             let Some(setting) = crate::versions::VersionSetting::parse(named) else {
                 return Err(ExecError::new(
                     ordo_api::ErrorCode::InvalidParam,
                     format!(
                         "the version setting was not changed: `{named}` is not one. There are \
-                         versions.served, versions.minimum, versions.new_tenant, and the \
-                         rollout settings {}",
-                        crate::rollouts::SETTINGS.join(", ")
+                         versions.served, versions.minimum, versions.new_tenant, the \
+                         rollout settings {}, and the backfill settings {}",
+                        crate::rollouts::SETTINGS.join(", "),
+                        crate::backfill::SETTINGS.join(", ")
                     ),
                 ));
             };

@@ -13,7 +13,10 @@
 #   2. HTTPS in front (tls-front.mjs): an OIDC issuer and an app's callback
 #      must be https, and everything here serves plain http on loopback.
 #   3. The identity service, with `notes` and `viewer` registered, each with
-#      open sign-up and its callback as a return URL.
+#      open sign-up and its callback as a return URL. Its own deployment,
+#      `main`, holds the deployment's people: the developer joins by its
+#      first invite and signs the `ordo` command in (tests/developer.ts).
+#      Both doors take their tokens (ORDO_IDENTITY_URL).
 #   4. notes v2 (examples/notes-v2) as role `notes_app` in schema `notes`.
 #      Its people sign in through the identity service (`accounts`). The
 #      deployment's own space admits anyone who signs in, as an editor.
@@ -158,6 +161,7 @@ id_url="host=$pg_host port=$pg_port user=$pg_user dbname=$id_db"
 id_env() {
   exec env ORDO_IDENTITY_DATABASE_URL="$id_url" ORDO_IDENTITY_ORIGIN="$issuer" \
     ORDO_IDENTITY_LISTEN="127.0.0.1:$id_port" ORDO_IDENTITY_DATA_DIR="$state/identity" \
+    ORDO_IDENTITY_DEPLOYMENT=main \
     ORDO_IDENTITY_SIGN_UPS_PER_ADDRESS=100 "$@"
 }
 # Registered before the service starts: a running service reads a new
@@ -198,6 +202,8 @@ door_env() { # role, schema, port, public, page, client id, then the command
     ORDO_BLOB_STORE="fs:$state/blobs-$schema" ORDO_DEV_UNSAFE_BLOB_STORE=1 \
     ORDO_READER_NOTE_VIEWER_ROLE=viewer_app ORDO_PEER_NOTES_SCHEMA=notes \
     ORDO_PUBLIC_CDN_S_MAXAGE=2 ORDO_EXTERNAL_WATCH_SECS=2 \
+    ORDO_IDENTITY_URL="http://127.0.0.1:$id_port" ORDO_IDENTITY_ORIGIN="$issuer" \
+    ORDO_IDENTITY_DEPLOYMENT=main \
     RUST_LOG="${RUST_LOG:-info}" "$@"
 }
 notes_env() { door_env notes_app notes "$notes_port" "$notes_public" "$notes_page" notes "$@"; }
@@ -243,6 +249,10 @@ cat >"$state/stack.json" <<EOF
   "notesPage": "$notes_page/",
   "viewerPage": "$viewer_page/",
   "ordo": "$ordo",
+  "identity": "http://127.0.0.1:$id_port",
+  "identityData": "$state/identity",
+  "identityBin": "$idsvc",
+  "identityDb": "$id_url",
   "host": "$host",
   "programV3": "$repo/examples/notes-v3",
   "pg": { "host": "$pg_host", "port": "$pg_port", "db": "$db", "admin": "$pg_user", "rolePassword": "$role_password" },

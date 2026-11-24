@@ -309,6 +309,120 @@ async fn removing_a_table_or_the_line_revokes() {
     );
 }
 
+/// **`$readergrant` records each column it granted**
+/// (`plan-evolution-federation.md` §3.1). The line grants `notes` by
+/// column (one is orphaned) and the sign-in contract by column; a person
+/// grants `secrets` to the same role by hand. The record lists exactly what
+/// Ordo granted. With the line gone, every recorded table and column is
+/// revoked, and the hand grant is left as it was. A row from before grants
+/// were recorded still revokes everything, as it did.
+///
+/// A regression looks like a hand grant taken by Ordo, a recorded column
+/// left granted after its line is gone, or a record that does not match
+/// the grants.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_line_revokes_what_it_recorded_and_nothing_granted_by_hand() {
+    let w = world("ordo_rgrant_bycol").await;
+    w.pg.exec("ALTER TABLE alpha.notes ADD COLUMN mood text")
+        .expect("a column a version left");
+    ordo_exec::orphans::record(
+        &w.a,
+        &[ordo_exec::orphans::Left {
+            entity: "notes".into(),
+            field: Some("mood".into()),
+            columns: vec!["mood".into()],
+            sealed: false,
+        }],
+        Some("1.0.0"),
+        "2.0.0",
+        "t",
+        1_900_000_000,
+    )
+    .await
+    .expect("orphaned");
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted by column");
+    w.pg.exec(&format!("GRANT SELECT ON alpha.secrets TO {READER}"))
+        .expect("granted by hand");
+    // A start with nothing changed writes nothing, hand grants and all.
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("unchanged");
+    let record = |w: &World| {
+        w.pg.query("SELECT \"grants\" FROM alpha.\"$readergrant\"")
+            .expect("record")
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .unwrap_or_default()
+    };
+    let grants = record(&w);
+    assert!(
+        grants.contains(r#"["notes","title"]"#) && !grants.contains(r#"["notes","mood"]"#),
+        "{grants}"
+    );
+    assert!(
+        !grants.contains("secrets"),
+        "a hand grant is not Ordo's: {grants}"
+    );
+    w.b.rows("SELECT body FROM alpha.secrets")
+        .await
+        .expect("the hand grant reads");
+
+    let privilege = |w: &World, what: &str| {
+        w.pg.query(&format!("SELECT {what}::text"))
+            .expect("asked")
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .unwrap_or_default()
+    };
+    peer::grant_readers_with(&w.a, &alpha_with(""), |_| None)
+        .await
+        .expect("the line is gone");
+    assert_eq!(
+        privilege(
+            &w,
+            &format!("has_column_privilege('{READER}', 'alpha.notes', 'title', 'SELECT')")
+        ),
+        "false",
+        "a recorded column is revoked"
+    );
+    assert_eq!(
+        privilege(
+            &w,
+            &format!("has_table_privilege('{READER}', 'alpha.secrets', 'SELECT')")
+        ),
+        "true",
+        "the hand grant is left"
+    );
+    assert_eq!(
+        privilege(
+            &w,
+            &format!("has_schema_privilege('{READER}', 'alpha', 'USAGE')")
+        ),
+        "false",
+        "Ordo's usage is revoked"
+    );
+
+    // A row from a release before grants were recorded: everything goes.
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted again");
+    w.pg.exec("UPDATE alpha.\"$readergrant\" SET \"grants\" = NULL")
+        .expect("an old row");
+    peer::grant_readers_with(&w.a, &alpha_with(""), |_| None)
+        .await
+        .expect("the line is gone");
+    assert_eq!(
+        privilege(
+            &w,
+            &format!("has_table_privilege('{READER}', 'alpha.secrets', 'SELECT')")
+        ),
+        "false",
+        "with no record, everything in the schema is revoked, as before"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_table_an_apply_creates_is_granted_by_that_apply() {
     let w = world("ordo_rgrant_apply").await;

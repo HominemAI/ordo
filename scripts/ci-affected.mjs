@@ -358,6 +358,8 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
       if (app === 'notes' || app === 'notes-v2' || app === 'notes-v3') flags.notesE2e = true;
       // The federation e2e runs notes v2 beside note_viewer.
       if (app === 'notes-v2' || app === 'notes-v3' || app === 'note-viewer') flags.federationE2e = true;
+      // The developer's sign-in, shared by both suites.
+      if (app === 'e2e-shared') flags.notesE2e = flags.federationE2e = true;
       reader(f);
       continue;
     }

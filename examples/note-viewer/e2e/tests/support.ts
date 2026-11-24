@@ -13,6 +13,14 @@ export interface Stack {
   readonly ordo: string;
   /** The `ordo-host` binary both doors run. */
   readonly host: string;
+  /** The identity service as the CLI reaches it: plain http on loopback. */
+  readonly identity: string;
+  /** Its data folder, which holds `first-invite`. */
+  readonly identityData: string;
+  /** Its binary, for its host commands. */
+  readonly identityBin: string;
+  /** Its database URL, for those commands. */
+  readonly identityDb: string;
   /** examples/notes-v3, applied over notes v2 by tests/v3 (increment 7a). */
   readonly programV3: string;
   readonly pg: {

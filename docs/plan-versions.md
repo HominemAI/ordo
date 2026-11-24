@@ -904,6 +904,19 @@ Added by the review of 2026-11-23:
 - An orphaned `public` field stops being served at once, and the public
   cache drops (§1.14).
 
+Built 2026-11-23 (increment 14):
+
+- `$orphans`, one row per orphaned field or entity, in each database.
+  Erasure, export, the reader grants and pruning read it.
+- Every orphan gets a drop date, 30 days by default
+  (`ORDO_ORPHANS_PERSONAL_DROP_AFTER`). The language cannot mark a field
+  personal yet, so every orphan is treated as personal. The date is shown
+  as due. Nothing drops by itself.
+- `ordo evolve --prune <entity.field>` asks twice. In production it also
+  asks for the deployment's name, the domain of the active version.
+- A reader loses an orphaned column when it is orphaned, by a column grant.
+  The soak's close (Q1) replaces that moment once soaks exist (11a).
+
 ### 2.8 The release check and editions: design (review 2026-11-23)
 
 New section. Increments 6 and 6b had one table line each.
@@ -1307,7 +1320,7 @@ round is about 35 minutes for the full suite.
 | 12 | **Staging clones.** Masking in production, deny by default, encrypted bundle, sinks, no credentials, clone carries its version. | L | 3, 4b | a clone of a tenant on X serves in staging on X with no real personal data | 27g (second half), 27v |
 | 12b | **Signed rehearsal (provisional, §3.2).** | M | 8, 12 | production refuses a plan digest staging did not sign | 27f (rest) |
 | 13 | **Sealed backfills.** No plaintext dual write, plaintext dropped on verify, `Purpose::Migration`. | L | 11b | sealing on 3 tenants under live writes verifies by count and hash, and no plaintext column remains | 13d |
-| 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
+| 14 | **Orphans and pruning.** `$orphans` for erasure and export, drop dates, prune rules, tombstones, named-environment confirmations. Pruning as `ordo evolve --prune` with its second confirmation; the reader rule for orphaned columns (§2.7, review 2026-11-23). **Built 2026-11-23** (239afd67, 525a781d, aefe7a8a): `$orphans` in each database (`ordo_exec::orphans`), written wherever a database is brought to a version that stops declaring a field or an entity: the deployment's own apply, each tenant's database brought forward, each stored step run (`schema_apply::record_orphans`). Each row has its columns, a sealed flag, a drop date and, once pruned, a tombstone. A version that declares the field again removes its row. Erasure deletes a space's rows from an orphaned table too, and names the orphans it reached (`std.space.delete`, `orphans`). Export writes each orphan under `orphans/` with the row's id. `std.deployment.orphans` and `ordo evolve --orphans` list them. `std.deployment.prune` and `ordo evolve --prune <entity.field>`: the first ask prunes nothing and says what would go; `--confirm <name>` prunes; in production `--confirm-deployment <domain>` too. Refused when `prune.enabled` is off (off in production; `ordo environments set prune on`), for a name no database records, and for a field the active version or a pinned one still declares. The reader rule (Q1): a table on a `reader` line that holds an orphaned column is granted by column, without it. The reader's check holds the entity with `external_changed`, naming the column, the read app and the fix. Tests: `orphans.rs`, `reader_grants.rs` (`a_reader_loses_an_orphaned_column_with_a_named_error`); notes e2e project `orphans` (`tests/orphans/orphans.spec.ts`); note-viewer e2e project `orphans` (`tests/orphans/orphaned-column.spec.ts`, fixture `notes-no-tags`). **Found by it:** `std.space.delete` failed on a tenant with a database of its own, which had no `$logconsumers`; erasure now makes it. **Not built:** soaks (11a), so an orphan is recorded when the database moves, not at a soak's close; nothing drops at the drop date by itself; the language cannot mark a field personal, so every orphan gets a drop date; restorable versions (17) are not yet checked by pruning; an orphaned `public` field (§1.14) is not handled apart. | M | 8 | a dropped field is orphaned and erased on request | 27y, 13e, 27h (rest) |
 | 15 | **`prev` in the language.** The syntax is ruled (2026-10-04) and written in `plan-syntax-additions.md` §5 (review 2026-11-23). Parser, the 3 compile checks, the 3 plan checks, the CDK's `prev()`, and the offer to remove landed `prev` lines. Refused on an external. | M | 8 | a declared rename renders as a rename; notes v3 uses it | 27x |
 | 16 | **Tenant builds.** After first deployment. | S | 3, 4b, 5, 10 | a beta tenant serves the branch while the rest serve main | 27t |
 | 17 | **Restore and import across versions** (new, review 2026-11-23; design in §2.9). | M | 3, 8 | a snapshot taken on X restores beside tenants on Y and serves X | 11-10b (`snapshot-restore`) |

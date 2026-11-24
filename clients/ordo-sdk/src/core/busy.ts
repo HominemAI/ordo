@@ -129,6 +129,28 @@ export { RETRY_CLASSES };
  */
 export const RECONNECT_CLASSES: ReadonlySet<string> = new Set<string>(['internal', ...RETRY_CLASSES]);
 
+/**
+ * The frame a feed ends with when its tenant moved to another program
+ * version (`plan-versions.md` §1.4): a pin switch, or a deploy that moves
+ * every tenant. Known by its event name, never by its class
+ * (`space_unavailable`), which elsewhere stays a standing answer. A feed
+ * that hears it reconnects at once, on the normal backoff, and the sync
+ * manager drops the tenant's device copy and fills it again (owner ruling
+ * Q7, 2026-11-23).
+ */
+export const VERSION_CHANGED_EVENT = 'version_changed';
+
+/** A feed ended because its tenant's program version changed. Not a refusal. */
+export class OrdoVersionChanged extends Error {
+  /** The op whose feed heard it. */
+  readonly op: string;
+  constructor(op: string) {
+    super(`the tenant's program version changed under the feed of \`${op}\`; it reconnects`);
+    this.name = 'OrdoVersionChanged';
+    this.op = op;
+  }
+}
+
 /** How a feed backs off between reconnects. Every field is optional. */
 export interface ReconnectBackoff {
   /** The wait before the second reconnect, in milliseconds. Default 250. */

@@ -1,0 +1,6 @@
+{
+  "name": "ordo-e2e-shared",
+  "private": true,
+  "description": "Helpers the example e2e suites share. No dependencies: each suite runs them with its own Playwright.",
+  "type": "module"
+}

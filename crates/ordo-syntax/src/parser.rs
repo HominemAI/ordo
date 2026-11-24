@@ -46,9 +46,13 @@ pub const INVALID_GUARD_WALK: &str = "invalid_guard_walk";
 pub const BARE_FIELD_IN_GROUP: &str = "bare_field_in_group";
 /// A second `release member` line. One rule per program (27aq).
 pub const DUPLICATE_RELEASE: &str = "duplicate_release";
+/// A second `edition` line (`plan-versions.md` §2.6).
+pub const DUPLICATE_EDITION: &str = "duplicate_edition";
 /// A `secret` bound to something other than an exact host name: a URL, a
 /// port or a wildcard (`plan-backend-functions.md` §5).
 pub const INVALID_SECRET_HOST: &str = "invalid_secret_host";
+/// A second `auth` block. One per program (`plan-configuration-in-the-file.md` §2.2).
+pub const DUPLICATE_AUTH: &str = "duplicate_auth";
 /// `$caller` inside a release rule. The seat being released is `$member`,
 /// and the rule is about that seat whoever asks (27aq).
 pub const RELEASE_SUBJECT: &str = "release_subject";
@@ -76,6 +80,13 @@ pub const EXTERNAL_SEALED: &str = "external_sealed";
 /// Any other clause or modifier an external entity cannot carry: `unique`,
 /// `index`, `check`, `public`, `std sealed`, `tree`, a default.
 pub const EXTERNAL_UNSUPPORTED: &str = "external_unsupported";
+/// `prev` naming the field's or entity's own name (`plan-syntax-additions.md`
+/// §5).
+pub const PREV_SELF: &str = "prev_self";
+/// `prev(name)` while `name` is still a field of the entity.
+pub const PREV_STILL_DECLARED: &str = "prev_still_declared";
+/// Two fields of one entity with the same `prev` target.
+pub const PREV_DUPLICATE: &str = "prev_duplicate";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -347,6 +358,15 @@ impl<'t> Parser<'t> {
         match self.pos.checked_sub(1).and_then(|i| self.toks.get(i)) {
             Some(prev) => self.tok().span.line > prev.span.line,
             None => false,
+        }
+    }
+
+    /// The span of the token just consumed. A clause that ends on its last
+    /// value reads its end here.
+    pub(crate) fn prev_span(&self) -> Span {
+        match self.pos.checked_sub(1).and_then(|i| self.toks.get(i)) {
+            Some(prev) => prev.span,
+            None => self.tok().span,
         }
     }
 

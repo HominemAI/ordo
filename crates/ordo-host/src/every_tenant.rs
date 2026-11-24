@@ -33,6 +33,8 @@
 //!   rollout's turn runs its tenants one after another.
 //! - Grants a move killed staying killed after a revert.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use ordo_exec::route::PoolResolver;
 use ordo_exec::Pool;
 use serde_json::{json, Value};
@@ -358,14 +360,21 @@ pub async fn revert_soaks_from(
     Ok(back)
 }
 
-/// How many tenants a rollback's dry run names; the rest are counted.
+/// How many tenants a rollback's dry run names.
 pub const DRY_RUN_LISTED: usize = 1_000;
 
 /// **What `ordo rollback --dry-run` to `version` says of each tenant** not
-/// on it (§2.5): one in its soak on a move from `version` goes back with
-/// every write kept; any other moves back, and loses what its version wrote
-/// to a field it renamed once its soak closed, since `version` reads the
-/// old column. Reads; changes nothing.
+/// on it (§2.5). Reads; changes nothing.
+///
+/// - One soaking on a move from `version` goes back, every write kept.
+/// - One in a tenant build stays: the build moves it.
+/// - When `version` is already active (a rollout to another was aborted),
+///   no other tenant moves.
+/// - Otherwise it moves back. A field its version renamed is read from the
+///   old column again. On a tenant's own database that column stopped
+///   being written when its soak closed, so what was written since is lost
+///   to `version`. On the deployment's own database, `$renames` keeps both
+///   columns current until a version drops the `prev` mark.
 pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value>, EvolveRefusal> {
     let v = Versions::on(control);
     let moves = match v.dual_moves().await {
@@ -373,27 +382,61 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
         Err(e) if e.is_missing_table() => Vec::new(),
         Err(e) => return Err(e.into()),
     };
+    let active = v.active_version().await?;
+    let own: BTreeSet<String> = match ordo_exec::spacedb::all(control).await {
+        Ok(a) => a.into_iter().map(|(s, _)| s.0).collect(),
+        Err(e) if e.is_missing_table() => BTreeSet::new(),
+        Err(e) => return Err(EvolveRefusal::Store(e.to_string())),
+    };
+    let built: BTreeSet<String> = pairs(
+        control,
+        "SELECT \"space\", '' FROM \"$tenant_build_members\"",
+    )
+    .await?
+    .into_iter()
+    .map(|(s, _)| s)
+    .collect();
+    let shared_renames = pairs(control, "SELECT \"entity\", \"field\" FROM \"$renames\"").await?;
     let (pins, _) = v.all_pins().await?;
     let mut out = Vec::new();
-    let mut lost_by_version: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
+    let mut renamed_by: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (space, on, _) in pins {
         if on == version || out.len() >= DRY_RUN_LISTED {
             continue;
         }
-        if let Some(m) = moves.iter().find(|m| m.space == space) {
-            if m.phase == MovePhase::Soaking && m.from == version {
-                out.push(json!({
-                    "tenant": space, "on": on, "kept": true,
-                    "note": format!(
-                        "in its soak until {}: back on {version}, every write kept",
-                        crate::versions::utc_minute(m.soak_until)
-                    ),
-                }));
-                continue;
-            }
+        let row = |kept: bool, note: String| json!({ "tenant": space, "on": on, "kept": kept, "note": note });
+        if let Some(m) = moves
+            .iter()
+            .find(|m| m.space == space && m.phase == MovePhase::Soaking && m.from == version)
+        {
+            out.push(row(
+                true,
+                format!(
+                    "in its soak until {}: back on {version}, every write kept",
+                    crate::versions::utc_minute(m.soak_until)
+                ),
+            ));
+            continue;
         }
-        if !lost_by_version.contains_key(&on) {
+        if built.contains(&space) {
+            out.push(row(
+                true,
+                format!("stays on {on}: it is in a tenant build, which moves it"),
+            ));
+            continue;
+        }
+        if active.as_deref() == Some(version) {
+            out.push(row(
+                true,
+                format!(
+                    "stays on {on}: {version} is already active, so a rollback moves only the \
+                     tenants soaking on a move from it. `ordo evolve --tenant {space} --to \
+                     {version}` moves this one"
+                ),
+            ));
+            continue;
+        }
+        if !renamed_by.contains_key(&on) {
             let renamed = match crate::evolve::path(control, version, &on).await {
                 Ok(steps) => steps
                     .iter()
@@ -401,27 +444,34 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
                     .collect(),
                 Err(_) => Vec::new(),
             };
-            lost_by_version.insert(on.clone(), renamed);
+            renamed_by.insert(on.clone(), renamed);
         }
-        let renamed = &lost_by_version[&on];
-        let note = if renamed.is_empty() {
-            format!("moves back to {version}; {on} renamed no field from it")
-        } else {
-            format!(
-                "past its soak, or never in one: moves back to {version}, and what {on} wrote to \
-                 {} since its soak closed is not in {version}'s columns",
-                renamed.join(", ")
+        let lost: Vec<String> = renamed_by[&on]
+            .iter()
+            .filter(|r| own.contains(&space) || !shared_renames.contains(*r))
+            .map(|(e, f)| format!("{e}.{f}"))
+            .collect();
+        out.push(if lost.is_empty() {
+            row(
+                true,
+                format!("moves back to {version}; every field it reads is current"),
             )
-        };
-        out.push(json!({
-            "tenant": space, "on": on, "kept": renamed.is_empty(), "note": note,
-        }));
+        } else {
+            row(
+                false,
+                format!(
+                    "past its soak, or never in one: moves back to {version}, and what {on} \
+                     wrote to {} since its soak closed is not in {version}'s columns",
+                    lost.join(", ")
+                ),
+            )
+        });
     }
     Ok(out)
 }
 
-/// Each field a stored step renamed, `entity.field (was old)`.
-fn renamed_fields(receipt: &str) -> Vec<String> {
+/// Each field a stored step renamed, `(entity, field)` by its new name.
+fn renamed_fields(receipt: &str) -> Vec<(String, String)> {
     let Ok(r) = serde_json::from_str::<Value>(receipt) else {
         return Vec::new();
     };
@@ -430,12 +480,27 @@ fn renamed_fields(receipt: &str) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter(|b| b["code"] == "B4")
-        .map(|b| {
-            format!(
-                "{}.{}",
-                b["entity"].as_str().unwrap_or("?"),
-                b["field"].as_str().unwrap_or("?")
-            )
+        .filter_map(|b| {
+            Some((
+                b["entity"].as_str()?.to_string(),
+                b["field"].as_str()?.to_string(),
+            ))
         })
         .collect()
+}
+
+/// Two columns of each row `sql` reads, as a set. A table not made yet
+/// reads empty.
+async fn pairs(control: &Pool, sql: &str) -> Result<BTreeSet<(String, String)>, EvolveRefusal> {
+    match control.rows(sql).await {
+        Ok(rows) => Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let mut it = r.into_iter();
+                Some((it.next()??, it.next().flatten().unwrap_or_default()))
+            })
+            .collect()),
+        Err(e) if e.is_missing_table() => Ok(BTreeSet::new()),
+        Err(e) => Err(EvolveRefusal::Store(e.to_string())),
+    }
 }

@@ -1,6 +1,9 @@
 # The backfill worker and dual writes: how one tenant moves through a transforming step
 
-Status: **plan started 2026-11-23, nothing built.** Written by the review
+Status: **B1, B3 and B6 built 2026-11-23** (`plan-versions.md` increment
+10b; `crates/ordo-host/src/backfill.rs`). B2, B4 and B5 are not built.
+What was built differs from the text below in the places marked
+"Built". Written by the review
 of the evolution plans (`review-evolution-plans-2026-11-23.md`). It is the
 design of `plan-versions.md` increments 10b, 11a and 11b, which had one
 table line each and 5 bullets in §2.4. It replaces increment 3 of
@@ -99,6 +102,27 @@ can run for hours, and the apply lock is the deployment's. Proposed:
 deployment. Proposed `backfill.per_database` (2), so 8 tenants in one
 shared database do not take its whole pool.
 
+**Built (10b, 2026-11-23).**
+
+- A step fills a field with `ordo evolve --fill <entity>.<field>=<expr>`
+  (B2, a new required field; B5, an optional field made required). The
+  fill is in the plan's options and its receipt, so in the digest.
+- The mapping is rendered by `ordo_schema::check::render_mapping`, the
+  row-local slice a `check` uses. The render types it against an empty
+  database of X, so a value the column refuses is a plan error.
+- The expand adds the column nullable. Its `$migrations` row names X, so
+  the database records X until the backfill verifies and `NOT NULL` lands.
+- `$backfills` holds the cursor, rows, attempts, last error and state.
+  `$backfill_spaces` holds each space's count and running content hash.
+- A chunk takes `pg_try_advisory_xact_lock`. A second worker is told
+  `backfill_busy`; it does not wait. The per-tenant move lock and
+  `backfill.concurrency` across tenants wait for 11b.
+- A failed chunk is retried with half the rows; 5 in a row mark it
+  `dead`. An explicit run again retries a dead cursor.
+- Settings: `chunk_rows` 1000, `chunk_timeout` 30 s, 5 attempts, and a
+  `budget` of chunks per run. They are defaults until increment 10 stores
+  them in Ordo (Q15).
+
 ---
 
 ## 3 · Dual writes: the move overlay (research)
@@ -193,6 +217,26 @@ in one database and 1 in its own.
   optional trailer, and a golden test of today's bytes lands first (the
   order `plan-opslog.md` D1a used).
 
+**Built (10b, 2026-11-23).**
+
+- Goldens of a plain group, a group with both flag tags and a restore
+  marker landed first (37bba572), then trailer `0x04` (3f931aed).
+- The record: kind (summarised or images), space, step digest, entity,
+  field, mapping, row count, content hash. Actor `system:backfill`.
+- The content hash is SHA-256 chained per space over each row's space,
+  id and new value, in `($space, id)` order
+  (`ordo_commandlog::backfill_row_hash`). Chunk sizes do not change it.
+- Verify: no row left null; for a new column filled by an expression,
+  every row equals the mapping, naming the first row that does not; each
+  space's count and hash recompute. A mismatch refuses and nothing is
+  made required.
+- The summaries and `done` are written in one transaction, so a run again
+  never writes them twice.
+- Images are refused for an entity with sealed or file fields, which need
+  the write path's custody. The summary is the default there.
+- The receipt says, before the step runs, which kind it writes and that a
+  summarised backfill's old values come back only from a backup.
+
 ---
 
 ## 6 · Backfill functions (D16)
@@ -211,6 +255,21 @@ in one database and 1 in its own.
   slow for the write path. So a step with a backfill function is a one-way
   step unless its forward mapping for single rows is also an expression.
   The plan says so when it is rendered.
+
+**Built (10b, 2026-11-23).**
+
+- `--fill <entity>.<field>=fn <name> [secrets a,b] [hosts h,i]`. The
+  function must be declared in Y with stored code; the receipt records
+  its code hash.
+- The secrets and hosts must be within the function's own declaration,
+  or the render refuses naming the line to add.
+- The call gets exactly the declared lists, no ops and no files. It runs
+  once per chunk per space: `{"rows": [...]}` in, `{"values": [...]}` out.
+  Each call is a `$fnruns` row as `system:backfill`.
+- A function with a secret or a host is marked `"reproducible": false` in
+  the receipt, for staging's rehearsal (12b) to read.
+- The one-way rule above is not enforced yet: it belongs to the dual
+  writes of 11a.
 
 ---
 

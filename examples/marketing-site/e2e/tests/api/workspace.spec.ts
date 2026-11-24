@@ -260,6 +260,10 @@ test('editorial review runs as the caller and a stale approval leaves no history
       (r) => r.id === id,
     )!;
     const data = { id, rev: before.rev, note: 'Editorial approval', at: new Date().toISOString() };
+    // The second write fails after the campaign update: neither may land.
+    await refused(await request.post(`${stack().door}/op/approveCampaign`, { headers, data: { ...data, note: '' } }), 409, 'check_violation');
+    expect((await rows(await request.get(`${stack().door}/op/campaignList`, { headers }))).find(r => r.id === id)).toEqual(before);
+    expect(await rows(await request.get(`${stack().door}/op/approvalHistory`, { headers, params: { campaign: id } }))).toEqual([]);
     await rows(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }));
     await refused(await request.post(`${stack().door}/op/approveCampaign`, { headers, data }), 409, 'cas_miss');
     const history = await rows(

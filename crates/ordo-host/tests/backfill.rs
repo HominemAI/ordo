@@ -116,7 +116,7 @@ fn one(pg: &Pg, sql: &str) -> String {
 }
 
 fn fills(spec: &str, images: &str) -> Choices {
-    evolve::typed_options("", spec, images).expect("options parse")
+    evolve::typed_options("", spec, images, "").expect("options parse")
 }
 
 /// A registry with v1 and `next` stored, the step stored with `choices`,
@@ -159,6 +159,7 @@ fn settings(chunk_rows: u32, budget: Option<u32>) -> StepContext {
         },
         functions: None,
         keys: None,
+        fence: None,
     }
 }
 
@@ -448,6 +449,7 @@ async fn five_failed_chunks_mark_the_cursor_dead_and_a_run_again_finishes() {
         },
         functions: None,
         keys: None,
+        fence: None,
     };
     let err = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &quick)
         .await
@@ -630,6 +632,7 @@ async fn a_backfill_function_runs_per_chunk_with_only_what_the_plan_declares() {
         },
         functions: Some(upper.clone()),
         keys: None,
+        fence: None,
     };
     let ran = evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &ctx)
         .await

@@ -1786,7 +1786,7 @@ fn program_v2() -> String {
 
 /// The plan's options: `notes.mood` filled from each note's title.
 fn fill() -> ordo_host::schema_apply::Choices {
-    ordo_host::evolve::typed_options("", "notes.mood=title", "").expect("options")
+    ordo_host::evolve::typed_options("", "notes.mood=title", "", "").expect("options")
 }
 
 /// Store 0.2.0 on `pool`, not activated.

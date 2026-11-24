@@ -2167,6 +2167,9 @@ impl Ticked {
 /// How one tenant's move ended.
 enum Outcome {
     Moved,
+    /// Partway through a move that takes several turns (a backfill under
+    /// its budget, increment 11b). Not a failure, and not waiting.
+    Moving(String),
     Waiting(String),
     Failed(String),
     Gone(String),
@@ -2692,6 +2695,12 @@ async fn batch(
                     .await?;
                 out.moved.push(t.space);
             }
+            Outcome::Moving(why) => {
+                rollouts
+                    .set_tenant(r.id, &t.space, TenantState::Moving, &why, now)
+                    .await?;
+                out.waiting.push((t.space, why));
+            }
             Outcome::Waiting(why) => {
                 rollouts
                     .set_tenant(r.id, &t.space, TenantState::Waiting, &why, now)
@@ -2745,8 +2754,10 @@ async fn pin(pool: &Pool, r: &Rollout, space: &str, now: u64) -> Result<Outcome,
     }
 }
 
-/// Move one tenant whose database is its own: expand it to the target
-/// (`schema_apply::bring_forward_from`), gate it, then pin it. A database
+/// Move one tenant whose database is its own: through its stored path
+/// when one leads to the target (increment 11b,
+/// `crate::every_tenant::forward_tenant`), or else expand it to the target
+/// (`schema_apply::bring_forward_from`); gate it, then pin it. A database
 /// that cannot be reached waits (Q10); a change refused by name fails.
 async fn move_own(
     ops: &ApplyOps,
@@ -2755,6 +2766,9 @@ async fn move_own(
     program: &Program,
     now: u64,
 ) -> Result<Outcome, RolloutRefusal> {
+    if let Some(outcome) = by_stored_path(ops, r, space, now).await? {
+        return Ok(outcome);
+    }
     let id = ordo_crypto::SpaceId(space.to_string());
     let target = match ops.pools.resolve(&id).await {
         Ok(p) => p,
@@ -2789,6 +2803,56 @@ async fn move_own(
         }
     }
     pin(&ops.pool, r, space, now).await
+}
+
+/// **The tenant's stored path to the target** (increment 11b): a move
+/// with dual writes for a rewriting step, which pins the tenant at its
+/// switch and starts its soak; a replay and a pin for any other. A
+/// backfill takes `backfill.budget` chunks per turn, and the tenant is
+/// `moving` until its switch. `None` when no stored path leads there.
+async fn by_stored_path(
+    ops: &ApplyOps,
+    r: &Rollout,
+    space: &str,
+    now: u64,
+) -> Result<Option<Outcome>, RolloutRefusal> {
+    use crate::every_tenant::Forward;
+    let ctx = match ops.step_context().await {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(Some(Outcome::Waiting(format!(
+                "the backfill settings could not be read ({e}); it is tried again"
+            ))))
+        }
+    };
+    let cx = crate::dual_writes::MoveContext {
+        control: &ops.pool,
+        pools: ops.pools.as_ref(),
+        spaces: ops.spaces.get().map(|s| s.as_ref()),
+    };
+    let forward = Box::pin(crate::every_tenant::forward_tenant(
+        &cx,
+        &ctx,
+        space,
+        &r.target,
+        crate::dual_writes::SOAK_DEFAULT_SECS,
+        ACTOR,
+    ))
+    .await;
+    Ok(Some(match forward {
+        Ok(Forward::NoPath) => return Ok(None),
+        Ok(Forward::Ready) => pin(&ops.pool, r, space, now).await?,
+        Ok(Forward::Backfilling(why)) => Outcome::Moving(why),
+        Ok(Forward::Switched(_)) => {
+            Versions::on(&ops.pool).tag_rollout(space, r.id).await?;
+            Outcome::Moved
+        }
+        Err(e) if e.class() == "unreachable" => Outcome::Waiting(format!(
+            "its database cannot be reached ({e}); it is tried again"
+        )),
+        Err(e) if e.transient() => Outcome::Waiting(format!("{e}; it is tried again")),
+        Err(e) => Outcome::Failed(format!("{}: {e}", e.class())),
+    }))
 }
 
 /// [`TICK_ENV`], or the default. A value that is not a whole number of

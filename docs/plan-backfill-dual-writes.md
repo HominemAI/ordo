@@ -3,7 +3,8 @@
 Status: **B1, B3 and B6 built 2026-11-23** (`plan-versions.md` increment
 10b; `crates/ordo-host/src/backfill.rs`). **B2 and B4 built 2026-11-24**
 (increment 11a, try 1; `crates/ordo-host/src/dual_writes.rs`,
-`crates/ordo-exec/src/overlay.rs`). B5 is not built.
+`crates/ordo-exec/src/overlay.rs`). **B5 part 1 built 2026-11-24** (increment
+11b; `crates/ordo-host/src/every_tenant.rs`); shared databases wait.
 What was built differs from the text below in the places marked
 "Built". Written by the review
 of the evolution plans (`review-evolution-plans-2026-11-23.md`). It is the
@@ -487,7 +488,7 @@ in one database and 1 in its own.
 | B6 | 10b | S | Backfill functions |
 | B2 | 11a | L, research, 2 to 3 tries | The move overlay: forward dual writes on X, both guards, the phase on the pin stream. **Built 2026-11-24, try 1** |
 | B4 | 11a | M | The switch, reverse dual writes on Y, the soak, revert in the soak, soak close into `$orphans`. **Built 2026-11-24** |
-| B5 | 11b | M | Driven by a rollout; shared-database constraints (§4); `ordo rollback` and `--dry-run` |
+| B5 | 11b | M | Driven by a rollout; shared-database constraints (§4); `ordo rollback` and `--dry-run`. **Part 1 built 2026-11-24**: the rollout, the activation, `ordo rollback` and `--dry-run`; §4 waits |
 
 What sets the pace:
 
@@ -524,6 +525,43 @@ What sets the pace:
 - Tests: `notes_app.rs`,
   `a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keeps_every_write`;
   notes e2e project `moves` (`tests/evolve/dual-writes.spec.ts`).
+
+**Built (B5, part 1, 2026-11-24).** `crates/ordo-host/src/every_tenant.rs`.
+
+- **A rollout** moves each tenant with a database of its own through its
+  stored path to the target (`forward_tenant`), when one leads there from
+  the version its database records. No stored path: the apply path, as
+  before.
+- A path of one rewriting step is the move above, with the default 7-day
+  soak. A rewriting step among others is refused, naming the version to
+  replay to first, as `ordo evolve --tenant` refuses it.
+- The backfill takes `backfill.budget` chunks per turn. The tenant is
+  `moving` with its rows done until the switch, which pins it; the
+  rollout names itself on that `$pins` row.
+- Any other path, a seal included, is replayed and the tenant pinned.
+- **An activation's catch-up** replays the stored path on each tenant
+  database the same way (`forward_database`), with the node's backfill
+  functions and key custody. A rewriting step there runs as `ordo evolve
+  --run` runs it: `$renames` keeps both columns current. Without
+  `backfill.budget`, a long backfill holds the apply lock for its length.
+- **`ordo rollback` to X** puts back every tenant soaking on a move from X
+  (`revert_soaks_from`), after the activation, under the apply lock. It
+  also runs when X is still active, which is how a rollout aborted in the
+  soak is undone. Through the door each tenant database's fence rises;
+  with `--direct` only the pin epoch does.
+- **`--dry-run`** lists each tenant not on X: back with every write, stays
+  (X already active, or a tenant build), or moves back and loses what a
+  renamed field took since its soak closed. On the deployment's own
+  database `$renames` keeps both columns, so nothing is lost there.
+- Tests: `notes_app.rs`
+  (`a_rollout_moves_3_tenants_through_a_rename_under_live_writes_and_a_rollback_in_the_soak_keeps_every_write`,
+  `an_activation_runs_each_tenant_stored_step_a_seal_included`); notes e2e
+  project `rollout-moves` (`tests/evolve/every-tenant.spec.ts`).
+- Not built: §4 (a tenant on a shared database in a move of its own, the
+  new shape's constraints at the last tenant's close, soaks on a read
+  table closing together); `backfill.concurrency` and
+  `backfill.per_database`; grants a move killed staying killed after a
+  revert.
 
 ## 9 · Tests
 

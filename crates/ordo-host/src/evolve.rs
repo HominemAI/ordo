@@ -2404,7 +2404,7 @@ pub const CLOSE_SOAK: &str = "std.deployment.closeSoak";
 
 /// A stored step a tenant moves through with dual writes (increment 11a):
 /// one that backfills, each by a per-row mapping.
-fn dual_writes_step(p: &StoredPlan) -> bool {
+pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
     let Ok(receipt) = serde_json::from_str::<Value>(&p.receipt) else {
         return false;
     };
@@ -2415,7 +2415,7 @@ fn dual_writes_step(p: &StoredPlan) -> bool {
 /// A stored step that seals a field (increment 13). Its end drops the
 /// plaintext and raises the tenant's pin fence, so it is the last step of
 /// a replay before the pin.
-fn sealing_step(p: &StoredPlan) -> bool {
+pub(crate) fn sealing_step(p: &StoredPlan) -> bool {
     serde_json::from_str::<Value>(&p.receipt).is_ok_and(|r| {
         r["backfills"].as_array().is_some_and(|b| {
             b.iter()
@@ -2462,6 +2462,9 @@ pub struct RollbackCheck {
     /// One line per external or peer table the version can no longer read.
     pub refusals: Vec<String>,
     pub notes: Vec<String>,
+    /// Each tenant not on the version, what the rollback does to it and
+    /// whether every write is kept (§2.5, increment 11b).
+    pub tenants: Vec<Value>,
 }
 
 impl RollbackCheck {
@@ -2469,7 +2472,7 @@ impl RollbackCheck {
         json!({
             "version": self.version, "active": self.active,
             "refusals": self.refusals, "notes": self.notes,
-            "ok": self.refusals.is_empty(),
+            "ok": self.refusals.is_empty(), "tenants": self.tenants,
         })
     }
 }
@@ -2488,11 +2491,13 @@ pub async fn rollback_check(pool: &Pool, version: &str) -> Result<RollbackCheck,
     let report = crate::external_check::check(pool, &program.schema)
         .await
         .map_err(EvolveRefusal::Store)?;
+    let tenants = crate::every_tenant::rollback_tenants(pool, &version).await?;
     Ok(RollbackCheck {
         version,
         active: v.active_version().await?,
         refusals: report.refusals(),
         notes: report.notes,
+        tenants,
     })
 }
 
@@ -2583,7 +2588,7 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
             ROLLBACK_CHECK,
             OpKind::Read,
             vec![text("version", 128, true)],
-            &["version", "active", "refusals", "notes", "ok"],
+            &["version", "active", "refusals", "notes", "ok", "tenants"],
         ),
         spec(
             REPLAY,
@@ -2891,19 +2896,9 @@ pub async fn execute(
                             match steps.iter().position(dual_writes_step) {
                                 Some(0) if steps.len() == 1 => steps.into_iter().next(),
                                 Some(i) => {
-                                    // The move first when it is the next
-                                    // step; the steps before it otherwise.
-                                    let stop = if i == 0 { &steps[0].to } else { &steps[i].from };
-                                    return Err(EvolveRefusal::Options(format!(
-                                        "the stored path from `{from}` to `{to}` holds {} \
-                                         steps, and the step from `{}` to `{}` rewrites data \
-                                         with live writes beside it, so it runs alone. Replay \
-                                         the tenant to `{stop}` first (`ordo evolve --tenant \
-                                         {tenant} --to {stop}`), then on to `{to}`",
-                                        steps.len(),
-                                        steps[i].from,
-                                        steps[i].to,
-                                    ))
+                                    return Err(crate::every_tenant::runs_alone(
+                                        tenant, &from, &to, &steps, i,
+                                    )
                                     .to_exec_error(WHAT));
                                 }
                                 None => None,

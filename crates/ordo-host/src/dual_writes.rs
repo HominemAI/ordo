@@ -56,8 +56,9 @@
 //! - A step filled by a backfill function has no per-row mapping for the
 //!   write path, so it runs as before, with no dual writes (D16's one-way
 //!   step).
-//! - Moves driven by a rollout, `ordo rollback`, and the constraints of a
-//!   shared database are increment 11b.
+//! - A rollout drives these moves and `ordo rollback` reverts their soaks
+//!   (increment 11b, part 1, `crate::every_tenant`). The constraints of a
+//!   shared database are 11b's part 2.
 
 use std::collections::HashMap;
 use std::sync::Arc;

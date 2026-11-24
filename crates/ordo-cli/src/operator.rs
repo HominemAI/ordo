@@ -2613,14 +2613,22 @@ async fn rollback(flags: Flags) -> Outcome {
             Err(o) => return o,
         };
         let to = row["version"].as_str().unwrap_or(&version);
-        return Outcome::ok(match row["state"].as_str() {
+        let reverted: Vec<String> = row["reverted"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.as_str().map(String::from))
+            .collect();
+        let mut out = match row["state"].as_str() {
             Some("alreadyActive") => format!("UNCHANGED  {to} is already active\n"),
             _ => format!(
                 "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n",
                 row["from"].as_str().unwrap_or("nothing"),
                 ordo_host::versions::DEPLOY_CHANNEL,
             ),
-        });
+        };
+        out.push_str(&reverted_lines(to, &reverted));
+        return Outcome::ok(out);
     }
     let actor = flags
         .named
@@ -2646,20 +2654,30 @@ async fn rollback(flags: Flags) -> Outcome {
     // lock as an apply, and the same refusal for a version whose tables
     // this database does not hold.
     use ordo_host::apply_op::Activation;
-    match ordo_host::apply_op::activate(&pool, &version, &actor).await {
-        Ok(Activation::Switched { from, to }) => Outcome::ok(format!(
-            "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n",
+    match ordo_host::apply_op::activate_reverting(&pool, None, None, &version, &actor).await {
+        Ok((Activation::Switched { from, to }, reverted)) => Outcome::ok(format!(
+            "rolled back to {to}  (was {})\nnodes      nudged on `{}`\n{}",
             from.as_deref().unwrap_or("nothing"),
             ordo_host::versions::DEPLOY_CHANNEL,
+            reverted_lines(&to, &reverted),
         )),
-        Ok(Activation::AlreadyActive { version }) => {
-            Outcome::ok(format!("UNCHANGED  {version} is already active\n"))
-        }
-        Ok(Activation::Staged) | Ok(Activation::RolloutStarted { .. }) => {
+        Ok((Activation::AlreadyActive { version }, reverted)) => Outcome::ok(format!(
+            "UNCHANGED  {version} is already active\n{}",
+            reverted_lines(&version, &reverted)
+        )),
+        Ok((Activation::Staged, _)) | Ok((Activation::RolloutStarted { .. }, _)) => {
             Outcome::failed("REFUSED an activation answered staged\n".into())
         }
         Err(e) => Outcome::failed(format!("REFUSED {e}\n")),
     }
+}
+
+/// One line per tenant a rollback put back in its soak (increment 11b).
+fn reverted_lines(to: &str, reverted: &[String]) -> String {
+    reverted
+        .iter()
+        .map(|t| format!("reverted   {t} back on {to} in its soak; every write kept\n"))
+        .collect()
 }
 
 /// `ordo deploys` — what is stored, what is serving, and every re-point.
@@ -4138,6 +4156,21 @@ async fn rollback_dry_run(host: &crate::wire::Host, flags: &Flags, version: &str
     );
     for n in row["notes"].as_array().into_iter().flatten() {
         out.push_str(&format!("note       {}\n", n.as_str().unwrap_or("")));
+    }
+    // Each tenant the rollback moves, and whether every write is kept
+    // (plan-versions.md §2.5, increment 11b).
+    for t in row["tenants"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "{}  {} on {}: {}\n",
+            if t["kept"].as_bool() == Some(true) {
+                "tenant    "
+            } else {
+                "LOSES     "
+            },
+            t["tenant"].as_str().unwrap_or("?"),
+            t["on"].as_str().unwrap_or("?"),
+            t["note"].as_str().unwrap_or(""),
+        ));
     }
     let refusals = row["refusals"].as_array().cloned().unwrap_or_default();
     if refusals.is_empty() {

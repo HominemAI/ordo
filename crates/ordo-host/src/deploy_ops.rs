@@ -296,7 +296,7 @@ pub fn specs() -> Vec<OpSpec> {
                 required: true,
                 bounds: None,
             }],
-            &["state", "version", "from"],
+            &["state", "version", "from", "reverted"],
         ),
         spec(
             PLAN,
@@ -810,8 +810,33 @@ pub async fn execute(
                 version.to_string()
             };
             let version = version.as_str();
-            match apply_op::activate(&ops.pool, version, caller).await {
-                Ok(Activation::Switched { from, to }) => {
+            // A rollback also puts back each tenant soaking on a move from
+            // the version, every write kept (increment 11b).
+            let activated = apply_op::activate_reverting(
+                &ops.pool,
+                Some(ops.pools.as_ref()),
+                ops.spaces.get().map(|s| s.as_ref()),
+                version,
+                caller,
+            )
+            .await;
+            let (activation, reverted) = match activated {
+                Ok(done) => done,
+                Err(refusal) => return Err(ExecError::new(refusal.code(), refusal.to_string())),
+            };
+            if !reverted.is_empty() {
+                ops.record(
+                    caller,
+                    ACTIVATE,
+                    "soaks-reverted",
+                    format!(
+                        "version={version} tenants={} by={caller}",
+                        reverted.join("+")
+                    ),
+                );
+            }
+            match activation {
+                Activation::Switched { from, to } => {
                     ops.record(
                         caller,
                         ACTIVATE,
@@ -821,15 +846,17 @@ pub async fn execute(
                             from.as_deref().unwrap_or("none")
                         ),
                     );
-                    json!({ "state": "switched", "version": to, "from": from })
+                    json!({ "state": "switched", "version": to, "from": from, "reverted": reverted })
                 }
-                Ok(Activation::AlreadyActive { version }) => {
-                    json!({ "state": "alreadyActive", "version": version, "from": version })
+                Activation::AlreadyActive { version } => {
+                    json!({
+                        "state": "alreadyActive", "version": version, "from": version,
+                        "reverted": reverted,
+                    })
                 }
-                Ok(Activation::Staged) | Ok(Activation::RolloutStarted { .. }) => {
+                Activation::Staged | Activation::RolloutStarted { .. } => {
                     return Err(ExecError::internal("an activation answered staged"))
                 }
-                Err(refusal) => return Err(ExecError::new(refusal.code(), refusal.to_string())),
             }
         }
         PLAN => {

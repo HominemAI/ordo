@@ -1296,6 +1296,68 @@ a reproduced defect, or an explicit unresolved investigation. Documented gaps
 remain gaps, consistent with the owner's refusal to omit them in U3.
 **Size:** M per remaining family, 1 to 2 CI rounds each. Count is measured after W5.
 
+### Coverage review: explicit journeys missing from the first draft
+
+Source review on 2026-11-24 found the following families under-specified.
+They are mandatory entries in W0 and extensions to the named slices, not
+reasons to build another application. Their registration and supported behavior
+must be checked before selecting exact request parameters.
+
+| Family | Minimum journey and outcomes | Owner slice / source evidence |
+|---|---|---|
+| Tenant lifecycle | Create a space through the app; self-service allowed/refused; pause/resume as tenant and deployment owner; leave, last-owner refusal where required, reap and delete; unrelated tenant keeps working | W2/W3/W5; `tenant_ops.rs`, `self_serve.rs`, `pause.rs`, `release_ops.rs`, `reap_op.rs`, `fleet.rs` |
+| Console bootstrap and trust | First setup, owner invitation/removal, console passkey recovery and step-up; link the door, rotate/revoke its key, unlink/forget and relink; old authority stays refused | W5; `ordo-console/src/server.rs` setup, owner and door routes |
+| Console runtime control | Apply, rollback and restart through console HTTP; unavailable runtime/door and partial failure; browser reconnects and verifies persisted app data | W5/W6; console runtime routes and their real downstream supervisor calls |
+| Machine and device credentials | Browser approval followed by actual token redemption/use; rejected/expired/reused approval; wrong audience/grant, rotation and revocation; no elevation into human-only presence actions | W2; identity-service `/cli/approve`, `/cli/redeem`, `/machine/begin`, `/machine/complete`, host `deployment_access.rs` |
+| Live policy changes | Set tenant/deployment session policy and password slowdown; change provider connection, origin list and self-service policy while sessions/feeds exist; verify documented inheritance and effective permissions | W2/W6; `session_policy.rs`, `guess_limits.rs`, `tenant_providers.rs`, `tenant_origins.rs` |
+| Secret lifecycle | Set/list/replace/remove an integration secret; listing never returns its value; function/delivery observes permitted changes; removed and foreign secrets stay inaccessible | W4/W5; `secrets.rs`, function and egress consumers |
+| Operational read surfaces | Read usage, observed cost, health and security records as allowed/forbidden actors; empty/populated/paged output and unavailable dependency; no tenant names or secrets leaked | W5/W6; `serve.rs`, `observed_cost.rs`, `security_record.rs`, quotas and usage handlers |
+
+**Actual browser protocol behavior (W1/W2/W6).** Run same-origin and allowed/
+forbidden cross-origin pages, with actual preflight and fetch credential modes.
+Exercise public versus authenticated routes, tenant-specific origins, refresh
+cookie scope and supported cookie attributes, missing/mismatched Origin, expired
+refresh and concurrent renewal. Verify the implemented anti-forgery checks on
+cookie-authenticated mutations. A Node request cannot prove browser CORS or
+cookie enforcement. CORS refusal must not be confused with server authorization:
+`ordo-api/src/cors.rs` explicitly allows some actual requests while withholding
+browser-readable cross-origin access.
+
+At the HTTP boundary also cover malformed JSON, unexpected content types,
+invalid UTF-8 where applicable, body limits, duplicate/ambiguous parameters,
+wrong method, invalid encoded names and forwarded-address handling under trusted
+and untrusted proxy configurations. Assert named refusal and no side effects.
+Only test protocol variants the deployed server supports; record others as such.
+
+**Identity-provider lifecycle (W2/W6).** Cover discovery and JWKS retrieval,
+unknown key id, key rotation/cache refresh, issuer/audience/signature/time
+refusals, unavailable provider and changed/retired tenant connection. Browser
+consent must preserve redirect/state/nonce/PKCE requirements wherever the
+supported flow uses them. Include an actual identity-service-backed profile;
+a controlled external provider complements it rather than replacing it.
+Use `ordo-identity-service/src/routes.rs` and the host's federation callers as
+the inventory sources. Routes containing `cli` still count if they are HTTP
+callable; the name alone is not evidence of a non-web exclusion.
+
+**Stateful sequences and realistic scale (W6).** In addition to isolated tests,
+run a seeded sequence of create/share/edit/upload/revoke/delete/rejoin actions
+through normal interfaces. Persist the seed and action log for reproduction.
+Check tenant separation, reference integrity, acknowledged writes and permissions
+after each transition. Use actual read interfaces as the oracle, supplemented
+by independent artifact/receiver checks. Exercise one large supported dataset,
+slow consumer and sustained reconnect profile; define bounds from the product
+contract or mark a missing limit as unresolved instead of inventing an SLO.
+
+**Outcome completeness (W0/W6).** Map each applicable enum/error variant and
+important boolean outcome in the reached handler chain to a journey, invariant
+or unresolved entry. Reconcile this with dynamic branch data where supported.
+Line/branch totals cannot establish full path coverage, and the full combination
+of paths is generally unbounded. Focus sequence combinations on shared mutable
+state and trust boundaries; record the residual risk explicitly.
+
+These additions enlarge W2, W5 and W6. Re-estimate their session and CI counts
+after W0 rather than retaining the first draft's sizes as a complete total.
+
 ### Known reachability questions, not assumed exclusions
 
 - `ordo-exec/src/undo.rs` and `reseal.rs`: initial caller search finds direct

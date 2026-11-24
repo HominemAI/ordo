@@ -220,7 +220,7 @@ in one database and 1 in its own.
   moves no object, in the deployment's bucket or a tenant's own.
 - A type change to or from a blob field is not on the menu. It is refused.
 - **A tenant database that cannot be reached** leaves the tenant on X.
-  Proposed (Q10): the rollout counts it as waiting, not failed.
+  Ruled 2026-11-23 (Q10): the rollout counts it as waiting, not failed.
 - **A destructive step on a tenant's own database** needs that tenant
   owner's confirmation (DL §9, `plan-schema-evolution.md` increment 5).
   The tenant waits in the rollout until it is given.

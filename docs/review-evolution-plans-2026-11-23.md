@@ -219,3 +219,18 @@ Each stands alone. The recommendation is first, in bold.
   default, with `backfill.function_egress` as the opt-in.** A function
   that calls out can differ between staging and production, which the
   rehearsal exists to rule out.
+
+---
+
+## 6 · Answers, 2026-11-23
+
+On the board the same day. 13 ruled, 3 asked again. `corpus-rulings.md`
+has each answer in the owner's words.
+
+- **As recommended:** Q1, Q2, Q4, Q5, Q7, Q8, Q9, Q10, Q13, Q15, Q16.
+- **Q6, changed:** the warning stops the evolve until the deployment owner
+  approves it, and it gives the migration steps.
+- **Q12, wider:** any staging deployment admin or a person staging allows.
+- **Asked again:** Q3 (one tenant moved to a hotfix during a rollout), Q11
+  (put in plain words), Q14 (with the cases a backfill may need secrets or
+  the network for).

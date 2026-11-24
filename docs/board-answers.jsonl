@@ -1629,3 +1629,45 @@
 {"seq": 1631, "item": "close-the-coverage-gap-through-the", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "yes", "source": "record", "read": true}
 {"seq": 1632, "item": "close-the-coverage-gap-through-the", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1633, "item": "close-the-coverage-gap-through-the", "ask": 5, "at": "2026-11-23", "status": "decided", "text": "yes. The running for atleast one of the apps should go through all of these things . We should be ordo applying/deploying etc..", "source": "record", "read": true}
+{"seq": 1634, "item": "close-the-coverage-gap-through-the", "ask": 6, "at": "2026-11-24T00:38:42Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1635, "item": "close-the-coverage-gap-through-the", "ask": 7, "at": "2026-11-24T00:38:46Z", "status": "open", "text": "Okay", "source": "page", "read": true}
+{"seq": 1636, "item": "close-the-coverage-gap-through-the", "ask": 8, "at": "2026-11-24T00:38:56Z", "status": "open", "text": "that's good", "source": "page", "read": true}
+{"seq": 1637, "item": "close-the-coverage-gap-through-the", "ask": 9, "at": "2026-11-24T00:39:11Z", "status": "open", "text": "After", "source": "page", "read": true}
+{"seq": 1638, "item": "close-the-coverage-gap-through-the", "ask": 10, "at": "2026-11-24T00:39:27Z", "status": "open", "text": "No. That's the whole point of testing it.", "source": "page", "read": true}
+{"seq": 1639, "item": "close-the-coverage-gap-through-the", "ask": 0, "at": "2026-11-24T00:39:38Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1640, "item": "evolution-review-federation-sign-in-and-devices", "ask": 1, "at": "2026-11-24T00:39:47Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1641, "item": "evolution-review-federation-sign-in-and-devices", "ask": 2, "at": "2026-11-24T00:39:50Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1642, "item": "evolution-review-federation-sign-in-and-devices", "ask": 3, "at": "2026-11-24T00:39:54Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1643, "item": "evolution-review-federation-sign-in-and-devices", "ask": 4, "at": "2026-11-24T00:40:09Z", "status": "open", "text": "good", "source": "page", "read": true}
+{"seq": 1644, "item": "evolution-review-federation-sign-in-and-devices", "ask": 5, "at": "2026-11-24T00:40:51Z", "status": "open", "text": "requires a approval to bypass a warn.  Possible migration steps provided.", "source": "page", "read": true}
+{"seq": 1645, "item": "evolution-review-federation-sign-in-and-devices", "ask": 6, "at": "2026-11-24T00:41:01Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1646, "item": "evolution-review-federation-sign-in-and-devices", "ask": 0, "at": "2026-11-24T00:41:05Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1647, "item": "evolution-review-release-check-promotion-staging", "ask": 1, "at": "2026-11-24T00:41:13Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1648, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24T00:42:14Z", "status": "open", "text": "Elaborate on the question. What is a \"promotion target\" what is \"fetch\" and what is the environment before it", "source": "page", "read": true}
+{"seq": 1649, "item": "evolution-review-release-check-promotion-staging", "ask": 3, "at": "2026-11-24T00:42:34Z", "status": "open", "text": "any deployment admin or allowed person", "source": "page", "read": true}
+{"seq": 1650, "item": "evolution-review-release-check-promotion-staging", "ask": 4, "at": "2026-11-24T00:42:55Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1651, "item": "evolution-review-release-check-promotion-staging", "ask": 0, "at": "2026-11-24T00:42:56Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1652, "item": "evolution-review-rollouts-records-and-backfills", "ask": 1, "at": "2026-11-24T00:44:04Z", "status": "open", "text": "Uhhhh individual tenant bumps should be supported - so that's something to think about - tenant specific hot fixes and such before a full app update", "source": "page", "read": true}
+{"seq": 1653, "item": "evolution-review-rollouts-records-and-backfills", "ask": 2, "at": "2026-11-24T00:44:08Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1654, "item": "evolution-review-rollouts-records-and-backfills", "ask": 3, "at": "2026-11-24T00:44:50Z", "status": "open", "text": "Correct all tenants should not be broken because one is.", "source": "page", "read": true}
+{"seq": 1655, "item": "evolution-review-rollouts-records-and-backfills", "ask": 4, "at": "2026-11-24T00:44:58Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1656, "item": "evolution-review-rollouts-records-and-backfills", "ask": 5, "at": "2026-11-24T00:45:00Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1657, "item": "evolution-review-rollouts-records-and-backfills", "ask": 6, "at": "2026-11-24T00:45:51Z", "status": "open", "text": "find situations where it may be neccesary", "source": "page", "read": true}
+{"seq": 1658, "item": "close-the-coverage-gap-through-the", "ask": 6, "at": "2026-11-23", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1659, "item": "close-the-coverage-gap-through-the", "ask": 7, "at": "2026-11-23", "status": "decided", "text": "Okay", "source": "record", "read": true}
+{"seq": 1660, "item": "close-the-coverage-gap-through-the", "ask": 8, "at": "2026-11-23", "status": "decided", "text": "that's good", "source": "record", "read": true}
+{"seq": 1661, "item": "close-the-coverage-gap-through-the", "ask": 9, "at": "2026-11-23", "status": "decided", "text": "After", "source": "record", "read": true}
+{"seq": 1662, "item": "close-the-coverage-gap-through-the", "ask": 10, "at": "2026-11-23", "status": "decided", "text": "No. That's the whole point of testing it.", "source": "record", "read": true}
+{"seq": 1663, "item": "evolution-review-federation-sign-in-and-devices", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1664, "item": "evolution-review-federation-sign-in-and-devices", "ask": 2, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1665, "item": "evolution-review-federation-sign-in-and-devices", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1666, "item": "evolution-review-federation-sign-in-and-devices", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "good", "source": "record", "read": true}
+{"seq": 1667, "item": "evolution-review-federation-sign-in-and-devices", "ask": 5, "at": "2026-11-23", "status": "decided", "text": "requires a approval to bypass a warn. Possible migration steps provided.", "source": "record", "read": true}
+{"seq": 1668, "item": "evolution-review-federation-sign-in-and-devices", "ask": 6, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1669, "item": "evolution-review-release-check-promotion-staging", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1670, "item": "evolution-review-release-check-promotion-staging", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "any deployment admin or allowed person", "source": "record", "read": true}
+{"seq": 1671, "item": "evolution-review-release-check-promotion-staging", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1672, "item": "evolution-review-rollouts-records-and-backfills", "ask": 2, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1673, "item": "evolution-review-rollouts-records-and-backfills", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "Correct all tenants should not be broken because one is.", "source": "record", "read": true}
+{"seq": 1674, "item": "evolution-review-rollouts-records-and-backfills", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1675, "item": "evolution-review-rollouts-records-and-backfills", "ask": 5, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}

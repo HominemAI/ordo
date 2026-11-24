@@ -405,7 +405,7 @@ Where each of the 16 goes:
 | 3 | A write on one node drops cached public answers on every other node | S3 step 3 |
 | 4 | No parameter, sealed value or token in a log line, span or metric label | U1 |
 | 5 | Changing a money field's places never silently changes amounts | U1 |
-| 6 | Durations compare and sort only within one unit class | Unbuilt (question 9) |
+| 6 | Durations compare and sort only within one unit class | U3 (built, then tested) |
 | 7 | A null parameter equals an omitted one | U1 |
 | 8 | A write op cannot be a source or be composed | U2 |
 | 9 | A tenant's own op choices survive a deploy | U1 |
@@ -414,8 +414,8 @@ Where each of the 16 goes:
 | 12 | The first-deployment path works end to end | C2 |
 | 13 | A database on the wrong host or port is refused naming host:port | C2 |
 | 14 | Public requests are counted; a probe mints no series | S2 step 9 |
-| 15 | A tenant in its own database does not reach a peer (documented gap) | Question 8 |
-| 16 | Nothing warns on an unindexed open filter (documented gap) | Question 8 |
+| 15 | A tenant in its own database does not reach a peer (documented gap) | U3 |
+| 16 | Nothing warns on an unindexed open filter (documented gap) | U3 |
 
 ### U1: four untested guarantees through the examples
 
@@ -494,6 +494,32 @@ Where each of the 16 goes:
 **Acceptance.** Line 247 moves from N to I.
 
 **Size.** S.
+
+### U3: the 3 guarantees first left out
+
+The owner, 2026-11-23, ask 10: *"No. That's the whole point of testing it."* The plan first left these 3 out as 2 documented gaps and 1 unbuilt rule. Each now gets a test through an example, and the product work it needs.
+
+**#15, a tenant in its own database reaching a peer.** `definition-language.md` "Known gap": the peer is in the shared database, so a tenant kept in a database of its own does not reach it.
+
+- Today's behaviour is unknown: a wrong answer, an empty page or a raw database error. First, write the test and see.
+- The guarantee to test: that tenant's op on a peer table is refused with a named class that says why and what to change. It never returns an empty or wrong answer.
+- Example: `examples/note-viewer` with a second tenant moved to its own database (the per-tenant database path S1 uses). Click the shared-notes view; expect the named refusal on the page, and the shared-database tenant still sees its notes.
+- If closing the gap (reaching the peer from a tenant database) is wanted instead of a refusal, that is a question for the board before building.
+- Size: M, 1 to 2 CI rounds.
+
+**#16, a slow filter on an unindexed open field.** `howto-cost.md` §7: nothing warns today.
+
+- Product work: the host notes when a filter on an open field with no index scanned more than a set number of rows (a setting, default 10,000), and reports it once per op and field: a line in `ordo dev`, a metric with the op and field as labels (no values), and the console's ops page.
+- Example: teamspace, seeded with 20,000 tasks. Filter by an unindexed open field; expect the warning in the `ordo dev` output and on the console, naming the op, the field and the index to add. Add the index; filter again; expect no warning.
+- Size: M, 2 CI rounds.
+
+**#6, durations compare and sort only within one unit class.** `definition-language.md` "Duration semantics": bare `duration` (the calendar class), `incomparable_duration` and `duration_unit_class` are settled and not built.
+
+- Product work: the two-component duration model the doc describes, replacing the engine's duration type (`audit-doc-contradictions.md` F4). This is the larger part.
+- Example: first-app gains a reminder with `every: duration` (calendar) and a timer with `duration(ms)`. Through the page: set "every 1 month" and see the next date land on the same day next month; sort by the timer. Compile tests: comparing the 2 classes is refused with `incomparable_duration`, and a months value into an exact field with `duration_unit_class`.
+- Size: L, 2 to 3 sessions with a review, 3 CI rounds. It may move to its own plan once started.
+
+**Acceptance.** All 3 audit lines move from N to E.
 
 ## Per-example click-and-expect suites
 
@@ -909,6 +935,7 @@ Ask 3: shopfront delivers orders to a small receiver that checks each with `ordo
 | S5 | Revocation reaching open feeds | M | the teamspace leave control; the assistant stack |
 | U1 | 4 untested through examples | M | 2 CI rounds |
 | U2 | A write op cannot be a source | S | 1 CI round |
+| U3 | The 3 first left out: peer from a tenant database, slow-filter warning, durations | 2 M and 1 L | the duration model is the bulk |
 | X1 | Notes v2 suite and forged ID tokens | M to L | the bad-issuer stand-in |
 | X2 | Shopfront suite | L | 3 origins; form and paging changes |
 | X3 | Teamspace suite | M | 2 CI rounds |
@@ -920,7 +947,7 @@ Ask 3: shopfront delivers orders to a small receiver that checks each with `ordo
 | C3 | README steps as scripts | M | one round per broken README step |
 | V1 | Verify-proof in shopfront | L | owner's answer to question 1; the product change |
 
-Total: about 25 to 32 agent sessions and 45 to 60 CI rounds. Every coverage run adds about 35 minutes.
+Total: about 29 to 37 agent sessions and 52 to 67 CI rounds, with U3. Every coverage run adds about 35 minutes.
 
 ### Expected coverage gain
 
@@ -939,6 +966,17 @@ These are estimates. Increment 0 measures the real baseline. The unit number sta
 | V1 | ordo-verify-proof (binary), `attestdrain.rs`, `attest_ops.rs`, ordo-egress | +1 to +2 points |
 
 ## Open questions for the owner
+
+**Answered on the board, 2026-11-23** (task `close-the-coverage-gap-through-the`):
+
+- Question 1: yes. Deliveries honour `ORDO_EGRESS_PRIVATE_HOSTS` and gain `ORDO_EGRESS_CA_FILE`, both off by default.
+- Question 3: a crate may dip 0.1 of a point before the ratchet fails.
+- Question 5: the TypeScript clients join the ratchet after the Rust crates.
+- Questions 8 and 9: no. All 3 are tested, in U3.
+- Question 11: no. `two_instances.rs` runs in the coverage job on PRs into `main`.
+
+The list below is as first written.
+
 
 1. **Attestation delivery to a test receiver needs a product change.** `DeliveryConfig::from_env` ignores `ORDO_EGRESS_PRIVATE_HOSTS` and has no trust-anchor setting, so a booted host cannot deliver to `https://localhost`. **Recommendation:** honour `ORDO_EGRESS_PRIVATE_HOSTS` for attestation as mail and OIDC do, and read extra anchors from a new `ORDO_EGRESS_CA_FILE` (off by default, a refusal names it). Fallback if no: the receiver pulls proofs only, with no webhook.
 2. **Receipts (untested #1) have no verifier.** `ordo-verify-proof` has `proof`, `attestation` and `consent` modes, none for a receipt. **Recommendation:** add a `receipt` mode for the account-deletion receipt in V1; leave tenant erasure receipts to their own task.

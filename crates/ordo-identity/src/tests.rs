@@ -208,6 +208,7 @@ fn roles_have_no_implicit_hierarchy() {
 fn pin(seed: &[u8], read: &[&str], guard: Option<&str>, caller: bool) -> OpPin {
     OpPin {
         manifest_hash: ManifestHash::of(seed),
+        version: None,
         unguarded: false,
         entities: vec![EntityPin {
             entity: "txns".into(),
@@ -3217,4 +3218,182 @@ fn a_deleted_account_is_given_no_new_authenticator_link() {
         Err(DirectoryError::Deleted(p)) if p == person
     ));
     assert_eq!(dir.principal_for(&new).unwrap(), None, "nothing was linked");
+}
+
+// ──────────── sharing across program versions (plan-versions §1.7) ────────────
+
+type VersionPins = std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, String>>>;
+
+/// An engine serving 0.1.0 and 0.2.0, with `txns.list` declared by each as
+/// given, and tenants pinned by the shared map. A move is a write to it.
+fn engine_on_versions(v1: OpPin, v2: OpPin) -> (AccessEngine, VersionPins) {
+    let mut e = engine_with_profile();
+    e.set_profile(
+        &other_space(),
+        AccessProfile::new().allow(Role::Owner, "txns.list"),
+    );
+    e.deploy_op("txns.list", v2.clone());
+    e.deploy_op_in("0.1.0", "txns.list", v1);
+    e.deploy_op_in("0.2.0", "txns.list", v2);
+    e.deploy_op("std.$blob.get", pin(b"blob", &[], None, false));
+    e.share_unversioned(&ops(&["txns.list"]));
+    let pins: VersionPins = Default::default();
+    let read = pins.clone();
+    e.set_tenant_versions(std::sync::Arc::new(move |s: &SpaceId| {
+        read.lock().unwrap().get(&s.0).cloned()
+    }));
+    (e, pins)
+}
+
+fn move_to(pins: &VersionPins, space: &SpaceId, version: &str) {
+    pins.lock().unwrap().insert(space.0.clone(), version.into());
+}
+
+fn holder(grant: crate::principal::CapabilityGrant) -> TokenClaims {
+    TokenClaims {
+        principal: PrincipalId("prn_guest".into()),
+        capability: Some(grant),
+        client: None,
+        user_presence_at: None,
+        delegation: None,
+        session: None,
+    }
+}
+
+fn granted(e: &AccessEngine, in_space: &SpaceId) -> TokenClaims {
+    holder(
+        e.grant_for(GrantId("shr_a".into()), in_space, ops(&["txns.list"]), T1)
+            .expect("deployed"),
+    )
+}
+
+/// A grant made in a tenant pins the ops of the version serving that
+/// tenant, not the active one, and records the version. Before §1.7 was
+/// built it pinned the active version's manifest whatever the tenant ran.
+#[test]
+fn a_grant_pins_the_ops_of_its_tenants_version() {
+    let v1 = pin(b"v1", &["amount"], Some("owner == $caller"), true);
+    let v2 = pin(b"v2", &["amount", "payee"], Some("owner == $caller"), true);
+    let (e, pins) = engine_on_versions(v1.clone(), v2);
+    move_to(&pins, &space(), "0.1.0");
+    move_to(&pins, &other_space(), "0.2.0");
+
+    let g = granted(&e, &space());
+    let held = &g.capability.as_ref().unwrap().pins()["txns.list"];
+    assert_eq!(held.version.as_deref(), Some("0.1.0"));
+    assert_eq!(
+        held.entities, v1.entities,
+        "0.1.0's shape, not the active one"
+    );
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+
+    let g = granted(&e, &other_space());
+    let held = &g.capability.as_ref().unwrap().pins()["txns.list"];
+    assert_eq!(held.version.as_deref(), Some("0.2.0"));
+    assert!(e.check(&g, &other_space(), "txns.list", T0).is_allow());
+
+    // The platform's own ops are in every version.
+    assert!(e.deployed_in(&space()).contains_key("std.$blob.get"));
+}
+
+/// A tenant whose grant was pinned under 0.1.0 moves to 0.2.0, where the op
+/// reads a field more: `versions_disagree`, naming both versions, the op
+/// and the entity. Back on 0.1.0 the grant is good again.
+#[test]
+fn a_tenant_that_moves_to_a_version_that_reads_more_refuses_the_grant_by_name() {
+    let v1 = pin(b"v1", &["amount"], Some("owner == $caller"), true);
+    let v2 = pin(b"v2", &["amount", "payee"], Some("owner == $caller"), true);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    match e.check(&g, &space(), "txns.list", T0) {
+        Decision::Deny {
+            reason:
+                DenyReason::VersionsDisagree {
+                    pinned,
+                    serving,
+                    op,
+                    entity,
+                    detail,
+                },
+            ..
+        } => {
+            assert_eq!((pinned.as_str(), serving.as_str()), ("0.1.0", "0.2.0"));
+            assert_eq!(op, "txns.list");
+            assert_eq!(entity.as_deref(), Some("txns"));
+            assert!(detail.contains("payee"), "{detail}");
+        }
+        other => panic!("expected versions_disagree, got {other:?}"),
+    }
+    move_to(&pins, &space(), "0.1.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+}
+
+/// The other direction: pinned under the version that reads more, the
+/// tenant moves to the one that reads less. Fewer fields keep sharing.
+#[test]
+fn fewer_fields_read_in_the_new_version_keep_the_grant() {
+    let v1 = pin(b"v1", &["amount"], Some("owner == $caller"), true);
+    let v2 = pin(b"v2", &["amount", "payee"], Some("owner == $caller"), true);
+    let (e, pins) = engine_on_versions(v1, v2);
+    move_to(&pins, &space(), "0.2.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.1.0");
+    assert!(e.check(&g, &space(), "txns.list", T0).is_allow());
+}
+
+/// Differing guards refuse (D7), a tighter one included: across versions
+/// the guards must match, where one version's redeploy lets a narrowing
+/// apply silently.
+#[test]
+fn a_differing_guard_across_versions_refuses_even_when_tighter() {
+    let v1 = pin(b"v1", &["amount"], None, false);
+    let v2 = pin(b"v2", &["amount"], Some("owner == $caller"), false);
+    let (e, pins) = engine_on_versions(v1.clone(), v2.clone());
+    move_to(&pins, &space(), "0.1.0");
+    let g = granted(&e, &space());
+    move_to(&pins, &space(), "0.2.0");
+    assert!(matches!(
+        e.check(&g, &space(), "txns.list", T0),
+        Decision::Deny {
+            reason: DenyReason::VersionsDisagree { .. },
+            ..
+        }
+    ));
+    // The same change as one version's redeploy is a narrowing.
+    assert!(!crate::pins::compare(&v1, &v2).is_fatal());
+}
+
+/// A grant pinned before versions were recorded is compared as before.
+#[test]
+fn a_grant_with_no_recorded_version_is_compared_as_a_redeploy() {
+    let v1 = pin(b"v1", &["amount"], None, false);
+    let v2 = pin(b"v2", &["amount"], Some("owner == $caller"), false);
+    let (e, pins) = engine_on_versions(v1.clone(), v2);
+    move_to(&pins, &space(), "0.2.0");
+    let old = crate::principal::CapabilityGrant::new(
+        GrantId("shr_old".into()),
+        space(),
+        [("txns.list".to_string(), v1)].into_iter().collect(),
+        T1,
+    );
+    assert!(e.check(&holder(old), &space(), "txns.list", T0).is_allow());
+}
+
+/// A pin's version rides in its encoding, which a pin with none keeps
+/// byte-identical to `pins.v1`.
+#[test]
+fn a_pins_version_round_trips_and_an_unversioned_pin_encodes_as_before() {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("a".to_string(), base_pin(b"a"));
+    let plain = encode_pins(&m);
+    assert!(plain.starts_with("7:pins.v1"), "{plain}");
+    assert_eq!(decode_pins(&plain), Some(m.clone()));
+    let mut versioned = base_pin(b"b");
+    versioned.version = Some("0.2.0".into());
+    m.insert("b".to_string(), versioned);
+    let text = encode_pins(&m);
+    assert!(text.starts_with("7:pins.v2"), "{text}");
+    assert_eq!(decode_pins(&text), Some(m));
 }

@@ -102,6 +102,8 @@ export interface RevokedInUse {
   reason: string;
   actor: string;
   at: number;
+  /** Where its tenants go when they move off it; `null` is the active version. */
+  moveTo?: string | null;
   tenantCount: number;
   tenants: { space: string; name: string; state: string }[];
 }

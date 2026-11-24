@@ -46,6 +46,28 @@ export default defineConfig({
         launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
       },
     },
+    // Notes v3 applied over the running notes v2 (plan-versions.md, increment
+    // 7a). It changes notes' program for the whole stack, so it runs last.
+    {
+      name: 'v3',
+      testMatch: /v3\/.*\.spec\.ts/,
+      dependencies: ['api', 'browser'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
+    // notes stops writing a column the viewer reads (plan-versions.md,
+    // increment 14). It changes notes' program again, so it runs after v3.
+    {
+      name: 'orphans',
+      testMatch: /orphans\/.*\.spec\.ts/,
+      dependencies: ['v3'],
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: { args: [`--ignore-certificate-errors-spki-list=${FIXTURE_LEAF_SPKI}`] },
+      },
+    },
   ],
   webServer: {
     command: 'bash stack.sh',

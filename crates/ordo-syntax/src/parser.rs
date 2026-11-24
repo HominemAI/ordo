@@ -46,6 +46,8 @@ pub const INVALID_GUARD_WALK: &str = "invalid_guard_walk";
 pub const BARE_FIELD_IN_GROUP: &str = "bare_field_in_group";
 /// A second `release member` line. One rule per program (27aq).
 pub const DUPLICATE_RELEASE: &str = "duplicate_release";
+/// A second `edition` line (`plan-versions.md` §2.6).
+pub const DUPLICATE_EDITION: &str = "duplicate_edition";
 /// A `secret` bound to something other than an exact host name: a URL, a
 /// port or a wildcard (`plan-backend-functions.md` §5).
 pub const INVALID_SECRET_HOST: &str = "invalid_secret_host";

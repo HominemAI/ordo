@@ -56,7 +56,12 @@
 //! close, and exits 0. A security upgrade is never blocked; only the named
 //! tenants close.
 //!
-//! **Not checked here:** language editions (increment 6b) and peers or
+//! **Editions** (increment 6b, `ordo_plan::edition`): a version whose
+//! language edition is outside `editions.load_window` fails under the
+//! `edition` check, naming `ordo fix`. One inside the window is a note,
+//! marked `soon` when the window ends within 3 months of this release.
+//!
+//! **Not checked here:** peers and
 //! readers on another Ordo release (`plan-evolution-federation.md` §5).
 //! Function code is checked as the host loads it, by hash and table; the
 //! JavaScript is compiled by the engine at each call.
@@ -530,7 +535,10 @@ pub async fn checked_set(
 /// Classify a compile refusal: an `auth` block outside this release's
 /// ranges is its own check.
 fn compile_check(why: &str) -> &'static str {
-    if why.contains("auth_duration_range") || why.contains("invalid_auth") {
+    use ordo_plan::edition as e;
+    if why.contains(e::EDITION_EXPIRED) || why.contains(e::EDITION_UNKNOWN) {
+        "edition"
+    } else if why.contains("auth_duration_range") || why.contains("invalid_auth") {
         "auth"
     } else {
         "compile"
@@ -551,7 +559,11 @@ pub async fn check_version(
     {
         use ordo_plan::artifact as a;
         let doc: Value = serde_json::from_str(&stored.artifact).unwrap_or_default();
-        let computed = a::source_identity(&stored.source, a::FIRST_EDITION, &a::code_hashes(&doc));
+        let computed = a::source_identity(
+            &stored.source,
+            ordo_plan::edition::of_source(&stored.source),
+            &a::code_hashes(&doc),
+        );
         match recorded_source_id(pool, &stored.version).await {
             Ok(Some(recorded)) if recorded != computed => failures.push(fail(
                 "identity",
@@ -569,6 +581,24 @@ pub async fn check_version(
                     .into(),
             ),
             Err(e) => failures.push(fail("identity", format!("not read: {e}"))),
+        }
+    }
+
+    // The edition: an old one near its window's end is called out, so the
+    // developer runs `ordo fix` before a release drops it. One outside the
+    // window fails the compile below, under the `edition` check.
+    {
+        use ordo_plan::edition as e;
+        let editions = e::Editions::this_release();
+        let n = e::of_source(&stored.source);
+        if let e::Standing::Loadable { ends, near } = editions.standing(n) {
+            let current = editions.current();
+            let when = if near { "soon: " } else { "" };
+            notes.push(format!(
+                "{when}it is written in edition {n}, which Ordo releases dated up to {ends} \
+                 load (`editions.load_window`). Run `ordo fix <dir> --write` on its source \
+                 to move it to edition {current}, then apply it"
+            ));
         }
     }
 

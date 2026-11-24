@@ -41,6 +41,10 @@ fn usage() -> ! {
          params, returned fields or entity contain it. --entity and --file\n      \
          narrow the list to one group or one source file. Exits 1 when an op\n      \
          does not compile, as `check` does, or when nothing matches.\n  \
+         ordo fix   <dir|file.ordo> [--write]\n      \
+         rewrite the source from an old language edition to the current\n      \
+         one. Without --write, a dry run that prints the diff. With it, the\n      \
+         rewritten program is compiled, then written. No door, no database.\n  \
          ordo skill install [<project dir>] [--force]\n      \
          write the Ordo agent skill, the one this binary carries, into\n      \
          <dir>/.claude/skills/ordo/ and a marked block into <dir>/AGENTS.md\n      \
@@ -73,7 +77,8 @@ fn usage() -> ! {
          the verdict, then every change with its class and what refuses it.\n      \
          Read-only. Exits 1 when the apply would refuse. Through the door\n      \
          only; `--against <db>` is gone.\n  \
-         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--digest <d>] [--run]\n      \
+         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--fill ...]\n      \
+         [--audit-images ...] [--digest <d>] [--run]\n      \
          render the step between two stored versions on the deployment,\n      \
          refuse it with its errors, store it, and print its receipt and\n      \
          digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
@@ -82,7 +87,12 @@ fn usage() -> ! {
          every database and list each issue with its fix. --run runs the\n      \
          stored plan on the deployment's own database, and refuses while an\n      \
          issue is open. A step that removes a sign-in method some people\n      \
-         rely on stops until --approve-sign-in-removal <count>.\n  \
+         rely on stops until --approve-sign-in-removal <count>.\n      \
+         --fill <entity>.<field>=<expr> states how existing rows get a value\n      \
+         for a field the step makes required (or `=fn <name> [secrets ..]\n      \
+         [hosts ..]`); the backfill runs in chunks and resumes from its\n      \
+         cursor. --audit-images writes every row's images instead of one\n      \
+         summary per tenant.\n  \
          ordo evolve --tenant <id> [--to <version>]\n      \
          replay the stored path on the tenant's database, one step at a\n      \
          time, then pin it (`std.deployment.replay`).\n  \
@@ -295,6 +305,16 @@ fn usage() -> ! {
          read a version from it. `--clear` forgets it.\n  \
          ordo environments set skip-staging on|off --reason \"<text>\"\n      \
          promotion.skip_staging: promote past staging from the step before it.\n  \
+         ordo clones key | set-key <env> <key> | list | set mask|readers <value>\n      \
+         staging clones of named production tenants. `key` prints this\n      \
+         deployment's clone key; `set-key` records it on production, which\n      \
+         seals each clone to it. clone.mask names the fields that leave\n      \
+         production unmasked (deny by default, `off` to opt out);\n      \
+         clone.readers names who besides staging's admins opens a clone.\n  \
+         ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
+         on staging: production masks the tenant, seals it to staging's key,\n      \
+         and staging imports it under its own keys, pinned to its version.\n      \
+         Members come without their sign-in; a staging admin opens it.\n  \
          ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
          the promotion gate: the target reads the version from the step before\n      \
          itself, as you (a token for it from your `ordo login` sign-in, or\n      \
@@ -576,6 +596,7 @@ fn main() {
             | "versions"
             | "windows"
             | "environments"
+            | "clones"
             | "promote"
             | "evolve"
             | "prune"
@@ -680,6 +701,23 @@ fn main() {
         print!("{out}");
         eprint!("{err}");
         exit(code);
+    }
+
+    // `ordo fix <dir> [--write]`: rewrite a source to the current language
+    // edition (`plan-versions.md` §2.8). No door and no database.
+    if cmd == "fix" {
+        if let Some(f) = rest.iter().find(|a| a.starts_with("--") && *a != "--write") {
+            eprintln!("ordo fix: unknown flag `{f}`; the one flag is `--write`");
+            exit(2);
+        }
+        let path = positional(rest, &[]).unwrap_or_else(|| usage());
+        let out = ordo_cli::fix::run(Path::new(&path), rest.iter().any(|a| a == "--write"));
+        if out.code == 0 {
+            print!("{}", out.report);
+        } else {
+            eprint!("{}", out.report);
+        }
+        exit(out.code);
     }
 
     // `ordo skill install [<dir>]`: the agent skill this binary carries.

@@ -41,6 +41,7 @@ pub mod dev;
 pub mod dev_db;
 pub mod direct;
 pub mod evolve;
+pub mod fix;
 pub mod identity;
 pub mod introspect;
 pub mod keys;
@@ -157,6 +158,9 @@ impl LoadDiagnostic {
 /// `acl_admin_ops` → `std_ops` → `cost::check_registration`.
 pub fn load_sources_diag(src: &Sources) -> Result<(Schema, Registry), LoadDiagnostic> {
     let program = parse_program(src.text()).map_err(LoadDiagnostic::Parse)?;
+    ordo_plan::edition::Editions::this_release()
+        .gate(src.text(), &program)
+        .map_err(LoadDiagnostic::Parse)?;
     let keys = KeyTable::from_env().map_err(LoadDiagnostic::Env)?;
     let schema = build_with_keys(&program, &keys).map_err(LoadDiagnostic::Schema)?;
     // What `ordo apply` will print must be printable now. A default the DDL

@@ -169,6 +169,12 @@ pub enum Applied {
     /// differently by this Ordo release. The row now holds this build, and
     /// `$builds` keeps both. No version moved.
     Rebuilt(String),
+    /// The same program as the version stored under this name, from a
+    /// source rewritten to a newer language edition (`ordo fix`,
+    /// `plan-versions.md` §2.8). The row now holds that source and its
+    /// edition, so later releases load it past the old edition's window.
+    /// No version moved.
+    EditionMoved(String),
 }
 
 /// What activating did.
@@ -301,12 +307,16 @@ pub async fn ordinal_of(pool: &Pool, version: &str) -> Result<Option<u64>, PoolE
         .and_then(|o| o.parse().ok()))
 }
 
-/// The source fingerprint of a stored row: its source, edition 1, and the
-/// code hashes its document carries.
+/// The source fingerprint of a stored row: its source, the edition it
+/// names, and the code hashes its document carries.
 fn source_id_of(artifact: &str, source: &str) -> String {
     use ordo_plan::artifact as a;
     let doc: serde_json::Value = serde_json::from_str(artifact).unwrap_or_default();
-    a::source_identity(source, a::FIRST_EDITION, &a::code_hashes(&doc))
+    a::source_identity(
+        source,
+        ordo_plan::edition::of_source(source),
+        &a::code_hashes(&doc),
+    )
 }
 
 /// The declared version as the `declared` column holds it: the `@` version,
@@ -424,8 +434,8 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
     pool.rows(&format!(
         "INSERT INTO \"$artifacts\" \
            (\"version\", \"artifact\", \"source\", \"ddl\", \"applied_at\", \"actor\", \
-            \"source_id\", \"declared\", \"ordinal\") \
-         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, \
+            \"source_id\", \"declared\", \"edition\", \"ordinal\") \
+         VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, \
            (SELECT coalesce(max(\"ordinal\"), 0) + 1 FROM \"$artifacts\"))",
         sql_lit(&a.version),
         sql_lit(&a.artifact),
@@ -435,6 +445,7 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
         sql_lit(&a.actor),
         sql_lit(&source_id_of(&a.artifact, &a.source)),
         sql_lit(&declared_of(&a.source)),
+        ordo_plan::edition::of_source(&a.source),
     ))
     .await?;
     record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
@@ -449,11 +460,31 @@ pub async fn store(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal
 /// build, which loads read, and `$builds` keeps both
 /// ([`Applied::Rebuilt`]). The stored source is kept, so an edit to
 /// comments or spacing alone leaves the row as it was.
+///
+/// A source at a newer language edition than the stored one replaces it,
+/// with its edition and fingerprint ([`Applied::EditionMoved`]): what
+/// `ordo fix` wrote is then what later releases load (`plan-versions.md`
+/// §2.8). The version keeps its name and its tenants.
 pub async fn rebuild(pool: &Pool, a: &Artifact) -> Result<Applied, RegistryRefusal> {
     let Some(existing) = get(pool, &a.version).await? else {
         return Err(RegistryRefusal::UnknownVersion(a.version.clone()));
     };
     record_build(pool, &a.version, &a.artifact, &a.ddl, a.applied_at).await?;
+    let edition = ordo_plan::edition::of_source(&a.source);
+    if edition > ordo_plan::edition::of_source(&existing.source) {
+        pool.rows(&format!(
+            "UPDATE \"$artifacts\" SET \"artifact\" = {}, \"ddl\" = {}, \"source\" = {}, \
+               \"source_id\" = {}, \"edition\" = {} WHERE \"version\" = {}",
+            sql_lit(&a.artifact),
+            sql_lit(&a.ddl),
+            sql_lit(&a.source),
+            sql_lit(&source_id_of(&a.artifact, &a.source)),
+            edition,
+            sql_lit(&a.version),
+        ))
+        .await?;
+        return Ok(Applied::EditionMoved(a.version.clone()));
+    }
     if existing.artifact == a.artifact && existing.ddl == a.ddl {
         return Ok(Applied::AlreadyStored(a.version.clone()));
     }

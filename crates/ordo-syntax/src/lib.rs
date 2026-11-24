@@ -27,9 +27,9 @@ pub use auth::{
     UserVerification, AUTH_BUILT_IN_METHODS, AUTH_CLAUSES, AUTH_PRESETS, PROVISIONING_MODES,
 };
 pub use decl::{
-    AggDecl, DomainDecl, EntityDecl, ExternalDecl, ExternalField, ExternalKeyTy, FieldDecl,
-    FieldKind, FunctionDecl, FunctionHost, FunctionLimits, GuardAtom, GuardClause, GuardExpr,
-    OpBody, OpDecl, OpFlags, ParamDecl, PeerDecl, Pipeline, PrevName, Program, ProjItem,
+    AggDecl, DomainDecl, EditionDecl, EntityDecl, ExternalDecl, ExternalField, ExternalKeyTy,
+    FieldDecl, FieldKind, FunctionDecl, FunctionHost, FunctionLimits, GuardAtom, GuardClause,
+    GuardExpr, OpBody, OpDecl, OpFlags, ParamDecl, PeerDecl, Pipeline, PrevName, Program, ProjItem,
     ReaderDecl, ReassignTarget, ReleaseAtom, ReleaseCond, ReleaseDecl, ReleaseEffect, ReleaseMode,
     RoutineDecl, RoutineNotify, RoutineTrigger, ScalarTy, SecretDecl, SortKey, Source, SourceArg,
     Step, TakeCount, WriteStmt, DIVISION_SCALE,
@@ -41,10 +41,10 @@ pub use declparse::{
 pub use lexer::{lex, LexError};
 pub use parser::{
     function_names, functions, parse_condition, parse_expr, ParseError, Parser, ALLOCATE_MODES,
-    BARE_FIELD_IN_GROUP, DUPLICATE_AUTH, DUPLICATE_RELEASE, EXTERNAL_ACL, EXTERNAL_COMPOSITE_KEY,
-    EXTERNAL_NOT_SHARED, EXTERNAL_OWNED, EXTERNAL_READ_ONLY, EXTERNAL_SEALED, EXTERNAL_UNSUPPORTED,
-    INVALID_GUARD_WALK, INVALID_SECRET_HOST, PARSE_ERROR, PEER_NAME, PREV_DUPLICATE, PREV_SELF,
-    PREV_STILL_DECLARED, READER_LINE, RELEASE_SUBJECT,
+    BARE_FIELD_IN_GROUP, DUPLICATE_AUTH, DUPLICATE_EDITION, DUPLICATE_RELEASE, EXTERNAL_ACL,
+    EXTERNAL_COMPOSITE_KEY, EXTERNAL_NOT_SHARED, EXTERNAL_OWNED, EXTERNAL_READ_ONLY,
+    EXTERNAL_SEALED, EXTERNAL_UNSUPPORTED, INVALID_GUARD_WALK, INVALID_SECRET_HOST, PARSE_ERROR,
+    PEER_NAME, PREV_DUPLICATE, PREV_SELF, PREV_STILL_DECLARED, READER_LINE, RELEASE_SUBJECT,
 };
 pub use span::Span;
 pub use text::{is_nfc, nfc};

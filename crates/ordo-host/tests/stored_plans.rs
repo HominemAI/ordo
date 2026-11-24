@@ -361,7 +361,7 @@ async fn a_tenant_three_behind_replays_three_steps() {
     assert!(done
         .steps
         .iter()
-        .all(|(_, r)| matches!(r, StepRun::Ran { statements } if *statements > 0)));
+        .all(|(_, r)| matches!(r, StepRun::Ran { statements, .. } if *statements > 0)));
     let recorded = tenant_pg
         .query(
             "SELECT from_version, to_version FROM \"$migrations\" \

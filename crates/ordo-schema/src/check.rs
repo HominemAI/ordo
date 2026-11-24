@@ -128,6 +128,33 @@ pub fn text_bound_checks(entity: &str, fields: &[Field]) -> Vec<CheckRule> {
         .collect()
 }
 
+/// **A backfill's forward mapping** (`plan-backfill-dual-writes.md` §2):
+/// an Ordo expression over one row's own fields, lowered to the SQL the
+/// backfill worker sets the new column to.
+///
+/// It is the row-local slice a `check` uses, for the same reason: the value
+/// is computed from this row alone, by the database, and the same rendering
+/// rules hold (money read in major units, no division, no clock, no other
+/// row, no sealed field). Every refusal a check would raise is raised here
+/// as `mapping_*` and names the mapping, never a check.
+pub fn render_mapping(entity: &str, fields: &[Field], expr: &Expr) -> Result<String, SchemaError> {
+    render_expr(entity, fields, expr).map_err(|e| SchemaError {
+        code: match e.code {
+            "check_beyond_row" => "mapping_beyond_row",
+            "check_time_dependent" => "mapping_time_dependent",
+            "check_unknown_field" => "mapping_unknown_field",
+            "check_sealed_field" => "mapping_sealed_field",
+            "json_opaque" => "mapping_json_opaque",
+            _ => "mapping_unsupported",
+        },
+        message: e
+            .message
+            .replace("a CHECK constraint", "a backfill mapping")
+            .replace("`check` on", "the backfill mapping on"),
+        span: e.span,
+    })
+}
+
 /// `{entity}$chk{i}$<condensed source>`, truncated to Postgres's 63-byte
 /// identifier limit on a UTF-8 boundary. The prefix alone is unique, so
 /// truncation can never collide two checks.

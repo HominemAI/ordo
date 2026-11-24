@@ -163,10 +163,12 @@
     "crates/ordo-host/src/auth/spaces.rs": "all",
     "crates/ordo-host/src/auth/store_failure.rs": "all",
     "crates/ordo-host/src/auth/tenant.rs": "all",
+    "crates/ordo-host/src/backfill.rs": "all",
     "crates/ordo-host/src/blob.rs": "all",
     "crates/ordo-host/src/boot_record.rs": "all",
     "crates/ordo-host/src/bucket_ops.rs": "all",
     "crates/ordo-host/src/ceremonies.rs": "all",
+    "crates/ordo-host/src/clones.rs": "all",
     "crates/ordo-host/src/consent.rs": "all",
     "crates/ordo-host/src/console_keys.rs": "all",
     "crates/ordo-host/src/contact_email.rs": [

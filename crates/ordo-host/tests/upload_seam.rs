@@ -167,6 +167,21 @@ fn only_the_write_protocol_updates_entity_rows() {
              to a database",
         ),
         (
+            "ordo-host/src/evolve.rs",
+            "the render of a stored plan types each backfill mapping with `EXPLAIN UPDATE` \
+             against an empty shadow namespace built from the earlier version's DDL and \
+             dropped after. It is planned, never run, and no entity row exists there",
+        ),
+        (
+            "ordo-host/src/backfill.rs",
+            "the backfill worker (plan-versions.md increment 10b): it fills a column a \
+             stored plan makes required, from a mapping over each row's own fields, in \
+             chunks under the migration's own lock. Only rows whose new column is null are \
+             set. Every backfill appends to each space's chain: a summarised record by \
+             default, or full before and after images per chunk (ruled 2026-09-08 and \
+             2026-09-20)",
+        ),
+        (
             "ordo-exec/src/reseal.rs",
             "the re-seal pass (K1): it rewrites a sealed column's envelope to the same value \
              under a new epoch key, and moves a blob column from an old handle to a new \

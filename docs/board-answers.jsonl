@@ -1685,3 +1685,10 @@
 {"seq": 1687, "item": "versions-increment-4a-three-small-choices", "ask": 1, "at": "2026-11-23", "status": "decided", "text": "We can do this for know.", "source": "record", "read": true}
 {"seq": 1688, "item": "versions-increment-4a-three-small-choices", "ask": 2, "at": "2026-11-23", "status": "decided", "text": "just bring 4b into 4a - no need to dupe work", "source": "record", "read": true}
 {"seq": 1689, "item": "versions-increment-4a-three-small-choices", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "bring in to this work, not later. It's all part of the same plan.", "source": "record", "read": true}
+{"seq": 1690, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24T03:43:01Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1691, "item": "evolution-review-release-check-promotion-staging", "ask": 0, "at": "2026-11-24T03:43:06Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1692, "item": "versions-increment-4a-three-small-choices", "ask": 4, "at": "2026-11-24T03:43:36Z", "status": "open", "text": "Yes", "source": "page", "read": true}
+{"seq": 1693, "item": "versions-increment-4a-three-small-choices", "ask": 5, "at": "2026-11-24T03:44:17Z", "status": "open", "text": "I believe it should go to dev by default but this should go in hand with the other changes so don't create a temporary dependency.", "source": "page", "read": true}
+{"seq": 1694, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1695, "item": "versions-increment-4a-three-small-choices", "ask": 4, "at": "2026-11-24", "status": "decided", "text": "Yes", "source": "record", "read": true}
+{"seq": 1696, "item": "versions-increment-4a-three-small-choices", "ask": 5, "at": "2026-11-24", "status": "decided", "text": "I believe it should go to dev by default but this should go in hand with the other changes so don't create a temporary dependency.", "source": "record", "read": true}

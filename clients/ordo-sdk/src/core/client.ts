@@ -17,6 +17,7 @@ import { checkRefine, encodeRefine, type Refine } from './refine.js';
 import { OrdoLocalRefusal, type RefusalClass } from './refusal.js';
 import type { OpSpec, ParamSpec } from './spec.js';
 import { busyRetryOf, conflictRetryOf } from './busy.js';
+import { VersionWatch } from './version.js';
 import { NO_RETRY, busyOnly, doorRequest, fetchOf, readBody, refusalOf } from './door.js';
 import type {
   BusyRetryOptions,
@@ -212,6 +213,8 @@ export class OrdoClient {
   readonly #renew: (() => Promise<boolean>) | undefined;
   readonly #fetch: typeof globalThis.fetch;
   readonly #site: NetworkSite;
+  /** The program version the door names on its answers; see {@link VersionWatch}. */
+  readonly versions = new VersionWatch();
   readonly #callTimeoutMs: number | undefined;
   readonly #newKey: () => string;
   readonly #busyRetry: ResolvedBusyRetry;
@@ -321,8 +324,8 @@ export class OrdoClient {
    *   reconnects on the same classes with the door's `Retry-After`, so a
    *   retry here would be a second loop over the first.
    */
-  #send(url: string, init: RequestInit, retry: 'op' | 'busy' | 'feed', onRetry?: OnRetry): Promise<Response> {
-    return doorRequest(this.#site, url, init, {
+  async #send(url: string, init: RequestInit, retry: 'op' | 'busy' | 'feed', onRetry?: OnRetry): Promise<Response> {
+    return this.versions.observe(await doorRequest(this.#site, url, init, {
       retry:
         retry === 'op'
           ? { busy: this.#busyRetry, conflict: this.#conflictRetry }
@@ -330,7 +333,7 @@ export class OrdoClient {
             ? busyOnly(this.#busyRetry)
             : NO_RETRY,
       onRetry,
-    });
+    }));
   }
 
   /**

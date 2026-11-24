@@ -1823,6 +1823,10 @@ pub struct ApplyOps {
     /// (`plan-console.md` G12). `None` records nothing there; the registry
     /// rows still name the caller.
     pub stream: Option<Arc<ordo_secevent::Recorder>>,
+    /// Runs backfill functions (10b, B6): this node's backend functions,
+    /// set by the runtime once they are built. Unset, a step that fills a
+    /// field with a function is refused naming why.
+    pub backfill_functions: std::sync::OnceLock<Arc<dyn crate::backfill::BackfillFunctions>>,
 }
 
 impl ApplyOps {
@@ -1846,7 +1850,18 @@ impl ApplyOps {
             pools,
             home: home.to_string(),
             stream,
+            backfill_functions: std::sync::OnceLock::new(),
         })
+    }
+
+    /// What a stored step runs its backfills with (10b): the plan's default
+    /// settings, and this node's backend functions when the runtime gave
+    /// them ([`ApplyOps::backfill_functions`]).
+    pub fn step_context(&self) -> crate::evolve::StepContext {
+        crate::evolve::StepContext {
+            settings: crate::backfill::BackfillSettings::default(),
+            functions: self.backfill_functions.get().cloned(),
+        }
     }
 
     /// Check 3 of the gate (see the module doc), for every deploy op.

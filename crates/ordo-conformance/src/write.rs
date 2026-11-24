@@ -1100,6 +1100,7 @@ impl Fixture {
                 // An ordinary write, never a revert, so there is nothing to
                 // have restored, verified or not. `ordo_exec::undo::apply`
                 // is the one producer of `true`.
+                backfill: None,
                 restored_unverified: false,
                 restore: None,
             };
@@ -1290,6 +1291,7 @@ impl Fixture {
             // `false` by the same argument that makes `run_write_on`'s
             // match arm the flag's only producer.
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         };
@@ -1514,6 +1516,7 @@ impl Fixture {
                 commands: group_cmds,
                 // The release rule is not rule 6, whoever leaves.
                 owner_administration: false,
+                backfill: None,
                 restored_unverified: false,
                 restore: None,
             })?;

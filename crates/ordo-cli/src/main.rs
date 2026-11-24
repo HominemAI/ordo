@@ -73,7 +73,8 @@ fn usage() -> ! {
          the verdict, then every change with its class and what refuses it.\n      \
          Read-only. Exits 1 when the apply would refuse. Through the door\n      \
          only; `--against <db>` is gone.\n  \
-         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--digest <d>] [--run]\n      \
+         ordo evolve [<dir>] --from <version> --to <version> [--places ...] [--fill ...]\n      \
+         [--audit-images ...] [--digest <d>] [--run]\n      \
          render the step between two stored versions on the deployment,\n      \
          refuse it with its errors, store it, and print its receipt and\n      \
          digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
@@ -82,7 +83,12 @@ fn usage() -> ! {
          every database and list each issue with its fix. --run runs the\n      \
          stored plan on the deployment's own database, and refuses while an\n      \
          issue is open. A step that removes a sign-in method some people\n      \
-         rely on stops until --approve-sign-in-removal <count>.\n  \
+         rely on stops until --approve-sign-in-removal <count>.\n      \
+         --fill <entity>.<field>=<expr> states how existing rows get a value\n      \
+         for a field the step makes required (or `=fn <name> [secrets ..]\n      \
+         [hosts ..]`); the backfill runs in chunks and resumes from its\n      \
+         cursor. --audit-images writes every row's images instead of one\n      \
+         summary per tenant.\n  \
          ordo evolve --tenant <id> [--to <version>]\n      \
          replay the stored path on the tenant's database, one step at a\n      \
          time, then pin it (`std.deployment.replay`).\n  \

@@ -7,9 +7,16 @@
 use crate::operator::{door_only, Flags, Outcome};
 
 pub(crate) const USAGE: &str = "\
-ordo rollout start <version> [--strategy rolling|all] [--batch-interval <5m>] [--window <1h>]
-                   [--failure-threshold <n>] [--deployment-space first|last] [--batch-size <n>]
-    start a rollout of a stored version. One runs at a time.
+ordo rollout start <version> [--strategy rolling|all|canary|group|query] [--batch-interval <5m>]
+                   [--window <1h>] [--failure-threshold <n>] [--deployment-space first|last]
+                   [--batch-size <n>] [--canary-count <n>] [--canary-wait <1h>]
+                   [--group <tenant,tenant>] [--query \"members < 5\"] [--order \"members asc\"]
+                   [--health-error-rate <1%>] [--alert-channel stream|mail:<address>]
+                   [--share-partners]
+    start a rollout of a stored version. One runs at a time. canary, group and query move
+    a first stage, then the rest once it has been healthy for --canary-wait. A query reads
+    the tenant facts: tenant, name, version, created_at, age_days, members, personal,
+    own_database, paused.
 ordo rollout status [--id <n>]
     the open rollout, or the newest, and where each tenant stands.
 ordo rollout resume
@@ -28,7 +35,9 @@ ordo rollout settings
     the rollout settings.
 ordo rollout set <setting> <value> --reason \"...\" | ordo rollout set <setting> --clear --reason \"...\"
     change one: rollout.strategy, rollout.batch_interval, rollout.window,
-    rollout.failure_threshold, rollout.deployment_space.
+    rollout.failure_threshold, rollout.deployment_space, rollout.canary_count,
+    rollout.canary_wait, rollout.health_error_rate, rollout.alert_channel,
+    rollout.share_partners, rollout.group, rollout.query, rollout.order.
 Every subcommand takes --host <h> (or ORDO_HOST), and --token or a signed-in session.";
 
 /// `ordo rollout`.
@@ -40,6 +49,14 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--failure-threshold",
         "--deployment-space",
         "--batch-size",
+        "--canary-count",
+        "--canary-wait",
+        "--health-error-rate",
+        "--alert-channel",
+        "--share-partners",
+        "--group",
+        "--query",
+        "--order",
         "--id",
         "--reason",
         "--clear",
@@ -76,6 +93,10 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 (Ok(t), Ok(s)) => (t, s),
                 (Err(o), _) | (_, Err(o)) => return o,
             };
+            let canary_count = match int("--canary-count") {
+                Ok(n) => n,
+                Err(o) => return o,
+            };
             (
                 ordo_host::rollouts::START,
                 serde_json::json!({
@@ -86,6 +107,14 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                     "failureThreshold": threshold,
                     "deploymentSpace": flags.named_value("--deployment-space"),
                     "batchSize": size,
+                    "canaryCount": canary_count,
+                    "canaryWait": flags.named_value("--canary-wait"),
+                    "healthErrorRate": flags.named_value("--health-error-rate"),
+                    "alertChannel": flags.named_value("--alert-channel"),
+                    "sharePartners": flags.has("--share-partners").then_some(true),
+                    "group": flags.named_value("--group"),
+                    "query": flags.named_value("--query"),
+                    "order": flags.named_value("--order"),
                 }),
             )
         }
@@ -233,12 +262,26 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
 }
 
 fn settings(r: &serde_json::Value) -> String {
+    let group: Vec<&str> = r["group"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|g| g.as_str())
+        .collect();
     format!(
         "rollout.strategy           {}\n\
          rollout.batch_interval     {}\n\
          rollout.window             {}\n\
          rollout.failure_threshold  {}\n\
-         rollout.deployment_space   {}\n",
+         rollout.deployment_space   {}\n\
+         rollout.canary_count       {}\n\
+         rollout.canary_wait        {}\n\
+         rollout.health_error_rate  {}\n\
+         rollout.alert_channel      {}\n\
+         rollout.share_partners     {}\n\
+         rollout.group              {}\n\
+         rollout.query              {}\n\
+         rollout.order              {}\n",
         r["strategy"]
             .as_str()
             .unwrap_or("unset: `ordo apply` moves every tenant at once"),
@@ -246,6 +289,22 @@ fn settings(r: &serde_json::Value) -> String {
         ordo_host::windows::format_length(r["window"].as_i64().unwrap_or(0)),
         r["failureThreshold"].as_i64().unwrap_or(0),
         r["deploymentSpace"].as_str().unwrap_or("?"),
+        r["canaryCount"].as_i64().unwrap_or(0),
+        ordo_host::windows::format_length(r["canaryWait"].as_i64().unwrap_or(0)),
+        r["healthErrorRate"].as_str().unwrap_or("?"),
+        r["alertChannel"].as_str().unwrap_or("stream"),
+        if r["sharePartners"].as_bool() == Some(true) {
+            "on"
+        } else {
+            "off"
+        },
+        if group.is_empty() {
+            "none".to_string()
+        } else {
+            group.join(",")
+        },
+        r["query"].as_str().unwrap_or("none"),
+        r["order"].as_str().unwrap_or("by tenant id"),
     )
 }
 
@@ -273,6 +332,21 @@ pub(crate) fn render(row: &serde_json::Value) -> String {
         row["batchSize"],
         ordo_host::windows::format_length(row["batchInterval"].as_i64().unwrap_or(0)),
     ));
+    if let Some(sel) = row["selection"].as_str().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("first      {sel}\n"));
+    }
+    match row["gate"].as_str() {
+        Some("pending") => out.push_str(&format!(
+            "gate       the rest wait until the first stage has been healthy for {} \
+             ({} of {} calls failed on the server; the limit is {})\n",
+            ordo_host::windows::format_length(row["canaryWait"].as_i64().unwrap_or(0)),
+            row["health"]["faults"].as_u64().unwrap_or(0),
+            row["health"]["calls"].as_u64().unwrap_or(0),
+            row["healthErrorRate"].as_str().unwrap_or("?"),
+        )),
+        Some("passed") => out.push_str("gate       the first stage was healthy; the rest move\n"),
+        _ => {}
+    }
     if let Some(step) = row["deploymentStep"].as_object() {
         out.push_str(&format!(
             "deployment its own space moves {}: {}\n",

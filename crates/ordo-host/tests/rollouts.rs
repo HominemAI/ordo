@@ -1002,7 +1002,7 @@ async fn the_door_starts_reads_and_controls_a_rollout() {
     let e = run(
         deploy_ops::SET_VERSION_SETTING,
         "home",
-        serde_json::json!({"setting": "rollout.strategy", "value": "canary", "reason": "x"}),
+        serde_json::json!({"setting": "rollout.strategy", "value": "blue-green", "reason": "x"}),
     )
     .await
     .unwrap_err();

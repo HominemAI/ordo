@@ -129,6 +129,7 @@ pub mod release_ops;
 pub mod renewal;
 pub mod replay;
 pub mod revoked_moves;
+pub mod rollout_strategies;
 pub mod rollouts;
 pub mod routines;
 pub mod runtime;

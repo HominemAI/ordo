@@ -82,6 +82,27 @@ describe('live: the hub and the stream it shares', () => {
     expect(invalidated).toBeGreaterThan(before);
   });
 
+  it('after a version change, space_unavailable on the re-add is a wait, not a failure', async () => {
+    const door = new LiveDoor();
+    const hub = new LiveHub(door.client(), { backoff: () => 0 });
+    const seen: LiveStatus[] = [];
+    hub.subscribe(TASKS, {}, { invalidate: () => undefined, status: (s) => seen.push(s) });
+    await until(() => door.live.length === 1, 'the stream to open');
+    door.ready();
+    await until(() => door.readsOf(TASKS).length === 1, 'the read');
+
+    // The door is bringing the tenant to the new version: the first re-add
+    // answers "closed for a moment".
+    door.refuseRead(TASKS, 503, 'space_unavailable');
+    const stream = door.live[0]!;
+    stream.push(sse('version_changed', { error: { code: 'space_unavailable', message: 'open it again' } }));
+    stream.close();
+    await until(() => door.live.length === 2, 'a second stream');
+    door.ready();
+    await until(() => seen.at(-1)?.state === 'open', 'the read open again');
+    expect(seen.some((s) => s.state === 'failed')).toBe(false);
+  });
+
   it('an error frame with a renewable token reconnects at once with the new one', async () => {
     let n = 0;
     const door = new LiveDoor();

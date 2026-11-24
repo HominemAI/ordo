@@ -1493,4 +1493,32 @@ describe('a version change under the feeds (plan-versions.md §1.4, owner ruling
     obs.stop();
     await manager.stop();
   });
+
+  it('waits out space_unavailable while the door brings the tenant to the new version', async () => {
+    const door = new LiveDoor();
+    const r = await replica();
+    const manager = start(door, r, [{ spec: tasks }]);
+    const first = await door.nth(0);
+    first.push(load([task(1)], 5));
+    await when(manager, (v) => v.complete);
+
+    // The reconnects meet the door's catch-up twice ("closed for a moment").
+    door.refuse(503, 'space_unavailable').refuse(503, 'space_unavailable').open();
+    first.push(moved());
+    first.close();
+    const again = await door.nth(1);
+    expect(door.urls).toHaveLength(4);
+    again.push(load([task(1, 'new shape')], 9));
+    const view = await when(manager, (v) => v.complete && v.position === 9);
+    expect(view.ops[0]?.stopped).toBeNull();
+    // On the backoff: the first try at once, then waits.
+    expect(door.waits.filter((ms) => ms > 0).length).toBeGreaterThan(0);
+
+    // Once a frame has arrived, space_unavailable is a standing answer again.
+    door.refuse(503, 'space_unavailable');
+    again.close();
+    const stopped = await when(manager, (v) => v.ops[0]?.stopped !== null);
+    expect(stopped.ops[0]?.stopped?.detail.class).toBe('space_unavailable');
+    await manager.stop();
+  });
 });

@@ -151,6 +151,8 @@ export interface ManagerLink {
   frame(key: string, state: SyncState, delta: SyncDelta): void;
   /** This manager's own feed for `key` was refused for good. */
   stopped(key: string, refusal: OrdoRefusal): void;
+  /** This manager dropped the tenant's device copy: the version changed. */
+  versionChanged(): void;
 }
 
 /** {@link SyncManagerOptions.touchEveryMs} when the app sets none: one hour. */
@@ -264,6 +266,13 @@ interface Entry {
    * be asked in a loop.
    */
   renewed: boolean;
+  /**
+   * The tenant's version changed and no frame has arrived since. The door
+   * may answer `space_unavailable` for a moment while it brings the
+   * tenant's data to the new version; until a frame arrives that is a wait,
+   * not a standing answer.
+   */
+  moving: boolean;
   task: Promise<void>;
   /** Connections begun so far, counting from 1 for the first. */
   connections: number;
@@ -388,6 +397,7 @@ export class SyncManager {
       stopped: null,
       network: null,
       renewed: false,
+      moving: false,
       task: Promise.resolve(),
       connections: 0,
       waiters: [],
@@ -478,6 +488,17 @@ export class SyncManager {
     }
     this.#absorb(key, delta);
     this.#flush(false);
+  }
+
+  /**
+   * The leading tab dropped the tenant's device copy because its program
+   * version changed (owner ruling Q7, 2026-11-23). The shared store is
+   * empty already; this tab's rows in memory go, and the leader's refill
+   * reaches it as frames. @internal
+   */
+  _remoteVersionChanged(): void {
+    if (!this.#running) return;
+    this.#poisoned();
   }
 
   /** Where the device stands now. */
@@ -663,6 +684,7 @@ export class SyncManager {
               applied = true;
               entry.network = null;
               entry.renewed = false;
+              entry.moving = false;
               this.#applied(entry, state, delta);
               answered(entry, connection);
               this.#link?.frame(entry.key, state, delta);
@@ -701,6 +723,12 @@ export class SyncManager {
           await this.#versionChanged(entry);
           if (!this.#running || entry.controller.signal.aborted) return;
           entry.attempts = 0;
+          entry.moving = true;
+        } else if (entry.moving && error instanceof OrdoRefusal && error.detail.class === 'space_unavailable') {
+          // The door is bringing the tenant's data to the new version
+          // ("closed for a moment"): wait on the backoff and try again.
+          entry.retryAfterMs = error.retryAfterMs;
+          entry.attempts += 1;
         } else if (error instanceof OrdoRefusal && error.detail.class === 'space_paused') {
           // The tenant is paused (`plan-tenant-pause.md` §5). Not a standing
           // refusal of this op and not a fault to retry: the op holds where
@@ -778,8 +806,13 @@ export class SyncManager {
         // A copy that could not be cleared is refilled over: every row the
         // new load sends replaces the old one, by position.
       }
+      // Other tabs on this replica drop their rows in memory too; the
+      // store they share is already empty.
+      this.#link?.versionChanged();
       for (const entry of this.#entries.values()) {
-        if (entry === heard || entry.stopped !== null) continue;
+        if (entry.stopped !== null) continue;
+        entry.moving = true;
+        if (entry === heard) continue;
         if (entry.wake) entry.wake();
         else entry.attempt.abort(new DOMException('version changed', 'AbortError'));
       }

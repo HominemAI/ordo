@@ -146,6 +146,13 @@ interface Connection {
    * is not asked in a loop (the SDK sync manager's rule).
    */
   renewed: boolean;
+  /**
+   * The tenant's version changed and no read has been accepted since. The
+   * door may answer `space_unavailable` for a moment while it brings the
+   * tenant's data to the new version; until then that is a wait, not a
+   * standing answer (the SDK sync manager's rule).
+   */
+  moving: boolean;
 }
 
 export class LiveHub {
@@ -230,7 +237,7 @@ export class LiveHub {
 
   #connection(attempts = 0): Connection {
     if (this.#conn) return this.#conn;
-    const conn: Connection = { controller: new AbortController(), stream: null, renewed: false };
+    const conn: Connection = { controller: new AbortController(), stream: null, renewed: false, moving: false };
     this.#conn = conn;
     void this.#run(conn, attempts);
     return conn;
@@ -293,7 +300,8 @@ export class LiveHub {
         this.#reopen(conn);
         return;
       }
-      if (error instanceof OrdoRefusal && !RETRYABLE.has(error.refusal.class)) {
+      const settling = !(conn.moving && error instanceof OrdoRefusal && error.refusal.class === 'space_unavailable');
+      if (settling && error instanceof OrdoRefusal && !RETRYABLE.has(error.refusal.class)) {
         const refusal = error.refusal;
         entry.settled = true;
         this.#set(
@@ -322,6 +330,7 @@ export class LiveHub {
     }
     entry.on = stream;
     conn.renewed = false;
+    conn.moving = false;
     this.#set(entry, { state: 'open' });
     // A read opened again may have missed signals while it was off.
     if (entry.opened) this.#invalidate(entry);
@@ -365,6 +374,7 @@ export class LiveHub {
             // opened again at once and every read added again, which
             // invalidates each so its hook reads the new version.
             moved = true;
+            conn.moving = true;
             break;
           }
           if (frame.event === 'error' || frame.event === 'space_paused') {

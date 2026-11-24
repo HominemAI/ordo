@@ -2362,3 +2362,227 @@ async fn my_notes_at_five_thousand_notes_uses_the_access_index() {
     assert!(sync_ms < 3_000.0, "the sync took {sync_ms:.0} ms");
     d.stop();
 }
+
+// ── sharing across program versions (plan-versions.md §1.7) ──────────────
+
+/// Notes v3.
+const V3: &str = include_str!("../../../examples/notes-v3/notes.ordo");
+
+/// `source` without its backend functions. Their code files are read by
+/// `ordo apply`, which these tests do not run, and a version whose
+/// functions have no code does not compile for a tenant's move. Sharing
+/// reads no function.
+fn without_functions(source: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        if line.starts_with("function ") {
+            inside = true;
+        } else if inside {
+            inside = line != "}";
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `sharer` shares `note` through `allNotes` with `guest`, who accepts and
+/// opens the window. Answers the window token.
+fn share_note(d: &Deployment, sharer: &Session, guest: &Session, note: &str, name: &str) -> String {
+    let (status, out) = d.op(
+        &sharer.space,
+        &sharer.token,
+        "POST",
+        "std.space.share",
+        json!({
+            "ops": "allNotes",
+            "rows": json!([{"entity": "notes", "id": note, "level": "read"}]).to_string(),
+            "expires": "365d",
+            "label": name,
+        }),
+    );
+    assert_eq!(status, 200, "{out}");
+    let ticket = out["rows"][0]["ticket"].as_str().expect("a ticket");
+    let (status, accepted) = d.auth(
+        "/auth/share/accept",
+        json!({"ticket": ticket, "display_name": name}),
+        Some(&guest.token),
+    );
+    assert_eq!(status, 200, "{accepted}");
+    window_of(d, guest, &sharer.space)
+}
+
+/// The window `guest` holds in `space`, minted now from the grant.
+fn window_of(d: &Deployment, guest: &Session, space: &str) -> String {
+    let (status, w) = d.auth("/auth/window", json!({"space": space}), Some(&guest.token));
+    assert_eq!(status, 200, "{w}");
+    w["token"].as_str().expect("a window token").to_string()
+}
+
+/// `allNotes` read through a window: the status, the version the answer
+/// names, and the body.
+fn read_window(d: &Deployment, space: &str, token: &str) -> (u16, Option<String>, Value) {
+    let bearer = format!("Bearer {token}");
+    let (status, head, body) = d.send(
+        "GET",
+        "/op/allNotes",
+        &[
+            ("X-Ordo-Space", space),
+            ("Authorization", &bearer),
+            ("Origin", PAGE),
+            ("Accept", "application/json"),
+        ],
+        "",
+    );
+    let version = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case("x-ordo-tenant-version")
+            .then(|| v.trim().to_string())
+    });
+    (status, version, body)
+}
+
+/// `plan-versions.md` §1.7, through the notes example. Ada's tenant serves
+/// notes v2 and Bo's notes v3. Ada shares a note with Bo and Bo one with
+/// Ada: each window reads, judged by the version of the tenant that owns
+/// the note, and each answer names that version. Then Bo's tenant moves to
+/// a version whose `allNotes` also reads `starred`. Ada's window into Bo's
+/// tenant, pinned under v3, is refused as `versions_disagree`, naming both
+/// versions and `notes`. Bo's window into Ada's tenant, still on v2, reads.
+///
+/// A regression looks like a share pinned to the active version's shape
+/// whatever the sharer's tenant runs (before 2026-11-23), a window refused
+/// across 2 versions that agree, or the refusal answered as the uniform
+/// `access_denied` with nothing said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_share_between_a_tenant_on_v2_and_one_on_v3_reads_both_ways_and_a_disagreeing_move_is_refused_by_name(
+) {
+    let _shared = shared().await;
+    let blobs = format!(
+        "fs:{}",
+        std::env::temp_dir()
+            .join(format!("ordo-notes-versions-share-{}", std::process::id()))
+            .display()
+    );
+    // The applies below run in this process, and read the reader's role
+    // from its environment as the server does. One process per test.
+    let reader = v2_reader_role();
+    std::env::set_var(reader.0, reader.1);
+    let settings = [
+        ("ORDO_BLOB_STORE", blobs.as_str()),
+        ("ORDO_DEV_UNSAFE_BLOB_STORE", "1"),
+        ("ORDO_TENANT_CATCHUP_SECS", "1"),
+        reader,
+    ];
+    let (v2_source, v3_source) = (without_functions(V2), without_functions(V3));
+    let d = Deployment::boot_program(
+        "ordo_notes_versions_share",
+        &v2_source,
+        Some(PAGE),
+        &settings,
+    )
+    .await;
+    let ada = sign_up(&d, &device(51, "ada"), "Ada");
+    let bo = sign_up(&d, &device(52, "bo"), "Bo");
+    let v2 = d.pin_of(&ada.space).await.expect("Ada is pinned");
+
+    // v3 is applied and both tenants move; Ada's is pinned back to v2.
+    let v3 = d.apply_program(&v3_source, false).await;
+    assert_ne!(v2, v3);
+    assert!(d.moved_to(&bo.space, &v3).await, "Bo moved to v3");
+    assert!(d.moved_to(&ada.space, &v3).await, "Ada moved to v3");
+    let (status, out) = d.op(
+        HOME,
+        &deployment_owner_token(),
+        "POST",
+        "std.deployment.pin",
+        json!({"tenant": ada.space, "version": v2}),
+    );
+    assert_eq!(status, 200, "{out}");
+    eventually("Ada's tenant serves v2 again", || {
+        let (status, version, _) = read_window(&d, &ada.space, &ada.token);
+        (status == 200 && version.as_deref() == Some(v2.as_str())).then_some(())
+    });
+
+    // Ada (v2) shares with Bo (v3), and Bo with Ada.
+    let ada_note = create_note(&d, &ada, "Venue", "on v2");
+    let bo_note = create_note(&d, &bo, "Menu", "on v3");
+    let bo_in_ada = share_note(&d, &ada, &bo, &ada_note, "Bo");
+    let ada_in_bo = share_note(&d, &bo, &ada, &bo_note, "Ada");
+    let (status, version, body) = read_window(&d, &ada.space, &bo_in_ada);
+    assert_eq!(status, 200, "Bo reads Ada's note: {body}");
+    assert_eq!(
+        version.as_deref(),
+        Some(v2.as_str()),
+        "Ada's version decides"
+    );
+    assert_eq!(
+        titles(body["rows"].as_array().expect("rows")),
+        vec!["Venue"]
+    );
+    let (status, version, body) = read_window(&d, &bo.space, &ada_in_bo);
+    assert_eq!(status, 200, "Ada reads Bo's note: {body}");
+    assert_eq!(
+        version.as_deref(),
+        Some(v3.as_str()),
+        "Bo's version decides"
+    );
+    assert_eq!(titles(body["rows"].as_array().expect("rows")), vec!["Menu"]);
+
+    // A version whose `allNotes` also reads `starred`. Bo's tenant moves to
+    // it; Ada's stays pinned to v2.
+    let reads_more = ordo_plan::artifact::with_declared(
+        &v3_source.replace(
+            "notes[id, rev, title, body, tags, created, pinned, archived]\n  sort -created",
+            "notes[id, rev, title, body, tags, created, pinned, archived, starred]\n  sort -created",
+        ),
+        "0.3.0",
+        "0.3.1",
+    )
+    .expect("notes v3 declares @ 0.3.0");
+    assert!(
+        reads_more.contains("archived, starred]"),
+        "the marker moved"
+    );
+    let v31 = d.apply_program(&reads_more, false).await;
+    assert!(d.moved_to(&bo.space, &v31).await, "Bo moved on");
+    if d.pin_of(&ada.space).await.as_deref() != Some(v2.as_str()) {
+        let (status, out) = d.op(
+            HOME,
+            &deployment_owner_token(),
+            "POST",
+            "std.deployment.pin",
+            json!({"tenant": ada.space, "version": v2}),
+        );
+        assert_eq!(status, 200, "{out}");
+    }
+
+    // Ada's window into Bo's tenant was pinned under v3, and the op now
+    // reads a field more: refused by name. A window minted again is the
+    // same grant, so it is refused the same.
+    let (status, _, body) = eventually("Ada's window meets the new version", || {
+        let token = window_of(&d, &ada, &bo.space);
+        let got = read_window(&d, &bo.space, &token);
+        (got.0 != 200).then_some(got)
+    })
+    .0;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], json!("versions_disagree"), "{body}");
+    let said = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains(&v3) && said.contains(&v31) && said.contains("`notes`"),
+        "the refusal names both versions and the entity: {said}"
+    );
+    assert!(
+        said.contains("std.space.share"),
+        "and what fixes it: {said}"
+    );
+
+    // Bo's window into Ada's tenant, still on v2, reads.
+    let (status, version, body) = read_window(&d, &ada.space, &bo_in_ada);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(version.as_deref(), Some(v2.as_str()));
+    d.stop();
+}

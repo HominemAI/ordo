@@ -75,6 +75,10 @@ jobs:
       - name: Test with coverage
         run: cargo llvm-cov --workspace --no-fail-fast --no-report
 
+      - name: Two-instance coverage (owner ruling)
+        if: always()
+        run: cargo llvm-cov -p ordo-host --test two_instances --no-report -- --ignored --test-threads=1
+
       - name: Report
         if: always()
         run: |

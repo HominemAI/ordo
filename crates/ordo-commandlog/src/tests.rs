@@ -1563,3 +1563,54 @@ fn a_non_canonical_decimal_spelling_does_not_decode() {
         Err(crate::chain::DecodeError::BadDecimal(_))
     ));
 }
+
+// ───────────── before the backfill trailer (`plan-backfill-dual-writes.md` B3) ─────────────
+
+/// **The fourth backward-compatibility proof**, taken before the backfill
+/// trailer (`0x04`) existed, against the encoder that knew three trailer
+/// tags. Three goldens, one per kind of group already written: a group with
+/// no trailer, one with both flag tags, and a restore marker. If adding the
+/// backfill trailer moved a byte of any of them, every chain already
+/// written over that kind of group would be void.
+///
+/// Pinned rather than derived, for the reason `PRE_FLAG_GOLDEN` states.
+const PRE_BACKFILL_GOLDEN: &str =
+    "6b1ed3eb99091ffcb83318478f4f95491ae7c3b8666d6aed4323edde78896e68";
+const PRE_BACKFILL_LEN: usize = 165;
+const PRE_BACKFILL_BOTH_TAGS_GOLDEN: &str =
+    "571bbbd45a4af9edcf7edbcdfe64b57025c740ec02fa412d3a6bbcbb36198aea";
+const PRE_BACKFILL_MARKER_GOLDEN: &str =
+    "89fd272c65f16baa87752df1abec4b9c9fefde7d5c081a55305b6a9a072e7331";
+
+#[test]
+fn every_kind_of_group_hashes_where_it_did_before_the_backfill_trailer() {
+    let plain = create_group("grp-b3");
+    let bytes = crate::chain::encode_group(&plain);
+    assert_eq!(bytes.len(), PRE_BACKFILL_LEN, "not one byte more");
+    assert_eq!(
+        crate::chain::hash_group(ChainHash::GENESIS, &plain).to_string(),
+        PRE_BACKFILL_GOLDEN,
+        "the backfill trailer moved a group with no trailer"
+    );
+    let mut both = create_group("grp-b3-both");
+    both.owner_administration = true;
+    both.restored_unverified = true;
+    assert_eq!(
+        crate::chain::hash_group(ChainHash::GENESIS, &both).to_string(),
+        PRE_BACKFILL_BOTH_TAGS_GOLDEN,
+        "the backfill trailer moved a flagged group"
+    );
+    let marker = marker_group("grp-b3-restore");
+    assert_eq!(
+        crate::chain::hash_group(ChainHash::GENESIS, &marker).to_string(),
+        PRE_BACKFILL_MARKER_GOLDEN,
+        "the backfill trailer moved a restore marker"
+    );
+    // Each still decodes to itself.
+    for g in [plain, both, marker] {
+        let bytes = crate::chain::encode_group(&g);
+        let decoded = crate::chain::decode_group(&bytes).expect("decodes");
+        assert_eq!(decoded, g);
+        assert_eq!(crate::chain::encode_group(&decoded), bytes);
+    }
+}

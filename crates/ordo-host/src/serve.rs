@@ -463,6 +463,8 @@ pub fn deploy_status(version: &str, nodes: &[ordo_exec::nodes::Node]) -> Value {
                 "version": v,
                 "why": why,
             })).collect::<Vec<_>>(),
+            // A version still loading, apart from the ones that loaded.
+            "loading": n.loading,
         })).collect::<Vec<_>>(),
     })
 }

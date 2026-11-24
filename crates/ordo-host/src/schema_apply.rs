@@ -8,7 +8,7 @@
 //! a run from the client to the database."* So this module takes a
 //! [`Pool`] and a compiled [`Program`] and returns structured outcomes; it
 //! reads no environment, prints nothing, prompts for nothing, and shells
-//! out to nothing. `ordo migrate --apply` and `ordo apply` are thin callers
+//! out to nothing. `ordo apply` and `ordo evolve` (through the door) are callers
 //! that parse arguments, render what comes back and set an exit code, and
 //! they exist to confirm the logic and to test it. A hosted control plane
 //! (checklist 18l) calls the same functions from behind an owner-gated
@@ -439,7 +439,7 @@ fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
 /// Today one kind: what happens to a stored money or decimal field's
 /// amounts when its places change (25aa, ruled 2026-10-05).
 ///
-/// Carried by the call (`ordo migrate --apply --places`), because the
+/// Carried by the call (`ordo evolve --places`, `ordo plan --places`), because the
 /// stored plan that should hold every choice (`plan-evolution-plans.md`
 /// §3.1 and §3.2) is not built. Once applied, each choice is written to
 /// `$places` with the change, and a tenant's database brought forward later
@@ -2672,7 +2672,7 @@ pub struct Record<'a> {
     pub from: Option<&'a str>,
     pub to: &'a str,
     pub actor: &'a str,
-    /// What the caller was: `ordo apply`, `ordo migrate --apply`, or the
+    /// What the caller was: `ordo apply`, `std.deployment.evolve`, or the
     /// platform op that 18l adds.
     pub op: &'a str,
     pub changes: &'a str,
@@ -2963,7 +2963,7 @@ pub enum SafeApply {
 
 /// Apply the program's changes over a database that is behind, when every
 /// one of them is safe (see [`is_safe_change`]) and the setting is on.
-/// The same path as `ordo migrate --apply`: plan, triage, execute, record.
+/// The same path as `ordo evolve --run`: plan, triage, execute, record.
 pub async fn apply_safe(
     pool: &Pool,
     program: &Program,

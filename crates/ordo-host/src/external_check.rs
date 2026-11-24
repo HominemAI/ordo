@@ -22,7 +22,7 @@
 //! # Where it runs
 //!
 //! [`check`] is called from `schema_apply::plan_with`, the one place a plan
-//! is read, so `ordo plan --against`, `ordo apply`, `ordo migrate --apply`
+//! is read, so `ordo plan`, `ordo apply`, `ordo evolve --run`
 //! and the tenant catch-up all see it. [`ExternalGate`] is the runtime half:
 //! a timer re-runs the check on the deployment's database, and while an
 //! entity is down every op that reads it answers `external_changed`. When

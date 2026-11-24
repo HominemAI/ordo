@@ -93,13 +93,32 @@ export default defineConfig({
       dependencies: ['upgrade'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // `ordo evolve` from v2 to v3 through the door, as a developer signed in
+    // with `ordo login` (plan-versions.md, increment 8). It stores v3 beside
+    // v2 and runs the step on the deployment's own database, so it runs
+    // after `v2` and before `v3`. Locally, `--project=evolve --no-deps`.
+    {
+      name: 'evolve',
+      testMatch: /evolve\/v2-to-v3\.spec\.ts/,
+      dependencies: ['v2'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Notes v3 over the running notes v2, with the page open (plan-versions.md,
-    // increment 7a). It moves the stack to v3, so it runs after `v2`, last.
+    // increment 7a). It moves the stack to v3, so it runs after `evolve`.
     // Locally, `--project=v3 --no-deps` applies v2 itself and runs alone.
     {
       name: 'v3',
       testMatch: /v3\/.*\.spec\.ts/,
-      dependencies: ['v2'],
+      dependencies: ['evolve'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The pre-checks of `ordo evolve` over bad data in a tenant (increment 9),
+    // from v3 to 0.3.1 (fixtures/notes-v3-1). It needs v3 serving, so it runs
+    // after `v3`, last. Locally, `--project=evolve-checks --no-deps`.
+    {
+      name: 'evolve-checks',
+      testMatch: /evolve\/prechecks\.spec\.ts/,
+      dependencies: ['v3'],
       use: { ...devices['Desktop Chrome'] },
     },
     {

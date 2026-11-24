@@ -9,6 +9,10 @@
 //!   `<dir>/receipts/<X>-to-<Y>.json`. With `--digest`, a deployment that
 //!   renders another digest refuses (staging re-rendering dev's plan). With
 //!   `--run`, the stored plan runs on the deployment's own database.
+//!   The pre-checks run on every database, and every issue is printed with
+//!   its fix; `--run` refuses while any is open (increment 9). A step that
+//!   removes a sign-in method some people rely on stops, and goes on only
+//!   with `--approve-sign-in-removal <count>` (ruled 2026-11-23, Q6).
 //! - `ordo evolve --tenant <id> [--to Y]` replays the stored path on the
 //!   tenant's database, then pins it (`std.deployment.replay`).
 //! - `ordo evolve --list [--from X] [--to Y]` lists the stored plans
@@ -21,10 +25,13 @@ use crate::operator::{door_only, Flags, Outcome};
 
 pub(crate) const USAGE: &str = "\
 ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=rescale|keep[,...]]
-            [--digest <sha256:...>] [--run]  --host <h> ...
-    render the step, refuse it if it has errors, store it; print the receipt and its digest.
+            [--digest <sha256:...>] [--run] [--approve-sign-in-removal <count>]  --host <h> ...
+    render the step, refuse it if it has errors, store it; print the receipt and its digest,
+    then the pre-checks on every database, each issue with its fix.
     With <dir>, write the receipt to <dir>/receipts/<from>-to-<to>.json. --digest refuses a
-    deployment that renders another one. --run runs it on the deployment's own database.
+    deployment that renders another one. --run runs it on the deployment's own database,
+    and refuses while a pre-check issue is open. A step that removes a sign-in method some
+    people rely on stops; --approve-sign-in-removal <count> goes on, naming the count.
 ordo evolve --tenant <id> [--to <version>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent).
@@ -34,7 +41,14 @@ ordo evolve --list [--from <version>] [--to <version>]  --host <h> ...
 /// `ordo evolve`.
 pub(crate) async fn run(flags: Flags) -> Outcome {
     let mut allowed = vec![
-        "--from", "--to", "--places", "--digest", "--run", "--list", "--tenant",
+        "--from",
+        "--to",
+        "--places",
+        "--digest",
+        "--run",
+        "--list",
+        "--tenant",
+        "--approve-sign-in-removal",
     ];
     allowed.extend(crate::operator::DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
@@ -68,6 +82,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "places": flags.named_value("--places"),
             "expectDigest": flags.named_value("--digest"),
             "run": flags.has("--run"),
+            "approveSignInRemoval": flags.named_value("--approve-sign-in-removal"),
         }),
         true,
     )
@@ -102,6 +117,26 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
     for w in row["warnings"].as_array().into_iter().flatten() {
         out.push_str(&format!("WARNING    {}\n", w.as_str().unwrap_or("?")));
     }
+    if let Some(s) = row["signIn"].as_object() {
+        out.push_str(&format!(
+            "SIGN-IN    removes {}; {} person(s) left with no method{}\n",
+            s.get("removed")
+                .and_then(|r| r.as_array())
+                .map(|r| r
+                    .iter()
+                    .filter_map(|m| m.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default(),
+            s.get("people").and_then(|n| n.as_u64()).unwrap_or(0),
+            if s.get("people").and_then(|n| n.as_u64()).unwrap_or(0) > 0 {
+                " (approved)"
+            } else {
+                ""
+            }
+        ));
+    }
+    out.push_str(&precheck_lines(&row["prechecks"]));
     if let Some(dir) = flags.positional.first() {
         match write_receipt(dir, &row) {
             Ok(path) => out.push_str(&format!("receipt    {path}\n")),
@@ -124,6 +159,45 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         }
     }
     Outcome::ok(out)
+}
+
+/// The pre-checks as a person reads them: each issue with its fix, each
+/// database not asked, and each check that did not run.
+fn precheck_lines(p: &serde_json::Value) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut out = format!(
+        "prechecks  {} database(s) asked, {} issue(s)\n",
+        p["checked"].as_array().map_or(0, |c| c.len()),
+        p["issues"].as_array().map_or(0, |c| c.len())
+    );
+    for i in p["issues"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "ISSUE      database `{}`: {} {}\n",
+            i["database"].as_str().unwrap_or("?"),
+            i["code"].as_str().unwrap_or("?"),
+            i["what"].as_str().unwrap_or("?")
+        ));
+        for l in i["lines"].as_array().into_iter().flatten() {
+            out.push_str(&format!("             {}\n", l.as_str().unwrap_or("?")));
+        }
+        out.push_str(&format!(
+            "  fix      {}\n",
+            i["fix"].as_str().unwrap_or("?")
+        ));
+    }
+    for n in p["notProbed"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "not asked  database `{}`: {}\n",
+            n["database"].as_str().unwrap_or("?"),
+            n["why"].as_str().unwrap_or("?")
+        ));
+    }
+    for n in p["notRun"].as_array().into_iter().flatten() {
+        out.push_str(&format!("not run    {}\n", n.as_str().unwrap_or("?")));
+    }
+    out
 }
 
 /// The receipt beside the sources: a record for the repository, never an
@@ -242,4 +316,32 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
         row["pinned"]["from"].as_str().unwrap_or("none")
     ));
     Outcome::ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Each issue prints with its database, its spaces and its fix; a
+    /// database not asked and a check not run are printed too, so a clean
+    /// answer never hides them.
+    #[test]
+    fn the_prechecks_print_each_issue_with_its_fix() {
+        let p = serde_json::json!({
+            "checked": ["default", "acme"],
+            "issues": [{
+                "database": "acme", "code": "C1", "what": "duplicates over `note`.`title`",
+                "lines": ["space `acme`  value first  2 row(s)"],
+                "fix": "make `note`.`title` distinct",
+            }],
+            "notProbed": [{ "database": "globex", "why": "it records `0.9.0`" }],
+            "notRun": ["the `requires` check did not run"],
+        });
+        let out = super::precheck_lines(&p);
+        assert!(out.contains("2 database(s) asked, 1 issue(s)"), "{out}");
+        assert!(out.contains("ISSUE      database `acme`: C1"), "{out}");
+        assert!(out.contains("space `acme`"), "{out}");
+        assert!(out.contains("fix      make"), "{out}");
+        assert!(out.contains("not asked  database `globex`"), "{out}");
+        assert!(out.contains("not run    the `requires`"), "{out}");
+        assert_eq!(super::precheck_lines(&serde_json::Value::Null), "");
+    }
 }

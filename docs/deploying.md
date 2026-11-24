@@ -1591,6 +1591,32 @@ it. It never stops the boot. A version that fails closes only its own
 tenants: they answer `server_busy` and are listed on `/health/ready`. Every
 other tenant serves. This holds for the active version too.
 
+### Language editions and `ordo fix`
+
+A source names its language edition with one line, `edition 2`. A source
+with no edition line is edition 1, for good (`plan-versions.md` §2.6).
+
+- Today only edition 1 is released, so nothing needs fixing yet.
+- When a release makes a newer edition current, an older one still loads
+  for `editions.load_window` (12 months) after that release's date. The
+  window is measured against the date of the Ordo release that loads it,
+  never the clock, so a running deployment never stops loading a version.
+- The release check calls out each version on an old edition with the
+  date its window ends, marked `soon` within 3 months of the end.
+- Outside the window the version fails the `edition` check, and its
+  tenants close. Every other tenant serves.
+- The fix, on your machine, with no door and no database:
+
+```
+ordo fix <dir>            # dry run: prints the diff, writes nothing
+ordo fix <dir> --write    # compiles the rewrite, then writes it
+ordo apply <dir> ...      # the same program, so the same version
+```
+
+The apply reports `already present; its source moved to a newer edition`.
+The version keeps its name and its tenants. Its stored source and edition
+are the rewritten ones, so later releases load it.
+
 ### How it is tested
 
 `crates/ordo-host/tests/upgrade_continuity.rs` makes all of the above (two

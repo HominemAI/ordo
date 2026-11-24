@@ -3667,6 +3667,31 @@ The page calls a function with `POST /fn/<name>` or the SDK's
 reads at most `ORDO_FN_BLOB_BYTES` (20 MiB) of files. Run history is
 `ordo fn runs` and `ordo fn log`.
 
+### Edition [built 2026-11-23]
+
+One top-level line names the language edition the source is written in:
+
+```
+domain shop @ 0.1.0
+edition 1
+```
+
+- A source with no edition line is edition 1, for good (ruled 2026-11-03).
+- At most one per program. `edition` stays an ordinary name elsewhere, so
+  a field may be called `edition`.
+- What each edition means, its load window and `ordo fix` are in
+  `deploying.md` ("Language editions and `ordo fix`") and
+  `plan-versions.md` §2.8.
+- Only edition 1 is released. Edition 2 is written, unreleased: it would
+  refuse bare `money`, and `ordo fix` would write `money(0)`.
+
+| Class | Refused |
+|---|---|
+| `duplicate_edition` | a second `edition` line |
+| `edition_unknown` | an edition newer than this Ordo release knows |
+| `edition_expired` | an edition outside `editions.load_window`; the refusal names `ordo fix` |
+| `edition_rule` | a construct the named edition refuses; the refusal names `ordo fix` |
+
 ### Domain package
 
 > **Not built yet [2026-10-04]: the compiler refuses the block form today.**

@@ -6,6 +6,10 @@ const contact = () => ({ name: unique('Visitor'), email: `${randomUUID()}@exampl
 const read = (request: APIRequestContext, op: string) => request.get(`${stack().door}/op/${op}`);
 
 test('a visitor reads the catalogue, pricing and reviews and never a private field', async ({ request }) => {
+  // Prove the fixture really contains private data before asserting absence.
+  const privateRows = await rows(await request.get(`${stack().door}/op/std.products.list`, { headers: await owner(request) }));
+  expect(privateRows).toHaveLength(10);
+  for (const row of privateRows) expect(row.internalNote).toBe(`INTERNAL-${row.slug}`);
   for (const [op, count, first] of [
     ['catalogue', 10, { slug: 'aurora-lamp', name: 'Aurora Lamp' }],
     ['pricing', 3, { name: 'Starter' }],

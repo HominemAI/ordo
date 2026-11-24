@@ -787,7 +787,8 @@ impl Fixture {
     /// already lets the owner grant themselves any acl level, so every row
     /// restored here is one the owner could write by hand. Every other
     /// guard is evaluated as for any caller. `owner` is a member id, and a
-    /// member who is not the space's owner is refused.
+    /// member who is not the space's owner is refused as `access_guard`
+    /// (the import refuses earlier, as `not_owner`, naming the fix).
     pub fn run_restore_on(
         &self,
         db: &dyn WriteDb,
@@ -797,8 +798,8 @@ impl Fixture {
     ) -> Result<Value, String> {
         if !self.is_space_owner(db, owner)? {
             return Err(format!(
-                "not_owner: an import restores acl rows as the space's owner, and `{owner}` is \
-                 not its owner"
+                "access_guard: an import restores acl rows as the space's owner, and \
+                 `{owner}` is not its owner"
             ));
         }
         let mut view = self.with_acl_guards_cleared();

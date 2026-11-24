@@ -703,6 +703,7 @@ async fn apply_report(
             steps,
             executed,
             recorded,
+            ..
         }) => {
             r.push_str(&format!("APPLY  ({} statement(s))\n", steps.len()));
             render_steps(&mut r, &steps);

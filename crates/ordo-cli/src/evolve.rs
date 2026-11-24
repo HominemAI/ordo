@@ -21,10 +21,15 @@ use crate::operator::{door_only, Flags, Outcome};
 
 pub(crate) const USAGE: &str = "\
 ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=rescale|keep[,...]]
-            [--digest <sha256:...>] [--run]  --host <h> ...
+            [--fill <entity>.<field>=<expression>|fn <name> [secrets a,b] [hosts h,i][;...]]
+            [--audit-images <entity>.<field>[,...]] [--digest <sha256:...>] [--run]  --host <h> ...
     render the step, refuse it if it has errors, store it; print the receipt and its digest.
     With <dir>, write the receipt to <dir>/receipts/<from>-to-<to>.json. --digest refuses a
     deployment that renders another one. --run runs it on the deployment's own database.
+    --fill states how every existing row gets a value for a field the step makes required:
+    an expression over the row's own fields, or a backend function of the new version with
+    the secrets and hosts it may use. A backfill runs in chunks and resumes from its cursor.
+    Its audit record is one summary per tenant; --audit-images writes every row's images.
 ordo evolve --tenant <id> [--to <version>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent).
@@ -34,7 +39,15 @@ ordo evolve --list [--from <version>] [--to <version>]  --host <h> ...
 /// `ordo evolve`.
 pub(crate) async fn run(flags: Flags) -> Outcome {
     let mut allowed = vec![
-        "--from", "--to", "--places", "--digest", "--run", "--list", "--tenant",
+        "--from",
+        "--to",
+        "--places",
+        "--fill",
+        "--audit-images",
+        "--digest",
+        "--run",
+        "--list",
+        "--tenant",
     ];
     allowed.extend(crate::operator::DOOR_FLAGS);
     if let Err(e) = flags.only(&allowed) {
@@ -66,6 +79,8 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "from": from,
             "to": to,
             "places": flags.named_value("--places"),
+            "fill": flags.named_value("--fill"),
+            "auditImages": flags.named_value("--audit-images"),
             "expectDigest": flags.named_value("--digest"),
             "run": flags.has("--run"),
         }),
@@ -119,8 +134,40 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 ran["statements"].as_i64().unwrap_or(0)
             ));
         }
+        for b in ran["backfills"].as_array().into_iter().flatten() {
+            out.push_str(&format!("{}\n", backfill_line(b)));
+        }
     }
     Outcome::ok(out)
+}
+
+/// One backfill's report, for a person: what was filled, how many rows,
+/// and the record written.
+fn backfill_line(b: &serde_json::Value) -> String {
+    let p = &b["progress"];
+    let mut line = format!(
+        "BACKFILL   {}.{} = {}: {} of {} row(s), {}",
+        b["entity"].as_str().unwrap_or("?"),
+        b["field"].as_str().unwrap_or("?"),
+        b["mapping"].as_str().unwrap_or("?"),
+        p["rowsDone"].as_i64().unwrap_or(0),
+        p["rowsTotal"].as_i64().unwrap_or(0),
+        p["state"].as_str().unwrap_or("?"),
+    );
+    if let Some(v) = b["verified"].as_object() {
+        line.push_str(&format!(
+            "; verified {} row(s) in {} space(s), {} audit record",
+            v.get("rows").and_then(|r| r.as_i64()).unwrap_or(0),
+            v.get("spaces")
+                .and_then(|s| s.as_array())
+                .map(Vec::len)
+                .unwrap_or(0),
+            b["audit"].as_str().unwrap_or("?"),
+        ));
+    } else {
+        line.push_str("; stopped at its budget, run the step again to resume from its cursor");
+    }
+    line
 }
 
 /// The receipt beside the sources: a record for the repository, never an
@@ -233,10 +280,19 @@ async fn replay(host: &crate::wire::Host, flags: &Flags) -> Outcome {
             s["statements"].as_i64().unwrap_or(0)
         ));
     }
-    out.push_str(&format!(
-        "pinned     {} (was {})\n",
-        row["pinned"]["to"].as_str().unwrap_or("?"),
-        row["pinned"]["from"].as_str().unwrap_or("none")
-    ));
+    for s in &steps {
+        for b in s["backfills"].as_array().into_iter().flatten() {
+            out.push_str(&format!("{}\n", backfill_line(b)));
+        }
+    }
+    if row["pinned"].is_null() {
+        out.push_str("pinned     not yet: a backfill is still running; replay again to resume\n");
+    } else {
+        out.push_str(&format!(
+            "pinned     {} (was {})\n",
+            row["pinned"]["to"].as_str().unwrap_or("?"),
+            row["pinned"]["from"].as_str().unwrap_or("none")
+        ));
+    }
     Outcome::ok(out)
 }

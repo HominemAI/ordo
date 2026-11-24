@@ -350,21 +350,57 @@ impl std::fmt::Display for EvolveRefusal {
 // ── the options ─────────────────────────────────────────────────────────
 
 /// The options as the plan stores them: `entity.field=choice`, sorted,
-/// comma-separated. Empty when there are none.
+/// comma-separated. Empty when there are none. Each fill (10b) follows on a
+/// line of its own, `fill <audit> <entity>.<field>=<mapping>`, so a plan
+/// with no fill stores exactly what it stored before fills existed.
 pub fn options_text(c: &Choices) -> String {
-    c.places
+    let mut out = c
+        .places
         .iter()
         .map(|((e, f), ch)| format!("{e}.{f}={}", ch.as_str()))
         .collect::<Vec<_>>()
-        .join(",")
+        .join(",");
+    for ((e, f), fill) in &c.fills {
+        out.push_str(&format!(
+            "\nfill {} {e}.{f}={}",
+            fill.audit.as_str(),
+            fill.mapping.text()
+        ));
+    }
+    out
 }
 
 /// Read stored or typed options back.
 pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
-    if text.trim().is_empty() {
-        return Ok(Choices::default());
+    let mut lines = text.split('\n');
+    let places = lines.next().unwrap_or_default();
+    let mut c = if places.trim().is_empty() {
+        Choices::default()
+    } else {
+        Choices::parse_places(places)
+            .map_err(|e| EvolveRefusal::Options(format!("--places {e}")))?
+    };
+    for line in lines.map(str::trim).filter(|l| !l.is_empty()) {
+        let bad = || EvolveRefusal::Options(format!("a stored fill does not read back: `{line}`"));
+        let rest = line.strip_prefix("fill ").ok_or_else(bad)?;
+        let (audit, spec) = rest.split_once(' ').ok_or_else(bad)?;
+        let images = match audit {
+            "summarised" => "",
+            "images" => spec.split_once('=').map(|(t, _)| t).ok_or_else(bad)?,
+            _ => return Err(bad()),
+        };
+        c.parse_fills(spec, images)
+            .map_err(|e| EvolveRefusal::Options(format!("--fill {e}")))?;
     }
-    Choices::parse_places(text).map_err(|e| EvolveRefusal::Options(format!("--places {e}")))
+    Ok(c)
+}
+
+/// The options a caller types: `--places`, `--fill` and `--audit-images`.
+pub fn typed_options(places: &str, fill: &str, images: &str) -> Result<Choices, EvolveRefusal> {
+    let mut c = parse_options(places)?;
+    c.parse_fills(fill, images)
+        .map_err(|e| EvolveRefusal::Options(format!("--fill {e}")))?;
+    Ok(c)
 }
 
 // ── the render ──────────────────────────────────────────────────────────
@@ -481,6 +517,21 @@ pub async fn render_stored(
     let y = compiled(b)?;
     let live = x_shape(pool, &a.ddl).await?;
     let changes = ordo_schema::diff_with(&live, Some(&x.schema), Some(&x.schema), &y.schema);
+    // A fill for a field the step neither adds required nor makes required
+    // is refused, as a stray `--places` is.
+    for (entity, field) in options.fills.keys() {
+        let named = changes.iter().any(|c| {
+            matches!(c, Change::AddRequiredField { entity: e, field: f }
+                | Change::RequireField { entity: e, field: f } if e == entity && f == field)
+        });
+        if !named {
+            return Err(EvolveRefusal::Options(format!(
+                "`{entity}.{field}` is not a field the step from `{}` to `{}` makes required; \
+                 drop it from `--fill`",
+                a.version, b.version
+            )));
+        }
+    }
 
     // Every change, assessed by the rulings alone: probes are the run's,
     // per database.
@@ -543,13 +594,30 @@ pub async fn render_stored(
         }
     }
 
+    let mut errors = mapping_errors(pool, &a.ddl, &triaged.backfills).await?;
+    let mut functions = Vec::new();
+    for bf in &triaged.backfills {
+        match function_of(bf, &y, b) {
+            Ok(Some(f)) => functions.push(f),
+            Ok(None) => {}
+            Err(e) => errors.push(e),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(EvolveRefusal::Errors {
+            from: a.version.clone(),
+            to: b.version.clone(),
+            errors,
+        });
+    }
+
     let forward: Vec<String> = triaged
         .steps
         .iter()
         .map(|s| s.sql.trim_end().to_string())
         .filter(|s| !is_system_statement(s))
         .collect();
-    let receipt = json!({
+    let mut receipt = json!({
         "format": RECEIPT_FORMAT,
         "from": { "version": a.version, "sourceId": x.source_id },
         "to": { "version": b.version, "sourceId": y.source_id },
@@ -557,6 +625,47 @@ pub async fn render_stored(
         "changes": changes.iter().map(|c| change_json(c, &y, options)).collect::<Vec<_>>(),
         "forward": forward,
     });
+    // Present only when the step backfills, so every plan stored before
+    // backfills existed keeps its digest.
+    if !triaged.backfills.is_empty() {
+        receipt["backfills"] = Value::Array(
+            triaged
+                .backfills
+                .iter()
+                .map(|bf| {
+                    let mut j = bf.to_json();
+                    let f = functions
+                        .iter()
+                        .find(|f| f.field == bf.field && f.entity == bf.entity);
+                    if let Some(f) = f {
+                        j["function"] = json!({
+                            "name": f.name, "codeHash": f.code_hash,
+                            "secrets": f.secrets, "hosts": f.hosts,
+                        });
+                    }
+                    // Q14: a function that reads a secret or calls out may
+                    // give staging and production different values.
+                    j["reproducible"] =
+                        json!(f.is_none_or(|f| f.secrets.is_empty() && f.hosts.is_empty()));
+                    j["oldValues"] = json!(match bf.audit {
+                        ordo_commandlog::BackfillAudit::Summarised =>
+                            "summarised: the rows' old values are not in the command log; \
+                             they come back only from a backup",
+                        ordo_commandlog::BackfillAudit::Images =>
+                            "images: every row's before and after image is in the command log",
+                    });
+                    j
+                })
+                .collect(),
+        );
+        receipt["after"] = Value::Array(
+            triaged
+                .after
+                .iter()
+                .map(|s| Value::String(s.sql.trim_end().to_string()))
+                .collect(),
+        );
+    }
     let digest = digest_of(&receipt);
     let readers = reader_notices(&x, &y, &changes, at);
     Ok(Rendered {
@@ -572,6 +681,23 @@ pub async fn render_stored(
 /// The live shape of an empty database built from `ddl`, in a shadow
 /// namespace drawn for this render and dropped after.
 async fn x_shape(pool: &Pool, ddl: &str) -> Result<ordo_schema::LiveShape, EvolveRefusal> {
+    Ok(in_shadow(pool, ddl, |ns| async move {
+        ordo_exec::migrate::live_shape(pool, &ns).await
+    })
+    .await??)
+}
+
+/// Run `f` against an empty database built from `ddl`, in a shadow
+/// namespace drawn for it and dropped after.
+async fn in_shadow<T, F, Fut>(
+    pool: &Pool,
+    ddl: &str,
+    f: F,
+) -> Result<Result<T, PoolError>, EvolveRefusal>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<T, PoolError>>,
+{
     let mut nonce = [0u8; 8];
     getrandom::getrandom(&mut nonce).map_err(|e| EvolveRefusal::Store(format!("random: {e}")))?;
     let ns = format!(
@@ -579,15 +705,154 @@ async fn x_shape(pool: &Pool, ddl: &str) -> Result<ordo_schema::LiveShape, Evolv
         ordo_exec::shape::DIFF_SHADOW,
         nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
     );
-    let live = async {
-        pool.build_shadow_in(&ns, ddl).await?;
-        ordo_exec::migrate::live_shape(pool, &ns).await
-    }
-    .await;
+    let out = match pool.build_shadow_in(&ns, ddl).await {
+        Ok(()) => f(ns.clone()).await,
+        Err(e) => Err(e),
+    };
     let _ = pool
         .rows(&format!("DROP SCHEMA IF EXISTS {ns} CASCADE"))
         .await;
-    Ok(live?)
+    Ok(out)
+}
+
+/// Each expression mapping, typed by the database against an empty
+/// database of X: a mapping whose value the column's type cannot take, or
+/// that reads a field X lacks, is a plan error, not a chunk that fails five
+/// times on every tenant.
+async fn mapping_errors(
+    pool: &Pool,
+    ddl: &str,
+    backfills: &[sa::BackfillStep],
+) -> Result<Vec<PlanError>, EvolveRefusal> {
+    let typed: Vec<&sa::BackfillStep> = backfills.iter().filter(|b| b.sql.is_some()).collect();
+    if typed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let owned: Vec<(String, String, String, String)> = typed
+        .iter()
+        .map(|b| {
+            (
+                b.entity.clone(),
+                b.field.clone(),
+                b.sql.clone().unwrap_or_default(),
+                b.column_ty.clone(),
+            )
+        })
+        .collect();
+    let found = in_shadow(pool, ddl, |ns| async move {
+        let mut errs = Vec::new();
+        for (entity, field, sql, ty) in &owned {
+            // The column as the expand adds it, then the backfill's own
+            // assignment, planned and never run: the database applies the
+            // assignment cast an `UPDATE` does.
+            let t = format!("{ns}.{}", ordo_schema::ddl::q(entity));
+            let c = ordo_schema::ddl::q(&format!("$bf_{field}"));
+            let probe = format!(
+                "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {c} {ty}; \
+                 EXPLAIN UPDATE {t} SET {c} = ({sql})"
+            );
+            if let Err(e) = pool.rows(&probe).await {
+                errs.push((entity.clone(), field.clone(), ty.clone(), e.to_string()));
+            }
+        }
+        Ok(errs)
+    })
+    .await??;
+    Ok(found
+        .into_iter()
+        .map(|(entity, field, ty, why)| PlanError {
+            code: "B2".into(),
+            change: format!("the fill of `{entity}.{field}`"),
+            class: "mapping_invalid".into(),
+            why: format!("the database refuses the mapping as `{ty}` over the version before the step: {why}"),
+            fix: format!(
+                "state a mapping over fields the version before declares, of the field's \
+                 type: `--fill {entity}.{field}=<expression>`"
+            ),
+        })
+        .collect())
+}
+
+/// A backfill function as the plan names it (D16, Q14).
+#[derive(Debug, Clone)]
+struct FnFill {
+    entity: String,
+    field: String,
+    name: String,
+    code_hash: String,
+    secrets: Vec<String>,
+    hosts: Vec<String>,
+}
+
+/// The function a fill names, checked against the version the step goes
+/// to: it is declared there, its code is stored, and what the fill
+/// declares it may use is within what the function itself declares.
+fn function_of(
+    bf: &sa::BackfillStep,
+    y: &Program,
+    b: &Artifact,
+) -> Result<Option<FnFill>, PlanError> {
+    let sa::FillMapping::Function {
+        name,
+        secrets,
+        hosts,
+    } = &bf.mapping
+    else {
+        return Ok(None);
+    };
+    let err = |why: String, fix: String| PlanError {
+        code: bf.code.into(),
+        change: format!("the fill of `{}.{}`", bf.entity, bf.field),
+        class: "backfill_function_invalid".into(),
+        why,
+        fix,
+    };
+    let Some(decl) = y.schema.functions.iter().find(|f| f.name.name == *name) else {
+        return Err(err(
+            format!("version `{}` declares no function `{name}`", b.version),
+            format!("declare `function {name}` in the version the step goes to, or fill with an expression"),
+        ));
+    };
+    let doc: Value = serde_json::from_str(&b.artifact).unwrap_or(Value::Null);
+    let code_hash = doc["functions"]
+        .as_array()
+        .and_then(|fs| fs.iter().find(|f| f["name"] == name.as_str()))
+        .and_then(|f| f["code_hash"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            err(
+                format!(
+                    "function `{name}` has no stored code in version `{}`",
+                    b.version
+                ),
+                "apply the version with `ordo apply`, which stores each function's code".into(),
+            )
+        })?;
+    let own_secrets: Vec<&str> = decl.secrets.iter().map(|s| s.name.as_str()).collect();
+    if let Some(s) = secrets.iter().find(|s| !own_secrets.contains(&s.as_str())) {
+        return Err(err(
+            format!("the fill declares secret `{s}`, which function `{name}` does not declare"),
+            format!("add `secrets {s}` to `function {name}`, or drop it from the fill"),
+        ));
+    }
+    let own_hosts: Vec<&str> = decl.egress.iter().map(|h| h.name.as_str()).collect();
+    if let Some(h) = hosts
+        .iter()
+        .find(|h| !own_hosts.contains(&h.to_ascii_lowercase().as_str()))
+    {
+        return Err(err(
+            format!("the fill declares host `{h}`, which function `{name}` does not declare"),
+            format!("add `egress {h}` to `function {name}`, or drop it from the fill"),
+        ));
+    }
+    Ok(Some(FnFill {
+        entity: bf.entity.clone(),
+        field: bf.field.clone(),
+        name: name.clone(),
+        code_hash,
+        secrets: secrets.clone(),
+        hosts: hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
+    }))
 }
 
 /// What a developer does about a change a step cannot make.
@@ -595,6 +860,13 @@ fn fix_for(c: &Change, class: &str) -> String {
     match (c, class) {
         (Change::ChangePlaces { entity, field, .. }, _) => format!(
             "state it: `--places {entity}.{field}=rescale` or `--places {entity}.{field}=keep`"
+        ),
+        (
+            Change::AddRequiredField { entity, field } | Change::RequireField { entity, field },
+            "not_class_a" | "mapping_invalid",
+        ) => format!(
+            "state how every existing row gets a value: `--fill {entity}.{field}=<expression>` \
+             over the row's own fields, or `--fill {entity}.{field}=fn <function>`"
         ),
         (_, "plan_refused") => "the change is refused by ruling; declare it another way".into(),
         _ => match c.class() {
@@ -1000,8 +1272,45 @@ pub async fn path(pool: &Pool, from: &str, to: &str) -> Result<Vec<StoredPlan>, 
 pub enum StepRun {
     /// The database already recorded the step's to-version.
     Current,
-    /// The step ran: how many statements were sent.
-    Ran { statements: usize },
+    /// The step ran: how many statements were sent, and each backfill's
+    /// report (10b).
+    Ran {
+        statements: usize,
+        backfills: Vec<Value>,
+    },
+    /// A backfill stopped at its budget (`backfill.budget`). The database
+    /// still records the version before the step; running the step again
+    /// resumes from the cursor.
+    Backfilling {
+        statements: usize,
+        backfills: Vec<Value>,
+    },
+}
+
+impl StepRun {
+    pub fn statements(&self) -> usize {
+        match self {
+            StepRun::Current => 0,
+            StepRun::Ran { statements, .. } | StepRun::Backfilling { statements, .. } => {
+                *statements
+            }
+        }
+    }
+
+    pub fn backfills(&self) -> &[Value] {
+        match self {
+            StepRun::Current => &[],
+            StepRun::Ran { backfills, .. } | StepRun::Backfilling { backfills, .. } => backfills,
+        }
+    }
+}
+
+/// What a step runs its backfills with (10b).
+#[derive(Clone, Default)]
+pub struct StepContext {
+    pub settings: crate::backfill::BackfillSettings,
+    /// Runs backfill functions (B6). `None` refuses a function fill.
+    pub functions: Option<std::sync::Arc<dyn crate::backfill::BackfillFunctions>>,
 }
 
 /// The database's recorded version.
@@ -1036,6 +1345,32 @@ pub async fn run_step(
     label: &str,
     plan: &StoredPlan,
     actor: &str,
+) -> Result<StepRun, EvolveRefusal> {
+    run_step_with(
+        registry,
+        target,
+        label,
+        plan,
+        actor,
+        &StepContext::default(),
+    )
+    .await
+}
+
+/// [`run_step`], with the backfills' settings and function runner.
+///
+/// A step that fills a field (10b) runs in three parts: the expand with the
+/// rest of the step, each backfill to its end and verified, then the
+/// `NOT NULL` each filled field declares. A kill at any point leaves the
+/// database recording the version before the step, and running the step
+/// again resumes each backfill from its cursor.
+pub async fn run_step_with(
+    registry: &Pool,
+    target: &Pool,
+    label: &str,
+    plan: &StoredPlan,
+    actor: &str,
+    ctx: &StepContext,
 ) -> Result<StepRun, EvolveRefusal> {
     let with_label = |mut e: EvolveRefusal| {
         if let EvolveRefusal::Run {
@@ -1104,10 +1439,15 @@ pub async fn run_step(
         }
     }
     p.refusals = refusals;
-    let statements = match sa::apply_planned(target, &p, actor, OP).await {
-        Ok(sa::Applied::Additive { steps, .. }) => steps.len(),
-        Ok(sa::Applied::Nothing) => 0,
-        Ok(sa::Applied::Created(c)) => c.tables,
+    let (statements, backfills, after) = match sa::apply_planned(target, &p, actor, OP).await {
+        Ok(sa::Applied::Additive {
+            steps,
+            backfills,
+            after,
+            ..
+        }) => (steps.len(), backfills, after),
+        Ok(sa::Applied::Nothing) => (0, Vec::new(), Vec::new()),
+        Ok(sa::Applied::Created(c)) => (c.tables, Vec::new(), Vec::new()),
         Err(sa::ApplyRefusal::ServingDrifted { serving, drift }) => {
             return Err(EvolveRefusal::Drifted {
                 database: label.to_string(),
@@ -1141,6 +1481,74 @@ pub async fn run_step(
         }
         Err(other) => return Err(run_err(other.class(), format!("{other:?}"), true)),
     };
+    // The backfills (10b), each to its end and verified, then what lands
+    // after them. A budget that stops one leaves the step for a run again.
+    let mut reports = Vec::new();
+    for bf in &backfills {
+        // Whether the column is new is the step's fact, not this run's: a
+        // run again after the expand sees the column there (B5), and the
+        // step still added it (B2), so verify still checks every row holds
+        // the mapping.
+        let mut bf = bf.clone();
+        let rendered_new = again.receipt["backfills"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r["entity"] == bf.entity.as_str()
+                    && r["field"] == bf.field.as_str()
+                    && r["code"] == "B2"
+            });
+        if rendered_new {
+            bf.code = "B2";
+        }
+        let bf = &bf;
+        let Some(entity) = y.schema.native(&bf.entity) else {
+            return Err(run_err(
+                "internal",
+                format!("`{}` is not an entity of `{}`", bf.entity, plan.to),
+                false,
+            ));
+        };
+        let worker = crate::backfill::Backfill {
+            pool: target,
+            step: &plan.digest,
+            version: &plan.to,
+            fill: bf,
+            entity,
+            settings: &ctx.settings,
+            functions: ctx.functions.clone(),
+        };
+        let bf_err =
+            |e: crate::backfill::BackfillRefusal| run_err(e.class(), e.to_string(), e.transient());
+        let progress = worker.run().await.map_err(bf_err)?;
+        let mut report = json!({
+            "entity": bf.entity, "field": bf.field, "mapping": bf.mapping.text(),
+            "audit": bf.audit.as_str(), "progress": progress.to_json(),
+        });
+        if !progress.ended {
+            // Stopped at its budget, with rows still after the cursor.
+            reports.push(report);
+            return Ok(StepRun::Backfilling {
+                statements,
+                backfills: reports,
+            });
+        }
+        let verified = worker.verify_and_close().await.map_err(bf_err)?;
+        report["verified"] = json!({
+            "rows": verified.rows,
+            "already": verified.already,
+            "spaces": verified.spaces.iter().map(|s| json!({
+                "space": s.space, "rows": s.rows, "content": s.content,
+            })).collect::<Vec<_>>(),
+        });
+        reports.push(report);
+    }
+    if !after.is_empty() {
+        sa::execute(target, &after)
+            .await
+            .map_err(|f| run_err("execute_failed", f.to_string(), false))?;
+    }
     // What was applied is checked rather than assumed: the record below
     // says the database holds Y.
     match sa::schema_state(target, &y.schema).await {
@@ -1175,7 +1583,10 @@ pub async fn run_step(
         .await
         .map_err(|e| run_err("internal", e, true))?;
     }
-    Ok(StepRun::Ran { statements })
+    Ok(StepRun::Ran {
+        statements,
+        backfills: reports,
+    })
 }
 
 /// What [`replay`] did on one database.
@@ -1195,10 +1606,20 @@ impl Replayed {
             "to": self.to,
             "steps": self.steps.iter().map(|(p, r)| json!({
                 "from": p.from, "to": p.to, "seq": p.seq, "digest": p.digest,
-                "statements": match r { StepRun::Ran { statements } => *statements as i64, StepRun::Current => 0 },
+                "statements": r.statements() as i64,
                 "ran": matches!(r, StepRun::Ran { .. }),
+                "backfilling": matches!(r, StepRun::Backfilling { .. }),
+                "backfills": r.backfills(),
             })).collect::<Vec<_>>(),
         })
+    }
+
+    /// A backfill stopped at its budget: the database is still on the
+    /// step's from-version.
+    pub fn backfilling(&self) -> bool {
+        self.steps
+            .last()
+            .is_some_and(|(_, r)| matches!(r, StepRun::Backfilling { .. }))
     }
 }
 
@@ -1212,6 +1633,19 @@ pub async fn replay(
     to: &str,
     actor: &str,
 ) -> Result<Replayed, EvolveRefusal> {
+    replay_with(registry, target, label, to, actor, &StepContext::default()).await
+}
+
+/// [`replay`], with the backfills' settings and function runner. A step
+/// whose backfill stops at its budget ends the replay there.
+pub async fn replay_with(
+    registry: &Pool,
+    target: &Pool,
+    label: &str,
+    to: &str,
+    actor: &str,
+    ctx: &StepContext,
+) -> Result<Replayed, EvolveRefusal> {
     let to = Versions::on(registry).resolve(to).await?;
     let Some(from) = recorded(target).await? else {
         return Err(EvolveRefusal::Stale {
@@ -1223,8 +1657,12 @@ pub async fn replay(
     let steps = path(registry, &from, &to).await?;
     let mut out = Vec::with_capacity(steps.len());
     for p in steps {
-        let r = run_step(registry, target, label, &p, actor).await?;
+        let r = run_step_with(registry, target, label, &p, actor, ctx).await?;
+        let stop = matches!(r, StepRun::Backfilling { .. });
         out.push((p, r));
+        if stop {
+            break;
+        }
     }
     Ok(Replayed {
         from,
@@ -1259,6 +1697,48 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
     }
     for s in receipt["forward"].as_array().into_iter().flatten() {
         out.push(format!("forward: {}", s.as_str().unwrap_or_default()));
+    }
+    for b in receipt["backfills"].as_array().into_iter().flatten() {
+        let mut line = format!(
+            "backfill: {}.{} = {} · audit: {}",
+            b["entity"].as_str().unwrap_or("?"),
+            b["field"].as_str().unwrap_or("?"),
+            b["mapping"].as_str().unwrap_or("?"),
+            b["audit"].as_str().unwrap_or("?"),
+        );
+        if let Some(f) = b["function"].as_object() {
+            let list = |k: &str| {
+                f.get(k)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "none".into())
+            };
+            line.push_str(&format!(
+                " · function code {} · secrets: {} · hosts: {}",
+                f.get("codeHash").and_then(|v| v.as_str()).unwrap_or("?"),
+                list("secrets"),
+                list("hosts")
+            ));
+        }
+        if b["reproducible"].as_bool() == Some(false) {
+            line.push_str(" · not reproducible: staging may get other values");
+        }
+        out.push(line);
+        if let Some(n) = b["oldValues"].as_str() {
+            out.push(format!("    old values: {n}"));
+        }
+    }
+    for s in receipt["after"].as_array().into_iter().flatten() {
+        out.push(format!(
+            "after backfill: {}",
+            s.as_str().unwrap_or_default()
+        ));
     }
     out
 }
@@ -1365,6 +1845,12 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 text("to", 128, true),
                 // `entity.field=rescale|keep`, comma-separated.
                 text("places", 4096, false),
+                // `entity.field=<expression>` or `entity.field=fn <name>
+                // [secrets a,b] [hosts h,i]`, `;`-separated (10b).
+                text("fill", 4096, false),
+                // `entity.field`, comma-separated: fills audited with full
+                // per-row images instead of a summary.
+                text("auditImages", 1024, false),
                 // The digest the step rendered to where it was rehearsed.
                 text("expectDigest", 128, false),
                 // Run the stored plan on the deployment's own database.
@@ -1419,8 +1905,12 @@ pub async fn execute(
     match name {
         EVOLVE => {
             const WHAT: &str = "the plan was not stored";
-            let options = parse_options(text("places").unwrap_or_default())
-                .map_err(|e| e.to_exec_error(WHAT))?;
+            let options = typed_options(
+                text("places").unwrap_or_default(),
+                text("fill").unwrap_or_default(),
+                text("auditImages").unwrap_or_default(),
+            )
+            .map_err(|e| e.to_exec_error(WHAT))?;
             let run = bound
                 .0
                 .get("run")
@@ -1456,9 +1946,16 @@ pub async fn execute(
             let mut row = done.to_json();
             row["ran"] = Value::Null;
             if run {
-                let ran = run_step(pool, pool, "default", &done.plan, caller)
-                    .await
-                    .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
+                let ran = run_step_with(
+                    pool,
+                    pool,
+                    "default",
+                    &done.plan,
+                    caller,
+                    &ops.step_context(),
+                )
+                .await
+                .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
                 drop(lock);
                 ops.record(
                     caller,
@@ -1471,11 +1968,9 @@ pub async fn execute(
                 );
                 row["ran"] = json!({
                     "database": "default",
-                    "statements": match ran {
-                        StepRun::Ran { statements } => statements as i64,
-                        StepRun::Current => 0,
-                    },
+                    "statements": ran.statements() as i64,
                     "current": ran == StepRun::Current,
+                    "backfills": ran.backfills(),
                 });
             }
             Ok(row)
@@ -1539,9 +2034,18 @@ pub async fn execute(
                 .to_exec_error(WHAT)
             })?;
             let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;
-            let done = replay(pool, &target, tenant, &to, caller)
+            let done = replay_with(pool, &target, tenant, &to, caller, &ops.step_context())
                 .await
                 .map_err(|e| e.to_exec_error(WHAT))?;
+            if done.backfilling() {
+                // A backfill stopped at its budget: the tenant stays on its
+                // version, and the next replay resumes from the cursor.
+                drop(lock);
+                let mut row = done.to_json();
+                row["tenant"] = json!(tenant);
+                row["pinned"] = Value::Null;
+                return Ok(row);
+            }
             // The move's own check before the pin: the tenant's database
             // holds all of the version it is about to serve.
             let program = match v.get(&to).await.map_err(|e| e.to_exec_error(WHAT))? {

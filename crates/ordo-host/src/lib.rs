@@ -54,6 +54,7 @@ pub mod attest;
 pub mod attest_ops;
 pub mod attestdrain;
 pub mod auth;
+pub mod backfill;
 pub mod blob;
 pub mod boot_record;
 pub mod bucket_ops;

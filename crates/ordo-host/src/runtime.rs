@@ -4982,6 +4982,9 @@ async fn assemble_program(
     let links_for_auth = platform_ops.links.clone();
     // The agent's half of the consent ceremony (11-4b) runs the same state.
     let consent_for_auth = platform_ops.consent.clone();
+    // A stored step's backfill functions run on this node's backend
+    // functions (10b, B6), handed over once they are built below.
+    let apply_for_backfills = platform_ops.apply.clone();
     // Tenant-owned sign-in providers (`plan-tenant-providers.md`): one state
     // for the four ops and the sign-in routes. Wired whenever there is
     // authentication, so the ops answer, off, with the setting to change.
@@ -5549,27 +5552,34 @@ async fn assemble_program(
         usage_rollup,
         catchup,
         node_status,
-        functions: Arc::new(
-            crate::functions::HostFunctions::new(
-                ordo_fn::HostConfig {
-                    engine_cache: functions_engine_cache,
-                    ..ordo_fn::HostConfig::default()
-                },
-                crate::functions::FnTable::default(),
-                spaces.clone(),
-                pool_for_functions,
-                crate::secrets::fn_fetch(
-                    secrets_for_functions.clone(),
-                    ordo_egress::TlsRoots::webpki(),
-                    functions_deny,
-                    functions_settings.fetch_limits(),
-                ),
-                secrets_for_functions,
-            )
-            .with_blobs(functions_blobs)
-            .with_settings(functions_settings)
-            .with_versions(functions_versions),
-        ),
+        functions: {
+            let functions = Arc::new(
+                crate::functions::HostFunctions::new(
+                    ordo_fn::HostConfig {
+                        engine_cache: functions_engine_cache,
+                        ..ordo_fn::HostConfig::default()
+                    },
+                    crate::functions::FnTable::default(),
+                    spaces.clone(),
+                    pool_for_functions,
+                    crate::secrets::fn_fetch(
+                        secrets_for_functions.clone(),
+                        ordo_egress::TlsRoots::webpki(),
+                        functions_deny,
+                        functions_settings.fetch_limits(),
+                    ),
+                    secrets_for_functions,
+                )
+                .with_blobs(functions_blobs)
+                .with_settings(functions_settings)
+                .with_versions(functions_versions),
+            );
+            if let Some(apply) = &apply_for_backfills {
+                let runner: Arc<dyn crate::backfill::BackfillFunctions> = functions.clone();
+                let _ = apply.backfill_functions.set(runner);
+            }
+            functions
+        },
         spaces,
         quotas,
         secrets,

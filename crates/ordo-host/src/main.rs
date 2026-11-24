@@ -17,8 +17,27 @@
 
 use ordo_host::runtime::{assemble, serve, BootRefusal, RuntimeConfig};
 
-#[tokio::main]
-async fn main() {
+/// Each worker thread's stack. A schema step's door op (a stored step, a
+/// move with dual writes) awaits a deep chain of large futures, and in a
+/// debug build it overflowed tokio's default 2 MiB on Linux CI runners. The
+/// stack is reserved, not committed: only what a thread touches is paid.
+const WORKER_STACK: usize = 8 * 1024 * 1024;
+
+fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK)
+        .build();
+    match runtime {
+        Ok(rt) => rt.block_on(host_main()),
+        Err(e) => {
+            eprintln!("ordo-host: the async runtime did not start: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn host_main() {
     if std::env::args().nth(1).as_deref() == Some("check-config") {
         match RuntimeConfig::from_env() {
             Ok(cfg) => {

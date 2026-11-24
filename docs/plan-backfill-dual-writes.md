@@ -198,17 +198,24 @@ between them is needed.
   it has none. A required field renamed with no default is refused
   (`prev_default_required`). The reverse `SET` keeps the old value when Y
   leaves the new one empty (`coalesce`), and the guard refuses the write.
-- **Renames outside a move** (merged 2026-11-24, replacing increment 15's
-  sync trigger). A rename `ordo apply` makes, or a stored step runs with
-  `--run`, has both versions serving on one database until the pins move,
-  with no `$moves` row. Each node reads the renames every stored version
-  declares (`read_renames`, with the pins; storing a version nudges the
-  stream) and gives each served version a rename overlay
-  (`rename_overlay`): the renaming version sets the old column from the
-  new one, a version still on the old name sets the new column from the
-  old one. Each is its own statement under a savepoint, skipped on a
-  database without the new column. A move's own overlay takes precedence.
-  A rename's copy in a `--run` step is verified under live writes.
+- **Renames outside a move** (2026-11-24, replacing increment 15's sync
+  trigger; the database, not the node, says since the follow-up). A rename
+  `ordo apply` makes, or a stored step runs with `--run`, has both versions
+  serving on one database until the pins move, with no `$moves` row. The
+  rename's step records it in that database's `$renames`, after
+  `LOCK TABLE "$renames" IN EXCLUSIVE MODE` and before its new column, all
+  in one transaction. Every write's first statement is
+  `LOCK TABLE "$renames" IN ROW SHARE MODE`, which takes no snapshot, then
+  it reads the table and runs each rename's dual write as its own version
+  reads it (`MoveOverlay::for_renames`). A write that locked first commits
+  before the new column exists, and the copy reaches it; a write after reads
+  the rename. No node needs to have read anything, so a node slow to read
+  the registry loses no write (`prev_rename.rs`,
+  `two_nodes_one_never_told_lose_no_write_across_a_rename`). A
+  `SELECT … FOR SHARE` there lost 2 writes in 341: it takes the
+  snapshot before it waits. A soak's close and a rename's reverse delete
+  the row, so an orphaned old column is not written again. A move's own
+  overlay takes precedence.
 - The overlay is keyed by version, never by phase: forward for a write on
   X, reverse on Y. A node that took the new pin before the new move cannot
   run one version's overlay under the other. The pin stream reads the

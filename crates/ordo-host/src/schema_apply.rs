@@ -2597,7 +2597,7 @@ pub fn triage_counted(
                 }
             },
             Change::RenameField { from, field, .. } if choices.renames_backfill => {
-                match rename_backfill(c, e, live, from, field) {
+                match rename_backfill(c, e, live, from, field, version) {
                     Err(r) => refused.push(*r),
                     Ok((expand, b, close)) => {
                         steps.extend(expand.into_iter().map(alter));
@@ -2617,7 +2617,7 @@ pub fn triage_counted(
             }
             Change::RenameField { from, field, .. } => {
                 steps.extend(
-                    rename_field_steps(e, live, from, field)?
+                    rename_field_steps(e, live, from, field, version)?
                         .into_iter()
                         .map(alter),
                 );
@@ -2754,6 +2754,7 @@ pub fn rename_field_steps(
     live: &LiveShape,
     from: &str,
     field: &str,
+    version: &str,
 ) -> Result<Vec<String>, String> {
     let Some(f) = e.field(field) else {
         return Err(format!("`{}.{field}` is not declared", e.name));
@@ -2765,8 +2766,11 @@ pub fn rename_field_steps(
     let of = open
         .field(field)
         .ok_or_else(|| format!("`{}.{field}` is not declared", e.name))?;
-    let mut out = ordo_schema::ddl::add_column(&open, of)
-        .map_err(|x| format!("{}: {}", x.code, x.message))?;
+    let mut out = rename_recorded(e, f, from, version);
+    out.extend(
+        ordo_schema::ddl::add_column(&open, of)
+            .map_err(|x| format!("{}: {}", x.code, x.message))?,
+    );
     out.extend(rename_old_default(e, f, live, from)?);
     let t = ordo_schema::ddl::q(&e.name);
     let new = ordo_schema::ddl::q(&f.column());
@@ -2778,6 +2782,42 @@ pub fn rename_field_steps(
         ));
     }
     Ok(out)
+}
+
+/// **The rename recorded in the database it changes** (`$renames`,
+/// [`ordo_exec::overlay::RENAMES_DDL`]), before its new column: the table,
+/// its exclusive lock, and the rename's row. The lock waits for every write
+/// that read the table before it, and every write after reads the row, so
+/// no write lands between the new column and its dual writes, whatever a
+/// node has read. [`execute`] runs these first in the step's transaction,
+/// before any table's lock, in the order every write takes them.
+fn rename_recorded(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    from: &str,
+    version: &str,
+) -> Vec<String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \"version\") \
+             VALUES ({}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \"from\") DO UPDATE SET \
+             \"field\" = EXCLUDED.\"field\", \"column\" = EXCLUDED.\"column\", \
+             \"version\" = EXCLUDED.\"version\";\n",
+            lit(&e.name),
+            lit(from),
+            lit(&f.name),
+            lit(&f.column()),
+            lit(version)
+        ),
+    ]
+}
+
+/// Whether a step's statement is one of a rename's records in `$renames`.
+pub fn is_rename_record(sql: &str) -> bool {
+    sql.contains("\"$renames\"")
 }
 
 /// The old column of a rename keeps its `NOT NULL`, so an insert by the
@@ -2830,6 +2870,7 @@ fn rename_backfill(
     live: &LiveShape,
     from: &str,
     field: &str,
+    version: &str,
 ) -> Result<RenameParts, Box<Refused>> {
     let refuse = |class: &'static str, why: String| -> Box<Refused> {
         Box::new(Refused {
@@ -2863,8 +2904,11 @@ fn rename_backfill(
     let of = open
         .field(field)
         .ok_or_else(|| refuse("mapping_invalid", format!("`{}.{field}`", e.name)))?;
-    let mut expand = ordo_schema::ddl::add_column(&open, of)
-        .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+    let mut expand = rename_recorded(e, f, from, version);
+    expand.extend(
+        ordo_schema::ddl::add_column(&open, of)
+            .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?,
+    );
     expand.extend(rename_old_default(e, f, live, from).map_err(|why| {
         let (class, why) = match why.split_once(": ") {
             Some(("prev_default_required", rest)) => ("prev_default_required", rest.to_string()),
@@ -3269,10 +3313,14 @@ pub async fn execute_with(
     steps: &[Step],
     locks: &LockPolicy,
 ) -> Result<Executed, ExecFailure> {
-    let tx_steps: Vec<&Step> = steps
+    // A rename's records in `$renames` first, before any table's lock: a
+    // write takes `$renames` first too, so the two never wait on each
+    // other in opposite orders (increment 11a).
+    let (records, rest): (Vec<&Step>, Vec<&Step>) = steps
         .iter()
         .filter(|s| matches!(s.phase, Phase::Table | Phase::Alter))
-        .collect();
+        .partition(|s| is_rename_record(&s.sql));
+    let tx_steps: Vec<&Step> = records.into_iter().chain(rest).collect();
     let validate_steps: Vec<&Step> = steps
         .iter()
         .filter(|s| s.phase == Phase::Validate)
@@ -3839,7 +3887,7 @@ pub async fn apply_safe(
 /// lines (owner ruling 2026-11-18, `ordo_exec::peer::grant_readers`): a
 /// table this apply creates is granted in the same apply, and a table taken
 /// off a line is revoked.
-pub(crate) async fn apply_planned(
+pub async fn apply_planned(
     pool: &Pool,
     plan: &Plan,
     actor: &str,

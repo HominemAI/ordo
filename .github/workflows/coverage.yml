@@ -87,9 +87,7 @@ jobs:
         if: always()
         with:
           name: lcov-unit
-          path: |
-            coverage-summary.txt
-            coverage-out/lcov-unit.info
+          path: coverage-out/lcov-unit.info
           if-no-files-found: error
 
   notes:

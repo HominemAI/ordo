@@ -2138,7 +2138,9 @@ pub(crate) fn served_version(report: &ordo_host::apply_op::Report) -> Option<Str
     match &report.activation {
         Activation::Switched { to, .. } => Some(to.clone()),
         Activation::AlreadyActive { version } => Some(version.clone()),
-        Activation::Staged => None,
+        // `ordo apply` returns when the rollout starts (§3.5); the rollout
+        // moves the deployment, and `ordo rollout status` follows it.
+        Activation::Staged | Activation::RolloutStarted { .. } => None,
     }
 }
 
@@ -2225,6 +2227,17 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, db:
         )),
         Activation::AlreadyActive { version } => out.push_str(&format!(
             "activated  {version}  (already active; nothing re-pointed)\n"
+        )),
+        Activation::RolloutStarted {
+            id,
+            strategy,
+            from,
+            to,
+        } => out.push_str(&format!(
+            "activated  not yet: rollout {id} to {to} started ({strategy}, from {}; \
+             rollout.strategy is set)\nrollout    `ordo rollout status` follows it; `ordo \
+             rollout abort` stops it\n",
+            from.as_deref().unwrap_or("nothing"),
         )),
     }
     let t = &report.tenants;
@@ -2417,7 +2430,9 @@ async fn rollback(flags: Flags) -> Outcome {
         Ok(Activation::AlreadyActive { version }) => {
             Outcome::ok(format!("UNCHANGED  {version} is already active\n"))
         }
-        Ok(Activation::Staged) => Outcome::failed("REFUSED an activation answered staged\n".into()),
+        Ok(Activation::Staged) | Ok(Activation::RolloutStarted { .. }) => {
+            Outcome::failed("REFUSED an activation answered staged\n".into())
+        }
         Err(e) => Outcome::failed(format!("REFUSED {e}\n")),
     }
 }

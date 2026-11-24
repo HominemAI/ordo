@@ -6465,6 +6465,39 @@ pub async fn serve(mut rt: Runtime) -> Result<(), BootRefusal> {
         })?;
     let deploys = spawn_deploy_listener(&rt, pin_every).await;
 
+    // **The rollout worker** (`plan-versions.md` §3.7, increment 10). Every
+    // node ticks; the one that takes the rollout lock leads that tick, so a
+    // second node goes on when the leader dies.
+    let rollout_every =
+        crate::rollouts::tick_from_env().map_err(|detail| BootRefusal::Invalid {
+            var: crate::rollouts::TICK_ENV,
+            detail,
+        })?;
+    {
+        let ops = crate::apply_op::ApplyOps::recording(
+            rt.pool.clone(),
+            rt.spaces.pools().clone(),
+            &rt.space.0,
+            Some(rt.access.recorder.clone()),
+        );
+        let node = rt.node_status.node();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(rollout_every);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                every.tick().await;
+                match crate::rollouts::tick(&ops, &node, now_secs()).await {
+                    Ok(t) => {
+                        for line in t.log_lines() {
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => eprintln!("rollout: this turn did not run ({e}); the next one tries"),
+                }
+            }
+        });
+    }
+
     // This node's row in `$nodes`, from now until shutdown. The access
     // engine was built for the boot's version in `assemble`, so the door
     // serves it from here.

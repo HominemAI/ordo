@@ -524,6 +524,17 @@ async fn ensure_revocations(pool: &Pool) -> Result<(), PoolError> {
     if pool.rows(SETTINGS_DDL).await.is_err() {
         pool.rows(SETTINGS_DDL).await?;
     }
+    // `$pins.rollout` came with increment 10 (2026-11-23): the rollout a
+    // pin change was part of, NULL for every other cause.
+    match pool.rows("SELECT \"rollout\" FROM \"$pins\" LIMIT 0").await {
+        Err(e) if e.is_missing_column() => {
+            pool.rows("ALTER TABLE \"$pins\" ADD COLUMN IF NOT EXISTS \"rollout\" bigint NULL")
+                .await?;
+        }
+        Err(e) if e.is_missing_table() => ensure_pin_tables(pool).await?,
+        Err(e) => return Err(e),
+        Ok(_) => {}
+    }
     Ok(())
 }
 
@@ -693,6 +704,33 @@ async fn active_in(tx: &ordo_exec::TxConn) -> Result<Option<String>, PoolError> 
     Ok(rows.first().and_then(|r| r.first().cloned().flatten()))
 }
 
+/// The open deployment-wide rollout, `(id, target)`, read inside `tx` after
+/// its pin lock (`crate::rollouts`). A deployment that never started one
+/// has no `$rollouts`, and answers none: the table is looked up first, so a
+/// missing one does not abort `tx`.
+pub(crate) async fn open_rollout_in(
+    tx: &ordo_exec::TxConn,
+) -> Result<Option<(i64, String)>, PoolError> {
+    let there = tx
+        .rows("SELECT to_regclass('\"$rollouts\"') IS NOT NULL")
+        .await?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .is_some_and(|v| v == "t" || v == "true");
+    if !there {
+        return Ok(None);
+    }
+    let rows = tx
+        .rows(
+            "SELECT \"id\", \"target\" FROM \"$rollouts\" \
+             WHERE \"state\" IN ('running', 'paused') ORDER BY \"id\" DESC LIMIT 1",
+        )
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|r| Some((r.first()?.clone()?.parse().ok()?, r.get(1)?.clone()?))))
+}
+
 /// `versions.new_tenant` as the environment sets it. Empty is unset.
 pub fn new_tenant_from_env() -> Option<String> {
     std::env::var(NEW_TENANT_ENV)
@@ -728,6 +766,9 @@ pub enum PinCause {
     /// the tenant's own database took the active version, was gated
     /// against it, and the pin followed.
     Move,
+    /// A rollout's batch moved it (`plan-versions.md` §3.7, increment
+    /// 10). Its `$pins` row names the rollout.
+    Rollout,
 }
 
 /// Where an open move stands (`$moves.phase`, §2.1).
@@ -839,6 +880,7 @@ impl PinCause {
             PinCause::Demand => "demand",
             PinCause::Tenant => "tenant",
             PinCause::Move => "move",
+            PinCause::Rollout => "rollout",
         }
     }
 }
@@ -1102,6 +1144,11 @@ pub enum VersionRefusal {
     /// promotion gate (`crate::promotion`). The text says which, and the
     /// command that promotes it.
     NotPromoted(String),
+    /// **One deployment-wide rollout at a time** (ruled 2026-11-23, Q3):
+    /// an activation while rollout `id` to `target` is open is refused,
+    /// naming `ordo rollout status` and `ordo rollout abort`. Moving one
+    /// tenant on its own is never refused for this.
+    RolloutOpen { id: i64, target: String },
     /// The database. Its class says whether a retry can help.
     Store(PoolError),
 }
@@ -1132,7 +1179,8 @@ impl VersionRefusal {
             | VersionRefusal::Revoked { .. }
             | VersionRefusal::AlreadyRevoked { .. }
             | VersionRefusal::NotOnRevoked { .. }
-            | VersionRefusal::NotRevoked { .. } => Remedy::Refuse,
+            | VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::RolloutOpen { .. } => Remedy::Refuse,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
                 // same call may pass once it is.
@@ -1187,6 +1235,7 @@ impl VersionRefusal {
             | VersionRefusal::NotServed { .. }
             | VersionRefusal::BelowMinimum { .. }
             | VersionRefusal::NotPromoted(_)
+            | VersionRefusal::RolloutOpen { .. }
             | VersionRefusal::NamedBySetting { .. } => {
                 ExecError::new(ErrorCode::ApplyRefused, message)
             }
@@ -1354,6 +1403,13 @@ impl std::fmt::Display for VersionRefusal {
                 list.join(",")
             ),
             VersionRefusal::NotPromoted(why) => write!(f, "not_promoted: {why}"),
+            VersionRefusal::RolloutOpen { id, target } => write!(
+                f,
+                "rollout_open: rollout {id} to {target} is open, and one deployment-wide \
+                 rollout runs at a time. `ordo rollout status` shows where it stands; `ordo \
+                 rollout finish` or `ordo rollout abort` closes it. One tenant may still move \
+                 on its own: `ordo versions pin <tenant> <version>`"
+            ),
             VersionRefusal::BelowMinimum { named, minimum } => write!(
                 f,
                 "below_minimum: {named} is older than {MINIMUM_SETTING}, {minimum}. Name a \
@@ -1973,6 +2029,12 @@ impl<'a> Versions<'a> {
             tx.rollback().await?;
             return Err(self.revoked(mark, None).await);
         }
+        // One deployment-wide rollout at a time (ruled 2026-11-23, Q3).
+        // Read under the pin lock a rollout's start takes too.
+        if let Some((id, target)) = open_rollout_in(&tx).await? {
+            tx.rollback().await?;
+            return Err(VersionRefusal::RolloutOpen { id, target });
+        }
         // Every tenant would land below `versions.minimum`. Read under the
         // lock a setting change takes (audit L4).
         let policy = self.policy_in(&tx).await?;
@@ -2039,6 +2101,164 @@ impl<'a> Versions<'a> {
             from,
             to: version.to_string(),
         })
+    }
+
+    /// **The deployment's own space moves to `version`, and no tenant
+    /// does** (`plan-versions.md` §3.7, §1.14; ruled 2026-11-23, Q4): the
+    /// rollout's named step. One activation row and its nudge, under the
+    /// pin lock, so every node loads `version` and swaps, which moves the
+    /// deployment's own space, the public path and new tenants. A tenant
+    /// keeps its pin and is served its version; only one that has none yet
+    /// is pinned. Open moves to another version are closed: the rollout
+    /// moves those tenants now.
+    ///
+    /// Called by the rollout that is open, so it is not refused for it.
+    /// Refused: a version not stored, or revoked.
+    pub async fn activate_alone(
+        &self,
+        version: &str,
+        actor: &str,
+        at: Timestamp,
+    ) -> Result<Activated, VersionRefusal> {
+        if registry::get(self.pool, version).await?.is_none() {
+            return Err(VersionRefusal::UnknownVersion(version.to_string()));
+        }
+        let from = registry::active_version(self.pool).await?;
+        if from.as_deref() == Some(version) {
+            return Ok(Activated::AlreadyActive(version.to_string()));
+        }
+        self.require_arrival(version).await?;
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        registry::record_activation(&tx, version, actor, at).await?;
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"to\" <> {}",
+            sql_lit(version)
+        ))
+        .await?;
+        repin(
+            &tx,
+            &repin_sql(
+                version,
+                actor,
+                PinCause::Rollout,
+                at.0,
+                Some("AND \"version\" IS NULL"),
+            ),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Activated::Switched {
+            from,
+            to: version.to_string(),
+        })
+    }
+
+    /// **Move one tenant as part of rollout `rollout`** (§3.7), cause
+    /// `rollout`, its `$pins` row naming the rollout. The caller has brought
+    /// a tenant's own database to `version` and gated it.
+    ///
+    /// `version` is the rollout's target, which becomes the active version,
+    /// so `versions.served` does not refuse it; a revoked version and one
+    /// below `versions.minimum` are refused. `None`: the tenant was on
+    /// `version` already. Refused as [`VersionRefusal::NoTenant`] when it
+    /// no longer holds a pin (reaped meanwhile).
+    pub async fn pin_in_rollout(
+        &self,
+        space: &str,
+        version: &str,
+        rollout: i64,
+        actor: &str,
+        at: u64,
+    ) -> Result<Option<PinChange>, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let policy = self.policy_in(&tx).await?;
+        if let Err(e) = self
+            .with_policy(&policy)
+            .refuse_below_minimum(version)
+            .await
+        {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        let held = tx
+            .rows(&format!(
+                "SELECT \"version\" FROM \"$spaces\" \
+                 WHERE \"$space\" = {} AND \"state\" IN {PINNED_STATES}",
+                sql_lit(space)
+            ))
+            .await?;
+        let Some(row) = held.first() else {
+            tx.rollback().await?;
+            return Err(VersionRefusal::NoTenant {
+                space: space.to_string(),
+            });
+        };
+        let from = row.first().cloned().flatten();
+        let filter = format!("AND \"$space\" = {}", sql_lit(space));
+        let moved = repin(
+            &tx,
+            &repin_sql(version, actor, PinCause::Rollout, at, Some(&filter)),
+        )
+        .await?;
+        tx.rows(&format!(
+            "UPDATE \"$pins\" SET \"rollout\" = {rollout} \
+             WHERE \"seq\" = (SELECT max(\"seq\") FROM \"$pins\" WHERE \"space\" = {})",
+            sql_lit(space)
+        ))
+        .await?;
+        tx.rows(&format!(
+            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+            sql_lit(space)
+        ))
+        .await?;
+        tx.commit().await?;
+        if moved.is_empty() {
+            return Ok(None);
+        }
+        let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);
+        Ok(Some(PinChange {
+            seq: 0,
+            space: space.to_string(),
+            from,
+            to: version.to_string(),
+            epoch,
+            actor: actor.to_string(),
+            cause: PinCause::Rollout.as_str().to_string(),
+            at,
+        }))
+    }
+
+    /// Reopen one tenant's refused move (§2.1, increment 7), so the
+    /// catch-up tries it again: phase `expanding`, reason cleared. The
+    /// move it reopened; `None` when the tenant has no refused move.
+    pub async fn retry_move(&self, space: &str) -> Result<Option<Move>, VersionRefusal> {
+        let sql = format!(
+            "UPDATE \"$moves\" SET \"phase\" = 'expanding', \"reason\" = '' \
+             WHERE \"space\" = {} AND \"phase\" = 'refused' RETURNING {MOVE_COLUMNS}",
+            sql_lit(space)
+        );
+        let rows = match self.pool.rows(&sql).await {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => return Ok(None),
+            Err(e) if e.is_missing_column() => {
+                ensure_revocations(self.pool).await?;
+                self.pool.rows(&sql).await?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(rows.first().and_then(|r| move_row(r)))
     }
 
     /// **Every open move** (§2.1), oldest first. A database with no

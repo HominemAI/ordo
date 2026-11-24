@@ -186,6 +186,9 @@ const READS: &[&str] = &[
     "std.deployment.plans",
     // Whether a rollback's version still reads its externals and peers.
     "std.deployment.rollbackCheck",
+    // Where the open or newest rollout stands, and its tenants; deployment
+    // owner only, home space (versions increment 10).
+    "std.deployment.rollout.status",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

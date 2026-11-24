@@ -336,6 +336,12 @@ async fn serve(
             keys,
             access: clone_access.clone(),
             tenants: None,
+        }))
+        // The console's tenant list.
+        .with_tenant_list(Arc::new(ordo_host::fleet::TenantListOps {
+            control: pool.clone(),
+            home: HOME.to_string(),
+            spaces: None,
         })),
     );
     let id_keys = Arc::new(IdentityKeys::new(
@@ -1194,6 +1200,175 @@ async fn a_given_name_wins_over_the_neutral_default() {
     .await
     .expect("cloned");
     assert_eq!(done.record.name, "qa-copy");
+}
+
+// ── production's tenant name ─────────────────────────────────────────────
+
+/// Every text cell of `table` in staging, as one string.
+async fn table_text(pool: &Pool, table: &str) -> String {
+    pool.rows(&format!(
+        "SELECT coalesce(string_agg(t::text, ' '), '') FROM \"{table}\" t"
+    ))
+    .await
+    .map(|r| r[0][0].clone().unwrap_or_default())
+    .unwrap_or_default()
+}
+
+/// **Production's tenant name never reaches staging** (2026-11-24). A
+/// self-serve tenant is named after its person. Staging records the
+/// tenant's id and version; the clone's answer, the clone list, the
+/// console's tenant list, the security stream, the registry and an export
+/// of the clone carry no trace of `acme`.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_clone_record_export_or_console_answer_in_staging_carries_productions_name() {
+    let p = pair("c11", PROGRAM).await;
+    let here = p.issuer.token(ADA, "staging");
+    let (status, body) = post(
+        &p.staging_address,
+        clones::CLONE_IN,
+        json!({
+            "tenant": "acme", "fromToken": p.issuer.token(ADA, "production"),
+            "reason": "rehearse on real shapes",
+        }),
+        &here,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let space = body["rows"][0]["clone"]["space"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(body["rows"][0]["clone"]["fromTenant"], p.tenant.as_str());
+    assert!(body["rows"][0]["clone"].get("fromName").is_none(), "{body}");
+    assert!(
+        !body.to_string().contains("acme"),
+        "the clone's answer: {body}"
+    );
+
+    // The tables a real deployment boots with, which the list reads.
+    ordo_exec::spacedb::ensure_table(&p.staging).await.unwrap();
+    ordo_host::fleet::ensure_tables(&p.staging).await.unwrap();
+    for op in [clones::CLONES, ordo_host::fleet::TENANTS] {
+        let (status, body) = call(&p.staging_address, "GET", op, HOME, None, &here).await;
+        assert_eq!(status, 200, "{op}: {body}");
+        assert!(
+            body.to_string().contains(&space),
+            "{op} lists the clone: {body}"
+        );
+        assert!(!body.to_string().contains("acme"), "{op}: {body}");
+    }
+    for t in ["$clones", "$spaces", "$promotions"] {
+        assert!(!table_text(&p.staging, t).await.contains("acme"), "{t}");
+    }
+    let events = p
+        .staging_stream
+        .drain_all(ordo_commandlog::Timestamp(u64::MAX / 2));
+    assert!(!events.is_empty());
+    assert!(!format!("{events:?}").contains("acme"), "the stream");
+
+    // An export of the clone, as staging's owner would take one.
+    let f = Fixture::from_source(PROGRAM, "").unwrap();
+    let artifact = ordo_exec::registry::Artifact {
+        version: "0.1.0".into(),
+        artifact: "{}\n".into(),
+        source: PROGRAM.into(),
+        ddl: f.ddl.clone(),
+        applied_at: ordo_commandlog::Timestamp(0),
+        actor: "test".into(),
+    };
+    let dir = std::env::temp_dir().join(format!("ordo-clone-export-{}", std::process::id()));
+    let mut sink = ordo_exec::export::DirectoryBundle::new(&dir);
+    ordo_exec::export::export_space(
+        &p.staging,
+        &ordo_exec::export::ExportRequest {
+            space: &SpaceId(space.clone()),
+            schema: &f.schema,
+            artifact: &artifact,
+            keys: p.staging_keys.as_ref(),
+            blobs: None,
+            sealed: ordo_exec::export::SealedMode::Open,
+            correlation: "exp_clone",
+        },
+        &mut sink,
+    )
+    .await
+    .expect("the clone exports");
+    let mut all = String::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if let Ok(text) = std::fs::read_to_string(entry.path()) {
+            all.push_str(&text);
+        }
+    }
+    let data = dir.join("data");
+    if let Ok(files) = std::fs::read_dir(&data) {
+        for entry in files.flatten() {
+            all.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(all.contains("masked-"), "the export holds the clone's rows");
+    assert!(!all.contains("acme"), "the export: {all}");
+}
+
+/// **A record written before carries no name after the upgrade.** The old
+/// table held `from_name`, and the old default named a clone after it, in
+/// `$clones` and `$spaces`. The first read renames each such clone to the
+/// neutral name, keeps a name the person gave, and drops the column.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_clone_record_loses_productions_name_on_upgrade() {
+    let (pool, _pg) = fresh("ordo_clone_c12").await;
+    tenants::ensure_table(&pool).await.unwrap();
+    pool.rows(
+        "CREATE TABLE \"$clones\" (\"space\" text PRIMARY KEY, \"name\" text NOT NULL, \
+         \"from_env\" text NOT NULL, \"from_tenant\" text NOT NULL, \"from_name\" text NOT NULL, \
+         \"version\" text NOT NULL, \"source_id\" text NOT NULL, \"opens_as\" text NOT NULL, \
+         \"rows\" bigint NOT NULL, \"actor\" text NOT NULL, \"reason\" text NOT NULL, \
+         \"at\" bigint NOT NULL)",
+    )
+    .await
+    .unwrap();
+    for (space, name) in [
+        ("spc_old_aaaa11112222", "Ada Lovelace-clone"),
+        ("spc_old_bbbb33334444", "qa-copy"),
+    ] {
+        tenants::reserve(&pool, space, name, ADA, 100, None)
+            .await
+            .unwrap();
+        pool.rows(&format!(
+            "INSERT INTO \"$clones\" VALUES ('{space}', '{name}', 'production', 'spc_prod', \
+             'Ada Lovelace', '0.1.0', 'sid', 'mem_ada', 3, '{ADA}', 'QA', 100)"
+        ))
+        .await
+        .unwrap();
+    }
+    let list = clones::clones(&pool).await.expect("read");
+    let mut names: Vec<_> = list.iter().map(|c| c.name.clone()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["clone-11112222".to_string(), "qa-copy".to_string()]
+    );
+    assert_eq!(
+        tenants::lookup(&pool, "spc_old_aaaa11112222")
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "clone-11112222"
+    );
+    let column = pool
+        .rows(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() \
+             AND table_name = '$clones' AND column_name = 'from_name'",
+        )
+        .await
+        .unwrap();
+    assert!(column.is_empty(), "the column is dropped");
+    for t in ["$clones", "$spaces"] {
+        assert!(!table_text(&pool, t).await.contains("Lovelace"), "{t}");
+    }
+    // A second read finds nothing to do.
+    assert_eq!(clones::clones(&pool).await.unwrap().len(), 2);
 }
 
 // ── sinks ────────────────────────────────────────────────────────────────

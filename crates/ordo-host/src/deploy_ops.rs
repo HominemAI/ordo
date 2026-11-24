@@ -1498,21 +1498,26 @@ pub async fn execute(
                 .set_promotion_setting(setting, value, caller, reason, crate::runtime::now_secs())
                 .await
                 .map_err(|e| e.to_exec_error("the promotion setting was not changed"))?;
-            let shown = if settings.skip_staging { "on" } else { "off" };
+            let (name, shown) = match crate::environments::rehearsal_setting(setting) {
+                Some(name) => (name, value.trim()),
+                None => (
+                    crate::environments::SKIP_STAGING,
+                    if settings.skip_staging { "on" } else { "off" },
+                ),
+            };
             if changed {
                 ops.record(
                     caller,
                     SET_PROMOTION_SETTING,
                     "promotion-setting",
                     format!(
-                        "setting={} value={shown} by={caller} reason={}",
-                        crate::environments::SKIP_STAGING,
+                        "setting={name} value={shown} by={caller} reason={}",
                         reason.trim()
                     ),
                 );
             }
             json!({
-                "setting": crate::environments::SKIP_STAGING, "value": shown,
+                "setting": name, "value": shown,
                 "changed": changed, "skipStaging": settings.skip_staging,
             })
         }

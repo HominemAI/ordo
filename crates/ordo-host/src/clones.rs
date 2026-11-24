@@ -1800,6 +1800,15 @@ impl CloneAccess {
             .contains_key(space)
     }
 
+    /// Whether `person` is named in `clone.readers`: such a person may
+    /// start a rehearsal on staging (Q12, `crate::rehearsals`).
+    pub fn may_rehearse(&self, person: &str) -> bool {
+        self.readers
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(person)
+    }
+
     /// The member `person` acts as in `space`: `Some` when `space` is a
     /// clone and the person is a deployment admin (`admin`) or named in
     /// `clone.readers`.

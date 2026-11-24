@@ -1759,3 +1759,404 @@ async fn a_tenant_with_its_own_database_is_cloned_onto_one_staging_makes() {
         .staging_pg
         .exec(&format!("DROP DATABASE IF EXISTS \"{space}\" WITH (FORCE)"));
 }
+
+// ── the signed rehearsal (increment 12b) ─────────────────────────────────
+
+/// The program at 0.2.0, with a new required field filled from the title:
+/// a step only a stored plan makes (B2), so the rehearsal runs it.
+fn program_v2() -> String {
+    PROGRAM
+        .replace("@ 0.1.0", "@ 0.2.0")
+        .replace("  tags: json = []\n", "  tags: json = []\n  mood: text\n")
+}
+
+/// The plan's options: `notes.mood` filled from each note's title.
+fn fill() -> ordo_host::schema_apply::Choices {
+    ordo_host::evolve::typed_options("", "notes.mood=title", "").expect("options")
+}
+
+/// Store 0.2.0 on `pool`, not activated.
+async fn store_v2(pool: &Pool) {
+    apply_op::run(
+        pool,
+        &SinglePool::new(pool.clone()),
+        &program_v2(),
+        &apply_op::CodeFiles::new(),
+        ADA,
+        "t",
+        false,
+    )
+    .await
+    .expect("0.2.0 stored");
+}
+
+/// A pair where both hold 0.2.0, production knows where staging answers,
+/// staging holds a clone of `acme` and the stored plan 0.1.0 to 0.2.0.
+/// Answers the pair, the clone's space and the plan staging stored.
+async fn rehearsal_pair(stem: &str) -> (Pair, String, ordo_host::evolve::StoredPlan) {
+    let p = pair(stem, PROGRAM).await;
+    store_v2(&p.staging).await;
+    store_v2(&p.prod).await;
+    Environments::on(&p.prod)
+        .set_door(
+            "staging",
+            Some(Door {
+                address: p.staging_address.clone(),
+                space: HOME.to_string(),
+                handle: Some("staging".to_string()),
+            }),
+            "where staging answers",
+        )
+        .await
+        .expect("door");
+    let done = clone_as(&p, ADA, p.issuer.token(ADA, "production"))
+        .await
+        .expect("cloned");
+    let staged = ordo_host::evolve::evolve(&p.staging, "0.1.0", "0.2.0", &fill(), None, ADA, 3_000)
+        .await
+        .expect("staging stores the plan");
+    (p, done.record.space, staged.plan)
+}
+
+/// Production's own plan for the step, stored, and its run on
+/// production's database.
+#[allow(clippy::result_large_err)]
+async fn run_on_production(
+    p: &Pair,
+) -> Result<ordo_host::evolve::StepRun, ordo_host::evolve::EvolveRefusal> {
+    let stored = ordo_host::evolve::evolve(&p.prod, "0.1.0", "0.2.0", &fill(), None, ADA, 3_000)
+        .await
+        .expect("production stores the plan");
+    ordo_host::evolve::run_step(&p.prod, &p.prod, "default", &stored.plan, ADA).await
+}
+
+fn rehearse_body(clone: &str) -> Value {
+    json!({
+        "from": "0.1.0", "to": "0.2.0", "tenants": clone,
+        "reason": "the mood field on real shapes",
+    })
+}
+
+fn accept_body(p: &Pair, who: &str) -> Value {
+    json!({"from": "0.1.0", "to": "0.2.0", "fromToken": p.issuer.token(who, "staging")})
+}
+
+/// Whether the database lacks `notes.mood`.
+async fn lacks_mood(pool: &Pool) -> bool {
+    pool.rows(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'notes' \
+         AND column_name = 'mood'",
+    )
+    .await
+    .unwrap()
+    .is_empty()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn production_runs_only_a_plan_digest_staging_signed() {
+    use ordo_host::rehearsals;
+    let (p, clone, staged) = rehearsal_pair("r1").await;
+    let prod = || p.issuer.token(ADA, "production");
+
+    // Production refuses the step: staging signed nothing.
+    let e = run_on_production(&p).await.unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed", "{e}");
+    assert!(e.to_string().contains("ordo rehearsals rehearse"), "{e}");
+    assert!(e.to_string().contains("ordo rehearsals accept"), "{e}");
+    assert!(e.to_string().contains("skip-staging"), "{e}");
+    assert!(lacks_mood(&p.prod).await, "nothing ran on production");
+
+    // Accepting before staging rehearsed names the command.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("rehearsal_not_signed"), "{body}");
+    assert!(
+        body.to_string().contains("ordo rehearsals rehearse"),
+        "{body}"
+    );
+
+    // Staging rehearses on the clone, through its door, and signs.
+    let (status, body) = post(
+        &p.staging_address,
+        rehearsals::REHEARSE,
+        rehearse_body(&clone),
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let a = &body["rows"][0]["rehearsal"]["attestation"];
+    assert_eq!(a["digest"], staged.digest.as_str());
+    assert_eq!(a["env"], "staging");
+    assert_eq!(a["result"], "green");
+    assert_eq!(a["clones"], json!([clone]));
+    assert_eq!(a["release"], ordo_host::release_check::release());
+    assert_eq!(a["notReproducible"], json!([]));
+    assert!(a["build"].as_str().unwrap().len() > 10);
+    // The clone moved to 0.2.0, and its database holds the new field.
+    let pin = Versions::on(&p.staging)
+        .pin_of(&clone)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pin.version.as_deref(), Some("0.2.0"));
+    assert!(!lacks_mood(&p.staging).await);
+    assert!(acts(&p.staging_stream).contains(&"rehearsed".to_string()));
+
+    // Production accepts it: read from staging as the person, the
+    // signature checked, the plan rendered here to the same digest.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let row = &body["rows"][0];
+    assert_eq!(row["digest"], staged.digest.as_str());
+    assert_eq!(
+        row["keyRecorded"], true,
+        "the key is recorded the first time"
+    );
+    assert!(acts(&p.prod_stream).contains(&"rehearsal-accepted".to_string()));
+
+    // Now the signed digest runs on production.
+    let ran = run_on_production(&p).await.expect("the signed step runs");
+    assert!(
+        matches!(ran, ordo_host::evolve::StepRun::Ran { .. }),
+        "{ran:?}"
+    );
+    assert!(!lacks_mood(&p.prod).await);
+
+    // A digest staging did not sign is still refused, naming the one that
+    // was accepted.
+    let other = ordo_host::evolve::StoredPlan {
+        digest: "sha256:0000".into(),
+        ..staged.clone()
+    };
+    let e = rehearsals::require_rehearsed(&p.prod, &other)
+        .await
+        .unwrap_err();
+    assert_eq!(e.class(), "plan_not_rehearsed");
+    assert!(e.to_string().contains(&staged.digest), "{e}");
+
+    // An edited attestation does not verify: staging's stored text is
+    // changed, and accepting it again is refused.
+    p.staging
+        .rows("UPDATE \"$rehearsals\" SET \"body\" = replace(\"body\", 'green', 'GREEN')")
+        .await
+        .unwrap();
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+    assert!(
+        body.to_string().contains("rehearsal_bad_signature"),
+        "{body}"
+    );
+
+    // Staging needs no key set up (Q11): it made its own, and answers its
+    // public half.
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["key"].as_str().unwrap().len(), 64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_rehearsal_refusal_names_its_fix() {
+    use ordo_host::rehearsals;
+    let (p, clone, _) = rehearsal_pair("r2").await;
+    let prod = || p.issuer.token(ADA, "production");
+    let rehearse_as = |token: String, body: Value| {
+        let address = p.staging_address.clone();
+        async move { post(&address, rehearsals::REHEARSE, body, &token).await }
+    };
+
+    // Production does not rehearse: it is not staging.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::REHEARSE,
+        rehearse_body("anything"),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("set-own staging"), "{body}");
+
+    // A tenant that is not a clone.
+    let (status, body) = rehearse_as(
+        p.issuer.token(ADA, "staging"),
+        rehearse_body("spc_live_tenant"),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("ordo clones clone"), "{body}");
+
+    // A step staging stored no plan for.
+    let (status, body) = rehearse_as(
+        p.issuer.token(ADA, "staging"),
+        json!({"from": "0.2.0", "to": "0.1.0", "tenants": clone, "reason": "back"}),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("no_stored_path"), "{body}");
+
+    // Q12: a person staging allows may rehearse; anyone else may not.
+    let (status, _) = rehearse_as(app_token("p_tester"), rehearse_body(&clone)).await;
+    assert_eq!(status, 403, "not allowed yet");
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.readers", "value": "p_tester", "reason": "QA rehearses"}),
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, _) = rehearse_as(app_token("p_other"), rehearse_body(&clone)).await;
+    assert_eq!(status, 403, "a person staging does not allow");
+    // Allowed to rehearse, and nothing else in the deployment's space.
+    let (status, _) = call(
+        &p.staging_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &app_token("p_tester"),
+    )
+    .await;
+    assert_eq!(status, 403, "a clone reader reads no rehearsal list");
+    let (status, body) = rehearse_as(app_token("p_tester"), rehearse_body(&clone)).await;
+    assert_eq!(status, 200, "an allowed person rehearses: {body}");
+    assert_eq!(
+        body["rows"][0]["rehearsal"]["attestation"]["actor"],
+        "p_tester"
+    );
+
+    // The clone is on 0.2.0 now: rehearsing again names a fresh clone.
+    let (status, body) = rehearse_as(p.issuer.token(ADA, "staging"), rehearse_body(&clone)).await;
+    assert_ne!(status, 200);
+    assert!(
+        body.to_string().contains("rehearsal_clone_version"),
+        "{body}"
+    );
+
+    // Production: another person read staging.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, BOB),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("ordo login"), "{body}");
+
+    // Too old for `promotion.attestation_max_age`: the refusal names it.
+    Environments::on(&p.prod)
+        .set_promotion_setting("attestation-max-age", "1s", ADA, "short", 1)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("attestation_max_age"), "{body}");
+    Environments::on(&p.prod)
+        .set_promotion_setting("attestation-max-age", "7d", ADA, "back", 1)
+        .await
+        .unwrap();
+
+    // Production recorded another key for staging (staging lost its key
+    // row since): the new key is refused until the person names it.
+    p.prod
+        .rows(
+            "CREATE TABLE IF NOT EXISTS \"$rehearsal_keys\" (\"env\" text PRIMARY KEY, \
+             \"public\" text NOT NULL, \"actor\" text NOT NULL, \"at\" bigint NOT NULL)",
+        )
+        .await
+        .unwrap();
+    p.prod
+        .rows(&format!(
+            "INSERT INTO \"$rehearsal_keys\" VALUES ('staging', '{}', 'p_ada', 1)",
+            "ab".repeat(32)
+        ))
+        .await
+        .unwrap();
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("rehearsal_key_changed"), "{body}");
+    let (_, listed) = call(
+        &p.staging_address,
+        "GET",
+        rehearsals::REHEARSALS,
+        HOME,
+        None,
+        &p.issuer.token(ADA, "staging"),
+    )
+    .await;
+    let new_key = listed["rows"][0]["key"].as_str().unwrap().to_string();
+    assert!(
+        body.to_string().contains(&format!("--trust-key {new_key}")),
+        "{body}"
+    );
+    let mut named = accept_body(&p, ADA);
+    named["trustKey"] = json!(new_key);
+    let (status, body) = post(&p.prod_address, rehearsals::ACCEPT, named, &prod()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["keyRecorded"], true);
+    // Accepted again under the recorded key: nothing new to record.
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["keyRecorded"], false);
+
+    // No staging before it: nothing to accept, and the refusal says how to
+    // require one.
+    Environments::on(&p.prod)
+        .set_promotion_setting("skip-staging", "on", ADA, "no staging", 1)
+        .await
+        .unwrap();
+    let (status, body) = post(
+        &p.prod_address,
+        rehearsals::ACCEPT,
+        accept_body(&p, ADA),
+        &prod(),
+    )
+    .await;
+    assert_ne!(status, 200);
+    assert!(body.to_string().contains("rehearsal_no_staging"), "{body}");
+}

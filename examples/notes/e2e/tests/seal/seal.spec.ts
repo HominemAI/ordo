@@ -21,7 +21,7 @@
  * rollout that runs every tenant's step (11b). Nothing is written while a
  * seal runs here.
  *
- * It seals a field for the whole stack, so it runs after `clone`, last.
+ * It seals a field for the whole stack, so it runs after `rehearsal`, last.
  * Locally, `--project=seal --no-deps`. Chromium only.
  */
 
@@ -81,7 +81,7 @@ async function openV2(page: Page): Promise<void> {
 
 test('a field sealed on live data: the page reads it, and the table holds no plaintext', async ({ browser }, testInfo) => {
   testInfo.setTimeout(300_000);
-  // v3 serves after `clone`. Run alone (`--no-deps`), v2 and v3 are
+  // v3 serves after `rehearsal`, which stores 0.3.3 and activates nothing. Run alone (`--no-deps`), v2 and v3 are
   // applied here.
   if (servingVersion() !== '0.3.0') {
     ensureServing(stack().programV2, '0.2.0');

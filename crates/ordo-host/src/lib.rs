@@ -123,6 +123,7 @@ pub mod recovery_hold;
 pub mod recovery_settings;
 mod refine_call;
 pub mod registrations;
+pub mod rehearsals;
 pub mod release_check;
 pub mod release_ops;
 pub mod renewal;
@@ -2686,6 +2687,21 @@ impl AccessChecker for IdentityAccess {
                     agent: Some(claims.principal.0.clone()),
                 };
             }
+        }
+        // **A person the staging deployment allows may start a rehearsal**
+        // (`plan-versions.md` §3.2, Q12): named in `clone.readers`, signed in
+        // to staging as themselves, in the deployment's own space, for
+        // `std.deployment.rehearse` alone. They act as themselves.
+        if op == crate::rehearsals::REHEARSE
+            && claims.capability.is_none()
+            && claims.delegation.is_none()
+            && self.console_home.get().is_some_and(|h| h == space)
+            && self
+                .clones
+                .get()
+                .is_some_and(|c| c.may_rehearse(&claims.principal.0))
+        {
+            return AccessDecision::allow(claims.principal.0.clone());
         }
         let ispace = SpaceId(space.to_string());
         match self.engine.check(&claims, &ispace, op, now) {

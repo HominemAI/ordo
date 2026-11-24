@@ -13,8 +13,8 @@
 //! The numbers are printed, and recorded in the plan. Run it in release,
 //! alone:
 //! `cargo test -p ordo-host --release --test versions_memory -- --nocapture`.
-//! The asserts hold what the settings rely on: a view costs memory, and
-//! eviction empties the cache.
+//! The asserts hold what the settings rely on: eviction empties the cache
+//! and a cap keeps the most recently used. The figures are only printed.
 //!
 //! Needs the conformance cluster (`scripts/conformance-pg.sh start`) for
 //! the pool a view holds; no query runs.
@@ -130,7 +130,7 @@ async fn memory_per_version_and_per_space_view() {
             m.cut_us,
         );
     }
-    for m in &out {
-        assert!(m.per_view > 0, "{}: a view holds memory", m.program);
-    }
+    // No assert on the figures: resident memory is a report, not a
+    // measure to hold. On Linux the allocator reuses the pages the last
+    // program's evicted views gave back, so a later program can show 0.
 }

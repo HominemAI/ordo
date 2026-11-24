@@ -1319,6 +1319,7 @@ async fn seed_chain(pool: &ordo_exec::Pool, space: &str, n: usize) {
                 at: ordo_commandlog::Timestamp(1_000 + i as u64),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         };

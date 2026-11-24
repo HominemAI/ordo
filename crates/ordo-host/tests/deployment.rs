@@ -2282,6 +2282,7 @@ async fn a_prune_moves_the_pins_floor_though_the_head_stands_still() {
                 at: Timestamp(1_000 + i),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })

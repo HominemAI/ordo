@@ -40,6 +40,10 @@ const RECORDED_ELSEWHERE: &[(&str, &str)] = &[
         "ordo-api/src/router.rs",
         "ApiError::new(ErrorCode::AccessDenied, message).with_op(op_name)",
     ),
+    // A grant a move killed (`plan-versions.md` §2.5): asked only after
+    // `check` denied it, and `check` records that denial as
+    // `GrantKilledByMove`.
+    ("ordo-api/src/router.rs", "state.access.grant_killed("),
     // `GET /live` with a token nobody signed: `token_known` records it.
     ("ordo-api/src/router.rs", "state.access.token_known(token)"),
     // The platform surfaces' one answer: after `authorize_in`, which

@@ -202,7 +202,7 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
   const id = created.created;
   try {
     expect(
-      (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some((r) => r.id === id),
+      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).some((r) => r.id === id),
     ).toBe(false);
     await rows(
       await request.post(`${stack().door}/op/grantCampaignsAccess`, {
@@ -210,7 +210,7 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
         data: { campaign: id, member: me.id, level: 'read' },
       }),
     );
-    const visible = (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).find(
+    const visible = (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).find(
       (r) => r.id === id,
     )!;
     expect(visible.brief).toBe('Private launch plan');
@@ -233,7 +233,7 @@ test('a colleague accepts an invitation, receives read access, and loses it on r
       await request.delete(`${stack().door}/op/unshareCampaign`, { headers, params: { campaign: id, member: me.id } }),
     );
     expect(
-      (await rows(await request.get(`${stack().door}/op/campaigns`, { headers: colleague }))).some((r) => r.id === id),
+      (await rows(await request.get(`${stack().door}/op/campaignList`, { headers: colleague }))).some((r) => r.id === id),
     ).toBe(false);
     await rows(
       await request.post(`${stack().door}/op/std.space.setRole`, { headers, data: { member: me.id, role: 'viewer' } }),

@@ -1060,6 +1060,9 @@ pub struct Deployment {
     /// again by the pin stream until a signed-in request for one of their
     /// tenants wakes them ([`Deployment::wake`]).
     evicted: RwLock<std::collections::BTreeSet<String>>,
+    /// Evicted versions a request woke, while they load. A request for one
+    /// of their tenants waits for the load ([`Deployment::waking`]).
+    waking: RwLock<std::collections::BTreeSet<String>>,
     /// Ops the **platform** serves that no program compiled (8r) — see
     /// [`crate::platform_ops`].
     ///
@@ -1128,6 +1131,7 @@ impl Deployment {
             retired: RwLock::new(Vec::new()),
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1155,6 +1159,7 @@ impl Deployment {
             retired: RwLock::new(Vec::new()),
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1294,6 +1299,7 @@ impl Deployment {
             retired: RwLock::new(Vec::new()),
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1333,6 +1339,7 @@ impl Deployment {
             retired: RwLock::new(Vec::new()),
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -1357,6 +1364,7 @@ impl Deployment {
             retired: RwLock::new(Vec::new()),
             guards: RwLock::new(LoadGuards::default()),
             evicted: RwLock::new(std::collections::BTreeSet::new()),
+            waking: RwLock::new(std::collections::BTreeSet::new()),
         }))
     }
 
@@ -1454,6 +1462,7 @@ impl Deployment {
         next.0.clock.installed(crate::runtime::now_secs());
         others.insert(to.clone(), Arc::new(next.0));
         self.evicted.write().expect("deployment lock").remove(&to);
+        self.waking.write().expect("deployment lock").remove(&to);
         Swapped::Installed {
             from: active.version.clone(),
             to,
@@ -1649,10 +1658,36 @@ impl Deployment {
     /// next read. True when it was evicted. Called for a signed-in
     /// caller's request only, so no anonymous call starts a load (V-29).
     pub fn wake(&self, version: &str) -> bool {
-        self.evicted
+        let woke = self
+            .evicted
             .write()
             .expect("deployment lock")
-            .remove(version)
+            .remove(version);
+        if woke {
+            self.waking
+                .write()
+                .expect("deployment lock")
+                .insert(version.to_string());
+        }
+        woke
+    }
+
+    /// Is `version` loading because a request woke it? A request for one
+    /// of its tenants waits for it rather than answering at once.
+    pub fn waking(&self, version: &str) -> bool {
+        self.waking
+            .read()
+            .expect("deployment lock")
+            .contains(version)
+    }
+
+    /// A woken version's load ended without installing it (refused): no
+    /// request waits for it any more.
+    pub fn woken_refused(&self, version: &str) {
+        self.waking
+            .write()
+            .expect("deployment lock")
+            .remove(version);
     }
 
     /// The registry's active version as the pin stream last read it. See

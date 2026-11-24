@@ -719,16 +719,24 @@ async fn a_version_stays_loaded_for_min_residency() {
 
 /// **`versions.idle_evict_after`**: 0.1.0 serves nothing for a second and
 /// is unloaded. Nothing loads it again by itself. The next signed-in
-/// request for its tenant answers `space_unavailable`, retryable, and
-/// wakes it; the request after that is served by 0.1.0.
+/// request for its tenant wakes it, waits for the load and is answered as
+/// ever, by 0.1.0. Past `WAKE_WAIT` it would answer `server_busy` with
+/// `Retry-After`, which the SDK retries.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
     use ordo_host::versions::VersionSetting;
     let node = boot("ordo_vbg_idle").await;
     set_guard(&node, VersionSetting::IdleEvictAfter, "1s").await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    nudge(&node).await;
-    wait(|| node.deployment.loaded("0.1.0").is_none()).await;
+    // `tickOne` runs in spc_a every 2 seconds, and a run is traffic. A
+    // read of the pins that lands in the quiet second between two runs
+    // evicts it; after that nothing of 0.1.0 is wired, so no run comes.
+    let evicted = eventually(30, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        node.deployment.loaded("0.1.0").is_none()
+    })
+    .await;
+    assert!(evicted, "0.1.0 was never idle for a second");
     assert_eq!(node.deployment.evicted(), vec!["0.1.0".to_string()]);
 
     // Not loaded again by a read with no request behind it.
@@ -738,16 +746,15 @@ async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
 
     // Off from here, so the reload is not evicted again under the test.
     set_guard(&node, VersionSetting::IdleEvictAfter, "off").await;
+    // The one request that wakes it waits for the load and answers as
+    // ever: standard behaviour, no error for the person.
     let first = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
-    assert_eq!(first.status, 503, "{}", first.body);
-    assert_eq!(first.code(), "space_unavailable");
-    wait(|| node.deployment.loaded("0.1.0").is_some()).await;
-    let again = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
-    assert_eq!(again.status, 200, "{}", again.body);
+    assert_eq!(first.status, 200, "{}", first.body);
     assert_eq!(
-        again.header("x-ordo-tenant-version").as_deref(),
+        first.header("x-ordo-tenant-version").as_deref(),
         Some("0.1.0")
     );
+    assert!(node.deployment.loaded("0.1.0").is_some());
 }
 
 /// **Per-node health shows a version still loading apart from one

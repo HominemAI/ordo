@@ -330,10 +330,16 @@ The pin this plan adds:
 - `versions.idle_evict_after` (stored in Ordo, default 30m, or `off`): a
   version beside the active one that served nothing this long is
   unloaded. The pin stream does not load it again by itself. A signed-in
-  request for one of its tenants wakes it: that request answers
-  `space_unavailable`, retryable, and the stream loads it. No anonymous
-  call wakes one (V-29). Kept: the active version, the one
-  `versions.new_tenant` names, and everything during a swap.
+  request for one of its tenants wakes it and waits for the load, up to
+  5 seconds (`WAKE_WAIT`), then is answered as ever. Past that it answers
+  `server_busy` with `Retry-After`, which the SDK retries by itself. A
+  request that meets the version while it loads waits too. No anonymous
+  call wakes one (V-29), and none needs to: a signed-out call reaches
+  only the deployment's own space, on the active version, which is never
+  evicted. Kept: the active version, the one `versions.new_tenant`
+  names, and everything during a swap. The op path waits; a function
+  call or a file read meeting an evicted version still answers
+  `space_unavailable` (a later change).
 - `versions.max_concurrent_loads` (node, `ORDO_VERSIONS_MAX_CONCURRENT_LOADS`,
   default 1, 1 to 16): loads in one pass at once. One pass runs at a
   time, so a version never loads twice at once.

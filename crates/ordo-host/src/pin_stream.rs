@@ -384,7 +384,11 @@ impl PinStream {
             match outcome {
                 Ok(Some(to)) => loaded.push(to),
                 Ok(None) => {}
-                Err(why) => refused.push((version, why)),
+                Err(why) => {
+                    // A request waiting on it stops waiting.
+                    self.deployment.woken_refused(&version);
+                    refused.push((version, why))
+                }
             }
         }
         loaded.sort();

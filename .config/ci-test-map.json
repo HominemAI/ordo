@@ -525,6 +525,7 @@
     "crates/ordo-host/src/share_accept.rs": "all",
     "crates/ordo-host/src/share_links.rs": "all",
     "crates/ordo-host/src/share_ops.rs": "all",
+    "crates/ordo-host/src/sinks.rs": "all",
     "crates/ordo-host/src/spaces.rs": "all",
     "crates/ordo-host/src/step_door.rs": "all",
     "crates/ordo-host/src/supervisor.rs": "all",

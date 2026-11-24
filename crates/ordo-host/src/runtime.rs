@@ -3010,13 +3010,6 @@ async fn platform_ops_for(
         Some(stream.clone()),
     );
     ops = ops.with_apply(apply.clone());
-    // Staging clones (`plan-versions.md` §3.4). Always, for `with_apply`'s
-    // reason: the specs are always registered.
-    ops = ops.with_clones(Arc::new(crate::clones::CloneOps {
-        apply,
-        keys: w.keys.clone(),
-        access: w.access.clones().unwrap_or_default(),
-    }));
     // 17aa piece 3. Always, for `with_apply`'s reason and one more: the
     // `KeyProvider` is here already (`ExitOps` took it above), and a
     // deployment that registered `std.space.create` and wired nothing for
@@ -3064,6 +3057,15 @@ async fn platform_ops_for(
         None => crate::tenant_ops::TenantOps::new(w.pool.clone(), w.keys.clone(), &w.home.0),
     };
     ops = ops.with_tenants(tenants.clone());
+    // Staging clones (`plan-versions.md` §3.4). Always, for `with_apply`'s
+    // reason: the specs are always registered. A clone of a tenant with a
+    // database of its own gets one here, as a new tenant does.
+    ops = ops.with_clones(Arc::new(crate::clones::CloneOps {
+        apply,
+        keys: w.keys.clone(),
+        access: w.access.clones().unwrap_or_default(),
+        tenants: Some(tenants.clone()),
+    }));
 
     // E3: the membership commands. Always wired, because they are always
     // registered. The refresh hook rebuilds the door on this replica so a
@@ -5676,12 +5678,13 @@ async fn assemble_program(
                     },
                     crate::functions::FnTable::default(),
                     spaces.clone(),
-                    pool_for_functions,
-                    crate::secrets::fn_fetch(
+                    pool_for_functions.clone(),
+                    crate::secrets::fn_fetch_sinking(
                         secrets_for_functions.clone(),
                         ordo_egress::TlsRoots::webpki(),
                         functions_deny,
                         functions_settings.fetch_limits(),
+                        pool_for_functions,
                     ),
                     secrets_for_functions,
                 )

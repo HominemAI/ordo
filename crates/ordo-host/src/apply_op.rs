@@ -806,7 +806,14 @@ async fn sequence(
     // below writes the name into `$migrations`, so an unchanged program
     // must keep the name it has, a 16-hex one included (ask 7), or every
     // tenant would read as behind it.
-    let naming = sa::name_version(pool, program).await.map_err(refused)?;
+    // A version that arrives with a staging clone keeps the number it was
+    // applied under, lower than this deployment's highest or not.
+    let naming = if op == crate::promotion::CLONE_OP_LABEL {
+        sa::name_arrival(pool, program).await
+    } else {
+        sa::name_version(pool, program).await
+    }
+    .map_err(refused)?;
     // **A production deployment takes only what arrived through the gate**,
     // refused before anything is stored (`crate::promotion`).
     if activate {

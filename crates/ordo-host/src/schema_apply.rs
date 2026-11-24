@@ -345,6 +345,22 @@ impl NameRefusal {
 /// by the 16-hex digest of what it compiles to, with a note saying how to
 /// declare one (ask 10).
 pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
+    name_version_with(pool, program, true).await
+}
+
+/// [`name_version`] for a version that arrived with a staging clone
+/// (`plan-versions.md` §3.4): its number was settled where it was applied,
+/// so a number lower than the highest stored here is taken as it is. A
+/// used number holding other content is still refused.
+pub async fn name_arrival(pool: &Pool, program: &Program) -> Result<Naming, NameRefusal> {
+    name_version_with(pool, program, false).await
+}
+
+async fn name_version_with(
+    pool: &Pool,
+    program: &Program,
+    rising: bool,
+) -> Result<Naming, NameRefusal> {
     let versions = crate::versions::Versions::on(pool);
     let registry_err = |e: crate::versions::VersionRefusal| NameRefusal::Registry(e.to_string());
     let declared = program.declared.as_deref();
@@ -403,7 +419,8 @@ pub async fn name_version(pool: &Pool, program: &Program) -> Result<Naming, Name
             next,
         });
     }
-    if let Some(highest) = ordo_plan::artifact::highest_above(d, numbers.iter().map(String::as_str))
+    if let Some(highest) =
+        ordo_plan::artifact::highest_above(d, numbers.iter().map(String::as_str)).filter(|_| rising)
     {
         return Err(NameRefusal::Behind {
             version: d.to_string(),

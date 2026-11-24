@@ -42,8 +42,10 @@
 //!
 //! The clone carries its version's source identity. Staging finds the
 //! version it holds with that identity and pins the clone to it. A version
-//! staging does not hold is refused, naming `ordo promote`: storing a
-//! version staging never saw from the clone is not built yet.
+//! staging does not hold comes down with the clone through the promotion
+//! gate ([`crate::promotion::arrive_with_clone`]): read from production as
+//! the same person, checked, compiled and gated as a promotion is, stored
+//! and never activated, and recorded in `$promotions` as a clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -76,21 +78,27 @@ pub const CLONE_IN: &str = "std.deployment.cloneIn";
 pub const CLONES: &str = "std.deployment.clones";
 /// Set `clone.mask` or `clone.readers`.
 pub const SET_CLONE_SETTING: &str = "std.deployment.setCloneSetting";
+/// What the clones would have sent: their mail, push and egress
+/// (`crate::sinks`).
+pub const SINKS: &str = "std.deployment.sinks";
 
 /// Every op of this module.
-pub const OPS: [&str; 6] = [
+pub const OPS: [&str; 7] = [
     CLONE_KEY,
     SET_CLONE_KEY,
     CLONE_OUT,
     CLONE_IN,
     CLONES,
     SET_CLONE_SETTING,
+    SINKS,
 ];
 
 /// Which fields leave production unmasked. Deny by default.
 pub const MASK_SETTING: &str = "clone.mask";
 /// Who besides the staging deployment's admins opens a clone.
 pub const READERS_SETTING: &str = "clone.readers";
+/// Which tenants' mail, push and egress go to the sink (`crate::sinks`).
+pub const SINKS_SETTING: &str = "clone.sinks";
 
 /// The sealed bundle's format tag, also bound into its associated data.
 pub const FORMAT: &str = "ordo.clone.v1";
@@ -183,11 +191,12 @@ pub enum CloneRefusal {
     },
     /// The sealed bundle did not open, or its contents are not a clone.
     Bundle(String),
-    /// Staging does not hold the clone's version. Promote it first.
-    VersionNotHere {
+    /// The clone's version, which staging did not hold, did not pass the
+    /// promotion gate on its way down.
+    Version {
         version: String,
-        source_id: String,
         from: String,
+        refusal: Box<crate::promotion::PromotionRefusal>,
     },
     /// A setting that does not exist, or a value it does not take.
     Setting(String),
@@ -248,15 +257,14 @@ impl std::fmt::Display for CloneRefusal {
                  token for `{env}`"
             ),
             CloneRefusal::Bundle(why) => write!(f, "the clone did not arrive whole: {why}"),
-            CloneRefusal::VersionNotHere {
+            CloneRefusal::Version {
                 version,
-                source_id,
                 from,
+                refusal,
             } => write!(
                 f,
-                "the tenant serves {version} on `{from}` (source {source_id}), and this \
-                 deployment does not hold that version. Promote it here first: `ordo promote \
-                 {version} --host <this deployment> --reason \"...\"`, then clone again"
+                "the tenant serves {version} on `{from}`, which this deployment does not hold, \
+                 and it was refused on its way down with the clone: {refusal}"
             ),
             CloneRefusal::Setting(why) | CloneRefusal::Input(why) => write!(f, "{why}"),
             CloneRefusal::Data(why) => write!(f, "{why}"),
@@ -286,6 +294,10 @@ impl CloneRefusal {
     pub fn retryable(&self) -> bool {
         match self {
             CloneRefusal::Source { error, .. } => error.retryable(),
+            CloneRefusal::Version { refusal, .. } => matches!(
+                refusal.as_ref(),
+                crate::promotion::PromotionRefusal::Store(_)
+            ),
             CloneRefusal::Store(_) => true,
             _ => false,
         }
@@ -301,6 +313,11 @@ impl CloneRefusal {
             }
             CloneRefusal::Source { error, .. } if error.retryable() => {
                 ExecError::new(ErrorCode::SpaceUnavailable, message)
+            }
+            CloneRefusal::Version { refusal, .. } => {
+                let mut e = refusal.to_exec_error(what);
+                e.message = message;
+                e
             }
             CloneRefusal::NoTenant { .. } => ExecError::new(ErrorCode::NotFound, message),
             CloneRefusal::Setting(_) | CloneRefusal::Input(_) => {
@@ -384,6 +401,8 @@ pub struct CloneSettings {
     pub mask: Mask,
     /// `clone.readers`, read on the deployment a clone lands in.
     pub readers: BTreeSet<String>,
+    /// `clone.sinks`, read on the deployment a clone lands in.
+    pub sinks: crate::sinks::SinkScope,
 }
 
 fn parse_readers(value: &str) -> Result<BTreeSet<String>, CloneRefusal> {
@@ -413,9 +432,10 @@ fn parse_readers(value: &str) -> Result<BTreeSet<String>, CloneRefusal> {
 pub async fn settings(pool: &Pool) -> Result<CloneSettings, CloneRefusal> {
     let sql = format!(
         "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" FROM \"$version_settings\" \
-         WHERE \"setting\" IN ({}, {}) ORDER BY \"setting\", \"seq\" DESC",
+         WHERE \"setting\" IN ({}, {}, {}) ORDER BY \"setting\", \"seq\" DESC",
         sql_lit(MASK_SETTING),
-        sql_lit(READERS_SETTING)
+        sql_lit(READERS_SETTING),
+        sql_lit(SINKS_SETTING)
     );
     let rows = match pool.rows(&sql).await {
         Ok(rows) => rows,
@@ -430,6 +450,8 @@ pub async fn settings(pool: &Pool) -> Result<CloneSettings, CloneRefusal> {
             out.mask = Mask::parse(&value)?;
         } else if name == READERS_SETTING {
             out.readers = parse_readers(&value)?;
+        } else if name == SINKS_SETTING {
+            out.sinks = crate::sinks::SinkScope::parse(&value).map_err(CloneRefusal::Setting)?;
         }
     }
     Ok(out)
@@ -449,15 +471,21 @@ pub async fn set_setting(
     let name = match setting.trim() {
         MASK_SETTING | "mask" => MASK_SETTING,
         READERS_SETTING | "readers" => READERS_SETTING,
+        SINKS_SETTING | "sinks" => SINKS_SETTING,
         other => {
             return Err(CloneRefusal::Setting(format!(
-                "`{other}` is not a clone setting. There are {MASK_SETTING} and \
-                 {READERS_SETTING}"
+                "`{other}` is not a clone setting. There are {MASK_SETTING}, \
+                 {READERS_SETTING} and {SINKS_SETTING}"
             )))
         }
     };
     let stored = if name == MASK_SETTING {
         Mask::parse(value)?.value()
+    } else if name == SINKS_SETTING {
+        crate::sinks::SinkScope::parse(value)
+            .map_err(CloneRefusal::Setting)?
+            .word()
+            .to_string()
     } else {
         let r = parse_readers(value)?;
         if r.is_empty() {
@@ -965,6 +993,11 @@ pub struct CloneOut {
     pub not_cloned: Vec<String>,
     /// Who production read the request as.
     pub read_by: String,
+    /// The tenant has a database of its own on production. Staging makes
+    /// the clone one of its own; nothing of production's is named.
+    pub own_database: bool,
+    /// The tenant keeps its files in a bucket of its own on production.
+    pub own_bucket: bool,
 }
 
 impl CloneOut {
@@ -974,7 +1007,8 @@ impl CloneOut {
             "version": self.version, "sourceId": self.source_id,
             "sealed": base64::engine::general_purpose::STANDARD.encode(&self.sealed),
             "report": self.report.to_json(), "notCloned": self.not_cloned,
-            "readBy": self.read_by,
+            "readBy": self.read_by, "ownDatabase": self.own_database,
+            "ownBucket": self.own_bucket,
         })
     }
 
@@ -1003,6 +1037,8 @@ impl CloneOut {
                 })
                 .unwrap_or_default(),
             read_by: text("readBy")?,
+            own_database: v["ownDatabase"].as_bool().unwrap_or(false),
+            own_bucket: v["ownBucket"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -1118,6 +1154,29 @@ pub async fn clone_out(
     let mask = settings(pool).await?.mask;
     let (masked, report) = mask_bundle(&members, &fixture.schema, &mask)?;
     let sealed = recipient_key.seal(&pack(&masked), &aad(&t.id, &source_id, &to.name));
+    // Whether the tenant has storage of its own: a yes or no, never where
+    // or with what credential.
+    let own_database = !t.target.is_empty()
+        || ordo_exec::spacedb::lookup(pool, &sid)
+            .await
+            .or_else(|e| {
+                if e.is_missing_table() {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            })?
+            .is_some();
+    let own_bucket = ordo_exec::bucket::lookup(pool, &sid)
+        .await
+        .or_else(|e| {
+            if e.is_missing_table() {
+                Ok(None)
+            } else {
+                Err(e)
+            }
+        })?
+        .is_some();
     Ok(CloneOut {
         env: own.name,
         tenant: t.id,
@@ -1133,6 +1192,8 @@ pub async fn clone_out(
             .map(|e| e.name.clone())
             .collect(),
         read_by: caller.to_string(),
+        own_database,
+        own_bucket,
     })
 }
 
@@ -1189,6 +1250,43 @@ pub struct Cloned {
     pub record: CloneRecord,
     pub report: MaskReport,
     pub not_cloned: Vec<String>,
+    /// The version that came down with the clone, when staging did not
+    /// hold it. Stored, not activated, recorded in `$promotions` as a
+    /// clone.
+    pub arrived: Option<String>,
+    /// Where the clone's rows are in staging.
+    pub database: Storage,
+    /// Production keeps the tenant's files in a bucket of its own. Files are
+    /// never cloned; the clone's new files go to staging's file store.
+    pub own_bucket: bool,
+}
+
+/// Where a clone's rows are in staging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Storage {
+    /// Production's tenant shares its deployment's database, and so does
+    /// the clone.
+    Shared,
+    /// A database of its own on staging's tenant cluster, by its label.
+    Own(String),
+    /// Production's tenant has a database of its own, and this server was
+    /// assembled with no tenant databases to give: the clone shares
+    /// staging's.
+    NotGiven,
+}
+
+impl Storage {
+    pub fn to_json(&self) -> Value {
+        match self {
+            Storage::Shared => json!({ "database": "shared" }),
+            Storage::Own(label) => json!({ "database": "own", "label": label }),
+            Storage::NotGiven => json!({
+                "database": "shared",
+                "note": "production's tenant has a database of its own, and this server gives \
+                         no tenant a database of its own",
+            }),
+        }
+    }
 }
 
 /// The stored version here whose source identity is `source_id`.
@@ -1227,11 +1325,13 @@ fn check_tenant_name(name: &str) -> Result<String, CloneRefusal> {
 /// The other deployment masks and seals it; this one opens it, makes a new
 /// tenant pinned to the clone's version, writes its members with no sign-in
 /// link, and imports the rows under its own keys. Recorded in `$clones`.
+#[allow(clippy::too_many_arguments)]
 pub async fn clone_in(
     pool: &Pool,
     pools: &dyn PoolResolver,
     keys: &Arc<dyn KeyProvider>,
     home: &str,
+    tenants: Option<&crate::tenant_ops::TenantOps>,
     req: CloneInRequest<'_>,
     actor: &str,
     at: u64,
@@ -1284,12 +1384,40 @@ pub async fn clone_in(
             here: actor.to_string(),
         });
     }
-    let Some(local) = version_here(pool, &out.source_id).await? else {
-        return Err(CloneRefusal::VersionNotHere {
-            version: out.version,
-            source_id: out.source_id,
-            from: from.name,
-        });
+    // A version staging does not hold comes down with the clone, through
+    // the promotion gate, read from production as the same person, and is
+    // recorded as a clone (`promotion::arrive_with_clone`).
+    let mut arrived = None;
+    let local = match version_here(pool, &out.source_id).await? {
+        Some(local) => local,
+        None => {
+            let p = crate::promotion::arrive_with_clone(
+                pool,
+                pools,
+                &from,
+                &out.version,
+                &crate::promotion::SourceCredential::Person {
+                    token: req.token.to_string(),
+                },
+                &format!("with the clone of {}: {reason}", out.tenant),
+                actor,
+                at,
+            )
+            .await
+            .map_err(|e| CloneRefusal::Version {
+                version: out.version.clone(),
+                from: from.name.clone(),
+                refusal: Box::new(e),
+            })?;
+            let Some(local) = version_here(pool, &out.source_id).await? else {
+                return Err(CloneRefusal::Data(format!(
+                    "{} arrived from `{}` and is not stored here under source {}",
+                    out.version, from.name, out.source_id
+                )));
+            };
+            arrived = Some(p.report.version.clone());
+            local
+        }
     };
     let secret = own_key(pool, keys.as_ref(), home, at).await?;
     let plain = secret
@@ -1318,12 +1446,39 @@ pub async fn clone_in(
     let id = crate::tenants::mint_space_id();
     crate::tenants::ensure_table(pool).await?;
     crate::tenants::reserve(pool, &id, &tenant_name, actor, at, None).await?;
-    match land(
-        pool, pools, keys, &id, &local, &artifact, &members, actor, at,
-    )
-    .await
-    {
-        Ok((opens_as, rows)) => {
+    // **Its own database, when production's tenant has one** (§3.4): made
+    // on staging's own tenant cluster with staging's credential, as a new
+    // tenant here gets one. Production's database is never named.
+    let database = match (out.own_database, tenants) {
+        (false, _) => Ok(Storage::Shared),
+        (true, Some(t)) if t.gives_databases() => t
+            .clone_database(&id)
+            .await
+            .map(Storage::Own)
+            .map_err(|why| {
+                CloneRefusal::Data(format!("the clone's own database could not be made: {why}"))
+            }),
+        (true, _) => Ok(Storage::NotGiven),
+    };
+    let landed = match database {
+        Ok(database) => land(
+            pool,
+            pools,
+            keys,
+            &id,
+            &local,
+            &artifact,
+            &members,
+            matches!(database, Storage::Own(_)),
+            actor,
+            at,
+        )
+        .await
+        .map(|r| (r, database)),
+        Err(e) => Err(e),
+    };
+    match landed {
+        Ok(((opens_as, rows), database)) => {
             let record = CloneRecord {
                 space: id,
                 name: tenant_name,
@@ -1361,6 +1516,9 @@ pub async fn clone_in(
                 record,
                 report: out.report,
                 not_cloned: out.not_cloned,
+                arrived,
+                database,
+                own_bucket: out.own_bucket,
             })
         }
         Err(e) => {
@@ -1381,16 +1539,54 @@ async fn land(
     version: &str,
     artifact: &crate::versions::Artifact,
     members: &BTreeMap<String, Vec<u8>>,
+    custody_made: bool,
     actor: &str,
     at: u64,
 ) -> Result<(String, u64), CloneRefusal> {
     let sid = SpaceId(id.to_string());
-    keys.create_space(&sid)
-        .map_err(|e| CloneRefusal::Custody(e.to_string()))?;
+    // An own database's provisioning minted custody with it.
+    if !custody_made {
+        keys.create_space(&sid)
+            .map_err(|e| CloneRefusal::Custody(e.to_string()))?;
+    }
     let space_pool = pools
         .resolve(&sid)
         .await
         .map_err(|e| CloneRefusal::Data(format!("the new tenant's database: {e}")))?;
+
+    // **The clone's database holds its version's schema** before a row is
+    // written. A database of its own was made empty, or on whatever this
+    // deployment serves, so it is brought to the clone's version as a
+    // tenant's database is. The deployment's shared database is never
+    // changed here (the promotion gate is what applies a version to it),
+    // so one that lacks the version's tables is refused, naming the fix.
+    let mut program = crate::schema_apply::Program::compile(&artifact.source)
+        .map_err(|e| CloneRefusal::Data(format!("{version} does not compile here: {e}")))?;
+    program.version = version.to_string();
+    if custody_made {
+        crate::schema_apply::bring_forward_from(&space_pool, Some(pool), &program, actor, CLONE_IN)
+            .await
+            .map_err(|e| {
+                CloneRefusal::Data(format!(
+                    "the clone's own database could not be brought to {version}: {e}"
+                ))
+            })?;
+    } else {
+        match crate::schema_apply::schema_state(&space_pool, &program.schema)
+            .await
+            .map_err(CloneRefusal::Data)?
+        {
+            crate::schema_apply::SchemaState::Matches { .. } => {}
+            _ => {
+                return Err(CloneRefusal::Data(format!(
+                    "this deployment's database does not hold the tables of {version}, the \
+                     clone's version, and a clone never changes it. Apply {version} here \
+                     first: `ordo promote {version} --reason \"...\"`, or `ordo evolve --to \
+                     {version} --run`, then clone again"
+                )))
+            }
+        }
+    }
 
     // The members: kept ids and roles, masked names, no sign-in link.
     let body = members
@@ -1459,8 +1655,8 @@ async fn land(
     for (k, v) in members {
         source.put(k, v.clone());
     }
-    // The import's name scopes its batch leases, which live beside every
-    // other tenant's in the database: one name per clone.
+    // The import's name, recorded in `$importmap`. Its batch leases are
+    // keyed by the space as well, so two clones never meet there.
     let import_name = format!("clone_{id}");
     let report = ordo_exec::import::import_space(
         &exec,
@@ -1583,6 +1779,9 @@ pub struct CloneOps {
     pub apply: Arc<crate::apply_op::ApplyOps>,
     pub keys: Arc<dyn KeyProvider>,
     pub access: Arc<CloneAccess>,
+    /// What gives a clone a database of its own, when production's tenant
+    /// has one. `None`: the clone shares this deployment's database.
+    pub tenants: Option<Arc<crate::tenant_ops::TenantOps>>,
 }
 
 fn text<'a>(bound: &'a BoundParams, k: &str) -> Option<&'a str> {
@@ -1646,6 +1845,8 @@ pub fn specs() -> Vec<OpSpec> {
                 "report",
                 "notCloned",
                 "readBy",
+                "ownDatabase",
+                "ownBucket",
             ],
         ),
         spec(
@@ -1660,9 +1861,35 @@ pub fn specs() -> Vec<OpSpec> {
                 param("name", 128, false),
                 param("reason", 4096, true),
             ],
-            &["clone", "report", "notCloned"],
+            &[
+                "clone",
+                "report",
+                "notCloned",
+                "arrived",
+                "storage",
+                "ownBucket",
+            ],
         ),
-        spec(CLONES, OpKind::Read, vec![], &["clones", "mask", "readers"]),
+        spec(
+            CLONES,
+            OpKind::Read,
+            vec![],
+            &["clones", "mask", "readers", "sinks"],
+        ),
+        spec(
+            SINKS,
+            OpKind::Read,
+            vec![
+                param("tenant", 128, false),
+                ParamSpec {
+                    name: "limit".to_string(),
+                    ty: ParamTy::Int,
+                    required: false,
+                    bounds: None,
+                },
+            ],
+            &["entries"],
+        ),
         spec(
             SET_CLONE_SETTING,
             OpKind::Write,
@@ -1671,7 +1898,7 @@ pub fn specs() -> Vec<OpSpec> {
                 param("value", 4096, true),
                 param("reason", 4096, true),
             ],
-            &["setting", "mask", "readers"],
+            &["setting", "mask", "readers", "sinks"],
         ),
     ]
 }
@@ -1761,6 +1988,7 @@ impl CloneOps {
                     ops.pools.as_ref(),
                     &self.keys,
                     &ops.home,
+                    self.tenants.as_deref(),
                     CloneInRequest {
                         from: text(bound, "from").unwrap_or_default(),
                         tenant: text(bound, "tenant").unwrap_or_default(),
@@ -1781,18 +2009,21 @@ impl CloneOps {
                     CLONE_IN,
                     "cloned-in",
                     format!(
-                        "space={} from={} tenant={} version={} rows={} by={caller} reason={}",
+                        "space={} from={} tenant={} version={} arrived={} rows={} by={caller} \
+                         reason={}",
                         r.space,
                         r.from_env,
                         r.from_tenant,
                         r.version,
+                        done.arrived.is_some(),
                         r.rows,
                         reason.trim()
                     ),
                 );
                 json!({
                     "clone": r.to_json(), "report": done.report.to_json(),
-                    "notCloned": done.not_cloned,
+                    "notCloned": done.not_cloned, "arrived": done.arrived,
+                    "storage": done.database.to_json(), "ownBucket": done.own_bucket,
                 })
             }
             CLONES => {
@@ -1806,6 +2037,32 @@ impl CloneOps {
                     "clones": list.iter().map(CloneRecord::to_json).collect::<Vec<_>>(),
                     "mask": s.mask.value(),
                     "readers": s.readers.iter().collect::<Vec<_>>(),
+                    "sinks": s.sinks.word(),
+                })
+            }
+            SINKS => {
+                let limit = bound
+                    .0
+                    .get("limit")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(100)
+                    .clamp(1, i64::from(crate::sinks::READ_MAX)) as u32;
+                // A tenant by id, or by name.
+                let space = match text(bound, "tenant").map(str::trim) {
+                    None | Some("") => None,
+                    Some(t) => Some(match find_tenant(&ops.pool, t).await {
+                        Ok(found) => found.id,
+                        Err(CloneRefusal::NoTenant { .. }) => t.to_string(),
+                        Err(e) => return Err(e.to_exec_error("the sinks could not be read")),
+                    }),
+                };
+                let list = crate::sinks::entries(&ops.pool, space.as_deref(), limit)
+                    .await
+                    .map_err(|e| {
+                        CloneRefusal::Store(e).to_exec_error("the sinks could not be read")
+                    })?;
+                json!({
+                    "entries": list.iter().map(crate::sinks::SinkEntry::to_json).collect::<Vec<_>>(),
                 })
             }
             SET_CLONE_SETTING => {
@@ -1830,6 +2087,7 @@ impl CloneOps {
                 json!({
                     "setting": setting.trim(), "mask": s.mask.value(),
                     "readers": s.readers.iter().collect::<Vec<_>>(),
+                    "sinks": s.sinks.word(),
                 })
             }
             other => return Err(ExecError::internal(format!("`{other}` is not a clone op"))),

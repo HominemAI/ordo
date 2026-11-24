@@ -24,6 +24,11 @@
 //! own space, with the bearer. The token is held for that one request and
 //! never stored or logged. The answer is bounded to 4 MiB.
 //!
+//! Staging reaches production through the same client for a clone
+//! (`plan-versions.md` §3.4): one `POST /op/std.deployment.cloneOut`, as the
+//! person cloning, with their own token for production. That answer carries
+//! the sealed bundle and is bounded to [`MAX_CLONE_BYTES`].
+//!
 //! # One error
 //!
 //! Every failure is a [`StepDoorError`], which keeps its cause and says
@@ -43,6 +48,14 @@ pub const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long one read may take, connect to last byte.
 pub const READ_SECS: u64 = 30;
+
+/// The largest clone answer read from production: the sealed bundle,
+/// base64, with its record.
+pub const MAX_CLONE_BYTES: usize = 64 * 1024 * 1024;
+
+/// How long a clone may take, connect to last byte: production masks and
+/// seals the whole tenant before it answers.
+pub const CLONE_SECS: u64 = 300;
 
 /// Whether `ORDO_PROMOTION_PLAIN_HTTP=on` in this process.
 pub fn plain_http_allowed() -> bool {
@@ -81,12 +94,12 @@ impl fmt::Display for StepDoorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StepDoorError::Address { address, why } => {
-                write!(f, "the step before's address `{address}` {why}")
+                write!(f, "the address `{address}` {why}")
             }
             StepDoorError::Unreachable { address, cause } => write!(
                 f,
-                "the step before at {address} could not be reached ({cause}). Check it is \
-                 running, then promote again"
+                "the deployment at {address} could not be reached ({cause}). Check it is \
+                 running, then try again"
             ),
             StepDoorError::Refused {
                 address,
@@ -94,18 +107,18 @@ impl fmt::Display for StepDoorError {
                 message,
             } => write!(
                 f,
-                "the step before at {address} refused your sign-in ({status}: {message}). \
-                 Promoting reads the version there as you: sign in to it through the same \
-                 identity service as this deployment (`ordo login`), as an admin of both"
+                "the deployment at {address} refused your sign-in ({status}: {message}). \
+                 This reads there as you: sign in to it through the same identity service as \
+                 this deployment (`ordo login`), as an admin of both"
             ),
             StepDoorError::NoVersion { address, message } => {
                 write!(
                     f,
-                    "the step before at {address} has no such version: {message}"
+                    "the deployment at {address} has no such version: {message}"
                 )
             }
             StepDoorError::Answer { address, why } => {
-                write!(f, "the step before at {address} answered {why}")
+                write!(f, "the deployment at {address} answered {why}")
             }
         }
     }
@@ -168,14 +181,45 @@ impl StepDoor {
             crate::deploy_ops::VERSION_SOURCE,
             query_escape(version)
         );
-        let read = self.get(&path, space, bearer);
+        let read = self.send("GET", &path, space, bearer, None, MAX_ANSWER_BYTES);
+        self.first_row(read, READ_SECS).await
+    }
+
+    /// **Ask production for a masked, sealed clone of one tenant**, as the
+    /// person cloning: `std.deployment.cloneOut` in production's own
+    /// `space`, with `bearer`. The answer's first row.
+    pub async fn clone_out(
+        &self,
+        space: &str,
+        bearer: &str,
+        tenant: &str,
+        env: &str,
+    ) -> Result<Value, StepDoorError> {
+        let body = serde_json::json!({ "$space": space, "tenant": tenant, "env": env });
+        let path = format!("/op/{}", crate::clones::CLONE_OUT);
+        let read = self.send(
+            "POST",
+            &path,
+            space,
+            bearer,
+            Some(body.to_string().into_bytes()),
+            MAX_CLONE_BYTES,
+        );
+        self.first_row(read, CLONE_SECS).await
+    }
+
+    async fn first_row(
+        &self,
+        read: impl std::future::Future<Output = Result<(u16, Vec<u8>), StepDoorError>>,
+        secs: u64,
+    ) -> Result<Value, StepDoorError> {
         let (status, body) =
-            match tokio::time::timeout(std::time::Duration::from_secs(READ_SECS), read).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), read).await {
                 Ok(r) => r?,
                 Err(_) => {
                     return Err(StepDoorError::Unreachable {
                         address: self.address.clone(),
-                        cause: format!("no answer in {READ_SECS} seconds"),
+                        cause: format!("no answer in {secs} seconds"),
                     })
                 }
             };
@@ -219,28 +263,39 @@ impl StepDoor {
         }
     }
 
-    async fn get(
+    async fn send(
         &self,
+        method: &'static str,
         path: &str,
         space: &str,
         bearer: &str,
+        body: Option<Vec<u8>>,
+        max: usize,
     ) -> Result<(u16, Vec<u8>), StepDoorError> {
         use futures::StreamExt;
         let unreachable = |cause: String| StepDoorError::Unreachable {
             address: self.address.clone(),
             cause,
         };
+        let mut headers = vec![
+            ("authorization".into(), format!("Bearer {bearer}")),
+            ("accept".into(), "application/json".into()),
+            (ordo_api::router::SPACE_HEADER.into(), space.to_string()),
+        ];
+        let body = body.map(|bytes| {
+            headers.push(("content-type".into(), "application/json".into()));
+            let len = bytes.len() as u64;
+            let stream: ordo_blob::ByteStream =
+                Box::pin(futures::stream::once(async move { Ok(bytes) }));
+            (len, stream)
+        });
         let response = http::send(
             &self.endpoint,
             Request {
-                method: "GET",
+                method,
                 path: path.to_string(),
-                headers: vec![
-                    ("authorization".into(), format!("Bearer {bearer}")),
-                    ("accept".into(), "application/json".into()),
-                    (ordo_api::router::SPACE_HEADER.into(), space.to_string()),
-                ],
-                body: None,
+                headers,
+                body,
             },
         )
         .await
@@ -250,10 +305,10 @@ impl StepDoor {
         let mut stream = response.body;
         while let Some(chunk) = stream.next().await {
             out.extend_from_slice(&chunk.map_err(|e| unreachable(e.to_string()))?);
-            if out.len() > MAX_ANSWER_BYTES {
+            if out.len() > max {
                 return Err(StepDoorError::Answer {
                     address: self.address.clone(),
-                    why: format!("more than {} MiB", MAX_ANSWER_BYTES / (1024 * 1024)),
+                    why: format!("more than {} MiB", max / (1024 * 1024)),
                 });
             }
         }

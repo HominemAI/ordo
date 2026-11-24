@@ -1040,6 +1040,7 @@ async fn signed_state(db: &str) -> (ApiState, std::sync::Arc<ordo_host::Identity
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
     });
     let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
         db: db.to_string(),
@@ -1200,6 +1201,7 @@ async fn suspension_stops_a_valid_token_immediately() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
     });
     state.access = access.clone();
 

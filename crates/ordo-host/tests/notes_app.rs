@@ -1002,6 +1002,135 @@ async fn a_program_update_leaves_the_people_who_signed_up_working() {
     d.stop();
 }
 
+/// Increment 10b (`plan-versions.md`; `plan-backfill-dual-writes.md` B1,
+/// B3): **a backfill over a person's existing notes, through the door.**
+/// The next version gives every note a required `heading`, filled from its
+/// title. The deployment owner stores the step with `--fill`
+/// (`std.deployment.evolve`) and replays Ada's tenant onto it
+/// (`std.deployment.replay`). Until the backfill completes Ada reads the
+/// same notes on the version she was on; after it, the new op shows each
+/// note's heading, her chain holds one summarised record of the 40 rows,
+/// and a note written after lands with its heading.
+///
+/// A regression looks like Ada's notes changing before the move, a heading
+/// left null, a tenant pinned to the new version over a half-filled column,
+/// or no audit record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backfill_over_existing_notes_shows_the_new_values_once_it_completes() {
+    let _shared = shared().await;
+    let d = Deployment::boot("ordo_notes_backfill", Some(PAGE)).await;
+    let ada = sign_up(&d, &device(23, "ada"), "Ada");
+    for i in 0..40 {
+        create_note(&d, &ada, &format!("Note {i:02}"), "body");
+    }
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let before = titles(&d.rows(&ada.space, &ada.token, "myNotes"));
+    assert_eq!(before.len(), 40);
+
+    // The next version: a required heading on every note, written by the
+    // ops from here on, and an op that reads it.
+    let next = raised(
+        &SOURCE
+            .replace(
+                "  created: datetime\n",
+                "  created: datetime\n  heading: text\n",
+            )
+            .replace(
+                "set notes { title: $title, body: $body, tags: $tags, created: $created }",
+                "set notes { title: $title, body: $body, tags: $tags, created: $created, heading: $title }",
+            ),
+    ) + "\nop headings unbounded =\n  notes[id, title, heading]\n  sort -created\n";
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let program = ordo_host::schema_apply::Program::compile(&next).expect("compiles");
+    // Stored, not activated: no database holds the step yet.
+    let stored = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored");
+    let to = stored.version.clone();
+    let owner = deployment_owner_token();
+
+    // A step that makes a field required with no fill is refused, naming
+    // `--fill`; with it, it is stored with the backfill in its receipt.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.evolve",
+        json!({"from": from, "to": to}),
+    );
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("--fill notes.heading="), "{body}");
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.evolve",
+        json!({"from": from, "to": to, "fill": "notes.heading=title"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let plan = &body["rows"][0];
+    assert_eq!(
+        plan["receipt"]["backfills"][0]["mapping"], "title",
+        "{plan}"
+    );
+    assert_eq!(
+        plan["receipt"]["backfills"][0]["audit"], "summarised",
+        "{plan}"
+    );
+
+    // Nothing Ada sees has changed: she is still on her version.
+    assert_eq!(titles(&d.rows(&ada.space, &ada.token, "myNotes")), before);
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(from.as_str()));
+
+    // The move: her database expands, the backfill fills 40 rows and
+    // verifies, `NOT NULL` lands, and her pin follows.
+    let (status, body) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.replay",
+        json!({"tenant": ada.space, "to": to}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let r = &body["rows"][0];
+    let bf = &r["steps"][0]["backfills"][0];
+    assert_eq!(bf["verified"]["rows"], 40, "{r}");
+    assert_eq!(r["pinned"]["to"], json!(to), "{r}");
+
+    // Then the new values appear, beside the same notes.
+    let (rows, _) = eventually("Ada is served the new version", || {
+        let (status, body) = d.op(&ada.space, &ada.token, "GET", "headings", json!({}));
+        (status == 200).then(|| body["rows"].as_array().cloned().unwrap_or_default())
+    });
+    assert_eq!(rows.len(), 40);
+    for r in &rows {
+        assert_eq!(r["heading"], r["title"], "{r}");
+    }
+    assert_eq!(titles(&d.rows(&ada.space, &ada.token, "myNotes")), before);
+    create_note(&d, &ada, "After", "written on the new version");
+    let rows = d.rows(&ada.space, &ada.token, "headings");
+    assert_eq!(rows[0]["heading"], "After");
+
+    // Her chain holds one summarised record of the backfill.
+    let theirs = Pool::connect(cfg(&ada.space))
+        .await
+        .expect("Ada's database");
+    let n = theirs
+        .rows("SELECT count(*) FROM \"$commandlog\" WHERE actor = 'system:backfill'")
+        .await
+        .expect("the chain");
+    assert_eq!(n[0][0].as_deref(), Some("1"));
+    d.stop();
+}
+
 /// Increment 7 (`plan-versions.md` §2.1). A change one tenant's data cannot
 /// take leaves that tenant serving the version it was on, and the deployment
 /// owner sees why. Ada has two notes and the program makes titles unique,

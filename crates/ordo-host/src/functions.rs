@@ -739,6 +739,8 @@ pub struct HostFunctions {
     /// The blob door's port, when the deployment stores files.
     blobs: Option<Arc<dyn BlobPort>>,
     settings: FnSettings,
+    /// The tables of versions a backfill calls into (10b), by version.
+    backfill_tables: std::sync::Mutex<HashMap<String, Arc<FnTable>>>,
 }
 
 impl HostFunctions {
@@ -762,6 +764,7 @@ impl HostFunctions {
             scrub,
             blobs: None,
             settings: FnSettings::default(),
+            backfill_tables: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1083,6 +1086,95 @@ impl FunctionRunner for HostFunctions {
             }
             run.outcome.map_err(exec_error)
         })
+    }
+}
+
+/// **Backfill functions** (`plan-versions.md` increment 10b, B6; D16): the
+/// worker calls a function of the version a step goes to, once per chunk.
+///
+/// - The version need not be served yet: a step runs before the switch, so
+///   its table is read from the registry and kept for the next chunk.
+/// - It reaches exactly the secrets and hosts the plan declares (ruled
+///   2026-11-23, Q14), never the function's own wider lists. A fetch to
+///   another host, or a secret not declared, is refused by the runtime.
+/// - It calls no op and reads no file: there is no person calling.
+/// - Each call is a `$fnruns` row, attributed `system:backfill`.
+#[async_trait::async_trait]
+impl crate::backfill::BackfillFunctions for HostFunctions {
+    async fn call(&self, chunk: crate::backfill::FunctionChunk) -> Result<Value, String> {
+        let held = self
+            .backfill_tables
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&chunk.version)
+            .cloned();
+        let table = match held {
+            Some(t) => t,
+            None => {
+                let stored = crate::versions::Versions::on(&self.control)
+                    .get(&chunk.version)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("version {} is not stored", chunk.version))?;
+                let program = crate::schema_apply::Program::from_artifact(&stored)?;
+                let t = Arc::new(
+                    Self::read_table(&self.control, &chunk.version, &program.schema).await?,
+                );
+                self.backfill_tables
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(chunk.version.clone(), t.clone());
+                t
+            }
+        };
+        let entry = table.by_name.get(&chunk.name).cloned().ok_or_else(|| {
+            format!(
+                "version {} declares no function `{}`",
+                chunk.version, chunk.name
+            )
+        })?;
+        let host = self
+            .host
+            .get_or_try_init(|| FnHost::new(self.config.clone()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let scrub = self.scrub.for_call(&chunk.space, &chunk.secrets).await;
+        let started_at = now_secs();
+        let run = host
+            .call(FnCall {
+                space: chunk.space.clone(),
+                function: entry.decl.name.name.clone(),
+                version: entry.version.clone(),
+                run_id: fresh_run_id(),
+                code: entry.code.clone(),
+                input: chunk.input,
+                egress: chunk.hosts,
+                secrets: chunk.secrets,
+                limits: entry.limits(),
+                fetch: self.fetch.clone(),
+                scrub,
+                blobs: Arc::new(NoBlobs),
+                blob_args: Vec::new(),
+                uses: Vec::new(),
+                ops: Arc::new(NoOps),
+            })
+            .await;
+        if let Err(e) = record_run(
+            &self.control,
+            &entry,
+            &chunk.space,
+            "system:backfill",
+            started_at,
+            &run,
+        )
+        .await
+        {
+            eprintln!(
+                "ordo: $fnruns write failed for {}: {e}",
+                entry.decl.name.name
+            );
+        }
+        run.outcome.map_err(|e| e.to_string())
     }
 }
 

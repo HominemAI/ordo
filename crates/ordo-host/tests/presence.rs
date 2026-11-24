@@ -186,6 +186,12 @@ const READS: &[&str] = &[
     "std.deployment.plans",
     // Whether a rollback's version still reads its externals and peers.
     "std.deployment.rollbackCheck",
+    // Staging's public clone key, which production seals a clone to. Public
+    // by design; made on first read (versions increment 12).
+    "std.deployment.cloneKey",
+    // The clones this deployment holds and the clone settings; deployment
+    // owner only, home space.
+    "std.deployment.clones",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

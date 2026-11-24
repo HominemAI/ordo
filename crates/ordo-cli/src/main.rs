@@ -94,6 +94,10 @@ fn usage() -> ! {
          time, then pin it (`std.deployment.replay`).\n  \
          ordo evolve --list [--from <version>] [--to <version>]\n      \
          the stored plans (`std.deployment.plans`).\n  \
+         ordo evolve --orphans\n      \
+         what versions left behind in every database (`std.deployment.orphans`).\n  \
+         ordo evolve --prune <entity.field> [--confirm <entity.field>] [--confirm-deployment <name>]\n      \
+         remove an orphan from every database, asked twice (`std.deployment.prune`).\n  \
          ordo release-check --direct [--db <db>] [--json] [--override --reason <why>]\n      \
          run from the new image before its tag changes: every version a\n      \
          tenant is pinned to or may move to must compile and load under\n      \

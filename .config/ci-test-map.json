@@ -441,6 +441,7 @@
     "crates/ordo-host/src/node_status.rs": "all",
     "crates/ordo-host/src/observed_cost.rs": "all",
     "crates/ordo-host/src/oidc.rs": "all",
+    "crates/ordo-host/src/orphan_ops.rs": "all",
     "crates/ordo-host/src/own_download.rs": [
       "marketing_site_app",
       "notes_app",

@@ -670,6 +670,9 @@ impl ExitOps {
             rows: vec![json!({
                 "space": erased.space,
                 "rowsDeleted": erased.total_deleted(),
+                // What versions left behind here, reached with the rest
+                // (`$orphans`, plan-versions.md §2.7).
+                "orphans": erased.orphans,
                 "deleted": erased.deleted.iter().map(|(t, n)| json!({
                     "table": t, "rows": n,
                 })).collect::<Vec<_>>(),

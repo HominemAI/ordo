@@ -128,6 +128,7 @@ export function everything(reason, packages, { perf = false } = {}) {
     identityE2e: true,
     federationE2e: true,
     marketingSiteE2e: true,
+    teamspaceE2e: true,
   };
 }
 
@@ -278,6 +279,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
     identityE2e: false,
     federationE2e: false,
     marketingSiteE2e: false,
+    teamspaceE2e: false,
   };
 
   // A file under a crate's tests/: the test binaries it reaches (rule 6).
@@ -345,6 +347,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
           EXAMPLE_JOBS.forEach((x) => examples.add(x));
           flags.notesE2e = true;
           flags.federationE2e = true;
+          flags.teamspaceE2e = true;
           tests.add('ordo-host');
         }
       } else return everything(`${f} is in a client CI does not know`, packages);
@@ -361,6 +364,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
       if (app === 'notes' || app === 'notes-v2' || app === 'notes-v3') flags.notesE2e = true;
       // The federation e2e runs notes v2 beside note_viewer.
       if (app === 'notes-v2' || app === 'notes-v3' || app === 'note-viewer') flags.federationE2e = true;
+      if (app === 'teamspace' || app === 'e2e-common') flags.teamspaceE2e = true;
       reader(f);
       continue;
     }
@@ -448,6 +452,7 @@ export function affected({ files, packages, readersOf = () => [], io = { read: (
   // scripts/authz-matrix.sh runs ordo-host's authz_matrix.
   if (runs(HOST, 'authz_matrix')) flags.authz = true;
   if (any(built, NOTES_E2E_BUILDS)) { flags.notesE2e = true; flags.marketingSiteE2e = true; }
+  if (any(built, NOTES_E2E_BUILDS)) { flags.notesE2e = true; flags.teamspaceE2e = true; }
   if (any(built, CONSOLE_E2E_BUILDS)) flags.consoleE2e = true;
   if (any(built, IDENTITY_E2E_BUILDS)) flags.identityE2e = true;
   if (any(built, FEDERATION_E2E_BUILDS)) flags.federationE2e = true;
@@ -505,6 +510,7 @@ export function outputs(r) {
     identity_e2e: b(r.identityE2e),
     federation_e2e: b(r.federationE2e),
     marketing_site_e2e: b(r.marketingSiteE2e),
+    teamspace_e2e: b(r.teamspaceE2e),
   };
 }
 
@@ -662,7 +668,7 @@ function decide(argv, env) {
  * node at once failed timing tests that pass alone.
  */
 export function deferToPullRequest(out) {
-  const off = ['perf', 'rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e', 'federation_e2e', 'marketing_site_e2e'];
+  const off = ['perf', 'rest', 'host', 's3', 'upgrade', 'audit', 'notes_e2e', 'authz', 'console_e2e', 'identity_e2e', 'federation_e2e', 'marketing_site_e2e', 'teamspace_e2e'];
   const d = { ...out, reason: `a pull request to main is open and runs everything (${out.reason})` };
   for (const k of off) d[k] = 'false';
   d.clients = '';

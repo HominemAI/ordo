@@ -132,3 +132,7 @@ After a change to `viewer.ordo`, run `npm run gen` in `web/`.
 
 `e2e/` is the federation end-to-end suite. `docs/howto-e2e.md`, "Two
 deployments", says what it covers and how to run it.
+
+The end-to-end workflow also accepts `coverage: true`. It runs instrumented
+Rust binaries and uploads LCOV data for the example coverage ratchet. See
+`docs/howto-e2e.md`, "Coverage through the examples".

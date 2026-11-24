@@ -88,8 +88,10 @@ pids=''
 own_pg=0
 
 stop() {
-  for p in $pids; do kill "$p" 2>/dev/null || true; done
-  wait 2>/dev/null || true
+  # LLVM flushes the host profile on normal exit. Keep Postgres alive until
+  # every child has handled SIGTERM and finished.
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+  for p in $pids; do wait "$p" 2>/dev/null || true; done
   if [ "$own_pg" = 1 ]; then
     ORDO_PGDATA="$pgdata" ORDO_PG_HOST="$socket" ORDO_PG_PORT="$pg_port" \
       bash "$repo/scripts/conformance-pg.sh" destroy >/dev/null 2>&1 || true
@@ -214,6 +216,7 @@ admit() { # schema, role
 notes_env "$host" >"$state/notes.log" 2>&1 &
 last=$!
 pids="$pids $last"
+printf '%s\n' "$last" >> "$state/host-pids"
 wait_for "notes v2" "$notes_door/health/live" "$last"
 (notes_env "$ordo" apply "$repo/examples/notes-v2" --as fed-e2e --direct) >"$state/notes-apply.log" 2>&1 ||
   { cat "$state/notes-apply.log" >&2; echo "stack: ordo apply of notes v2 failed" >&2; exit 1; }
@@ -225,6 +228,7 @@ admit notes editor
 viewer_env "$host" >"$state/viewer.log" 2>&1 &
 last=$!
 pids="$pids $last"
+printf '%s\n' "$last" >> "$state/host-pids"
 wait_for "note_viewer" "$viewer_door/health/live" "$last"
 (viewer_env "$ordo" apply "$repo/examples/note-viewer" --as fed-e2e --direct) >"$state/viewer-apply.log" 2>&1 ||
   { cat "$state/viewer-apply.log" >&2; echo "stack: ordo apply of note_viewer failed" >&2; exit 1; }

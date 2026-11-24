@@ -248,3 +248,12 @@ acts as the page does, with a software authenticator in place of the browser.
 | `a_member_adds_tasks_only_to_projects_they_are_on` | A member adds tasks to a project they are on and is refused on one they are not (25ay) |
 | `an_invited_colleague_is_shown_by_the_name_they_gave` | A colleague admitted by invitation is shown by the name they gave, not their account id (25ba) |
 | `a_tenant_owner_opens_the_report_to_a_group` | A tenant owner makes a group, adds a member and opens `reportByProject` to it with `std.space.setOpAccess`. The member then reads the report and another tenant is unchanged |
+
+
+## End-to-end tests
+
+`e2e/` runs the real deployment and page with a throwaway database and a
+local mail catcher. The API tests prove that founders cannot read another
+team's board, team or report, and that forbidden and undeclared calls get
+the same refusal. See `docs/howto-e2e.md`, "Tenant isolation in notes v2 and
+teamspace", for commands and ports.

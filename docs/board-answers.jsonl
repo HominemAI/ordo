@@ -1671,3 +1671,4 @@
 {"seq": 1673, "item": "evolution-review-rollouts-records-and-backfills", "ask": 3, "at": "2026-11-23", "status": "decided", "text": "Correct all tenants should not be broken because one is.", "source": "record", "read": true}
 {"seq": 1674, "item": "evolution-review-rollouts-records-and-backfills", "ask": 4, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
 {"seq": 1675, "item": "evolution-review-rollouts-records-and-backfills", "ask": 5, "at": "2026-11-23", "status": "decided", "text": "ok", "source": "record", "read": true}
+{"seq": 1676, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24T00:51:32Z", "status": "open", "text": "Having to provide a key sounds like work. Given in the future", "source": "page", "read": false}

@@ -490,9 +490,8 @@ async fn share_partners_move_in_the_same_batch() {
 async fn a_strategy_without_its_input_is_refused_naming_the_fix() {
     let pool = deployment("ordo_rs_refused", &["spc_a", "spc_b"]).await;
     let r = Rollouts::on(&pool);
-    let start = |opts: StartOptions| {
-        async move { r.start("0.2.0", &opts, OWNER, NOW).await.unwrap_err() }
-    };
+    let start =
+        |opts: StartOptions| async move { r.start("0.2.0", &opts, OWNER, NOW).await.unwrap_err() };
     let e = start(StartOptions {
         strategy: Some(Strategy::Group),
         ..Default::default()

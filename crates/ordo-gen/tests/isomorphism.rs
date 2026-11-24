@@ -61,6 +61,30 @@ const MARKET: &str = include_str!("../../../crates/ordo-conformance/fixtures/mar
 const EXTERNAL: &str = include_str!("fixtures/external.ordo");
 const WIDE: &str = include_str!("../../../crates/ordo-conformance/fixtures/wide.ordo");
 
+/// The `auth` block, every clause written
+/// (`plan-configuration-in-the-file.md` §2.2), beside a small program.
+const AUTH: &str = r#"domain hal @ 1.0.0
+
+auth {
+  methods           passkey, email, google, work
+  provider google   preset google
+  provider work     kind oidc, label "Work account"
+  passkeyName       "Human Agent Link"
+  provisioning      domains example.com, "my-co.example"
+  selfServe         off
+  guest             on, keep 7d
+  linking           on, window 5m
+  secondFactor      required-without-passkey
+  userVerification  preferred
+  session           token 1h, max 12h, tenants 15m to 4h
+  remember          on, idle 30d, max none
+}
+
+entity notes {
+  body: text
+}
+"#;
+
 /// Where the emitted fixtures live: inside the package that runs leg B.
 fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -161,6 +185,10 @@ fn candidates() -> Vec<Candidate> {
         Candidate {
             name: "fixture-wide".into(),
             source: WIDE.to_string(),
+        },
+        Candidate {
+            name: "auth-block".into(),
+            source: AUTH.to_string(),
         },
         // The corpus's own source has no `external` block, so this file is
         // the one that keeps the CDK form honest.

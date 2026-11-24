@@ -54,10 +54,13 @@ pub mod attest;
 pub mod attest_ops;
 pub mod attestdrain;
 pub mod auth;
+pub mod backfill;
 pub mod blob;
 pub mod boot_record;
+pub mod branches;
 pub mod bucket_ops;
 pub mod ceremonies;
+pub mod clones;
 pub mod consent;
 pub mod console_keys;
 pub mod contact_email;
@@ -73,6 +76,8 @@ pub mod direct_uses;
 pub mod directory;
 pub mod email_code;
 pub mod enrolment;
+pub mod environments;
+pub mod evolve;
 pub mod exit_ops;
 pub mod external_check;
 pub mod federation;
@@ -94,6 +99,7 @@ pub mod metrics;
 pub mod node_status;
 pub mod observed_cost;
 pub mod oidc;
+pub mod orphan_ops;
 pub mod own_download;
 pub mod passkeys;
 pub mod pause;
@@ -101,9 +107,12 @@ pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
 pub mod platform_ops;
+pub mod precheck;
 pub mod presence;
+pub mod prev_offer;
 pub mod principal_directory;
 pub mod profile_ops;
+pub mod promotion;
 pub mod provision;
 pub mod proxy;
 pub mod public;
@@ -115,10 +124,14 @@ pub mod recovery_hold;
 pub mod recovery_settings;
 mod refine_call;
 pub mod registrations;
+pub mod rehearsals;
+pub mod release_check;
 pub mod release_ops;
 pub mod renewal;
 pub mod replay;
 pub mod revoked_moves;
+pub mod rollout_strategies;
+pub mod rollouts;
 pub mod routines;
 pub mod runtime;
 pub mod schema_apply;
@@ -138,7 +151,9 @@ pub mod shape;
 pub mod share_accept;
 pub mod share_links;
 pub mod share_ops;
+pub mod sinks;
 pub mod spaces;
+pub mod step_door;
 pub mod supervisor;
 pub mod tenant_forward;
 pub mod tenant_identities;
@@ -1180,7 +1195,16 @@ impl OpExecutor for FixtureExecutor {
             // this string is the space the door *authorized*, which is the
             // check the assertion was standing next to and is the one that
             // matters.
-            let bound_space = self.spaces.resolve(space).await.map_err(space_refusal)?;
+            // A version unloaded for idleness is loaded again for a
+            // signed-in caller, who waits for it; never for an anonymous
+            // one (V-29), whose calls reach only the deployment's own
+            // space, on the active version, which is never evicted.
+            let bound_space = if caller != ordo_api::ANONYMOUS {
+                self.spaces.resolve_waking(space).await
+            } else {
+                self.spaces.resolve(space).await
+            }
+            .map_err(space_refusal)?;
             let view = &bound_space.view;
             match op.kind {
                 OpKind::Read => {
@@ -1524,6 +1548,9 @@ pub fn interface_for(
             conditions: limits.max_conditions,
             in_values: limits.max_in_values,
         },
+        // The program's sign-in facts: the same for every asker, and the
+        // file's values, which the deployment's ceilings may narrow.
+        ordo_plan::artifact::auth_artifact(&f.schema).as_ref(),
     )
 }
 
@@ -1793,9 +1820,39 @@ pub struct IdentityAccess {
     /// deployment token, 3 segments, is verified with. Unset, the door
     /// accepts no deployment token, and records each one it refuses.
     pub deployment: std::sync::OnceLock<Arc<identity_keys::IdentityKeys>>,
+    /// Which tenants are staging clones, and who opens them
+    /// (`plan-versions.md` §3.4, owner ruling 2026-11-23, Q12). Unset, no
+    /// person's deployment token reaches an app op anywhere.
+    pub clones: std::sync::OnceLock<Arc<clones::CloneAccess>>,
 }
 
 impl IdentityAccess {
+    /// Tell the door which tenants are clones. Once.
+    pub fn wire_clones(&self, access: Arc<clones::CloneAccess>) {
+        let _ = self.clones.set(access);
+    }
+
+    /// The same, for a door being built.
+    pub fn with_clones(self, access: Arc<clones::CloneAccess>) -> IdentityAccess {
+        self.wire_clones(access);
+        self
+    }
+
+    /// The cloned member a person's deployment token opens `space` as, for
+    /// an app op: `Some` only in a clone, for a staging admin or a person
+    /// `clone.readers` names.
+    fn clone_member(
+        &self,
+        claims: &ordo_identity::deployment_token::DeploymentClaims,
+        space: &str,
+        op: &str,
+    ) -> Option<String> {
+        if deployment_access::is_platform_op(op) {
+            return None;
+        }
+        let admin = claims.role == ordo_identity::deployment_token::ROLE_ADMIN;
+        self.clones.get()?.opens_as(space, &claims.sub, admin)
+    }
     /// Give the door the identity service's keys. Once.
     pub fn wire_identity_keys(&self, keys: Arc<identity_keys::IdentityKeys>) {
         let _ = self.deployment.set(keys);
@@ -1858,6 +1915,7 @@ impl IdentityAccess {
             shares: None,
             second_step: std::sync::OnceLock::new(),
             console_home: std::sync::OnceLock::new(),
+            clones: std::sync::OnceLock::new(),
             deployment: std::sync::OnceLock::new(),
         }
     }
@@ -2033,6 +2091,9 @@ impl IdentityAccess {
         op: &str,
         now: u64,
     ) -> deployment_access::Realm {
+        if self.clone_member(claims, space, op).is_some() {
+            return deployment_access::clone_realm(claims, now);
+        }
         deployment_access::decide(
             claims,
             self.console_home.get().map(String::as_str),
@@ -2100,7 +2161,15 @@ impl IdentityAccess {
                     },
                     Relationship::None,
                 );
-                AccessDecision::allow(claims.sub.clone())
+                // In a staging clone the person acts as its founding owner,
+                // and is recorded beside it as the one who acted (Q12).
+                match self.clone_member(&claims, space, op) {
+                    Some(member) => AccessDecision::Allow {
+                        principal: member,
+                        agent: Some(claims.sub.clone()),
+                    },
+                    None => AccessDecision::allow(claims.sub.clone()),
+                }
             }
             Realm::PresenceRequired => refused(RecordedDecision::StepUpStale),
             Realm::Deny => refused(RecordedDecision::OutsideDeploymentRealm),
@@ -2448,6 +2517,41 @@ impl AccessChecker for IdentityAccess {
         })
     }
 
+    /// A grant pinned under one program version, called in a tenant now on
+    /// another that disagrees (`plan-versions.md` §1.7): the refusal names
+    /// both versions, the op and the entity, and what fixes it. Only for a
+    /// verified capability token, whose holder already holds the grant; the
+    /// engine reached this reason only after the grant's space, expiry and
+    /// the token gate passed.
+    fn versions_disagree(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        use ordo_identity::access::{Decision, DenyReason};
+        let now = ordo_identity::principal::Timestamp((self.now)());
+        let claims = ordo_identity::verify(&self.key, token, now).ok()?;
+        claims.capability.as_ref()?;
+        let ispace = ordo_identity::principal::SpaceId(space.to_string());
+        let Decision::Deny {
+            reason:
+                DenyReason::VersionsDisagree {
+                    pinned,
+                    serving,
+                    op: listed,
+                    entity,
+                    detail,
+                },
+            ..
+        } = self.engine.check(&claims, &ispace, op, now)
+        else {
+            return None;
+        };
+        let on = entity.map(|e| format!(" on `{e}`")).unwrap_or_default();
+        Some(format!(
+            "`{op}`: this share or grant was made under version {pinned} of the program and \
+             the space is now on {serving}; the two disagree{on} for `{listed}` ({detail}). Ask \
+             the person who shared it to share it again (std.space.share), or pin the space back \
+             to {pinned} (ordo versions pin)"
+        ))
+    }
+
     fn check(&self, token: &str, space: &str, op: &str) -> AccessDecision {
         use ordo_identity::access::Decision;
         use ordo_identity::principal::{SpaceId, Timestamp};
@@ -2565,6 +2669,41 @@ impl AccessChecker for IdentityAccess {
             );
             self.metrics.deny(space, &claims.principal.0, "member", op);
             return AccessDecision::Deny;
+        }
+        // **A person the staging deployment allows opens a clone**
+        // (`plan-versions.md` §3.4, Q12): named in `clone.readers`, signed in
+        // to staging as themselves. They act as the clone's founding owner
+        // and are recorded beside it. A cloned member's own sign-in never
+        // reaches here as one: its link was not carried.
+        if claims.capability.is_none()
+            && claims.delegation.is_none()
+            && !deployment_access::is_platform_op(op)
+        {
+            if let Some(member) = self
+                .clones
+                .get()
+                .and_then(|c| c.opens_as(space, &claims.principal.0, false))
+            {
+                return AccessDecision::Allow {
+                    principal: member,
+                    agent: Some(claims.principal.0.clone()),
+                };
+            }
+        }
+        // **A person the staging deployment allows may start a rehearsal**
+        // (`plan-versions.md` §3.2, Q12): named in `clone.readers`, signed in
+        // to staging as themselves, in the deployment's own space, for
+        // `std.deployment.rehearse` alone. They act as themselves.
+        if op == crate::rehearsals::REHEARSE
+            && claims.capability.is_none()
+            && claims.delegation.is_none()
+            && self.console_home.get().is_some_and(|h| h == space)
+            && self
+                .clones
+                .get()
+                .is_some_and(|c| c.may_rehearse(&claims.principal.0))
+        {
+            return AccessDecision::allow(claims.principal.0.clone());
         }
         let ispace = SpaceId(space.to_string());
         match self.engine.check(&claims, &ispace, op, now) {
@@ -2910,11 +3049,31 @@ pub fn engine_from_directory(
     delegating: &delegable::DelegablePolicy,
     template: &access_template::AccessTemplate,
 ) -> Result<ordo_identity::AccessEngine, String> {
-    engine_from_directory_served(f, &[], rows, tenant, policy, pausing, delegating, template)
+    engine_from_directory_served(
+        f,
+        &Served::default(),
+        rows,
+        tenant,
+        policy,
+        pausing,
+        delegating,
+        template,
+    )
 }
 
-/// [`engine_from_directory`] for a node serving `others` beside `f`, the
-/// active version (`plan-versions.md` §1.4, increment 3).
+/// The program versions a node serves beside the active one, by name
+/// (`plan-versions.md` §1.4, §1.7).
+#[derive(Default, Clone)]
+pub struct Served {
+    /// The active version's name. `None` for an engine that knows no
+    /// versions: it then holds no per-version manifests.
+    pub active: Option<String>,
+    /// Every other served version, by name.
+    pub others: Vec<(String, Arc<Fixture>)>,
+}
+
+/// [`engine_from_directory`] for a node serving `served.others` beside `f`,
+/// the active version (`plan-versions.md` §1.4, increment 3).
 ///
 /// The profile grants every op and function any served version declares,
 /// by name, so a tenant pinned to another version may call its own ops.
@@ -2922,10 +3081,14 @@ pub fn engine_from_directory(
 /// looks an op up in the caller's tenant's version
 /// (`OpRegistry::get_in`), so an op only another version declares is
 /// unregistered to the active version's tenants all the same.
+///
+/// When the versions are named, the engine also holds each version's ops
+/// as that version declares them (§1.7), so a share or grant made in a
+/// tenant pins its own version's manifests and is judged by them.
 #[allow(clippy::too_many_arguments)]
 pub fn engine_from_directory_served(
     f: &Fixture,
-    others: &[Arc<Fixture>],
+    served: &Served,
     rows: &[Vec<Option<String>>],
     tenant: &profile_ops::TenantAccess,
     policy: &presence::PresencePolicy,
@@ -2981,6 +3144,17 @@ pub fn engine_from_directory_served(
         {
             continue;
         }
+        // **A member of a staging clone is no membership anyone signs in
+        // as** (`plan-versions.md` §3.4, Q12). Its sign-in link was never
+        // carried; the row stays so the clone's rows keep their authors,
+        // and a staging admin opens the clone through `clones::CloneAccess`.
+        if r.get(4)
+            .and_then(|p| p.as_deref())
+            .is_some_and(|p| p.starts_with(clones::CLONE_PRINCIPAL_PREFIX))
+        {
+            spaces.insert(space);
+            continue;
+        }
         let principal = PrincipalId(
             r.get(4)
                 .and_then(|p| p.clone())
@@ -3007,10 +3181,23 @@ pub fn engine_from_directory_served(
     // Each op once, from the first served version that declares it: the
     // active one first.
     let mut specs: Vec<(OpSpec, &Fixture)> = build_specs(f).into_iter().map(|s| (s, f)).collect();
-    for o in others {
+    for (_, o) in &served.others {
         for s in build_specs(o) {
             if !specs.iter().any(|(have, _)| have.name == s.name) {
                 specs.push((s, o.as_ref()));
+            }
+        }
+    }
+    // Each served version's ops as it declares them (§1.7): what a share or
+    // grant made in a tenant on that version pins, and is judged by.
+    if let Some(active) = &served.active {
+        let named =
+            std::iter::once((active, f)).chain(served.others.iter().map(|(v, o)| (v, o.as_ref())));
+        for (version, fx) in named {
+            for s in build_specs(fx) {
+                if let Some(pin) = op_pin(fx, &s.name) {
+                    engine.deploy_op_in(version, &s.name, pin);
+                }
             }
         }
     }
@@ -3048,7 +3235,7 @@ pub fn engine_from_directory_served(
     // ran a checker of their own. `tests/upgrade_continuity.rs` calls them
     // through the binary.
     let mut funcs: Vec<&String> = Vec::new();
-    for fx in std::iter::once(f).chain(others.iter().map(|o| o.as_ref())) {
+    for fx in std::iter::once(f).chain(served.others.iter().map(|(_, o)| o.as_ref())) {
         for func in &fx.schema.functions {
             if !funcs.contains(&&func.name.name) {
                 funcs.push(&func.name.name);
@@ -3109,6 +3296,7 @@ pub fn engine_from_directory_served(
             op,
             ordo_identity::OpPin {
                 manifest_hash: ordo_identity::principal::ManifestHash::of(op.as_bytes()),
+                version: None,
                 unguarded: false,
                 entities: Vec::new(),
             },
@@ -3172,6 +3360,7 @@ pub fn engine_from_directory_served(
             op,
             ordo_identity::OpPin {
                 manifest_hash: ordo_identity::principal::ManifestHash::of(op.as_bytes()),
+                version: None,
                 unguarded: false,
                 entities: Vec::new(),
             },
@@ -3218,6 +3407,7 @@ pub fn engine_from_directory_served(
                     ),
                     unguarded: false,
                     entities: Vec::new(),
+                    version: None,
                 },
             );
             continue;
@@ -3318,6 +3508,7 @@ pub fn engine_from_directory_served(
                 ),
                 unguarded: false,
                 entities: Vec::new(),
+                version: None,
             },
         );
     }
@@ -3341,6 +3532,8 @@ pub fn engine_from_directory_served(
     // did not open, and every platform write (`delegable`'s module doc).
     let specs: Vec<OpSpec> = specs.into_iter().map(|(s, _)| s).collect();
     delegable::close(&mut engine, &specs, &platform_ops::specs(), delegating);
+    // Platform ops and functions mean the same in every version.
+    engine.share_unversioned(&program);
     Ok(engine)
 }
 
@@ -3400,6 +3593,7 @@ pub fn op_pin(f: &Fixture, op: &str) -> Option<ordo_identity::OpPin> {
         .collect();
     Some(OpPin {
         manifest_hash,
+        version: None,
         unguarded: rows.unguarded,
         entities,
     })

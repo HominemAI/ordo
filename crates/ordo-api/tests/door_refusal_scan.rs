@@ -8,8 +8,9 @@
 //!
 //! 1. the bare `door_denial` is called only by the three functions that wrap
 //!    it;
-//! 2. `denied_after_check` is called only right after `check` denied or the
-//!    token gate closed a share grant, both of which recorded already;
+//! 2. `denied_after_check` is called only right after `check` denied (and the
+//!    follow-up questions asked after it, `versions_disagree` among them) or
+//!    the token gate closed a share grant, both of which recorded already;
 //! 3. an `ErrorCode::AccessDenied` built anywhere else is inside a
 //!    `recorded(` call, or is one of the few named below with the place that
 //!    records it.
@@ -99,7 +100,8 @@ fn every_door_refusal_is_recorded() {
                 if !(near.contains("AccessDecision::Deny")
                     || near.contains("TokenGate::ShareNotLive")
                     || near.contains("not_ready(")
-                    || near.contains("presence_required("))
+                    || near.contains("presence_required(")
+                    || near.contains("versions_disagree("))
                 {
                     problems.push(format!(
                         "{rel}:{}: denied_after_check without a check or gate denial before it",

@@ -374,6 +374,7 @@ pub fn op_class(name: &str) -> Option<OpClass> {
         | "std.space.setLinkPassword"
         | "std.space.setLinkMaxOpens"
         | "std.space.sessionPolicy"
+        | "std.space.version"
         | "std.space.touches"
         | "std.space.approveMemberRecovery"
         | "std.space.recoverMember"

@@ -36,10 +36,13 @@ use ordo_schema::{build_with_keys, FieldTy, KeyTable, Schema};
 use ordo_sema::Registry;
 use ordo_syntax::parse_program;
 
+pub mod branches;
 pub mod deploy_wait;
 pub mod dev;
 pub mod dev_db;
 pub mod direct;
+pub mod evolve;
+pub mod fix;
 pub mod identity;
 pub mod introspect;
 pub mod keys;
@@ -47,6 +50,9 @@ pub mod migrate;
 pub mod operator;
 pub mod ops;
 pub mod people;
+pub mod prev;
+pub mod release_check;
+pub mod rollout;
 pub mod signin;
 pub mod skill;
 pub mod sources;
@@ -154,6 +160,9 @@ impl LoadDiagnostic {
 /// `acl_admin_ops` → `std_ops` → `cost::check_registration`.
 pub fn load_sources_diag(src: &Sources) -> Result<(Schema, Registry), LoadDiagnostic> {
     let program = parse_program(src.text()).map_err(LoadDiagnostic::Parse)?;
+    ordo_plan::edition::Editions::this_release()
+        .gate(src.text(), &program)
+        .map_err(LoadDiagnostic::Parse)?;
     let keys = KeyTable::from_env().map_err(LoadDiagnostic::Env)?;
     let schema = build_with_keys(&program, &keys).map_err(LoadDiagnostic::Schema)?;
     // What `ordo apply` will print must be printable now. A default the DDL
@@ -901,10 +910,12 @@ pub fn interface_value(schema: &Schema, artifact: &serde_json::Value) -> serde_j
         .iter()
         .map(ordo_plan::artifact::catalog_view)
         .collect();
-    ordo_plan::interface::interface_document(
+    ordo_plan::interface::interface_document_with(
         &artifact["domain"],
         &ordo_plan::artifact::entity_artifacts(schema),
         &ops,
+        ordo_plan::interface::RefineLimits::default(),
+        artifact.get("auth"),
     )
 }
 

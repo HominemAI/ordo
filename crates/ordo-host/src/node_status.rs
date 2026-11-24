@@ -64,6 +64,21 @@ impl NodeStatus {
         self.row.lock().expect("node row lock").also_serving = versions;
     }
 
+    /// The versions this node is loading now (per-node health, increment
+    /// 3): shown apart from the ones it serves until each lands.
+    pub fn loading(&self, versions: Vec<String>) {
+        self.row.lock().expect("node row lock").loading = versions;
+    }
+
+    /// One version finished loading, landed or refused.
+    pub fn loaded_one(&self, version: &str) {
+        self.row
+            .lock()
+            .expect("node row lock")
+            .loading
+            .retain(|v| v != version);
+    }
+
     /// The versions a pin names that this node could not load, with why
     /// (per-node health, increment 3 session 2). True when that changed,
     /// so the caller writes the row now rather than at the next beat.

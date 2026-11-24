@@ -144,13 +144,17 @@ async fn restored(stem: &str, data: &str) -> (Pool, Pg, Pg, String) {
 }
 
 fn record(control_db: &str, space: &str) -> Output {
+    record_with(&["--tenant"], control_db, space)
+}
+
+/// `ordo restore --record` with `form`: `--tenant`, or `--db <tenant db>`
+/// for the manual form.
+fn record_with(form: &[&str], control_db: &str, space: &str) -> Output {
     let pg = Pg::default();
     support::ordo()
+        .args(["restore", "--record", "--direct"])
+        .args(form)
         .args([
-            "restore",
-            "--record",
-            "--direct",
-            "--tenant",
             "--space",
             space,
             "--control-db",
@@ -224,4 +228,19 @@ async fn a_restored_database_on_a_version_not_stored_is_refused_before_the_marke
         .await
         .unwrap();
     assert!(markers.is_empty(), "no marker: {markers:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manual_form_with_a_control_database_moves_the_pin_too() {
+    let (control, control_pg, target_pg, id) = restored("ordo_rv_cli3", "0.1.0").await;
+    let out = record_with(&["--db", &target_pg.db], &control_pg.db, &id);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("version PINNED 0.2.0 -> 0.1.0 · cause restore"),
+        "{stdout}"
+    );
+    let pin = Versions::on(&control).pin_of(&id).await.unwrap().unwrap();
+    assert_eq!(pin.version.as_deref(), Some("0.1.0"));
 }

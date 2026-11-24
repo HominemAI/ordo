@@ -264,6 +264,21 @@ fn usage() -> ! {
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
+         ordo environments list [<name>] | register <name> [--position <n>] --reason \"<text>\"\n      \
+         the chain of environments this deployment declares (dev, staging,\n      \
+         production), and which one it is. A deployment that registered\n      \
+         none is production. A name not registered is refused, naming the\n      \
+         `register` command. Through the door only (`--host ...`).\n  \
+         ordo environments set-own <name> | remove <name> | rename <name> <new> --reason \"<text>\"\n      \
+         say which environment this deployment is, or remove or rename one.\n      \
+         The deployment's own cannot be removed, and neither can one a stored\n      \
+         promotion names be removed or renamed.\n  \
+         ordo promote <version> --from <host> --reason \"<text>\" [--no-activate] --host <h>\n      \
+         the promotion gate: the target takes the version from the step before\n      \
+         (read as you), refuses what that step has not activated or what was\n      \
+         edited (naming the file), and runs its own secret and external checks\n      \
+         before storing. `ordo apply --env <name>` checks the name is registered\n      \
+         and is this deployment. Production pins only what came through the gate.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \
@@ -535,6 +550,8 @@ fn main() {
             | "deploys"
             | "versions"
             | "windows"
+            | "environments"
+            | "promote"
             | "prune"
             | "restore"
             | "keys"

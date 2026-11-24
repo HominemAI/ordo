@@ -289,6 +289,8 @@
       "runtime",
       "shopfront_app",
       "teamspace_app",
+      "environments",
+      "promotion",
       "two_instances",
       "versions_moves",
       "versions_moves_door",
@@ -355,6 +357,10 @@
       "usage"
     ],
     "crates/ordo-host/src/enrolment.rs": "all",
+    "crates/ordo-host/src/environments.rs": [
+      "environments",
+      "promotion"
+    ],
     "crates/ordo-host/src/exit_ops.rs": "all",
     "crates/ordo-host/src/external_check.rs": "all",
     "crates/ordo-host/src/federation.rs": "all",
@@ -450,6 +456,7 @@
     "crates/ordo-host/src/presence.rs": "all",
     "crates/ordo-host/src/principal_directory.rs": "all",
     "crates/ordo-host/src/profile_ops.rs": "all",
+    "crates/ordo-host/src/promotion.rs": "all",
     "crates/ordo-host/src/provision.rs": "all",
     "crates/ordo-host/src/proxy.rs": "all",
     "crates/ordo-host/src/public.rs": "all",

@@ -2160,3 +2160,62 @@ async fn each_rehearsal_refusal_names_its_fix() {
     assert_ne!(status, 200);
     assert!(body.to_string().contains("rehearsal_no_staging"), "{body}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn past_staging_an_apply_makes_no_rename_without_a_rehearsal() {
+    let p = pair("r3", PROGRAM).await;
+    let renamed = PROGRAM
+        .replace("@ 0.1.0", "@ 0.2.0")
+        .replace("  title: text\n", "  heading: text prev(title)\n")
+        .replace("notes[title, body", "notes[heading, body");
+    let apply = |activate: bool| {
+        let body = json!({"program": renamed, "activate": activate});
+        let (address, token) = (p.prod_address.clone(), p.issuer.token(ADA, "production"));
+        async move { post(&address, apply_op::APPLY, body, &token).await }
+    };
+    let has_heading = || async {
+        !p.prod
+            .rows(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'notes' \
+                 AND column_name = 'heading'",
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    };
+
+    // Stored without activating (the way round 3 of the e2e found an
+    // apply moving production's database): kept, and the rename not made.
+    let (status, body) = apply(false).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(!has_heading().await, "the rename ran");
+
+    // Arrived through the gate (as a promotion records it) and activated:
+    // refused, naming the rehearsal; still nothing renamed.
+    ordo_host::promotion::promotions(&p.prod, 1).await.unwrap();
+    p.prod
+        .rows(
+            "INSERT INTO \"$promotions\" (\"version\", \"from_env\", \"to_env\", \
+             \"source_id\", \"actor\", \"reason\", \"at\") \
+             VALUES ('0.2.0', 'staging', 'production', 'x', 'p_ada', 'test', 1)",
+        )
+        .await
+        .unwrap();
+    let (status, body) = apply(true).await;
+    assert_ne!(status, 200, "{body}");
+    assert!(body.to_string().contains("plan_not_rehearsed"), "{body}");
+    assert!(
+        body.to_string().contains("ordo rehearsals rehearse"),
+        "{body}"
+    );
+    assert!(!has_heading().await, "the rename ran");
+
+    // Without staging before it, the same apply makes the rename itself.
+    Environments::on(&p.prod)
+        .set_promotion_setting("skip-staging", "on", ADA, "no staging", 1)
+        .await
+        .unwrap();
+    let (status, body) = apply(true).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(has_heading().await, "the rename was made");
+}

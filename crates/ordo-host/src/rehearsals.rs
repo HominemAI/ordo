@@ -910,6 +910,12 @@ async fn staging_before(
     Ok(Some((own, staging)))
 }
 
+/// **Whether this deployment requires a rehearsal**: staging comes before
+/// it in its chain and `promotion.skip_staging` is off.
+pub async fn required(pool: &Pool) -> Result<bool, RehearsalRefusal> {
+    Ok(staging_before(pool).await?.is_some())
+}
+
 /// What an acceptance asks for.
 pub struct AcceptRequest<'a> {
     pub from: &'a str,

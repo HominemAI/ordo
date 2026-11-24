@@ -514,6 +514,10 @@ pub enum ApplyRefused {
     /// leading with its class (`external_missing`, `external_changed`,
     /// `external_no_grant`) and ending with the fix. Nothing was applied.
     External(Vec<String>),
+    /// Staging comes before this deployment, and the version renames a
+    /// field or an entity: a change only a stored plan staging rehearsed
+    /// makes here (`crate::rehearsals`, §3.2). The text names the commands.
+    NotRehearsed(String),
 }
 
 impl ApplyRefused {
@@ -535,6 +539,7 @@ impl ApplyRefused {
             ApplyRefused::NotPromoted(_) => "not_promoted",
             ApplyRefused::RolloutOpen(_) => "rollout_open",
             ApplyRefused::External(_) => "external_refused",
+            ApplyRefused::NotRehearsed(_) => "plan_not_rehearsed",
         }
     }
 
@@ -553,7 +558,8 @@ impl ApplyRefused {
             | ApplyRefused::Revoked(_)
             | ApplyRefused::NotPromoted(_)
             | ApplyRefused::RolloutOpen(_)
-            | ApplyRefused::External(_) => ErrorCode::ApplyRefused,
+            | ApplyRefused::External(_)
+            | ApplyRefused::NotRehearsed(_) => ErrorCode::ApplyRefused,
             ApplyRefused::NotActivated { .. } => ErrorCode::NotActivated,
             ApplyRefused::InProgress => ErrorCode::ApplyInProgress,
             // A version that is not there is the same fact a missing row
@@ -615,6 +621,7 @@ impl std::fmt::Display for ApplyRefused {
             ApplyRefused::Revoked(e)
             | ApplyRefused::NotPromoted(e)
             | ApplyRefused::RolloutOpen(e) => write!(f, "{e}"),
+            ApplyRefused::NotRehearsed(e) => write!(f, "plan_not_rehearsed: {e}"),
             ApplyRefused::External(lines) => write!(
                 f,
                 "external_refused: {} external entit{} cannot be read, so nothing was \
@@ -903,10 +910,39 @@ async fn sequence(
             SchemaOutcome::Matches { pending }
         }
         SchemaState::Behind(changes) => {
-            match sa::apply_safe(pool, program, actor, op, Some(external.clone()))
-                .await
-                .map_err(ApplyRefused::Internal)?
-            {
+            // **Past staging, an apply makes no rename** (§3.2, 12b): the
+            // one change the safe apply makes that a stored step makes too.
+            // It is stored and left behind, and an activation is refused,
+            // naming the rehearsal.
+            let renames: Vec<String> = changes
+                .iter()
+                .filter(|c| matches!(c, Change::RenameField { .. } | Change::RenameEntity { .. }))
+                .map(|c| c.to_string())
+                .collect();
+            let unrehearsed = !renames.is_empty()
+                && crate::rehearsals::required(pool)
+                    .await
+                    .map_err(|e| ApplyRefused::Internal(e.to_string()))?;
+            if unrehearsed && activate {
+                return Err(ApplyRefused::NotRehearsed(format!(
+                    "staging comes before this deployment, and {} renames {}: a change this \
+                     deployment makes only through a stored plan staging rehearsed. Store it \
+                     without activating (`--no-activate`), render the step (`ordo evolve \
+                     --from <serving> --to {}`), rehearse it on staging (`ordo rehearsals \
+                     rehearse`), accept it here (`ordo rehearsals accept`), then run it",
+                    program.version,
+                    renames.join(", "),
+                    program.version
+                )));
+            }
+            let safe = if unrehearsed {
+                sa::SafeApply::NotSafe
+            } else {
+                sa::apply_safe(pool, program, actor, op, Some(external.clone()))
+                    .await
+                    .map_err(ApplyRefused::Internal)?
+            };
+            match safe {
                 sa::SafeApply::Applied {
                     changes,
                     migration,

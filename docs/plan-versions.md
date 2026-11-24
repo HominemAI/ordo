@@ -1325,6 +1325,13 @@ What may change:
 7. **Q14.** A backfill whose function declares secrets or hosts is listed
    under `notReproducible`, and production's acceptance warns about each.
 8. `ordo rehearsals list` reads the signed and the accepted rehearsals.
+9. **An apply makes no rename past staging.** `ordo apply` (and the apply
+   inside `ordo promote`) runs class A changes and a field rename itself
+   (`schema_apply::is_safe_change`). The rename is a stored step's change,
+   so on a deployment with staging before it the apply leaves it unmade:
+   `--no-activate` stores the version behind, and an activation is refused
+   `plan_not_rehearsed` (`apply_op`). Class A changes (add an entity, an
+   optional or constant field, an index; drop an index) still apply.
 
 Tests: `ordo-host/tests/clones.rs` (2 real doors: production refuses the
 step, staging rehearses and signs, production accepts and then runs it;

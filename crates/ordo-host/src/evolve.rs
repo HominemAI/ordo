@@ -432,9 +432,11 @@ impl std::fmt::Display for EvolveRefusal {
                  `{from}` to `{to}` with digest {digest} was accepted here{}. Rehearse it on \
                  staging: `ordo rehearsals rehearse --from {from} --to {to} --clone <clone> \
                  --reason \"...\" --host <staging>`; then accept it here: `ordo rehearsals \
-                 accept --from {from} --to {to}`. To promote from dev with no staging, set \
-                 promotion.skip_staging: `ordo environments set skip-staging on --reason \
-                 \"...\"`",
+                 accept --from {from} --to {to}`. When staging is down, the deployment owner \
+                 may break glass for this step, for one hour: `ordo rehearsals break-glass \
+                 --from {from} --to {to} --reason \"...\"`. To promote from dev with no \
+                 staging, set promotion.skip_staging: `ordo environments set skip-staging on \
+                 --reason \"...\"`",
                 if signed.is_empty() {
                     String::new()
                 } else {

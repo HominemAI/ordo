@@ -79,12 +79,16 @@ fn usage() -> ! {
          refuse it with its errors, store it, and print its receipt and\n      \
          digest (`std.deployment.evolve`). With <dir> the receipt is\n      \
          written to <dir>/receipts/<from>-to-<to>.json. --digest refuses a\n      \
-         deployment that renders another digest. --run runs the stored\n      \
-         plan on the deployment's own database. --fill <entity>.<field>=<expr>\n      \
-         states how existing rows get a value for a field the step makes\n      \
-         required (or `=fn <name> [secrets ..] [hosts ..]`); the backfill\n      \
-         runs in chunks and resumes from its cursor. --audit-images writes\n      \
-         every row's images instead of one summary per tenant.\n  \
+         deployment that renders another digest. The pre-checks run on\n      \
+         every database and list each issue with its fix. --run runs the\n      \
+         stored plan on the deployment's own database, and refuses while an\n      \
+         issue is open. A step that removes a sign-in method some people\n      \
+         rely on stops until --approve-sign-in-removal <count>.\n      \
+         --fill <entity>.<field>=<expr> states how existing rows get a value\n      \
+         for a field the step makes required (or `=fn <name> [secrets ..]\n      \
+         [hosts ..]`); the backfill runs in chunks and resumes from its\n      \
+         cursor. --audit-images writes every row's images instead of one\n      \
+         summary per tenant.\n  \
          ordo evolve --tenant <id> [--to <version>]\n      \
          replay the stored path on the tenant's database, one step at a\n      \
          time, then pin it (`std.deployment.replay`).\n  \
@@ -291,12 +295,20 @@ fn usage() -> ! {
          say which environment this deployment is, or remove or rename one.\n      \
          The deployment's own cannot be removed, and neither can one a stored\n      \
          promotion names be removed or renamed.\n  \
-         ordo promote <version> --from <host> --reason \"<text>\" [--no-activate] --host <h>\n      \
-         the promotion gate: the target takes the version from the step before\n      \
-         (read as you), refuses what that step has not activated or what was\n      \
-         edited (naming the file), and runs its own secret and external checks\n      \
-         before storing. `ordo apply --env <name>` checks the name is registered\n      \
-         and is this deployment. Production pins only what came through the gate.\n  \
+         ordo environments door <name> <address> <its space> [--handle <h>] --reason \"<text>\"\n      \
+         where that environment's deployment answers, so the next step can\n      \
+         read a version from it. `--clear` forgets it.\n  \
+         ordo environments set skip-staging on|off --reason \"<text>\"\n      \
+         promotion.skip_staging: promote past staging from the step before it.\n  \
+         ordo promote <version> --reason \"<text>\" [--from-token <t>] [--no-activate] --host <h>\n      \
+         the promotion gate: the target reads the version from the step before\n      \
+         itself, as you (a token for it from your `ordo login` sign-in, or\n      \
+         --from-token), refuses what that step has not activated or what\n      \
+         differs from what it recorded (naming the file), and runs its own\n      \
+         secret, external and reader checks before storing. `ordo apply` with\n      \
+         no --env goes to the first step of the chain (dev); `--env <name>`\n      \
+         checks the name is registered and is this deployment. Every step\n      \
+         after the first pins only what came through the gate.\n  \
          ordo versions  revoked\n      \
          each revoked version, its reason, and the tenants pinned to it.\n      \
          ordo windows   set [--id <id>] (--all | --only <t>... | --except <t>...)\n                 \

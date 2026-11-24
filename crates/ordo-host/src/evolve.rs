@@ -58,6 +58,16 @@
 //! apply refuses a database that lacks part of X ([`EvolveRefusal::Drifted`]).
 //! Render-time probes are advisory; the per-database probes run in the run.
 //!
+//! # Pre-checks (increment 9)
+//!
+//! After a plan is stored, `std.deployment.evolve` runs its pre-checks on
+//! every database ([`crate::precheck`]) and lists every issue with its fix.
+//! `--run` refuses while any is open ([`EvolveRefusal::PreChecks`]), and
+//! [`run_step`] refuses a database whose own data breaks the step the same
+//! way. A step that removes a sign-in method some people rely on is not
+//! stored until the deployment owner approves that count
+//! ([`evolve_approved`], ruled 2026-11-23, Q6).
+//!
 //! # Readers (`plan-evolution-federation.md` F1)
 //!
 //! A step that retypes or removes a field of a table on a `reader` line
@@ -173,6 +183,21 @@ pub enum EvolveRefusal {
         why: String,
         transient: bool,
     },
+    /// The version removes a sign-in method some people rely on, and the
+    /// deployment owner has not approved it for this count (ruled
+    /// 2026-11-23, Q6). Nothing was stored.
+    SignInRemoval {
+        removal: crate::precheck::SignInRemoval,
+        /// The count an approval named, when one was given.
+        approved: Option<u64>,
+    },
+    /// The pre-checks found data the step's new shape would refuse
+    /// (27w). Every issue, from every database asked.
+    PreChecks {
+        from: String,
+        to: String,
+        issues: Vec<crate::precheck::Issue>,
+    },
     /// Another apply holds the deployment.
     Busy,
     /// A database fault outside the version store.
@@ -205,6 +230,8 @@ impl EvolveRefusal {
             EvolveRefusal::Stale { .. } => "plan_stale",
             EvolveRefusal::Drifted { .. } => "database_drifted",
             EvolveRefusal::Run { class, .. } => class,
+            EvolveRefusal::SignInRemoval { .. } => "sign_in_removal_unapproved",
+            EvolveRefusal::PreChecks { .. } => "precheck_failed",
             EvolveRefusal::Busy => "apply_in_progress",
             EvolveRefusal::Store(_) => "store_failed",
         }
@@ -337,6 +364,45 @@ impl std::fmt::Display for EvolveRefusal {
                 "{class}: the step from `{from}` to `{to}` was not run on database \
                  `{database}`: {why}"
             ),
+            EvolveRefusal::SignInRemoval { removal, approved } => {
+                write!(
+                    f,
+                    "sign_in_removal_unapproved: version `{}` removes the sign-in method(s) {}, \
+                     and {} person(s) would be left with no method. Nothing was stored.",
+                    removal.to,
+                    removal
+                        .removed
+                        .iter()
+                        .map(|m| format!("`{m}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    removal.people
+                )?;
+                if let Some(n) = approved {
+                    write!(
+                        f,
+                        " The approval named {n} person(s); the count is now {}.",
+                        removal.people
+                    )?;
+                }
+                write!(f, " Migration steps:")?;
+                for s in removal.steps() {
+                    write!(f, "\n  {s}")?;
+                }
+                Ok(())
+            }
+            EvolveRefusal::PreChecks { from, to, issues } => {
+                write!(
+                    f,
+                    "precheck_failed: the step from `{from}` to `{to}` meets {} issue(s) in the \
+                     data, and nothing was run. Fix each, then run it again:",
+                    issues.len()
+                )?;
+                for i in issues {
+                    write!(f, "\n  {}", i.line())?;
+                }
+                Ok(())
+            }
             EvolveRefusal::Busy => write!(
                 f,
                 "apply_in_progress: another apply or move holds the deployment. Try again \
@@ -498,7 +564,7 @@ pub async fn render(
     render_stored(pool, &a, &b, options, at).await
 }
 
-fn compiled(a: &Artifact) -> Result<Program, EvolveRefusal> {
+pub(crate) fn compiled(a: &Artifact) -> Result<Program, EvolveRefusal> {
     Program::from_artifact(a).map_err(|why| EvolveRefusal::Uncompilable {
         version: a.version.clone(),
         why,
@@ -1159,6 +1225,9 @@ pub struct Evolved {
     pub plan: StoredPlan,
     /// `false` when the same plan was stored already.
     pub stored: bool,
+    /// The sign-in methods the step removes, when it removes any: approved,
+    /// or leaving nobody without a method.
+    pub sign_in: Option<crate::precheck::SignInRemoval>,
 }
 
 impl Evolved {
@@ -1177,18 +1246,39 @@ impl Evolved {
                 "change": r.change, "grantEndsNotBefore": r.grant_ends_not_before,
                 "line": r.line(),
             })).collect::<Vec<_>>(),
+            "signIn": self.sign_in.as_ref().map(crate::precheck::SignInRemoval::to_json),
         })
     }
 }
 
 /// **`ordo evolve --from X --to Y`**: render the step, refuse it if it has
-/// errors or if `expect` names another digest, and store it.
+/// errors or if `expect` names another digest, and store it. A step that
+/// removes a sign-in method some people rely on is refused: see
+/// [`evolve_approved`].
 pub async fn evolve(
     pool: &Pool,
     from: &str,
     to: &str,
     options: &Choices,
     expect: Option<&str>,
+    actor: &str,
+    at: u64,
+) -> Result<Evolved, EvolveRefusal> {
+    evolve_approved(pool, from, to, options, expect, None, actor, at).await
+}
+
+/// [`evolve`], with the deployment owner's approval of a sign-in method
+/// removal (ruled 2026-11-23, Q6). `approved` names how many people the
+/// owner accepts leaving with no method. It must be the count the check
+/// finds now, so an approval never covers more people than it named.
+#[allow(clippy::too_many_arguments)]
+pub async fn evolve_approved(
+    pool: &Pool,
+    from: &str,
+    to: &str,
+    options: &Choices,
+    expect: Option<&str>,
+    approved: Option<u64>,
     actor: &str,
     at: u64,
 ) -> Result<Evolved, EvolveRefusal> {
@@ -1203,11 +1293,32 @@ pub async fn evolve(
             });
         }
     }
+    let v = Versions::on(pool);
+    let (Some(a), Some(b)) = (v.get(&rendered.from).await?, v.get(&rendered.to).await?) else {
+        return Err(VersionRefusal::UnknownVersion(rendered.from.clone()).into());
+    };
+    let sign_in = crate::precheck::sign_in_removal(
+        pool,
+        &compiled(&a)?,
+        &compiled(&b)?,
+        &rendered.from,
+        &rendered.to,
+    )
+    .await?;
+    if let Some(removal) = &sign_in {
+        if removal.people > 0 && approved != Some(removal.people) {
+            return Err(EvolveRefusal::SignInRemoval {
+                removal: removal.clone(),
+                approved,
+            });
+        }
+    }
     let (plan, stored) = Plans::on(pool).store(&rendered, actor, at).await?;
     Ok(Evolved {
         rendered,
         plan,
         stored,
+        sign_in,
     })
 }
 
@@ -1439,6 +1550,16 @@ pub async fn run_step_with(
         }
     }
     p.refusals = refusals;
+    // The pre-checks on this database (27w): every issue, each with its
+    // fix, rather than the first refusal the apply meets.
+    let issues = crate::precheck::issues_of(label, &p, &plan.to);
+    if !issues.is_empty() {
+        return Err(EvolveRefusal::PreChecks {
+            from: plan.from.clone(),
+            to: plan.to.clone(),
+            issues,
+        });
+    }
     let (statements, backfills, after) = match sa::apply_planned(target, &p, actor, OP).await {
         Ok(sa::Applied::Additive {
             steps,
@@ -1855,9 +1976,22 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 text("expectDigest", 128, false),
                 // Run the stored plan on the deployment's own database.
                 flag("run"),
+                // The deployment owner's approval of a sign-in method
+                // removal: the number of people the warning named (Q6).
+                text("approveSignInRemoval", 20, false),
             ],
             &[
-                "from", "to", "digest", "stored", "seq", "options", "receipt", "readers", "ran",
+                "from",
+                "to",
+                "digest",
+                "stored",
+                "seq",
+                "options",
+                "receipt",
+                "readers",
+                "signIn",
+                "prechecks",
+                "ran",
             ],
         ),
         spec(
@@ -1921,17 +2055,43 @@ pub async fn execute(
             } else {
                 None
             };
-            let done = evolve(
+            let approved = match text("approveSignInRemoval") {
+                None => None,
+                Some(n) => Some(n.parse::<u64>().map_err(|_| {
+                    EvolveRefusal::Options(format!(
+                        "`--approve-sign-in-removal {n}` is not a count: name the number of \
+                         people the warning gave"
+                    ))
+                    .to_exec_error(WHAT)
+                })?),
+            };
+            let done = evolve_approved(
                 pool,
                 text("from").unwrap_or_default(),
                 text("to").unwrap_or_default(),
                 &options,
                 text("expectDigest"),
+                approved,
                 caller,
                 crate::runtime::now_secs(),
             )
             .await
             .map_err(|e| e.to_exec_error(WHAT))?;
+            if let Some(removal) = done.sign_in.as_ref().filter(|r| r.people > 0) {
+                // Q6: the deployment owner's approval, on the stream.
+                ops.record(
+                    caller,
+                    EVOLVE,
+                    "sign-in-removal-approved",
+                    format!(
+                        "from={} to={} removed={} people={} by={caller}",
+                        done.plan.from,
+                        done.plan.to,
+                        removal.removed.join("+"),
+                        removal.people
+                    ),
+                );
+            }
             if done.stored {
                 ops.record(
                     caller,
@@ -1945,6 +2105,20 @@ pub async fn execute(
             }
             let mut row = done.to_json();
             row["ran"] = Value::Null;
+            // The pre-checks on every database (27w). The plan is stored
+            // either way: it is the same everywhere, and the data is not.
+            let checks = crate::precheck::precheck(pool, ops.pools.as_ref(), &done.plan)
+                .await
+                .map_err(|e| e.to_exec_error("the plan was stored and not checked"))?;
+            row["prechecks"] = checks.to_json();
+            if run && !checks.issues.is_empty() {
+                return Err(EvolveRefusal::PreChecks {
+                    from: done.plan.from.clone(),
+                    to: done.plan.to.clone(),
+                    issues: checks.issues,
+                }
+                .to_exec_error("the plan was stored and not run"));
+            }
             if run {
                 let ran = run_step_with(
                     pool,

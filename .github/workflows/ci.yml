@@ -885,6 +885,10 @@ jobs:
         if: env.REACHED == 'true'
         run: node scripts/ci-affected.test.mjs
 
+      - name: Web coverage inventory and accounting
+        if: env.REACHED == 'true'
+        run: node --test scripts/web-coverage.test.mjs
+
       # The dev audit excepts advisories by id (owner rulings); its judgement
       # is tested here before it is trusted below.
       - name: The dev audit's tests

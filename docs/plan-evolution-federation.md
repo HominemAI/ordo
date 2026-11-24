@@ -98,7 +98,7 @@ In a shared database, tenants move one at a time and share the table.
 4. **First soak closes:** by §2 the old column stops being readable.
 
 - The reader's window is from step 3 to step 4.
-- **Proposed (Q1):** on a table a `reader` line names, the soaks close
+- **Ruled 2026-11-23 (Q1):** on a table a `reader` line names, the soaks close
   together, when the last one is due. That makes the window at least
   `soak.length` long (7 days by default).
 - A soak length of 0 on such a table needs the one-way confirmation,
@@ -133,7 +133,7 @@ In a shared database, tenants move one at a time and share the table.
 
 - Grants follow one version of the read app's file. A grant is a fact
   about the deployment, never about a tenant.
-- **Proposed (Q2):** a line removed or narrowed takes effect when the
+- **Ruled 2026-11-23 (Q2):** a line removed or narrowed takes effect when the
   version is applied, before any tenant moves. A line added or widened
   takes effect then too. A rollback puts the earlier line back.
 - The reason: taking consent away should not wait for a rollout to end.
@@ -163,7 +163,7 @@ In a shared database, tenants move one at a time and share the table.
 - Those are Ordo's tables. Their shape moves with the Ordo release, not
   with a program version.
 - 2 deployments in one database can run 2 Ordo releases.
-- **Proposed (Q16):** the columns a reader may be granted in those 4
+- **Ruled 2026-11-23 (Q16):** the columns a reader may be granted in those 4
   tables are a named contract. A release that changes one keeps the old
   column readable for `editions.load_window`. The release check
   (`plan-versions.md` §2.8) names each peer and reader on another release.

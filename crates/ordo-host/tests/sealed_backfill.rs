@@ -478,3 +478,40 @@ async fn the_apply_path_and_a_sealed_index_are_refused_by_name() {
     let text = format!("{err:?}");
     assert!(text.contains("sealed_index_backfill_not_built"), "{text}");
 }
+
+/// **A field a reader app reads is not sealed**: the render is refused as
+/// `seal_read_by_reader`, naming the reader and what lets it through, and
+/// no step is stored.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seal_of_a_field_a_reader_reads_is_refused_naming_the_reader() {
+    let with_reader = |src: String| {
+        src.replace(
+            "\nentity note",
+            "\nreader note_viewer reads note\n\nentity note",
+        )
+    };
+    let (_rpg, registry) = empty("ordo_seal_reader_reg").await;
+    store(&registry, &with_reader(v1())).await;
+    store(&registry, &with_reader(v2())).await;
+    let err = evolve::evolve(
+        &registry,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect_err("refused");
+    let text = format!("{err:?}");
+    assert!(text.contains("seal_read_by_reader"), "{text}");
+    assert!(text.contains("note_viewer"), "names the reader: {text}");
+    assert!(text.contains("7b"), "names what lets it through: {text}");
+    assert!(
+        evolve::path(&registry, "1.0.0", "1.1.0")
+            .await
+            .map_or(true, |p| p.is_empty()),
+        "no step is stored"
+    );
+}

@@ -698,6 +698,7 @@ pub async fn render_stored(
     }
 
     let mut errors = mapping_errors(pool, &a.ddl, &triaged.backfills).await?;
+    errors.extend(sealed_under_readers(&x, &y, &triaged.backfills));
     let mut functions = Vec::new();
     for bf in &triaged.backfills {
         match function_of(bf, &y, b) {
@@ -883,6 +884,41 @@ async fn mapping_errors(
             ),
         })
         .collect())
+}
+
+/// A seal (increment 13) of a field a reader app reads. A reader holds a
+/// grant on the whole table, so it would read ciphertext where it read
+/// text. Refused until the reader can read the sealed field (7b).
+fn sealed_under_readers(
+    x: &Program,
+    y: &Program,
+    backfills: &[sa::BackfillStep],
+) -> Vec<PlanError> {
+    let mut out = Vec::new();
+    for bf in backfills.iter().filter(|b| b.sealing_from.is_some()) {
+        let mut names = BTreeSet::new();
+        for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
+            if r.tables.iter().any(|t| *t == bf.entity) && names.insert(r.name.clone()) {
+                out.push(PlanError {
+                    code: bf.code.into(),
+                    change: format!("`{}.{}` becomes sealed", bf.entity, bf.field),
+                    class: "seal_read_by_reader".into(),
+                    why: format!(
+                        "reader `{}` reads `{}`, so it would read `{}` as ciphertext once it is \
+                         sealed",
+                        r.name, bf.entity, bf.field
+                    ),
+                    fix: format!(
+                        "move `{}` to a version that reads the sealed `{}.{}` \
+                         (plan-evolution-federation.md, increment 7b, not built yet), or take \
+                         `{}` off the `reader {}` line in a version before this one, then seal",
+                        r.name, bf.entity, bf.field, bf.entity, r.name
+                    ),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A backfill function as the plan names it (D16, Q14).

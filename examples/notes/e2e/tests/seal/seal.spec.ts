@@ -1,18 +1,21 @@
 /**
  * Sealing a field on live data (plan-versions.md increment 13).
  *
- * 0.3.2 (fixtures/notes-v3-2) is notes v3 with `notes.body` made `sealed`.
- * Ada, on v3, writes a note from the page. The developer stores 0.3.2 and
- * runs the step from 0.3.0 through the door. The backfill worker seals
- * every note's body under its tenant's key, verifies each tenant's count
- * and hash and that every sealed value opens to its plaintext, then drops
- * the plaintext column: `--run` on the deployment's database, `--tenant` on
- * each tenant's, which pins that tenant to 0.3.2. 0.3.2 is activated. The
- * page reads Ada's note, and a note written after the seal, and the table
- * holds no plaintext.
+ * The versions are notes v3 rewritten here (`v3As`). Ada, on v3, writes a
+ * note from the page. 0.3.2 seals `notes.body`, which note-viewer reads
+ * (the `reader` line): its plan is refused, naming the reader. 0.3.3 takes
+ * `notes` off the reader line and is applied. 0.3.4 seals `notes.body`.
+ * The developer runs the step from 0.3.3 through the door. The backfill
+ * worker seals every note's body under its tenant's key, verifies each
+ * tenant's count and hash and that every sealed value opens to its
+ * plaintext, then drops the plaintext column: `--run` on the deployment's
+ * database, `--tenant` on each tenant's, which pins that tenant to 0.3.4.
+ * 0.3.4 is activated. The page reads Ada's note, and a note written after
+ * the seal, and the table holds no plaintext.
  *
- * A regression looks like a plan with no sealed backfill, a refused run, a
- * page that shows ciphertext or nothing, or a body readable in the table.
+ * A regression looks like a seal under a reader that is not refused, a plan
+ * with no sealed backfill, a refused run, a page that shows ciphertext or
+ * nothing, or a body readable in the table.
  *
  * Not built here: live writes during the seal (increment 11a), and a
  * rollout that runs every tenant's step (11b). Nothing is written while a
@@ -22,11 +25,10 @@
  * Locally, `--project=seal --no-deps`. Chromium only.
  */
 
-import { cpSync, copyFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { owner } from '../people.js';
@@ -34,10 +36,21 @@ import { addNote, applyProgram, ensureServing, noteInList, servingVersion, signI
 
 test.describe.configure({ mode: 'serial' });
 
-/** The 0.3.2 program: the fixture as `notes.ordo`, beside notes v3's `fn` code. */
-function sealedBody(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'notes-v3-2-'));
-  copyFileSync(fileURLToPath(new URL('../../fixtures/notes-v3-2.ordo.fixture', import.meta.url)), join(dir, 'notes.ordo'));
+/**
+ * Notes v3 at `version`, beside its `fn` code. `sealed` makes `notes.body`
+ * sealed; `noReader` takes `notes` off the `reader note_viewer` line.
+ */
+function v3As(version: string, sealed: boolean, noReader: boolean): string {
+  let src = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
+  const swap = (from: string, to: string) => {
+    expect(src, `notes v3 still holds ${from}`).toContain(from);
+    src = src.replace(from, to);
+  };
+  swap('domain notes @ 0.3.0', `domain notes @ ${version}`);
+  if (sealed) swap('  body:  text = ""\n', '  body:  text sealed\n');
+  if (noReader) swap('reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess');
+  const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
+  writeFileSync(join(dir, 'notes.ordo'), src);
   cpSync(join(stack().programV3, 'fn'), join(dir, 'fn'), { recursive: true });
   return dir;
 }
@@ -96,21 +109,38 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
     expect(adaDb, `Ada's note is in one of ${dbs.length} tenant database(s)`).not.toBe('');
     expect(sql(adaDb, `SELECT count(*) FROM notes WHERE body = '${marker} and more'`), 'the body is plaintext before').toBe('1');
 
-    const dir = sealedBody();
-    await test.step('0.3.2 is stored beside 0.3.0', () => {
+    await test.step('a seal of a field note-viewer reads is refused, naming it', () => {
+      const dir = v3As('0.3.2', true, false);
       const stored = dev.ordo(['apply', dir, '--no-activate', ...door()]);
       expect(stored.code, `${stored.out}\n${stored.err}`).toBe(0);
-      expect(stored.out).toContain('0.3.2');
+      const plan = dev.ordo(['evolve', '--from', '0.3.0', '--to', '0.3.2', ...door()]);
+      expect(plan.code, plan.out).not.toBe(0);
+      const said = `${plan.out}${plan.err}`;
+      expect(said).toContain('seal_read_by_reader');
+      expect(said).toContain('note_viewer');
+      expect(said).toContain('7b');
+    });
+
+    await test.step('0.3.3 takes notes off the reader line', () => {
+      applyProgram(v3As('0.3.3', false, true));
+      expect(servingVersion()).toBe('0.3.3');
+    });
+
+    const dir = v3As('0.3.4', true, true);
+    await test.step('0.3.4 is stored beside 0.3.3', () => {
+      const stored = dev.ordo(['apply', dir, '--no-activate', ...door()]);
+      expect(stored.code, `${stored.out}\n${stored.err}`).toBe(0);
+      expect(stored.out).toContain('0.3.4');
       expect(stored.out).toContain('activated  no');
     });
 
     await test.step('the plan seals notes.body, and the run seals every note', () => {
-      const plan = dev.ordo(['evolve', '--from', '0.3.0', '--to', '0.3.2', ...door()]);
+      const plan = dev.ordo(['evolve', '--from', '0.3.3', '--to', '0.3.4', ...door()]);
       expect(plan.code, `${plan.out}\n${plan.err}`).toBe(0);
       expect(plan.out).toContain('backfill: notes.body = seal');
       expect(plan.out).toContain('plaintext: no plaintext dual write');
       expect(plan.out).toMatch(/^prechecks +\d+ database\(s\) asked, 0 issue\(s\)$/m);
-      const ran = dev.ordo(['evolve', '--from', '0.3.0', '--to', '0.3.2', '--run', ...door()]);
+      const ran = dev.ordo(['evolve', '--from', '0.3.3', '--to', '0.3.4', '--run', ...door()]);
       expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
       expect(ran.out).toMatch(/^ran +/m);
     });
@@ -123,7 +153,7 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
       const ada = sql(stack().pg.db, `SELECT "$space" FROM "$spacedb" WHERE db = '${adaDb}'`);
       expect(spaces).toContain(ada);
       for (const space of spaces) {
-        const replayed = dev.ordo(['evolve', '--tenant', space, '--to', '0.3.2', ...door()]);
+        const replayed = dev.ordo(['evolve', '--tenant', space, '--to', '0.3.4', ...door()]);
         if (space !== ada) continue;
         expect(replayed.code, `${replayed.out}\n${replayed.err}`).toBe(0);
         expect(replayed.out).toContain('notes.body = seal');
@@ -131,11 +161,11 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
       }
     });
 
-    await test.step('0.3.2 is activated', () => {
+    await test.step('0.3.4 is activated', () => {
       const active = dev.ordo(['apply', dir, ...door()]);
       expect(active.code, `${active.out}\n${active.err}`).toBe(0);
-      expect(active.out).toContain('activated  0.3.2');
-      expect(servingVersion()).toBe('0.3.2');
+      expect(active.out).toContain('activated  0.3.4');
+      expect(servingVersion()).toBe('0.3.4');
     });
 
     await test.step('the table holds no plaintext', () => {

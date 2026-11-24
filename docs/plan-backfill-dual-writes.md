@@ -298,7 +298,11 @@ in one database and 1 in its own.
   happens to the plaintext. Its old values stay in earlier backups and WAL.
 - Refused by name: `sealed indexed` or `sealed unique` in one step
   (`sealed_index_backfill_not_built`, B8), a field that is not `text`
-  before (`seal_type_not_built`), a node with no key custody.
+  before (`seal_type_not_built`), a node with no key custody, and a field
+  a reader app reads (`seal_read_by_reader`): the reader would read
+  ciphertext. It names the reader and the fix: a reader version that reads
+  the sealed field (7b, not built), or the table off the `reader` line in a
+  version before the seal.
 - Not built: the plaintext kept by `seal.keep_plaintext`; live writes during
   the seal and the pin switch at its end (11a); every tenant by a rollout
   (11b). Each tenant runs it with `ordo evolve --tenant`, which pins the

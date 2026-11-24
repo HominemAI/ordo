@@ -140,7 +140,7 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
     // notes.body sealed on live data (plan-versions.md increment 13), from
-    // v3 to 0.3.2 (fixtures/notes-v3-2). It seals a field for the whole
+    // v3 to 0.3.4 (versions written by the spec). It seals a field for the whole
     // stack, so it runs after `clone`, last. Locally, `--project=seal --no-deps`.
     {
       name: 'seal',

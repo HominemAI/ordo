@@ -105,6 +105,7 @@ pub mod platform_ops;
 pub mod presence;
 pub mod principal_directory;
 pub mod profile_ops;
+pub mod promotion;
 pub mod provision;
 pub mod proxy;
 pub mod public;

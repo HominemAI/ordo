@@ -62,6 +62,16 @@ pub enum EnvironmentRefusal {
     Reason(String),
     /// The position is outside the chain. Fix the input.
     Position { given: u32, max: u32 },
+    /// The deployment's own environment cannot be removed. Say which
+    /// environment this deployment is first.
+    RemoveOwn { name: String },
+    /// A stored promotion record names the environment, and records are
+    /// kept as they are.
+    Named {
+        name: String,
+        records: u64,
+        act: &'static str,
+    },
     /// The database failed. Retry.
     Store(PoolError),
 }
@@ -87,6 +97,19 @@ impl std::fmt::Display for EnvironmentRefusal {
                 "position {given} is outside the chain: use 1 to {max}, or leave it out to \
                  put the environment before this deployment's own"
             ),
+            EnvironmentRefusal::RemoveOwn { name } => write!(
+                f,
+                "`{name}` is the environment this deployment is, so it stays. Say this \
+                 deployment is another one first: `ordo environments set-own <name> \
+                 --reason \"...\"`"
+            ),
+            EnvironmentRefusal::Named { name, records, act } => write!(
+                f,
+                "`{name}` is named by {records} stored promotion record(s), which are kept \
+                 as they are, so it cannot be {act}. Leave it registered. To use another \
+                 name, register it: `ordo environments register <new-name> --reason \
+                 \"...\"`"
+            ),
             EnvironmentRefusal::Store(e) => write!(f, "{e}"),
         }
     }
@@ -106,6 +129,9 @@ impl EnvironmentRefusal {
         match self {
             EnvironmentRefusal::Missing { .. } => ExecError::new(ErrorCode::NotFound, message),
             EnvironmentRefusal::Registered { .. } => ExecError::new(ErrorCode::Duplicate, message),
+            EnvironmentRefusal::RemoveOwn { .. } | EnvironmentRefusal::Named { .. } => {
+                ExecError::new(ErrorCode::ApplyRefused, message)
+            }
             EnvironmentRefusal::Name(_)
             | EnvironmentRefusal::Reason(_)
             | EnvironmentRefusal::Position { .. } => {
@@ -288,5 +314,189 @@ impl<'a> Environments<'a> {
         let rows = tx.rows(READ_SQL).await?;
         tx.commit().await?;
         Ok(parse(&rows))
+    }
+
+    /// The chain read inside `tx`, with the implicit production written
+    /// when nothing is stored, so a change has a row to change.
+    async fn locked_chain(
+        &self,
+        tx: &ordo_exec::TxConn,
+    ) -> Result<Vec<Environment>, EnvironmentRefusal> {
+        tx.rows("LOCK TABLE \"$environments\" IN EXCLUSIVE MODE")
+            .await?;
+        let chain = parse(&tx.rows(READ_SQL).await?);
+        if !chain.is_empty() {
+            return Ok(chain);
+        }
+        let own = implicit();
+        tx.rows(&format!(
+            "INSERT INTO \"$environments\" (\"name\", \"pos\", \"own\", \"actor\", \"reason\", \
+             \"at\") VALUES ({}, 1, true, {}, {}, 0)",
+            sql_lit(&own.name),
+            sql_lit(&own.actor),
+            sql_lit(&own.reason)
+        ))
+        .await?;
+        Ok(vec![own])
+    }
+
+    /// How many stored promotion records name `name`, as the step before or
+    /// the target. A deployment that never promoted has none.
+    pub async fn promotions_naming(&self, name: &str) -> Result<u64, EnvironmentRefusal> {
+        let sql = format!(
+            "SELECT count(*)::text FROM \"$promotions\" WHERE \"from_env\" = {n} OR \"to_env\" = {n}",
+            n = sql_lit(name)
+        );
+        match self.pool.rows(&sql).await {
+            Ok(rows) => Ok(rows
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0)),
+            Err(e) if e.is_missing_table() => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// **Say which environment this deployment is.** `name` must be
+    /// registered. Answers the chain and whether anything changed.
+    pub async fn set_own(
+        &self,
+        name: &str,
+        reason: &str,
+    ) -> Result<(Vec<Environment>, bool), EnvironmentRefusal> {
+        crate::versions::check_reason(reason)
+            .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+        self.ensure().await?;
+        let tx = self.pool.begin().await?;
+        let chain = self.locked_chain(&tx).await?;
+        let name = name.trim();
+        if !chain.iter().any(|e| e.name == name) {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::Missing {
+                name: name.to_string(),
+                chain: chain.into_iter().map(|e| e.name).collect(),
+            });
+        }
+        if chain.iter().any(|e| e.own && e.name == name) {
+            tx.rollback().await?;
+            return Ok((chain, false));
+        }
+        tx.rows(&format!(
+            "UPDATE \"$environments\" SET \"own\" = (\"name\" = {})",
+            sql_lit(name)
+        ))
+        .await?;
+        let rows = tx.rows(READ_SQL).await?;
+        tx.commit().await?;
+        Ok((parse(&rows), true))
+    }
+
+    /// **Remove an environment** from the chain. Refused for this
+    /// deployment's own, and for one a stored promotion record names.
+    pub async fn remove(
+        &self,
+        name: &str,
+        reason: &str,
+    ) -> Result<Vec<Environment>, EnvironmentRefusal> {
+        crate::versions::check_reason(reason)
+            .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+        self.ensure().await?;
+        let name = name.trim();
+        let tx = self.pool.begin().await?;
+        let chain = self.locked_chain(&tx).await?;
+        let Some(found) = chain.iter().find(|e| e.name == name).cloned() else {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::Missing {
+                name: name.to_string(),
+                chain: chain.into_iter().map(|e| e.name).collect(),
+            });
+        };
+        if found.own {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::RemoveOwn {
+                name: name.to_string(),
+            });
+        }
+        let records = self.promotions_naming(name).await?;
+        if records > 0 {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::Named {
+                name: name.to_string(),
+                records,
+                act: "removed",
+            });
+        }
+        tx.rows(&format!(
+            "DELETE FROM \"$environments\" WHERE \"name\" = {}",
+            sql_lit(name)
+        ))
+        .await?;
+        tx.rows(&format!(
+            "UPDATE \"$environments\" SET \"pos\" = \"pos\" - 1 WHERE \"pos\" > {}",
+            found.position
+        ))
+        .await?;
+        let rows = tx.rows(READ_SQL).await?;
+        tx.commit().await?;
+        Ok(parse(&rows))
+    }
+
+    /// **Rename an environment.** Refused for one a stored promotion record
+    /// names, and for a name already in the chain.
+    pub async fn rename(
+        &self,
+        name: &str,
+        to: &str,
+        reason: &str,
+    ) -> Result<Vec<Environment>, EnvironmentRefusal> {
+        let to = check_name(to)?;
+        crate::versions::check_reason(reason)
+            .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+        self.ensure().await?;
+        let name = name.trim();
+        let tx = self.pool.begin().await?;
+        let chain = self.locked_chain(&tx).await?;
+        if !chain.iter().any(|e| e.name == name) {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::Missing {
+                name: name.to_string(),
+                chain: chain.into_iter().map(|e| e.name).collect(),
+            });
+        }
+        if chain.iter().any(|e| e.name == to) {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::Registered { name: to });
+        }
+        let records = self.promotions_naming(name).await?;
+        if records > 0 {
+            tx.rollback().await?;
+            return Err(EnvironmentRefusal::Named {
+                name: name.to_string(),
+                records,
+                act: "renamed",
+            });
+        }
+        tx.rows(&format!(
+            "UPDATE \"$environments\" SET \"name\" = {} WHERE \"name\" = {}",
+            sql_lit(&to),
+            sql_lit(name)
+        ))
+        .await?;
+        let rows = tx.rows(READ_SQL).await?;
+        tx.commit().await?;
+        Ok(parse(&rows))
+    }
+
+    /// When the first environment besides the implicit production was
+    /// registered. `None` before that.
+    pub async fn first_registered_at(&self) -> Result<Option<u64>, EnvironmentRefusal> {
+        Ok(self
+            .chain()
+            .await?
+            .iter()
+            .filter(|e| e.at > 0)
+            .map(|e| e.at)
+            .min())
     }
 }

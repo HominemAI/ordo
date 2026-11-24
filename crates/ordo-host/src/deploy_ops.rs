@@ -40,6 +40,14 @@
 //! - `std.deployment.registerEnvironment($name, $position?, $reason)`: add
 //!   one to the chain (`plan-versions.md` §4 row 4a). What `ordo
 //!   environments register` does.
+//! - `std.deployment.setOwnEnvironment($name, $reason)`, `removeEnvironment`
+//!   and `renameEnvironment($name, $to, $reason)`: which environment this
+//!   deployment is, and removing or renaming one. Each is recorded.
+//! - `std.deployment.versionSource($version)`: a stored version as a
+//!   promotion's source, with its identity and whether it was activated.
+//!   What `ordo promote` reads from the step before.
+//! - `std.deployment.promote(...)`: the promotion gate on this deployment
+//!   ([`crate::promotion`]). What `ordo promote` does.
 //!
 //! The bodies are `crate::apply_op`'s ([`apply_op::history`],
 //! [`apply_op::activate`], [`apply_op::preview`]), which the CLI calls
@@ -111,7 +119,18 @@ pub const ENVIRONMENTS: &str = "std.deployment.environments";
 /// **Register an environment** in the chain, with a reason.
 pub const REGISTER_ENVIRONMENT: &str = "std.deployment.registerEnvironment";
 
-pub const OPS: [&str; 16] = [
+/// Say which environment this deployment is.
+pub const SET_OWN_ENVIRONMENT: &str = "std.deployment.setOwnEnvironment";
+/// Remove an environment from the chain.
+pub const REMOVE_ENVIRONMENT: &str = "std.deployment.removeEnvironment";
+/// Rename an environment in the chain.
+pub const RENAME_ENVIRONMENT: &str = "std.deployment.renameEnvironment";
+/// **A stored version as a promotion's source.**
+pub const VERSION_SOURCE: &str = "std.deployment.versionSource";
+/// **Promote a version into this deployment**, through the gate.
+pub const PROMOTE: &str = "std.deployment.promote";
+
+pub const OPS: [&str; 21] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -128,6 +147,11 @@ pub const OPS: [&str; 16] = [
     SET_VERSION_SETTING,
     ENVIRONMENTS,
     REGISTER_ENVIRONMENT,
+    SET_OWN_ENVIRONMENT,
+    REMOVE_ENVIRONMENT,
+    RENAME_ENVIRONMENT,
+    VERSION_SOURCE,
+    PROMOTE,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -416,7 +440,106 @@ pub fn specs() -> Vec<OpSpec> {
             ],
             &["registered", "own", "chain"],
         ),
+        spec(
+            SET_OWN_ENVIRONMENT,
+            OpKind::Write,
+            vec![name_param(), reason_param()],
+            &["own", "changed", "chain"],
+        ),
+        spec(
+            REMOVE_ENVIRONMENT,
+            OpKind::Write,
+            vec![name_param(), reason_param()],
+            &["removed", "own", "chain"],
+        ),
+        spec(
+            RENAME_ENVIRONMENT,
+            OpKind::Write,
+            vec![
+                name_param(),
+                ParamSpec {
+                    name: "to".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: true,
+                    bounds: None,
+                },
+                reason_param(),
+            ],
+            &["renamed", "to", "own", "chain"],
+        ),
+        spec(
+            VERSION_SOURCE,
+            OpKind::Read,
+            vec![version_param("version")],
+            &[
+                "env",
+                "version",
+                "source",
+                "sourceId",
+                "codeHashes",
+                "code",
+                "activated",
+            ],
+        ),
+        spec(
+            PROMOTE,
+            OpKind::Write,
+            vec![
+                ParamSpec {
+                    name: "sourceEnv".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: true,
+                    bounds: None,
+                },
+                version_param("version"),
+                ParamSpec {
+                    name: "source".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(1024 * 1024),
+                    },
+                    required: true,
+                    bounds: None,
+                },
+                ParamSpec {
+                    name: "sourceId".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: true,
+                    bounds: None,
+                },
+                ParamSpec {
+                    // A JSON object, code path to hash.
+                    name: "codeHashes".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(64 * 1024),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+                ParamSpec {
+                    // As `std.deployment.apply`'s `code`.
+                    name: "code".to_string(),
+                    ty: ParamTy::Text {
+                        max_len: Some(apply_op::MAX_DOOR_CODE as u32),
+                    },
+                    required: false,
+                    bounds: None,
+                },
+                flag_param("activated"),
+                flag_param("activate"),
+                reason_param(),
+            ],
+            &["promoted", "from", "to", "sourceId", "report"],
+        ),
     ]
+}
+
+fn name_param() -> ParamSpec {
+    ParamSpec {
+        name: "name".to_string(),
+        ty: ParamTy::Text { max_len: Some(128) },
+        required: true,
+        bounds: None,
+    }
 }
 
 /// One environment as the ops answer it.
@@ -873,6 +996,175 @@ pub async fn execute(
                 "registered": name,
                 "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
                 "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
+        }
+        SET_OWN_ENVIRONMENT => {
+            let name = text(bound, "name").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let (chain, changed) = crate::environments::Environments::on(&ops.pool)
+                .set_own(name, reason)
+                .await
+                .map_err(|e| e.to_exec_error("this deployment's environment was not changed"))?;
+            if changed {
+                ops.record(
+                    caller,
+                    SET_OWN_ENVIRONMENT,
+                    "environment-own",
+                    format!("environment={name} by={caller} reason={}", reason.trim()),
+                );
+            }
+            json!({
+                "own": name, "changed": changed,
+                "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
+        }
+        REMOVE_ENVIRONMENT => {
+            let name = text(bound, "name").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let chain = crate::environments::Environments::on(&ops.pool)
+                .remove(name, reason)
+                .await
+                .map_err(|e| e.to_exec_error("the environment was not removed"))?;
+            ops.record(
+                caller,
+                REMOVE_ENVIRONMENT,
+                "environment-removed",
+                format!("environment={name} by={caller} reason={}", reason.trim()),
+            );
+            json!({
+                "removed": name,
+                "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
+                "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
+        }
+        RENAME_ENVIRONMENT => {
+            let name = text(bound, "name").unwrap_or_default();
+            let to = text(bound, "to").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let chain = crate::environments::Environments::on(&ops.pool)
+                .rename(name, to, reason)
+                .await
+                .map_err(|e| e.to_exec_error("the environment was not renamed"))?;
+            ops.record(
+                caller,
+                RENAME_ENVIRONMENT,
+                "environment-renamed",
+                format!(
+                    "environment={name} to={to} by={caller} reason={}",
+                    reason.trim()
+                ),
+            );
+            json!({
+                "renamed": name, "to": to,
+                "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
+                "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
+        }
+        VERSION_SOURCE => {
+            let asked = text(bound, "version").unwrap_or_default();
+            let read = |e: crate::versions::VersionRefusal| {
+                e.to_exec_error("the version's source could not be read")
+            };
+            let v = crate::versions::Versions::on(&ops.pool);
+            let version = v.resolve(asked).await.map_err(read)?;
+            let stored =
+                v.get(&version).await.map_err(read)?.ok_or_else(|| {
+                    ExecError::new(ordo_api::ErrorCode::NotFound, "no such version")
+                })?;
+            let doc: serde_json::Value = serde_json::from_str(&stored.artifact)
+                .map_err(|e| ExecError::internal(format!("the stored artifact: {e}")))?;
+            let hashes = ordo_plan::artifact::code_hashes(&doc);
+            let mut files = apply_op::CodeFiles::new();
+            for (path, hash) in &hashes {
+                let bytes = crate::functions::load_code(&ops.pool, hash)
+                    .await
+                    .map_err(|e| ExecError::internal(format!("function code: {e}")))?
+                    .ok_or_else(|| {
+                        ExecError::internal(format!("the code for `{path}` is not stored"))
+                    })?;
+                files.insert(
+                    path.clone(),
+                    apply_op::CodeFile {
+                        hash: hash.clone(),
+                        text: String::from_utf8_lossy(&bytes).into_owned(),
+                    },
+                );
+            }
+            let (_, source_id) = v
+                .identity(&version)
+                .await
+                .map_err(read)?
+                .unwrap_or_default();
+            let activated = v.activated_at(&version).await.map_err(read)?.is_some();
+            let env = crate::environments::Environments::on(&ops.pool)
+                .own()
+                .await
+                .map_err(|e| e.to_exec_error("the environment could not be read"))?;
+            json!({
+                "env": env.name, "version": version, "source": stored.source,
+                "sourceId": source_id, "codeHashes": hashes,
+                "code": apply_op::code_text(&files), "activated": activated,
+            })
+        }
+        PROMOTE => {
+            let get = |k: &str| text(bound, k).unwrap_or_default().to_string();
+            let flag = |k: &str, default: bool| {
+                bound.0.get(k).and_then(|v| v.as_bool()).unwrap_or(default)
+            };
+            let code = apply_op::parse_code(bound.0.get("code").and_then(|v| v.as_str()))
+                .map_err(|r| ExecError::new(r.code(), r.to_string()))?;
+            let code_hashes: std::collections::BTreeMap<String, String> =
+                match bound.0.get("codeHashes").and_then(|v| v.as_str()) {
+                    None => Default::default(),
+                    Some(raw) => serde_json::from_str(raw).map_err(|_| {
+                        ExecError::new(
+                            ordo_api::ErrorCode::InvalidParam,
+                            "`codeHashes` is not a JSON object from code path to hash",
+                        )
+                    })?,
+                };
+            let supplied = crate::promotion::SourceVersion {
+                env: get("sourceEnv"),
+                version: get("version"),
+                source: bound
+                    .0
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                source_id: get("sourceId"),
+                code_hashes,
+                code,
+                activated: flag("activated", false),
+            };
+            let reason = get("reason");
+            let done = crate::promotion::promote(
+                &ops.pool,
+                ops.pools.as_ref(),
+                supplied,
+                caller,
+                &reason,
+                flag("activate", true),
+                crate::runtime::now_secs(),
+            )
+            .await
+            .map_err(|e| e.to_exec_error("the version was not promoted"))?;
+            ops.record(
+                caller,
+                PROMOTE,
+                "promoted",
+                format!(
+                    "version={} from={} to={} source={} by={caller} reason={}",
+                    done.report.version,
+                    done.from,
+                    done.to,
+                    done.source_id,
+                    reason.trim()
+                ),
+            );
+            json!({
+                "promoted": done.report.version, "from": done.from, "to": done.to,
+                "sourceId": done.source_id, "report": done.report.to_json(),
             })
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a deploy op"))),

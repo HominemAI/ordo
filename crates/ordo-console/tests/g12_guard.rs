@@ -114,6 +114,39 @@ const CALLS: &[(&str, Rule)] = &[
             test: "environments.rs",
         },
     ),
+    ("std.deployment.versionSource", Read),
+    (
+        "std.deployment.setOwnEnvironment",
+        Write {
+            act: "environment-own",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.removeEnvironment",
+        Write {
+            act: "environment-removed",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.renameEnvironment",
+        Write {
+            act: "environment-renamed",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.promote",
+        Write {
+            act: "promoted",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
     // A tenant's version, moved from the Tenants screen.
     (
         "std.deployment.pin",

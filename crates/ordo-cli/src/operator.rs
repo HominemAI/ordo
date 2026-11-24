@@ -408,6 +408,7 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         "versions" => rt.block_on(versions_cmd(flags)),
         "windows" => rt.block_on(crate::windows::run(flags)),
         "environments" => rt.block_on(environments_cmd(flags)),
+        "promote" => rt.block_on(promote_cmd(flags)),
         "prune" => rt.block_on(prune(flags)),
         "restore" => rt.block_on(restore(flags)),
         "quota" => rt.block_on(quota(flags)),
@@ -1885,6 +1886,7 @@ async fn apply_once(flags: &Flags) -> Outcome {
         "--no-activate",
         "--no-wait",
         "--wait-secs",
+        "--env",
         "--host",
         "--token",
         "--space",
@@ -1907,6 +1909,13 @@ async fn apply_once(flags: &Flags) -> Outcome {
     };
     // The database this deployment uses: `--db`, else the one the
     // environment names. The refusal prints it in the command it suggests.
+    if flags.named_value("--env").is_some() && door_unless_direct(flags).is_none() {
+        return Outcome::usage(
+            "`--env` is checked by the deployment, so it goes through the door: name it \
+             with `--host <h>` (or ORDO_HOST)\n"
+                .into(),
+        );
+    }
     let db = pool_config(flags).db;
     let activate = !flags.has("--no-activate");
     // The label is checked by the apply itself, on both paths, so the
@@ -1935,6 +1944,13 @@ async fn apply_once(flags: &Flags) -> Outcome {
             Ok(h) => h,
             Err(e) => return Outcome::usage(e),
         };
+        // `--env <name>`: the deployment must have registered it and be
+        // it, so an apply meant for dev cannot land on production.
+        if let Some(env) = flags.named_value("--env") {
+            if let Err(o) = check_environment(&host, flags, env).await {
+                return o;
+            }
+        }
         // Backend functions: each code file is read and hashed here, as the
         // local path does, and carried with the program. The door hashes
         // each again, refuses a mismatch, and stores it by hash. A program
@@ -2463,15 +2479,46 @@ pub(crate) fn numbered(ordinal: Option<u64>, version: &str) -> String {
     }
 }
 
+/// **`--env <name>`** on a command that targets a deployment: the name must
+/// be registered there (the refusal names the command that registers it),
+/// and must be the environment that deployment is.
+pub(crate) async fn check_environment(
+    host: &crate::wire::Host,
+    flags: &Flags,
+    env: &str,
+) -> Result<(), Outcome> {
+    let row = crate::wire::door_op(
+        host,
+        flags,
+        ordo_host::deploy_ops::ENVIRONMENTS,
+        serde_json::json!({ "name": env }),
+        false,
+    )
+    .await?;
+    let own = row["own"].as_str().unwrap_or("production");
+    if own != env {
+        return Err(Outcome::failed(format!(
+            "REFUSED  `--env {env}`, and this deployment is `{own}`. Name the deployment \
+             that is `{env}` with `--host`, or say this one is: `ordo environments set-own \
+             {env} --reason \"...\"`\n"
+        )));
+    }
+    Ok(())
+}
+
 // ── environments ─────────────────────────────────────────────────────────
 
 const ENVIRONMENTS_USAGE: &str = "ordo environments list [<name>]  --host <h> ...\n\
      ordo environments register <name> [--position <n>] --reason \"<text>\"  --host <h> ...\n\
-     both go through the door (`--host <h>` or ORDO_HOST)";
+     ordo environments set-own <name> --reason \"<text>\"  --host <h> ...\n\
+     ordo environments remove <name> --reason \"<text>\"  --host <h> ...\n\
+     ordo environments rename <name> <new-name> --reason \"<text>\"  --host <h> ...\n\
+     each goes through the door (`--host <h>` or ORDO_HOST)";
 
-/// `ordo environments list|register`: the chain of environments this
-/// deployment declares (`plan-versions.md` §3.1, increment 4a), through the
-/// door (`std.deployment.environments`, `std.deployment.registerEnvironment`).
+/// `ordo environments list|register|set-own|remove|rename`: the chain of
+/// environments this deployment declares (`plan-versions.md` §3.1,
+/// increment 4a), through the door (`std.deployment.environments` and its
+/// siblings).
 async fn environments_cmd(flags: Flags) -> Outcome {
     let Some(sub) = flags.positional.first().cloned() else {
         return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n"));
@@ -2481,10 +2528,11 @@ async fn environments_cmd(flags: Flags) -> Outcome {
     let own: &[&str] = match sub.as_str() {
         "list" => &[],
         "register" => &["--position", "--reason"],
+        "set-own" | "remove" | "rename" => &["--reason"],
         other => {
             return Outcome::usage(format!(
-                "unknown `ordo environments` subcommand `{other}`; there are `list` and \
-                 `register`\n{ENVIRONMENTS_USAGE}\n"
+                "unknown `ordo environments` subcommand `{other}`; there are `list`, \
+                 `register`, `set-own`, `remove` and `rename`\n{ENVIRONMENTS_USAGE}\n"
             ))
         }
     };
@@ -2497,50 +2545,103 @@ async fn environments_cmd(flags: Flags) -> Outcome {
         Ok(h) => h,
         Err(o) => return o,
     };
-    let row = if sub == "list" {
-        let name = match flags.positional.as_slice() {
-            [] => None,
-            [n] => Some(n.clone()),
-            _ => return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n")),
-        };
-        crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::ENVIRONMENTS,
-            serde_json::json!({ "name": name }),
-            false,
-        )
-        .await
-    } else {
-        let [name] = flags.positional.as_slice() else {
-            return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n"));
-        };
-        let Some(reason) = flags.named_value("--reason") else {
-            return Outcome::usage(
-                "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
-            );
-        };
-        let position = match flags.named_value("--position").map(str::parse::<u32>) {
-            None => None,
-            Some(Ok(n)) if n >= 1 => Some(n),
-            Some(_) => return Outcome::usage("`--position` is a whole number from 1\n".into()),
-        };
-        crate::wire::door_op(
-            &host,
-            &flags,
-            ordo_host::deploy_ops::REGISTER_ENVIRONMENT,
-            serde_json::json!({ "name": name, "position": position, "reason": reason }),
-            true,
-        )
-        .await
+    let reason = flags.named_value("--reason").map(str::to_string);
+    let need_reason =
+        || Outcome::usage("`--reason \"<text>\"` says why, and is kept with the change\n".into());
+    let door = ordo_host::deploy_ops::ENVIRONMENTS;
+    let row = match (sub.as_str(), flags.positional.as_slice()) {
+        ("list", []) => {
+            crate::wire::door_op(&host, &flags, door, serde_json::json!({}), false).await
+        }
+        ("list", [name]) => {
+            crate::wire::door_op(
+                &host,
+                &flags,
+                door,
+                serde_json::json!({ "name": name }),
+                false,
+            )
+            .await
+        }
+        ("register", [name]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            let position = match flags.named_value("--position").map(str::parse::<u32>) {
+                None => None,
+                Some(Ok(n)) if n >= 1 => Some(n),
+                Some(_) => return Outcome::usage("`--position` is a whole number from 1\n".into()),
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                ordo_host::deploy_ops::REGISTER_ENVIRONMENT,
+                serde_json::json!({ "name": name, "position": position, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        ("set-own", [name]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                ordo_host::deploy_ops::SET_OWN_ENVIRONMENT,
+                serde_json::json!({ "name": name, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        ("remove", [name]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                ordo_host::deploy_ops::REMOVE_ENVIRONMENT,
+                serde_json::json!({ "name": name, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        ("rename", [name, to]) => {
+            let Some(reason) = reason else {
+                return need_reason();
+            };
+            crate::wire::door_op(
+                &host,
+                &flags,
+                ordo_host::deploy_ops::RENAME_ENVIRONMENT,
+                serde_json::json!({ "name": name, "to": to, "reason": reason }),
+                true,
+            )
+            .await
+        }
+        _ => return Outcome::usage(format!("{ENVIRONMENTS_USAGE}\n")),
     };
     let row = match row {
         Ok(r) => r,
         Err(o) => return o,
     };
-    let head = match row["registered"].as_str() {
-        Some(n) => format!("registered  {n}\n"),
-        None => String::new(),
+    let head = match (
+        row["registered"].as_str(),
+        row["removed"].as_str(),
+        row["renamed"].as_str(),
+    ) {
+        (Some(n), _, _) => format!("registered  {n}\n"),
+        (_, Some(n), _) => format!("removed     {n}\n"),
+        (_, _, Some(n)) => format!("renamed     {n} -> {}\n", row["to"].as_str().unwrap_or("?")),
+        _ if sub == "set-own" => match row["changed"].as_bool() {
+            Some(true) => format!("set         this deployment is {}\n", sub_name(&row)),
+            _ => format!(
+                "unchanged   this deployment is already {}\n",
+                sub_name(&row)
+            ),
+        },
+        _ => String::new(),
     };
     let mut out = format!("{head}CHAIN\n");
     for e in row["chain"].as_array().cloned().unwrap_or_default() {
@@ -2558,6 +2659,112 @@ async fn environments_cmd(flags: Flags) -> Outcome {
         ));
     }
     Outcome::ok(out)
+}
+
+fn sub_name(row: &serde_json::Value) -> String {
+    row["own"].as_str().unwrap_or("?").to_string()
+}
+
+const PROMOTE_USAGE: &str = "ordo promote <version> --from <host> --reason \"<text>\" \
+     [--from-token <t>] [--from-space <s>] [--no-activate]  --host <h> ...\n\
+     --host is the deployment promoted into; --from is the step before it. The version is \
+     read from the step before as you, never from this machine's files";
+
+/// `ordo promote <version> --from <host> --reason "..."`: the promotion gate
+/// (`std.deployment.promote`). The version is read from the step before's
+/// door (`std.deployment.versionSource`) and handed to the target, which
+/// enforces the gate ([`ordo_host::promotion`]). How the target reads it
+/// itself is the owner's open question 11.
+async fn promote_cmd(flags: Flags) -> Outcome {
+    let mut allowed = vec![
+        "--from",
+        "--from-token",
+        "--from-space",
+        "--reason",
+        "--no-activate",
+    ];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let ([version], Some(from), Some(reason)) = (
+        flags.positional.as_slice(),
+        flags.named_value("--from").map(str::to_string),
+        flags.named_value("--reason").map(str::to_string),
+    ) else {
+        return Outcome::usage(format!("{PROMOTE_USAGE}\n"));
+    };
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let from_host = match crate::wire::Host::parse(&from) {
+        Ok(h) => h,
+        Err(e) => return Outcome::usage(format!("`--from`: {e}\n")),
+    };
+    // The step before is read as the person promoting: their token, or the
+    // one named for it.
+    let mut source_flags = Flags::default();
+    source_flags
+        .named
+        .insert("--host".to_string(), from.clone());
+    if let Some(t) = flags
+        .named_value("--from-token")
+        .or_else(|| flags.named_value("--token"))
+    {
+        source_flags
+            .named
+            .insert("--token".to_string(), t.to_string());
+    }
+    if let Some(s) = flags
+        .named_value("--from-space")
+        .or_else(|| flags.named_value("--space"))
+    {
+        source_flags
+            .named
+            .insert("--space".to_string(), s.to_string());
+    }
+    let src = match crate::wire::door_op(
+        &from_host,
+        &source_flags,
+        ordo_host::deploy_ops::VERSION_SOURCE,
+        serde_json::json!({ "version": version }),
+        false,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::PROMOTE,
+        serde_json::json!({
+            "sourceEnv": src["env"],
+            "version": src["version"],
+            "source": src["source"],
+            "sourceId": src["sourceId"],
+            "codeHashes": src["codeHashes"].to_string(),
+            "code": src["code"],
+            "activated": src["activated"],
+            "activate": !flags.has("--no-activate"),
+            "reason": reason,
+        }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    Outcome::ok(format!(
+        "promoted    {} from {} to {}\nsource      {}\n",
+        row["promoted"].as_str().unwrap_or("?"),
+        row["from"].as_str().unwrap_or("?"),
+        row["to"].as_str().unwrap_or("?"),
+        row["sourceId"].as_str().unwrap_or("?"),
+    ))
 }
 
 // ── versions ─────────────────────────────────────────────────────────────

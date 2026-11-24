@@ -921,6 +921,9 @@ pub enum PinCause {
     /// A rollout's batch moved it (`plan-versions.md` §3.7, increment
     /// 10). Its `$pins` row names the rollout.
     Rollout,
+    /// The tenant's own database was restored from a snapshot taken on
+    /// another version, and the pin followed the data (§2.9, increment 17).
+    Restore,
 }
 
 /// Where an open move stands (`$moves.phase`, §2.1).
@@ -1033,6 +1036,7 @@ impl PinCause {
             PinCause::Tenant => "tenant",
             PinCause::Move => "move",
             PinCause::Rollout => "rollout",
+            PinCause::Restore => "restore",
         }
     }
 }
@@ -1055,6 +1059,39 @@ pub struct PinChange {
     pub actor: String,
     pub cause: String,
     pub at: u64,
+}
+
+/// Where a restore left a tenant's pin ([`Versions::restore_pin`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestorePin {
+    /// The tenant was already pinned to the restored data's version.
+    Unchanged { version: String },
+    /// The pin followed the data, cause `restore`.
+    Pinned { change: PinChange },
+    /// The data's version may not be served now (revoked, left out of
+    /// `versions.served`, or below `versions.minimum`). The restore stands,
+    /// the pin stays ahead of the data, and the tenant is held closed until
+    /// its database is brought to its pin. `why` names the fix.
+    Held {
+        data: String,
+        pin: Option<String>,
+        why: String,
+    },
+}
+
+/// Two version names in order: dotted numbers compared as numbers, part by
+/// part; anything else compared as text.
+pub fn version_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        v.split(['.', '-', '+'])
+            .take(3)
+            .map(|p| p.parse::<u64>().ok())
+            .collect()
+    };
+    match (parts(a), parts(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    }
 }
 
 /// A revoke or an unrevoke.
@@ -1301,6 +1338,14 @@ pub enum VersionRefusal {
     /// naming `ordo rollout status` and `ordo rollout abort`. Moving one
     /// tenant on its own is never refused for this.
     RolloutOpen { id: i64, target: String },
+    /// A restored database is at a version this deployment does not store
+    /// (§2.9, increment 17). `newer` when it is newer than every stored
+    /// version. Refused until the version is stored here.
+    RestoreNotStored {
+        version: String,
+        newer: bool,
+        stored: Vec<String>,
+    },
     /// A load guard's value that is not a duration. Fix the input.
     Guard {
         setting: &'static str,
@@ -1338,6 +1383,7 @@ impl VersionRefusal {
             | VersionRefusal::AlreadyRevoked { .. }
             | VersionRefusal::NotOnRevoked { .. }
             | VersionRefusal::NotRevoked { .. }
+            | VersionRefusal::RestoreNotStored { .. }
             | VersionRefusal::RolloutOpen { .. } => Remedy::Refuse,
             VersionRefusal::Store(e) => match e.class() {
                 // A broken store is the deployment's to mend, and the
@@ -1395,6 +1441,7 @@ impl VersionRefusal {
             | VersionRefusal::BelowMinimum { .. }
             | VersionRefusal::NotPromoted(_)
             | VersionRefusal::RolloutOpen { .. }
+            | VersionRefusal::RestoreNotStored { .. }
             | VersionRefusal::NamedBySetting { .. } => {
                 ExecError::new(ErrorCode::ApplyRefused, message)
             }
@@ -1411,6 +1458,27 @@ impl VersionRefusal {
 impl std::fmt::Display for VersionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            VersionRefusal::RestoreNotStored {
+                version,
+                newer: true,
+                stored,
+            } => write!(
+                f,
+                "the restored database is at {version}, newer than every version this \
+                 deployment stores ({}). Store {version} first (`ordo apply` its source, or \
+                 `ordo promote {version}`), then run `ordo restore --record` again",
+                stored.join(", ")
+            ),
+            VersionRefusal::RestoreNotStored {
+                version, stored, ..
+            } => write!(
+                f,
+                "the restored database is at {version}, which this deployment does not store \
+                 (stored: {}). Bring it here first (`ordo promote {version}` from the \
+                 environment that holds it, or `ordo apply` its source), then run `ordo \
+                 restore --record` again",
+                stored.join(", ")
+            ),
             VersionRefusal::Guard { setting, value } => write!(
                 f,
                 "`{setting}` is a duration like `10m`, `30s` or `2h`, or `0`{}, not `{value}`. \
@@ -2736,6 +2804,19 @@ impl<'a> Versions<'a> {
         actor: &str,
         at: u64,
     ) -> Result<PinChange, VersionRefusal> {
+        self.pin_as(space, name, actor, at, PinCause::Pin).await
+    }
+
+    /// [`Versions::pin`] with its cause. A restore keeps an open move and
+    /// points it at the restored version; every other cause ends it.
+    async fn pin_as(
+        &self,
+        space: &str,
+        name: &str,
+        actor: &str,
+        at: u64,
+        cause: PinCause,
+    ) -> Result<PinChange, VersionRefusal> {
         let version = self.resolve(name).await?;
         self.require_arrival(&version).await?;
         ensure_revocations(self.pool).await?;
@@ -2767,18 +2848,29 @@ impl<'a> Versions<'a> {
         };
         let from = row.first().cloned().flatten();
         let filter = format!("AND \"$space\" = {}", sql_lit(space));
-        repin(
-            &tx,
-            &repin_sql(&version, actor, PinCause::Pin, at, Some(&filter)),
-        )
-        .await?;
-        // A person chose this tenant's version, so an open move (§2.1) no
-        // longer applies to it.
-        tx.rows(&format!(
-            "DELETE FROM \"$moves\" WHERE \"space\" = {}",
-            sql_lit(space)
-        ))
-        .await?;
+        repin(&tx, &repin_sql(&version, actor, cause, at, Some(&filter))).await?;
+        if cause == PinCause::Restore {
+            // **The database's own cursor wins** (§2.9): a move that was
+            // open goes on from the version the data is at now, and the
+            // backfill reads its cursor from the restored `$backfills`. A
+            // move to the version restored is no move at all.
+            tx.rows(&format!(
+                "DELETE FROM \"$moves\" WHERE \"space\" = {s} AND \"to\" = {v}; \
+                 UPDATE \"$moves\" SET \"from\" = {v}, \"phase\" = 'expanding', \
+                 \"reason\" = 'restored at ' || {v} WHERE \"space\" = {s}",
+                s = sql_lit(space),
+                v = sql_lit(&version)
+            ))
+            .await?;
+        } else {
+            // A person chose this tenant's version, so an open move (§2.1)
+            // no longer applies to it.
+            tx.rows(&format!(
+                "DELETE FROM \"$moves\" WHERE \"space\" = {}",
+                sql_lit(space)
+            ))
+            .await?;
+        }
         tx.commit().await?;
         let epoch = self.pin_of(space).await?.map(|p| p.epoch).unwrap_or(0);
         Ok(PinChange {
@@ -2788,8 +2880,115 @@ impl<'a> Versions<'a> {
             to: version,
             epoch,
             actor: actor.to_string(),
-            cause: PinCause::Pin.as_str().to_string(),
+            cause: cause.as_str().to_string(),
             at,
+        })
+    }
+
+    /// **The pin after a tenant's own database was restored** (§2.9,
+    /// increment 17). `data` is the version the restored database records
+    /// (`$migrations`). The pin follows the data, so the tenant serves the
+    /// version its rows are shaped for:
+    ///
+    /// - already pinned there: nothing moves;
+    /// - stored, not revoked, served and not below `versions.minimum`:
+    ///   pinned there, cause `restore`, a new epoch;
+    /// - revoked, left out of `versions.served`, or below the minimum (Q13,
+    ///   ruled 2026-11-23): the restore stands and the pin is left where it
+    ///   is, ahead of the data. The tenant is held closed as any tenant
+    ///   whose database is behind (`SchemaBehind`) until the database is
+    ///   brought to its pin;
+    /// - not stored: refused, naming the version and how to store it.
+    ///
+    /// Asked before the restore marker is written, so a refusal leaves the
+    /// tenant closed and the same command runs again once the version is
+    /// stored. Moves the pin only for a version that passes every check.
+    pub async fn restore_pin(
+        &self,
+        space: &str,
+        data: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<RestorePin, VersionRefusal> {
+        let check = self.restore_check(space, data).await?;
+        match check {
+            RestorePin::Pinned { .. } => Ok(RestorePin::Pinned {
+                change: self
+                    .pin_as(space, data, actor, at, PinCause::Restore)
+                    .await?,
+            }),
+            other => Ok(other),
+        }
+    }
+
+    /// What [`Versions::restore_pin`] would do, moving nothing: refused for
+    /// a version not stored, otherwise the answer with no pin written (a
+    /// `Pinned` here carries the change that would be made, epoch 0).
+    pub async fn restore_check(
+        &self,
+        space: &str,
+        data: &str,
+    ) -> Result<RestorePin, VersionRefusal> {
+        let pin = self
+            .pin_of(space)
+            .await?
+            .ok_or_else(|| VersionRefusal::NoTenant {
+                space: space.to_string(),
+            })?;
+        if registry::get(self.pool, data).await?.is_none() {
+            let stored: Vec<String> = registry::stored(self.pool)
+                .await?
+                .into_iter()
+                .map(|(v, _, _)| v)
+                .collect();
+            let newer = stored
+                .iter()
+                .all(|v| version_order(data, v) == std::cmp::Ordering::Greater);
+            return Err(VersionRefusal::RestoreNotStored {
+                version: data.to_string(),
+                newer,
+                stored,
+            });
+        }
+        if pin.version.as_deref() == Some(data) {
+            return Ok(RestorePin::Unchanged {
+                version: data.to_string(),
+            });
+        }
+        ensure_revocations(self.pool).await?;
+        let held = if let Some(mark) = self.revocation_of(data).await? {
+            Some(format!(
+                "{data} is revoked ({}). Lift the mark (`ordo versions unrevoke {data}`), or \
+                 bring the database to its pin",
+                mark.reason
+            ))
+        } else {
+            match self.check_served(data).await {
+                Ok(()) => None,
+                Err(
+                    e @ (VersionRefusal::NotServed { .. } | VersionRefusal::BelowMinimum { .. }),
+                ) => Some(e.to_string()),
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(match held {
+            Some(why) => RestorePin::Held {
+                data: data.to_string(),
+                pin: pin.version,
+                why,
+            },
+            None => RestorePin::Pinned {
+                change: PinChange {
+                    seq: 0,
+                    space: space.to_string(),
+                    from: pin.version,
+                    to: data.to_string(),
+                    epoch: 0,
+                    actor: String::new(),
+                    cause: PinCause::Restore.as_str().to_string(),
+                    at: 0,
+                },
+            },
         })
     }
 

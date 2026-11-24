@@ -115,10 +115,20 @@ export default defineConfig({
     // The pre-checks of `ordo evolve` over bad data in a tenant (increment 9),
     // from v3 to 0.3.1 (fixtures/notes-v3-1). It needs v3 serving, so it runs
     // after `v3`, last. Locally, `--project=evolve-checks --no-deps`.
+    // Restore across versions (plan-versions.md increment 17): a tenant's
+    // database restored from a snapshot taken on v2 while v3 serves; its pin
+    // follows the data, then it moves again. It needs v3 active, so it runs
+    // after `v3`. Locally, `--project=restore --no-deps`.
+    {
+      name: 'restore',
+      testMatch: /restore\/.*\.spec\.ts/,
+      dependencies: ['v3'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'evolve-checks',
       testMatch: /evolve\/prechecks\.spec\.ts/,
-      dependencies: ['v3'],
+      dependencies: ['restore'],
       use: { ...devices['Desktop Chrome'] },
     },
     // attachments.size, orphaned by v3: exported, erased, then pruned

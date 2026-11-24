@@ -172,8 +172,11 @@ impl Program {
 
     fn identify(&mut self) {
         use ordo_plan::artifact as a;
-        self.source_id =
-            a::source_identity(&self.source, a::FIRST_EDITION, &a::code_hashes(&self.doc));
+        self.source_id = a::source_identity(
+            &self.source,
+            ordo_plan::edition::of_source(&self.source),
+            &a::code_hashes(&self.doc),
+        );
         self.build_id = a::build_identity(&self.doc, &self.ddl, a::ORDO_RELEASE);
         self.declared = a::declared_version(&self.source);
         self.version = match &self.declared {

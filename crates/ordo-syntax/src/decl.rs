@@ -21,6 +21,11 @@ use crate::trigger::{ListenerPattern, Modifiers, Schedule};
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Program {
     pub domain: Option<DomainDecl>,
+    /// `edition 2`: the language edition the source is written in
+    /// (`plan-versions.md` §2.6). Absent is edition 1, for good (board
+    /// `program-versions-the-core-under-schema` ask 5). What each edition
+    /// means is the release's, in `ordo_plan::edition`.
+    pub edition: Option<EditionDecl>,
     pub entities: Vec<EntityDecl>,
     pub ops: Vec<OpDecl>,
     /// `release member …`: whether a member may leave the tenant on their
@@ -162,6 +167,14 @@ pub struct SecretDecl {
     /// one subdomain may receive the key. Empty for a signing key
     /// (`secret hookKey`), which is sent nowhere.
     pub hosts: Vec<String>,
+    pub span: Span,
+}
+
+/// `edition <n>`: one line, at most once per program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditionDecl {
+    pub number: u32,
+    /// The whole line, `edition` to the number.
     pub span: Span,
 }
 

@@ -430,6 +430,94 @@ pub async fn deployed_artifact(pool: &Pool) -> Option<crate::versions::Artifact>
     versions.get(&v).await.ok()?
 }
 
+/// The schema of the version the deployment is serving, or `None`.
+pub async fn active_schema(pool: &Pool) -> Option<Schema> {
+    deployed_artifact(pool).await.as_ref().and_then(recompile)
+}
+
+/// **Record what a version left behind on this database** (`$orphans`,
+/// `plan-versions.md` §2.7, increment 14).
+///
+/// `prior` is the version the database held before, `program` the one it
+/// holds now. Every field or entity `prior` declared, `program` does not,
+/// and the live database still holds is an orphan: kept, never written.
+/// Each is recorded once, with its columns, its sealed flag and a drop date.
+/// An orphan `program` declares again is removed, because it is written
+/// again. Answers the names newly recorded.
+///
+/// Called wherever a database is brought to a version: the deployment's own
+/// apply, each tenant's database brought forward, and each stored step run.
+pub async fn record_orphans(
+    pool: &Pool,
+    prior: &Schema,
+    program: &Program,
+    from: Option<&str>,
+    actor: &str,
+) -> Result<Vec<String>, String> {
+    let live = migrate::live_shape(pool, pool.schema())
+        .await
+        .map_err(|e| format!("reading the live schema: {e}"))?;
+    let mut left: Vec<ordo_exec::orphans::Left> = Vec::new();
+    for c in ordo_schema::diff(&live, Some(prior), &program.schema) {
+        match c {
+            Change::DropField { entity, field } => {
+                let Some(f) = prior.native(&entity).and_then(|e| e.field(&field)) else {
+                    continue;
+                };
+                let table = live.table(&entity);
+                let mut columns = vec![f.column()];
+                if f.indexed && table.is_some_and(|t| t.columns.contains_key(&f.index_column())) {
+                    columns.push(f.index_column());
+                }
+                left.push(ordo_exec::orphans::Left {
+                    entity,
+                    field: Some(field),
+                    columns,
+                    sealed: f.sealed || f.private,
+                });
+            }
+            Change::DropEntity { entity } => {
+                let sealed = prior
+                    .native(&entity)
+                    .is_some_and(|e| e.fields.iter().any(|f| f.sealed || f.private));
+                left.push(ordo_exec::orphans::Left {
+                    entity,
+                    field: None,
+                    columns: Vec::new(),
+                    sealed,
+                });
+            }
+            _ => {}
+        }
+    }
+    let schema = &program.schema;
+    ordo_exec::orphans::revive(pool, &|entity: &str, field: &str| {
+        schema
+            .native(entity)
+            .is_some_and(|e| field.is_empty() || e.field(field).is_some())
+    })
+    .await
+    .map_err(|e| format!("$orphans: {e}"))?;
+    let names: Vec<String> = left
+        .iter()
+        .map(|l| match &l.field {
+            Some(f) => format!("{}.{f}", l.entity),
+            None => l.entity.clone(),
+        })
+        .collect();
+    let written = ordo_exec::orphans::record(
+        pool,
+        &left,
+        from,
+        &program.version,
+        actor,
+        crate::runtime::now_secs(),
+    )
+    .await
+    .map_err(|e| format!("$orphans: {e}"))?;
+    Ok(if written == 0 { Vec::new() } else { names })
+}
+
 fn recompile(a: &crate::versions::Artifact) -> Option<Schema> {
     crate::Fixture::from_source(&a.source, "")
         .ok()
@@ -3657,6 +3745,13 @@ pub async fn bring_forward_from(
             .map_err(internal)?;
         }
         Err(e) => return Err(internal(e.to_string())),
+    }
+    // What the version left behind here (§2.7). Read against the version
+    // this database held, when the deployment's own database could say it.
+    if let Some(prior) = &written {
+        record_orphans(pool, prior, program, before.as_deref(), actor)
+            .await
+            .map_err(internal)?;
     }
     Ok(Forward::Advanced { statements })
 }

@@ -154,8 +154,12 @@ pub const PLANS: &str = crate::evolve::PLANS;
 pub const REPLAY: &str = crate::evolve::REPLAY;
 /// What a rollback to a version would find: its externals and peers now.
 pub const ROLLBACK_CHECK: &str = crate::evolve::ROLLBACK_CHECK;
+/// What versions left behind in every database (`$orphans`).
+pub const ORPHANS: &str = crate::orphan_ops::ORPHANS;
+/// Remove one orphan from every database, once asked twice.
+pub const PRUNE: &str = crate::orphan_ops::PRUNE;
 
-pub const OPS: [&str; 27] = [
+pub const OPS: [&str; 29] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -183,6 +187,8 @@ pub const OPS: [&str; 27] = [
     PLANS,
     REPLAY,
     ROLLBACK_CHECK,
+    ORPHANS,
+    PRUNE,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -581,6 +587,7 @@ pub fn specs() -> Vec<OpSpec> {
     ]
     .into_iter()
     .chain(crate::evolve::specs())
+    .chain(crate::orphan_ops::specs())
     .collect()
 }
 
@@ -887,6 +894,7 @@ pub async fn execute(
         EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK => {
             crate::evolve::execute(ops, name, bound, caller).await?
         }
+        ORPHANS | PRUNE => crate::orphan_ops::execute(ops, name, bound, caller).await?,
         PIN => {
             let tenant = text(bound, "tenant").unwrap_or_default();
             let version = text(bound, "version").unwrap_or_default();
@@ -1309,6 +1317,40 @@ pub async fn execute(
                 "door": row.map(environment_json).map(|e| e["door"].clone()),
                 "own": chain.iter().find(|e| e.own).map(|e| e.name.clone()),
                 "chain": chain.iter().map(environment_json).collect::<Vec<_>>(),
+            })
+        }
+        SET_PROMOTION_SETTING
+            if crate::environments::is_prune_setting(
+                text(bound, "setting").unwrap_or_default(),
+            ) =>
+        {
+            let value = text(bound, "value").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let envs = crate::environments::Environments::on(&ops.pool);
+            let (on, changed) = envs
+                .set_prune_enabled(value, caller, reason, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the prune setting was not changed"))?;
+            let shown = if on { "on" } else { "off" };
+            if changed {
+                ops.record(
+                    caller,
+                    SET_PROMOTION_SETTING,
+                    "prune-setting",
+                    format!(
+                        "setting={} value={shown} by={caller} reason={}",
+                        crate::environments::PRUNE_ENABLED,
+                        reason.trim()
+                    ),
+                );
+            }
+            let skip = envs
+                .promotion_settings()
+                .await
+                .map_err(|e| e.to_exec_error("the settings could not be read"))?;
+            json!({
+                "setting": crate::environments::PRUNE_ENABLED, "value": shown,
+                "changed": changed, "skipStaging": skip.skip_staging,
             })
         }
         SET_PROMOTION_SETTING => {

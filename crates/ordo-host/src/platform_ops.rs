@@ -389,6 +389,9 @@ pub fn specs() -> Vec<OpSpec> {
                 FieldSpec::new("objectsLeft"),
                 // E7: what deleting the tenant did to the identities it made.
                 FieldSpec::new("identities"),
+                // What versions left behind that the erasure reached
+                // (`$orphans`, plan-versions.md §2.7).
+                FieldSpec::new("orphans"),
             ],
             live_capable: false,
             reads_external: false,

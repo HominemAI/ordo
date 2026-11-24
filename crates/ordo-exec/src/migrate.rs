@@ -203,6 +203,43 @@ pub async fn access_to(
     }))
 }
 
+/// Of `columns`, the ones the current role may not `SELECT` in
+/// `schema.table`. Asked of the catalog, so a column granted by column and
+/// a table granted whole both read as granted.
+pub async fn columns_not_granted(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+    columns: &[&str],
+) -> Result<Vec<String>, PoolError> {
+    let mut out = Vec::new();
+    for c in columns {
+        let rows = pool
+            .rows(&format!(
+                "SELECT has_column_privilege(current_user, t.oid, {}, 'SELECT') \
+                 FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace \
+                 JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = {} \
+                   AND NOT a.attisdropped \
+                 WHERE n.nspname = {} AND t.relname = {}",
+                crate::sql_lit(c),
+                crate::sql_lit(c),
+                crate::sql_lit(schema),
+                crate::sql_lit(table)
+            ))
+            .await?;
+        let granted = rows
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .as_deref()
+            == Some("t");
+        // A column that is not there is the shape check's to report.
+        if !rows.is_empty() && !granted {
+            out.push(c.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// Is this relation a table (ordinary or partitioned), as opposed to a view,
 /// a materialized view or a foreign table? Only a table states its keys and
 /// its NOT NULLs in the catalog.

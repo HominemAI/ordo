@@ -772,3 +772,10 @@ them, locally and from GitHub: `docs/howto-e2e.md`.
 The newest page tests are `web/test/signin.test.ts` (the ways in, the return
 from a provider, the emailed code, the guest) and additions to
 `web/test/friendly.test.ts` and `web/test/notes.test.ts`.
+
+
+The v2 isolation suite tries another tenant's reads, refinements, feeds,
+files, downloads, exports, search and writes. It also checks the device
+records after sign-out and after a second person signs in to the same
+browser. Run `npx playwright test tests/v2/isolation.spec.ts --project=v2
+--no-deps` from `e2e/`.

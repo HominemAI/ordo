@@ -143,6 +143,7 @@ fn command_switches(cmd: &str) -> &'static [&'static str] {
         "versions" => &["--source", "--schema", "--clear"],
         "windows" => &["--all"],
         "evolve" => &["--run", "--list"],
+        "release-check" => &["--json", "--override"],
         _ => &[],
     }
 }
@@ -393,6 +394,10 @@ fn run_with(cmd: &str, args: &[String], input: Option<Vec<u8>>) -> Outcome {
         let mut flags = flags;
         flags.positional.remove(0);
         return crate::identity::run(&sub, flags, cfg);
+    }
+    if cmd == "release-check" {
+        let cfg = pool_config(&flags);
+        return rt.block_on(crate::release_check::run(flags, cfg));
     }
     match cmd {
         "verify" => rt.block_on(verify(flags)),

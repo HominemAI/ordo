@@ -119,6 +119,7 @@ pub mod recovery_hold;
 pub mod recovery_settings;
 mod refine_call;
 pub mod registrations;
+pub mod release_check;
 pub mod release_ops;
 pub mod renewal;
 pub mod replay;

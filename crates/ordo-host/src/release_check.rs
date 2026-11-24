@@ -61,8 +61,16 @@
 //! `edition` check, naming `ordo fix`. One inside the window is a note,
 //! marked `soon` when the window ends within 3 months of this release.
 //!
-//! **Not checked here:** peers and
-//! readers on another Ordo release (`plan-evolution-federation.md` §5).
+//! **Peers and readers** ([`neighbours`], `plan-evolution-federation.md`
+//! §5, owner ruling 2026-11-23, Q16). Each peer a checked version names is
+//! listed with the Ordo release it last started under (its `$ordorelease`,
+//! granted to its readers), and each reader this deployment grants to is
+//! listed by its role. A reader's release is not visible from here: it
+//! grants this deployment nothing. Neither fails the check: the sign-in
+//! columns a reader reads are a contract (`ordo_exec::sign_in_contract`),
+//! kept for `editions.load_window` after a release changes one. A column
+//! this release retires is named with the date it stops being granted.
+//!
 //! Function code is checked as the host loads it, by hash and table; the
 //! JavaScript is compiled by the engine at each call.
 
@@ -158,6 +166,49 @@ pub struct Report {
     /// A name the set holds with no stored row: a setting or a target that
     /// names a version this deployment does not have.
     pub missing: Vec<(String, String)>,
+    /// Each peer and reader, with the release it runs when that is known.
+    pub neighbours: Vec<Neighbour>,
+}
+
+/// A peer this deployment reads, or a reader that reads it
+/// (`plan-evolution-federation.md` §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Neighbour {
+    /// `peer` or `reader`.
+    pub kind: &'static str,
+    /// The nickname its line gives it.
+    pub name: String,
+    /// A peer's schema, or a reader's database role.
+    pub at: String,
+    /// The Ordo release it last started under, when this deployment can
+    /// read it.
+    pub release: Option<String>,
+    /// Why the release is not known, when it is not.
+    pub unknown: String,
+}
+
+impl Neighbour {
+    /// One line for a person.
+    pub fn line(&self, this: &str) -> String {
+        let place = if self.kind == "peer" {
+            format!("schema `{}`", self.at)
+        } else {
+            format!("role `{}`", self.at)
+        };
+        match &self.release {
+            Some(r) if r == this => {
+                format!(
+                    "{} {} ({place}): Ordo {r}, this release",
+                    self.kind, self.name
+                )
+            }
+            Some(r) => format!(
+                "{} {} ({place}): Ordo {r}, ANOTHER RELEASE",
+                self.kind, self.name
+            ),
+            None => format!("{} {} ({place}): {}", self.kind, self.name, self.unknown),
+        }
+    }
 }
 
 impl Report {
@@ -204,6 +255,14 @@ impl Report {
             })).collect::<Vec<_>>(),
             "missing": self.missing.iter().map(|(v, why)| json!({"version": v, "named": why}))
                 .collect::<Vec<_>>(),
+            "neighbours": self.neighbours.iter().map(|n| json!({
+                "kind": n.kind,
+                "name": n.name,
+                "at": n.at,
+                "release": n.release,
+                "otherRelease": n.release.as_ref().is_some_and(|r| r != &self.release),
+                "unknown": n.unknown,
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -235,6 +294,7 @@ impl Report {
                  version with `ordo versions`"
             ));
         }
+        out.extend(neighbour_lines(&self.neighbours, &self.release));
         let failing = self.failing();
         if failing.is_empty() && self.missing.is_empty() {
             out.push(format!(
@@ -281,6 +341,116 @@ impl Report {
 }
 
 // ── reading, tolerant of any earlier release's control database ─────────
+
+// ── peers and readers ───────────────────────────────────────────────────
+
+/// The peers and readers section: each one, then what the contract keeps.
+/// Empty when there are none.
+pub fn neighbour_lines(neighbours: &[Neighbour], this: &str) -> Vec<String> {
+    use ordo_exec::sign_in_contract as c;
+    let retired = c::retired_by(this);
+    if neighbours.is_empty() && retired.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![format!(
+        "peers and readers: the sign-in columns a reader reads stay readable for {} months \
+         after a release changes one (`editions.load_window`)",
+        ordo_plan::edition::LOAD_WINDOW_MONTHS
+    )];
+    for n in neighbours {
+        out.push(format!("  {}", n.line(this)));
+    }
+    for col in retired {
+        let r = col.retired.expect("retired");
+        let now = r
+            .replaced_by
+            .map(|n| format!(" (now `{n}`)"))
+            .unwrap_or_default();
+        let until = c::kept_until(&r)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "the window's end".into());
+        out.push(format!(
+            "  this release retires `{}.{}`{now}; every reader is still granted it until \
+             Ordo releases dated {until}",
+            col.table, col.column
+        ));
+    }
+    out
+}
+
+/// **Each peer and each reader** of this deployment, and the release each
+/// runs when it can be read (`plan-evolution-federation.md` §5, Q16).
+///
+/// Peers come from `schemas`, the checked versions' compiled programs: a
+/// peer's schema is its `ORDO_PEER_<NAME>_SCHEMA`, read through `lookup`,
+/// and its release from its `$ordorelease`, which it grants to its
+/// readers. Readers come from `$readergrant`, the roles this deployment
+/// grants to.
+pub async fn neighbours(
+    pool: &Pool,
+    schemas: &[ordo_schema::Schema],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<Neighbour>, PoolError> {
+    use ordo_exec::sign_in_contract::{release_of, PeerRelease};
+    let mut out = Vec::new();
+    let peers: BTreeSet<&String> = schemas.iter().flat_map(|s| s.peers.iter()).collect();
+    for name in peers {
+        let var = ordo_exec::peer::schema_env(name);
+        let Some(pg) = lookup(&var).filter(|v| !v.trim().is_empty()) else {
+            out.push(Neighbour {
+                kind: "peer",
+                name: name.clone(),
+                at: "?".into(),
+                release: None,
+                unknown: format!(
+                    "`{var}` is not set where the check runs, so its release is not read; run \
+                     the check with the deployment's own settings"
+                ),
+            });
+            continue;
+        };
+        let (release, unknown) = match release_of(pool, pg.trim()).await? {
+            PeerRelease::Known(r) => (Some(r), String::new()),
+            PeerRelease::Unrecorded => (
+                None,
+                format!("an Ordo release before {}, which records none", release()),
+            ),
+            PeerRelease::NotGranted => (
+                None,
+                "its release is not granted to this deployment yet; the peer grants it at \
+                 its next start"
+                    .to_string(),
+            ),
+        };
+        out.push(Neighbour {
+            kind: "peer",
+            name: name.clone(),
+            at: pg.trim().to_string(),
+            release,
+            unknown,
+        });
+    }
+    for r in rows_or_none(
+        pool,
+        r#"SELECT "reader", "role" FROM "$readergrant" ORDER BY 1, 2"#,
+    )
+    .await?
+    {
+        let (Some(name), Some(role)) = (col(&r, 0), col(&r, 1)) else {
+            continue;
+        };
+        out.push(Neighbour {
+            kind: "reader",
+            name,
+            at: role,
+            release: None,
+            unknown: "its release is not visible from this deployment, which it grants \
+                      nothing"
+                .into(),
+        });
+    }
+    Ok(out)
+}
 
 /// Rows of `sql`, or none when a table or column it reads is not there.
 async fn rows_or_none(pool: &Pool, sql: &str) -> Result<Vec<Vec<Option<String>>>, PoolError> {
@@ -709,6 +879,7 @@ pub async fn run(pool: &Pool, cfg: &PoolConfig) -> Result<Report, PoolError> {
         active,
         versions: Vec::new(),
         missing: Vec::new(),
+        neighbours: Vec::new(),
     };
     let mut artifacts: BTreeMap<String, Artifact> = BTreeMap::new();
     for (version, reasons) in &set {
@@ -766,6 +937,14 @@ pub async fn run(pool: &Pool, cfg: &PoolConfig) -> Result<Report, PoolError> {
             }
         }
     }
+    // The peers every checked version that compiles names, and the
+    // readers this deployment grants to.
+    let schemas: Vec<ordo_schema::Schema> = artifacts
+        .values()
+        .filter_map(|a| compile_stored(a).ok())
+        .map(|f| f.schema)
+        .collect();
+    report.neighbours = neighbours(pool, &schemas, ordo_exec::schema_setting).await?;
     Ok(report)
 }
 
@@ -990,6 +1169,22 @@ mod tests {
                 },
             ],
             missing: vec![],
+            neighbours: vec![
+                Neighbour {
+                    kind: "peer",
+                    name: "journal".into(),
+                    at: "journal_db".into(),
+                    release: Some("9.8.0".into()),
+                    unknown: String::new(),
+                },
+                Neighbour {
+                    kind: "reader",
+                    name: "viewer".into(),
+                    at: "viewer_app".into(),
+                    release: None,
+                    unknown: "not visible".into(),
+                },
+            ],
         };
         assert!(!r.passed());
         let text = r.lines().join("\n");
@@ -997,6 +1192,17 @@ mod tests {
         assert!(text.contains("spc_a (Acme)"), "{text}");
         assert!(text.contains("--override --reason"), "{text}");
         assert!(text.contains("ok    0.2.0"), "{text}");
+        // Peers and readers are named, and never fail the check.
+        assert!(
+            text.contains("peer journal (schema `journal_db`): Ordo 9.8.0, ANOTHER RELEASE"),
+            "{text}"
+        );
+        assert!(
+            text.contains("reader viewer (role `viewer_app`): not visible"),
+            "{text}"
+        );
+        assert!(text.contains("`editions.load_window`"), "{text}");
         assert_eq!(r.to_json()["result"], "fail");
+        assert_eq!(r.to_json()["neighbours"][0]["otherRelease"], true);
     }
 }

@@ -1,6 +1,6 @@
 # Evolution across deployments: externals, peers and readers under versions
 
-Status: **plan started 2026-11-23, nothing built, nothing ruled.** Written
+Status: **plan started 2026-11-23; Q1, Q2 and Q16 ruled 2026-11-23; F1 and F6 built, F2 to F5 in part; see §6.** Written
 by the review of the evolution plans (`review-evolution-plans-2026-11-23.md`).
 It is increment 7b of `plan-versions.md` §4. Its open questions are Q1, Q2
 and Q16 of that review.
@@ -167,6 +167,10 @@ In a shared database, tenants move one at a time and share the table.
   tables are a named contract. A release that changes one keeps the old
   column readable for `editions.load_window`. The release check
   (`plan-versions.md` §2.8) names each peer and reader on another release.
+- **Built 2026-11-24 (F6):** the contract is `ordo_exec::sign_in_contract`.
+  Each deployment records its release in `$ordorelease` and grants it to
+  its readers. A reader grants the read app nothing, so the read app's
+  check names each reader by its role, without its release.
 - A sign-in provider removed from one side's `auth` block ends the match
   for people who used it. They read nothing; nothing leaks. The pre-check
   on that version says: "this version removes `google`, the only provider
@@ -182,8 +186,8 @@ In a shared database, tenants move one at a time and share the table.
 | F2 | M | Grants by column; the union while 2 versions serve; the revoke at soak close; `$readergrant` by column; soaks on a read table close together. **Part built 2026-11-23** (increment 14): a table holding an orphaned column is granted by column, without it, and the reader's check names the column it lost (`external_changed`). With no soaks yet, the revoke comes when the column is orphaned. **Not built:** the union while 2 versions serve, `$readergrant` by column, soaks closing together | increment 11a |
 | F3 | S | The reader checks every loaded version against its peers and externals; a mismatch holds that version's tenants only; the timer covers tenant databases | increment 3 |
 | F4 | S | The check in `ordo rollback --dry-run` and in the promotion gate; the "changing" notice on `/health/ready`. **Built 2026-11-23** (9856f637): `std.deployment.rollbackCheck` and `ordo rollback --dry-run`; the gate's check was built in 4b. **Not built:** the "changing" notice, which needs F2's grant union | increments 4b, 8 |
-| F5 | M | The example test in §7 | F2 |
-| F6 | S | The sign-in column contract and the release check's peer list | increment 6 |
+| F5 | M | The example test in §7. **Part built 2026-11-24** (branch `evo-7b-part2`): note-viewer e2e project `rename` (`tests/rename/title-to-heading.spec.ts`, fixture `notes-heading`, 0.3.1) is test 1: notes renames `title` to `heading` with `prev`, and the viewer shows a note from before and one written after, each with its title. **Not built:** tests 3 and 4 wait for the soak's close (11a; test 3 is `fixme`); test 2 needs the deployment owner's sign-in in this harness for `ordo evolve` (the notes e2e has it); tests 5 and 6 are not written | F2 |
+| F6 | S | The sign-in column contract and the release check's peer list. **Built 2026-11-24** (branch `evo-7b-part2`): `ordo_exec::sign_in_contract`. `CONTRACT` lists the 13 columns a reader is granted in the 4 tables; a release that changes one marks it `Retired` with its date, and it stays granted until that date plus `editions.load_window`, measured against the build's release date. Each start records the release in `$ordorelease`, whose `release` column every reader is granted. `ordo release-check` lists each peer with its release (`ANOTHER RELEASE` when it differs) and each reader by its role, and names a column this release retires with its end date. Neither fails the check. Tests: the contract's unit tests; `reader_grants.rs` (`the_sign_in_contract_is_granted_and_the_release_check_names_the_peer_on_another_release`); note-viewer e2e `tests/api/release.spec.ts`. **Not built:** a reader's release, which the read app cannot see (asked) | increment 6 |
 
 What sets the pace:
 

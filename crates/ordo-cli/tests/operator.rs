@@ -51,7 +51,7 @@ static PROCESS_ENV: std::sync::RwLock<()> = std::sync::RwLock::new(());
 /// database only behind `--direct`. These tests are about what they do once
 /// allowed, so the flag is added here; `direct_flag.rs` is about the flag.
 fn needs_direct(cmd: &str) -> bool {
-    matches!(cmd, "verify" | "restore" | "migrate" | "keys" | "identity")
+    matches!(cmd, "verify" | "restore" | "keys" | "identity")
 }
 
 fn run_op(cmd: &str, args: &[String]) -> operator::Outcome {

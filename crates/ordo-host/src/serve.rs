@@ -1411,10 +1411,13 @@ async fn interface_route(
         })
         .map(|(_, m)| m)
         .collect();
-    let doc = ordo_plan::interface::interface_document(
+    // The program's sign-in facts ride along, the same for every asker.
+    let doc = ordo_plan::interface::interface_document_with(
         &json!(loaded.fixture.schema.domain),
         &ordo_plan::artifact::entity_artifacts(&loaded.fixture.schema),
         &allowed,
+        ordo_plan::interface::RefineLimits::default(),
+        ordo_plan::artifact::auth_artifact(&loaded.fixture.schema).as_ref(),
     );
     (StatusCode::OK, Json(doc)).into_response()
 }

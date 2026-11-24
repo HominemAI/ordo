@@ -1516,8 +1516,9 @@ level. A machine key is never asked. A reauth lasts 5 minutes
 (`ordo login --touch`).
 
 **What stays on the database, and why.** `ordo keys`, `ordo verify` (except
-`--proof`), `ordo restore`, `ordo identity recover` and
-`ordo migrate --apply` open the database and need `--direct`. `ordo apply`
+`--proof`), `ordo restore` and `ordo identity recover` open the database
+and need `--direct`. `ordo migrate` is removed: `ordo evolve` moves the
+schema through the door. `ordo apply`
 and `ordo rollback` take `--host`, or `--direct` as the break-glass path
 when no host can boot. `ordo checkpoint`, `ordo prune`, `ordo revert`,
 `ordo deploys`, `ordo usage` and `ordo triggers` still take `--db` and

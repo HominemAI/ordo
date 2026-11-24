@@ -234,7 +234,28 @@ export function applyProgram(dir: string): string {
       ORDO_PAGE_KEY: '2'.repeat(64),
       // v2's `reader note_viewer` line: the role stack.sh made.
       ORDO_READER_NOTE_VIEWER_ROLE: 'note_viewer',
+      // The editions the stack's server knows (stack.sh).
+      ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE,
     },
+    encoding: 'utf8',
+  });
+}
+
+/**
+ * The date edition 2 became current in the stack's debug build (stack.sh
+ * sets `ORDO_TEST_EDITION_2_SINCE` to it). Only edition 1 is released, so
+ * this is how notes v1, written with no edition line, is an old edition.
+ */
+export const EDITION_2_SINCE = '2026-11-01';
+
+/**
+ * `ordo fix <dir> [--write]` under the stack's editions: the developer's
+ * own command, on their machine, with no door and no database.
+ */
+export function ordoFix(dir: string, write: boolean): string {
+  const args = ['fix', dir, ...(write ? ['--write'] : [])];
+  return execFileSync(stack().ordo, args, {
+    env: { ...process.env, ORDO_TEST_EDITION_2_SINCE: EDITION_2_SINCE },
     encoding: 'utf8',
   });
 }

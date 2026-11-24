@@ -424,7 +424,11 @@ fn check_files(src: &SourceVersion) -> Result<(), PromotionRefusal> {
         }
     }
     use ordo_plan::artifact as a;
-    let id = a::source_identity(&src.source, a::FIRST_EDITION, &src.code_hashes);
+    let id = a::source_identity(
+        &src.source,
+        ordo_plan::edition::of_source(&src.source),
+        &src.code_hashes,
+    );
     if id != src.source_id {
         return Err(PromotionRefusal::Edited {
             file: "the definition file".to_string(),

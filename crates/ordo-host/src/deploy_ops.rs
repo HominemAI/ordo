@@ -928,7 +928,9 @@ pub async fn execute(
             row
         }
         EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK | REVERT_SOAK | CLOSE_SOAK => {
-            crate::evolve::execute(ops, name, bound, caller).await?
+            // Boxed: a step's future is deep, and a door task's stack is
+            // not (a move overflowed it on CI's runners).
+            Box::pin(crate::evolve::execute(ops, name, bound, caller)).await?
         }
         name if crate::rollouts::OPS.contains(&name) => {
             crate::rollouts::execute(ops, name, bound, caller).await?

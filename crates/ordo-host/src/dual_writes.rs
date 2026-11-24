@@ -248,141 +248,6 @@ pub async fn read_all(control: &Pool) -> Result<HashMap<String, MoveOverlays>, E
     Ok(out)
 }
 
-// ── renames outside a move ───────────────────────────────────────────────
-
-/// One field rename a stored version declares with `prev(old)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rename {
-    /// The version that declares the mark.
-    pub version: String,
-    pub entity: String,
-    /// The old field, which is also the old column.
-    pub from: String,
-    /// The new field, and its column.
-    pub field: String,
-    pub column: String,
-}
-
-/// The field renames `schema` declares: one old name, in the same entity.
-/// A merge or a move is refused by the plan, so it has none.
-pub fn renames_of(version: &str, schema: &ordo_schema::Schema) -> Vec<Rename> {
-    let mut out = Vec::new();
-    for m in &schema.prev {
-        let (Some(field), [from]) = (&m.field, m.prev.as_slice()) else {
-            continue;
-        };
-        if from.contains('.') {
-            continue;
-        }
-        let Some(f) = schema.native(&m.entity).and_then(|e| e.field(field)) else {
-            continue;
-        };
-        out.push(Rename {
-            version: version.to_string(),
-            entity: m.entity.clone(),
-            from: from.clone(),
-            field: field.clone(),
-            column: f.column(),
-        });
-    }
-    out
-}
-
-/// **The rename overlay** a version writes with outside a move: the dual
-/// writes of every rename a stored version declares, while the database
-/// holds both columns (increment 11a; the owner's rule that no stopgap
-/// ships replaced increment 15's sync trigger with these).
-///
-/// - A version that declares `field prev(from)` also sets the old column
-///   from the new one, so the version before reads every row it writes
-///   whole, and a rollback loses nothing.
-/// - A version that still declares `from`, and not `field`, also sets the
-///   new column from the old one, so a write it makes after the rename's
-///   copy and before the tenant's pin moves reaches the new column.
-///
-/// Each rename is its own statement under a savepoint: a database the
-/// rename has not reached lacks the new column, and the statement is
-/// skipped ([`ordo_exec::overlay`]). `None` when no rename reaches the
-/// version.
-pub fn rename_overlay(
-    version: &str,
-    schema: &ordo_schema::Schema,
-    renames: &[Rename],
-) -> Option<MoveOverlay> {
-    let mut entities: Vec<OverlayEntity> = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for r in renames {
-        let Some(e) = schema.native(&r.entity) else {
-            continue;
-        };
-        // A value this version may leave empty keeps what the other
-        // column holds, so the other version's `required` is never broken
-        // by a write that is legal here.
-        let copy = |to: &str, src: &str, optional: bool| {
-            if optional {
-                (to.to_string(), format!("coalesce({}, {})", q(src), q(to)))
-            } else {
-                (to.to_string(), q(src))
-            }
-        };
-        let set = if r.version == version {
-            // The version that renames: the old column from the new one.
-            let (None, Some(f)) = (e.field(&r.from), e.field(&r.field)) else {
-                continue;
-            };
-            copy(&r.from, &r.column, f.optional)
-        } else {
-            // A version still on the old name: the new column from it.
-            let (Some(old), None) = (e.field(&r.from), e.field(&r.field)) else {
-                continue;
-            };
-            copy(&r.column, &old.column(), old.optional)
-        };
-        if !seen.insert((r.entity.clone(), set.0.clone())) {
-            continue;
-        }
-        entities.push(OverlayEntity {
-            entity: r.entity.clone(),
-            sets: vec![set],
-            guards: Vec::new(),
-        });
-    }
-    (!entities.is_empty()).then(|| MoveOverlay {
-        step: "prev".into(),
-        serving: version.to_string(),
-        other: String::new(),
-        entities,
-    })
-}
-
-/// The renames of every stored version not in `known`, read from the
-/// registry. Only a version whose source writes `prev(` is compiled; every
-/// other one is answered with none, so it is not read again.
-pub async fn read_renames(
-    control: &Pool,
-    known: &std::collections::BTreeSet<String>,
-) -> Result<Vec<(String, Vec<Rename>)>, EvolveRefusal> {
-    let v = Versions::on(control);
-    let mut out = Vec::new();
-    for (version, _, _) in v.stored().await? {
-        if known.contains(&version) {
-            continue;
-        }
-        let Some(a) = v.get(&version).await? else {
-            continue;
-        };
-        if !a.source.contains("prev(") {
-            out.push((version, Vec::new()));
-            continue;
-        }
-        match crate::evolve::compiled(&a) {
-            Ok(p) => out.push((version.clone(), renames_of(&version, &p.schema))),
-            Err(e) => eprintln!("renames: stored version {version} does not compile ({e})"),
-        }
-    }
-    Ok(out)
-}
-
 /// Whether the database holds every column the move's backfills fill.
 async fn expanded(target: &Pool, overlay: &Value) -> Result<bool, EvolveRefusal> {
     let live = ordo_exec::migrate::live_shape(target, target.schema())
@@ -903,6 +768,23 @@ pub async fn close(
     ordo_exec::orphans::record(&target, &left, Some(&m.from), &m.to, actor, at)
         .await
         .map_err(|e| run_err("internal", format!("$orphans: {e}")))?;
+    // Each orphaned old column leaves `$renames`: no version writes it
+    // again, and Y's writes stop keeping it current.
+    for l in &left {
+        let Some(field) = &l.field else { continue };
+        match target
+            .rows(&format!(
+                "DELETE FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {}",
+                sql_lit(&l.entity),
+                sql_lit(field)
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_missing_table() => {}
+            Err(e) => return Err(run_err("internal", format!("$renames: {e}"))),
+        }
+    }
     let mut orphaned: Vec<String> = left
         .iter()
         .map(|l| format!("{}.{}", l.entity, l.field.as_deref().unwrap_or("")))
@@ -974,56 +856,4 @@ pub async fn close_due(cx: &MoveContext<'_>) -> Vec<String> {
     }
     drop(lock);
     closed
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn schema(version: &str, fields: &str) -> ordo_schema::Schema {
-        Program::compile(&format!(
-            "domain notes @ {version}\n\nentity note {{\n{fields}}}\n\n\
-             op allNotes unbounded =\n  note[body]\n"
-        ))
-        .expect("compiles")
-        .schema
-    }
-
-    /// The renaming version copies the new column back; a version still on
-    /// the old name copies forward; a version that has neither name, or
-    /// both, writes nothing more. An optional source keeps what the other
-    /// column holds.
-    #[test]
-    fn each_version_keeps_the_other_column_of_a_rename_current() {
-        let x = schema("1.0.0", "  title: text\n  body: text?\n");
-        let y = schema(
-            "1.1.0",
-            "  heading: text = \"\" prev(title)\n  body: text?\n",
-        );
-        let z = schema("1.2.0", "  heading: text\n  body: text?\n");
-        let r = renames_of("1.1.0", &y);
-        assert_eq!(r.len(), 1, "{r:?}");
-
-        let on_y = rename_overlay("1.1.0", &y, &r).expect("1.1.0 writes back");
-        assert_eq!(
-            on_y.entities[0].sets,
-            [("title".to_string(), "\"heading\"".to_string())]
-        );
-        let on_x = rename_overlay("1.0.0", &x, &r).expect("1.0.0 writes forward");
-        assert_eq!(
-            on_x.entities[0].sets,
-            [("heading".to_string(), "\"title\"".to_string())]
-        );
-        assert!(rename_overlay("1.2.0", &z, &r).is_none());
-
-        let w = schema("1.0.1", "  title: text?\n  body: text?\n");
-        let on_w = rename_overlay("1.0.1", &w, &r).expect("1.0.1 writes forward");
-        assert_eq!(
-            on_w.entities[0].sets,
-            [(
-                "heading".to_string(),
-                "coalesce(\"title\", \"heading\")".to_string()
-            )]
-        );
-    }
 }

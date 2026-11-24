@@ -81,7 +81,7 @@ One command, from the repository root:
 bash examples/notes/e2e/run.sh
 ```
 
-It builds `ordo-host` and `ordo`, installs the page and the tests, installs
+It builds `ordo-host`, `ordo` and `ordo-identity-service`, installs the page and the tests, installs
 Chromium, Firefox and WebKit for Playwright, and runs every use case. It ends with a table of
 the use cases, passed or failed.
 
@@ -324,6 +324,25 @@ what v2 added later:
 
 Run alone with `--project=v2 --no-deps`: it applies v2 itself when the
 stack still serves v1.
+
+The `evolve` project runs `tests/evolve/v2-to-v3.spec.ts` after `v2`, and
+`evolve-checks` runs `tests/evolve/prechecks.spec.ts` after `v3`. Both act
+as the deployment's developer, signed in as a real one is: the stack runs
+the identity service (`ordo-identity-service`, port `E2E_ID_PORT`, 4644),
+the developer joins it by its first invite with a passkey, then runs `ordo
+login` and approves the link it prints (`tests/developer.ts`). Every
+command after that goes to the door with that session:
+
+- `evolve`: `ordo apply notes-v3 --no-activate`, then `ordo evolve --from
+  0.2.0 --to 0.3.0` prints the plan, its digest and clean pre-checks, and
+  `--run` runs it, with the v2 page open and every note still shown;
+- `evolve-checks`: a person writes 2 notes with one title; 0.3.1
+  (`fixtures/notes-v3-1.ordo.fixture`, v3 with `title` unique) is stored,
+  `ordo evolve --from 0.3.0 --to 0.3.1` lists the duplicate with its fix,
+  `--run` is refused, the person renames one note, and `--run` passes.
+
+Each prints every command and its answer in the run's log. Run alone with
+`--project=evolve --no-deps` or `--project=evolve-checks --no-deps`.
 
 ## The console
 

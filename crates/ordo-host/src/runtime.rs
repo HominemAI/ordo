@@ -2108,6 +2108,7 @@ fn platform_specs(exit: bool, imports: bool, attest: bool, buckets: bool) -> Vec
             name if crate::window_ops::OPS.contains(&name) => true,
             // The tenant's own move off a revoked version, the same state.
             crate::revoked_moves::MOVE_SELF => true,
+            crate::revoked_moves::VERSION_SELF => true,
             // 17aa piece 3 and 11-15: wired unconditionally in `assemble`
             // (`with_tenants`, `with_reap`), and until 2026-09-29 missing
             // here, so the binary answered 404 for both.
@@ -6749,12 +6750,20 @@ async fn spawn_deploy_listener(
     // **Every tenant's pin, and every version they name** (`plan-versions.md`
     // §1.4, increment 3), before the first request: a tenant pinned beside
     // the active version is served its own from the start.
-    let pins = crate::pin_stream::PinStream::new(
+    let pins = crate::pin_stream::PinStream::with_loads(
         deployment.clone(),
         pool.clone(),
         pg.clone(),
         keys.clone(),
         space.clone(),
+        {
+            let (limits, said) = crate::pin_stream::NodeLimits::from_env();
+            for line in said {
+                eprintln!("versions: {line}");
+            }
+            limits
+        },
+        node_status.clone(),
     );
     // `versions.new_tenant` is read from the control database with the
     // pins (`PinStream::settle`), and kept loaded so a new tenant is
@@ -6769,6 +6778,7 @@ async fn spawn_deploy_listener(
         let node_status = node_status.clone();
         let functions = functions.clone();
         let live_streams = live_streams.clone();
+        let routines = routines.clone();
         move |read: crate::pin_stream::Read| {
             let deployment = deployment.clone();
             let pool = pool.clone();
@@ -6779,6 +6789,7 @@ async fn spawn_deploy_listener(
             let node_status = node_status.clone();
             let functions = functions.clone();
             let live_streams = live_streams.clone();
+            let routines = routines.clone();
             async move {
                 for line in crate::pin_stream::log_lines(&read) {
                     println!("{line}");
@@ -6804,6 +6815,12 @@ async fn spawn_deploy_listener(
                 // the active version calls its own (§1.10).
                 for line in functions.sync(&pool, &deployment).await {
                     println!("{line}");
+                }
+                // Schedules and listeners are the union over served
+                // versions; each tenant runs what its own declares (§1.10).
+                match routines.switch_served(&pool, &deployment).await {
+                    Ok(line) => println!("{line}"),
+                    Err(e) => eprintln!("versions: the routines were not switched ({e})"),
                 }
                 // The door knows every served version's ops.
                 if let Err(e) = refresh_access(
@@ -6836,6 +6853,27 @@ async fn spawn_deploy_listener(
             "pins: not read at boot ({e}); every tenant is served the active version until \
              the next read"
         ),
+    }
+    // **A signed-in request woke a version unloaded for idleness**
+    // (`versions.idle_evict_after`): read the pins again, which loads it.
+    // Wakes that arrive together are taken in one read.
+    {
+        let (tx, mut woken) = tokio::sync::mpsc::unbounded_channel::<String>();
+        spaces.set_waker(Arc::new(move |version: String| {
+            let _ = tx.send(version);
+        }));
+        let pins = pins.clone();
+        let rebuild = rebuild.clone();
+        tokio::spawn(async move {
+            while let Some(version) = woken.recv().await {
+                while woken.try_recv().is_ok() {}
+                println!("versions: {version} woken by a request; loading it again");
+                match pins.reload().await {
+                    Ok(read) => rebuild(read).await,
+                    Err(e) => eprintln!("pins: not read for a woken version ({e})"),
+                }
+            }
+        });
     }
     // The reconcile tick: a whole read, whatever the stream said, the
     // version settings with it.
@@ -7075,10 +7113,7 @@ async fn spawn_deploy_listener(
                     // ones start, removed ones stop, retimed ones move.
                     // Before the row below, so an apply that waited sees
                     // them running.
-                    match routines
-                        .switch(&pool, &deployment.current().fixture.schema, &to)
-                        .await
-                    {
+                    match routines.switch_served(&pool, &deployment).await {
                         Ok(line) => println!("{line}"),
                         Err(e) => eprintln!(
                             "deploy {to}: the routines were not switched ({e}); the previous \

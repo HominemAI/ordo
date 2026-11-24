@@ -106,7 +106,7 @@ op addItem($price: money(2)) =
 - Money with different places does not mix: `money(2)` beside `money(0)` is `money_places_mismatch`.
 - Bare `money` is `money(0)`: whole units. Programs written before places existed keep their meaning, and `29.99` against one is refused.
 
-**Changing a field's places.** `ordo migrate --apply` refuses a change of places until you state `--places <entity>.<field>=rescale|keep` (25aa).
+**Changing a field's places.** `ordo evolve` refuses a change of places until you state `--places <entity>.<field>=rescale|keep` (25aa).
 
 - `rescale` multiplies or divides every stored amount by 10^n. 29.99 stays 29.99.
 - `keep` leaves the stored numbers as written. 2999 at `money(2)` then reads 0.2999 at `money(4)`.

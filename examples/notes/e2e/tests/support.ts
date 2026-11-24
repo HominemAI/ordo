@@ -17,6 +17,10 @@ export interface Stack {
   readonly programV3: string;
   readonly provider: string;
   readonly mail: string;
+  /** The identity service's address, where the deployment's people sign in. */
+  readonly identity: string;
+  /** Its data folder; its first start writes `first-invite` there. */
+  readonly identityData: string;
   readonly program: string;
   readonly pg: { readonly host: string; readonly port: string; readonly user: string; readonly db: string };
   readonly ordo: string;

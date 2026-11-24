@@ -53,6 +53,24 @@ pub const SHADOW: &str = "ordo_shadow";
 /// `pg_namespace` when an operator is looking.
 pub const EXPORT_SHADOW: &str = "ordo_shadow_export";
 
+/// The shadow one load gate builds (`ordo_host::shape::verify_registry`):
+/// `ordo_shadow_<nonce>`, or `ordo_shadow_<nonce>_of_<schema>` by
+/// [`shadow_for`]'s rule, where `nonce` is 6 hex characters the gate drew.
+/// Two gates over one database at once (the boot's release check beside a
+/// pinned version's load, two pinned versions loading, two replicas
+/// booting) each build and drop their own, so neither deletes the other's
+/// mid-verification (reported fix versions-background-busy-flake). A hex
+/// nonce never begins `of_`, `export` or `diff_`, so it is never another
+/// shadow's name, and the longest schema name [`crate::check_schema_name`]
+/// allows keeps it within Postgres's 63 bytes.
+pub fn gate_shadow_for(schema: &str, nonce: &str) -> String {
+    if schema == crate::DEFAULT_SCHEMA {
+        format!("{SHADOW}_{nonce}")
+    } else {
+        format!("{SHADOW}_{nonce}_of_{schema}")
+    }
+}
+
 /// The prefix of the shadow `ordo versions diff` builds a stored version's
 /// schema in, to read its shape back (`ordo_host::versions_diff`). Each
 /// diff adds a random hex suffix and drops the namespace after, so two
@@ -149,8 +167,19 @@ impl Pool {
     /// effects and free of data: the server still resolves every
     /// expression and reports the row type, but evaluates nothing.
     pub async fn observed_shape(&self, sql: &str) -> Result<Vec<(String, String)>, PoolError> {
+        self.observed_shape_in(&self.shadow(), sql).await
+    }
+
+    /// [`Pool::observed_shape`] against a shadow built under a
+    /// caller-chosen name ([`Pool::build_shadow_in`]). The same rule holds
+    /// for `shadow`: one of this module's own names, never caller data.
+    pub async fn observed_shape_in(
+        &self,
+        shadow: &str,
+        sql: &str,
+    ) -> Result<Vec<(String, String)>, PoolError> {
         let inner = sql.trim().trim_end_matches(';');
-        let shadow = ordo_schema::ddl::q(&self.shadow());
+        let shadow = ordo_schema::ddl::q(shadow);
         let probe = format!(
             // DROP then CREATE, never CREATE OR REPLACE: replacing a view
             // may not change its column list, and every op has a different

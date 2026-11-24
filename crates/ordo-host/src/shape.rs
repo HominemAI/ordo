@@ -357,21 +357,37 @@ pub async fn verify_registry(
     })
     .await
     .map_err(|e| ShapeRefusal::Unavailable(e.to_string()))?;
-    let report = verify_on(f, &pool, ddl).await;
-    // Best effort: the shadow is rebuilt from scratch on every verification
-    // anyway, so a failure to tidy it is not a reason to refuse a boot that
-    // otherwise passed.
+    // A shadow of this gate's own: another gate over the same database (the
+    // boot's release check, a second pinned version, another replica) may
+    // be running now, and one shared shadow was dropped under it (reported
+    // fix versions-background-busy-flake).
+    let mut nonce = [0u8; 3];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|e| ShapeRefusal::Unavailable(format!("random: {e}")))?;
+    let shadow = ordo_exec::shape::gate_shadow_for(
+        pool.schema(),
+        &nonce.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    );
+    let report = verify_on(f, &pool, &shadow, ddl).await;
+    // Best effort: a failure to tidy the shadow is not a reason to refuse a
+    // boot that otherwise passed. One a crash leaves is an empty namespace
+    // `ordo_exec::shape::is_ordo_schema` still names as Ordo's.
     let _ = pool
         .rows(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
-            ordo_schema::ddl::q(&pool.shadow())
+            ordo_schema::ddl::q(&shadow)
         ))
         .await;
     drop(pool);
     report
 }
 
-async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, ShapeRefusal> {
+async fn verify_on(
+    f: &Fixture,
+    pool: &Pool,
+    shadow: &str,
+    ddl: &str,
+) -> Result<ShapeReport, ShapeRefusal> {
     // `$caller` on a peer's table reads this deployment's own sign-in
     // directory (`$principal`, `$authenticator`) unqualified, beside
     // `members`. Those are platform tables, not the program's DDL, so the
@@ -388,19 +404,16 @@ async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, S
         with_directory = all.join(";\n");
         &with_directory
     };
-    pool.build_shadow(ddl)
+    pool.build_shadow_in(shadow, ddl)
         .await
         .map_err(|e| ShapeRefusal::Unavailable(format!("the shadow schema did not build: {e}")))?;
 
     // Asked while the shadow still exists, and asked here rather than by a
     // second caller building a second shadow. It does not refuse — see
     // `ShapeReport::drift`.
-    let drift = pool
-        .live_drift(&pool.shadow(), pool.schema())
-        .await
-        .map_err(|e| {
-            ShapeRefusal::Unavailable(format!("the live schema could not be read: {e}"))
-        })?;
+    let drift = pool.live_drift(shadow, pool.schema()).await.map_err(|e| {
+        ShapeRefusal::Unavailable(format!("the live schema could not be read: {e}"))
+    })?;
     let gone = never_null_gone(pool, &f.schema).await.map_err(|e| {
         ShapeRefusal::Unavailable(format!("the live schema could not be read: {e}"))
     })?;
@@ -494,7 +507,7 @@ async fn verify_on(f: &Fixture, pool: &Pool, ddl: &str) -> Result<ShapeReport, S
             ));
             continue;
         }
-        let observed = match pool.observed_shape(&plan.sql).await {
+        let observed = match pool.observed_shape_in(shadow, &plan.sql).await {
             Ok(o) => o,
             Err(e) => {
                 // A database that REFUSES the plan is divergence, not an

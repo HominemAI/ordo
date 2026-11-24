@@ -343,6 +343,49 @@ op customerByEmail($e: text) =
     assert!(shape.unwrap().drift.is_empty());
 }
 
+/// Two load gates at once over one database each build their own shadow
+/// (reported fix versions-background-busy-flake). The boot's release check
+/// runs in the background while the pin stream loads a pinned version, and
+/// a node loads up to `versions.max_loads` versions at once. When they
+/// shared one shadow, one dropped it while the other was describing its
+/// ops: `relation "widgets" does not exist`, the version refused, and its
+/// tenants closed until the next pin read.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_load_gates_at_once_each_build_their_own_shadow() {
+    let pg = Pg::scoped("ordo_dschema_gates");
+    pg.exec("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        .expect("reset");
+    let c = cfg(&pg.db, ordo_exec::DEFAULT_SCHEMA);
+    let pool = Pool::connect(c.clone()).await.expect("boots");
+    let program = applied(&pool, ALPHA).await;
+    let f = Arc::new(Fixture::from_source(ALPHA, "").expect("fixture"));
+    for round in 0..10 {
+        let (a, b, d) = tokio::join!(
+            ordo_host::shape::verify_registry(&f, &c, &program.ddl),
+            ordo_host::shape::verify_registry(&f, &c, &program.ddl),
+            ordo_host::shape::verify_registry(&f, &c, &program.ddl),
+        );
+        for r in [a, b, d] {
+            assert!(r.is_ok(), "round {round}: {r:?}");
+        }
+    }
+    // The longest schema name still fits Postgres's 63 bytes, and a gate's
+    // shadow is never the plain one.
+    let longest = "n".repeat(ordo_exec::SCHEMA_MAX_LEN);
+    let gate = ordo_exec::shape::gate_shadow_for(&longest, "abcdef");
+    assert!(gate.len() <= 63, "{gate}");
+    assert_ne!(gate, ordo_exec::shape::shadow_for(&longest));
+    assert!(ordo_exec::shape::is_ordo_schema(&gate));
+    // Each gate drops its own shadow when it is done.
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'ordo\\_shadow%'"
+        ),
+        "0"
+    );
+}
+
 #[tokio::test]
 async fn a_refused_schema_name_names_the_setting() {
     for bad in [

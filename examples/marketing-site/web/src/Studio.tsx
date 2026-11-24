@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { OrdoProvider, useOpQuery, type DescriptorClient } from '@hominemai/ordo-react';
+import { OrdoProvider, useOpQuery, useOpPages, type DescriptorClient } from '@hominemai/ordo-react';
 import { registerPasskey, signInWithPasskey } from '@hominemai/ordo-sdk/auth/passkey.js';
 import { downloadFile, saveBlob, uploadFile } from '@hominemai/ordo-sdk/core/files.js';
 import type { Params, Row } from '@hominemai/ordo-sdk/core/client.js';
@@ -65,6 +65,13 @@ function Workspace(ctx: Context) {
   </>;
 }
 
+/** Walk every keyset page, including a short or empty page with a cursor. */
+function useListing(name: string, params?: Params) {
+  const query = useOpPages(name, params ? { params } : {});
+  useEffect(() => { if (!query.loading && query.hasMore && !query.refusal) query.more(); }, [query.loading, query.hasMore, query.refusal, query.more]);
+  return { ...query, refetch: query.restart };
+}
+
 function QueryStatus({ loading, refusal }: { loading: boolean; refusal: { message: string } | null }) {
   return refusal ? <p role="alert">{refusal.message}</p> : loading ? <p role="status">Loading…</p> : null;
 }
@@ -97,17 +104,17 @@ function Remove({ ctx, op, row, done }: { ctx: Context; op: string; row: Row; do
   return <>{!confirm ? <button onClick={() => setConfirm(true)}>Delete</button> : <><span>Delete permanently?</span><button disabled={busy} onClick={async () => { setBusy(true); try { await commit(ctx.client, ctx.session, op, { id: text(row['id']) }); done(); } catch(e) { setError(message(e)); } finally { setBusy(false); } }}>Confirm delete</button><button disabled={busy} onClick={() => setConfirm(false)}>Keep record</button></>}{error && <span role="alert">{error}</span>}</>;
 }
 function Records(props: Context & { title: string; read: string; create: string; edit: string; remove: string; fields: Field[] }) {
-  const q = useOpQuery(props.read); const [editing, setEditing] = useState<Row | null>(null);
+  const q = useListing(props.read); const [editing, setEditing] = useState<Row | null>(null);
   return <section><h2>{props.title}</h2><p>Saved changes appear on the public site. Private staff notes stay in this workspace.</p><button onClick={() => setEditing({})}>Add {props.title.toLowerCase().replace(/s$/, '')}</button><QueryStatus {...q} />{editing && <Editor key={text(editing['id']) || 'new'} ctx={props} title={editing['id'] ? `Edit ${props.title.toLowerCase()}` : `New ${props.title.toLowerCase()}`} op={editing['id'] ? props.edit : props.create} initial={editing} fields={props.fields.filter(f => !(editing['id'] && f.name === 'slug'))} onCancel={() => setEditing(null)} onDone={() => { setEditing(null); q.refetch(); }} />}<Table title={props.title} columns={props.title === 'Reviews' ? ['author', 'quote', 'stars'] : ['name', 'tagline', 'price']} rows={q.rows} actions={r => <><button onClick={() => setEditing(r)}>Edit</button><Remove ctx={props} op={props.remove} row={r} done={q.refetch} /></>} /></section>;
 }
 function Inbox(ctx: Context) {
-  const q = useOpQuery('inbox'); const report = useOpQuery('enquiryReport'); const [query, setQuery] = useState(''); const [editing, setEditing] = useState<Row | null>(null);
+  const q = useListing('inbox'); const report = useOpQuery('enquiryReport'); const [query, setQuery] = useState(''); const [editing, setEditing] = useState<Row | null>(null);
   const matches = q.rows.filter(r => ['name', 'email', 'company', 'message', 'status'].some(k => text(r[k]).toLowerCase().includes(query.toLowerCase())));
   return <section><h2>Enquiry inbox</h2><p>Follow up, keep private notes, and record the outcome.</p><QueryStatus {...report} /><p>{report.rows.map(r => `${text(r['status'])}: ${text(r['total'])}`).join(' · ')}</p><form role="search" onSubmit={e => { e.preventDefault(); setQuery(text(new FormData(e.currentTarget).get('q'))); }} className="toolbar"><label htmlFor="inbox-search">Search enquiries</label><input id="inbox-search" name="q" type="search" /><button>Search</button></form><QueryStatus {...q} />{editing && <><blockquote>{text(editing['message'])}</blockquote><Editor key={text(editing['id'])} ctx={ctx} title={`Follow up with ${text(editing['name'])}`} op="triageEnquiry" initial={editing} fields={[{ name: 'status', label: 'Status', choices: ['new', 'responding', 'won', 'closed'] }, field('notes', 'Private notes', 'long')]} onCancel={() => setEditing(null)} onDone={() => { setEditing(null); q.refetch(); report.refetch(); }} /></>}<Table title="Enquiries" columns={['name', 'email', 'company', 'status']} rows={matches} actions={r => <><button onClick={() => setEditing(r)}>Follow up</button><Remove ctx={ctx} op="deleteEnquiry" row={r} done={() => { q.refetch(); report.refetch(); }} /></>} /></section>;
 }
 function Campaigns(ctx: Context) {
   const [tag, setTag] = useState('');
-  const q = useOpQuery(tag ? 'campaignsTagged' : 'campaigns', tag ? { params: { tag } } : {});
+  const q = useListing(tag ? 'campaignsTagged' : 'campaigns', tag ? { tag } : undefined);
   const report = useOpQuery('campaignReport');
   const [editing, setEditing] = useState<Row | null>(null);
   const [selected, setSelected] = useState<Row | null>(null);
@@ -115,12 +122,12 @@ function Campaigns(ctx: Context) {
 }
 function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
   const campaign = text(ctx.row['id']);
-  const files = useOpQuery('assets', { params: { campaign } });
-  const access = useOpQuery('campaignAccess', { params: { campaign } });
-  const approvals = useOpQuery('approvals', { params: { campaign } });
-  const current = useOpQuery('campaigns');
+  const files = useListing('assets', { campaign });
+  const access = useListing('campaignAccess', { campaign });
+  const approvals = useListing('approvals', { campaign });
+  const current = useListing('campaigns');
   const [review, setReview] = useState<{ words: number; checks: { label: string; passed: boolean }[] } | null>(null);
-  const people = useOpQuery('people'); const reminders = useOpQuery('reminders');
+  const people = useListing('people'); const reminders = useListing('reminders');
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   async function act(work: () => Promise<unknown>) { setBusy(true); setError(''); setNotice(''); try { await work(); files.refetch(); access.refetch(); reminders.refetch(); approvals.refetch(); current.refetch(); setNotice('Changes saved.'); } catch(e) { setError(message(e)); } finally { setBusy(false); } }
   return <section className="card campaign-detail"><div className="toolbar"><h3>{text(ctx.row['title'])}</h3><button onClick={ctx.close}>Close details</button></div><p>{text(ctx.row['brief'])}</p>{error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
@@ -131,7 +138,7 @@ function CampaignDetail(ctx: Context & { row: Row; close: () => void }) {
   </section>;
 }
 function Team(ctx: Context) {
-  const people = useOpQuery('people'); const invitations = useOpQuery('std.space.invitations', { live: false });
+  const people = useListing('people'); const invitations = useOpQuery('std.space.invitations', { live: false });
   const [error, setError] = useState(''); const [ticket, setTicket] = useState(''); const [busy, setBusy] = useState(false);
   async function act(name: string, params: Params) { setBusy(true); setError(''); try { const r = await commit(ctx.client, ctx.session, name, params); if (name === 'std.space.invite') setTicket(text(r.rows[0]?.['ticket'])); people.refetch(); invitations.refetch(); } catch(e) { setError(message(e)); } finally { setBusy(false); } }
   return <section><h2>Team access</h2><p>Owners manage roles and invitations. Sensitive changes may ask for a fresh passkey touch.</p>{error && <p role="alert">{error}</p>}<QueryStatus {...people} /><Table title="Studio members" columns={['displayName', 'role', 'status']} rows={people.rows} actions={r => <><form className="toolbar" onSubmit={e => { e.preventDefault(); void act('std.space.setRole', { member: text(r['id']), role: text(new FormData(e.currentTarget).get('role')) }); }}><label htmlFor={`role-${text(r['id'])}`}>Role for {text(r['displayName'])}</label><select id={`role-${text(r['id'])}`} name="role" defaultValue={text(r['role'])}>{['viewer', 'editor', 'manager', 'owner'].map(role => <option key={role}>{role}</option>)}</select><button disabled={busy}>Save role</button></form><button disabled={busy} onClick={() => void act(r['status'] === 'suspended' ? 'std.space.reinstate' : 'std.space.suspend', { member: text(r['id']) })}>{r['status'] === 'suspended' ? 'Reinstate' : 'Suspend'}</button></>} />

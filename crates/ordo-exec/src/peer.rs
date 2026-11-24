@@ -1047,6 +1047,91 @@ pub async fn check_readers(pool: &Pool, schema: &Schema) -> Result<(), SchemaRef
     check_readers_with(pool, schema, schema_setting).await
 }
 
+/// **A renamed column, told to the reader** (`plan-evolution-federation.md`
+/// §3.1 and §3.3). The read app cannot see a reader's file, and a reader is
+/// granted nothing but the tables on its line. So the read app writes, on
+/// the old column of each field a table on a `reader` line renames with
+/// `prev`, the comment `ordo: renamed to <new column>`. Every role reads
+/// `pg_description`, so the reader's check reads it
+/// ([`crate::migrate::column_comments`]):
+///
+/// - While the rename is declared, the old column is written and granted.
+///   The reader's check says the column is changing, and holds nothing.
+/// - Once a version stops writing it (`$orphans`), the grant ends and the
+///   comment stays. The reader's `external_changed` names the new column.
+///
+/// A version that declares the old name again clears the comment.
+pub struct Renamed;
+
+impl Renamed {
+    /// What every comment of this protocol starts with.
+    pub const PREFIX: &'static str = "ordo: renamed to ";
+
+    /// The comment for an old column whose field is now `new`.
+    pub fn comment(new: &str) -> String {
+        format!("{}{new}", Self::PREFIX)
+    }
+
+    /// The new column a comment names, when it is one of these.
+    pub fn new_column(comment: &str) -> Option<&str> {
+        comment
+            .strip_prefix(Self::PREFIX)
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && !c.contains(char::is_whitespace))
+    }
+}
+
+/// The comment statements that make each table on a `reader` line carry
+/// [`Renamed`] as `schema` says: set on the old column of each declared
+/// rename, cleared from a column a field declares again. Empty when the
+/// catalog already agrees.
+async fn rename_comments_sql(
+    pool: &Pool,
+    pg: &str,
+    schema: &Schema,
+    present: &std::collections::BTreeMap<String, BTreeSet<String>>,
+) -> Result<String, SchemaRefusal> {
+    let mut tables: BTreeSet<&str> = BTreeSet::new();
+    for r in &schema.readers {
+        tables.extend(r.tables.iter().map(String::as_str));
+    }
+    let mut sql = String::new();
+    for t in tables {
+        let (Some(cols), Some(e)) = (present.get(t), schema.native(t)) else {
+            continue;
+        };
+        let mut want: std::collections::BTreeMap<String, String> = Default::default();
+        for m in schema.prev.iter().filter(|m| m.entity == t) {
+            let (Some(f), [old]) = (m.field.as_deref(), m.prev.as_slice()) else {
+                continue;
+            };
+            let Some(field) = e.field(f) else {
+                continue;
+            };
+            if old.contains('.') || !cols.contains(old) || old.as_str() == field.column() {
+                continue;
+            }
+            want.insert(old.clone(), Renamed::comment(&field.column()));
+        }
+        let have = crate::migrate::column_comments(pool, pg, t)
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        let on = |c: &str| format!("COMMENT ON COLUMN {}.{}.{} IS ", quote(pg), quote(t), quote(c));
+        for (c, text) in &want {
+            if have.get(c) != Some(text) {
+                sql += &format!("{}{}; ", on(c), sql_lit(text));
+            }
+        }
+        for (c, text) in &have {
+            let declared = e.fields.iter().any(|f| f.column() == *c);
+            if Renamed::new_column(text).is_some() && declared && !want.contains_key(c) {
+                sql += &format!("{}NULL; ", on(c));
+            }
+        }
+    }
+    Ok(sql)
+}
+
 /// [`grant_readers_with`] over this process's environment.
 pub async fn grant_readers(pool: &Pool, schema: &Schema) -> Result<Vec<String>, SchemaRefusal> {
     grant_readers_with(pool, schema, schema_setting).await
@@ -1169,7 +1254,8 @@ pub async fn grant_readers_with(
     }
 
     let s = quote(&pg);
-    let mut sql = String::new();
+    // The reader is told of each rename on its tables ([`Renamed`]).
+    let mut sql = rename_comments_sql(pool, &pg, schema, &present).await?;
     for role in &gone {
         let r = quote(role);
         sql += &format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {r}; ");

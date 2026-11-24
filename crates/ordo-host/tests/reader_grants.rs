@@ -563,6 +563,109 @@ async fn a_reader_loses_an_orphaned_column_with_a_named_error() {
     assert!(lines.is_empty(), "{lines:?}");
 }
 
+/// **A rename on a read table** (`plan-evolution-federation.md` §3.1,
+/// §3.3; owner ruling 2026-11-23, Q1). The writer renames `notes.title` to
+/// `heading` with `prev`. While the mark is declared, both columns are
+/// written and the reader holds both (the union): its check passes and says
+/// `title` is changing, naming `heading`. The version that drops the mark
+/// stops writing `title`: it is recorded as an orphan, the reader keeps
+/// `heading` alone, and its check holds the entity, naming `title` and its
+/// new name. A version that declares `title` again clears the comment.
+///
+/// A regression looks like a reader still reading `title` once nothing
+/// writes it, a refusal that does not name `heading`, or a hold while the
+/// rename is still written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_renamed_column_is_read_until_the_rename_lands_then_refused_naming_its_new_name() {
+    let w = world("ordo_rgrant_rename").await;
+    let program = |fields: &str| {
+        Program::compile(&format!(
+            "domain journal @ 1.0.0\n\nreader viewer reads notes\n\n\
+             entity notes {{\n{fields}  owner -> members?\n  \
+             access read owner == $caller\n  access write owner == $caller\n}}\n"
+        ))
+        .expect("compiles")
+    };
+    let renaming = program("  heading: text = \"\" prev(title)\n");
+    let landed = program("  heading: text = \"\"\n");
+    // The rename's expand, as its step runs it: the new column, copied.
+    w.pg.exec(
+        "ALTER TABLE alpha.notes ADD COLUMN heading text NOT NULL DEFAULT ''; \
+         UPDATE alpha.notes SET heading = title;",
+    )
+    .expect("the expand");
+
+    // While the rename is declared: the union, and the reader is told.
+    peer::grant_readers_with(&w.a, &renaming.schema, lookup)
+        .await
+        .expect("granted");
+    w.b.rows("SELECT title, heading FROM alpha.notes")
+        .await
+        .expect("both columns read while both are written");
+    let report = ordo_host::external_check::check(&w.b, &reader_of(""))
+        .await
+        .expect("checks");
+    assert!(report.refusals().is_empty(), "{:?}", report.refusals());
+    let changing: Vec<&String> = report
+        .notes
+        .iter()
+        .filter(|n| n.starts_with(ordo_host::external_check::CHANGING))
+        .collect();
+    assert_eq!(changing.len(), 1, "{:?}", report.notes);
+    assert!(
+        changing[0].contains("`alpha.notes.title`")
+            && changing[0].contains("is renamed to `heading` by `journal`"),
+        "{changing:?}"
+    );
+
+    // The rename lands: `title` is an orphan, and the reader loses it.
+    let names = sa::record_orphans(&w.a, &renaming.schema, &landed, Some("1.0.0"), "t")
+        .await
+        .expect("recorded");
+    assert_eq!(names, vec!["notes.title".to_string()]);
+    peer::grant_readers_with(&w.a, &landed.schema, lookup)
+        .await
+        .expect("granted by column");
+    assert!(denied(&w.b, "SELECT title FROM alpha.notes").await);
+    w.b.rows("SELECT id, heading FROM alpha.notes")
+        .await
+        .expect("the new column reads");
+    let lines = ordo_host::external_check::check(&w.b, &reader_of(""))
+        .await
+        .expect("checks")
+        .refusals();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("external_changed on `entries`")
+            && lines[0].contains(
+                "column `title` (it is now `heading`) is no longer written by `journal`"
+            )
+            && lines[0].contains("ordo introspect --external"),
+        "{lines:?}"
+    );
+
+    // `title` declared again: written again, granted again, no comment.
+    let again = program("  heading: text = \"\"\n  title: text = \"\"\n");
+    sa::record_orphans(&w.a, &landed.schema, &again, Some("1.0.0"), "t")
+        .await
+        .expect("revived");
+    peer::grant_readers_with(&w.a, &again.schema, lookup)
+        .await
+        .expect("granted whole");
+    let report = ordo_host::external_check::check(&w.b, &reader_of(""))
+        .await
+        .expect("checks");
+    assert!(report.refusals().is_empty(), "{:?}", report.refusals());
+    assert!(
+        !report
+            .notes
+            .iter()
+            .any(|n| n.starts_with(ordo_host::external_check::CHANGING)),
+        "{:?}",
+        report.notes
+    );
+}
+
 /// **The sign-in contract** (owner ruling 2026-11-23, Q16;
 /// `plan-evolution-federation.md` §5, step F6). Every column of
 /// `ordo_exec::sign_in_contract::CONTRACT` is in the tables a deployment

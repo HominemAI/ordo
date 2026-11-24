@@ -49,6 +49,10 @@ pub const WATCH_ENV: &str = "ORDO_EXTERNAL_WATCH_SECS";
 /// Five minutes.
 pub const WATCH_DEFAULT_SECS: u64 = 300;
 
+/// How a note about a peer column that is being renamed starts
+/// (`plan-evolution-federation.md` §3.3). The watcher logs these lines.
+pub const CHANGING: &str = "changing:";
+
 /// [`WATCH_ENV`], or the default when unset. A value that is not a whole
 /// number of seconds from 1 is refused at boot, naming the setting.
 pub fn watch_interval_from_env() -> Result<Duration, String> {
@@ -271,9 +275,22 @@ async fn check_one(
                 .map_err(|err| db("the column grants", err))?;
             column_granted = lost.is_empty();
             if !lost.is_empty() && lost.len() < mapped.len() {
+                // A renamed field's old column names the new one
+                // (`ordo_exec::peer::Renamed`).
+                let comments = migrate::column_comments(pool, &pg, &src.table)
+                    .await
+                    .map_err(|err| db("the column comments", err))?;
                 let named = lost
                     .iter()
-                    .map(|c| format!("column `{c}`"))
+                    .map(|c| {
+                        match comments
+                            .get(c)
+                            .and_then(|t| ordo_exec::peer::Renamed::new_column(t))
+                        {
+                            Some(new) => format!("column `{c}` (it is now `{new}`)"),
+                            None => format!("column `{c}`"),
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let (is, it) = if lost.len() == 1 {
@@ -388,6 +405,32 @@ async fn check_one(
             detail: format!("{}. {regenerate}", wrong.join("; ")),
         });
         return Ok(());
+    }
+    // **Changing** (`plan-evolution-federation.md` §3.3): a mapped column
+    // its peer renamed is still written and granted, until the version that
+    // stops writing it. Said now, while the reader can still switch; it
+    // holds nothing.
+    if let Some(p) = &src.peer {
+        let comments = migrate::column_comments(pool, &pg, &src.table)
+            .await
+            .map_err(|err| db("the column comments", err))?;
+        for (field, column) in &src.columns {
+            let Some(new) = comments
+                .get(column)
+                .and_then(|t| ordo_exec::peer::Renamed::new_column(t))
+            else {
+                continue;
+            };
+            report.notes.push(format!(
+                "{CHANGING} `{table}.{column}`, which `{}` reads as `{field}`, is renamed \
+                 to `{new}` by `{}`. It is written until a version of `{}` stops \
+                 declaring the rename; then this deployment loses it. Map `{field}` to \
+                 `{new}`. {regenerate}",
+                e.name,
+                p.name,
+                p.name,
+            ));
+        }
     }
     let unused: Vec<String> = live
         .keys()
@@ -509,6 +552,8 @@ pub struct ExternalGate {
     /// The fixture that serves one tenant.
     for_space: ForSpace,
     reads: RwLock<HashMap<usize, Reads>>,
+    /// The last pass's [`CHANGING`] notes: peer columns being renamed.
+    changing: RwLock<Vec<String>>,
 }
 
 /// The fixture the deployment serves now.
@@ -636,6 +681,7 @@ impl ExternalGate {
             served: Arc::new(move || vec![(String::new(), served())]),
             for_space: Arc::new(move |_| for_space()),
             reads: RwLock::new(HashMap::new()),
+            changing: RwLock::new(Vec::new()),
         })
     }
 
@@ -649,6 +695,7 @@ impl ExternalGate {
             served,
             for_space,
             reads: RwLock::new(HashMap::new()),
+            changing: RwLock::new(Vec::new()),
         })
     }
 
@@ -663,6 +710,15 @@ impl ExternalGate {
             }
         }
         out
+    }
+
+    /// The last pass's notes on peer columns being renamed
+    /// ([`CHANGING`]), each version's once.
+    pub fn changing(&self) -> Vec<String> {
+        self.changing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The entities held for the version that serves `space`.
@@ -718,6 +774,7 @@ impl ExternalGate {
         let many = served.len() > 1;
         let mut holds: HashMap<usize, BTreeMap<String, String>> = HashMap::new();
         let mut lines = Vec::new();
+        let mut changing: Vec<String> = Vec::new();
         for (version, fixture) in &served {
             if fixture.schema.externals.is_empty() || holds.contains_key(&identity(fixture)) {
                 continue;
@@ -730,6 +787,9 @@ impl ExternalGate {
             for l in report.refusals() {
                 lines.push(if many { format!("{version}: {l}") } else { l });
             }
+            for n in report.notes.iter().filter(|n| n.starts_with(CHANGING)) {
+                changing.push(if many { format!("{version}: {n}") } else { n.clone() });
+            }
             let down: BTreeMap<String, String> = report
                 .problems
                 .into_iter()
@@ -740,6 +800,7 @@ impl ExternalGate {
             }
         }
         *self.holds.write().unwrap_or_else(|e| e.into_inner()) = holds;
+        *self.changing.write().unwrap_or_else(|e| e.into_inner()) = changing;
         // A version no longer served keeps nothing here.
         let keep: std::collections::HashSet<usize> =
             served.iter().map(|(_, f)| identity(f)).collect();
@@ -796,10 +857,19 @@ pub fn spawn_watch(
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut held = false;
+        let mut said: Vec<String> = Vec::new();
         loop {
             tick.tick().await;
             match gate.watch_once(&pool).await {
                 Ok(lines) => {
+                    // A rename is said once each time the set changes.
+                    let changing = gate.changing();
+                    if changing != said {
+                        for c in &changing {
+                            println!("external: {c}");
+                        }
+                        said = changing;
+                    }
                     for l in &lines {
                         eprintln!("external: {l}");
                     }

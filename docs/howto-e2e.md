@@ -459,3 +459,36 @@ https front is the next port up), `E2E_NOTES_PAGE_PORT` and
 `E2E_VIEWER_PAGE_PORT`. `E2E_NO_PAGES=1 bash stack.sh` starts everything
 but the pages, for poking at the doors with curl. The artifact
 `federation-e2e-report` holds the traces and `.stack/*.log`.
+
+
+## Coverage through the examples
+
+Dispatch `coverage.yml` on the branch to measure the Rust suite and the
+example suites separately. It also runs on pull requests into `main`.
+The notes and federation workflows accept `coverage: true` when called or
+run by hand. Coverage runs skip the screenshot comparison projects.
+
+The jobs load `bash scripts/e2e-coverage.sh env` before building. The same
+exports stay set while Playwright starts the instrumented binaries and while
+`bash scripts/e2e-coverage.sh report <suite>` writes the LCOV report. Each
+stack sends SIGTERM to its children and waits before stopping Postgres, so
+hosts finish and LLVM can write their profiles.
+
+Artifacts `lcov-unit`, `lcov-notes` and `lcov-federation` hold the line data.
+`coverage-per-crate` holds the tables and JSON counts. The examples table
+merges hits by source file and line across the suites. It counts a line once
+when any suite reaches it. Only `crates/<name>/src/` contributes to either
+table; test code and dependencies do not.
+
+`coverage/floor.json` stores the per-crate floors. The ratchet rejects a
+missing crate or a fall larger than its tolerance. A higher result prints
+`raise <crate> <label> to <pct>`; put measured increases in the floor file.
+The initial floors need the first green instrumented run. S1 adds the new
+examples workflow to the same collection when that suite exists.
+
+Check the accounting without a Rust build:
+
+```
+node --test scripts/coverage-crates.test.mjs
+node scripts/coverage-crates.mjs --label examples --check coverage/floor.json coverage-out/lcov-notes.info coverage-out/lcov-federation.info
+```

@@ -772,3 +772,7 @@ them, locally and from GitHub: `docs/howto-e2e.md`.
 The newest page tests are `web/test/signin.test.ts` (the ways in, the return
 from a provider, the emailed code, the guest) and additions to
 `web/test/friendly.test.ts` and `web/test/notes.test.ts`.
+
+The end-to-end workflow also accepts `coverage: true`. It runs instrumented
+Rust binaries and uploads LCOV data for the example coverage ratchet. See
+`docs/howto-e2e.md`, "Coverage through the examples".

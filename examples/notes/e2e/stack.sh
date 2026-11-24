@@ -87,8 +87,10 @@ stop() {
     PGHOST="$pg_host" PGPORT="$pg_port" PGUSER="$pg_user" ORDO_PSQL="${psql_bin:-}" \
       bash "$repo/scripts/pg-snapshot.sh" "$state/pg-at-stop.log" "stack stopping" || true
   fi
-  for p in $pids; do kill "$p" 2>/dev/null || true; done
-  wait 2>/dev/null || true
+  # LLVM flushes the host profile on normal exit. Keep Postgres alive until
+  # every child has handled SIGTERM and finished.
+  for p in $pids; do kill -TERM "$p" 2>/dev/null || true; done
+  for p in $pids; do wait "$p" 2>/dev/null || true; done
   if [ "$own_pg" = 1 ]; then
     ORDO_PGDATA="$pgdata" ORDO_PG_HOST="$socket" ORDO_PG_PORT="$pg_port" \
       bash "$repo/scripts/conformance-pg.sh" destroy >/dev/null 2>&1 || true
@@ -202,6 +204,7 @@ for v in ORDO_PG_ROUTING ORDO_TENANT_CREDENTIALS ORDO_TENANT_CREDENTIALS_DIR ORD
 RUST_LOG=${RUST_LOG:-info} "$host" >"$state/door.log" 2>&1 &
 last=$!
 pids="$pids $last"
+printf '%s\n' "$last" >> "$state/host-pids"
 wait_for "ordo-host" "$door/health/live" "$last"
 
 # ── 4. The program ─────────────────────────────────────────────────────────

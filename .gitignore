@@ -35,3 +35,6 @@ review/history/
 review/report.json
 review/report.prev.json
 review/report.html
+
+# Coverage reports and the shell environment used by instrumented e2e runs.
+coverage-out/

@@ -456,6 +456,7 @@
     "crates/ordo-host/src/pin_stream.rs": "all",
     "crates/ordo-host/src/platform_ops.rs": "all",
     "crates/ordo-host/src/presence.rs": "all",
+    "crates/ordo-host/src/prev_offer.rs": "all",
     "crates/ordo-host/src/principal_directory.rs": "all",
     "crates/ordo-host/src/profile_ops.rs": "all",
     "crates/ordo-host/src/promotion.rs": "all",

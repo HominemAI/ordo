@@ -136,7 +136,7 @@ with the same database and keys and a distinct replica id. Both addresses
 and the database connection details are in `.stack/stack.json`.
 
 `tests/api/public-cache.spec.ts` checks cache hits against PostgreSQL's table
-scan counters, write invalidation on each node, a comment-only apply and
+scan counters, write invalidation on each node, both a comment-only apply and a version bump, and
 2 distinct signed-in owners bypassing the public cache. Counter checks wait
 for equal samples 11 seconds apart and include a miss control that must
 increase the count. Cross-node observations are attached to the test report.

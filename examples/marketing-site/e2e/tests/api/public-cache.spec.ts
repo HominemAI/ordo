@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test as base, expect, type APIRequestContext, type APIResponse } from '@playwright/test';
+import { test as base, expect, type APIRequestContext, type APIResponse, type TestInfo } from '@playwright/test';
 import { owner, rows, stack } from '../support.js';
 import { tableReads } from '../reads.js';
 const exec = promisify(execFile);
@@ -82,14 +82,12 @@ test('a write on one node drops the cached answer on the other node', async ({ r
   }
 });
 
-test('a deploy drops every cached answer', async ({ request }, testInfo) => {
-  test.setTimeout(300_000);
+async function checkApply(request: APIRequestContext, testInfo: TestInfo, source: string) {
   for (const door of [stack().door, stack().doorB]) await warm(request, door);
   const s = stack();
   const folder = await mkdtemp(join(tmpdir(), 'ordo-marketing-deploy-'));
   try {
-    // The plan explicitly asks for a comment-only change, without a schema edit.
-    await writeFile(join(folder, 'site.ordo'), `${await readFile(s.program, 'utf8')}\n# Cache deploy ${randomUUID()}\n`);
+    await writeFile(join(folder, 'site.ordo'), source);
     const result = await exec(s.ordo, ['apply', folder, '--direct', '--as', 'marketing-cache-e2e', '--wait-secs', '240'], {
       timeout: 260_000,
       env: { ...process.env, ORDO_PG_HOST: s.pg.host, ORDO_PG_PORT: s.pg.port, ORDO_PG_USER: s.pg.user, ORDO_PG_DB: s.pg.db,
@@ -105,6 +103,18 @@ test('a deploy drops every cached answer', async ({ request }, testInfo) => {
   } finally {
     await rm(folder, { recursive: true, force: true });
   }
+}
+
+test('a comment-only apply drops every cached answer as the plan requires', async ({ request }, testInfo) => {
+  test.setTimeout(300_000);
+  await checkApply(request, testInfo, `${await readFile(stack().program, 'utf8')}\n# Cache deploy ${randomUUID()}\n`);
+});
+
+test('a new version drops every cached answer on both nodes', async ({ request }, testInfo) => {
+  test.setTimeout(300_000);
+  const source = await readFile(stack().program, 'utf8');
+  expect(source).toContain('domain marketing @ 0.2.1');
+  await checkApply(request, testInfo, source.replace('domain marketing @ 0.2.1', 'domain marketing @ 0.2.2'));
 });
 
 test('two members never share one cached answer', async ({ request }) => {

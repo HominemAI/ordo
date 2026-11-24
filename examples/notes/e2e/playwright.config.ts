@@ -93,6 +93,15 @@ export default defineConfig({
       dependencies: ['upgrade'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // Notes v3 over the running notes v2, with the page open (plan-versions.md,
+    // increment 7a). It moves the stack to v3, so it runs after `v2`, last.
+    // Locally, `--project=v3 --no-deps` applies v2 itself and runs alone.
+    {
+      name: 'v3',
+      testMatch: /v3\/.*\.spec\.ts/,
+      dependencies: ['v2'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

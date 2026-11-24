@@ -176,6 +176,16 @@ const READS: &[&str] = &[
     "std.deployment.versionSettings",
     // Which touches tenants may choose, and the changes; deployment owner.
     "std.deployment.tenantTouches",
+    // The chain of environments and which one this is; deployment owner.
+    "std.deployment.environments",
+    // A stored version as a promotion's source, with whether it was
+    // activated: what `ordo promote` reads as the person promoting.
+    "std.deployment.versionSource",
+    // The stored plans and their receipts; deployment owner only, home
+    // space (versions increment 8).
+    "std.deployment.plans",
+    // Whether a rollback's version still reads its externals and peers.
+    "std.deployment.rollbackCheck",
     // The open recoveries and successions, with objections: the deployment
     // owner's to read, home space (owner succession, 2026-10-24).
     "std.identity.openCases",

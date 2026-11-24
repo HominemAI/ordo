@@ -104,6 +104,65 @@ const CALLS: &[(&str, Rule)] = &[
             test: "versions_settings.rs",
         },
     ),
+    // The chain of environments (versions increment 4a).
+    ("std.deployment.environments", Read),
+    (
+        "std.deployment.registerEnvironment",
+        Write {
+            act: "environment-registered",
+            src: "deploy_ops.rs",
+            test: "environments.rs",
+        },
+    ),
+    ("std.deployment.versionSource", Read),
+    (
+        "std.deployment.setOwnEnvironment",
+        Write {
+            act: "environment-own",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.removeEnvironment",
+        Write {
+            act: "environment-removed",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.renameEnvironment",
+        Write {
+            act: "environment-renamed",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.promote",
+        Write {
+            act: "promoted",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.setEnvironmentDoor",
+        Write {
+            act: "environment-door",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
+    (
+        "std.deployment.setPromotionSetting",
+        Write {
+            act: "promotion-setting",
+            src: "deploy_ops.rs",
+            test: "promotion.rs",
+        },
+    ),
     // A tenant's version, moved from the Tenants screen.
     (
         "std.deployment.pin",

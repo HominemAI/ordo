@@ -202,6 +202,16 @@ pub enum EvolveRefusal {
     Busy,
     /// A database fault outside the version store.
     Store(String),
+    /// Staging comes before this deployment, and it accepted no rehearsal
+    /// of this step with this digest (§3.2, increment 12b). Rehearse it on
+    /// staging and accept it here.
+    NotRehearsed {
+        from: String,
+        to: String,
+        digest: String,
+        /// The digests accepted here for the same step.
+        signed: Vec<String>,
+    },
 }
 
 impl From<VersionRefusal> for EvolveRefusal {
@@ -234,6 +244,7 @@ impl EvolveRefusal {
             EvolveRefusal::PreChecks { .. } => "precheck_failed",
             EvolveRefusal::Busy => "apply_in_progress",
             EvolveRefusal::Store(_) => "store_failed",
+            EvolveRefusal::NotRehearsed { .. } => "plan_not_rehearsed",
         }
     }
 
@@ -409,6 +420,27 @@ impl std::fmt::Display for EvolveRefusal {
                  when it ends"
             ),
             EvolveRefusal::Store(e) => write!(f, "store_failed: {e}"),
+            EvolveRefusal::NotRehearsed {
+                from,
+                to,
+                digest,
+                signed,
+            } => write!(
+                f,
+                "plan_not_rehearsed: staging comes before this deployment, and it runs only a \
+                 plan staging rehearsed on a clone and signed. No rehearsal of the step from \
+                 `{from}` to `{to}` with digest {digest} was accepted here{}. Rehearse it on \
+                 staging: `ordo rehearsals rehearse --from {from} --to {to} --clone <clone> \
+                 --reason \"...\" --host <staging>`; then accept it here: `ordo rehearsals \
+                 accept --from {from} --to {to}`. To promote from dev with no staging, set \
+                 promotion.skip_staging: `ordo environments set skip-staging on --reason \
+                 \"...\"`",
+                if signed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (accepted: {})", signed.join(", "))
+                }
+            ),
         }
     }
 }
@@ -1652,6 +1684,8 @@ pub async fn run_step_with(
             rendered: again.digest,
         });
     }
+    // Past staging, only a digest staging signed runs (§3.2, 12b).
+    crate::rehearsals::require_rehearsed(registry, plan).await?;
     let x = compiled(&a)?;
     let y = compiled(&b)?;
     let run_err = |class: &'static str, why: String, transient: bool| EvolveRefusal::Run {

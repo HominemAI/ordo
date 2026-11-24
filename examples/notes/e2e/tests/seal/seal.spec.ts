@@ -21,7 +21,8 @@
  * rollout that runs every tenant's step (11b). Nothing is written while a
  * seal runs here.
  *
- * It seals a field for the whole stack, so it runs after `clone`, last.
+ * It seals a field for the whole stack, so it runs after `clone`, before
+ * `rehearsal`.
  * Locally, `--project=seal --no-deps`. Chromium only.
  */
 

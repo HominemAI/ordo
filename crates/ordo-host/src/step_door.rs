@@ -29,6 +29,10 @@
 //! person cloning, with their own token for production. That answer carries
 //! the sealed bundle and is bounded to [`MAX_CLONE_BYTES`].
 //!
+//! Production reads staging's signed rehearsal of a step the same way
+//! (`crate::rehearsals`): one `GET /op/std.deployment.rehearsals`, as the
+//! person accepting, with their own token for staging.
+//!
 //! # One error
 //!
 //! Every failure is a [`StepDoorError`], which keeps its cause and says
@@ -206,6 +210,26 @@ impl StepDoor {
             MAX_CLONE_BYTES,
         );
         self.first_row(read, CLONE_SECS).await
+    }
+
+    /// **Read staging's signed rehearsals of one step** as the person
+    /// accepting: `std.deployment.rehearsals` in staging's own `space`,
+    /// with `bearer` (`crate::rehearsals`, §3.2). The answer's first row.
+    pub async fn rehearsals(
+        &self,
+        space: &str,
+        bearer: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Value, StepDoorError> {
+        let path = format!(
+            "/op/{}?from={}&to={}",
+            crate::rehearsals::REHEARSALS,
+            query_escape(from),
+            query_escape(to)
+        );
+        let read = self.send("GET", &path, space, bearer, None, MAX_ANSWER_BYTES);
+        self.first_row(read, READ_SECS).await
     }
 
     async fn first_row(

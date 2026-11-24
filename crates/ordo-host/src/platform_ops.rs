@@ -1060,6 +1060,7 @@ pub fn specs() -> Vec<OpSpec> {
     .chain(crate::fn_runs::specs())
     .chain(crate::deploy_ops::specs())
     .chain(crate::clones::specs())
+    .chain(crate::rehearsals::specs())
     .chain(crate::window_ops::specs())
     .chain(crate::revoked_moves::specs())
     .chain(crate::fleet::specs())
@@ -1876,6 +1877,10 @@ pub fn owner_only(name: &str) -> bool {
         // Staging clones (`plan-versions.md` §3.4): the deployment's, on
         // `APPLY`'s terms. A clone discloses a tenant, masked.
         || crate::clones::OPS.contains(&name)
+        // The signed rehearsal (§3.2, 12b): the deployment's, on `APPLY`'s
+        // terms. A `clone.readers` person may also rehearse (Q12): the
+        // door lets them, not a role.
+        || crate::rehearsals::OPS.contains(&name)
         // Maintenance windows (owner, 2026-11-04): the app developer's
         // contract with each tenant, set by the deployment owner on
         // `APPLY`'s terms. A tenant has no say in them through Ordo.
@@ -2780,6 +2785,14 @@ impl PlatformOps {
                     )
                 })?;
                 clones.execute(name, space, bound, caller).await
+            }
+            name if crate::rehearsals::OPS.contains(&name) => {
+                let clones = self.clones.as_deref().ok_or_else(|| {
+                    ExecError::internal(
+                        "this deployment registered the rehearsal ops and wired no state for them",
+                    )
+                })?;
+                crate::rehearsals::execute(clones, name, space, bound, caller).await
             }
             name if crate::window_ops::OPS.contains(&name) => {
                 crate::window_ops::execute(self.apply_ops()?, name, space, bound, caller).await

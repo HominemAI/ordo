@@ -142,6 +142,17 @@ impl Door {
     }
 }
 
+/// `promotion.release_mismatch` or `promotion.attestation_max_age`, by
+/// either spelling, when `setting` names one (`crate::rehearsals`).
+pub fn rehearsal_setting(setting: &str) -> Option<&'static str> {
+    let setting = setting.trim();
+    match setting.strip_prefix("promotion.").unwrap_or(setting) {
+        "release_mismatch" | "release-mismatch" => Some(crate::rehearsals::RELEASE_MISMATCH),
+        "attestation_max_age" | "attestation-max-age" => Some(crate::rehearsals::MAX_AGE),
+        _ => None,
+    }
+}
+
 /// The promotion settings this deployment holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PromotionSettings {
@@ -509,10 +520,53 @@ impl<'a> Environments<'a> {
     ) -> Result<(PromotionSettings, bool), EnvironmentRefusal> {
         let setting = setting.trim();
         let named = setting.strip_prefix("promotion.").unwrap_or(setting);
+        // The signed rehearsal's two (`crate::rehearsals`, §3.2).
+        if let Some(name) = rehearsal_setting(setting) {
+            let value = value.trim();
+            if name == crate::rehearsals::RELEASE_MISMATCH {
+                if !matches!(value, "refuse" | "warn") {
+                    return Err(EnvironmentRefusal::Setting(format!(
+                        "{name} takes `refuse` or `warn`, not `{value}`"
+                    )));
+                }
+            } else {
+                crate::rehearsals::parse_age(value).map_err(EnvironmentRefusal::Setting)?;
+            }
+            let reason = crate::versions::check_reason(reason)
+                .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
+            let latest = format!(
+                "SELECT \"value\" FROM \"$promotion_settings\" WHERE \"setting\" = {} \
+                 ORDER BY \"seq\" DESC LIMIT 1",
+                sql_lit(name)
+            );
+            let was = match self.pool.rows(&latest).await {
+                Ok(rows) => rows.first().and_then(|r| r.first().cloned().flatten()),
+                Err(e) if e.is_missing_table() => None,
+                Err(e) => return Err(e.into()),
+            };
+            let now = self.promotion_settings().await?;
+            if was.as_deref() == Some(value) {
+                return Ok((now, false));
+            }
+            self.pool.rows(SETTINGS_DDL).await?;
+            self.pool
+                .rows(&format!(
+                    "INSERT INTO \"$promotion_settings\" (\"setting\", \"value\", \"actor\", \
+                     \"reason\", \"at\") VALUES ({}, {}, {}, {}, {at})",
+                    sql_lit(name),
+                    sql_lit(value),
+                    sql_lit(actor),
+                    sql_lit(&reason)
+                ))
+                .await?;
+            return Ok((now, true));
+        }
         if !matches!(named, "skip_staging" | "skip-staging") {
             return Err(EnvironmentRefusal::Setting(format!(
-                "`{setting}` is not a promotion setting. There are {SKIP_STAGING} and \
-                 {PRUNE_ENABLED}"
+                "`{setting}` is not a promotion setting. There are {SKIP_STAGING}, \
+                 {PRUNE_ENABLED}, {} and {}",
+                crate::rehearsals::RELEASE_MISMATCH,
+                crate::rehearsals::MAX_AGE
             )));
         }
         let on = match value.trim() {

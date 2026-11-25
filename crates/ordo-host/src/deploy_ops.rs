@@ -718,6 +718,59 @@ fn settings_json(s: &crate::versions::VersionSettings) -> serde_json::Value {
     })
 }
 
+/// **A tenant on the deployment's own database is not pinned apart from
+/// the active version across B10** (increment 13): there its field's
+/// blind index is under the active version's normalization, and `version`
+/// would read the index kept beside it, which only an activation trades
+/// in, for every space at once. Refused by name; the node refuses to serve
+/// such a pin too (`crate::spaces::Spaces::resolve`), however it was made.
+async fn refuse_pin_apart_from_kept(
+    ops: &ApplyOps,
+    tenant: &str,
+    version: &str,
+) -> Result<(), ExecError> {
+    const WHAT: &str = "the tenant was not moved";
+    let v = crate::versions::Versions::on(&ops.pool);
+    let Ok(version) = v.resolve(version).await else {
+        return Ok(()); // the pin names the refusal
+    };
+    let space = ordo_crypto::SpaceId(tenant.to_string());
+    let Ok(pool) = ops.pools.resolve(&space).await else {
+        return Ok(());
+    };
+    if !crate::dual_writes::same_database(&pool, &ops.pool) {
+        return Ok(()); // its own database: the node trades it
+    }
+    let Some(schema) = v
+        .get(&version)
+        .await
+        .map_err(|e| e.to_exec_error(WHAT))?
+        .and_then(|a| crate::Fixture::from_source(&a.source, "").ok())
+        .map(|f| f.schema)
+    else {
+        return Ok(());
+    };
+    let due = crate::schema_apply::kept_indexes_due(&pool, &schema)
+        .await
+        .map_err(|e| {
+            ExecError::of_fault(
+                e.class(),
+                ordo_api::ErrorCode::SpaceUnavailable,
+                format!("{WHAT}: its database could not be read: {e}"),
+            )
+        })?;
+    match due.first() {
+        Some(k) => Err(ExecError::new(
+            ordo_api::ErrorCode::ApplyRefused,
+            format!(
+                "{WHAT}: {}",
+                crate::spaces::kept_on_shared(&k.entity, &k.field, &version, tenant)
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The tenants waiting to move off a revoked or too-old version, and how
 /// many of them no window covers. Best effort: unreadable counts as none.
 async fn waiting_json(pool: &ordo_exec::Pool) -> serde_json::Value {
@@ -967,6 +1020,7 @@ pub async fn execute(
             let tenant = text(bound, "tenant").unwrap_or_default();
             let version = text(bound, "version").unwrap_or_default();
             let v = crate::versions::Versions::on(&ops.pool);
+            refuse_pin_apart_from_kept(ops, tenant, version).await?;
             let moved = v
                 .pin(tenant, version, caller, crate::runtime::now_secs())
                 .await

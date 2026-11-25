@@ -99,6 +99,9 @@ pub const ACTOR: &str = "ordo:rollout";
 /// How a pause by the first stage's health begins its reason: `resume`
 /// then passes the gate.
 pub const UNHEALTHY: &str = "unhealthy";
+/// The reason a rollout paused on a first stage with too few calls starts
+/// with this (ruled 2026-11-25).
+pub const QUIET: &str = "quiet";
 
 /// The advisory lock the leading worker takes for each tick, at
 /// transaction scope (`ORRL`).
@@ -131,8 +134,10 @@ pub const GROUP_SETTING: &str = "rollout.group";
 pub const QUERY_SETTING: &str = "rollout.query";
 pub const ORDER_SETTING: &str = "rollout.order";
 pub const LIMIT_SETTING: &str = "rollout.limit";
+/// Ruled 2026-11-25: the calls a first stage must have before it passes.
+pub const HEALTH_MIN_CALLS_SETTING: &str = "rollout.health_min_calls";
 
-pub const SETTINGS: [&str; 14] = [
+pub const SETTINGS: [&str; 15] = [
     STRATEGY_SETTING,
     BATCH_INTERVAL_SETTING,
     WINDOW_SETTING,
@@ -147,6 +152,7 @@ pub const SETTINGS: [&str; 14] = [
     QUERY_SETTING,
     ORDER_SETTING,
     LIMIT_SETTING,
+    HEALTH_MIN_CALLS_SETTING,
 ];
 
 /// The key a setting answers under in [`RolloutSettings::to_json`].
@@ -165,6 +171,7 @@ pub fn json_key(setting: &str) -> &'static str {
         QUERY_SETTING => "query",
         ORDER_SETTING => "order",
         LIMIT_SETTING => "limit",
+        HEALTH_MIN_CALLS_SETTING => "healthMinCalls",
         _ => "deploymentSpace",
     }
 }
@@ -357,10 +364,15 @@ impl TenantState {
 /// The rollout settings as stored (§7, Q15).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutSettings {
-    /// `None`: unset, and `ordo apply` activates as it did before rollouts
-    /// existed, every tenant at once. A value makes each apply start a
-    /// rollout with that strategy.
+    /// `None`: unset, and [`RolloutSettings::default_strategy`] holds
+    /// (ruled 2026-11-25). See [`RolloutSettings::apply_strategy`] for what
+    /// an apply does with it.
     pub strategy: Option<Strategy>,
+    /// What an unset strategy is here: `rolling` in every environment but
+    /// dev, `all` in dev, where `ordo apply` activates every tenant at once
+    /// as before rollouts (ruled 2026-11-25). Read from the environment
+    /// registry by [`Rollouts::settings`].
+    pub default_strategy: Strategy,
     pub batch_interval: i64,
     pub window: i64,
     pub failure_threshold: i64,
@@ -370,6 +382,9 @@ pub struct RolloutSettings {
     pub canary_wait: i64,
     /// In hundredths of a percent.
     pub health_error_rate: i64,
+    /// The calls the first stage must have had before it passes; fewer
+    /// pause the rollout (ruled 2026-11-25). 0 judges a quiet stage healthy.
+    pub health_min_calls: i64,
     /// `stream`, or `mail:<address>`.
     pub alert_channel: String,
     pub share_partners: bool,
@@ -387,6 +402,7 @@ impl Default for RolloutSettings {
     fn default() -> RolloutSettings {
         RolloutSettings {
             strategy: None,
+            default_strategy: Strategy::Rolling,
             batch_interval: BATCH_INTERVAL_DEFAULT,
             window: WINDOW_DEFAULT,
             failure_threshold: FAILURE_THRESHOLD_DEFAULT,
@@ -394,6 +410,7 @@ impl Default for RolloutSettings {
             canary_count: CANARY_COUNT_DEFAULT,
             canary_wait: CANARY_WAIT_DEFAULT,
             health_error_rate: crate::rollout_strategies::HEALTH_ERROR_RATE_DEFAULT,
+            health_min_calls: crate::rollout_strategies::HEALTH_MIN_CALLS_DEFAULT,
             alert_channel: crate::rollout_strategies::ALERT_STREAM.to_string(),
             share_partners: false,
             group: Vec::new(),
@@ -419,11 +436,40 @@ pub fn group_list(text: &str) -> Vec<String> {
     out
 }
 
+/// The environment whose unset `rollout.strategy` moves every tenant at once
+/// (ruled 2026-11-25).
+pub const DEV_ENVIRONMENT: &str = "dev";
+
+/// What an unset `rollout.strategy` is in the environment `own`: `all` in
+/// dev, `rolling` everywhere else (ruled 2026-11-25).
+pub fn default_strategy_in(own: &str) -> Strategy {
+    if own == DEV_ENVIRONMENT {
+        Strategy::All
+    } else {
+        Strategy::Rolling
+    }
+}
+
 impl RolloutSettings {
+    /// **Whether `ordo apply` starts a rollout, and with which strategy.**
+    /// The strategy set, or the default where none is: `rolling` in every
+    /// environment but dev (ruled 2026-11-25). `all`, set or dev's default,
+    /// is the activation as before rollouts: every tenant at once, "active"
+    /// at once, so a save in dev stays quick (§3.7: "the strategy `all` is
+    /// today's behaviour"). `None` then. `ordo rollout start --strategy all`
+    /// still starts a rollout that moves every tenant in one batch.
+    pub fn apply_strategy(&self) -> Option<Strategy> {
+        match self.strategy.unwrap_or(self.default_strategy) {
+            Strategy::All => None,
+            s => Some(s),
+        }
+    }
+
     /// The value of one as it reads, `None` when unset.
     pub fn to_json(&self) -> Value {
         json!({
             "strategy": self.strategy.map(Strategy::as_str),
+            "strategyDefault": self.default_strategy.as_str(),
             "batchInterval": self.batch_interval,
             "window": self.window,
             "failureThreshold": self.failure_threshold,
@@ -431,6 +477,7 @@ impl RolloutSettings {
             "canaryCount": self.canary_count,
             "canaryWait": self.canary_wait,
             "healthErrorRate": crate::rollout_strategies::format_rate(self.health_error_rate),
+            "healthMinCalls": self.health_min_calls,
             "alertChannel": self.alert_channel,
             "sharePartners": self.share_partners,
             "group": self.group,
@@ -470,6 +517,11 @@ impl RolloutSettings {
                 self.health_error_rate = v
                     .and_then(crate::rollout_strategies::parse_rate)
                     .unwrap_or(crate::rollout_strategies::HEALTH_ERROR_RATE_DEFAULT)
+            }
+            (HEALTH_MIN_CALLS_SETTING, v) => {
+                self.health_min_calls = v
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(crate::rollout_strategies::HEALTH_MIN_CALLS_DEFAULT)
             }
             (ALERT_CHANNEL_SETTING, v) => {
                 self.alert_channel = v
@@ -526,8 +578,9 @@ pub fn check_setting(setting: &str, value: Option<&str>) -> Result<Option<String
             .map(|s| Some(s.as_str().to_string()))
             .ok_or_else(|| {
                 bad(&format!(
-                    "it is {STRATEGIES}. `--clear` makes `ordo apply` move every tenant at \
-                     once, as before rollouts"
+                    "it is {STRATEGIES}. `all` makes `ordo apply` move every tenant at once, \
+                     as before rollouts; `--clear` gives the default: `rolling`, or `all` in \
+                     dev"
                 ))
             }),
         BATCH_INTERVAL_SETTING | WINDOW_SETTING => match parse_secs(v) {
@@ -554,6 +607,16 @@ pub fn check_setting(setting: &str, value: Option<&str>) -> Result<Option<String
         HEALTH_ERROR_RATE_SETTING => crate::rollout_strategies::parse_rate(v)
             .map(|r| Some(crate::rollout_strategies::format_rate(r)))
             .ok_or_else(|| bad("it is a percentage from 0.01% to 100%, like `1%`")),
+        HEALTH_MIN_CALLS_SETTING => match v.parse::<i64>() {
+            Ok(n) if (0..=crate::rollout_strategies::MAX_MIN_CALLS).contains(&n) => {
+                Ok(Some(n.to_string()))
+            }
+            _ => Err(bad(&format!(
+                "it is a whole number of calls from 0 to {}; 0 lets a first stage with no \
+                 calls pass",
+                crate::rollout_strategies::MAX_MIN_CALLS
+            ))),
+        },
         ALERT_CHANNEL_SETTING => crate::rollout_strategies::check_channel(v)
             .map(Some)
             .map_err(|why| bad(&why)),
@@ -651,14 +714,17 @@ ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"share_partners\" boolean NO
 ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"selection\" text NOT NULL DEFAULT ''; \
 ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"gate\" text NOT NULL DEFAULT ''; \
 ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"first_done_at\" bigint NOT NULL DEFAULT 0; \
-ALTER TABLE \"$rollout_tenants\" ADD COLUMN IF NOT EXISTS \"stage\" bigint NOT NULL DEFAULT 1";
+ALTER TABLE \"$rollout_tenants\" ADD COLUMN IF NOT EXISTS \"stage\" bigint NOT NULL DEFAULT 1; \
+ALTER TABLE \"$rollouts\" ADD COLUMN IF NOT EXISTS \"health_min_calls\" bigint NOT NULL \
+  DEFAULT 0";
 
 const COLUMNS: &str =
     "\"id\", \"target\", \"from\", \"strategy\", \"batch_interval\", \"window\", \
   \"batch_size\", \"failure_threshold\", \"deployment_space\", \"state\", \"reason\", \"actor\", \
   \"started_at\", \"ended_at\", \"last_batch_at\", \"batches\", \"failed_base\", \"pin_seq\", \
   \"leader\", \"led_at\", \"canary_count\", \"canary_wait\", \"health_error_rate\", \
-  \"alert_channel\", \"share_partners\", \"selection\", \"gate\", \"first_done_at\"";
+  \"alert_channel\", \"share_partners\", \"selection\", \"gate\", \"first_done_at\", \
+  \"health_min_calls\"";
 
 /// Where a staged rollout's first stage stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -733,6 +799,9 @@ pub struct Rollout {
     pub gate: Gate,
     /// When the first stage had nothing left to move; 0 before.
     pub first_done_at: u64,
+    /// The calls the first stage must have had before it passes (ruled
+    /// 2026-11-25). A rollout started before the setting reads 0.
+    pub health_min_calls: i64,
 }
 
 fn rollout_row(r: &[Option<String>]) -> Option<Rollout> {
@@ -767,6 +836,7 @@ fn rollout_row(r: &[Option<String>]) -> Option<Rollout> {
         selection: s(25).unwrap_or_default(),
         gate: Gate::parse(s(26).as_deref().unwrap_or_default()),
         first_done_at: n(27).unwrap_or(0) as u64,
+        health_min_calls: n(28).unwrap_or(0),
     })
 }
 
@@ -794,6 +864,7 @@ impl Rollout {
             "canaryCount": self.canary_count,
             "canaryWait": self.canary_wait,
             "healthErrorRate": crate::rollout_strategies::format_rate(self.health_error_rate),
+            "healthMinCalls": self.health_min_calls,
             "alertChannel": self.alert_channel,
             "sharePartners": self.share_partners,
             "selection": self.selection,
@@ -921,6 +992,7 @@ pub struct StartOptions {
     pub canary_wait: Option<i64>,
     /// In hundredths of a percent.
     pub health_error_rate: Option<i64>,
+    pub health_min_calls: Option<i64>,
     pub alert_channel: Option<String>,
     pub share_partners: Option<bool>,
     /// The tenants `group` moves first.
@@ -1182,10 +1254,26 @@ impl<'a> Rollouts<'a> {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.is_missing_table() => return Ok(RolloutSettings::default()),
+            Err(e) if e.is_missing_table() => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        let mut out = RolloutSettings::default();
+        // The environment registry answers production when nothing was
+        // registered; a registry that cannot be read is a store error.
+        let default_strategy = match crate::environments::Environments::on(self.pool).own().await {
+            Ok(env) => default_strategy_in(&env.name),
+            Err(crate::environments::EnvironmentRefusal::Store(e)) => {
+                return Err(RolloutRefusal::Store(e))
+            }
+            Err(e) => {
+                return Err(RolloutRefusal::Store(PoolError::db(format!(
+                    "the environment registry could not be read: {e}"
+                ))))
+            }
+        };
+        let mut out = RolloutSettings {
+            default_strategy,
+            ..RolloutSettings::default()
+        };
         for r in rows {
             let (Some(Some(name)), value) = (r.first().cloned(), r.get(1).cloned().flatten())
             else {
@@ -1258,7 +1346,15 @@ impl<'a> Rollouts<'a> {
     async fn one(&self, filter: &str) -> Result<Option<Rollout>, RolloutRefusal> {
         let sql =
             format!("SELECT {COLUMNS} FROM \"$rollouts\" {filter} ORDER BY \"id\" DESC LIMIT 1");
-        match self.pool.rows(&sql).await {
+        let rows = match self.pool.rows(&sql).await {
+            // A table an older build made: its new columns first.
+            Err(e) if e.is_missing_column() => {
+                self.ensure().await?;
+                self.pool.rows(&sql).await
+            }
+            other => other,
+        };
+        match rows {
             Ok(rows) => Ok(rows.first().and_then(|r| rollout_row(r))),
             Err(e) if e.is_missing_table() => Ok(None),
             Err(e) => Err(e.into()),
@@ -1483,7 +1579,7 @@ impl<'a> Rollouts<'a> {
         let strategy = opts
             .strategy
             .or(settings.strategy)
-            .unwrap_or(Strategy::Rolling);
+            .unwrap_or(settings.default_strategy);
         let check = |setting: &str, n: Option<i64>| -> Result<(), RolloutRefusal> {
             match n {
                 Some(n) if n < 1 => Err(RolloutRefusal::Setting {
@@ -1542,6 +1638,17 @@ impl<'a> Rollouts<'a> {
                 HEALTH_ERROR_RATE_SETTING,
                 &health_error_rate.to_string(),
                 "it is a percentage from 0.01% to 100%",
+            ));
+        }
+        let health_min_calls = opts.health_min_calls.unwrap_or(settings.health_min_calls);
+        if !(0..=crate::rollout_strategies::MAX_MIN_CALLS).contains(&health_min_calls) {
+            return Err(bad(
+                HEALTH_MIN_CALLS_SETTING,
+                &health_min_calls.to_string(),
+                &format!(
+                    "it is a whole number of calls from 0 to {}",
+                    crate::rollout_strategies::MAX_MIN_CALLS
+                ),
             ));
         }
         let alert_channel = match &opts.alert_channel {
@@ -1675,10 +1782,11 @@ impl<'a> Rollouts<'a> {
                    \"window\", \"batch_size\", \"failure_threshold\", \"deployment_space\", \
                    \"state\", \"actor\", \"started_at\", \"pin_seq\", \"canary_count\", \
                    \"canary_wait\", \"health_error_rate\", \"alert_channel\", \"share_partners\", \
-                   \"selection\", \"gate\") \
+                   \"selection\", \"gate\", \"health_min_calls\") \
                  VALUES ({}, {}, {}, {batch_interval}, {window}, {batch_size}, \
                    {failure_threshold}, {}, 'running', {}, {at}, {head}, {canary_count}, \
-                   {canary_wait}, {health_error_rate}, {}, {share_partners}, {}, {}) \
+                   {canary_wait}, {health_error_rate}, {}, {share_partners}, {}, {}, \
+                   {health_min_calls}) \
                  RETURNING \"id\"",
                 sql_lit(&target),
                 active.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
@@ -1837,7 +1945,9 @@ impl<'a> Rollouts<'a> {
         let failed = self.count(r.id, TenantState::Failed).await?;
         // A resume after an unhealthy first stage is the deployment owner
         // moving the rest anyway: the gate is passed.
-        let gate = if r.gate == Gate::Pending && r.reason.starts_with(UNHEALTHY) {
+        let gate = if r.gate == Gate::Pending
+            && (r.reason.starts_with(UNHEALTHY) || r.reason.starts_with(QUIET))
+        {
             ", \"gate\" = 'passed', \"last_batch_at\" = 0"
         } else {
             ""
@@ -2127,6 +2237,9 @@ pub struct Ticked {
     pub finished: bool,
     /// The first stage's health paused it in this tick (10c).
     pub unhealthy: bool,
+    /// The first stage had fewer calls than `rollout.health_min_calls`
+    /// when its wait ended, and paused it in this tick.
+    pub quiet: bool,
     /// The first stage was healthy for its wait: the rest move (10c).
     pub gate_passed: bool,
     /// What the alert channel could not do, when it failed.
@@ -2173,6 +2286,10 @@ impl Ticked {
         if self.paused && self.unhealthy {
             out.push(format!(
                 "rollout {id}: paused by {HEALTH_ERROR_RATE_SETTING}; `ordo rollout status`"
+            ));
+        } else if self.paused && self.quiet {
+            out.push(format!(
+                "rollout {id}: paused by {HEALTH_MIN_CALLS_SETTING}; `ordo rollout status`"
             ));
         } else if self.paused {
             out.push(format!(
@@ -2408,7 +2525,47 @@ async fn lead(
                 .await?;
                 r.first_done_at = now;
             }
-            if now >= r.first_done_at.saturating_add(r.canary_wait.max(0) as u64) {
+            let waited = now >= r.first_done_at.saturating_add(r.canary_wait.max(0) as u64);
+            // **A quiet first stage has proved nothing** (ruled 2026-11-25):
+            // fewer calls than `rollout.health_min_calls` when its wait ends
+            // pause the rollout, naming the setting.
+            if waited && crate::rollout_strategies::too_quiet(calls, r.health_min_calls) {
+                let why = format!(
+                    "{QUIET}: the tenants that moved first had {calls} call(s) while the \
+                     rollout waited, fewer than {HEALTH_MIN_CALLS_SETTING} {}, so their \
+                     health proves nothing. The rest stay on {}. `ordo rollout resume` moves \
+                     them anyway; `ordo rollout set {HEALTH_MIN_CALLS_SETTING} <n> --reason \
+                     \"...\"` lowers the number for the next rollout; `ordo rollout abort` \
+                     stops here",
+                    r.health_min_calls,
+                    r.from.as_deref().unwrap_or("their version"),
+                );
+                rollouts
+                    .set_state(r.id, RolloutState::Paused, &why, now, "")
+                    .await?;
+                ops.record(
+                    ACTOR,
+                    STATUS,
+                    "rollout-paused",
+                    format!(
+                        "rollout={} target={} quiet calls={calls} min={}",
+                        r.id, r.target, r.health_min_calls
+                    ),
+                );
+                alert(
+                    ops,
+                    &r,
+                    &format!("Rollout {} to {} paused: too few calls", r.id, r.target),
+                    &why,
+                    now,
+                    out,
+                )
+                .await;
+                out.paused = true;
+                out.quiet = true;
+                return Ok(());
+            }
+            if waited {
                 pool.rows(&format!(
                     "UPDATE \"$rollouts\" SET \"gate\" = 'passed', \"last_batch_at\" = 0 \
                      WHERE \"id\" = {}",
@@ -3106,6 +3263,7 @@ pub fn specs() -> Vec<OpSpec> {
         "canaryCount",
         "canaryWait",
         "healthErrorRate",
+        "healthMinCalls",
         "alertChannel",
         "sharePartners",
         "selection",
@@ -3128,6 +3286,7 @@ pub fn specs() -> Vec<OpSpec> {
                 int("canaryCount"),
                 text("canaryWait", 32, false),
                 text("healthErrorRate", 16, false),
+                int("healthMinCalls"),
                 text("alertChannel", 320, false),
                 flag("sharePartners"),
                 text("group", 65_536, false),
@@ -3280,6 +3439,7 @@ pub async fn execute(
                         .to_exec_error(WHAT)
                     })?),
                 },
+                health_min_calls: int("healthMinCalls"),
                 alert_channel: text("alertChannel").map(str::to_string),
                 share_partners: bound.0.get("sharePartners").and_then(|v| v.as_bool()),
                 group: text("group").map(group_list),

@@ -200,6 +200,8 @@ struct StartBody {
     canary_wait: Option<String>,
     #[serde(default, rename = "healthErrorRate")]
     health_error_rate: Option<String>,
+    #[serde(default, rename = "healthMinCalls")]
+    health_min_calls: Option<i64>,
     #[serde(default)]
     group: Option<String>,
     #[serde(default)]
@@ -240,6 +242,7 @@ async fn rollout_start(
         ("batchSize", req.batch_size),
         ("failureThreshold", req.failure_threshold),
         ("canaryCount", req.canary_count),
+        ("healthMinCalls", req.health_min_calls),
         ("limit", req.limit),
     ] {
         if let Some(v) = v {

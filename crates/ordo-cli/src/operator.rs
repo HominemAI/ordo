@@ -2453,9 +2453,10 @@ pub(crate) fn render_apply(report: &ordo_host::apply_op::Report, path: &str, _db
             from,
             to,
         } => out.push_str(&format!(
-            "activated  not yet: rollout {id} to {to} started ({strategy}, from {}; \
-             rollout.strategy is set)\nrollout    `ordo rollout status` follows it; `ordo \
-             rollout abort` stops it\n",
+            "activated  not yet: rollout {id} to {to} started ({strategy}, from {})\n\
+             rollout    `ordo rollout status` follows it; `ordo rollout abort` stops it. \
+             `ordo rollout set rollout.strategy all --reason \"...\"` makes the next apply \
+             move every tenant at once\n",
             from.as_deref().unwrap_or("nothing"),
         )),
     }
@@ -2620,12 +2621,18 @@ async fn rollback(flags: Flags) -> Outcome {
             Err(o) => return o,
         };
         let to = row["version"].as_str().unwrap_or(&version);
-        let reverted: Vec<String> = row["reverted"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|t| t.as_str().map(String::from))
-            .collect();
+        let list = |k: &str| -> Vec<String> {
+            row[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        };
+        let reverted = ordo_host::apply_op::Reverted {
+            soaks: list("reverted"),
+            pins: list("movedBack"),
+        };
         let mut out = match row["state"].as_str() {
             Some("alreadyActive") => format!("UNCHANGED  {to} is already active\n"),
             _ => format!(
@@ -2679,12 +2686,22 @@ async fn rollback(flags: Flags) -> Outcome {
     }
 }
 
-/// One line per tenant a rollback put back in its soak (increment 11b).
-fn reverted_lines(to: &str, reverted: &[String]) -> String {
-    reverted
+/// One line per tenant a rollback put back in its soak (increment 11b),
+/// and per tenant an aborted rollout pinned with no soak (ruled
+/// 2026-11-25).
+fn reverted_lines(to: &str, reverted: &ordo_host::apply_op::Reverted) -> String {
+    let mut out: String = reverted
+        .soaks
         .iter()
         .map(|t| format!("reverted   {t} back on {to} in its soak; every write kept\n"))
-        .collect()
+        .collect();
+    for t in &reverted.pins {
+        out.push_str(&format!(
+            "moved back {t} on {to}: the aborted rollout pinned it with no soak; every write \
+             kept\n"
+        ));
+    }
+    out
 }
 
 /// `ordo deploys` — what is stored, what is serving, and every re-point.

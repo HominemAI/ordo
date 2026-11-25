@@ -889,6 +889,26 @@ impl<'a> Environments<'a> {
         }
     }
 
+    /// **This deployment is `name`**: registered first when the chain does
+    /// not hold it (before this deployment's own, as [`Environments::register`]
+    /// places it), then made its own ([`Environments::set_own`]). Answers the
+    /// chain. A dev deployment and a test of one start so: with
+    /// `rollout.strategy` unset, dev activates every tenant at once
+    /// (ruled 2026-11-25).
+    pub async fn declare_own(
+        &self,
+        name: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<Vec<Environment>, EnvironmentRefusal> {
+        match self.register(name, None, actor, reason, at).await {
+            Ok(_) | Err(EnvironmentRefusal::Registered { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(self.set_own(name, reason).await?.0)
+    }
+
     /// **Say which environment this deployment is.** `name` must be
     /// registered. Answers the chain and whether anything changed.
     pub async fn set_own(

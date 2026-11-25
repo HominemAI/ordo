@@ -86,6 +86,7 @@ async fn dev(stem: &str, routed: bool) -> Dev {
     .await
     .expect("a pool");
     tenants::ensure_table(&pool).await.expect("$spaces");
+    all_at_once(&pool).await;
     let keys = keys();
     let own = PoolConfig::from_env().password.clone();
     let creds = ordo_host::runtime::tenant_credentials(None, own);
@@ -569,4 +570,20 @@ async fn the_idle_setting_is_stored_and_decides_which_branches_are_idle() {
     assert_eq!(branches::stored_idle(&d.pool).await.unwrap(), None);
 
     drop_db(&d, &database_of(&d, &a.branch.space).await);
+}
+
+/// `rollout.strategy` `all` on `pool`. With it unset, a deployment that is
+/// not dev rolls an apply out a batch at a time (ruled 2026-11-25); these
+/// tests apply and expect every tenant on the new version at once.
+async fn all_at_once(pool: &ordo_exec::Pool) {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 }

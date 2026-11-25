@@ -55,6 +55,7 @@ async fn fresh(stem: &str) -> (Pool, Pg) {
     .await
     .expect("a pool");
     tenants::ensure_table(&pool).await.expect("$spaces");
+    all_at_once(&pool).await;
     (pool, pg)
 }
 
@@ -212,4 +213,20 @@ async fn a_restore_in_the_middle_of_a_move_goes_on_from_the_restored_version() {
     v.restore_pin(&id, "0.3.0", ADA, 300).await.expect("pinned");
     assert!(v.moves().await.unwrap().iter().all(|m| m.space != id));
     assert_eq!(pin(&pool, &id).await.0.as_deref(), Some("0.3.0"));
+}
+
+/// `rollout.strategy` `all` on `pool`. With it unset, a deployment that is
+/// not dev rolls an apply out a batch at a time (ruled 2026-11-25); these
+/// tests apply and expect every tenant on the new version at once.
+async fn all_at_once(pool: &ordo_exec::Pool) {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 }

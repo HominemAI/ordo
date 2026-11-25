@@ -25,7 +25,10 @@
  *    retitles another note on the new version.
  * 5. `ordo rollout abort`, then `ordo rollback --version <from> --dry-run`
  *    names each as kept, and `ordo rollback --version <from>` puts the 3
- *    back. After a reload, every title each person typed is there.
+ *    back. After a reload, every title each person typed is there. The
+ *    rollout also pinned the deployment's own space, with no soak: the
+ *    dry run says it moves back, and the rollback moves it (owner,
+ *    2026-11-25).
  * 6. Ann shared a note with Ben before the rollout. Her move killed that
  *    share, and it stays closed after the rollback: Ben's page says so and
  *    holds none of it. Ann shares again and Ben reads it (11b part 3).
@@ -36,7 +39,8 @@
  *
  * A regression looks like a typed title missing after a reload, a tenant
  * the rollout moves without a copy (never `backfilling`), a failed tenant,
- * or a rollback that leaves a tenant on the new version.
+ * or a rollback that leaves a tenant, or the deployment's own space, on the
+ * new version.
  *
  * It stores 0.3.7, above `moves`' 0.3.6 and below `branch`'s 0.5.x, so it
  * runs between them. Chromium only.
@@ -177,14 +181,19 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
       for (const t of tenants) {
         expect(dry).toMatch(new RegExp(`tenant +${t} on ${to.replace(/\./g, '\\.')}: in its soak`));
       }
-      // The rollout was aborted, so `from` is still active and no other
-      // tenant moves: none loses a write.
+      // The rollout was aborted, so `from` is still active. The rollout
+      // pinned the deployment's own space with no soak; it moves back too,
+      // every write kept (owner, 2026-11-25). None loses a write.
+      expect(dry).toMatch(
+        new RegExp(`tenant +system on ${to.replace(/\./g, '\\.')}: rollout \\d+ pinned it with no soak: moves back to ${from.replace(/\./g, '\\.')}`),
+      );
       expect(dry).not.toContain('LOSES');
     });
 
     await test.step(`ordo rollback puts the 3 back on ${from}`, () => {
       const back = ordo(['rollback', '--version', from]);
       for (const t of tenants) expect(back).toContain(`reverted   ${t} back on ${from} in its soak`);
+      expect(back).toContain(`moved back system on ${from}: the aborted rollout pinned it with no soak`);
     });
 
     await test.step(`Ben's share, closed by Ann's move, stays closed after the rollback; shared again, he reads it`, async () => {

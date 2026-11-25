@@ -373,8 +373,8 @@ pub enum Activation {
     /// `--no-activate`: stored, and the deployment still points where it
     /// did.
     Staged,
-    /// `rollout.strategy` is set, so the apply stored the version and
-    /// started a rollout to it (`plan-versions.md` §3.7, increment 10). The
+    /// The deployment is not dev, or `rollout.strategy` is set, so the
+    /// apply stored the version and started a rollout to it (`plan-versions.md` §3.7, increment 10). The
     /// deployment points where it did until the rollout moves its own
     /// space.
     RolloutStarted {
@@ -1151,12 +1151,13 @@ async fn sequence(
             changes: behind,
         });
     }
-    // **A rollout instead of an activation** when `rollout.strategy` is set
-    // (`plan-versions.md` §3.7, increment 10). Unset, every tenant moves at
-    // once, as before rollouts.
+    // **A rollout instead of an activation** (`plan-versions.md` §3.7,
+    // increment 10). With `rollout.strategy` unset, a deployment that is not
+    // dev rolls out `rolling`, and dev activates every tenant at once
+    // (ruled 2026-11-25).
     let strategy = if activate {
         match crate::rollouts::Rollouts::on(pool).settings().await {
-            Ok(s) => s.strategy,
+            Ok(s) => s.apply_strategy(),
             Err(e) => return Err(ApplyRefused::Internal(e.to_string())),
         }
     } else {
@@ -1382,20 +1383,36 @@ pub async fn activate(pool: &Pool, version: &str, actor: &str) -> Result<Activat
         .map(|(a, _)| a)
 }
 
+/// The tenants a rollback put back besides the activation itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reverted {
+    /// Soaking on a move from the version: back in their soak, every write
+    /// kept (increment 11b).
+    pub soaks: Vec<String>,
+    /// Pinned by an aborted rollout with no soak: pinned back, every write
+    /// kept (ruled 2026-11-25).
+    pub pins: Vec<String>,
+}
+
 /// [`activate`], then **every tenant soaking on a move from `version` goes
 /// back to it** (`plan-versions.md` §2.5, increment 11b): a revert in its
 /// soak, every write kept. An activation leaves a tenant in a move with
 /// dual writes alone, so this is what `ordo rollback` adds, whether or not
 /// `version` was already active (an aborted rollout leaves its moved
 /// tenants on the target). With `pools`, each tenant database's pin fence
-/// rises too. The tenants put back.
+/// rises too.
+///
+/// **After an aborted rollout** (ruled 2026-11-25), with `version` still
+/// active, each tenant that rollout pinned itself with no soak goes back
+/// too, when every write is kept
+/// ([`crate::every_tenant::rollout_pins_back`]). Pins set by hand stay.
 pub async fn activate_reverting(
     pool: &Pool,
     pools: Option<&dyn ordo_exec::route::PoolResolver>,
     spaces: Option<&crate::spaces::Spaces>,
     version: &str,
     actor: &str,
-) -> Result<(Activation, Vec<String>), ApplyRefused> {
+) -> Result<(Activation, Reverted), ApplyRefused> {
     let lock = match ApplyLock::take(pool).await {
         Ok(Some(lock)) => lock,
         Ok(None) => return Err(ApplyRefused::InProgress),
@@ -1405,7 +1422,17 @@ pub async fn activate_reverting(
         Ok(a) => {
             match crate::every_tenant::revert_soaks_from(pool, pools, spaces, version, actor).await
             {
-                Ok(back) => Ok((a, back)),
+                Ok(soaks) => {
+                    match crate::every_tenant::rollout_pins_back(pool, version, actor).await {
+                        Ok(pins) => Ok((a, Reverted { soaks, pins })),
+                        Err(e) => Err(ApplyRefused::Internal(format!(
+                            "{version} is active, and a tenant an aborted rollout pinned was \
+                             not moved back: {e}. `ordo rollback --version {version} \
+                             --dry-run` lists them; `ordo versions pin <tenant> {version}` \
+                             moves one"
+                        ))),
+                    }
+                }
                 Err(e) => Err(ApplyRefused::Internal(format!(
                     "{version} is active, and a tenant soaking on a move from it was not put \
                      back: {e}. `ordo evolve --tenant <id> --revert` puts one back"

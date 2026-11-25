@@ -193,6 +193,7 @@ async fn harness(db: &str) -> Harness {
     })
     .await
     .expect("target pool");
+    all_at_once(&target).await;
 
     let grants = Arc::new(PgGrantRegistry::new(dir_pool.clone()));
     grants.ensure_table().await.expect("platform table");
@@ -1231,4 +1232,20 @@ async fn an_apply_through_the_door_leaves_a_deploy_event() {
         events[0].1.contains(&format!("by={DEP_OWNER}")),
         "{events:?}"
     );
+}
+
+/// `rollout.strategy` `all` on `pool`. With it unset, a deployment that is
+/// not dev rolls an apply out a batch at a time (ruled 2026-11-25); these
+/// tests apply and expect every tenant on the new version at once.
+async fn all_at_once(pool: &ordo_exec::Pool) {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 }

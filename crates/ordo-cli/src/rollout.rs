@@ -11,10 +11,12 @@ ordo rollout start <version> [--strategy rolling|all|canary|group|query] [--batc
                    [--window <1h>] [--failure-threshold <n>] [--deployment-space first|last]
                    [--batch-size <n>] [--canary-count <n>] [--canary-wait <1h>]
                    [--group <tenant,tenant>] [--query \"members < 5\"] [--order \"members asc\"] [--limit <n>]
-                   [--health-error-rate <1%>] [--alert-channel stream|mail:<address>]
+                   [--health-error-rate <1%>] [--health-min-calls <20>]
+                   [--alert-channel stream|mail:<address>]
                    [--share-partners]
     start a rollout of a stored version. One runs at a time. canary, group and query move
-    a first stage, then the rest once it has been healthy for --canary-wait. A query reads
+    a first stage, then the rest once it has been healthy for --canary-wait, with at least
+    --health-min-calls calls; fewer pause it. A query reads
     the tenant facts: tenant, name, version, createdAt, ageDays, members, requests30d,
     writes30d, personal, ownDatabase, paused, and rows.<entity>. --limit keeps the first n:
     --query true --order \"requests_30d asc\" --limit 5 moves the 5 least used first.
@@ -37,7 +39,7 @@ ordo rollout settings
 ordo rollout set <setting> <value> --reason \"...\" | ordo rollout set <setting> --clear --reason \"...\"
     change one: rollout.strategy, rollout.batch_interval, rollout.window,
     rollout.failure_threshold, rollout.deployment_space, rollout.canary_count,
-    rollout.canary_wait, rollout.health_error_rate, rollout.alert_channel,
+    rollout.canary_wait, rollout.health_error_rate, rollout.health_min_calls, rollout.alert_channel,
     rollout.share_partners, rollout.group, rollout.query, rollout.order, rollout.limit.
 Every subcommand takes --host <h> (or ORDO_HOST), and --token or a signed-in session.";
 
@@ -53,6 +55,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--canary-count",
         "--canary-wait",
         "--health-error-rate",
+        "--health-min-calls",
         "--alert-channel",
         "--share-partners",
         "--group",
@@ -103,6 +106,10 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 Ok(n) => n,
                 Err(o) => return o,
             };
+            let min_calls = match int("--health-min-calls") {
+                Ok(n) => n,
+                Err(o) => return o,
+            };
             (
                 ordo_host::rollouts::START,
                 serde_json::json!({
@@ -116,6 +123,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                     "canaryCount": canary_count,
                     "canaryWait": flags.named_value("--canary-wait"),
                     "healthErrorRate": flags.named_value("--health-error-rate"),
+                    "healthMinCalls": min_calls,
                     "alertChannel": flags.named_value("--alert-channel"),
                     "sharePartners": flags.has("--share-partners").then_some(true),
                     "group": flags.named_value("--group"),
@@ -284,15 +292,25 @@ fn settings(r: &serde_json::Value) -> String {
          rollout.canary_count       {}\n\
          rollout.canary_wait        {}\n\
          rollout.health_error_rate  {}\n\
+         rollout.health_min_calls   {}\n\
          rollout.alert_channel      {}\n\
          rollout.share_partners     {}\n\
          rollout.group              {}\n\
          rollout.query              {}\n\
          rollout.order              {}\n\
          rollout.limit              {}\n",
-        r["strategy"]
-            .as_str()
-            .unwrap_or("unset: `ordo apply` moves every tenant at once"),
+        match r["strategy"].as_str() {
+            Some(s) => s.to_string(),
+            None => format!(
+                "unset: {} here ({})",
+                r["strategyDefault"].as_str().unwrap_or("rolling"),
+                if r["strategyDefault"].as_str() == Some("all") {
+                    "this deployment is dev, so `ordo apply` moves every tenant at once"
+                } else {
+                    "`ordo apply` starts a rolling rollout; dev moves every tenant at once"
+                }
+            ),
+        },
         ordo_host::windows::format_length(r["batchInterval"].as_i64().unwrap_or(0)),
         ordo_host::windows::format_length(r["window"].as_i64().unwrap_or(0)),
         r["failureThreshold"].as_i64().unwrap_or(0),
@@ -300,6 +318,7 @@ fn settings(r: &serde_json::Value) -> String {
         r["canaryCount"].as_i64().unwrap_or(0),
         ordo_host::windows::format_length(r["canaryWait"].as_i64().unwrap_or(0)),
         r["healthErrorRate"].as_str().unwrap_or("?"),
+        r["healthMinCalls"].as_i64().unwrap_or(0),
         r["alertChannel"].as_str().unwrap_or("stream"),
         if r["sharePartners"].as_bool() == Some(true) {
             "on"
@@ -350,11 +369,12 @@ pub(crate) fn render(row: &serde_json::Value) -> String {
     match row["gate"].as_str() {
         Some("pending") => out.push_str(&format!(
             "gate       the rest wait until the first stage has been healthy for {} \
-             ({} of {} calls failed on the server; the limit is {})\n",
+             ({} of {} calls failed on the server; the limit is {}; it needs {} calls)\n",
             ordo_host::windows::format_length(row["canaryWait"].as_i64().unwrap_or(0)),
             row["health"]["faults"].as_u64().unwrap_or(0),
             row["health"]["calls"].as_u64().unwrap_or(0),
             row["healthErrorRate"].as_str().unwrap_or("?"),
+            row["healthMinCalls"].as_i64().unwrap_or(0),
         )),
         Some("passed") => out.push_str("gate       the first stage was healthy; the rest move\n"),
         _ => {}

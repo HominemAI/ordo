@@ -230,7 +230,8 @@ async fn a_rolling_rollout_moves_a_batch_per_interval_and_the_deployment_first()
     }
     apply(&pool, V1).await;
     let r = Rollouts::on(&pool);
-    // Unset, an apply moves every tenant at once, as before rollouts.
+    // Unset here, outside dev, an apply rolls out `rolling` (ruled
+    // 2026-11-25; `rollout_defaults.rs`). It is set by hand below.
     assert_eq!(r.settings().await.unwrap().strategy, None);
     r.set_setting("rollout.strategy", Some("rolling"), OWNER, "batches", NOW)
         .await

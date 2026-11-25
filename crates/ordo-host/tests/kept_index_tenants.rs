@@ -129,7 +129,7 @@ impl World {
                 .expect("active");
         }
         let p1 = Program::compile(&v1()).expect("1.0.0");
-        apply_op::run_program(
+        run_all_at_once(
             &control,
             &SinglePool::new(control.clone()),
             &p1,
@@ -479,11 +479,11 @@ async fn a_rollback_across_b10_moves_the_tenant_and_finds_every_row() {
 }
 
 /// **A rollout moves the tenant across B10, is aborted, and `ordo
-/// rollback` leaves it** (§3.7: 1.0.0 is still active, so no tenant
-/// moves). `ordo versions pin` takes it back to the active 1.0.0, which the
-/// catch-up records on its database. A rollout takes it forward again: the
-/// stored step finds the index it would compute kept whole, and does not
-/// compute it again.
+/// rollback` moves it back**: the rollout pinned it with no soak, so the
+/// rollback to the active 1.0.0 takes it back (ruled 2026-11-25), and the
+/// catch-up records that on its database. A rollout takes it forward
+/// again: the stored step finds the index it would compute kept whole, and
+/// does not compute it again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rollout_aborted_then_a_pin_back_and_a_rollout_forward_find_every_row() {
     let _serial = SERIAL.lock().await;
@@ -507,11 +507,15 @@ async fn a_rollout_aborted_then_a_pin_back_and_a_rollout_forward_find_every_row(
         json!({ "reason": "a regression in 1.1.0" }),
     )
     .await;
-    w.activate("1.0.0").await;
-    assert_eq!(w.pinned().await, "1.1.0", "a rollback leaves a moved seal");
     assert_eq!(w.found("mixed-a").await, ("1.1.0".into(), vec!["a".into()]));
-
-    w.pin_door("1.0.0").await;
+    w.activate("1.0.0").await;
+    assert_eq!(
+        w.pinned().await,
+        "1.0.0",
+        "a rollback moves back the aborted rollout's own pin"
+    );
+    w.take_pin().await;
+    w.sweep().await;
     w.finds_every_row_back_then_forward(async || w.rollout("1.1.0").await)
         .await;
 }
@@ -809,4 +813,30 @@ async fn a_tenant_on_the_deployments_database_serves_between_the_run_and_the_act
     }
     w.write_in("zed", "d", "After-D").await;
     assert_eq!(w.found_in("zed", "AFTER-d").await.1, ["d"]);
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

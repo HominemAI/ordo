@@ -75,6 +75,7 @@ async fn harness(stem: &str) -> H {
     .await
     .expect("a pool");
     tenants::ensure_table(&pool).await.unwrap();
+    all_at_once(&pool).await;
     for source in [PROGRAM.to_string(), v2()] {
         apply_op::run(
             &pool,
@@ -375,4 +376,20 @@ async fn an_import_into_a_database_not_of_the_bundles_shape_is_refused_by_name()
     assert!(e.contains("Nothing was written"), "{e}");
     assert_eq!(h.pin(&new).await, "0.2.0", "no pin moved");
     assert!(h.titles(&new).await.is_empty());
+}
+
+/// `rollout.strategy` `all` on `pool`. With it unset, a deployment that is
+/// not dev rolls an apply out a batch at a time (ruled 2026-11-25); these
+/// tests apply and expect every tenant on the new version at once.
+async fn all_at_once(pool: &ordo_exec::Pool) {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 }

@@ -27,7 +27,6 @@ use ordo_api::{router, ApiState, MemoryBus, MemoryReplayCache, PageKey};
 use ordo_conformance::{Fixture, Pg, FIXTURE, SEED};
 use ordo_exec::route::SinglePool;
 use ordo_exec::{Pool, PoolConfig};
-use ordo_host::apply_op;
 use ordo_host::deploy::{self, Deployment, PinMap, Swapped};
 use ordo_host::schema_apply::Program;
 use ordo_host::spaces::Spaces;
@@ -685,7 +684,7 @@ async fn registry_db(stem: &str) -> (Pool, PoolConfig) {
 
 async fn apply(pool: &Pool, source: &str) {
     let program = Program::compile(source).expect("compiles");
-    apply_op::run_program(
+    run_all_at_once(
         pool,
         &SinglePool::new(pool.clone()),
         &program,
@@ -1127,4 +1126,30 @@ async fn the_residency_settings_refuse_a_bad_value_and_the_node_takes_a_good_one
     assert_eq!(live.view_count(), 4, "versions.memory_budget 1MB keeps 4");
     assert_eq!(d.guards().max_loads, 3);
     assert_eq!(d.guards().memory_budget, 1024 * 1024);
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

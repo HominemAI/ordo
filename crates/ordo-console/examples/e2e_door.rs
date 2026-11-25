@@ -595,6 +595,21 @@ async fn main() {
             .await
             .expect("e2e door: a tenant active");
     }
+    // With `rollout.strategy` unset, a deployment that is not dev rolls an
+    // apply out a batch at a time (owner, 2026-11-25). The Deploys screen's
+    // test applies a version and expects every node on it at once, so the
+    // strategy is `all`, as `ordo rollout set rollout.strategy all` sets it.
+    // The Rollouts screen's test starts its rollouts by name.
+    rollouts::Rollouts::on(&app)
+        .set_setting(
+            rollouts::STRATEGY_SETTING,
+            Some("all"),
+            "e2e",
+            "the Deploys test applies every tenant at once",
+            now(),
+        )
+        .await
+        .expect("e2e door: rollout.strategy all");
     // The leading worker: one node, a tick a second.
     {
         let deploys = deploys.clone();

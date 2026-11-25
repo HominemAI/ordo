@@ -3031,6 +3031,40 @@ impl Executor {
                         });
                     }
                 }
+                // **An entity rename's dual writes**: every row this
+                // version wrote to a renamed entity is copied whole into
+                // the other name's table, and every row it deleted is
+                // deleted there, in this transaction. Read from `$renames`
+                // whether or not the tenant is in a move: both tables stay
+                // current until the rename lands.
+                let mirrors = overlay::entity_mirrors(&self.schema, &renames);
+                if let (false, Some(group)) = (mirrors.is_empty(), scratch.pending()) {
+                    let (deleted, written): (Vec<_>, Vec<_>) = group
+                        .commands
+                        .iter()
+                        .partition(|c| c.kind == ordo_commandlog::CommandKind::Delete);
+                    let pairs = |cs: Vec<&ordo_commandlog::Command>| -> Vec<(String, String)> {
+                        cs.into_iter()
+                            .map(|c| (c.entity.clone(), c.row_id.clone()))
+                            .collect()
+                    };
+                    if let Err(e) = overlay::apply_mirrors(
+                        &tx,
+                        &self.space.0,
+                        &mirrors,
+                        &pairs(written),
+                        &pairs(deleted),
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
+                            overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
                 // **The seal overlay** (increment 13): a field this version
                 // writes as plaintext while a stored step seals it, or as
                 // sealed while one indexes it, gets the column the worker

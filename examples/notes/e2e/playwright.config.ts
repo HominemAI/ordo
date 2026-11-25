@@ -189,14 +189,25 @@ export default defineConfig({
       dependencies: ['moves'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A `--fill` backfill on one tenant under live writes (plan-versions.md
+    // increment 10b): the person types while the fill runs, and every row
+    // ends filled. It stores 0.3.8, above `rollout-moves`' 0.3.7 and below
+    // `branch`'s 0.5.x, so it runs between them. Locally,
+    // `--project=fill --no-deps`.
+    {
+      name: 'fill',
+      testMatch: /evolve\/fill\.spec\.ts/,
+      dependencies: ['rollout-moves'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Dev branches as tenants on their own version (plan-versions.md
     // increment 5): 2 branches served side by side while the stack serves
-    // its own. It applies programs, so it runs after `rollout-moves`.
+    // its own. It applies programs, so it runs after `fill`.
     // Locally, `--project=branch --no-deps`.
     {
       name: 'branch',
       testMatch: /branch\/.*\.spec\.ts/,
-      dependencies: ['rollout-moves'],
+      dependencies: ['fill'],
       use: { ...devices['Desktop Chrome'] },
     },
     // Tenant builds (plan-versions.md increment 16): a beta tenant serves the

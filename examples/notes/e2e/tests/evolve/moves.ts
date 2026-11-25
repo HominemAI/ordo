@@ -43,6 +43,40 @@ export function renamedTitle(version: string, sealed: boolean, refused?: string)
   return dir;
 }
 
+/**
+ * The program a `--fill` step goes to (plan-versions.md increment 10b):
+ * notes v3 at `version`, as `seal` and `rehearsal` write it when `sealed`,
+ * always off the reader line, with `excerpt`, a new required field with no
+ * default. The step fills it with `--fill notes.excerpt=title`. Its ops set
+ * `excerpt` with the title and answer `title` from `excerpt`, so once a
+ * tenant serves it the v2 page shows each note's title only if its row was
+ * filled.
+ */
+export function filledExcerpt(version: string, sealed: boolean): string {
+  const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
+  const swaps: [string, string][] = [
+    ['domain notes @ 0.3.0', `domain notes @ ${version}`],
+    ['reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess'],
+    ['  title: text\n', '  title: text\n  excerpt: text\n'],
+    ['set notes { title: $title,', 'set notes { title: $title, excerpt: $title,'],
+    [
+      'set notes { id: $id, rev: $rev, title: $title',
+      'set notes { id: $id, rev: $rev, title: $title, excerpt: $title',
+    ],
+    ['[id, rev, title,', '[id, rev, title: excerpt,'],
+  ];
+  if (sealed) swaps.push(['  body:  text = ""\n', '  body:  text sealed\n']);
+  let source = v3;
+  for (const [from, to] of swaps) {
+    expect(source, `notes v3 still holds \`${from}\``).toContain(from);
+    source = source.split(from).join(to);
+  }
+  const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
+  writeFileSync(join(dir, 'notes.ordo'), source);
+  cpSync(join(stack().programV3, 'fn'), join(dir, 'fn'), { recursive: true });
+  return dir;
+}
+
 export async function openV2(page: Page): Promise<void> {
   await page.goto(stack().pageV2);
   const notes = page.getByLabel('New note', { exact: true });

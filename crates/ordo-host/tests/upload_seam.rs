@@ -191,6 +191,13 @@ fn only_the_write_protocol_updates_entity_rows() {
              rolls the whole write back",
         ),
         (
+            "ordo-exec/src/pick.rs",
+            "a move through a link that is not unique (plan-versions.md increment 15e): the \
+             dual write sets the moved columns of the rows the write's group touched, inside \
+             the write protocol's own transaction, before the chain append, the same as the \
+             move overlay; the backfill worker runs the same statement under its audit record",
+        ),
+        (
             "ordo-exec/src/reseal.rs",
             "the re-seal pass (K1): it rewrites a sealed column's envelope to the same value \
              under a new epoch key, and moves a blob column from an old handle to a new \

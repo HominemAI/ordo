@@ -837,6 +837,31 @@ pub async fn render_stored(
                              space have equal indexes, which is what makes `==` work"
                         );
                     }
+                    // B10: the index computed again, and what a rollback meets.
+                    if bf.code == "B10" {
+                        j["index"] = json!(format!(
+                            "every row's sealed value is opened under its space's key, one \
+                             lease per space per chunk, and its blind index computed again \
+                             under the new `normalize` into `{}`; once every row's index \
+                             verifies, it replaces the old one. The old index is kept as \
+                             `{}$bidx$prev` and written by every write until `ordo evolve \
+                             --prune` removes it, so a rollback to the version before trades \
+                             it back and `==` there finds every row",
+                            bf.column, bf.field
+                        ));
+                    }
+                    let unique = y
+                        .schema
+                        .native(&bf.entity)
+                        .and_then(|e| e.field(&bf.field))
+                        .is_some_and(|f| f.unique && !f.implicit);
+                    if bf.indexing_from.is_some() && unique {
+                        j["unique"] = json!(
+                            "the field is `unique`: two rows of one space with one value refuse \
+                             the end, naming the rows, and the constraint lands at the end over \
+                             the indexes computed"
+                        );
+                    }
                     j["oldValues"] = json!(match bf.audit {
                         ordo_commandlog::BackfillAudit::Summarised =>
                             "summarised: the rows' old values are not in the command log; \
@@ -1775,6 +1800,12 @@ pub(crate) async fn expand_step(
         why,
         transient,
     };
+    // A blind index this database is in the middle of computing (B8,
+    // B10): run again after the expand, the triage no longer sees it
+    // arrive, and a `unique` over it still waits for its end.
+    options.indexing_live = indexing_in(target)
+        .await
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     let mut p = sa::plan_with(target, &y, &options, Some(&x.schema))
         .await
         .map_err(|e| run_err("internal", e, true))?;
@@ -1884,6 +1915,25 @@ pub(crate) async fn expand_step(
         y,
         receipt: again.receipt,
     }))
+}
+
+/// The blind-index backfills `pool` is in the middle of, from its
+/// `$seals` (kinds `index` and `reindex`). None when it has no `$seals`.
+async fn indexing_in(pool: &Pool) -> Result<BTreeSet<(String, String)>, PoolError> {
+    match pool
+        .rows(
+            "SELECT \"entity\", \"field\" FROM \"$seals\" \
+             WHERE \"kind\" IN ('index', 'reindex')",
+        )
+        .await
+    {
+        Ok(rows) => Ok(rows
+            .into_iter()
+            .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?)))
+            .collect()),
+        Err(e) if e.is_missing_table() => Ok(BTreeSet::new()),
+        Err(e) => Err(e),
+    }
 }
 
 /// What a step's expand left to do (`expand_step`): the backfills, what
@@ -2060,6 +2110,58 @@ pub async fn run_step_with(
         });
         reports.push(report);
     }
+    // **`sealed unique` by backfill** (C1 over blind indexes, §7.3): equal
+    // values in one space have equal indexes, so the duplicates are read
+    // over the indexes just verified, and named, before the end. The end
+    // asks again under its lock, for a write between this read and it.
+    for bf in backfills.iter().filter(|b| b.indexing_from.is_some()) {
+        let unique = y
+            .schema
+            .native(&bf.entity)
+            .and_then(|e| e.field(&bf.field))
+            .is_some_and(|f| f.unique && !f.implicit);
+        if !unique {
+            continue;
+        }
+        let found = target
+            .rows(&format!(
+                "SELECT \"$space\", string_agg(\"id\"::text, ', ' ORDER BY \"id\"), count(*) \
+                 FROM {t} GROUP BY \"$space\", {c} HAVING count(*) > 1 ORDER BY 1, 2 LIMIT 5",
+                t = ordo_schema::ddl::q(&bf.entity),
+                c = ordo_schema::ddl::q(&bf.column),
+            ))
+            .await
+            .map_err(|e| run_err("internal", e.to_string(), true))?;
+        if !found.is_empty() {
+            let lines: Vec<String> = found
+                .iter()
+                .map(|r| {
+                    format!(
+                        "space `{}`: rows {}",
+                        r.first().cloned().flatten().unwrap_or_default(),
+                        r.get(1).cloned().flatten().unwrap_or_default()
+                    )
+                })
+                .collect();
+            return Err(run_err(
+                "sealed_unique_duplicates",
+                format!(
+                    "`{}.{}` is `unique`, and rows of one space hold the same value{}: {}. \
+                     Change or remove all but one of each, then run the step again; the \
+                     indexes stay computed, and every write keeps them current",
+                    bf.entity,
+                    bf.field,
+                    if bf.code == "B10" {
+                        " under its new `normalize`"
+                    } else {
+                        ""
+                    },
+                    lines.join("; ")
+                ),
+                false,
+            ));
+        }
+    }
     let mut after = after;
     let sealing = backfills
         .iter()
@@ -2090,13 +2192,20 @@ pub async fn run_step_with(
     }
     // `seal.keep_plaintext`: the kept plaintext column is an orphan, for
     // erasure, export and pruning (increment 14's table).
+    // B10's old blind index too: kept and written until it is pruned, so a
+    // rollback in the meantime reads a whole index.
     let kept: Vec<ordo_exec::orphans::Left> = backfills
         .iter()
         .filter_map(|b| {
+            let column = match (&b.kept_plaintext, b.code) {
+                (Some(k), _) => k.clone(),
+                (None, "B10") => format!("{}$bidx$prev", b.field),
+                _ => return None,
+            };
             Some(ordo_exec::orphans::Left {
                 entity: b.entity.clone(),
-                field: Some(b.kept_plaintext.clone()?),
-                columns: vec![b.kept_plaintext.clone()?],
+                field: Some(column.clone()),
+                columns: vec![column],
                 sealed: false,
             })
         })
@@ -2307,6 +2416,9 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         }
         if let Some(n) = b["index"].as_str() {
             out.push(format!("    index: {n}"));
+        }
+        if let Some(n) = b["unique"].as_str() {
+            out.push(format!("    unique: {n}"));
         }
     }
     for s in receipt["after"].as_array().into_iter().flatten() {
@@ -2658,16 +2770,50 @@ pub async fn execute(
                 .to_exec_error("the plan was stored and not run"));
             }
             if run {
-                let ran = run_step_with(
-                    pool,
-                    pool,
-                    "default",
-                    &done.plan,
-                    caller,
-                    &ops.step_context().await?,
-                )
-                .await
-                .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
+                let mut ctx = ops.step_context().await?;
+                // **A seal on the deployment's database** (increment 13):
+                // its end drops the plaintext (or replaces the index) the
+                // version before writes. The deployment's own space is
+                // served under a pin from here, so its end can fence the
+                // version before, and the own space then moves to the
+                // version the database holds, first, as a rollout moves it
+                // (Q4). Its writes are accepted and sealed by that version.
+                let sealing = sealing_step(&done.plan);
+                if sealing {
+                    let own = Versions::on(pool)
+                        .own_pin_made(&ops.home, caller, crate::runtime::now_secs())
+                        .await
+                        .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
+                    if let Some((version, epoch)) = own {
+                        take_own(ops, &version, epoch, false).await;
+                        ctx.fence = Some((ops.home.clone(), epoch + 1));
+                    }
+                }
+                let ran = run_step_with(pool, pool, "default", &done.plan, caller, &ctx)
+                    .await
+                    .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
+                let own_moved = if sealing && !matches!(ran, StepRun::Backfilling { .. }) {
+                    let at = crate::runtime::now_secs();
+                    Versions::on(pool)
+                        .pin_own_for_step(&ops.home, &done.plan.to, caller, at)
+                        .await
+                        .map_err(|e| {
+                            e.to_exec_error(
+                                "the step ran and the deployment's own space was not moved",
+                            )
+                        })?;
+                    if let Some((version, epoch)) = Versions::on(pool)
+                        .own_pin()
+                        .await
+                        .map_err(|e| e.to_exec_error("the own space's pin could not be read"))?
+                        .map(|(_, v, e)| (v, e))
+                    {
+                        take_own(ops, &version, epoch, true).await;
+                    }
+                    true
+                } else {
+                    false
+                };
                 drop(lock);
                 ops.record(
                     caller,
@@ -2683,6 +2829,11 @@ pub async fn execute(
                     "statements": ran.statements() as i64,
                     "current": ran == StepRun::Current,
                     "backfills": ran.backfills(),
+                    "ownSpace": if own_moved {
+                        json!({ "space": ops.home, "version": done.plan.to })
+                    } else {
+                        Value::Null
+                    },
                 });
             }
             Ok(row)
@@ -2987,5 +3138,23 @@ async fn take_lock(pool: &Pool) -> Result<crate::apply_op::ApplyLock, EvolveRefu
         Ok(Some(l)) => Ok(l),
         Ok(None) => Err(EvolveRefusal::Busy),
         Err(e) => Err(EvolveRefusal::Store(e)),
+    }
+}
+
+/// Take the deployment's own space's pin on this node now, rather than on
+/// the pin stream's next read (other nodes take it from the nudge). With
+/// `wait`, wait up to 60 seconds for this node to serve the version it
+/// names, so the command answers once the own space is served again.
+async fn take_own(ops: &crate::apply_op::ApplyOps, version: &str, epoch: i64, wait: bool) {
+    let Some(s) = ops.spaces.get() else {
+        return;
+    };
+    s.deployment().note_pin(&ops.home, version, epoch, 0);
+    if !wait {
+        return;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while s.deployment().for_space(&ops.home).is_err() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

@@ -628,6 +628,12 @@ pub struct Choices {
     /// `<column>$plaintext` and orphaned, instead of dropping it. Off by
     /// default; stated by name with `--keep-plaintext <entity>.<field>`.
     pub keep_plaintext: std::collections::BTreeSet<(String, String)>,
+    /// The blind-index backfills (B8, B10) the database being planned is
+    /// in the middle of, `(entity, field)`, read from its `$seals` by a
+    /// stored step's run. A run again after the expand no longer sees the
+    /// index column arrive, and a `unique` over it still lands at the
+    /// backfill's end. Never stated by a person; not in the options.
+    pub indexing_live: std::collections::BTreeSet<(String, String)>,
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -1009,6 +1015,15 @@ pub async fn assess_with(
     // Per-entity numbers are read once each: a schema with nine changes to
     // one entity must not count its rows nine times.
     let mut extents: BTreeMap<String, (migrate::Extent, Option<f64>)> = BTreeMap::new();
+    // The sealed fields whose indexes a stored step computes (B8, B10): a
+    // `unique` they gain is asked over those indexes at the backfill's end.
+    let indexing: BTreeSet<(String, String)> = if choices.stored {
+        let mut s = choices.indexing_live.clone();
+        s.extend(changes.iter().filter_map(|c| indexed_by(schema, live, c)));
+        s
+    } else {
+        BTreeSet::new()
+    };
     for c in changes {
         let mut a = Assessed {
             refused: Vec::new(),
@@ -1091,6 +1106,31 @@ pub async fn assess_with(
             });
             out.push(a);
             continue;
+        }
+        if let Change::AddUnique { entity, field, .. } = &a.change {
+            if indexing.contains(&(entity.clone(), field.clone())) {
+                a.probe = Some(Ok(Probe::Clean(format!(
+                    "duplicates over `{entity}`.`{field}`: found over the blind indexes the \
+                     backfill computes, before its end; a space holding two rows with one \
+                     value refuses the end, naming them"
+                ))));
+                out.push(a);
+                continue;
+            }
+        }
+        if let Change::Normalize { entity, field, .. } = &a.change {
+            let reindexed = schema
+                .native(entity)
+                .is_some_and(|e| reindexes(e, live, field));
+            if reindexed && !choices.stored {
+                a.refused.push(
+                    "reindex_needs_stored_plan — every row's blind index is computed again \
+                     under the new normalization by the backfill worker; store the version \
+                     with `ordo apply --no-activate`, then run the step with `ordo evolve \
+                     --from <version> --to <version> --run`"
+                        .into(),
+                );
+            }
         }
         let probed = probe(pool, schema, live, &a.change).await;
         match &probed {
@@ -1403,11 +1443,18 @@ pub async fn probe(
             to: Some(norm),
             ..
         } => {
-            let unique = schema
-                .native(entity)
-                .and_then(|e| e.field(field))
-                .is_some_and(|f| f.unique);
+            let declared = schema.native(entity).and_then(|e| e.field(field));
+            let unique = declared.is_some_and(|f| f.unique);
             let what = format!("collisions under `normalize({norm})` on `{entity}`.`{field}`");
+            // A sealed value is ciphertext, which SQL cannot fold. Its
+            // collisions are equal blind indexes, found by the backfill
+            // that computes them, at its end (B10).
+            if declared.is_some_and(|f| f.sealed) {
+                return Ok(Probe::Clean(format!(
+                    "{what}: the values are sealed, so collisions are found over the blind \
+                     indexes the backfill computes, before its end"
+                )));
+            }
             if !unique {
                 return Ok(Probe::Clean(format!(
                     "{what}: the column carries no unique, so a merge loses no row"
@@ -2177,6 +2224,7 @@ impl BackfillStep {
             "B5" => "B5",
             "B7" => "B7",
             "B8" => "B8",
+            "B10" => "B10",
             _ => return None,
         };
         Some(BackfillStep {
@@ -2393,57 +2441,367 @@ fn index_step(
             ),
         ));
     }
-    if f.unique {
-        return Err(refuse(
-            "sealed_unique_backfill_not_built",
-            format!(
-                "`{}.{field}` becomes `sealed indexed unique`. Its duplicates can only be found \
-                 over the blind indexes the backfill computes, which is not built (§7.3, C1). \
-                 Add `indexed` in one version, then `unique` in a later one, which is not built \
-                 either",
-                e.name
-            ),
-        ));
-    }
     let table = ordo_schema::ddl::q(&e.name);
     let bidx = f.index_column();
     let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let record = vec![
-        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
-        format!("{};\n", ordo_exec::overlay::SEALS_DDL),
-        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
-        format!(
-            "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
-             \"version\") VALUES ({}, {}, 'index', {}, {}, {}) ON CONFLICT (\"entity\", \"field\", \
-             \"kind\") DO UPDATE SET \"source\" = EXCLUDED.\"source\", \"target\" = \
-             EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\";\n",
-            lit(&e.name),
-            lit(field),
-            lit(&f.column()),
-            lit(&bidx),
-            lit(version),
-        ),
-    ];
-    let end = format!(
+    let record = index_record(e, f, "index", &bidx, version);
+    // `sealed indexed unique` (C1 over blind indexes): its duplicates are
+    // found over the indexes the backfill computed, under the end's lock,
+    // and the constraint lands in the same transaction.
+    let mut end = format!(
         "{};\n\
          LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
          DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {b} IS NULL) THEN RAISE \
          EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
          path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n\
-         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n\
-         DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = 'index';\n",
+         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n",
         ordo_exec::overlay::RENAMES_DDL,
-        lit(&e.name),
-        lit(field),
         b = ordo_schema::ddl::q(&bidx),
         name = e.name,
     );
+    end.push_str(&sealed_unique_end(e, f, &bidx));
+    end.push_str(&format!(
+        "DELETE FROM \"$seals\" WHERE \"entity\" = {} AND \"field\" = {} AND \"kind\" = 'index';\n",
+        lit(&e.name),
+        lit(field),
+    ));
     Ok(SealStep {
         backfill: BackfillStep {
             code: c.code(),
             entity: e.name.clone(),
             field: field.to_string(),
             column: bidx,
+            column_ty: "bytea".into(),
+            mapping: FillMapping::BlindIndex,
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: Some(f.column()),
+        },
+        record,
+        after: vec![end],
+    })
+}
+
+/// The record of a blind-index backfill in `$seals` (`index`, B8, or
+/// `reindex`, B10), with the normalization its target is computed under,
+/// so a write by any version computes the same index the worker does.
+fn index_record(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    kind: &str,
+    target: &str,
+    version: &str,
+) -> Vec<String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        format!("{};\n", ordo_exec::overlay::SEALS_DDL),
+        // After the lock: the `ALTER` locks `$seals`, which a write reads
+        // under `"$renames"`. Taken first, a write holding `"$renames"`
+        // and reading `$seals` would deadlock with it.
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!("{};\n", ordo_exec::overlay::SEALS_NORMALIZE_DDL),
+        format!(
+            "INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+             \"version\", \"normalize\") VALUES ({}, {}, {}, {}, {}, {}, {}) ON CONFLICT \
+             (\"entity\", \"field\", \"kind\") DO UPDATE SET \"source\" = EXCLUDED.\"source\", \
+             \"target\" = EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\", \
+             \"normalize\" = EXCLUDED.\"normalize\";\n",
+            lit(&e.name),
+            lit(&f.name),
+            lit(kind),
+            lit(&f.column()),
+            lit(target),
+            lit(version),
+            lit(f.normalize.as_deref().unwrap_or("")),
+        ),
+    ]
+}
+
+/// The end of a blind index's backfill for a `sealed indexed unique` field
+/// (C1 over blind indexes, §7.3): two rows of one space with one index
+/// refuse the end by name, then the constraint lands, in the end's
+/// transaction under its lock. Nothing for a field that is not unique.
+/// The step's run names the rows first (`crate::evolve`); this is the
+/// guard for a write between that read and the lock.
+fn sealed_unique_end(e: &ordo_schema::Entity, f: &ordo_schema::Field, column: &str) -> String {
+    if !f.unique || f.implicit {
+        return String::new();
+    }
+    format!(
+        "DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {t} GROUP BY \"$space\", {c} HAVING count(*) > \
+         1) THEN RAISE EXCEPTION 'sealed_unique_duplicates: two rows of one space hold the same \
+         {name}.{field}; change one of each, then run the step again'; END IF; END $ordo$;\n{}",
+        ordo_schema::ddl::unique(e, f).unwrap_or_default(),
+        t = ordo_schema::ddl::q(&e.name),
+        c = ordo_schema::ddl::q(column),
+        name = e.name,
+        field = f.name,
+    )
+}
+
+/// Whether a `normalize` change on `field` has blind indexes to compute
+/// again (B10): the field is sealed and indexed, and the database holds
+/// its index, computed under the old normalization.
+fn reindexes(e: &ordo_schema::Entity, live: &LiveShape, field: &str) -> bool {
+    e.field(field).is_some_and(|f| {
+        f.sealed
+            && f.indexed
+            && live
+                .table(&e.name)
+                .is_some_and(|t| t.columns.contains_key(&f.index_column()))
+    })
+}
+
+/// The `(entity, field)`s whose blind indexes a stored step computes by
+/// backfill: a sealed field gaining `indexed` (B8), and one whose
+/// `normalize` changes (B10). Empty outside a stored plan.
+fn indexed_by_backfill(
+    schema: &Schema,
+    live: &LiveShape,
+    assessed: &[Assessed],
+    choices: &Choices,
+) -> BTreeSet<(String, String)> {
+    if !choices.stored {
+        return BTreeSet::new();
+    }
+    let mut out = choices.indexing_live.clone();
+    out.extend(
+        assessed
+            .iter()
+            .filter(|a| a.refused.is_empty())
+            .filter_map(|a| indexed_by(schema, live, &a.change)),
+    );
+    out
+}
+
+/// The `(entity, field)` whose blind indexes change `c` computes by
+/// backfill, if it does.
+fn indexed_by(schema: &Schema, live: &LiveShape, c: &Change) -> Option<(String, String)> {
+    match c {
+        Change::IndexSealedField { entity, field } => Some((entity.clone(), field.clone())),
+        Change::Normalize { entity, field, .. }
+            if schema
+                .native(entity)
+                .is_some_and(|e| reindexes(e, live, field)) =>
+        {
+            Some((entity.clone(), field.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The physical column a re-normalized blind index (B10) is computed into
+/// beside the one the version before reads, until it takes its name.
+pub fn reindex_column(field: &ordo_schema::Field) -> String {
+    format!("{}$next", field.index_column())
+}
+
+/// The physical column B10 keeps the old blind index in after its end,
+/// written by every write, until its orphan is pruned.
+pub fn kept_index_column(field: &ordo_schema::Field) -> String {
+    format!("{}$prev", field.index_column())
+}
+
+/// The statements that make `incoming` the field's blind index and keep
+/// the one it replaces as `outgoing`, open to nulls, under a lock the
+/// caller holds. The field's unique and indexes are made again over the
+/// new index: renamed, they would follow the old one. `incoming` and
+/// `outgoing` may be one name (a swap).
+fn swap_index_columns(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    incoming: &str,
+    outgoing: &str,
+) -> String {
+    let q = ordo_schema::ddl::q;
+    let table = q(&e.name);
+    let bidx = f.index_column();
+    let swap = format!("{bidx}$swap");
+    let keys: Vec<Vec<String>> = e
+        .all_indexes()
+        .into_iter()
+        .filter(|k| k.contains(&f.name))
+        .collect();
+    let mut out = format!(
+        "ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {};\n",
+        q(&ordo_schema::diff::unique_name(&e.name, &f.name))
+    );
+    for key in &keys {
+        out.push_str(&format!(
+            "DROP INDEX IF EXISTS {};\n",
+            q(&ordo_schema::diff::index_name(&e.name, key))
+        ));
+    }
+    out.push_str(&format!(
+        "ALTER TABLE {table} RENAME COLUMN {b} TO {s};\n\
+         ALTER TABLE {table} RENAME COLUMN {i} TO {b};\n\
+         ALTER TABLE {table} RENAME COLUMN {s} TO {o};\n\
+         ALTER TABLE {table} ALTER COLUMN {o} DROP NOT NULL;\n\
+         ALTER TABLE {table} ALTER COLUMN {b} SET NOT NULL;\n",
+        b = q(&bidx),
+        s = q(&swap),
+        i = q(incoming),
+        o = q(outgoing),
+    ));
+    out.push_str(&sealed_unique_end(e, f, &bidx));
+    for key in &keys {
+        if let Ok(Some(sql)) = ordo_schema::ddl::index(e, key, false) {
+            out.push_str(&sql);
+        }
+    }
+    out
+}
+
+/// **A rollback across B10 reads a whole index** (owner, 2026-11-24, PR
+/// 80). For every blind index B10 kept (`$seals` kind `kept`) whose
+/// normalization is the one `schema` declares, the kept index and the
+/// field's index trade places under the `"$renames"` lock, and the row
+/// records the normalization of the index now kept: `leaving`'s, the
+/// version that served before. Every write kept both current, so `==`
+/// under `schema` finds every row. Run before an activation's gate. The
+/// fields swapped, `entity.field`.
+pub async fn restore_kept_indexes(
+    pool: &Pool,
+    schema: &Schema,
+    leaving: Option<&Schema>,
+) -> Result<Vec<String>, String> {
+    let rows = match pool
+        .rows(
+            "SELECT s.\"entity\", s.\"field\", s.\"target\", coalesce(to_jsonb(s) ->> \
+             'normalize', '') FROM \"$seals\" s WHERE s.\"kind\" = 'kept'",
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_missing_table() => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let mut done = Vec::new();
+    for r in rows {
+        let (Some(entity), Some(field), Some(target), Some(norm)) = (
+            r.first().cloned().flatten(),
+            r.get(1).cloned().flatten(),
+            r.get(2).cloned().flatten(),
+            r.get(3).cloned().flatten(),
+        ) else {
+            continue;
+        };
+        let Some(e) = schema.native(&entity) else {
+            continue;
+        };
+        let Some(f) = e.field(&field).filter(|f| f.sealed && f.indexed) else {
+            continue;
+        };
+        if f.normalize.as_deref().unwrap_or("") != norm {
+            continue;
+        }
+        let there = pool
+            .rows(&format!(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = {} AND \
+                 column_name = {}",
+                lit(&entity),
+                lit(&target)
+            ))
+            .await
+            .map_err(|e| e.to_string())?;
+        if there.is_empty() {
+            continue; // pruned: the soak closed
+        }
+        let other = leaving
+            .and_then(|s| s.native(&entity))
+            .and_then(|e| e.field(&field))
+            .and_then(|f| f.normalize.clone())
+            .unwrap_or_default();
+        let sql = format!(
+            "{};\nLOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n{}\
+             UPDATE \"$seals\" SET \"normalize\" = {} WHERE \"entity\" = {} AND \"field\" = {} \
+             AND \"kind\" = 'kept';\n",
+            ordo_exec::overlay::RENAMES_DDL,
+            swap_index_columns(e, f, &target, &target),
+            lit(&other),
+            lit(&entity),
+            lit(&field),
+        );
+        let tx = pool.begin().await.map_err(|e| e.to_string())?;
+        if let Err(e) = tx.rows(&sql).await {
+            let _ = tx.rollback().await;
+            return Err(format!("the kept index of `{entity}.{field}`: {e}"));
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        done.push(format!("{entity}.{field}"));
+    }
+    Ok(done)
+}
+
+/// **B10: a sealed indexed field's `normalize` changes.** Every row's blind
+/// index is computed again under the new normalization into
+/// `<field>$bidx$next`, beside the index the version before reads and
+/// writes. Recorded in `$seals` as kind `reindex`, with the normalization,
+/// so every write fills it too. Once verified, the end, under the lock:
+/// a row left without one refuses it; under `unique`, two rows of one
+/// space with one index refuse it (C4's collisions, found over the indexes
+/// themselves since the values are sealed); then the old index is dropped,
+/// the new one takes its name, and the field's constraints and indexes
+/// are made again over it.
+fn reindex_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    field: &str,
+    version: &str,
+    from_normalize: Option<&str>,
+) -> Result<SealStep, Box<Refused>> {
+    let Some(f) = e.field(field) else {
+        return Err(Box::new(Refused {
+            change: c.clone(),
+            class: "mapping_invalid",
+            why: format!("`{}.{field}` is not declared", e.name),
+            run: None,
+        }));
+    };
+    let table = ordo_schema::ddl::q(&e.name);
+    let next = reindex_column(f);
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let record = index_record(e, f, "reindex", &next, version);
+    let prev = kept_index_column(f);
+    // The old index is kept, as `<field>$bidx$prev`, and written by every
+    // write under its own normalization (`$seals` kind `kept`), until its
+    // orphan is pruned: a rollback swaps it back
+    // ([`restore_kept_indexes`]) and reads a whole index.
+    let mut end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {n} IS NULL) THEN RAISE \
+         EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
+         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        n = ordo_schema::ddl::q(&next),
+        name = e.name,
+    );
+    end.push_str(&swap_index_columns(e, f, &next, &prev));
+    end.push_str(&format!(
+        "DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
+         'reindex';\n\
+         INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+         \"version\", \"normalize\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}) ON CONFLICT \
+         (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = EXCLUDED.\"target\", \
+         \"version\" = EXCLUDED.\"version\", \"normalize\" = EXCLUDED.\"normalize\";\n",
+        e = lit(&e.name),
+        fl = lit(field),
+        s = lit(&f.column()),
+        p = lit(&prev),
+        v = lit(version),
+        o = lit(from_normalize.unwrap_or("")),
+    ));
+    Ok(SealStep {
+        backfill: BackfillStep {
+            code: "B10",
+            entity: e.name.clone(),
+            field: field.to_string(),
+            column: next,
             column_ty: "bytea".into(),
             mapping: FillMapping::BlindIndex,
             sql: None,
@@ -2646,6 +3004,10 @@ pub fn triage_counted(
             _ => {}
         }
     }
+    // The sealed fields whose blind index a stored step computes (B8) or
+    // computes again (B10): a `unique` they gain lands at that backfill's
+    // end, over the indexes it computed (C1 over blind indexes).
+    let indexing = indexed_by_backfill(schema, live, assessed, choices);
     let mut steps = Vec::new();
     let mut refused = Vec::new();
     let mut backfills = Vec::new();
@@ -2774,6 +3136,9 @@ pub fn triage_counted(
                     ordo_schema::ddl::q(object)
                 )),
             }),
+            // Folded into the backfill's end that computes its indexes.
+            Change::AddUnique { field, .. }
+                if indexing.contains(&(e.name.clone(), field.clone())) => {}
             Change::AddUnique { field, column, .. } => {
                 let Some(f) = e.field(field) else {
                     return Err(format!("`{}.{field}` is not declared", e.name));
@@ -2990,6 +3355,52 @@ pub fn triage_counted(
                     }
                 }
             }
+            // B10 in a stored plan (increment 13): every row's blind index
+            // is computed again under the new normalization.
+            Change::Normalize { field, from, .. }
+                if choices.stored && reindexes(e, live, field) =>
+            {
+                match reindex_step(c, e, field, version, from.as_deref()) {
+                    Err(r) => refused.push(*r),
+                    Ok(SealStep {
+                        backfill: b,
+                        record,
+                        after: contract,
+                    }) => {
+                        steps.extend(record.into_iter().map(alter));
+                        steps.push(alter(format!(
+                            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} bytea;\n",
+                            ordo_schema::ddl::q(&e.name),
+                            ordo_schema::ddl::q(&b.column),
+                        )));
+                        after.extend(contract.into_iter().map(|sql| Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        }));
+                        backfills.push(b);
+                    }
+                }
+            }
+            // No blind index is stored under the old normalization (a field
+            // with none, or one a B8 in this step computes under the new):
+            // nothing to compute again.
+            Change::Normalize { field, .. } if !reindexes(e, live, field) => {}
+            Change::Normalize { entity, field, .. } => refused.push(Refused {
+                change: c.clone(),
+                class: "reindex_needs_stored_plan",
+                why: format!(
+                    "sealed `{entity}.{field}` changes its `normalize`. Every row's blind \
+                         index is computed again under it by the backfill worker, with a key \
+                         lease per space (plan-versions.md increment 13, B10). `ordo apply` does \
+                         not run that. Store the version with `ordo apply --no-activate`, then \
+                         run the step with `ordo evolve --from <version> --to <version> --run`"
+                ),
+                run: None,
+            }),
             Change::IndexSealedField { entity, field } => refused.push(Refused {
                 change: c.clone(),
                 class: "index_needs_stored_plan",

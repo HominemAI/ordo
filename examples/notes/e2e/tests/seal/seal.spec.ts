@@ -10,6 +10,9 @@
  * tenant's count and hash and that every sealed value opens to its
  * plaintext, then drops the plaintext column: `--run` on the deployment's
  * database, `--tenant` on each tenant's, which pins that tenant to 0.3.4.
+ * The run on the deployment's database moves the deployment's own space to
+ * 0.3.4 at the seal's end, since the version before can no longer write
+ * the field there; "active" stays on 0.3.3 until the activation.
  * Ada's seal stops at its budget after 1 note; with the page open she edits
  * a note's body and writes a new one while it runs, and each write lands
  * sealed beside its plaintext (`$seals`, increment 13 under live writes).
@@ -151,6 +154,12 @@ test('a field sealed on live data: the page reads it, and the table holds no pla
       const ran = dev.ordo(['evolve', '--from', '0.3.3', '--to', '0.3.4', '--run', ...door()]);
       expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
       expect(ran.out).toMatch(/^ran +/m);
+      // The seal's end dropped the plaintext the version before writes on
+      // the deployment's database, so the deployment's own space moved to
+      // 0.3.4 with it, first. "Active" waits for the activation.
+      expect(ran.out).toMatch(/^own space +`[^`]+` now serves 0\.3\.4/m);
+      expect(sql(stack().pg.db, `SELECT version FROM "$own_pin"`)).toBe('0.3.4');
+      expect(servingVersion()).toBe('0.3.3');
     });
 
     await test.step("each tenant's database runs the stored step: Ada's notes are sealed", () => {

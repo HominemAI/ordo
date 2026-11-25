@@ -2680,6 +2680,82 @@ impl<'a> Versions<'a> {
         Ok(moved)
     }
 
+    /// **The own space's pin, made when it has none** (increment 13): at
+    /// the active version, epoch 0, with a `$pins` row and the nudge, so
+    /// every node serves the own space under an epoch, and its writes check
+    /// the pin fence. A seal on the deployment's database fences them at
+    /// its end. `(version, epoch)`; `None` when no version is active.
+    pub async fn own_pin_made(
+        &self,
+        space: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<Option<(String, i64)>, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        if self.pool.rows(OWN_PIN_DDL).await.is_err() {
+            self.pool.rows(OWN_PIN_DDL).await?;
+        }
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        let made = tx
+            .rows(&format!(
+                "INSERT INTO \"$own_pin\" (\"space\", \"version\", \"epoch\") \
+                 SELECT {s}, a.\"version\", 0 FROM (SELECT \"version\" FROM \"$activations\" \
+                   ORDER BY \"seq\" DESC LIMIT 1) a \
+                 WHERE NOT EXISTS (SELECT 1 FROM \"$own_pin\") RETURNING \"version\"",
+                s = sql_lit(space),
+            ))
+            .await?;
+        if let Some(v) = made.first().and_then(|r| r.first().cloned().flatten()) {
+            tx.rows(&format!(
+                "INSERT INTO \"$pins\" (\"space\", \"from\", \"to\", \"epoch\", \"actor\", \
+                 \"cause\", \"at\") VALUES ({}, NULL, {}, 0, {}, {}, {at})",
+                sql_lit(space),
+                sql_lit(&v),
+                sql_lit(actor),
+                sql_lit(PinCause::Move.as_str()),
+            ))
+            .await?;
+            tx.notify(PINS_CHANNEL, "").await?;
+        }
+        let row = tx
+            .rows("SELECT \"version\", \"epoch\" FROM \"$own_pin\" LIMIT 1")
+            .await?;
+        tx.commit().await?;
+        Ok(row
+            .first()
+            .and_then(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?.parse().ok()?))))
+    }
+
+    /// **The own space moves to `version` with a seal's end on the
+    /// deployment's database** (increment 13): the version before can no
+    /// longer write the sealed field there, so the own space follows the
+    /// data, first, as a rollout moves it (Q4). "Active", sign-in and new
+    /// tenants stay until the activation. Cause `move`. `true` when it
+    /// moved.
+    pub async fn pin_own_for_step(
+        &self,
+        space: &str,
+        version: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<bool, VersionRefusal> {
+        ensure_revocations(self.pool).await?;
+        if self.pool.rows(OWN_PIN_DDL).await.is_err() {
+            self.pool.rows(OWN_PIN_DDL).await?;
+        }
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if let Some(mark) = mark_in(&tx, version).await? {
+            tx.rollback().await?;
+            return Err(self.revoked(mark, None).await);
+        }
+        let moved =
+            repin_own_in(&tx, version, actor, PinCause::Move, at, None, Some(space)).await?;
+        tx.commit().await?;
+        Ok(moved)
+    }
+
     /// The own space's pin, `(space, version, epoch)`, when a rollout gave
     /// it one.
     pub async fn own_pin(&self) -> Result<Option<(String, String, i64)>, VersionRefusal> {

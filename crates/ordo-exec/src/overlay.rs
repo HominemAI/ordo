@@ -116,6 +116,20 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
 /// - `kind` `index`: `target` (`<field>$bidx`) holds the blind index of the
 ///   value sealed in `source`. Written by a version that declares the field
 ///   sealed and not indexed.
+/// - `kind` `reindex` (B10): `target` (`<field>$bidx$next`) holds the blind
+///   index of the value sealed in `source` under the coming normalization.
+///   Written by every version that declares the field sealed: the one
+///   before computes its own index under the normalization it declares.
+///
+/// `normalize` is the normalization an `index` or `reindex` target is
+/// computed under (`lower`, or empty for none). Null on a row recorded
+/// before the column existed: the writer's own declaration is used then.
+/// [`SEALS_NORMALIZE_DDL`] adds it to a table made before it.
+///
+/// - `kind` `kept` (B10 after its end): `target` (`<field>$bidx$prev`)
+///   holds the index under the normalization the row records, the one the
+///   step replaced. Written by every sealed writer until the column is
+///   pruned; a rollback trades it back in.
 ///
 /// The row leaves in the transaction that lands the step's end (the
 /// plaintext dropped, or the index made `NOT NULL`), under the same
@@ -128,8 +142,13 @@ CREATE TABLE IF NOT EXISTS \"$seals\" ( \
   \"source\" text NOT NULL, \
   \"target\" text NOT NULL, \
   \"version\" text NOT NULL, \
+  \"normalize\" text NULL, \
   PRIMARY KEY (\"entity\", \"field\", \"kind\") \
 )";
+
+/// The `normalize` column of [`SEALS_DDL`], on a table made before it.
+pub const SEALS_NORMALIZE_DDL: &str =
+    "ALTER TABLE \"$seals\" ADD COLUMN IF NOT EXISTS \"normalize\" text NULL";
 
 /// What a sealed backfill in progress fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +157,12 @@ pub enum SealKind {
     Seal,
     /// B8: the sealed value's blind index.
     Index,
+    /// B10: the sealed value's blind index under a new normalization.
+    Reindex,
+    /// B10, after its end: the old blind index, kept under the old
+    /// normalization until its orphan is pruned, so a rollback reads a
+    /// whole index.
+    Kept,
 }
 
 impl SealKind {
@@ -145,6 +170,8 @@ impl SealKind {
         match self {
             SealKind::Seal => "seal",
             SealKind::Index => "index",
+            SealKind::Reindex => "reindex",
+            SealKind::Kept => "kept",
         }
     }
 
@@ -152,6 +179,8 @@ impl SealKind {
         match s {
             "seal" => Some(SealKind::Seal),
             "index" => Some(SealKind::Index),
+            "reindex" => Some(SealKind::Reindex),
+            "kept" => Some(SealKind::Kept),
             _ => None,
         }
     }
@@ -167,15 +196,20 @@ pub struct Seal {
     pub source: String,
     /// The column filled.
     pub target: String,
+    /// The normalization an index is computed under: `Some("")` for none,
+    /// `None` when the row does not say (recorded before the column).
+    pub normalize: Option<String>,
 }
 
 /// Read `$seals`. Run after [`renames_in`], whose lock fences this table
-/// too.
+/// too. `normalize` is read through the row's JSON, so a table made before
+/// that column reads as not saying.
 pub async fn seals_in(tx: &TxConn) -> Result<Vec<Seal>, PoolError> {
     let rows = tx
         .rows(
-            "SELECT \"entity\", \"field\", \"kind\", \"source\", \"target\" FROM \"$seals\" \
-             ORDER BY \"entity\", \"field\", \"kind\"",
+            "SELECT s.\"entity\", s.\"field\", s.\"kind\", s.\"source\", s.\"target\", \
+             to_jsonb(s) ->> 'normalize' FROM \"$seals\" s \
+             ORDER BY s.\"entity\", s.\"field\", s.\"kind\"",
         )
         .await?;
     Ok(rows
@@ -188,6 +222,7 @@ pub async fn seals_in(tx: &TxConn) -> Result<Vec<Seal>, PoolError> {
                 kind: SealKind::parse(&it.next()??)?,
                 source: it.next()??,
                 target: it.next()??,
+                normalize: it.next().flatten(),
             })
         })
         .collect())
@@ -228,8 +263,11 @@ impl std::fmt::Display for SealOverlayError {
 
 /// The seals in progress a version writes into: a `seal` while it declares
 /// the field plaintext, an `index` while it declares it sealed and not
-/// indexed. A version that already declares the end shape writes nothing
-/// more: the step's end lands before it serves.
+/// indexed, a `reindex` while it declares it sealed. A version that already
+/// declares the end shape of a `seal` or an `index` writes nothing more:
+/// the step's end lands before it serves. `normalize` is no column, so no
+/// version's shape shows a `reindex` done: every sealed writer fills its
+/// target, under the recorded normalization.
 pub fn seals_for<'a>(schema: &ordo_schema::Schema, seals: &'a [Seal]) -> Vec<&'a Seal> {
     seals
         .iter()
@@ -240,6 +278,7 @@ pub fn seals_for<'a>(schema: &ordo_schema::Schema, seals: &'a [Seal]) -> Vec<&'a
             match s.kind {
                 SealKind::Seal => !f.sealed,
                 SealKind::Index => f.sealed && !f.indexed,
+                SealKind::Reindex | SealKind::Kept => f.sealed,
             }
         })
         .collect()
@@ -275,10 +314,15 @@ pub async fn apply_seals(
         if ids.is_empty() {
             continue;
         }
-        let normalize = schema
-            .native(&s.entity)
-            .and_then(|e| e.field(&s.field))
-            .and_then(|f| f.normalize.clone());
+        // The normalization the step recorded, which is the coming
+        // version's; the writer's own when the row does not say.
+        let normalize = match &s.normalize {
+            Some(n) => Some(n.clone()).filter(|n| !n.is_empty()),
+            None => schema
+                .native(&s.entity)
+                .and_then(|e| e.field(&s.field))
+                .and_then(|f| f.normalize.clone()),
+        };
         for chunk in ids.chunks(IDS_PER_STATEMENT) {
             let list = chunk
                 .iter()
@@ -324,7 +368,7 @@ pub async fn apply_seals(
                             text.as_bytes(),
                         )?)
                     }
-                    (SealKind::Index, sealed) => {
+                    (SealKind::Index | SealKind::Reindex | SealKind::Kept, sealed) => {
                         let plain = match sealed {
                             None => None,
                             Some(hexed) => {

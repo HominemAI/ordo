@@ -215,6 +215,14 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         for b in ran["backfills"].as_array().into_iter().flatten() {
             out.push_str(&format!("{}\n", backfill_line(b)));
         }
+        // A seal's end moved the deployment's own space to the version the
+        // database now holds (increment 13). "Active" waits for activation.
+        if let Some(v) = ran["ownSpace"]["version"].as_str() {
+            out.push_str(&format!(
+                "own space  `{}` now serves {v}; activate {v} to move the rest\n",
+                ran["ownSpace"]["space"].as_str().unwrap_or("?")
+            ));
+        }
     }
     Outcome::ok(out)
 }

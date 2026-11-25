@@ -2981,6 +2981,9 @@ impl Executor {
         let run = pool_overlay.map(|o| o.as_ref()).or(by_renames.as_ref());
         let capture = overlay::RowCapture::for_seals(&overlay::seals_for(&self.schema, &seals))
             .with_move(run);
+        // An entity rename's dual writes (below), worked out here too.
+        let mirrors = overlay::entity_mirrors(&self.schema, &renames);
+        let capture = capture.with_mirrors(&mirrors);
         let (result, tx, mut scratch, mut capture) = tokio::task::spawn_blocking(move || {
             let db = BlockingTx {
                 tx,
@@ -3037,7 +3040,6 @@ impl Executor {
                 // deleted there, in this transaction. Read from `$renames`
                 // whether or not the tenant is in a move: both tables stay
                 // current until the rename lands.
-                let mirrors = overlay::entity_mirrors(&self.schema, &renames);
                 if let (false, Some(group)) = (mirrors.is_empty(), scratch.pending()) {
                     let (deleted, written): (Vec<_>, Vec<_>) = group
                         .commands
@@ -3052,8 +3054,15 @@ impl Executor {
                         &tx,
                         &self.space.0,
                         &mirrors,
-                        &pairs(written),
+                        &pairs(written.clone()),
                         &pairs(deleted),
+                        &pairs(
+                            written
+                                .into_iter()
+                                .filter(|c| c.kind == ordo_commandlog::CommandKind::Create)
+                                .collect(),
+                        ),
+                        &capture,
                     )
                     .await
                     {

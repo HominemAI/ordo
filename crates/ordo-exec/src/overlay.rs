@@ -127,19 +127,28 @@ pub fn entity_mirrors(schema: &ordo_schema::Schema, renames: &[Rename]) -> Vec<E
 }
 
 /// Run each mirror over the rows this write wrote (`written`) and deleted
-/// (`deleted`), `(entity, row id)`, in `space`, inside `tx`.
+/// (`deleted`), `(entity, row id)`, in `space`, inside `tx`. `created`
+/// names the written rows this write created.
 ///
 /// A written row is copied whole (`INSERT … ON CONFLICT DO UPDATE`), so the
 /// worker's copy and a live write cannot disagree: whichever runs second
 /// writes the row as it stands. A deleted row leaves the other table too.
 /// A key a unique there already holds is refused by name
 /// ([`OverlayError::Duplicate`]).
+///
+/// A row the write's own statements returned ([`RowCapture`]) is read by
+/// `ctid`, with no read by key of this table. A row this write created is
+/// new in both tables, so it is inserted there plainly, with no
+/// `ON CONFLICT` read of the other table's key either. Any other row is
+/// read by key.
 pub async fn apply_mirrors(
     tx: &TxConn,
     space: &str,
     mirrors: &[EntityMirror],
     written: &[(String, String)],
     deleted: &[(String, String)],
+    created: &[(String, String)],
+    captured: &RowCapture,
 ) -> Result<(), OverlayError> {
     for m in mirrors {
         let ids = |list: &[(String, String)]| {
@@ -165,37 +174,68 @@ pub async fn apply_mirrors(
             .map(|c| format!("{} = EXCLUDED.{}", quote(c), quote(c)))
             .collect::<Vec<_>>()
             .join(", ");
+        let upsert = if sets.is_empty() {
+            " ON CONFLICT (\"$space\", \"id\") DO NOTHING".to_string()
+        } else {
+            format!(" ON CONFLICT (\"$space\", \"id\") DO UPDATE SET {sets}")
+        };
+        let copy = |at: &str, conflict: &str| {
+            format!(
+                "INSERT INTO {other} ({cols}) SELECT {cols} FROM {t} WHERE {at}{conflict} \
+                 RETURNING \"id\"::text",
+                other = quote(&m.other),
+                t = quote(&m.table),
+            )
+        };
+        let run = |sql: String, rows: Vec<String>| async move {
+            match tx.rows(&sql).await {
+                Ok(back) => Ok(back
+                    .into_iter()
+                    .filter_map(|r| r.into_iter().next().flatten())
+                    .collect::<std::collections::BTreeSet<String>>()),
+                Err(err) if err.is_unique_violation() => {
+                    Err(OverlayError::Duplicate(Box::new(Duplicate {
+                        entity: m.other.clone(),
+                        columns: Vec::new(),
+                        rows,
+                    })))
+                }
+                Err(err) => Err(OverlayError::from(err)),
+            }
+        };
         let written = ids(written);
-        for chunk in written.chunks(IDS_PER_STATEMENT) {
+        let created: std::collections::BTreeSet<String> = ids(created).into_iter().collect();
+        let refs: Vec<&str> = written.iter().map(String::as_str).collect();
+        let (by_ctid, by_key) = captured.split(&m.table, space, &refs);
+        let mut by_key: Vec<String> = by_key.into_iter().map(str::to_string).collect();
+        for fresh in [true, false] {
+            let group: Vec<&(&str, String)> = by_ctid
+                .iter()
+                .filter(|(id, _)| created.contains(*id) == fresh)
+                .collect();
+            for chunk in group.chunks(IDS_PER_STATEMENT) {
+                let tids = chunk
+                    .iter()
+                    .map(|(_, t)| sql_lit(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rows: Vec<String> = chunk.iter().map(|(id, _)| id.to_string()).collect();
+                let conflict = if fresh { "" } else { upsert.as_str() };
+                let at = format!("ctid = ANY(ARRAY[{tids}]::tid[])");
+                let back = run(copy(&at, conflict), rows.clone()).await?;
+                // A row whose `ctid` moved since it was returned is read by
+                // key.
+                by_key.extend(rows.into_iter().filter(|id| !back.contains(id)));
+            }
+        }
+        for chunk in by_key.chunks(IDS_PER_STATEMENT) {
             let list = chunk
                 .iter()
                 .map(|i| sql_lit(i))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let conflict = if sets.is_empty() {
-                "DO NOTHING".to_string()
-            } else {
-                format!("DO UPDATE SET {sets}")
-            };
-            let sql = format!(
-                "INSERT INTO {other} ({cols}) SELECT {cols} FROM {t} \
-                 WHERE \"$space\" = {} AND \"id\" IN ({list}) \
-                 ON CONFLICT (\"$space\", \"id\") {conflict}",
-                sql_lit(space),
-                other = quote(&m.other),
-                t = quote(&m.table),
-            );
-            match tx.rows(&sql).await {
-                Ok(_) => {}
-                Err(err) if err.is_unique_violation() => {
-                    return Err(OverlayError::Duplicate(Box::new(Duplicate {
-                        entity: m.other.clone(),
-                        columns: Vec::new(),
-                        rows: chunk.to_vec(),
-                    })));
-                }
-                Err(err) => return Err(err.into()),
-            }
+            let at = format!("\"$space\" = {} AND \"id\" IN ({list})", sql_lit(space));
+            run(copy(&at, &upsert), chunk.to_vec()).await?;
         }
         let deleted = ids(deleted);
         for chunk in deleted.chunks(IDS_PER_STATEMENT) {
@@ -640,6 +680,14 @@ impl RowCapture {
     pub fn with_move(mut self, overlay: Option<&MoveOverlay>) -> RowCapture {
         for e in overlay.map(|o| o.entities.as_slice()).unwrap_or_default() {
             self.entities.entry(e.entity.clone()).or_default();
+        }
+        self
+    }
+
+    /// Also capture the tables entity-rename mirrors copy from.
+    pub fn with_mirrors(mut self, mirrors: &[EntityMirror]) -> RowCapture {
+        for m in mirrors {
+            self.entities.entry(m.table.clone()).or_default();
         }
         self
     }

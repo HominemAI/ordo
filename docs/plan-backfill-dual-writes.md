@@ -222,8 +222,9 @@ between them is needed.
   overlay takes precedence.
 - **Entity renames** (built 2026-11-24, branch `evo-entity-rename`). The
   `$renames` row has an empty `field`. The step makes the new table and
-  copies every row inside the expand's transaction, under the same lock,
-  so writes wait for the copy (no chunked table copy yet). Every write, in
+  copies every row with the backfill worker, in chunks (`FillMapping::Copy`),
+  each chunk's rows read `FOR SHARE` so a write to one waits for that chunk
+  only. `ordo apply` copies in its step. Every write, in
   a move or not, copies each row it wrote and deletes each row it deleted
   in the other name's table (`entity_mirrors`, `INSERT … ON CONFLICT`). A
   reference into the old table is checked at commit until the rename

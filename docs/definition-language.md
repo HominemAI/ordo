@@ -2038,7 +2038,8 @@ entity customers (key: cust, prev: clients) {
 - `ordo apply` makes a field rename itself, as it makes an additive change.
   A stored step copies the values with the backfill worker.
 - An entity rename (built 2026-11-24) makes the new table, copies every
-  row into it, and keeps the old table whole, so the version before still
+  row into it (a stored step in chunks, with the backfill worker; `ordo
+  apply` in its step), and keeps the old table whole, so the version before still
   serves. The rename is recorded in the database's `$renames`, and every
   write copies what it writes, and deletes what it deletes, into the other
   name's table in its own transaction. A reference another entity holds

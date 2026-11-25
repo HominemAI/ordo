@@ -651,6 +651,33 @@ impl<'a> Backfill<'a> {
         q(&self.fill.column)
     }
 
+    /// The table the cursor walks: the old table of an entity rename's
+    /// copy, or the table filled.
+    fn source(&self) -> String {
+        match self.fill.copy_from() {
+            Some(from) => q(from),
+            None => self.table(),
+        }
+    }
+
+    /// What one row's content hash reads: the column filled, or a copied
+    /// row whole.
+    fn value(&self) -> String {
+        match self.fill.copy_from() {
+            Some(_) => format!("row_to_json({})::text", self.table()),
+            None => format!("{}::text", self.col()),
+        }
+    }
+
+    /// The copied columns of an entity rename: every physical column.
+    fn copied_columns(&self) -> String {
+        ordo_schema::ddl::physical_columns(self.entity)
+            .iter()
+            .map(|c| q(&c.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// `("$space", "id") > (cursor)`, or true with no cursor.
     fn after(cursor: &Option<(String, String)>) -> String {
         match cursor {
@@ -669,7 +696,7 @@ impl<'a> Backfill<'a> {
             .await?;
         let total = self
             .pool
-            .rows(&format!("SELECT count(*) FROM {}", self.table()))
+            .rows(&format!("SELECT count(*) FROM {}", self.source()))
             .await?
             .first()
             .and_then(|r| r.first().cloned().flatten())
@@ -842,7 +869,7 @@ impl<'a> Backfill<'a> {
                 "SELECT {sp}, \"id\" FROM (SELECT {sp}, \"id\" FROM {t} WHERE {after} \
                  ORDER BY {sp}, \"id\" LIMIT {n}) c ORDER BY {sp} DESC, \"id\" DESC LIMIT 1",
                 sp = q(SPACE),
-                t = self.table(),
+                t = self.source(),
             ))
             .await?;
         let Some((us, ui)) = last
@@ -900,6 +927,21 @@ impl<'a> Backfill<'a> {
             (FillMapping::BlindIndex, _) => {
                 self.index_chunk(&tx, &range).await?;
             }
+            // An entity rename: the chunk's rows of the old table, copied
+            // whole, each locked while it is read so a write to it waits
+            // and its dual write lands after. A row a write already put in
+            // the new table is newer, and kept.
+            (FillMapping::Copy(from), _) => {
+                let cols = self.copied_columns();
+                tx.rows(&format!(
+                    "INSERT INTO {t} ({cols}) SELECT {cols} FROM {o} WHERE {range} \
+                     ORDER BY {sp}, \"id\" FOR SHARE ON CONFLICT ({sp}, \"id\") DO NOTHING",
+                    t = self.table(),
+                    o = q(from),
+                    sp = q(SPACE),
+                ))
+                .await?;
+            }
             (FillMapping::Expr(src), None) => {
                 return Err(BackfillRefusal::Store(format!(
                     "the mapping `{src}` was stored without its SQL; render the plan again"
@@ -909,9 +951,9 @@ impl<'a> Backfill<'a> {
         // Each row's new value, folded into its space's content hash.
         let filled = tx
             .rows(&format!(
-                "SELECT {sp}, \"id\", {c}::text FROM {t} WHERE {range} ORDER BY {sp}, \"id\"",
+                "SELECT {sp}, \"id\", {v} FROM {t} WHERE {range} ORDER BY {sp}, \"id\"",
                 sp = q(SPACE),
-                c = self.col(),
+                v = self.value(),
                 t = self.table(),
             ))
             .await?;
@@ -1438,6 +1480,32 @@ impl<'a> Backfill<'a> {
                 )
             })
         };
+        // An entity rename's copy: both tables hold the same rows, each
+        // with the same columns. Writes during the copy kept both current.
+        if let Some(from) = self.fill.copy_from() {
+            let on = ordo_schema::ddl::physical_columns(self.entity)
+                .iter()
+                .map(|c| format!("o.{c} IS NOT DISTINCT FROM n.{c}", c = q(&c.name)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let off = self
+                .pool
+                .rows(&format!(
+                    "SELECT coalesce(o.{sp}, n.{sp}), coalesce(o.\"id\", n.\"id\") \
+                     FROM {o} o FULL JOIN {t} n ON o.{sp} = n.{sp} AND o.\"id\" = n.\"id\" \
+                     WHERE o.\"id\" IS NULL OR n.\"id\" IS NULL OR NOT ({on}) LIMIT 1",
+                    sp = q(SPACE),
+                    o = q(from),
+                    t = self.table(),
+                ))
+                .await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    format!("is not the same in `{from}` and `{}`", self.fill.entity),
+                ));
+            }
+        }
         // No row left null. A sealed backfill leaves a null plaintext null.
         let plain = self.plain_col();
         let sealed_src = self.sealed_col();
@@ -1445,14 +1513,17 @@ impl<'a> Backfill<'a> {
             Some(p) => format!("{} IS NULL AND {p} IS NOT NULL", self.col()),
             None => format!("{} IS NULL", self.col()),
         };
-        let nulls = self
-            .pool
-            .rows(&format!(
-                "SELECT {sp}, \"id\" FROM {t} WHERE {unfilled} ORDER BY {sp}, \"id\" LIMIT 1",
-                sp = q(SPACE),
-                t = self.table(),
-            ))
-            .await?;
+        let nulls = if self.fill.copy_from().is_some() {
+            Vec::new()
+        } else {
+            self.pool
+                .rows(&format!(
+                    "SELECT {sp}, \"id\" FROM {t} WHERE {unfilled} ORDER BY {sp}, \"id\" LIMIT 1",
+                    sp = q(SPACE),
+                    t = self.table(),
+                ))
+                .await?
+        };
         if let Some(row) = first(nulls) {
             return Err(fail(Some(row), "has a row the backfill left null".into()));
         }
@@ -1493,10 +1564,10 @@ impl<'a> Backfill<'a> {
             let page = self
                 .pool
                 .rows(&format!(
-                    "SELECT {sp}, \"id\", {c}::text{p} FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
+                    "SELECT {sp}, \"id\", {v}{p} FROM {t} WHERE {a} ORDER BY {sp}, \"id\" \
                      LIMIT 5000",
                     sp = q(SPACE),
-                    c = self.col(),
+                    v = self.value(),
                     p = plain
                         .as_deref()
                         .map(|p| format!(", {p}"))

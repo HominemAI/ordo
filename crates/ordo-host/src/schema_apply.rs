@@ -700,6 +700,9 @@ pub enum FillMapping {
     /// A blind-index backfill (B8, increment 13): each row's sealed value
     /// opened under its space's key and its blind index written.
     BlindIndex,
+    /// An entity rename's copy (B4 on an entity): every row of the old
+    /// table, named here, copied whole into the new one, in chunks.
+    Copy(String),
 }
 
 impl FillMapping {
@@ -723,6 +726,7 @@ impl FillMapping {
             }
             FillMapping::Seal => "seal".into(),
             FillMapping::BlindIndex => "blind index".into(),
+            FillMapping::Copy(from) => format!("every row of {from}"),
         }
     }
 
@@ -2491,7 +2495,19 @@ impl BackfillStep {
         if let Some(from) = &self.indexing_from {
             j["indexFrom"] = serde_json::json!(from);
         }
+        // Present only on an entity rename's copy.
+        if let FillMapping::Copy(from) = &self.mapping {
+            j["copyFrom"] = serde_json::json!(from);
+        }
         j
+    }
+
+    /// An entity rename's copy: the old table, when this backfill is one.
+    pub fn copy_from(&self) -> Option<&str> {
+        match &self.mapping {
+            FillMapping::Copy(from) => Some(from),
+            _ => None,
+        }
     }
 
     /// Read one back from a stored receipt ([`BackfillStep::to_json`]).
@@ -2516,6 +2532,8 @@ impl BackfillStep {
                 FillMapping::Seal
             } else if v["indexFrom"].is_string() {
                 FillMapping::BlindIndex
+            } else if let Some(from) = v["copyFrom"].as_str() {
+                FillMapping::Copy(from.to_string())
             } else {
                 FillMapping::parse(v["mapping"].as_str()?).ok()?
             },
@@ -3171,7 +3189,7 @@ fn backfill_step(
             )
         }
         FillMapping::Function { .. } => None,
-        FillMapping::Seal | FillMapping::BlindIndex => {
+        FillMapping::Seal | FillMapping::BlindIndex | FillMapping::Copy(_) => {
             return Err(refuse(
                 "mapping_invalid",
                 format!("`seal` is not a fill: a stored plan seals `{}.{field}` when the version declares it `sealed`", e.name),
@@ -3527,9 +3545,13 @@ pub fn triage_counted(
                 );
             }
             Change::RenameEntity { from, .. } => {
-                match rename_entity_steps(c, schema, e, live, from, version) {
+                match rename_entity_steps(c, schema, e, live, from, version, choices) {
                     Err(r) => refused.push(*r),
-                    Ok(s) => steps.extend(s),
+                    Ok((s, b, a)) => {
+                        steps.extend(s);
+                        backfills.extend(b);
+                        after.extend(a);
+                    }
                 }
             }
             Change::AddCheck { object, .. } => {
@@ -3911,7 +3933,8 @@ fn rename_entity_steps(
     live: &LiveShape,
     from: &str,
     version: &str,
-) -> Result<Vec<Step>, Box<Refused>> {
+    choices: &Choices,
+) -> Result<EntityRenameParts, Box<Refused>> {
     let refuse = |class: &'static str, why: String| -> Box<Refused> {
         Box::new(Refused {
             change: c.clone(),
@@ -3995,14 +4018,36 @@ fn rename_entity_steps(
         &e.name,
         ordo_schema::ddl::create_table(e).map_err(ddl_err)?,
     ));
-    out.push(step(
-        Phase::Alter,
-        &e.name,
-        format!(
-            "INSERT INTO {t} ({list}) SELECT {list} FROM {};\n",
-            ordo_schema::ddl::q(from)
-        ),
-    ));
+    // `ordo apply` copies in the step. A stored step copies with the
+    // backfill worker, in chunks, while `$renames` keeps every row written
+    // meanwhile current in both tables.
+    let stored = choices.renames_backfill;
+    let mut copy = Vec::new();
+    if stored {
+        copy.push(BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: String::new(),
+            column: String::new(),
+            column_ty: String::new(),
+            mapping: FillMapping::Copy(from.to_string()),
+            sql: None,
+            audit: ordo_commandlog::BackfillAudit::Summarised,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: None,
+        });
+    } else {
+        out.push(step(
+            Phase::Alter,
+            &e.name,
+            format!(
+                "INSERT INTO {t} ({list}) SELECT {list} FROM {};\n",
+                ordo_schema::ddl::q(from)
+            ),
+        ));
+    }
+    let mut later = Vec::new();
     for f in &e.fields {
         out.extend(ordo_schema::ddl::unique(e, f).map(|sql| step(Phase::Alter, &e.name, sql)));
     }
@@ -4022,6 +4067,14 @@ fn rename_entity_steps(
     }
     for f in &e.fields {
         if let Some(sql) = ordo_schema::ddl::foreign_key(schema, e, f) {
+            // A reference into the table being copied (its own tree) waits
+            // for the copy: a chunk may hold a row before its parent.
+            let into_itself =
+                matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if *target == e.name);
+            if stored && into_itself {
+                later.push(sql);
+                continue;
+            }
             out.extend(not_valid_then_validate(
                 c,
                 e,
@@ -4043,8 +4096,16 @@ fn rename_entity_steps(
             ));
         }
     }
-    Ok(out)
+    let after = later
+        .into_iter()
+        .map(|sql| step(Phase::Alter, &e.name, sql))
+        .collect();
+    Ok((out, copy, after))
 }
+
+/// An entity rename's statements, its copy when a stored step runs it with
+/// the backfill worker, and what lands after the copy.
+type EntityRenameParts = (Vec<Step>, Vec<BackfillStep>, Vec<Step>);
 
 /// Each reference another entity of `schema` holds into `entity`, as
 /// `(table, constraint)`. The constraint is named for the referring field,

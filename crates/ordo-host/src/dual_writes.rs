@@ -158,6 +158,10 @@ pub fn render(
         list.last_mut().expect("just pushed")
     }
     for bf in backfills {
+        // An entity rename's copy: `$renames` keeps both tables current.
+        if bf.copy_from().is_some() {
+            continue;
+        }
         let sql = bf.sql.as_ref()?;
         let col = q(&bf.column);
         let set = match bf.code {
@@ -325,7 +329,7 @@ async fn expanded(target: &Pool, overlay: &Value) -> Result<bool, EvolveRefusal>
         .filter_map(BackfillStep::from_json)
         .all(|bf| {
             live.table(&bf.entity)
-                .is_some_and(|t| t.columns.contains_key(&bf.column))
+                .is_some_and(|t| bf.copy_from().is_some() || t.columns.contains_key(&bf.column))
         })
         && entities_of(overlay)
             .iter()

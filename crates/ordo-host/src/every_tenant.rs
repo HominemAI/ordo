@@ -578,7 +578,7 @@ fn renamed_fields(receipt: &str) -> Vec<(String, String)> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|b| b["code"] == "B4")
+        .filter(|b| b["code"] == "B4" && b["copyFrom"].is_null())
         .filter_map(|b| {
             Some((
                 b["entity"].as_str()?.to_string(),

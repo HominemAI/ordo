@@ -1236,6 +1236,166 @@ async fn a_tenant_with_its_own_database_moves_through_an_entity_rename_and_rolls
     );
 }
 
+/// **A large entity rename copies in chunks while writes keep landing**
+/// (the backfill worker, 10b, with `$renames`' dual writes). `solo` has a
+/// database of its own holding 20,000 notes. The stored step's move copies
+/// `note` into `memo` 500 rows a turn (`backfill.chunk_rows`, a budget of
+/// 1). Between turns, and while each turn runs, a node on 1.0.0 adds notes
+/// and deletes old ones, both ahead of the cursor and behind it. Every
+/// write lands while the copy is still `backfilling`, none waits for the
+/// whole copy, and once verify passes and the pin switches, every row is in
+/// both tables with the same columns, with no deleted row copied back.
+///
+/// A regression looks like a write refused or timed out during the copy (a
+/// copy held under the `$renames` lock), a row in one table only, or a
+/// deleted row back in `memo`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_entity_rename_copies_in_chunks_while_writes_keep_landing() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let (_cpg, control) = empty("ordo_prev_entity_big_ctl").await;
+    let (tpg, solo) = empty("ordo_prev_entity_big").await;
+    ordo_host::tenants::ensure_table(&control)
+        .await
+        .expect("$spaces");
+    assert!(
+        ordo_host::tenants::reserve(&control, "solo", "solo", "dev:ada", 10, None)
+            .await
+            .expect("reserved")
+    );
+    ordo_host::tenants::activate(&control, "solo", 11)
+        .await
+        .expect("active");
+    let (x_src, y_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+    );
+    apply_source(&control, &x_src).await;
+    let x = Program::compile(&x_src).expect("1.0.0");
+    let (_, created) = sa::apply(&solo, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    tpg.exec(
+        "INSERT INTO note (\"$space\", id, rev, kind) \
+         SELECT 'solo', 'solo' || lpad(i::text, 5, '0'), 1, 'solo ' || i \
+         FROM generate_series(1, 20000) i",
+    )
+    .expect("20,000 rows");
+    store(&control, &y_src).await;
+    let plan = evolve::evolve(
+        &control,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("the step stores")
+    .plan;
+    assert!(
+        plan.receipt.contains("copyFrom"),
+        "the copy is the worker's: {}",
+        plan.receipt
+    );
+    let pools = PerTenant {
+        control: control.clone(),
+        tenants: vec![("solo".into(), solo.clone())],
+    };
+    let cx = MoveContext {
+        control: &control,
+        pools: &pools,
+        spaces: None,
+    };
+    let ctx = evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 500,
+            budget: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let week = 7 * 86_400;
+
+    // The first turn: the expand and one chunk. Writes go on.
+    let first = dual_writes::run(&cx, "solo", &plan, &ctx, week, OWNER)
+        .await
+        .expect("the move starts");
+    assert_eq!(first.phase, MovePhase::Backfilling, "{first:?}");
+    let copied = one(&tpg, "SELECT count(*) FROM memo");
+    assert_eq!(copied, "500", "one chunk, not the table");
+
+    let writer = std::sync::Arc::new(node_in(&tpg.db, &x_src, "w", "solo").await);
+    let w = writer.clone();
+    let writes = tokio::spawn(async move {
+        let mut bad = Vec::new();
+        let mut slowest = std::time::Duration::ZERO;
+        for i in 0..150 {
+            let started = std::time::Instant::now();
+            if let Err(e) = w.write(format!(r#"addNote($kind: "live {i}")"#)).await {
+                bad.push(format!("add {i}: {e}"));
+            }
+            if i % 5 == 0 {
+                // One ahead of the cursor, one behind it.
+                for id in [format!("solo{:05}", 20000 - i), format!("solo{:05}", i + 1)] {
+                    if let Err(e) = w.write(format!(r#"dropNote($id: "{id}")"#)).await {
+                        bad.push(format!("drop {id}: {e}"));
+                    }
+                }
+            }
+            slowest = slowest.max(started.elapsed());
+        }
+        (bad, slowest)
+    });
+
+    // The worker's turns, beside the writes.
+    let mut turns = 1;
+    let mut during = 0;
+    loop {
+        let m = dual_writes::run(&cx, "solo", &plan, &ctx, week, OWNER)
+            .await
+            .expect("a turn");
+        turns += 1;
+        if m.phase != MovePhase::Backfilling {
+            assert_eq!(m.phase, MovePhase::Soaking, "{m:?}");
+            break;
+        }
+        if !writes.is_finished() {
+            during += 1;
+        }
+        assert!(turns < 200, "the copy ends");
+    }
+    let (bad, slowest) = writes.await.unwrap();
+    assert!(bad.is_empty(), "every write landed: {bad:?}");
+    assert!(during > 0, "the writes ran while the copy was backfilling");
+    assert!(
+        slowest < std::time::Duration::from_secs(5),
+        "no write waited for the copy: {slowest:?}"
+    );
+    assert!(turns >= 40, "the copy ran in chunks: {turns} turns");
+    // Writes the node makes after the switch, on 1.0.0 still: kept too.
+    writer
+        .write(r#"addNote($kind: "after the switch")"#.into())
+        .await
+        .expect("a write after the copy");
+    assert_eq!(
+        one(&tpg, "SELECT count(*) FROM note"),
+        (20000 + 150 + 1 - 60).to_string()
+    );
+    assert_eq!(one(&tpg, TABLES_DIFFER), "0", "every row is in both tables");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT count(*) FROM memo WHERE id IN ('solo20000', 'solo00001')"
+        ),
+        "0",
+        "no deleted row is copied back"
+    );
+}
+
 /// **The offer to remove a landed mark** names it in the chain's last
 /// environment, once every tenant has the new name, and not before.
 #[tokio::test(flavor = "multi_thread")]

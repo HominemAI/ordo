@@ -2454,10 +2454,16 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         out.push(format!("forward: {}", s.as_str().unwrap_or_default()));
     }
     for b in receipt["backfills"].as_array().into_iter().flatten() {
+        let target = match b["field"].as_str() {
+            Some("") => b["entity"].as_str().unwrap_or("?").to_string(),
+            f => format!(
+                "{}.{}",
+                b["entity"].as_str().unwrap_or("?"),
+                f.unwrap_or("?")
+            ),
+        };
         let mut line = format!(
-            "backfill: {}.{} = {} · audit: {}",
-            b["entity"].as_str().unwrap_or("?"),
-            b["field"].as_str().unwrap_or("?"),
+            "backfill: {target} = {} · audit: {}",
             b["mapping"].as_str().unwrap_or("?"),
             b["audit"].as_str().unwrap_or("?"),
         );
@@ -2535,7 +2541,10 @@ pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
     let entities = !entity_renames(&receipt).is_empty();
-    (!fills.is_empty() || entities) && fills.iter().all(|b| b["sql"].is_string())
+    (!fills.is_empty() || entities)
+        && fills
+            .iter()
+            .all(|b| b["sql"].is_string() || b["copyFrom"].is_string())
 }
 
 /// Each entity a stored step renames, `(new name, old name)`, as its

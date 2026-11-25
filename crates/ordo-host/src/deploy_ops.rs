@@ -1182,6 +1182,8 @@ pub async fn execute(
                     crate::backfill::CHUNK_ROWS_SETTING => "chunkRows",
                     crate::backfill::CHUNK_TIMEOUT_SETTING => "chunkTimeout",
                     crate::backfill::MAX_ATTEMPTS_SETTING => "maxAttempts",
+                    crate::backfill::CONCURRENCY_SETTING => "concurrency",
+                    crate::backfill::PER_DATABASE_SETTING => "perDatabase",
                     _ => "budget",
                 }]
                 .clone();

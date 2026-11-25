@@ -301,6 +301,10 @@ impl PinStream {
             Ok(m) => self.deployment.set_moves(m),
             Err(e) => eprintln!("pins: the moves with dual writes were not read ({e})"),
         }
+        match crate::grant_kills::read_all(&self.control).await {
+            Ok(k) => self.deployment.set_grant_kills(k),
+            Err(e) => eprintln!("pins: the grants moves killed were not read ({e})"),
+        }
     }
 
     /// Load what the pins name and drop what they no longer do.

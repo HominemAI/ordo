@@ -21,17 +21,18 @@
 //! - **`ordo rollback --dry-run`** lists each tenant the rollback moves and
 //!   what it keeps or loses ([`rollback_tenants`]).
 //!
-//! # What waits (11b, part 2)
+//! # Part 2
 //!
-//! - A tenant on the deployment's own database shares it with every other
-//!   tenant there. A rollout pins it once that database holds the target
-//!   (`ordo evolve --run`), and `$renames` keeps both columns of a rename
-//!   current for all of them. Its soaks, the constraints of the new shape
-//!   landing at the last tenant's close, and soaks on a read table closing
-//!   together (Q1) are part 2.
-//! - `backfill.concurrency` and `backfill.per_database` across tenants: a
-//!   rollout's turn runs its tenants one after another.
-//! - Grants a move killed staying killed after a revert.
+//! - A tenant on the deployment's own database moves with `ordo evolve
+//!   --tenant`, and the soaks of one step there close together
+//!   (`crate::dual_writes`, §4). A rollout still pins such a tenant once
+//!   that database holds the target.
+//! - A seal on a database several tenants share fences each of them in its
+//!   end's transaction ([`seal_fence`]), and the catch-up pins them together.
+//! - A rollout's turn moves up to `backfill.concurrency` tenants at once, at
+//!   most `backfill.per_database` in one database (`crate::rollouts`).
+//! - A grant a move's switch killed stays killed after a revert
+//!   (`crate::grant_kills`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -192,7 +193,8 @@ pub async fn forward_tenant(
         Some(i) => Err(runs_alone(tenant, &from, to, &steps, i)),
         None => {
             let mut ctx = ctx.clone();
-            ctx.fence = seal_fence(cx.control, &steps, &[tenant.to_string()], &from, to).await?;
+            let fences = seal_fence(cx.control, &steps, &[tenant.to_string()], &from, to).await?;
+            fence_with(&mut ctx, fences);
             let done = Box::pin(crate::evolve::replay_with(
                 cx.control, &target, tenant, to, actor, &ctx,
             ))
@@ -212,19 +214,21 @@ pub async fn forward_tenant(
 }
 
 /// **A seal on the path** (increment 13 under live writes): its end drops
-/// the plaintext and raises the tenant's pin fence to the epoch of the pin
-/// that follows, so a node still on the version before writes nothing more
-/// there. So a seal is the last step before the pin, and its database is
-/// one tenant's. `None` when the path seals nothing.
+/// the plaintext and raises the pin fence of each tenant on the database to
+/// the epoch of the pin that follows, so a node still on the version before
+/// writes nothing more there. So a seal is the last step before the pin.
+/// On a database several tenants share, every one of them is fenced in the
+/// end's transaction and pinned together after it (increment 11b part 2).
+/// Empty when the path seals nothing.
 async fn seal_fence(
     control: &Pool,
     steps: &[StoredPlan],
     tenants: &[String],
     from: &str,
     to: &str,
-) -> Result<Option<(String, i64)>, EvolveRefusal> {
+) -> Result<Vec<(String, i64)>, EvolveRefusal> {
     let Some(i) = steps.iter().position(crate::evolve::sealing_step) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let stop = &steps[i].to;
     if i + 1 < steps.len() {
@@ -235,29 +239,20 @@ async fn seal_fence(
             steps[i].from,
         )));
     }
-    if tenants.is_empty() {
-        return Ok(None);
+    let v = Versions::on(control);
+    let mut out = Vec::new();
+    for tenant in tenants {
+        let epoch = v.pin_of(tenant).await?.map(|p| p.epoch).unwrap_or(0);
+        out.push((tenant.clone(), epoch + 1));
     }
-    let [tenant] = tenants else {
-        return Err(EvolveRefusal::Run {
-            database: tenants.join(", "),
-            from: from.to_string(),
-            to: to.to_string(),
-            class: "seal_shared_database",
-            why: format!(
-                "the step to `{stop}` seals a field, and a seal ends with its tenant's pin, but \
-                 {} tenants share this database. Replay each with `ordo evolve --tenant <id>`",
-                tenants.len()
-            ),
-            transient: false,
-        });
-    };
-    let epoch = Versions::on(control)
-        .pin_of(tenant)
-        .await?
-        .map(|p| p.epoch)
-        .unwrap_or(0);
-    Ok(Some((tenant.clone(), epoch + 1)))
+    Ok(out)
+}
+
+/// Put [`seal_fence`]'s fences in a step's context.
+fn fence_with(ctx: &mut StepContext, fences: Vec<(String, i64)>) {
+    let mut it = fences.into_iter();
+    ctx.fence = it.next();
+    ctx.fences = it.collect();
 }
 
 /// One move with dual writes, as far as this try goes.
@@ -332,8 +327,8 @@ pub async fn forward_database(
         transient: e.transient(),
     };
     let mut ctx = ctx.clone();
-    ctx.fence = match seal_fence(control, &steps, tenants, &from, &program.version).await {
-        Ok(f) => f,
+    match seal_fence(control, &steps, tenants, &from, &program.version).await {
+        Ok(f) => fence_with(&mut ctx, f),
         Err(e) => return Some(Err(refused(e))),
     };
     let done = match Box::pin(crate::evolve::replay_with(

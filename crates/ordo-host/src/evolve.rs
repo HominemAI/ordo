@@ -1680,6 +1680,11 @@ pub struct StepContext {
     /// still on the version before writes nothing more there until it
     /// reads the new pin (increment 13 under live writes).
     pub fence: Option<(String, i64)>,
+    /// The other tenants on the same database, each with the pin epoch it
+    /// is moved under next: a seal on a database several tenants share
+    /// raises every one's fence in the end's transaction (increment 11b
+    /// part 2).
+    pub fences: Vec<(String, i64)>,
 }
 
 /// The database's recorded version.
@@ -1969,6 +1974,47 @@ pub async fn run_step_with(
         }
         e
     };
+    // On the deployment's own database, a tenant there in a move through
+    // this step holds its constraints until the soaks close together
+    // (increment 11b part 2): the step is not run over it.
+    if crate::dual_writes::same_database(target, registry) {
+        let shared: std::collections::BTreeSet<String> =
+            crate::dual_writes::shared_spaces(registry)
+                .await?
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect();
+        let moving: Vec<String> = match Versions::on(registry).dual_moves().await {
+            Ok(m) => m
+                .into_iter()
+                .filter(|m| m.step == plan.digest && shared.contains(&m.space))
+                .map(|m| m.space)
+                .collect(),
+            Err(e) if e.is_missing_table() => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+        if !moving.is_empty() {
+            return Err(EvolveRefusal::Run {
+                database: label.to_string(),
+                from: plan.from.clone(),
+                to: plan.to.clone(),
+                class: "moves_open",
+                why: format!(
+                    "{} on this database {} in a move with dual writes through this step ({}). \
+                     The step's constraints land when their soaks close together: `ordo evolve \
+                     --tenant <id> --close-soak`, or each soak's end",
+                    if moving.len() == 1 {
+                        "1 tenant".to_string()
+                    } else {
+                        format!("{} tenants", moving.len())
+                    },
+                    if moving.len() == 1 { "is" } else { "are" },
+                    moving.join(", ")
+                ),
+                transient: false,
+            });
+        }
+    }
     let Some(Expanded {
         statements,
         backfills,
@@ -2120,7 +2166,9 @@ pub async fn run_step_with(
     let sealing = backfills
         .iter()
         .any(|b| b.sealing_from.is_some() || b.indexing_from.is_some());
-    if let (true, false, Some((space, epoch))) = (sealing, after.is_empty(), &ctx.fence) {
+    let fence_now = sealing && !after.is_empty();
+    let fenced: Vec<&(String, i64)> = ctx.fence.iter().chain(ctx.fences.iter()).collect();
+    for (space, epoch) in fenced.into_iter().filter(|_| fence_now) {
         // In the end's own transaction (it runs after the records' lock).
         after.push(sa::Step {
             code: "B7",

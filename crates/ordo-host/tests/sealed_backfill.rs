@@ -165,6 +165,7 @@ fn ctx(keys: Option<Arc<dyn KeyProvider>>, chunk_rows: u32, budget: Option<u32>)
         functions: None,
         keys,
         fence: None,
+        fences: Vec::new(),
     }
 }
 
@@ -1642,5 +1643,38 @@ async fn a_rollback_across_a_new_normalize_finds_every_row() {
         .expect("forward again");
     for (body, title) in [("MIXED-A", "a"), ("new-d", "d"), ("back-f", "f")] {
         assert_eq!(found(&new, body).await, [title], "`{body}` under 1.1.0");
+    }
+}
+
+/// Increment 11b part 2: **a seal on a database 3 tenants share fences
+/// each of them in its end's transaction.** Part 1 refused it as
+/// `seal_shared_database`. The end drops the plaintext, so every tenant
+/// there must be told its pin moved before a node on the version before
+/// writes again: each one's `$pin_fence` rises to the epoch of the pin it
+/// takes next, as the catch-up passes them (`every_tenant::seal_fence`).
+///
+/// A regression looks like one tenant's fence left behind: a node still on
+/// the version before would write plaintext into a dropped column.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seal_on_a_database_3_tenants_share_fences_each_of_them() {
+    let (_rpg, registry, tpg, tenant, plan) = setup("ordo_seal_shared", &v2()).await;
+    let (keys, _) = metered();
+    let mut c = ctx(Some(keys), 100, None);
+    c.fence = Some(("acme".into(), 5));
+    c.fences = vec![("beta".into(), 3), ("gamma".into(), 8)];
+    let ran = evolve::run_step_with(&registry, &tenant, "tenant-db", &plan, OWNER, &c)
+        .await
+        .expect("the seal runs");
+    assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+    assert_eq!(column_type(&tpg, "body"), "bytea");
+    for (s, epoch) in [("acme", "5"), ("beta", "3"), ("gamma", "8")] {
+        assert_eq!(
+            one(
+                &tpg,
+                &format!("SELECT epoch FROM \"$pin_fence\" WHERE space = '{s}'")
+            ),
+            epoch,
+            "{s}'s fence"
+        );
     }
 }

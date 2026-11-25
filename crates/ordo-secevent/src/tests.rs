@@ -1047,6 +1047,10 @@ fn every_deny_reason_maps_to_a_distinct_recorded_decision() {
             entity: Some("notes".into()),
             detail: "`notes`: the read guard differs".into(),
         },
+        DenyReason::GrantKilledByMove {
+            from: "0.1.0".into(),
+            to: "0.2.0".into(),
+        },
     ];
     let mapped: BTreeSet<RecordedDecision> = reasons.iter().map(RecordedDecision::from).collect();
     assert_eq!(
@@ -1077,6 +1081,7 @@ fn every_deny_reason_maps_to_a_distinct_recorded_decision() {
         RecordedDecision::OutsideDeploymentRealm,
         RecordedDecision::ConsoleKeyClosed,
         RecordedDecision::VersionsDisagree,
+        RecordedDecision::GrantKilledByMove,
     ] {
         assert_eq!(RecordedDecision::from_tag(d.tag()), Some(d));
     }

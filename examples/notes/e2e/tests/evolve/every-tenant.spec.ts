@@ -13,7 +13,9 @@
  * 1. Stores it and its step, and runs the step on the deployment's own
  *    database (`ordo evolve --run`), so a rollout may start.
  * 2. Sets `backfill.chunk_rows` 1 and `backfill.budget` 1, so each
- *    tenant's copy takes one row per turn of the rollout.
+ *    tenant's copy takes one row per turn of the rollout, and
+ *    `backfill.concurrency` 3 with `backfill.per_database` 1, so the 3
+ *    moves of a turn run at once (part 2); 0 is refused, naming it.
  * 3. `ordo rollout start <to> --strategy group --group <the 3>`, a turn
  *    a second: the rollout moves each through its stored step, a move
  *    with dual writes. The rest wait behind the group's day-long gate.
@@ -78,6 +80,17 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
       ordo(['evolve', '--from', from, '--to', to, '--run']);
       ordo(['versions', 'set', 'backfill.chunk_rows', '1', '--reason', 'one row per turn, to type during it']);
       ordo(['versions', 'set', 'backfill.budget', '1', '--reason', 'one chunk per turn, to type during it']);
+      // 11b part 2: the 3 tenants' moves run at once, one per database.
+      expect(ordo(['versions', 'set', 'backfill.concurrency', '3', '--reason', 'the 3 move at once'])).toMatch(
+        /concurrency +3 moves/,
+      );
+      expect(ordo(['versions', 'set', 'backfill.per_database', '1', '--reason', 'one move per database'])).toMatch(
+        /per database +1 moves/,
+      );
+      // Out of range: refused, naming the setting.
+      const bad = dev.ordo(['versions', 'set', 'backfill.concurrency', '0', '--reason', 'none at once', ...door()]);
+      expect(bad.code).not.toBe(0);
+      expect(`${bad.out}${bad.err}`).toContain('backfill.concurrency');
     });
 
     await test.step('the rollout starts each tenant on its stored step', async () => {
@@ -142,7 +155,7 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
   } finally {
     // The settings are the deployment's; the projects after this one run
     // with the defaults.
-    for (const s of ['backfill.chunk_rows', 'backfill.budget']) {
+    for (const s of ['backfill.chunk_rows', 'backfill.budget', 'backfill.concurrency', 'backfill.per_database']) {
       dev.ordo(['versions', 'set', s, '--clear', '--reason', 'back to the default', ...door()]);
     }
     await dev.close();

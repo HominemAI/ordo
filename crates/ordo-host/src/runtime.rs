@@ -2472,9 +2472,20 @@ pub struct SwappableAccess {
     /// given to the engine of every door installed, so a share made in a
     /// tenant is pinned to, and judged by, that tenant's version.
     tenant_versions: std::sync::OnceLock<ordo_identity::access::TenantVersions>,
+    /// The grants a move killed (`crate::grant_kills`), given to the engine
+    /// of every door installed.
+    killed_grants: std::sync::OnceLock<ordo_identity::access::KilledGrants>,
 }
 
 impl SwappableAccess {
+    /// Give the door that is serving, and every door installed after it,
+    /// the grants a move killed. Once.
+    pub fn wire_killed_grants(&self, killed: ordo_identity::access::KilledGrants) {
+        if self.killed_grants.set(killed.clone()).is_ok() {
+            self.current().engine.set_killed_grants(killed);
+        }
+    }
+
     /// Give the door that is serving, and every door installed after it,
     /// the tenants' versions. Once.
     pub fn wire_tenant_versions(&self, versions: ordo_identity::access::TenantVersions) {
@@ -2549,6 +2560,7 @@ impl SwappableAccess {
             not_ready: std::sync::OnceLock::new(),
             contact: std::sync::OnceLock::new(),
             tenant_versions: std::sync::OnceLock::new(),
+            killed_grants: std::sync::OnceLock::new(),
         }
     }
 
@@ -2620,6 +2632,9 @@ impl SwappableAccess {
         }
         if let Some(versions) = self.tenant_versions.get() {
             door.engine.set_tenant_versions(versions.clone());
+        }
+        if let Some(killed) = self.killed_grants.get() {
+            door.engine.set_killed_grants(killed.clone());
         }
         if let Some(clones) = self.clones.get() {
             door.wire_clones(clones.clone());
@@ -4681,6 +4696,10 @@ async fn assemble_program(
         let versions = deployment.clone();
         access.wire_tenant_versions(Arc::new(move |space| {
             ordo_api::OpRegistry::version_in(versions.as_ref(), &space.0)
+        }));
+        let kills = deployment.clone();
+        access.wire_killed_grants(Arc::new(move |space, grant| {
+            kills.grant_killed(&space.0, &grant.0)
         }));
     }
     access.wire_console_home(&cfg.space.0);

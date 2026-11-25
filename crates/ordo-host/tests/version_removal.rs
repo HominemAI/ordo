@@ -35,7 +35,7 @@ use ordo_crypto::SpaceId;
 use ordo_exec::route::{AttachedPools, Installed, PoolResolver, SinglePool};
 use ordo_exec::spacedb::{DbAttachment, DbCustody};
 use ordo_exec::{Pool, PoolConfig};
-use ordo_host::apply_op::{self, ApplyOps};
+use ordo_host::apply_op::ApplyOps;
 use ordo_host::runtime::now_secs;
 use ordo_host::schema_apply::Program;
 use ordo_host::tenant_builds::TenantBuilds;
@@ -98,7 +98,7 @@ async fn fresh(stem: &str) -> Pool {
 
 async fn run(pool: &Pool, pools: &dyn PoolResolver, source: &str, activate: bool) {
     let program = Program::compile(source).expect("compiles");
-    apply_op::run_program(pool, pools, &program, vec![], "dev:ada", "t", activate)
+    run_all_at_once(pool, pools, &program, vec![], "dev:ada", "t", activate)
         .await
         .expect("applies");
 }
@@ -478,4 +478,30 @@ async fn a_tenant_database_is_brought_to_the_named_version_through_the_door() {
         })
         .collect();
     assert_eq!(acts, ["version-removed"]);
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

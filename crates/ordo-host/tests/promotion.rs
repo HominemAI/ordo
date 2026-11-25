@@ -93,6 +93,7 @@ async fn fresh(stem: &str) -> Pool {
     .await
     .expect("a pool");
     tenants::ensure_table(&pool).await.expect("$spaces");
+    all_at_once(&pool).await;
     pool
 }
 
@@ -1077,4 +1078,20 @@ async fn an_environment_is_removed_or_renamed_unless_it_is_owned_or_named() {
         acts(&stream),
         ["environment-renamed", "environment-removed"]
     );
+}
+
+/// `rollout.strategy` `all` on `pool`. With it unset, a deployment that is
+/// not dev rolls an apply out a batch at a time (ruled 2026-11-25); these
+/// tests apply and expect every tenant on the new version at once.
+async fn all_at_once(pool: &ordo_exec::Pool) {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
 }

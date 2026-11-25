@@ -219,6 +219,21 @@ admit() { # schema, role
       ON CONFLICT (\"space\") DO UPDATE SET \"open\" = true, \"default_role\" = '$2';"
 }
 
+# With `rollout.strategy` unset, a deployment that is not dev rolls each
+# apply out a batch at a time (owner, 2026-11-25). These two are
+# production, and a test here applies another version and expects every
+# tenant on it at once, so each sets `all`, as `ordo rollout set
+# rollout.strategy all` does.
+all_at_once() { # schema, its owner
+  as_admin "$db" "SET ROLE $2; SET search_path TO $1;
+    CREATE TABLE IF NOT EXISTS \"\$version_settings\" (\"seq\" bigserial PRIMARY KEY,
+      \"setting\" text NOT NULL, \"value\" text NULL, \"actor\" text NOT NULL,
+      \"reason\" text NOT NULL, \"at\" bigint NOT NULL);
+    INSERT INTO \"\$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\")
+      VALUES ('rollout.strategy', 'all', 'fed-e2e', 'the tests apply every tenant at once',
+      extract(epoch from now())::bigint);"
+}
+
 notes_env "$host" >"$state/notes.log" 2>&1 &
 last=$!
 pids="$pids $last"
@@ -226,6 +241,7 @@ wait_for "notes v2" "$notes_door/health/live" "$last"
 (notes_env "$ordo" apply "$repo/examples/notes-v2" --as fed-e2e --direct) >"$state/notes-apply.log" 2>&1 ||
   { cat "$state/notes-apply.log" >&2; echo "stack: ordo apply of notes v2 failed" >&2; exit 1; }
 admit notes editor
+all_at_once notes notes_app
 # notes v2's environment, for a test that applies another notes program over
 # it with the same `--direct` apply (tests/v3, increment 7a). Test values.
 (notes_env env) >"$state/notes.env"
@@ -237,6 +253,7 @@ wait_for "note_viewer" "$viewer_door/health/live" "$last"
 (viewer_env "$ordo" apply "$repo/examples/note-viewer" --as fed-e2e --direct) >"$state/viewer-apply.log" 2>&1 ||
   { cat "$state/viewer-apply.log" >&2; echo "stack: ordo apply of note_viewer failed" >&2; exit 1; }
 admit viewer viewer
+all_at_once viewer viewer_app
 # note_viewer's environment, for a test that runs `ordo release-check
 # --direct` as the viewer (tests/api/release.spec.ts, increment 7b).
 (viewer_env env) >"$state/viewer.env"

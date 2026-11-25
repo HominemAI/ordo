@@ -31,6 +31,19 @@ use ordo_syntax::ast::{CmpOp, Condition, Expr, TextOp};
 /// `rollout.health_error_rate`'s default, in hundredths of a percent: 1%.
 pub const HEALTH_ERROR_RATE_DEFAULT: i64 = 100;
 
+/// `rollout.health_min_calls`' default: 20 calls (ruled 2026-11-25). A
+/// first stage that had fewer when its wait ends has proved nothing, and
+/// the rollout pauses.
+pub const HEALTH_MIN_CALLS_DEFAULT: i64 = 20;
+
+/// The largest `rollout.health_min_calls` takes.
+pub const MAX_MIN_CALLS: i64 = 1_000_000_000;
+
+/// Whether a first stage had too few calls to judge: fewer than `min`.
+pub fn too_quiet(calls: u64, min: i64) -> bool {
+    (calls as i128) < (min.max(0) as i128)
+}
+
 /// A rate as typed (`1%`, `0.5%`, `2`) in hundredths of a percent, from
 /// 0.01% to 100%.
 pub fn parse_rate(text: &str) -> Option<i64> {
@@ -67,7 +80,7 @@ pub fn format_rate(h: i64) -> String {
 }
 
 /// Whether `faults` of `calls` reach the rate: unhealthy. No calls is no
-/// signal, and reads as healthy.
+/// fault; too few calls is judged apart ([`too_quiet`]).
 pub fn unhealthy(calls: u64, faults: u64, rate: i64) -> bool {
     faults > 0 && (faults as u128) * 10_000 >= (calls as u128) * (rate.max(1) as u128)
 }

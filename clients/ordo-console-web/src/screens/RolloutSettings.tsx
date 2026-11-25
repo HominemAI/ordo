@@ -21,6 +21,7 @@ const ROWS: Row[] = [
   { name: 'rollout.canary_count', group: 'rollout', key: 'canaryCount', hint: '1 or more' },
   { name: 'rollout.canary_wait', group: 'rollout', key: 'canaryWait', length: true, hint: 'like 30m' },
   { name: 'rollout.health_error_rate', group: 'rollout', key: 'healthErrorRate', hint: 'like 1%' },
+  { name: 'rollout.health_min_calls', group: 'rollout', key: 'healthMinCalls', hint: 'calls before the rest move, like 20' },
   { name: 'rollout.alert_channel', group: 'rollout', key: 'alertChannel', hint: 'stream, or a channel' },
   { name: 'rollout.share_partners', group: 'rollout', key: 'sharePartners', hint: 'on or off' },
   { name: 'rollout.group', group: 'rollout', key: 'group', hint: 'tenant ids, comma separated' },
@@ -37,6 +38,11 @@ const ROWS: Row[] = [
 
 function shown(r: Row, s: VersionSettings): string {
   const v = s[r.group]?.[r.key];
+  // Unset, the strategy is rolling, or all in dev (ruled 2026-11-25).
+  if (r.key === 'strategy' && (v === null || v === undefined || v === '')) {
+    const d = s.rollout?.strategyDefault;
+    return typeof d === 'string' ? `not set: ${d}` : 'not set';
+  }
   if (v === null || v === undefined || v === '') return 'not set';
   if (Array.isArray(v)) return v.length ? v.join(', ') : 'none';
   if (typeof v === 'boolean') return v ? 'on' : 'off';

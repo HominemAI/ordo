@@ -299,7 +299,7 @@ pub fn specs() -> Vec<OpSpec> {
                 required: true,
                 bounds: None,
             }],
-            &["state", "version", "from", "reverted"],
+            &["state", "version", "from", "reverted", "movedBack"],
         ),
         spec(
             PLAN,
@@ -928,10 +928,27 @@ pub async fn execute(
                 caller,
             )
             .await;
-            let (activation, reverted) = match activated {
+            let (
+                activation,
+                apply_op::Reverted {
+                    soaks: reverted,
+                    pins: moved_back,
+                },
+            ) = match activated {
                 Ok(done) => done,
                 Err(refusal) => return Err(ExecError::new(refusal.code(), refusal.to_string())),
             };
+            if !moved_back.is_empty() {
+                ops.record(
+                    caller,
+                    ACTIVATE,
+                    "rollout-pins-reverted",
+                    format!(
+                        "version={version} tenants={} by={caller}",
+                        moved_back.join("+")
+                    ),
+                );
+            }
             if !reverted.is_empty() {
                 ops.record(
                     caller,
@@ -954,12 +971,15 @@ pub async fn execute(
                             from.as_deref().unwrap_or("none")
                         ),
                     );
-                    json!({ "state": "switched", "version": to, "from": from, "reverted": reverted })
+                    json!({
+                        "state": "switched", "version": to, "from": from, "reverted": reverted,
+                        "movedBack": moved_back,
+                    })
                 }
                 Activation::AlreadyActive { version } => {
                     json!({
                         "state": "alreadyActive", "version": version, "from": version,
-                        "reverted": reverted,
+                        "reverted": reverted, "movedBack": moved_back,
                     })
                 }
                 Activation::Staged | Activation::RolloutStarted { .. } => {

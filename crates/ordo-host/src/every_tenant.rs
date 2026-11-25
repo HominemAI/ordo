@@ -478,23 +478,63 @@ pub async fn revert_soaks_from(
 /// How many tenants a rollback's dry run names.
 pub const DRY_RUN_LISTED: usize = 1_000;
 
-/// **What `ordo rollback --dry-run` to `version` says of each tenant** not
-/// on it (§2.5). Reads; changes nothing.
-///
-/// - One soaking on a move from `version` goes back, every write kept.
-/// - One in a tenant build stays: the build moves it.
-/// - When `version` is already active (a rollout to another was aborted),
-///   no other tenant moves.
-/// - Otherwise it moves back. A field its version renamed is read from the
-///   old column again. On a tenant's own database that column stopped
-///   being written when its soak closed, so what was written since is lost
-///   to `version`. On the deployment's own database, `$renames` keeps both
-///   columns current until a version drops the `prev` mark.
-pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value>, EvolveRefusal> {
+/// What a rollback to a version does to one tenant not on it.
+#[derive(Debug, Clone)]
+struct RollbackEntry {
+    space: String,
+    on: String,
+    /// Every write is kept.
+    kept: bool,
+    note: String,
+    /// The aborted rollout that pinned it with no soak, when the rollback
+    /// moves it back (ruled 2026-11-25).
+    back_from: Option<i64>,
+}
+
+/// **Each tenant an aborted rollout from `version` pinned itself**: the
+/// tenant, and the rollout its newest `$pins` row names. A pin set by hand
+/// since is newer, and leaves the tenant out. Reads.
+async fn rollout_pinned(
+    control: &Pool,
+    version: &str,
+) -> Result<BTreeMap<String, i64>, EvolveRefusal> {
+    let sql = format!(
+        "SELECT p.\"space\", p.\"rollout\"::text FROM ( \
+           SELECT DISTINCT ON (\"space\") \"space\", \"rollout\" FROM \"$pins\" \
+           ORDER BY \"space\", \"seq\" DESC) p \
+         JOIN \"$rollouts\" r ON r.\"id\" = p.\"rollout\" \
+         WHERE r.\"state\" = 'aborted' AND r.\"from\" = {v} AND r.\"target\" <> {v}",
+        v = ordo_exec::sql_lit(version),
+    );
+    match control.rows(&sql).await {
+        Ok(rows) => Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let mut it = r.into_iter();
+                Some((it.next()??, it.next()??.parse().ok()?))
+            })
+            .collect()),
+        Err(e) if e.is_missing_table() || e.is_missing_column() => Ok(BTreeMap::new()),
+        Err(e) => Err(EvolveRefusal::Store(e.to_string())),
+    }
+}
+
+/// **What a rollback to `version` does to each tenant not on it**, at
+/// most `limit`. Reads; changes nothing. See [`rollback_tenants`].
+async fn rollback_plan(
+    control: &Pool,
+    version: &str,
+    limit: usize,
+) -> Result<Vec<RollbackEntry>, EvolveRefusal> {
     let v = Versions::on(control);
     let moves = match v.dual_moves().await {
         Ok(m) => m,
         Err(e) if e.is_missing_table() => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let open: BTreeSet<String> = match v.moves().await {
+        Ok(m) => m.into_iter().map(|m| m.space).collect(),
+        Err(e) if e.is_missing_table() => BTreeSet::new(),
         Err(e) => return Err(e.into()),
     };
     let active = v.active_version().await?;
@@ -512,14 +552,25 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
     .map(|(s, _)| s)
     .collect();
     let shared_renames = pairs(control, "SELECT \"entity\", \"field\" FROM \"$renames\"").await?;
+    let by_rollout = if active.as_deref() == Some(version) {
+        rollout_pinned(control, version).await?
+    } else {
+        BTreeMap::new()
+    };
     let (pins, _) = v.all_pins().await?;
     let mut out = Vec::new();
     let mut renamed_by: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (space, on, _) in pins {
-        if on == version || out.len() >= DRY_RUN_LISTED {
+        if on == version || out.len() >= limit {
             continue;
         }
-        let row = |kept: bool, note: String| json!({ "tenant": space, "on": on, "kept": kept, "note": note });
+        let row = |kept: bool, note: String| RollbackEntry {
+            space: space.clone(),
+            on: on.clone(),
+            kept,
+            note,
+            back_from: None,
+        };
         if let Some(m) = moves
             .iter()
             .find(|m| m.space == space && m.phase == MovePhase::Soaking && m.from == version)
@@ -540,14 +591,22 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
             ));
             continue;
         }
-        if active.as_deref() == Some(version) {
+        let rollout = by_rollout.get(&space).copied();
+        if active.as_deref() == Some(version) && (rollout.is_none() || open.contains(&space)) {
             out.push(row(
                 true,
-                format!(
-                    "stays on {on}: {version} is already active, so a rollback moves only the \
-                     tenants soaking on a move from it. `ordo evolve --tenant {space} --to \
-                     {version}` moves this one"
-                ),
+                if rollout.is_some() {
+                    format!(
+                        "stays on {on}: its move is open. `ordo evolve --tenant {space} \
+                         --revert` puts it back"
+                    )
+                } else {
+                    format!(
+                        "stays on {on}: {version} is already active, and its pin was set by \
+                         hand, so a rollback leaves it. `ordo evolve --tenant {space} --to \
+                         {version}` moves this one"
+                    )
+                },
             ));
             continue;
         }
@@ -572,6 +631,34 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
                 }
             })
             .collect();
+        // **After an aborted rollout** (ruled 2026-11-25): a tenant that
+        // rollout pinned with no soak goes back too, when every write is
+        // kept. One that would lose a write stays.
+        if let Some(id) = rollout {
+            out.push(if lost.is_empty() {
+                RollbackEntry {
+                    back_from: Some(id),
+                    ..row(
+                        true,
+                        format!(
+                            "rollout {id} pinned it with no soak: moves back to {version}; \
+                             every field it reads is current"
+                        ),
+                    )
+                }
+            } else {
+                row(
+                    true,
+                    format!(
+                        "stays on {on}: rollout {id} pinned it, and moving it back would lose \
+                         what {on} wrote to {} since its soak closed. `ordo evolve --tenant \
+                         {space} --to {version}` moves it anyway",
+                        lost.join(", ")
+                    ),
+                )
+            });
+            continue;
+        }
         out.push(if lost.is_empty() {
             row(
                 true,
@@ -589,6 +676,58 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
         });
     }
     Ok(out)
+}
+
+/// **What `ordo rollback --dry-run` to `version` says of each tenant** not
+/// on it (§2.5). Reads; changes nothing.
+///
+/// - One soaking on a move from `version` goes back, every write kept.
+/// - One in a tenant build stays: the build moves it.
+/// - When `version` is already active (a rollout to another was aborted):
+///   a tenant that rollout pinned with no soak goes back when every field
+///   it reads is current (ruled 2026-11-25). A pin set by hand stays, and
+///   so does one whose move is open or that would lose a write.
+/// - Otherwise it moves back. A field its version renamed is read from the
+///   old column again. On a tenant's own database that column stopped
+///   being written when its soak closed, so what was written since is lost
+///   to `version`. On the deployment's own database, `$renames` keeps both
+///   columns current until a version drops the `prev` mark.
+pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value>, EvolveRefusal> {
+    Ok(rollback_plan(control, version, DRY_RUN_LISTED)
+        .await?
+        .into_iter()
+        .map(|e| {
+            json!({
+                "tenant": e.space, "on": e.on, "kept": e.kept, "note": e.note,
+                "back": e.back_from.is_some(), "rollout": e.back_from,
+            })
+        })
+        .collect())
+}
+
+/// **`ordo rollback` to `version`, already active after an aborted
+/// rollout** (ruled 2026-11-25): each tenant that rollout pinned itself
+/// with no soak is pinned back to `version`, cause `rollback`, when every
+/// field it reads is current ([`rollback_plan`]). Pins set by hand stay, a
+/// one-tenant hotfix among them. Nothing while a rollout is open. The
+/// tenants moved back. The caller holds the apply lock.
+pub async fn rollout_pins_back(
+    control: &Pool,
+    version: &str,
+    actor: &str,
+) -> Result<Vec<String>, EvolveRefusal> {
+    let back: Vec<String> = rollback_plan(control, version, usize::MAX)
+        .await?
+        .into_iter()
+        .filter(|e| e.back_from.is_some())
+        .map(|e| e.space)
+        .collect();
+    if back.is_empty() {
+        return Ok(back);
+    }
+    Ok(Versions::on(control)
+        .pin_back_from_rollout(&back, version, actor, crate::runtime::now_secs())
+        .await?)
 }
 
 /// Each field a stored step renamed, `(entity, field)` by its new name,

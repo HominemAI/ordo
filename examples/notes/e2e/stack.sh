@@ -314,6 +314,23 @@ wait_for "ordo-host" "$door/health/live" "$last"
 "${prev_ordo:-$ordo}" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
   { cat "$state/apply.log" >&2; echo "stack: ordo apply failed" >&2; exit 1; }
 
+# ── 5a. Every tenant at once ───────────────────────────────────────────────
+# With `rollout.strategy` unset, a deployment that is not dev rolls each
+# apply out a batch at a time (owner, 2026-11-25). This stack is production,
+# and its flows apply a version and expect every tenant on it at once, so
+# the strategy is set to `all`, as `ordo rollout set rollout.strategy all`
+# does. The flows that test a rollout start one by name.
+all_at_once() {
+  "$psql_bin" -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$1" -qc \
+    "CREATE TABLE IF NOT EXISTS \"\$version_settings\" (\"seq\" bigserial PRIMARY KEY, \
+       \"setting\" text NOT NULL, \"value\" text NULL, \"actor\" text NOT NULL, \
+       \"reason\" text NOT NULL, \"at\" bigint NOT NULL); \
+     INSERT INTO \"\$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+       VALUES ('rollout.strategy', 'all', 'notes-e2e', 'the flows apply every tenant at once', \
+       extract(epoch from now())::bigint)"
+}
+all_at_once "$db"
+
 # ── 5b. Staging ────────────────────────────────────────────────────────────
 # The door's settings, with its own database, keys, port and identity
 # handle. Sign-in is passkey alone and makes no tenant: the people who open
@@ -334,6 +351,8 @@ wait_for "ordo-host" "$door/health/live" "$last"
 last=$!
 pids="$pids $last"
 wait_for "staging's ordo-host" "$staging/health/live" "$last"
+# Staging takes a promotion every tenant at once too (5a).
+all_at_once "${db}_staging"
 
 # ── 6. The page ────────────────────────────────────────────────────────────
 (cd "$web" && VITE_ORDO_URL="$page_door" node_modules/.bin/vite build --outDir "$state/page" --emptyOutDir) >"$state/page-build.log" 2>&1 ||

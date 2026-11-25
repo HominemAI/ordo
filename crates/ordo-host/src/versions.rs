@@ -2934,6 +2934,61 @@ impl<'a> Versions<'a> {
         Ok(())
     }
 
+    /// **Pin `spaces` back to `version`, the active version, after an
+    /// aborted rollout** (ruled 2026-11-25): cause `rollback`, a new epoch
+    /// each, the nudge. The caller chose tenants that rollout pinned with
+    /// no soak and whose every write is kept
+    /// (`crate::every_tenant::rollout_pins_back`). Under the pin lock a
+    /// tenant in a move, in a tenant build, or pinned again meanwhile by a
+    /// person is left; so is every tenant while a rollout is open. The
+    /// deployment's own space follows when it is among them. The tenants
+    /// moved.
+    pub async fn pin_back_from_rollout(
+        &self,
+        spaces: &[String],
+        version: &str,
+        actor: &str,
+        at: u64,
+    ) -> Result<Vec<String>, VersionRefusal> {
+        if spaces.is_empty() {
+            return Ok(Vec::new());
+        }
+        ensure_build_tables(self.pool).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if open_rollout_in(&tx).await?.is_some()
+            || active_in(&tx).await?.as_deref() != Some(version)
+        {
+            tx.rollback().await?;
+            return Ok(Vec::new());
+        }
+        let list = sql_list(spaces);
+        // Still the rollout's own pin: its newest `$pins` row names one.
+        let filter = format!(
+            "AND \"$space\" IN ({list}) \
+             AND \"$space\" NOT IN (SELECT \"space\" FROM \"$moves\") {NOT_IN_A_BUILD} \
+             AND (SELECT p.\"rollout\" FROM \"$pins\" p WHERE p.\"space\" = \"$space\" \
+               ORDER BY p.\"seq\" DESC LIMIT 1) IS NOT NULL"
+        );
+        let mut moved: Vec<String> = repin(
+            &tx,
+            &repin_sql(version, actor, PinCause::Rollback, at, Some(&filter)),
+        )
+        .await?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+        if let Some((own, _, _)) = self.own_pin().await? {
+            if spaces.contains(&own)
+                && repin_own_in(&tx, version, actor, PinCause::Rollback, at, None, None).await?
+            {
+                moved.push(own);
+            }
+        }
+        tx.commit().await?;
+        Ok(moved)
+    }
+
     /// Reopen one tenant's refused move (§2.1, increment 7), so the
     /// catch-up tries it again: phase `expanding`, reason cleared. The
     /// move it reopened; `None` when the tenant has no refused move.

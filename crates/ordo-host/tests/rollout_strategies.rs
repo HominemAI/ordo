@@ -358,6 +358,8 @@ async fn group_first_and_by_query_move_their_tenants_first() {
                 strategy: Some(Strategy::Group),
                 group: Some(vec!["spc_d".into(), "spc_b".into()]),
                 canary_wait: Some(0),
+                // No calls reach these tenants here: a quiet first stage passes.
+                health_min_calls: Some(0),
                 batch_size: Some(10),
                 ..Default::default()
             },
@@ -398,6 +400,8 @@ async fn group_first_and_by_query_move_their_tenants_first() {
                 query: Some("members > 0 and tenant != \"spc_a\"".into()),
                 order: Some("members desc".into()),
                 canary_wait: Some(0),
+                // No calls reach these tenants here: a quiet first stage passes.
+                health_min_calls: Some(0),
                 batch_size: Some(1),
                 batch_interval: Some(60),
                 ..Default::default()
@@ -672,6 +676,8 @@ async fn the_least_used_and_the_most_rows_move_first() {
                 query: Some("requests30d is not null".into()),
                 order: Some("requests30d asc".into()),
                 canary_wait: Some(0),
+                // No calls reach these tenants here: a quiet first stage passes.
+                health_min_calls: Some(0),
                 batch_size: Some(5),
                 ..Default::default()
             },
@@ -733,6 +739,8 @@ async fn the_least_used_and_the_most_rows_move_first() {
             query: Some("rows.task > 0".into()),
             order: Some("rows.task desc".into()),
             canary_wait: Some(0),
+            // No calls reach these tenants here: a quiet first stage passes.
+            health_min_calls: Some(0),
             batch_size: Some(5),
             ..Default::default()
         },

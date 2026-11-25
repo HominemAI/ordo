@@ -31,6 +31,7 @@ fn program(db: &str, tag: &str, text: &str) -> String {
 }
 
 fn apply(path: &str, db: &str, extra: &[&str]) -> operator::Outcome {
+    all_at_once(db);
     let mut args: Vec<String> = vec![
         path.into(),
         "--db".into(),
@@ -229,4 +230,22 @@ fn no_wait_and_wait_secs_together_are_a_usage_error() {
         &["--no-wait", "--wait-secs", "3"],
     );
     assert_eq!(out.code, 2, "{}", out.report);
+}
+
+/// `rollout.strategy` `all` on `db`, as `ordo rollout set rollout.strategy
+/// all` stores it, once. With it unset, a deployment that is not dev rolls
+/// an apply out a batch at a time (ruled 2026-11-25); these tests apply and
+/// expect every tenant on the new version at once.
+fn all_at_once(db: &str) {
+    Pg::named(db)
+        .exec(
+            "CREATE TABLE IF NOT EXISTS \"$version_settings\" (\"seq\" bigserial PRIMARY KEY, \
+               \"setting\" text NOT NULL, \"value\" text NULL, \"actor\" text NOT NULL, \
+               \"reason\" text NOT NULL, \"at\" bigint NOT NULL); \
+             INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+               SELECT 'rollout.strategy', 'all', 'test', 'every tenant at once', 0 \
+               WHERE NOT EXISTS (SELECT 1 FROM \"$version_settings\" \
+                 WHERE \"setting\" = 'rollout.strategy')",
+        )
+        .expect("rollout.strategy all");
 }

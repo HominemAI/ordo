@@ -429,7 +429,7 @@ impl Deployment {
                 ordo_host::schema_apply::apply(&control, &program, "notes-test", "migrate").await;
             applied.expect("the deployment's own database takes the change");
         }
-        let report = ordo_host::apply_op::run_program(
+        let report = run_all_at_once(
             &control,
             &ordo_exec::route::SinglePool::new(control.clone()),
             &program,
@@ -1043,7 +1043,7 @@ async fn a_backfill_over_existing_notes_shows_the_new_values_once_it_completes()
     let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
     let program = ordo_host::schema_apply::Program::compile(&next).expect("compiles");
     // Stored, not activated: no database holds the step yet.
-    let stored = ordo_host::apply_op::run_program(
+    let stored = run_all_at_once(
         &control,
         &ordo_exec::route::SinglePool::new(control.clone()),
         &program,
@@ -1223,7 +1223,7 @@ async fn a_rename_under_live_writes_loses_no_write_and_a_revert_in_the_soak_keep
     let next = renamed_body();
     let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
     let program = ordo_host::schema_apply::Program::compile(&next).expect("compiles");
-    let stored = ordo_host::apply_op::run_program(
+    let stored = run_all_at_once(
         &control,
         &ordo_exec::route::SinglePool::new(control.clone()),
         &program,
@@ -1494,7 +1494,7 @@ async fn a_rollout_moves_3_tenants_through_a_rename_under_live_writes_and_a_roll
     let from = d.pin_of(&people[0].space).await.expect("Ada is pinned");
     let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
     let program = ordo_host::schema_apply::Program::compile(&renamed_body()).expect("compiles");
-    let to = ordo_host::apply_op::run_program(
+    let to = run_all_at_once(
         &control,
         &ordo_exec::route::SinglePool::new(control.clone()),
         &program,
@@ -1706,7 +1706,7 @@ async fn an_activation_runs_each_tenant_stored_step_a_seal_included() {
     .await
     .expect("recorded");
     let program = ordo_host::schema_apply::Program::compile(&sealed).expect("compiles");
-    let to = ordo_host::apply_op::run_program(
+    let to = run_all_at_once(
         &control,
         &ordo_exec::route::SinglePool::new(control.clone()),
         &program,
@@ -1779,7 +1779,7 @@ async fn a_move_with_dual_writes_refuses_what_it_cannot_keep_current() {
         let control = control.clone();
         async move {
             let program = ordo_host::schema_apply::Program::compile(&source).expect("compiles");
-            ordo_host::apply_op::run_program(
+            run_all_at_once(
                 &control,
                 &ordo_exec::route::SinglePool::new(control.clone()),
                 &program,
@@ -3364,7 +3364,7 @@ async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
     let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
     let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
     let program = ordo_host::schema_apply::Program::compile(&renamed_body()).expect("compiles");
-    let to = ordo_host::apply_op::run_program(
+    let to = run_all_at_once(
         &control,
         &ordo_exec::route::SinglePool::new(control.clone()),
         &program,
@@ -3627,7 +3627,7 @@ async fn a_share_across_a_version_that_seals_a_field_it_reads_is_refused_naming_
     .await
     .expect("recorded");
     let program = ordo_host::schema_apply::Program::compile(&sealed).expect("compiles");
-    let to = ordo_host::apply_op::run_program(
+    let to = run_all_at_once(
         &control,
         &ordo_exec::route::SinglePool::new(control.clone()),
         &program,
@@ -3679,4 +3679,30 @@ async fn a_share_across_a_version_that_seals_a_field_it_reads_is_refused_naming_
         "{said}"
     );
     d.stop();
+}
+
+/// `apply_op::run_program` with `rollout.strategy` set to `all` first. With
+/// it unset, a deployment that is not dev rolls an apply out a batch at a
+/// time (ruled 2026-11-25); these tests apply and expect every tenant on
+/// the new version at once.
+async fn run_all_at_once(
+    pool: &ordo_exec::Pool,
+    pools: &dyn ordo_exec::route::PoolResolver,
+    program: &ordo_host::schema_apply::Program,
+    notes: Vec<String>,
+    actor: &str,
+    op: &str,
+    activate: bool,
+) -> Result<ordo_host::apply_op::Report, ordo_host::apply_op::ApplyRefused> {
+    ordo_host::rollouts::Rollouts::on(pool)
+        .set_setting(
+            "rollout.strategy",
+            Some("all"),
+            "test",
+            "every tenant at once",
+            0,
+        )
+        .await
+        .expect("rollout.strategy all");
+    ordo_host::apply_op::run_program(pool, pools, program, notes, actor, op, activate).await
 }

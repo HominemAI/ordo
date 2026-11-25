@@ -140,6 +140,7 @@ async fn write(pg: &Pg, pool: &Pool, n: usize, id: &str, kind: CommandKind, from
             at: Timestamp(1_000 + n as u64),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };

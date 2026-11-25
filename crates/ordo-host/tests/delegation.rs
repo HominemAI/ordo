@@ -682,6 +682,7 @@ async fn the_command_log_names_the_agent_and_the_user_and_the_chain_keeps_both()
             at: ordo_commandlog::Timestamp(NOW),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };

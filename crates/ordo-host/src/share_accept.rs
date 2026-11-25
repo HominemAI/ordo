@@ -695,10 +695,30 @@ impl ShareOps {
         let id = newest.id.clone();
         let mut pins = BTreeMap::new();
         let mut expires = newest.expires.0;
+        // A `pins.v2` pin is re-recorded here, its first use since, with
+        // the sealing and release of the version it was made under
+        // (`plan-versions.md` §1.7). Its fields, guards and hash stay as
+        // consented. A registry that cannot write it keeps the old pin, and
+        // the door re-records it on every call all the same.
+        let engine = self.accept.as_ref().map(|w| (w.engine)());
         for r in live.iter().filter(|r| r.id == id) {
             expires = expires.min(r.expires.0);
-            let one = ordo_identity::decode_pins(&r.pin)
+            let mut one = ordo_identity::decode_pins(&r.pin)
                 .ok_or(ShareFailure::Refused("share-pin-undecodable"))?;
+            if let Some(engine) = &engine {
+                for (op, pin) in one.iter_mut() {
+                    if let Some(recorded) = engine.record_contract(pin) {
+                        if let Err(e) = self
+                            .grants
+                            .repin(&SpaceId(space.to_string()), &id, op, &recorded)
+                            .await
+                        {
+                            eprintln!("share: grant {} kept its pins.v2 pin: {e}", id.0);
+                        }
+                        *pin = recorded;
+                    }
+                }
+            }
             pins.extend(one);
         }
         Ok(Window {

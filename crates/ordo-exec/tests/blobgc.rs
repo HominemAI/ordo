@@ -613,6 +613,7 @@ async fn append_stamped(e: &Env, times: &[u64]) {
                 at: ordo_commandlog::Timestamp(*at),
             }],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })

@@ -694,6 +694,10 @@ pub struct Choices {
     /// be reverted; the old columns are kept, orphaned, for a revert by
     /// hand.
     pub one_way: bool,
+    /// `--correspond <part>.<link>` (entity splits, `forward-gaps` ask 8):
+    /// part to the link field naming the whole row each of its rows comes
+    /// from. One part row per whole row.
+    pub correspond: BTreeMap<String, String>,
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -729,6 +733,14 @@ pub enum FillMapping {
     /// An entity rename's copy (B4 on an entity): every row of the old
     /// table, named here, copied whole into the new one, in chunks.
     Copy(String),
+    /// An entity split's copy (B13): one part row per row of the whole,
+    /// its link naming that row, its id `<key>_<whole id>`, the moved
+    /// columns copied.
+    Part {
+        whole: String,
+        link: String,
+        key: String,
+    },
 }
 
 impl FillMapping {
@@ -753,6 +765,9 @@ impl FillMapping {
             FillMapping::Seal => "seal".into(),
             FillMapping::BlindIndex => "blind index".into(),
             FillMapping::Copy(from) => format!("every row of {from}"),
+            FillMapping::Part { whole, link, .. } => {
+                format!("one row per row of {whole}, by {link}")
+            }
         }
     }
 
@@ -862,6 +877,30 @@ impl Choices {
                 (entity.trim().to_string(), field.trim().to_string()),
                 mapping.to_string(),
             );
+        }
+        Ok(())
+    }
+
+    /// Parse `address.person,...` into [`Choices::correspond`]: for each
+    /// part of an entity split, the link field its rows name the whole by.
+    /// That is the one rule built: one part row per whole row.
+    pub fn parse_correspond(&mut self, spec: &str) -> Result<(), String> {
+        for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (entity, link) = part.split_once('.').ok_or_else(|| {
+                format!(
+                    "`{part}`: name the part's link to the entity it is split off, `<part>.<link>`"
+                )
+            })?;
+            let link = link.trim();
+            if link.is_empty() || link.contains(|c: char| !c.is_alphanumeric()) {
+                return Err(format!(
+                    "`{part}`: the rule built is one part row per row, named by a link field \
+                     (`<part>.<link>`); a condition or another rule is not built yet \
+                     (correspond_rule_not_built)"
+                ));
+            }
+            self.correspond
+                .insert(entity.trim().to_string(), link.to_string());
         }
         Ok(())
     }
@@ -2657,7 +2696,19 @@ impl BackfillStep {
         if let FillMapping::Copy(from) = &self.mapping {
             j["copyFrom"] = serde_json::json!(from);
         }
+        // Present only on an entity split's copy.
+        if let FillMapping::Part { whole, link, key } = &self.mapping {
+            j["partOf"] = serde_json::json!({ "whole": whole, "link": link, "key": key });
+        }
         j
+    }
+
+    /// An entity split's copy: the whole, its link and the part's key.
+    pub fn part_of(&self) -> Option<(&str, &str, &str)> {
+        match &self.mapping {
+            FillMapping::Part { whole, link, key } => Some((whole, link, key)),
+            _ => None,
+        }
     }
 
     /// An entity rename's copy: the old table, when this backfill is one.
@@ -2675,6 +2726,7 @@ impl BackfillStep {
             "B4" => "B4",
             "B5" => "B5",
             "B12" => "B12",
+            "B13" => "B13",
             "B7" => "B7",
             "B8" => "B8",
             "B10" => "B10",
@@ -2693,6 +2745,12 @@ impl BackfillStep {
                 FillMapping::BlindIndex
             } else if let Some(from) = v["copyFrom"].as_str() {
                 FillMapping::Copy(from.to_string())
+            } else if v["partOf"].is_object() {
+                FillMapping::Part {
+                    whole: v["partOf"]["whole"].as_str()?.to_string(),
+                    link: v["partOf"]["link"].as_str()?.to_string(),
+                    key: v["partOf"]["key"].as_str()?.to_string(),
+                }
             } else {
                 FillMapping::parse(v["mapping"].as_str()?).ok()?
             },
@@ -3523,7 +3581,10 @@ fn backfill_step(
             )
         }
         FillMapping::Function { .. } => None,
-        FillMapping::Seal | FillMapping::BlindIndex | FillMapping::Copy(_) => {
+        FillMapping::Seal
+        | FillMapping::BlindIndex
+        | FillMapping::Copy(_)
+        | FillMapping::Part { .. } => {
             return Err(refuse(
                 "mapping_invalid",
                 format!("`seal` is not a fill: a stored plan seals `{}.{field}` when the version declares it `sealed`", e.name),
@@ -3614,7 +3675,9 @@ pub fn triage_counted(
     let mut arriving: BTreeSet<(String, String)> = BTreeSet::new();
     for a in assessed {
         match &a.change {
-            Change::AddEntity { entity } | Change::RenameEntity { entity, .. } => {
+            Change::AddEntity { entity }
+            | Change::RenameEntity { entity, .. }
+            | Change::SplitEntity { entity, .. } => {
                 if let Some(e) = schema.native(entity) {
                     for pc in ordo_schema::ddl::physical_columns(e) {
                         arriving.insert((entity.clone(), pc.name));
@@ -3909,6 +3972,16 @@ pub fn triage_counted(
             },
             Change::RenameEntity { from, .. } => {
                 match rename_entity_steps(c, schema, e, live, from, version, choices) {
+                    Err(r) => refused.push(*r),
+                    Ok((s, b, a)) => {
+                        steps.extend(s);
+                        backfills.extend(b);
+                        after.extend(a);
+                    }
+                }
+            }
+            Change::SplitEntity { from, fields, .. } => {
+                match split_entity_steps(c, schema, e, from, fields, version, choices) {
                     Err(r) => refused.push(*r),
                     Ok((s, b, a)) => {
                         steps.extend(s);
@@ -4463,6 +4536,288 @@ fn rename_entity_steps(
         .into_iter()
         .map(|sql| step(Phase::Alter, &e.name, sql))
         .collect();
+    Ok((out, copy, after))
+}
+
+/// **An entity split** (B13; `forward-gaps` ask 8, owner: *"declared
+/// correspondence tool based on prev"*): `part (prev: whole)` while `whole`
+/// stays declared. The step:
+///
+/// - records the split in `$renames` (`field` [`ordo_exec::overlay::SPLIT_FIELD`],
+///   `column` the link, `split` the part's key and moved columns), under its
+///   exclusive lock, first: every write after it keeps both shapes current
+///   (`ordo_exec::overlay::split_mirrors`);
+/// - makes the part's table, its uniques and indexes, and its references
+///   `NOT VALID` then validated, the link checked at commit
+///   (`DEFERRABLE INITIALLY DEFERRED`) so the version before can delete a
+///   whole row and the overlay its part row after;
+/// - copies one part row per whole row with the backfill worker, in
+///   chunks: the rule `--correspond <part>.<link>` states.
+///
+/// The whole keeps the moved columns, kept current, orphaned at the close,
+/// when the link is checked at once again.
+///
+/// Refused, each naming the fix: no stored plan (`split_needs_stored_plan`);
+/// no rule (`split_rule_required`); a link that is not `-> whole owned
+/// unique` and required (`split_entity_link`); a part field the whole does
+/// not hold the same way, or a moved field the whole still declares
+/// (`split_entity_reshaped`); a sealed or file field (`split_entity_sealed`);
+/// a moved field required with no default (`split_default_required`: the
+/// new version's inserts of the whole do not name it); a part with `acl`
+/// or a tree (`split_entity_acl`).
+fn split_entity_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    whole: &str,
+    moved: &[ordo_schema::Field],
+    version: &str,
+    choices: &Choices,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let part = &e.name;
+    let candidate = e
+        .fields
+        .iter()
+        .find(|f| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == whole))
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| whole.to_string());
+    if !choices.renames_backfill {
+        return Err(refuse(
+            "split_needs_stored_plan",
+            format!(
+                "`{part}` is split off `{whole}`. Its rows are copied in chunks by the backfill \
+                 worker, with every write kept in both shapes meanwhile. `ordo apply` does not \
+                 run that. Store the version with `ordo apply --no-activate`, then move tenants \
+                 with `ordo evolve --from <version> --to <version> --correspond \
+                 {part}.{candidate}` and `ordo evolve --tenant <id>`"
+            ),
+        ));
+    }
+    let Some(link_name) = choices.correspond.get(part) else {
+        return Err(refuse(
+            "split_rule_required",
+            format!(
+                "`{part}` takes its rows from `{whole}`, and Ordo does not guess how they \
+                 correspond. State it: `--correspond {part}.{candidate}`, one `{part}` row per \
+                 `{whole}` row, its `{candidate}` naming it"
+            ),
+        ));
+    };
+    let link_fix =
+        format!("declare the link in `{part}`: `{link_name} -> {whole} owned unique`, required");
+    let Some(link) = e.field(link_name) else {
+        return Err(refuse(
+            "split_entity_link",
+            format!("`{part}` declares no `{link_name}`; {link_fix}"),
+        ));
+    };
+    let owned_ref = matches!(&link.ty,
+        ordo_schema::FieldTy::Ref { target, owned: true, .. } if target == whole);
+    if !owned_ref || !link.unique || link.optional {
+        return Err(refuse(
+            "split_entity_link",
+            format!(
+                "`{part}.{link_name}` must name one `{whole}` row each, and be part of it: \
+                 {link_fix}"
+            ),
+        ));
+    }
+    if e.acl_levels.is_some() || e.is_tree {
+        return Err(refuse(
+            "split_entity_acl",
+            format!(
+                "`{part}` declares `acl` or is a tree. A part takes its access from `{whole}` \
+                 through its owned link. Drop it from `{part}` in this version"
+            ),
+        ));
+    }
+    let whole_now = schema.native(whole);
+    let mut columns = Vec::new();
+    let mut cleared = Vec::new();
+    for f in e.declared().filter(|f| f.name != *link_name) {
+        let Some(was) = moved.iter().find(|m| m.name == f.name) else {
+            return Err(refuse(
+                "split_entity_reshaped",
+                format!(
+                    "`{part}.{}` is not a field of `{whole}` in the version serving now. A split \
+                     moves fields as they are. Split them in this version, and add or change \
+                     fields in the next",
+                    f.name
+                ),
+            ));
+        };
+        if f.sealed || f.private || was.sealed || f.is_content() {
+            return Err(refuse(
+                "split_entity_sealed",
+                format!(
+                    "`{whole}.{}` is sealed or a file. A sealed value is bound to its entity, \
+                     and a file's handle to its row, so neither moves into `{part}`. Keep it in \
+                     `{whole}`",
+                    f.name
+                ),
+            ));
+        }
+        let ty = |x: &ordo_schema::Field| {
+            (
+                ordo_schema::ddl::column_ty(x),
+                x.text_max,
+                x.optional,
+                x.ty.clone(),
+            )
+        };
+        if ty(f) != ty(was) {
+            return Err(refuse(
+                "split_entity_reshaped",
+                format!(
+                    "`{part}.{}` is not declared as `{whole}.{}` was (its type or whether it is \
+                     optional). A split moves fields as they are; change them in the next \
+                     version",
+                    f.name, f.name
+                ),
+            ));
+        }
+        if whole_now.is_some_and(|w| w.field(&f.name).is_some()) {
+            return Err(refuse(
+                "split_entity_reshaped",
+                format!(
+                    "`{whole}.{}` is still declared, so `{part}.{}` would copy it, not move it. \
+                     Remove it from `{whole}`",
+                    f.name, f.name
+                ),
+            ));
+        }
+        let default = ordo_schema::ddl::column_default(was)
+            .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+        if !was.optional && default.is_none() {
+            return Err(refuse(
+                "split_default_required",
+                format!(
+                    "`{whole}.{}` is required with no default. While both versions write, the \
+                     new version's inserts of `{whole}` do not name it, and the version before \
+                     would read a value nobody wrote. Give it a default, or make it optional, in \
+                     a version before this one",
+                    f.name
+                ),
+            ));
+        }
+        cleared.push(serde_json::json!([
+            was.column(),
+            default.unwrap_or_else(|| "NULL".into())
+        ]));
+        columns.push(f.column());
+    }
+    let ddl_err = |x: ordo_schema::SchemaError| {
+        refuse("mapping_invalid", format!("{}: {}", x.code, x.message))
+    };
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": e.key, "columns": columns, "cleared": cleared,
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(part),
+            lit(whole),
+            lit(ordo_exec::overlay::SPLIT_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(Phase::Alter, part, sql))
+    .collect();
+    out.push(step(
+        Phase::Table,
+        part,
+        ordo_schema::ddl::create_table(e).map_err(ddl_err)?,
+    ));
+    for f in &e.fields {
+        out.extend(ordo_schema::ddl::unique(e, f).map(|sql| step(Phase::Alter, part, sql)));
+    }
+    for key in &e.unique_keys {
+        out.extend(
+            ordo_schema::ddl::composite_unique(e, key)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, part, sql)),
+        );
+    }
+    for key in &e.all_indexes() {
+        out.extend(
+            ordo_schema::ddl::index(e, key, false)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, part, sql)),
+        );
+    }
+    let link_fk = format!("{part}${link_name}$fk");
+    for f in &e.fields {
+        if let Some(sql) = ordo_schema::ddl::foreign_key(schema, e, f) {
+            let sql = if f.name == *link_name {
+                format!(
+                    "{} DEFERRABLE INITIALLY DEFERRED;\n",
+                    sql.trim_end().trim_end_matches(';')
+                )
+            } else {
+                sql
+            };
+            out.extend(not_valid_then_validate(
+                c,
+                e,
+                &format!("{part}${}$fk", f.name),
+                &sql,
+            ));
+        }
+    }
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: part.clone(),
+        field: String::new(),
+        column: link.column(),
+        column_ty: String::new(),
+        mapping: FillMapping::Part {
+            whole: whole.to_string(),
+            link: link.column(),
+            key: e.key.clone(),
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    // At the close the link is checked at once again, as declared.
+    let after = vec![step(
+        Phase::Alter,
+        part,
+        format!(
+            "ALTER TABLE {} ALTER CONSTRAINT {} NOT DEFERRABLE;\n",
+            ordo_schema::ddl::q(part),
+            ordo_schema::ddl::q(&link_fk)
+        ),
+    )];
     Ok((out, copy, after))
 }
 

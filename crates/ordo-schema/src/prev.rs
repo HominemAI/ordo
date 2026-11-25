@@ -17,7 +17,14 @@
 //!   asks 15 and 17). `prev_type` is left for a file, whose handle no
 //!   expression computes.
 //! - `prev_mapping_required`: a move (`prev(orders.note)`), which needs a
-//!   rule the plan does not offer yet.
+//!   rule the plan does not offer yet. An entity merge is spelled with
+//!   moves, so it is refused the same way.
+//! - **Entity splits** (built 2026-11-25): an entity `(prev: whole)` while
+//!   `whole` is still declared is a part split off it, an [`EntityPart`].
+//!   It takes the fields it declares from `whole`, one row per `whole` row,
+//!   by the correspondence rule the stored plan states (`--correspond`).
+//!   Two entities `(prev: x)` with `x` gone is a split with no whole,
+//!   refused as `entity_split_needs_whole`.
 //! - **Splits and merges** (increment 15b): several fields each
 //!   `prev(name)` split `name`; one field `prev(first, last)` merges two.
 //!   Each resolves to a [`FieldMap`]. Its mapping is the stored plan's
@@ -93,6 +100,19 @@ pub struct Renames {
     pub entities: BTreeMap<String, String>,
     /// The splits and merges.
     pub maps: Vec<FieldMap>,
+    /// The entity splits: each part, and the entity it is split off.
+    pub parts: Vec<EntityPart>,
+}
+
+/// **An entity split** (`forward-gaps` ask 8): `part (prev: whole)` while
+/// `whole` stays declared. The part's fields, its link to `whole` aside,
+/// move from `whole` into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityPart {
+    pub part: String,
+    pub whole: String,
+    /// The part's declared fields, in declaration order.
+    pub fields: Vec<String>,
 }
 
 /// **A field split or merge** (increment 15b): the old fields of `entity`
@@ -149,6 +169,18 @@ impl Renames {
             .find(|m| m.entity == entity && m.from.iter().any(|f| f.name == field))
     }
 
+    /// The entity `part` is split off, when it is a part.
+    pub fn part_of(&self, part: &str) -> Option<&EntityPart> {
+        self.parts.iter().find(|p| p.part == part)
+    }
+
+    /// The part `whole.field` moves into, when a split moves it.
+    pub fn moved_to(&self, whole: &str, field: &str) -> Option<&EntityPart> {
+        self.parts
+            .iter()
+            .find(|p| p.whole == whole && p.fields.iter().any(|f| f == field))
+    }
+
     /// The old name of `entity`, when the step renames it from one.
     pub fn entity_from(&self, entity: &str) -> Option<&str> {
         self.entities
@@ -170,7 +202,7 @@ pub fn check(prior: Option<&Schema>, declared: &Schema) -> PrevReport {
             continue;
         };
         match &m.field {
-            None => entity_mark(prior, m, &mut out),
+            None => entity_mark(prior, declared, m, &mut out),
             Some(f) => field_mark(prior, declared, e, f, m, &mut out),
         }
     }
@@ -198,6 +230,17 @@ pub fn renames(prior: Option<&Schema>, declared: &Schema) -> Renames {
             continue;
         }
         match &m.field {
+            // A part split off an entity still declared.
+            None if declared.native(&m.prev[0]).is_some() => {
+                r.parts.push(EntityPart {
+                    part: m.entity.clone(),
+                    whole: m.prev[0].clone(),
+                    fields: declared
+                        .native(&m.entity)
+                        .map(|e| e.declared().map(|f| f.name.clone()).collect())
+                        .unwrap_or_default(),
+                });
+            }
             None => {
                 r.entities.insert(m.prev[0].clone(), m.entity.clone());
             }
@@ -284,7 +327,7 @@ fn entity_in_prior<'a>(prior: &'a Schema, declared: &Schema, name: &str) -> Opti
     })
 }
 
-fn entity_mark(prior: &Schema, m: &PrevMark, out: &mut PrevReport) {
+fn entity_mark(prior: &Schema, declared: &Schema, m: &PrevMark, out: &mut PrevReport) {
     let old = &m.prev[0];
     if prior.native(&m.entity).is_some() {
         out.stale.push(PrevIssue {
@@ -306,6 +349,34 @@ fn entity_mark(prior: &Schema, m: &PrevMark, out: &mut PrevReport) {
                 "the version serving now has no `{old}`. `prev` reaches one version back only"
             ),
             fix: format!("name an entity of the version serving now, or remove `prev: {old}`"),
+        });
+        return;
+    }
+    // Several entities from one that is gone: a split with no whole. Only
+    // a split whose whole keeps its name is built.
+    let claims: Vec<&str> = declared
+        .prev
+        .iter()
+        .filter(|x| x.field.is_none() && x.prev == m.prev)
+        .map(|x| x.entity.as_str())
+        .collect();
+    if declared.native(old).is_none() && claims.len() > 1 {
+        out.errors.push(PrevIssue {
+            class: "entity_split_needs_whole",
+            mark: m.clone(),
+            message: format!(
+                "{} each claim `{old}`, which is gone. A split keeps the entity it splits: \
+                 its rows stay where they are, and each part takes one row per row",
+                claims
+                    .iter()
+                    .map(|c| format!("`{c}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            fix: format!(
+                "keep `{old}` declared as one of the parts (rename it in a version of its own), \
+                 and mark only the others `(prev: {old})`"
+            ),
         });
     }
 }
@@ -359,13 +430,15 @@ fn field_mark(
             mark: m.clone(),
             message: format!(
                 "`{}.{f} prev({})` is a move from another entity, which needs a rule for \
-                 which related row gives the value, and the plan does not offer one yet",
+                 which related row gives the value. Moves, and entity merges spelled with \
+                 them, are not built yet",
                 e.name,
                 m.prev.join(", ")
             ),
             fix: format!(
                 "add `{f}` as a new field and fill it with an op, then remove the old \
-                 field in a later version"
+                 field in a later version. To move fields into a new entity, split it: \
+                 `entity <part> (prev: <entity>)` with a link `-> <entity> owned unique`"
             ),
         });
         return;

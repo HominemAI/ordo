@@ -41,6 +41,7 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
             [--fill <entity>.<field>=<expression>|fn <name> [secrets a,b] [hosts h,i][;...]]
             [--audit-images <entity>.<field>[,...]] [--keep-plaintext <entity>.<field>[,...]]
             [--reverse <entity>.<old field>=<expression>[;...]] [--one-way]
+            [--correspond <part>.<link>[,...]]
             [--digest <sha256:...>] [--run]
             [--approve-sign-in-removal <count>]  --host <h> ...
     render the step, refuse it if it has errors, store it; print the receipt and its digest,
@@ -60,6 +61,10 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     for each new field, over the old ones, and a --reverse for each old field, over the new
     ones, which keeps it current through the soak. With no reverse it is one way, and needs
     --one-way. The pre-checks list the rows a mapping does not parse, and preview it on 3 rows.
+    A rename that changes the type is converted the same way: --fill with `int(x)`, `text(x)`
+    or `bool(x)`, and --reverse.
+    An entity split (`entity <part> (prev: <entity>)` while <entity> stays declared) takes
+    --correspond <part>.<link>: one part row per row, its owned unique link naming it.
 ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent). A step that rewrites data moves the tenant
@@ -88,6 +93,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--keep-plaintext",
         "--reverse",
         "--one-way",
+        "--correspond",
         "--digest",
         "--run",
         "--list",
@@ -144,6 +150,7 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "keepPlaintext": flags.named_value("--keep-plaintext"),
             "reverse": flags.named_value("--reverse"),
             "oneWay": flags.has("--one-way"),
+            "correspond": flags.named_value("--correspond"),
             "expectDigest": flags.named_value("--digest"),
             "run": flags.has("--run"),
             "approveSignInRemoval": flags.named_value("--approve-sign-in-removal"),

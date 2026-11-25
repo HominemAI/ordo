@@ -614,6 +614,13 @@ fn renamed_fields(receipt: &str) -> Vec<(String, String)> {
             .into_iter()
             .map(|(entity, _)| (entity, String::new())),
     );
+    // An entity split: the part, kept current with the whole until the
+    // split's soak closes.
+    out.extend(
+        crate::evolve::entity_splits(&r)
+            .into_iter()
+            .map(|(part, _)| (part, String::new())),
+    );
     out
 }
 

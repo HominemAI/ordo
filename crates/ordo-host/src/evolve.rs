@@ -480,6 +480,10 @@ pub fn options_text(c: &Choices) -> String {
     if c.one_way {
         out.push_str("\none-way");
     }
+    // An entity split's rule: present only when stated.
+    for (part, link) in &c.correspond {
+        out.push_str(&format!("\ncorrespond {part}.{link}"));
+    }
     out
 }
 
@@ -500,6 +504,11 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
         let bad = || EvolveRefusal::Options(format!("a stored fill does not read back: `{line}`"));
         if line == "one-way" {
             c.one_way = true;
+            continue;
+        }
+        if let Some(spec) = line.strip_prefix("correspond ") {
+            c.parse_correspond(spec)
+                .map_err(|e| EvolveRefusal::Options(format!("--correspond {e}")))?;
             continue;
         }
         if let Some(spec) = line.strip_prefix("reverse ") {
@@ -746,6 +755,20 @@ pub async fn render_stored(
             )));
         }
     }
+    // A rule for an entity the step does not split off another is refused
+    // the same way.
+    for part in options.correspond.keys() {
+        if !changes
+            .iter()
+            .any(|c| matches!(c, Change::SplitEntity { entity, .. } if entity == part))
+        {
+            return Err(EvolveRefusal::Options(format!(
+                "`{part}` is not an entity the step from `{}` to `{}` splits off another; drop \
+                 it from `--correspond`",
+                a.version, b.version
+            )));
+        }
+    }
     if options.one_way
         && !changes
             .iter()
@@ -973,6 +996,19 @@ pub async fn render_stored(
         .collect();
     if !renamed.is_empty() {
         receipt["entityRenames"] = Value::Array(renamed);
+    }
+    // An entity split: present only when the step splits one.
+    let parts: Vec<Value> = changes
+        .iter()
+        .filter_map(|c| match c {
+            Change::SplitEntity { entity, from, .. } => {
+                Some(json!({ "entity": entity, "from": from }))
+            }
+            _ => None,
+        })
+        .collect();
+    if !parts.is_empty() {
+        receipt["entitySplits"] = Value::Array(parts);
     }
     let digest = digest_of(&receipt);
     let readers = reader_notices(&x, &y, &changes, at);
@@ -1289,6 +1325,30 @@ fn fix_for(c: &Change, class: &str) -> String {
         (Change::RenameEntity { from, .. }, "rename_entity_acl") => {
             format!("keep the name `{from}`: an entity with `acl` is not renamed yet")
         }
+        (Change::SplitEntity { entity, from, .. }, "split_rule_required") => format!(
+            "state the rule: `--correspond {entity}.<link>`, one `{entity}` row per `{from}` row"
+        ),
+        (Change::SplitEntity { entity, from, .. }, "split_entity_link") => {
+            format!("declare the link in `{entity}`: `<name> -> {from} owned unique`, required")
+        }
+        (Change::SplitEntity { from, .. }, "split_entity_reshaped") => format!(
+            "move the fields of `{from}` as they are in this version, and change them in the next"
+        ),
+        (Change::SplitEntity { from, .. }, "split_entity_sealed") => {
+            format!("keep sealed and file fields in `{from}`")
+        }
+        (Change::SplitEntity { from, .. }, "split_default_required") => format!(
+            "give the moved fields of `{from}` a default, or make them optional, in a version \
+             before this one"
+        ),
+        (Change::SplitEntity { entity, .. }, "split_entity_acl") => {
+            format!("drop `acl` and the tree from `{entity}`: it takes its access from its link")
+        }
+        (Change::SplitEntity { .. }, "split_needs_stored_plan") => {
+            "store the version with `ordo apply --no-activate`, then move tenants with \
+             `ordo evolve --tenant <id>`"
+                .into()
+        }
         (_, "plan_refused") => "the change is refused by ruling; declare it another way".into(),
         // A split or a merge (15b): the refusal names the option to give.
         (
@@ -1493,6 +1553,21 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
                 Some("the rename read backwards: the old table was kept and written by both versions, and the new one goes".into()),
             )
         }
+        // An entity split read backwards: the whole kept the moved columns,
+        // kept current by both versions, so the split leaves `$renames` and
+        // the part goes.
+        Change::SplitEntity { entity, from, .. } => (
+            vec![
+                format!("{};", ordo_exec::overlay::RENAMES_DDL),
+                format!(
+                    "DELETE FROM \"$renames\" WHERE \"entity\" = '{}' AND \"from\" = '{}';",
+                    entity.replace('\'', "''"),
+                    from.replace('\'', "''")
+                ),
+                format!("DROP TABLE {};", q(entity)),
+            ],
+            Some("the split read backwards: the whole kept the moved columns and both versions kept them current, and the part goes".into()),
+        ),
         Change::ChangePlaces { .. } | Change::ChangeType { .. } => (
             Vec::new(),
             Some("the reverse is the stored plan from the later version back, with the same option".into()),
@@ -1524,6 +1599,16 @@ fn reader_notices(x: &Program, y: &Program, changes: &[Change], at: u64) -> Vec<
             | Change::UnsealField { entity, field } => (entity, Some(field.clone())),
             Change::DropEntity { entity } => (entity, None),
             Change::RenameEntity { from, .. } => (from, None),
+            Change::SplitEntity { from, fields, .. } => (
+                from,
+                Some(
+                    fields
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ),
             Change::MapFields { entity, from, .. } => (
                 entity,
                 Some(
@@ -2332,6 +2417,19 @@ pub async fn run_step_with(
     // A split or a merge (15b) keeps both shapes current only in a move,
     // whose overlays and soak it needs.
     let receipt_maps: Value = serde_json::from_str(&plan.receipt).unwrap_or_default();
+    if !entity_splits(&receipt_maps).is_empty() {
+        return Err(with_label(EvolveRefusal::Run {
+            database: String::new(),
+            from: String::new(),
+            to: String::new(),
+            class: "split_needs_move",
+            why: "the step splits an entity, which keeps both shapes current only in a move: \
+                  run it per tenant with `ordo evolve --tenant <id> --to <version>`, or roll it \
+                  out with `ordo rollout`"
+                .into(),
+            transient: false,
+        }));
+    }
     if !sa::MapStep::all_of(&receipt_maps).is_empty() {
         return Err(with_label(EvolveRefusal::Run {
             database: String::new(),
@@ -2861,11 +2959,27 @@ pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
         return false;
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
-    let entities = !entity_renames(&receipt).is_empty();
+    let entities = !entity_renames(&receipt).is_empty() || !entity_splits(&receipt).is_empty();
     (!fills.is_empty() || entities)
         && fills
             .iter()
-            .all(|b| b["sql"].is_string() || b["copyFrom"].is_string())
+            .all(|b| b["sql"].is_string() || b["copyFrom"].is_string() || b["partOf"].is_object())
+}
+
+/// Each entity a stored step splits off another, `(part, whole)`, as its
+/// receipt records it.
+pub(crate) fn entity_splits(receipt: &Value) -> Vec<(String, String)> {
+    receipt["entitySplits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r["entity"].as_str()?.to_string(),
+                r["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Each entity a stored step renames, `(new name, old name)`, as its
@@ -3102,6 +3216,8 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 // `entity.field=<expression>`, `;`-separated: a split's or a
                 // merge's reverse for each old field (15b).
                 text("reverse", 4096, false),
+                // `part.link`, comma-separated: an entity split's rule.
+                text("correspond", 1024, false),
                 // Accept a split or a merge with no reverse: one way.
                 flag("oneWay"),
                 // The digest the step rendered to where it was rehearsed.
@@ -3200,6 +3316,11 @@ pub async fn execute(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
             )
+            .and_then(|mut c| {
+                c.parse_correspond(text("correspond").unwrap_or_default())
+                    .map_err(|e| EvolveRefusal::Options(format!("--correspond {e}")))?;
+                Ok(c)
+            })
             .map_err(|e| e.to_exec_error(WHAT))?;
             let run = bound
                 .0

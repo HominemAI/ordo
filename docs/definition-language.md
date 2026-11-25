@@ -1006,6 +1006,11 @@ exclusively `since` or a parameter, so nondeterminism has one keyword.
   for field splits, legal anywhere), and `+` for concatenation
   (`"lease ends " + end`; non-text operands render canonically); matching
   stays in operators
+- Conversions (built 2026-11-25 for type casts on a rename, legal
+  anywhere): `text(x)`, the value's canonical text; `int(t)`, the whole
+  number `t` spells, spaces around it allowed; `bool(t)`, `true` or `false`
+  as `t` spells it, in any case. Each is null where the value does not
+  convert, never an error
 
 ### Ownership [settled]
 
@@ -2084,6 +2089,57 @@ entity customers (key: cust, prev: clients) {
     `preview.values` is on: off in production, on elsewhere.
   - It runs as a move (`ordo evolve --tenant`, or a rollout). `ordo apply`
     and `ordo evolve --run` refuse it.
+- **Type casts** (built 2026-11-25, increment 15c). A rename whose type
+  changes, `qty: int = 0 prev(count)` over `count: text`, is a one-to-one
+  map. Its conversion is the plan's `--fill`, never guessed:
+  `--fill 'item.qty=int(count)' --reverse 'item.count=text(qty)'`.
+  - The conversions are `text(x)`, `int(t)` and `bool(t)`, and `round(x, n)`
+    for places. Each gives null where a value does not convert, so the
+    pre-check lists the row and the move waits.
+  - A mapping that gives another kind than its field holds is refused
+    (`map_cast_required`), naming the conversion. One that loses places
+    names `round`: Ordo never rounds unasked.
+  - A conversion Ordo has no function for (text to a date) is refused as
+    `map_cast_not_built`. A `money` field is not filled by a mapping yet
+    (`map_type_not_built`).
+- **Entity splits** (built 2026-11-25, increment 15c). An entity marked
+  `(prev: whole)` while `whole` stays declared is a part split off it. It
+  takes the fields it declares from `whole`, as they were declared there:
+
+  ```
+  entity notes { title: text }
+  entity stars (key: star, prev: notes) {
+    note -> notes owned unique
+    starred: bool = false
+  }
+  ```
+
+  ```
+  ordo evolve --from 0.3.4 --to 0.3.10 --correspond stars.note
+  ```
+
+  - `--correspond <part>.<link>` is the rule: one part row per row of
+    `whole`, its link naming that row, its id `<part key>_<whole id>`. The
+    link is `-> whole owned unique` and required, so the part takes the
+    whole's access.
+  - The plan previews the rule on 3 rows: the part row each gives, with
+    values where `preview.values` is on.
+  - The step makes the part's table and copies one row per whole row in
+    chunks. The whole keeps the moved columns. Through `$renames` every
+    write keeps both shapes current: a write of the whole by the version
+    before reaches its part row, and a write of a part row by the new
+    version reaches the whole's old columns. Deleting a part row puts them
+    back to their defaults. A revert in the soak loses nothing.
+  - At the close the moved columns are orphaned and the split leaves
+    `$renames`.
+  - A moved field must be optional or have a default: the new version's
+    inserts of the whole do not name it.
+  - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
+- **Not built:** moves from another entity, `prev(orders.note)`, and
+  entity merges, which are spelled with them (`prev_mapping_required`); a
+  split whose whole is renamed or gone (`entity_split_needs_whole`); a
+  correspondence rule other than one row per row
+  (`correspond_rule_not_built`).
 - A clean `ordo apply` names each mark whose rename has landed in every
   environment. `ordo apply --remove-landed-prev` cuts those marks from the
   source. A mark has landed when this deployment is the last environment of
@@ -2105,8 +2161,16 @@ serving, nothing is checked and the program is created as declared:
 | Class | Refused |
 |---|---|
 | `prev_unresolved` | the old name is not in the version serving now |
-| `prev_type` | the old and new fields' types differ; no cast option exists yet |
-| `prev_mapping_required` | a move `prev(orders.note)`; no rule for which related row gives the value exists yet |
+| `prev_type` | a rename to or from a file: a file's handle is never computed |
+| `prev_mapping_required` | a move `prev(orders.note)`, or an entity merge spelled with moves; no rule for which related row gives the value exists yet |
+| `map_cast_required`, `map_cast_not_built`, `map_type_not_built` | a mapping that gives another kind than its field holds, or loses places; one Ordo has no conversion for; a `money` field filled by a mapping |
+| `split_rule_required` | an entity split with no `--correspond` |
+| `split_entity_link` | a part whose link is not `-> whole owned unique` and required |
+| `split_entity_reshaped` | a part field the whole did not declare the same way, or a moved field the whole still declares |
+| `split_entity_sealed`, `split_entity_acl` | a sealed or file field moved; a part with `acl` or a tree |
+| `split_default_required` | a moved field required with no default |
+| `split_needs_stored_plan`, `split_needs_move` | an entity split through `ordo apply`, or `ordo evolve --run` |
+| `entity_split_needs_whole` | two or more entities `(prev: x)` with `x` gone |
 | `map_fill_required` | a split's or a merge's new field with no `--fill` |
 | `one_way_unconfirmed` | an old field with no `--reverse`, and no `--one-way` |
 | `map_needs_stored_plan`, `map_needs_move` | a split or a merge through `ordo apply`, or `ordo evolve --run` |

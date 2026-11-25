@@ -433,6 +433,27 @@ async fn expanded(target: &Pool, overlay: &Value) -> Result<bool, EvolveRefusal>
     let live = ordo_exec::migrate::live_shape(target, target.schema())
         .await
         .map_err(|e| EvolveRefusal::Store(format!("reading the live schema: {e}")))?;
+    // A move or a merge has expanded once `$renames` records it: its
+    // columns alone may be an earlier step's orphans.
+    for (entity, from, _) in merges_of(overlay) {
+        let recorded = match target
+            .rows(&format!(
+                "SELECT 1 FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {} \
+                 AND \"field\" = {}",
+                sql_lit(&from),
+                sql_lit(&entity),
+                sql_lit(ordo_exec::overlay::MERGE_FIELD)
+            ))
+            .await
+        {
+            Ok(r) => !r.is_empty(),
+            Err(e) if e.is_missing_table() => false,
+            Err(e) => return Err(EvolveRefusal::Store(format!("$renames: {e}"))),
+        };
+        if !recorded {
+            return Ok(false);
+        }
+    }
     Ok(overlay["backfills"]
         .as_array()
         .into_iter()
@@ -567,7 +588,7 @@ impl MoveContext<'_> {
     /// [`LOAD_WAIT`]) for this node to serve the version the pin names, so
     /// the command answers once the tenant is served again. The pin stream
     /// loads a version a pin names when it reads the pin.
-    async fn take(&self, tenant: &str) {
+    pub(crate) async fn take(&self, tenant: &str) {
         let Some(s) = self.spaces else {
             return;
         };

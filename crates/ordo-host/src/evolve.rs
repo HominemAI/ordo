@@ -1397,6 +1397,10 @@ fn fix_for(c: &Change, class: &str) -> String {
             "give each moved field a default in `{entity}`, or make it optional, and give a \
              required field that stays behind a default in a version before this one"
         ),
+        (Change::MoveFields { entity, .. }, "move_column_orphaned") => format!(
+            "prune the orphaned column of `{entity}` first (`ordo evolve --prune \
+             {entity}.<field>`), or move the field under another name"
+        ),
         (Change::MoveFields { from, .. }, "move_acl") => {
             format!("drop `acl` and the tree from `{from}` in a version before this one")
         }
@@ -3889,6 +3893,16 @@ pub async fn execute(
                     )
                 })?;
             drop(lock);
+            // This node takes the new pin now and serves the tenant on it
+            // before answering, as a move's switch does: the pin stream
+            // alone left the space closed on a version first served here.
+            crate::dual_writes::MoveContext {
+                control: pool,
+                pools: ops.pools.as_ref(),
+                spaces: ops.spaces.get().map(|s| s.as_ref()),
+            }
+            .take(tenant)
+            .await;
             ops.record(
                 caller,
                 REPLAY,

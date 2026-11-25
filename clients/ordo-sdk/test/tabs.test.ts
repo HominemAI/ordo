@@ -262,6 +262,35 @@ describe('tabs share one set of feeds', () => {
     sb.stop();
   });
 
+  itTabs('a version change empties every tab, and the refill reaches every tab', async () => {
+    // plan-versions.md §1.4, owner ruling Q7 (2026-11-23): the leader drops
+    // the device copy and tells the other tabs to drop their rows in memory.
+    const { door, tab } = browser();
+    const a = await tab();
+    const b = await tab();
+    const key = a.manager.sync(tasks);
+    b.manager.sync(tasks);
+    (await door.nth(0)).push(load([task(1), task(2)], 3));
+    const sa = ids(a, key);
+    const sb = ids(b, key);
+    await until(() => sa.now() === 'task_1,task_2' && sb.now() === 'task_1,task_2');
+
+    const first = await door.nth(0);
+    first.push(frame('version_changed', { error: { code: 'space_unavailable', message: 'open it again' } }));
+    first.close();
+    // Both tabs empty: the follower's memory as well as the leader's.
+    await until(() => sa.now() === '' && sb.now() === '', 'every tab to drop its rows');
+    expect(a.replica.poisoned || b.replica.poisoned).toBe(false);
+
+    // One reconnect, at the leader; its refill reaches the follower.
+    const again = await door.nth(1);
+    again.push(load([task(1, 'new shape')], 9));
+    await until(() => sa.now() === 'task_1' && sb.now() === 'task_1', 'the refill in every tab');
+    expect(door.open()).toHaveLength(1);
+    sa.stop();
+    sb.stop();
+  });
+
   it('with no BroadcastChannel or locks, each tab leads itself', async () => {
     const { door, tab } = browser(() => null);
     const a = await tab();

@@ -1027,6 +1027,14 @@
   "mark": "done",
   "at": "2026-10-09T09:31:18+00:00"
  },
+ "federation-ordo-deployments-share-data-through:2": {
+  "mark": "done",
+  "at": "2026-11-25T23:17:35+00:00"
+ },
+ "federation-ordo-deployments-share-data-through:3": {
+  "mark": "done",
+  "at": "2026-11-25T23:18:52+00:00"
+ },
  "feed-cap:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -1975,6 +1983,18 @@
   "mark": "done",
   "at": "2026-11-25T20:00:24+00:00"
  },
+ "rollouts-the-default-strategy-when-none:4": {
+  "mark": "done",
+  "at": "2026-11-25T23:20:24+00:00"
+ },
+ "rollouts-the-default-strategy-when-none:5": {
+  "mark": "done",
+  "at": "2026-11-25T23:20:27+00:00"
+ },
+ "rollouts-the-default-strategy-when-none:6": {
+  "mark": "done",
+  "at": "2026-11-25T23:20:30+00:00"
+ },
  "rotation-objects:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -2118,6 +2138,18 @@
  "serve-sealed-reads:1": {
   "mark": "done",
   "at": "2026-10-05T07:44:49+00:00"
+ },
+ "settings-3-choices-left-after-the:1": {
+  "mark": "done",
+  "at": "2026-11-25T23:15:48+00:00"
+ },
+ "settings-3-choices-left-after-the:2": {
+  "mark": "questions",
+  "at": "2026-11-25T23:16:25+00:00"
+ },
+ "settings-3-choices-left-after-the:3": {
+  "mark": "done",
+  "at": "2026-11-25T23:16:46+00:00"
  },
  "shared-identity:1": {
   "mark": "done",
@@ -2832,16 +2864,16 @@
   "at": "2026-11-03T03:47:07+00:00"
  },
  "versions-three-design-choices-left-after:1": {
-  "mark": "questions",
-  "at": "2026-11-25T20:12:27+00:00"
+  "mark": "done",
+  "at": "2026-11-25T23:19:51+00:00"
  },
  "versions-three-design-choices-left-after:2": {
-  "mark": "questions",
-  "at": "2026-11-25T19:55:17+00:00"
+  "mark": "done",
+  "at": "2026-11-25T23:20:05+00:00"
  },
  "versions-three-design-choices-left-after:3": {
-  "mark": "questions",
-  "at": "2026-11-25T19:56:10+00:00"
+  "mark": "done",
+  "at": "2026-11-25T23:20:07+00:00"
  },
  "vscode-extension:1": {
   "mark": "done",

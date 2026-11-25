@@ -2689,6 +2689,10 @@ impl AccessChecker for SwappableAccess {
         self.current().versions_disagree(token, space, op)
     }
 
+    fn grant_killed(&self, token: &str, space: &str, op: &str) -> Option<String> {
+        self.current().grant_killed(token, space, op)
+    }
+
     /// A tenant still being set up answers its own person `tenant_not_ready`
     /// (owner, 2026-10-21). Anyone else, a share grant and a delegation
     /// included, keeps the door's uniform denial.

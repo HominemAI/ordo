@@ -1467,6 +1467,9 @@ impl<'a> Rollouts<'a> {
             })?;
         match sa::schema_state(self.pool, &program.schema).await {
             Ok(sa::SchemaState::Matches { .. }) => {}
+            // A rename the tenants there take by moves with dual writes,
+            // as each tenant with a database of its own does (11b part 3).
+            Ok(_) if crate::every_tenant::moves_there(self.pool, &target).await => {}
             Ok(other) => {
                 return Err(RolloutRefusal::DeploymentBehind {
                     version: target,
@@ -2066,6 +2069,22 @@ impl<'a> Rollouts<'a> {
             return Ok(false);
         };
         if step.state == TenantState::Moved {
+            return Ok(false);
+        }
+        // Its database still records the version before, and the tenants
+        // there move with dual writes: the own space waits for the first
+        // move to expand and copy it (11b part 3).
+        if crate::every_tenant::moves_there(self.pool, &r.target).await
+            && !crate::every_tenant::copied_there(self.pool, &r.target).await
+        {
+            self.set_tenant(
+                r.id,
+                DEPLOYMENT_STEP,
+                TenantState::Waiting,
+                "waits for the first move on the deployment's own database to copy its rows",
+                at,
+            )
+            .await?;
             return Ok(false);
         }
         Versions::on(self.pool)
@@ -2736,7 +2755,21 @@ async fn batch(
                 }
             }
         } else {
-            pin(pool, r, &t.space, now).await?
+            // On the deployment's own database: its stored step as a move
+            // with dual writes when its path is one (11b part 3), under the
+            // apply lock; else a pin, that database holding the target.
+            if apply_lock.is_none() {
+                apply_lock = Some(crate::apply_op::ApplyLock::take(pool).await.ok().flatten());
+            }
+            match apply_lock.as_ref().and_then(|l| l.as_ref()) {
+                None => Outcome::Waiting(
+                    "an apply holds the apply lock; it is tried again on the next turn".into(),
+                ),
+                Some(_) => match Box::pin(by_stored_path(ops, r, &t.space, now)).await? {
+                    Some(outcome) => outcome,
+                    None => pin(pool, r, &t.space, now).await?,
+                },
+            }
         };
         s.settle(t, outcome, &seen, &mut work, out).await?;
     }

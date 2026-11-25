@@ -26,6 +26,9 @@
  * 5. `ordo rollout abort`, then `ordo rollback --version <from> --dry-run`
  *    names each as kept, and `ordo rollback --version <from>` puts the 3
  *    back. After a reload, every title each person typed is there.
+ * 6. Ann shared a note with Ben before the rollout. Her move killed that
+ *    share, and it stays closed after the rollback: Ben's page says so and
+ *    holds none of it. Ann shares again and Ben reads it (11b part 3).
  *
  * A regression looks like a typed title missing after a reload, a tenant
  * the rollout moves without a copy (never `backfilling`), a failed tenant,
@@ -37,7 +40,7 @@
 
 import { expect, test } from '@playwright/test';
 import { door, developer } from '../developer.js';
-import { owner } from '../people.js';
+import { acceptInvitation, invitationFor, owner, sharedList } from '../people.js';
 import { addNote, applyProgram, ensureServing, servingVersion, signedIn, stack, unique } from '../support.js';
 import { holds, openV2, renamedTitle, retitle, watchTenant } from './moves.js';
 
@@ -73,6 +76,16 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
       tenants.push(tenant());
       titles.push(mine);
     }
+    // Ann shares a note with Ben before the rollout (11b part 3).
+    const [ann, ben] = [people[0]!.page, people[1]!.page];
+    const sharedTitle = unique('shared-for-ben-');
+    await test.step('Ann shares a note with Ben, who reads it', async () => {
+      await addNote(ann, sharedTitle, 'Ann wrote this for Ben.');
+      const link = await invitationFor(ann, sharedTitle);
+      await ann.getByRole('button', { name: 'Close', exact: true }).click();
+      await acceptInvitation(ben, link, 'Ben', sharedTitle);
+      await openV2(ben);
+    });
 
     await test.step(`${to} is stored, and its step runs on the deployment's own database`, () => {
       expect(ordo(['apply', renamedTitle(to, sealed), '--no-activate'])).toContain(to);
@@ -140,6 +153,18 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
     await test.step(`ordo rollback puts the 3 back on ${from}`, () => {
       const back = ordo(['rollback', '--version', from]);
       for (const t of tenants) expect(back).toContain(`reverted   ${t} back on ${from} in its soak`);
+    });
+
+    await test.step(`Ben's share, closed by Ann's move, stays closed after the rollback; shared again, he reads it`, async () => {
+      await ben.reload();
+      await signedIn(ben);
+      await ben.getByRole('button', { name: 'Shared with me', exact: true }).click();
+      await expect(sharedList(ben).getByText('This share was closed.')).toBeVisible({ timeout: 60_000 });
+      await expect(sharedList(ben).getByText(sharedTitle)).toHaveCount(0);
+      const again = await invitationFor(ann, sharedTitle);
+      await ann.getByRole('button', { name: 'Close', exact: true }).click();
+      await acceptInvitation(ben, again, 'Ben', sharedTitle);
+      await openV2(ben);
     });
 
     await test.step(`after a reload on ${from}, every title each person typed is there`, async () => {

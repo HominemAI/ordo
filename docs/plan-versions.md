@@ -530,12 +530,24 @@ tenant on X was pinned to the active version's shape.
   `op_pin`): each entity in a pin records the entity's sealed fields
   (`sealed` or `blob private`) and each field's `release member` effect
   as source text. A versioned pin encodes as `pins.v3`; `pins.v2` still
-  decodes, as a pin whose sealing and release are unknown and so are not
-  compared. A field the pin reached that one version seals and the other
+  decodes, and is re-recorded on use (below). A field the pin reached that one version seals and the other
   does not, or whose release effect differs, refuses as
   `versions_disagree`, naming the field. A sealed field the op never
   reached is not compared. Tests: `ordo-identity` `tests.rs` (6),
   `share_contract.rs` (3, compiled programs through the node's engine).
+- **Old grants are compared too** (2026-11-25, branch
+  `evo-share-contract-followup`): a `pins.v2` pin is re-recorded from the
+  version it was made under (`AccessEngine::record_contract`). The door
+  does it on every call; opening the window writes it back to the
+  registry as `pins.v3` (`GrantRegistry::repin`). Its fields, guards and
+  hash stay as consented. A pin whose version this node does not serve
+  stays as it was. Tests: `tests.rs`
+  (`a_pins_v2_grant_is_re_recorded_from_its_version_and_compared_on_use`);
+  `notes_app.rs`
+  (`a_share_across_a_version_that_seals_a_field_it_reads_is_refused_naming_the_field`):
+  on a running node, an old grant is re-recorded at first use, then Ada's
+  tenant alone moves to a version sealing `body` and Bo's window is
+  refused naming it.
 - Left: the dual-write shape during a move and moving share partners
   together.
 - Tests: `ordo-identity` `tests.rs` (6); `notes_app.rs`, a share both

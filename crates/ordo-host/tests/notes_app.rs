@@ -3478,3 +3478,199 @@ async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
     assert_eq!(status, 200, "{body}");
     d.stop();
 }
+
+/// One op's pin written as `pins.v2` did, before sealing and release were
+/// recorded: what a grant made before 2026-11-24 holds in the registry.
+fn as_pins_v2(op: &str, pin: &ordo_identity::OpPin) -> String {
+    fn put(out: &mut String, s: &str) {
+        out.push_str(&format!("{}:{s}", s.len()));
+    }
+    let set =
+        |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>().join(",");
+    let guard = |g: &ordo_identity::GuardPin| match g {
+        ordo_identity::GuardPin::Every => String::new(),
+        ordo_identity::GuardPin::Walk(w) => w.clone(),
+    };
+    let flag = |b: bool| if b { "1" } else { "0" };
+    let mut out = String::new();
+    put(&mut out, "pins.v2");
+    put(&mut out, "1");
+    put(&mut out, op);
+    let hash: String = pin
+        .manifest_hash
+        .0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    put(&mut out, &hash);
+    put(&mut out, pin.version.as_deref().unwrap_or(""));
+    put(&mut out, flag(pin.unguarded));
+    put(&mut out, &pin.entities.len().to_string());
+    for e in &pin.entities {
+        put(&mut out, &e.entity);
+        put(&mut out, &set(&e.read));
+        put(&mut out, &set(&e.written));
+        put(&mut out, flag(e.structure));
+        put(&mut out, &guard(&e.read_guard));
+        put(&mut out, &guard(&e.write_guard));
+        put(&mut out, flag(e.caller_restricted));
+    }
+    out
+}
+
+/// `plan-versions.md` §1.7, sealing in the sharing rule, on a running
+/// node. Ada (notes v2) shares a note with Bo through `allNotes`, which
+/// reads `body`. Bo's grant is then written back as a `pins.v2` grant, as
+/// one made before sealing was recorded. Bo opening his window re-records
+/// it as `pins.v3` from the version it was made under. Ada's tenant alone
+/// moves to a version that seals `body`; Bo's stays on v2, so the 2
+/// tenants serve 2 versions. Bo's window into Ada's tenant is refused as
+/// `versions_disagree`, naming `body` and both versions.
+///
+/// A regression looks like a share reading a field one version seals and
+/// the other keeps in plaintext, or an old grant never compared on sealing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_share_across_a_version_that_seals_a_field_it_reads_is_refused_naming_the_field() {
+    let _shared = shared().await;
+    let base: String = without_functions(V2)
+        .lines()
+        .filter(|l| !l.starts_with("reader "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let blobs = format!(
+        "fs:{}",
+        std::env::temp_dir()
+            .join(format!("ordo-notes-share-sealed-{}", std::process::id()))
+            .display()
+    );
+    let settings = [
+        ("ORDO_BLOB_STORE", blobs.as_str()),
+        ("ORDO_DEV_UNSAFE_BLOB_STORE", "1"),
+    ];
+    let d = Deployment::boot_program("ordo_notes_share_sealed", &base, Some(PAGE), &settings).await;
+    let ada = sign_up(&d, &device(61, "ada"), "Ada");
+    let bo = sign_up(&d, &device(62, "bo"), "Bo");
+    let from = d.pin_of(&ada.space).await.expect("Ada is pinned");
+    let note = create_note(&d, &ada, "Venue", "the hall");
+    let token = share_note(&d, &ada, &bo, &note, "Bo");
+    let (status, _, body) = read_window(&d, &ada.space, &token);
+    assert_eq!(status, 200, "Bo reads Ada's note: {body}");
+
+    // Bo's grant, as a grant made before sealing was recorded.
+    let control = Pool::connect(cfg(&d.db)).await.expect("the control pool");
+    let registry = format!(
+        "SELECT \"grant_id\", \"op\", \"pin\" FROM \"$capabilitygrant\" \
+         WHERE \"$space\" = '{}' AND \"grant_id\" LIKE 'shr_%'",
+        ada.space
+    );
+    let rows = control.rows(&registry).await.expect("the registry");
+    assert!(!rows.is_empty(), "the share is recorded");
+    for r in &rows {
+        let (id, op, text) = (
+            r[0].clone().unwrap(),
+            r[1].clone().unwrap(),
+            r[2].clone().unwrap(),
+        );
+        assert!(text.starts_with("7:pins.v3"), "{text}");
+        let pins = ordo_identity::decode_pins(&text).expect("decodes");
+        let old = as_pins_v2(&op, &pins[&op]);
+        assert!(!ordo_identity::decode_pins(&old).expect("v2 decodes")[&op].contract);
+        control
+            .rows(&format!(
+                "UPDATE \"$capabilitygrant\" SET \"pin\" = '{old}' \
+                 WHERE \"grant_id\" = '{id}' AND \"op\" = '{op}'"
+            ))
+            .await
+            .expect("written back as v2");
+    }
+
+    // Its first use re-records it, from the version it was made under.
+    let token = window_of(&d, &bo, &ada.space);
+    let (status, _, body) = read_window(&d, &ada.space, &token);
+    assert_eq!(status, 200, "{body}");
+    for r in &control.rows(&registry).await.expect("the registry") {
+        let (op, text) = (r[1].clone().unwrap(), r[2].clone().unwrap());
+        assert!(text.starts_with("7:pins.v3"), "re-recorded: {text}");
+        let pin = &ordo_identity::decode_pins(&text).expect("decodes")[&op];
+        assert!(pin.contract, "{text}");
+        assert_eq!(pin.version.as_deref(), Some(from.as_str()));
+    }
+
+    // Ada's tenant alone moves to a version that seals `body`.
+    let sealed = ordo_plan::artifact::with_declared(
+        &base.replace("  body:  text = \"\"\n", "  body:  text sealed\n"),
+        "0.2.0",
+        "0.2.1",
+    )
+    .expect("notes v2 declares @ 0.2.0");
+    assert!(sealed.contains("text sealed"), "the body line moved");
+    ordo_host::schema_apply::record(
+        &control,
+        &ordo_host::schema_apply::Record {
+            kind: ordo_exec::migrate::kind::VERSION,
+            from: None,
+            to: &from,
+            actor: "notes-test",
+            op: "ordo apply",
+            changes: "",
+            ddl: "",
+            phase: ordo_exec::migrate::phase::APPLIED,
+            note: "",
+        },
+    )
+    .await
+    .expect("recorded");
+    let program = ordo_host::schema_apply::Program::compile(&sealed).expect("compiles");
+    let to = ordo_host::apply_op::run_program(
+        &control,
+        &ordo_exec::route::SinglePool::new(control.clone()),
+        &program,
+        vec![],
+        "notes-test",
+        "ordo apply",
+        false,
+    )
+    .await
+    .expect("stored")
+    .version;
+    let owner = deployment_owner_token();
+    let (status, out) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.evolve",
+        json!({"from": from, "to": to}),
+    );
+    assert_eq!(status, 200, "{out}");
+    let (status, out) = d.op(
+        HOME,
+        &owner,
+        "POST",
+        "std.deployment.replay",
+        json!({"tenant": ada.space, "to": to, "soak": "0"}),
+    );
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(d.pin_of(&ada.space).await.as_deref(), Some(to.as_str()));
+    assert_eq!(
+        d.pin_of(&bo.space).await.as_deref(),
+        Some(from.as_str()),
+        "Bo's tenant stays on v2"
+    );
+
+    // Refused, naming the field and both versions.
+    // A 503 is the node still loading the new version.
+    let (status, _, body) = eventually("Bo's window meets the sealing version", || {
+        let token = window_of(&d, &bo, &ada.space);
+        let got = read_window(&d, &ada.space, &token);
+        (got.0 != 200 && got.0 != 503).then_some(got)
+    })
+    .0;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], json!("versions_disagree"), "{body}");
+    let said = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("`body` is sealed") && said.contains(&from) && said.contains(&to),
+        "{said}"
+    );
+    d.stop();
+}

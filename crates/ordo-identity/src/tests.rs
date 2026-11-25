@@ -3553,21 +3553,45 @@ fn a_share_is_refused_when_the_two_versions_differ_in_release() {
 }
 
 /// A grant pinned before sealing and release were recorded (`pins.v2`)
-/// is compared on fields and guards as before: its sealing is unknown,
-/// so it is not compared.
+/// does not escape them: on use, its pin is re-recorded from the version
+/// it was made under, then compared as any other. Made on 0.1.0, where
+/// `amount` is plain, and called on 0.2.0, which seals it: refused by
+/// name. A version this engine does not serve leaves it as it was.
 #[test]
-fn a_pin_with_no_recorded_contract_is_not_compared_on_sealing() {
-    let mut v1 = contracted(&["amount"], &[], &[]);
-    let v2 = contracted(&["amount"], &["amount"], &[]);
-    v1.contract = false;
-    v1.version = Some("0.1.0".into());
+fn a_pins_v2_grant_is_re_recorded_from_its_version_and_compared_on_use() {
+    let v1 = contracted(&["amount"], &[], &[("amount", "remove")]);
+    let v2 = contracted(&["amount"], &["amount"], &[("amount", "remove")]);
     let (e, pins) = engine_on_versions(v1.clone(), v2);
+    let mut old_pin = v1.clone();
+    old_pin.contract = false;
+    old_pin.version = Some("0.1.0".into());
+    for en in &mut old_pin.entities {
+        en.sealed.clear();
+        en.release.clear();
+    }
+
+    let recorded = e.record_contract(&old_pin).expect("0.1.0 is served");
+    assert!(recorded.contract);
+    assert_eq!(recorded.entities[0].release, v1.entities[0].release);
+    assert!(recorded.entities[0].sealed.is_empty());
+    assert_eq!(
+        recorded.manifest_hash, old_pin.manifest_hash,
+        "as consented"
+    );
+    assert!(e.record_contract(&recorded).is_none(), "once is enough");
+    let mut elsewhere = old_pin.clone();
+    elsewhere.version = Some("0.0.9".into());
+    assert!(e.record_contract(&elsewhere).is_none());
+
     move_to(&pins, &space(), "0.2.0");
     let old = crate::principal::CapabilityGrant::new(
         GrantId("shr_v2".into()),
         space(),
-        [("txns.list".to_string(), v1)].into_iter().collect(),
+        [("txns.list".to_string(), old_pin)].into_iter().collect(),
         T1,
     );
+    let said = disagrees(&e, &holder(old.clone()));
+    assert!(said.contains("`amount` is sealed"), "{said}");
+    move_to(&pins, &space(), "0.1.0");
     assert!(e.check(&holder(old), &space(), "txns.list", T0).is_allow());
 }

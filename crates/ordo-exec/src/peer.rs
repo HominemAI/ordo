@@ -1210,6 +1210,24 @@ pub async fn grant_readers_with(
                 .extend(o.columns.iter().cloned());
         }
     }
+    // **An entity rename in progress**: a reader of the new table also
+    // reads the old one until the rename lands, so a read app still on the
+    // old name reads through the soak (Q1). The rename leaves `$renames`
+    // when it lands, and the old table's grant goes then.
+    let renamed_from: std::collections::BTreeMap<String, String> = match pool
+        .rows("SELECT \"entity\", \"from\" FROM \"$renames\" WHERE \"field\" = ''")
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|r| {
+                let mut it = r.into_iter();
+                Some((it.next()??, it.next()??))
+            })
+            .collect(),
+        Err(e) if e.is_missing_table() => Default::default(),
+        Err(e) => return Err(SchemaRefusal::Database(e)),
+    };
     let mut want: std::collections::BTreeMap<String, (String, Held)> = Default::default();
     let mut out = Vec::new();
     for (r, (reader, role)) in schema.readers.iter().zip(&roles) {
@@ -1233,6 +1251,11 @@ pub async fn grant_readers_with(
                 _ => {
                     entry.1.insert((t.clone(), String::new(), "SELECT".into()));
                 }
+            }
+            if let Some(old) = renamed_from.get(t).filter(|o| present.contains_key(*o)) {
+                entry
+                    .1
+                    .insert((old.clone(), String::new(), "SELECT".into()));
             }
         }
         out.push(format!(

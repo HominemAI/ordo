@@ -145,6 +145,7 @@ pub fn render(
     backfills: &[BackfillStep],
     after: &[String],
     held: &[sa::Held],
+    entities: &[(String, String)],
 ) -> Option<Value> {
     let mut forward: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
     let mut reverse: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
@@ -160,6 +161,10 @@ pub fn render(
         list.last_mut().expect("just pushed")
     }
     for bf in backfills {
+        // An entity rename's copy: `$renames` keeps both tables current.
+        if bf.copy_from().is_some() {
+            continue;
+        }
         let sql = bf.sql.as_ref()?;
         let col = q(&bf.column);
         let set = match bf.code {
@@ -229,7 +234,28 @@ pub fn render(
         "after": after,
         "orphans": orphans,
         "held": held.iter().map(sa::Held::to_json).collect::<Vec<_>>(),
+        // Each entity the step renames, `{entity, from}`: both tables are
+        // kept current through `$renames` by every write, and the rename
+        // lands at the close (`schema_apply::land_entity_rename`).
+        "entities": entities.iter().map(|(entity, from)| json!({
+            "entity": entity, "from": from,
+        })).collect::<Vec<_>>(),
     }))
+}
+
+/// Each entity a move renames, `(new name, old name)`, from its overlays.
+fn entities_of(overlay: &Value) -> Vec<(String, String)> {
+    overlay["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            Some((
+                e["entity"].as_str()?.to_string(),
+                e["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn overlay_of(v: &Value) -> Option<MoveOverlay> {
@@ -306,8 +332,11 @@ async fn expanded(target: &Pool, overlay: &Value) -> Result<bool, EvolveRefusal>
         .filter_map(BackfillStep::from_json)
         .all(|bf| {
             live.table(&bf.entity)
-                .is_some_and(|t| t.columns.contains_key(&bf.column))
-        }))
+                .is_some_and(|t| bf.copy_from().is_some() || t.columns.contains_key(&bf.column))
+        })
+        && entities_of(overlay)
+            .iter()
+            .all(|(entity, _)| live.table(entity).is_some()))
 }
 
 /// Raise the pin fence in the tenant's database to `epoch`: a node still
@@ -494,7 +523,9 @@ pub async fn run(
                 .filter_map(|s| s.as_str().map(String::from))
                 .collect();
             let held = crate::evolve::held_of(&receipt);
-            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after, &held) else {
+            let entities = crate::evolve::entity_renames(&receipt);
+            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after, &held, &entities)
+            else {
                 return Err(cx.err(
                     tenant,
                     &plan.from,
@@ -898,7 +929,7 @@ pub async fn close(
         .map_err(|e| run_err("internal", e))?;
     }
     // The old columns: kept, never written again, and recorded (§2.7).
-    let left: Vec<ordo_exec::orphans::Left> = overlay["orphans"]
+    let mut left: Vec<ordo_exec::orphans::Left> = overlay["orphans"]
         .as_array()
         .into_iter()
         .flatten()
@@ -915,6 +946,21 @@ pub async fn close(
             })
         })
         .collect();
+    // Each entity rename lands: the references move to the new table, the
+    // rename leaves `$renames`, and the old table is an orphan.
+    for (entity, from) in entities_of(&overlay) {
+        let landed = sa::land_entity_rename(&target, &y.schema, &entity, &from)
+            .await
+            .map_err(|e| run_err("execute_failed", e))?;
+        if landed {
+            left.push(ordo_exec::orphans::Left {
+                entity: from,
+                field: None,
+                columns: Vec::new(),
+                sealed: false,
+            });
+        }
+    }
     let at = crate::runtime::now_secs();
     ordo_exec::orphans::record(&target, &left, Some(&m.from), &m.to, actor, at)
         .await
@@ -938,7 +984,10 @@ pub async fn close(
     }
     let mut orphaned: Vec<String> = left
         .iter()
-        .map(|l| format!("{}.{}", l.entity, l.field.as_deref().unwrap_or("")))
+        .map(|l| match &l.field {
+            Some(f) => format!("{}.{f}", l.entity),
+            None => l.entity.clone(),
+        })
         .collect();
     orphaned.extend(
         sa::record_orphans(&target, &x.schema, &y, Some(&m.from), actor)

@@ -220,6 +220,18 @@ between them is needed.
   snapshot before it waits. A soak's close and a rename's reverse delete
   the row, so an orphaned old column is not written again. A move's own
   overlay takes precedence.
+- **Entity renames** (built 2026-11-24, branch `evo-entity-rename`). The
+  `$renames` row has an empty `field`. The step makes the new table and
+  copies every row with the backfill worker, in chunks (`FillMapping::Copy`),
+  each chunk's rows read `FOR SHARE` so a write to one waits for that chunk
+  only. `ordo apply` refuses an entity rename, naming `ordo evolve`. Every write, in
+  a move or not, copies each row it wrote and deletes each row it deleted
+  in the other name's table (`entity_mirrors`, `INSERT … ON CONFLICT`). A
+  reference into the old table is checked at commit until the rename
+  lands, and the load gate reads it as the same reference
+  (`same_definition` in `ordo_exec::shape`). The rename lands at the
+  soak's close, or when a version drops the mark: references move to the
+  new table, the old one is an orphan.
 - The overlay is keyed by version, never by phase: forward for a write on
   X, reverse on Y. A node that took the new pin before the new move cannot
   run one version's overlay under the other. The pin stream reads the

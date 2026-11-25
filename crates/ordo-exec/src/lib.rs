@@ -2475,10 +2475,34 @@ pub struct BlockingTx {
     /// `is_unique_violation`), for the same reason as `conflict`: a release
     /// rule reads it to tell "rows still stand in the way" from an outage.
     constraint: std::sync::atomic::AtomicBool,
+    /// While a seal runs: what this write's own statements returned for
+    /// the seal overlay (`overlay::SealCapture`).
+    seal_capture: std::sync::Mutex<overlay::SealCapture>,
 }
 
 impl ordo_conformance::write::WriteDb for BlockingTx {
     fn rows(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+        let rewritten = self.seal_capture.lock().expect("seal capture").rewrite(sql);
+        if let Some((entity, with_returning)) = rewritten {
+            // The statement answered no rows before its `RETURNING`; the
+            // rows returned are the overlay's, and the caller sees none.
+            let rows = self.run(&with_returning)?;
+            self.seal_capture
+                .lock()
+                .expect("seal capture")
+                .record(&entity, &rows);
+            return Ok(Vec::new());
+        }
+        self.run(sql)
+    }
+
+    fn refused_by_constraint(&self) -> bool {
+        self.constraint.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl BlockingTx {
+    fn run(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
         self.handle.block_on(self.tx.rows(sql)).map_err(|e| {
             if e.is_retryable() {
                 self.conflict
@@ -2490,10 +2514,6 @@ impl ordo_conformance::write::WriteDb for BlockingTx {
             }
             e.to_string()
         })
-    }
-
-    fn refused_by_constraint(&self) -> bool {
-        self.constraint.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2924,15 +2944,18 @@ impl Executor {
         let log_after = log;
         let conflict = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conflict_seen = conflict.clone();
-        let (result, tx, mut scratch) = tokio::task::spawn_blocking(move || {
+        let capture = overlay::SealCapture::for_seals(&overlay::seals_for(&self.schema, &seals));
+        let (result, tx, mut scratch, mut capture) = tokio::task::spawn_blocking(move || {
             let db = BlockingTx {
                 tx,
                 handle,
                 conflict,
                 constraint: std::sync::atomic::AtomicBool::new(false),
+                seal_capture: std::sync::Mutex::new(capture),
             };
             let out = work(&db, &mut scratch);
-            (out, db.tx, scratch)
+            let capture = db.seal_capture.into_inner().expect("seal capture");
+            (out, db.tx, scratch, capture)
         })
         .await
         .map_err(|e| ExecFail::Compile(format!("write task: {e}")))?;
@@ -2999,6 +3022,7 @@ impl Executor {
                         &self.space.0,
                         &sealing,
                         &written,
+                        &mut capture,
                     )
                     .await
                     {

@@ -1174,7 +1174,7 @@ pub async fn assess_with(
         if let (Change::MapFields { entity, from, to }, true) = (&a.change, choices.stored) {
             if let Some(e) = schema.native(entity) {
                 if let Ok((_, bfs, _, _)) = map_step(&a.change, e, live, from, to, choices) {
-                    let probed = unparsed(pool, schema, &bfs).await;
+                    let probed = Box::pin(unparsed(pool, schema, &bfs)).await;
                     if matches!(probed, Ok(Probe::Dirty { .. })) {
                         a.refused.push("probe_not_empty".into());
                     }

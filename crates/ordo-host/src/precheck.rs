@@ -660,7 +660,7 @@ async fn check_one(
                 crate::evolve::release_held(a, &options.held);
             }
             let issues = issues_of(&label, &p, &plan.to);
-            let preview = previews(&pool, &label, &p, show).await;
+            let preview = Box::pin(previews(&pool, &label, &p, show)).await;
             (label, Answer::Checked(issues, preview))
         }
         Err(why) => {

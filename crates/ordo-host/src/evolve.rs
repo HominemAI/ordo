@@ -3221,7 +3221,9 @@ pub async fn execute(
                     .to_exec_error(WHAT)
                 })?),
             };
-            let done = evolve_approved(
+            // Boxed, as each large step below is: the door's task runs on a
+            // worker's own stack.
+            let done = Box::pin(evolve_approved(
                 pool,
                 text("from").unwrap_or_default(),
                 text("to").unwrap_or_default(),
@@ -3230,7 +3232,7 @@ pub async fn execute(
                 approved,
                 caller,
                 crate::runtime::now_secs(),
-            )
+            ))
             .await
             .map_err(|e| e.to_exec_error(WHAT))?;
             if let Some(removal) = done.sign_in.as_ref().filter(|r| r.people > 0) {
@@ -3263,9 +3265,13 @@ pub async fn execute(
             row["ran"] = Value::Null;
             // The pre-checks on every database (27w). The plan is stored
             // either way: it is the same everywhere, and the data is not.
-            let checks = crate::precheck::precheck(pool, ops.pools.as_ref(), &done.plan)
-                .await
-                .map_err(|e| e.to_exec_error("the plan was stored and not checked"))?;
+            let checks = Box::pin(crate::precheck::precheck(
+                pool,
+                ops.pools.as_ref(),
+                &done.plan,
+            ))
+            .await
+            .map_err(|e| e.to_exec_error("the plan was stored and not checked"))?;
             row["prechecks"] = checks.to_json();
             if run && !checks.issues.is_empty() {
                 return Err(EvolveRefusal::PreChecks {
@@ -3299,9 +3305,11 @@ pub async fn execute(
                         ctx.fence = Some((ops.home.clone(), epoch + 1));
                     }
                 }
-                let ran = run_step_with(pool, pool, "default", &done.plan, caller, &ctx)
-                    .await
-                    .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
+                let ran = Box::pin(run_step_with(
+                    pool, pool, "default", &done.plan, caller, &ctx,
+                ))
+                .await
+                .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
                 let own_moved = if sealing && !matches!(ran, StepRun::Backfilling { .. }) {
                     let at = crate::runtime::now_secs();
                     Versions::on(pool)

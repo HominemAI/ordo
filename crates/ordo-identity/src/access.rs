@@ -810,6 +810,33 @@ impl AccessEngine {
         let _ = self.killed_grants.set(killed);
     }
 
+    /// **A pin made before sealing and release were recorded
+    /// (`pins.v2`), re-recorded from the version it was made under**
+    /// (`plan-versions.md` §1.7). Sealing and release belong to an entity in
+    /// a version, so each entity the pin reaches takes them from any op of
+    /// that version that reaches it. `None` when the pin already has them,
+    /// names no version, or names one this engine does not serve, or when
+    /// an entity it reaches is in no op of that version: it is then compared
+    /// as before.
+    pub fn record_contract(&self, pinned: &OpPin) -> Option<OpPin> {
+        if pinned.contract {
+            return None;
+        }
+        let ops = self.by_version.get(pinned.version.as_deref()?)?;
+        let mut out = pinned.clone();
+        for e in &mut out.entities {
+            let found = ops
+                .values()
+                .filter(|p| p.contract)
+                .flat_map(|p| p.entities.iter())
+                .find(|x| x.entity == e.entity)?;
+            e.sealed = found.sealed.clone();
+            e.release = found.release.clone();
+        }
+        out.contract = true;
+        Some(out)
+    }
+
     /// The version serving `space`, when the engine knows versions.
     pub fn version_of(&self, space: &SpaceId) -> Option<String> {
         self.tenant_versions.get().and_then(|f| f(space))
@@ -990,6 +1017,10 @@ impl AccessEngine {
         for (op, pinned) in grant.pins() {
             match (&pinned.version, &serving) {
                 (Some(was), Some(now)) if was != now && self.by_version.contains_key(now) => {
+                    // A `pins.v2` pin is compared on its version's sealing
+                    // and release too, never let past them for good.
+                    let recorded = self.record_contract(pinned);
+                    let pinned = recorded.as_ref().unwrap_or(pinned);
                     let found = match deployed.get(op) {
                         None => Some(pins::Disagreement {
                             entity: None,

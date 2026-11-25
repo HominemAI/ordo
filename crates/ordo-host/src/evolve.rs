@@ -594,7 +594,7 @@ pub struct ReaderNotice {
     /// The change in words.
     pub change: String,
     /// The earliest the reader's grant on the old column can end: the
-    /// render's time plus the soak's default length, unix seconds.
+    /// render's time plus `soak.length` as stored, unix seconds.
     pub grant_ends_not_before: u64,
 }
 
@@ -1048,7 +1048,8 @@ pub async fn render_stored(
         receipt["entityMoves"] = Value::Array(moves);
     }
     let digest = digest_of(&receipt);
-    let readers = reader_notices(&x, &y, &changes, at);
+    let soak = crate::dual_writes::stored_soak_secs(pool).await?;
+    let readers = reader_notices(&x, &y, &changes, at, soak);
     Ok(Rendered {
         from: a.version.clone(),
         to: b.version.clone(),
@@ -1693,8 +1694,14 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
 /// F1: each reader of a table the step retypes or removes a field of, or
 /// removes whole. The read app cannot see the reader's file, so every
 /// reader of the table is listed, whether or not it maps the field.
-fn reader_notices(x: &Program, y: &Program, changes: &[Change], at: u64) -> Vec<ReaderNotice> {
-    let ends = at + SOAK_DEFAULT_DAYS * 86_400;
+fn reader_notices(
+    x: &Program,
+    y: &Program,
+    changes: &[Change],
+    at: u64,
+    soak: u64,
+) -> Vec<ReaderNotice> {
+    let ends = at + soak;
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for c in changes {
@@ -3771,7 +3778,9 @@ pub async fn execute(
                     Some(s) => {
                         crate::dual_writes::soak_secs(s).map_err(|e| e.to_exec_error(WHAT))?
                     }
-                    None => crate::dual_writes::SOAK_DEFAULT_SECS,
+                    None => crate::dual_writes::stored_soak_secs(pool)
+                        .await
+                        .map_err(|e| e.to_exec_error(WHAT))?,
                 };
                 let ctx = move_context(ops, bound).await?;
                 let lock = take_lock(pool).await.map_err(|e| e.to_exec_error(WHAT))?;

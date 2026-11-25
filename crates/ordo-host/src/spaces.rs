@@ -174,7 +174,8 @@ pub enum SpaceRefusal {
     /// version at boot and when the pin stream names one.
     Unserved { space: String, version: String },
     /// The tenant's version was unloaded for idleness and is loading again,
-    /// and did not land within [`WAKE_WAIT`]. Retryable, as `server_busy`.
+    /// and did not land within `versions.wake_wait`. Retryable, as
+    /// `server_busy`.
     Waking { space: String, version: String },
     /// **The tenant's database is not the shape of the version it is
     /// pinned to** (§1.4 step 6, the shape fingerprint). Only asked of a
@@ -354,11 +355,6 @@ impl Reconciled {
     }
 }
 
-/// How long a signed-in request waits for its tenant's version to load
-/// again after an idle eviction ([`Spaces::resolve_waking`]). A load
-/// measured well under a second in `tests/versions_background.rs`.
-pub const WAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// The resolver: one deployment, N spaces.
 pub struct Spaces {
     deployment: Arc<Deployment>,
@@ -489,13 +485,16 @@ impl Spaces {
     /// **[`Spaces::resolve`] for a signed-in caller, waiting for a woken
     /// version** (`versions.idle_evict_after`, `plan-versions.md` §1.5).
     /// A tenant whose version was unloaded for idleness wakes it, and the
-    /// request waits up to [`WAKE_WAIT`] for the load, so the person sees
+    /// request waits up to `versions.wake_wait` (default 5 seconds; a load
+    /// measured well under a second in `tests/versions_background.rs`) for
+    /// the load, so the person sees
     /// an ordinary answer. Past it, [`SpaceRefusal::Waking`], which the
     /// door answers `server_busy` with `Retry-After`, a class the SDK
     /// retries. A version that is not loading (refused, or never named)
     /// answers at once, as [`Spaces::resolve`] does.
     pub async fn resolve_waking(&self, space: &str) -> Result<Bound, SpaceRefusal> {
-        let deadline = std::time::Instant::now() + WAKE_WAIT;
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(self.deployment.guards().wake_wait);
         loop {
             match self.resolve(space).await {
                 Err(SpaceRefusal::Unserved { space, version }) => {

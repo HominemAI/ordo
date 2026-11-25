@@ -134,6 +134,143 @@ pub enum VersionSetting {
     /// increment 17). Unset, it is the deployment's backup retention, or 30
     /// days when Ordo does not know that (owner, 2026-11-25).
     RestoreWindow,
+    /// `versions.max_loaded`: how many versions a node holds loaded at
+    /// once, the active one included (§1.5). Owner, 2026-11-25: no number
+    /// is hard coded.
+    MaxLoaded,
+    /// `versions.memory_budget`: the memory a node gives per-space views
+    /// across every loaded version (§1.5).
+    MemoryBudget,
+    /// `versions.max_concurrent_loads`: versions a node compiles and gates
+    /// at once.
+    MaxConcurrentLoads,
+    /// `versions.at_capacity`: what a load past `versions.max_loaded` does.
+    /// `evict-idle` (the default, ruled 2026-11-25) pushes out the least
+    /// recently used idle version; `refuse` refuses the load.
+    AtCapacity,
+    /// `versions.wake_wait`: how long a request for a tenant whose version
+    /// was unloaded for idleness waits for it to load again.
+    WakeWait,
+}
+
+/// `versions.max_loaded`.
+pub const MAX_LOADED_SETTING: &str = "versions.max_loaded";
+/// `versions.memory_budget`.
+pub const MEMORY_BUDGET_SETTING: &str = "versions.memory_budget";
+/// `versions.max_concurrent_loads`.
+pub const MAX_CONCURRENT_LOADS_SETTING: &str = "versions.max_concurrent_loads";
+/// `versions.at_capacity`.
+pub const AT_CAPACITY_SETTING: &str = "versions.at_capacity";
+/// `versions.wake_wait`.
+pub const WAKE_WAIT_SETTING: &str = "versions.wake_wait";
+/// Their defaults (§7): 8 versions, 512 MB, 1 load at once, 5 seconds.
+pub const DEFAULT_MAX_LOADED: usize = 8;
+pub const DEFAULT_MEMORY_BUDGET: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_CONCURRENT_LOADS: usize = 1;
+pub const DEFAULT_WAKE_WAIT_SECS: u64 = 5;
+/// The bounds a value is checked against: `max_loaded` 1 to 256, loads at
+/// once 1 to 16, the budget at least one view (256 KB), the wake wait 0
+/// to 5 minutes, so a request never holds its connection longer.
+pub const MAX_MAX_LOADED: usize = 256;
+pub const MAX_CONCURRENT_LOADS: usize = 16;
+pub const MIN_MEMORY_BUDGET: u64 = 256 * 1024;
+pub const MAX_WAKE_WAIT_SECS: u64 = 300;
+
+/// What a load past `versions.max_loaded` does (`versions.at_capacity`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AtCapacity {
+    /// Push out the least recently used idle version beside the active
+    /// one; refuse only when none is idle (owner, 2026-11-25).
+    #[default]
+    EvictIdle,
+    /// Refuse the load; the version's tenants stay closed on the node.
+    Refuse,
+}
+
+impl AtCapacity {
+    pub fn parse(v: &str) -> Option<AtCapacity> {
+        match v.trim() {
+            "evict-idle" | "evict_idle" => Some(AtCapacity::EvictIdle),
+            "refuse" => Some(AtCapacity::Refuse),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AtCapacity::EvictIdle => "evict-idle",
+            AtCapacity::Refuse => "refuse",
+        }
+    }
+}
+
+/// `512MB`, `2GB`, `256KB` or a number of bytes.
+pub fn parse_bytes(v: &str) -> Option<u64> {
+    let t = v.trim().to_ascii_uppercase();
+    let (n, unit) = match t.find(|c: char| !c.is_ascii_digit()) {
+        Some(i) => (&t[..i], t[i..].trim()),
+        None => (t.as_str(), ""),
+    };
+    let n: u64 = n.parse().ok()?;
+    let mul = match unit {
+        "" | "B" => 1,
+        "KB" | "K" => 1024,
+        "MB" | "M" => 1024 * 1024,
+        "GB" | "G" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    n.checked_mul(mul)
+}
+
+/// **Check a value for a setting that names no version**, and answer it
+/// as stored (trimmed). `None` when the value is not of the setting's
+/// form; [`guard_form`] says what the form is.
+pub fn check_guard(setting: VersionSetting, value: &str) -> Option<String> {
+    let v = value.trim();
+    let count = |hi: usize| match v.parse::<usize>() {
+        Ok(n) if (1..=hi).contains(&n) => Some(n.to_string()),
+        _ => None,
+    };
+    match setting {
+        VersionSetting::MaxLoaded => count(MAX_MAX_LOADED),
+        VersionSetting::MaxConcurrentLoads => count(MAX_CONCURRENT_LOADS),
+        VersionSetting::MemoryBudget => parse_bytes(v)
+            .filter(|b| *b >= MIN_MEMORY_BUDGET)
+            .map(|_| v.to_string()),
+        VersionSetting::AtCapacity => AtCapacity::parse(v).map(|a| a.as_str().to_string()),
+        VersionSetting::WakeWait => guard_secs(setting, v)
+            .flatten()
+            .filter(|s| *s <= MAX_WAKE_WAIT_SECS)
+            .map(|_| v.to_string()),
+        VersionSetting::MinResidency
+        | VersionSetting::IdleEvictAfter
+        | VersionSetting::RestoreWindow => guard_secs(setting, v).map(|_| v.to_string()),
+        VersionSetting::Served | VersionSetting::Minimum | VersionSetting::NewTenant => None,
+    }
+}
+
+/// What a value of `setting` looks like, for its refusal.
+pub fn guard_form(setting: &str) -> String {
+    match VersionSetting::from_name(setting) {
+        Some(VersionSetting::MaxLoaded) => {
+            format!("a whole number of versions from 1 to {MAX_MAX_LOADED}")
+        }
+        Some(VersionSetting::MaxConcurrentLoads) => {
+            format!("a whole number of loads from 1 to {MAX_CONCURRENT_LOADS}")
+        }
+        Some(VersionSetting::MemoryBudget) => {
+            "a size like `512MB` or `2GB`, at least `256KB`".to_string()
+        }
+        Some(VersionSetting::AtCapacity) => "`evict-idle` or `refuse`".to_string(),
+        Some(VersionSetting::WakeWait) => format!(
+            "a duration like `5s` or `1m`, or `0`, at most {} minutes",
+            MAX_WAKE_WAIT_SECS / 60
+        ),
+        Some(VersionSetting::IdleEvictAfter) => {
+            "a duration like `10m`, `30s` or `2h`, or `0`, or `off`".to_string()
+        }
+        _ => "a duration like `10m`, `30s` or `2h`, or `0`".to_string(),
+    }
 }
 
 /// `versions.min_residency`.
@@ -164,22 +301,26 @@ pub fn guard_secs(setting: VersionSetting, value: &str) -> Option<Option<u64>> {
 }
 
 impl VersionSetting {
-    pub const ALL: [VersionSetting; 6] = [
+    pub const ALL: [VersionSetting; 11] = [
         VersionSetting::Served,
         VersionSetting::Minimum,
         VersionSetting::NewTenant,
         VersionSetting::MinResidency,
         VersionSetting::IdleEvictAfter,
         VersionSetting::RestoreWindow,
+        VersionSetting::MaxLoaded,
+        VersionSetting::MemoryBudget,
+        VersionSetting::MaxConcurrentLoads,
+        VersionSetting::AtCapacity,
+        VersionSetting::WakeWait,
     ];
 
-    /// A duration, not a version: the load guards and the restore window.
+    /// Names no version: the load guards, the residency limits and the
+    /// restore window. Each is checked alone ([`check_guard`]).
     pub fn is_guard(self) -> bool {
-        matches!(
+        !matches!(
             self,
-            VersionSetting::MinResidency
-                | VersionSetting::IdleEvictAfter
-                | VersionSetting::RestoreWindow
+            VersionSetting::Served | VersionSetting::Minimum | VersionSetting::NewTenant
         )
     }
 
@@ -192,19 +333,31 @@ impl VersionSetting {
             VersionSetting::MinResidency => MIN_RESIDENCY_SETTING,
             VersionSetting::IdleEvictAfter => IDLE_EVICT_SETTING,
             VersionSetting::RestoreWindow => RESTORE_WINDOW_SETTING,
+            VersionSetting::MaxLoaded => MAX_LOADED_SETTING,
+            VersionSetting::MemoryBudget => MEMORY_BUDGET_SETTING,
+            VersionSetting::MaxConcurrentLoads => MAX_CONCURRENT_LOADS_SETTING,
+            VersionSetting::AtCapacity => AT_CAPACITY_SETTING,
+            VersionSetting::WakeWait => WAKE_WAIT_SETTING,
         }
     }
 
-    /// The environment variable it was read from before 2026-11-05.
+    /// The environment variable it was read from before it was stored
+    /// (2026-11-05 for the first three, 2026-11-25 for the node limits).
+    /// Empty for one that never was.
     pub fn env(self) -> &'static str {
         match self {
             VersionSetting::Served => SERVED_ENV,
             VersionSetting::Minimum => MINIMUM_ENV,
             VersionSetting::NewTenant => NEW_TENANT_ENV,
+            VersionSetting::MaxLoaded => "ORDO_VERSIONS_MAX_LOADED",
+            VersionSetting::MemoryBudget => "ORDO_VERSIONS_MEMORY_BUDGET",
+            VersionSetting::MaxConcurrentLoads => "ORDO_VERSIONS_MAX_CONCURRENT_LOADS",
             // Never an environment variable: stored in Ordo from the start.
             VersionSetting::MinResidency
             | VersionSetting::IdleEvictAfter
-            | VersionSetting::RestoreWindow => "",
+            | VersionSetting::RestoreWindow
+            | VersionSetting::AtCapacity
+            | VersionSetting::WakeWait => "",
         }
     }
 
@@ -217,6 +370,11 @@ impl VersionSetting {
             VersionSetting::MinResidency => "ordo versions set min-residency",
             VersionSetting::IdleEvictAfter => "ordo versions set idle-evict-after",
             VersionSetting::RestoreWindow => "ordo versions set restore-window",
+            VersionSetting::MaxLoaded => "ordo versions set max-loaded",
+            VersionSetting::MemoryBudget => "ordo versions set memory-budget",
+            VersionSetting::MaxConcurrentLoads => "ordo versions set max-concurrent-loads",
+            VersionSetting::AtCapacity => "ordo versions set at-capacity",
+            VersionSetting::WakeWait => "ordo versions set wake-wait",
         }
     }
 
@@ -229,6 +387,11 @@ impl VersionSetting {
             VersionSetting::MinResidency => "10m",
             VersionSetting::IdleEvictAfter => "30m",
             VersionSetting::RestoreWindow => "30d, or your backup retention when known",
+            VersionSetting::MaxLoaded => "8",
+            VersionSetting::MemoryBudget => "512MB",
+            VersionSetting::MaxConcurrentLoads => "1",
+            VersionSetting::AtCapacity => "evict-idle",
+            VersionSetting::WakeWait => "5s",
         }
     }
 
@@ -250,6 +413,15 @@ impl VersionSetting {
             "restore_window" | "restore-window" | "restoreWindow" => {
                 Some(VersionSetting::RestoreWindow)
             }
+            "max_loaded" | "max-loaded" | "maxLoaded" => Some(VersionSetting::MaxLoaded),
+            "memory_budget" | "memory-budget" | "memoryBudget" => {
+                Some(VersionSetting::MemoryBudget)
+            }
+            "max_concurrent_loads" | "max-concurrent-loads" | "maxConcurrentLoads" => {
+                Some(VersionSetting::MaxConcurrentLoads)
+            }
+            "at_capacity" | "at-capacity" | "atCapacity" => Some(VersionSetting::AtCapacity),
+            "wake_wait" | "wake-wait" | "wakeWait" => Some(VersionSetting::WakeWait),
             _ => None,
         }
     }
@@ -277,6 +449,14 @@ pub struct VersionSettings {
     pub idle_evict_after: Option<String>,
     /// `versions.restore_window` as stored, `None` when unset.
     pub restore_window: Option<String>,
+    /// `versions.max_loaded`, `versions.memory_budget`,
+    /// `versions.max_concurrent_loads`, `versions.at_capacity` and
+    /// `versions.wake_wait` as stored, `None` for the default.
+    pub max_loaded: Option<String>,
+    pub memory_budget: Option<String>,
+    pub max_concurrent_loads: Option<String>,
+    pub at_capacity: Option<String>,
+    pub wake_wait: Option<String>,
 }
 
 impl VersionSettings {
@@ -289,7 +469,53 @@ impl VersionSettings {
             VersionSetting::MinResidency => self.min_residency.clone(),
             VersionSetting::IdleEvictAfter => self.idle_evict_after.clone(),
             VersionSetting::RestoreWindow => self.restore_window.clone(),
+            VersionSetting::MaxLoaded => self.max_loaded.clone(),
+            VersionSetting::MemoryBudget => self.memory_budget.clone(),
+            VersionSetting::MaxConcurrentLoads => self.max_concurrent_loads.clone(),
+            VersionSetting::AtCapacity => self.at_capacity.clone(),
+            VersionSetting::WakeWait => self.wake_wait.clone(),
         }
+    }
+
+    /// The stored value of `s` checked again, `None` when unset or when it
+    /// would be refused now (written by hand): the default then holds.
+    fn checked(&self, s: VersionSetting) -> Option<String> {
+        self.value(s).and_then(|v| check_guard(s, &v))
+    }
+
+    /// `versions.max_loaded`: the stored value or 8.
+    pub fn max_loaded(&self) -> usize {
+        self.checked(VersionSetting::MaxLoaded)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_LOADED)
+    }
+
+    /// `versions.memory_budget` in bytes: the stored value or 512 MB.
+    pub fn memory_budget(&self) -> u64 {
+        self.checked(VersionSetting::MemoryBudget)
+            .and_then(|v| parse_bytes(&v))
+            .unwrap_or(DEFAULT_MEMORY_BUDGET)
+    }
+
+    /// `versions.max_concurrent_loads`: the stored value or 1.
+    pub fn max_concurrent_loads(&self) -> usize {
+        self.checked(VersionSetting::MaxConcurrentLoads)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_LOADS)
+    }
+
+    /// `versions.at_capacity`: the stored value or `evict-idle`.
+    pub fn at_capacity(&self) -> AtCapacity {
+        self.checked(VersionSetting::AtCapacity)
+            .and_then(|v| AtCapacity::parse(&v))
+            .unwrap_or_default()
+    }
+
+    /// `versions.wake_wait` in seconds: the stored value or 5.
+    pub fn wake_wait_secs(&self) -> u64 {
+        self.checked(VersionSetting::WakeWait)
+            .and_then(|v| guard_secs(VersionSetting::WakeWait, &v).flatten())
+            .unwrap_or(DEFAULT_WAKE_WAIT_SECS)
     }
 
     /// `versions.restore_window` in seconds, as set. `None` when unset.
@@ -354,6 +580,11 @@ impl VersionSettings {
             VersionSetting::MinResidency => out.min_residency = value,
             VersionSetting::IdleEvictAfter => out.idle_evict_after = value,
             VersionSetting::RestoreWindow => out.restore_window = value,
+            VersionSetting::MaxLoaded => out.max_loaded = value,
+            VersionSetting::MemoryBudget => out.memory_budget = value,
+            VersionSetting::MaxConcurrentLoads => out.max_concurrent_loads = value,
+            VersionSetting::AtCapacity => out.at_capacity = value,
+            VersionSetting::WakeWait => out.wake_wait = value,
         }
         out
     }
@@ -746,6 +977,68 @@ CREATE TABLE IF NOT EXISTS \"$version_settings\" ( \
 ); \
 CREATE INDEX IF NOT EXISTS \"$version_settings_setting\" \
   ON \"$version_settings\" (\"setting\", \"seq\")";
+
+/// **One named setting's stored value** in `$version_settings`, for the
+/// settings stored beside the version settings by other modules (the
+/// window caps, `soak.length`). `None` when unset, cleared, or the table
+/// is not there yet.
+pub(crate) async fn stored_named(pool: &Pool, name: &str) -> Result<Option<String>, PoolError> {
+    match pool
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        ))
+        .await
+    {
+        Ok(rows) => Ok(rows.first().and_then(|r| r.first().cloned().flatten())),
+        Err(e) if e.is_missing_table() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// **Write one named setting's row**, checked by the caller, under the pin
+/// lock with the pin stream's nudge, with who and why. `false` when it
+/// already held that value (or clearing what was never set): nothing is
+/// written.
+pub(crate) async fn record_named(
+    pool: &Pool,
+    name: &str,
+    value: Option<&str>,
+    actor: &str,
+    reason: &str,
+    at: u64,
+) -> Result<bool, PoolError> {
+    if pool.rows(SETTINGS_DDL).await.is_err() {
+        pool.rows(SETTINGS_DDL).await?;
+    }
+    let tx = pool.begin().await?;
+    tx.rows(&pin_lock_sql()).await?;
+    let now = tx
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(name)
+        ))
+        .await?;
+    let current = now.first().and_then(|r| r.first().cloned().flatten());
+    if current.as_deref() == value {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    tx.rows(&format!(
+        "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+         VALUES ({}, {}, {}, {}, {at})",
+        sql_lit(name),
+        value.map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        sql_lit(actor),
+        sql_lit(reason),
+    ))
+    .await?;
+    tx.notify(PINS_CHANNEL, "").await?;
+    tx.commit().await?;
+    Ok(true)
+}
 
 /// The newest row of each setting.
 const SETTINGS_NOW_SQL: &str = "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" \
@@ -1756,13 +2049,8 @@ impl std::fmt::Display for VersionRefusal {
             ),
             VersionRefusal::Guard { setting, value } => write!(
                 f,
-                "`{setting}` is a duration like `10m`, `30s` or `2h`, or `0`{}, not `{value}`. \
-                 Set it with `{}`",
-                if *setting == IDLE_EVICT_SETTING {
-                    ", or `off`"
-                } else {
-                    ""
-                },
+                "`{setting}` is {}, not `{value}`. Set it with `{}`",
+                guard_form(setting),
                 command_of(setting)
             ),
             // The registry's own words, so a refusal reads the same moved.
@@ -4655,15 +4943,19 @@ impl<'a> Versions<'a> {
         // A load guard is a duration, checked alone: it names no version.
         if setting.is_guard() {
             let now = self.settings().await?;
-            if let Some(v) = value {
-                if guard_secs(setting, v).is_none() {
-                    return Err(VersionRefusal::Guard {
-                        setting: setting.name(),
-                        value: v.to_string(),
-                    });
-                }
-            }
-            let resolved = now.with(setting, value.map(str::to_string));
+            let value = match value {
+                Some(v) => match check_guard(setting, v) {
+                    Some(v) => Some(v),
+                    None => {
+                        return Err(VersionRefusal::Guard {
+                            setting: setting.name(),
+                            value: v.chars().take(40).collect(),
+                        })
+                    }
+                },
+                None => None,
+            };
+            let resolved = now.with(setting, value);
             return Ok((resolved.value(setting), resolved));
         }
         let value = match (setting, value) {
@@ -4685,17 +4977,12 @@ impl<'a> Versions<'a> {
             VersionSetting::Served | VersionSetting::Minimum => {
                 stored_only.check_policy(&candidate.policy).await?
             }
-            VersionSetting::NewTenant
-            | VersionSetting::MinResidency
-            | VersionSetting::IdleEvictAfter
-            | VersionSetting::RestoreWindow => candidate.policy.clone(),
+            _ => candidate.policy.clone(),
         };
         let mut resolved = VersionSettings {
             policy,
             new_tenant: None,
-            min_residency: candidate.min_residency.clone(),
-            idle_evict_after: candidate.idle_evict_after.clone(),
-            restore_window: candidate.restore_window.clone(),
+            ..candidate.clone()
         };
         if let Some(named) = &candidate.new_tenant {
             let version = match self.resolve(named).await {
@@ -4814,7 +5101,7 @@ impl<'a> Versions<'a> {
             return out;
         }
         for s in VersionSetting::ALL {
-            if s.is_guard() {
+            if s.env().is_empty() {
                 continue;
             }
             // Empty was unset before 2026-11-05 too.

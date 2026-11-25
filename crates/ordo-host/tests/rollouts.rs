@@ -1443,3 +1443,76 @@ async fn a_rollout_moves_tenants_on_the_deployments_own_database_with_dual_write
         assert_eq!(on(&pool, t).await.as_deref(), Some("0.2.0"), "{t}");
     }
 }
+
+/// **`soak.length` is a setting** (owner, 2026-11-25: no number is hard
+/// coded). A rollout's move with dual writes soaks for the stored length,
+/// here 1 hour, not the 7-day default. A bad value is refused naming the
+/// setting and the command.
+///
+/// A regression looks like a rollout's soak ending 7 days out whatever
+/// `soak.length` says.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollouts_soak_is_as_long_as_soak_length_says() {
+    let pool = fresh("ordo_ro_soak_length").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V1).await;
+    let y = Program::compile(V2_RENAMED).expect("compiles");
+    ordo_exec::registry::store(
+        &pool,
+        &ordo_exec::registry::Artifact {
+            version: y.version.clone(),
+            artifact: ordo_plan::artifact::to_bytes(&y.doc),
+            source: y.source.clone(),
+            ddl: y.ddl.clone(),
+            applied_at: ordo_commandlog::Timestamp(0),
+            actor: "dev:ada".into(),
+        },
+    )
+    .await
+    .expect("stored");
+    ordo_host::evolve::evolve(
+        &pool,
+        "0.1.0",
+        "0.2.0",
+        &ordo_host::schema_apply::Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("the step stores");
+
+    let e = ordo_host::dual_writes::set_soak(&pool, Some("soon"), OWNER, "t", 1)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("soak.length") && e.contains("ordo versions set soak.length"),
+        "{e}"
+    );
+    let (changed, secs) = ordo_host::dual_writes::set_soak(&pool, Some("1h"), OWNER, "short", 1)
+        .await
+        .expect("set");
+    assert!(changed);
+    assert_eq!(secs, 3_600);
+
+    let all = StartOptions {
+        strategy: Some(Strategy::All),
+        ..Default::default()
+    };
+    Rollouts::on(&pool)
+        .start("0.2.0", &all, OWNER, NOW)
+        .await
+        .expect("starts");
+    let (ops, _) = shared_ops(&pool);
+    let t = rollouts::tick(&ops, "n", NOW).await.expect("tick");
+    assert_eq!(t.moved, ["spc_a"], "{t:?}");
+    let moves = Versions::on(&pool).dual_moves().await.expect("moves");
+    let m = moves.first().expect("a move");
+    let wall = ordo_host::runtime::now_secs();
+    assert!(
+        m.soak_until > wall + 3_000 && m.soak_until <= wall + 3_600,
+        "soaks 1 hour, not 7 days: until {} at {wall}",
+        m.soak_until
+    );
+}

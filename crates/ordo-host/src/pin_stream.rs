@@ -41,118 +41,16 @@ use crate::versions::{VersionRefusal, Versions};
 /// How many `$pins` rows one read of the stream takes.
 const TAIL_BATCH: usize = 1_000;
 
-/// `versions.max_concurrent_loads`: how many versions this node compiles
-/// and gates at once. A node setting, so an environment variable.
-pub const MAX_LOADS_ENV: &str = "ORDO_VERSIONS_MAX_CONCURRENT_LOADS";
-/// Its default (§7).
-pub const DEFAULT_MAX_LOADS: usize = 1;
-
-/// `versions.max_loaded`: how many versions this node holds loaded at
-/// once, the active one included. A load past it is refused, naming the
-/// setting, and the version's tenants are closed on this node until a
-/// version drops or the setting is raised.
-pub const MAX_LOADED_ENV: &str = "ORDO_VERSIONS_MAX_LOADED";
-/// Its default. A `Loaded` measured 0.05 to 3.6 MB in
-/// `tests/versions_memory.rs`; its views are what cost, and the budget
-/// below bounds those.
-pub const DEFAULT_MAX_LOADED: usize = 8;
-
-/// `versions.memory_budget`: the memory this node gives per-space views,
-/// across every loaded version. Each version keeps at most its share of
-/// [`VIEW_BYTES`]-sized views, the least recently used evicted first.
-pub const MEMORY_BUDGET_ENV: &str = "ORDO_VERSIONS_MEMORY_BUDGET";
-/// Its default: 512 MB.
-pub const DEFAULT_MEMORY_BUDGET: u64 = 512 * 1024 * 1024;
-/// What one per-space view is counted as: the largest measured, 222 KB for
-/// teamspace, rounded up (`tests/versions_memory.rs`, 2026-11-23).
+/// What one per-space view is counted as against `versions.memory_budget`:
+/// the largest measured, 222 KB for teamspace, rounded up
+/// (`tests/versions_memory.rs`, 2026-11-23). A measurement, not a policy:
+/// the budget is the setting.
 pub const VIEW_BYTES: u64 = 256 * 1024;
 
-/// A node's limits on versions and views, read from the environment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NodeLimits {
-    pub max_loads: usize,
-    pub max_loaded: usize,
-    pub memory_budget: u64,
-}
-
-impl Default for NodeLimits {
-    fn default() -> NodeLimits {
-        NodeLimits {
-            max_loads: DEFAULT_MAX_LOADS,
-            max_loaded: DEFAULT_MAX_LOADED,
-            memory_budget: DEFAULT_MEMORY_BUDGET,
-        }
-    }
-}
-
-impl NodeLimits {
-    /// From the three variables. Each one that does not parse is said,
-    /// naming it, and its default is kept.
-    pub fn from_env() -> (NodeLimits, Vec<String>) {
-        NodeLimits::from(|v| std::env::var(v).ok())
-    }
-
-    /// [`NodeLimits::from_env`], reading through `read`.
-    pub fn from(read: impl Fn(&str) -> Option<String>) -> (NodeLimits, Vec<String>) {
-        let mut out = NodeLimits::default();
-        let mut said = Vec::new();
-        match parse_count(read(MAX_LOADS_ENV), MAX_LOADS_ENV, 16) {
-            Ok(Some(n)) => out.max_loads = n,
-            Ok(None) => {}
-            Err(e) => said.push(e),
-        }
-        match parse_count(read(MAX_LOADED_ENV), MAX_LOADED_ENV, 256) {
-            Ok(Some(n)) => out.max_loaded = n.max(1),
-            Ok(None) => {}
-            Err(e) => said.push(e),
-        }
-        match read(MEMORY_BUDGET_ENV).filter(|v| !v.trim().is_empty()) {
-            None => {}
-            Some(v) => match parse_bytes(&v) {
-                Some(b) if b >= VIEW_BYTES => out.memory_budget = b,
-                _ => said.push(format!(
-                    "{MEMORY_BUDGET_ENV}={v} is not a size like `512MB` or `2GB` of at least \
-                     256KB; the default, 512MB, is kept"
-                )),
-            },
-        }
-        (out, said)
-    }
-
-    /// The views one version may keep while `loaded` versions are loaded.
-    pub fn views_per_version(&self, loaded: usize) -> u64 {
-        (self.memory_budget / VIEW_BYTES / loaded.max(1) as u64).max(1)
-    }
-}
-
-fn parse_count(v: Option<String>, name: &str, max: usize) -> Result<Option<usize>, String> {
-    let Some(v) = v.filter(|v| !v.trim().is_empty()) else {
-        return Ok(None);
-    };
-    match v.trim().parse::<usize>() {
-        Ok(n) if (1..=max).contains(&n) => Ok(Some(n)),
-        _ => Err(format!(
-            "{name}={v} is not a whole number from 1 to {max}; its default is kept"
-        )),
-    }
-}
-
-/// `512MB`, `2GB`, `256KB` or a number of bytes.
-pub fn parse_bytes(v: &str) -> Option<u64> {
-    let t = v.trim().to_ascii_uppercase();
-    let (n, unit) = match t.find(|c: char| !c.is_ascii_digit()) {
-        Some(i) => (&t[..i], t[i..].trim()),
-        None => (t.as_str(), ""),
-    };
-    let n: u64 = n.parse().ok()?;
-    let mul = match unit {
-        "" | "B" => 1,
-        "KB" | "K" => 1024,
-        "MB" | "M" => 1024 * 1024,
-        "GB" | "G" => 1024 * 1024 * 1024,
-        _ => return None,
-    };
-    n.checked_mul(mul)
+/// The views one version may keep while `loaded` versions are loaded under
+/// a budget of `budget` bytes.
+pub fn views_per_version(budget: u64, loaded: usize) -> u64 {
+    (budget / VIEW_BYTES / loaded.max(1) as u64).max(1)
 }
 
 /// What one read of the stream did.
@@ -167,6 +65,10 @@ pub struct Read {
     pub refused: Vec<(String, String)>,
     /// Versions unloaded for idleness (`versions.idle_evict_after`).
     pub evicted: Vec<String>,
+    /// Versions pushed out to make room for another under
+    /// `versions.max_loaded` (`versions.at_capacity` `evict-idle`): each
+    /// with the version it made room for.
+    pub pushed_out: Vec<(String, String)>,
     /// `versions.new_tenant`, when this read found it changed: the version
     /// it names now, `None` inside when it was cleared.
     pub new_tenant: Option<Option<String>>,
@@ -176,7 +78,10 @@ impl Read {
     /// Did the set of served versions change? The door's access engine
     /// and the routines are rebuilt when it did.
     pub fn versions_changed(&self) -> bool {
-        !self.loaded.is_empty() || !self.dropped.is_empty() || !self.evicted.is_empty()
+        !self.loaded.is_empty()
+            || !self.dropped.is_empty()
+            || !self.evicted.is_empty()
+            || !self.pushed_out.is_empty()
     }
 }
 
@@ -190,12 +95,11 @@ pub struct PinStream {
     keys: Arc<dyn ordo_crypto::KeyProvider>,
     space: ordo_crypto::SpaceId,
     /// One pass of loads at a time on this node, so a version is never
-    /// loaded twice at once.
+    /// loaded twice at once. `versions.max_concurrent_loads`,
+    /// `versions.max_loaded`, `versions.memory_budget` and
+    /// `versions.at_capacity` are read from the stored settings on each
+    /// read ([`Deployment::guards`]).
     loading: tokio::sync::Mutex<()>,
-    /// `versions.max_concurrent_loads`: loads in one pass at once.
-    max_loads: usize,
-    /// `versions.max_loaded` and `versions.memory_budget`.
-    limits: NodeLimits,
     /// The versions being loaded now, for per-node health.
     status: Option<Arc<crate::node_status::NodeStatus>>,
 }
@@ -215,21 +119,18 @@ impl PinStream {
             keys,
             space,
             loading: tokio::sync::Mutex::new(()),
-            max_loads: DEFAULT_MAX_LOADS,
-            limits: NodeLimits::default(),
             status: None,
         })
     }
 
-    /// The same stream, loading `max_loads` versions at once and saying on
-    /// `/health/deploy` which it is loading.
-    pub fn with_loads(
+    /// The same stream, saying on `/health/deploy` which versions it is
+    /// loading.
+    pub fn with_status(
         deployment: Arc<Deployment>,
         control: Pool,
         cfg: PoolConfig,
         keys: Arc<dyn ordo_crypto::KeyProvider>,
         space: ordo_crypto::SpaceId,
-        limits: NodeLimits,
         status: Arc<crate::node_status::NodeStatus>,
     ) -> Arc<PinStream> {
         Arc::new(PinStream {
@@ -239,8 +140,6 @@ impl PinStream {
             keys,
             space,
             loading: tokio::sync::Mutex::new(()),
-            max_loads: limits.max_loads.max(1),
-            limits,
             status: Some(status),
         })
     }
@@ -314,10 +213,7 @@ impl PinStream {
         // the loads, so the version it names is loaded and kept.
         match Versions::on(&self.control).settings().await {
             Ok(s) => {
-                self.deployment.set_guards(deploy::LoadGuards {
-                    min_residency: s.min_residency_secs(),
-                    idle_evict: s.idle_evict_secs(),
-                });
+                self.deployment.set_guards(deploy::LoadGuards::of(&s));
                 if self.deployment.new_tenant_setting() != s.new_tenant {
                     self.deployment.set_new_tenant(s.new_tenant.clone());
                     read.new_tenant = Some(s.new_tenant);
@@ -339,9 +235,10 @@ impl PinStream {
                 self.deployment.wake(&v);
             }
         }
-        let (loaded, refused) = self.load_wanted().await;
+        let (loaded, refused, pushed) = self.load_wanted().await;
         read.loaded = loaded;
         read.refused = refused;
+        read.pushed_out = pushed;
         read.dropped = self.deployment.retain_pinned();
         read.evicted = self.deployment.evict_idle(crate::runtime::now_secs());
         self.evict_views();
@@ -372,35 +269,46 @@ impl PinStream {
     /// versions loaded, and the ones refused with why. A refused version
     /// keeps its tenants closed (`SpaceRefusal::Unserved`) and is tried
     /// again on the next read; the refusal is the deployment owner's alert.
-    pub async fn load_wanted(&self) -> (Vec<String>, Vec<(String, String)>) {
+    #[allow(clippy::type_complexity)]
+    pub async fn load_wanted(&self) -> (Vec<String>, Vec<(String, String)>, Vec<(String, String)>) {
         use futures::StreamExt;
         let _turn = self.loading.lock().await;
         let wanted = self.wanted();
         if wanted.is_empty() {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
+        let max_loads = self.deployment.guards().max_loads.max(1);
         // Per-node health: these are loading, not loaded, until they land.
         if let Some(status) = &self.status {
             status.loading(wanted.clone());
             status.write().await;
         }
-        let outcomes: Vec<(String, Result<Option<String>, String>)> = futures::stream::iter(wanted)
-            .map(|version| async move {
-                let outcome = self.load_one(&version).await;
-                if let Some(status) = &self.status {
-                    status.loaded_one(&version);
-                }
-                (version, outcome)
-            })
-            .buffer_unordered(self.max_loads)
-            .collect()
-            .await;
+        #[allow(clippy::type_complexity)]
+        let outcomes: Vec<(String, Result<(Option<String>, Option<String>), String>)> =
+            futures::stream::iter(wanted)
+                .map(|version| async move {
+                    let outcome = self.load_one(&version).await;
+                    if let Some(status) = &self.status {
+                        status.loaded_one(&version);
+                    }
+                    (version, outcome)
+                })
+                .buffer_unordered(max_loads)
+                .collect()
+                .await;
         let mut loaded = Vec::new();
         let mut refused = Vec::new();
+        let mut pushed = Vec::new();
         for (version, outcome) in outcomes {
             match outcome {
-                Ok(Some(to)) => loaded.push(to),
-                Ok(None) => {}
+                Ok((installed, out)) => {
+                    if let Some(out) = out {
+                        pushed.push((out, version.clone()));
+                    }
+                    if let Some(to) = installed {
+                        loaded.push(to);
+                    }
+                }
                 Err(why) => {
                     // A request waiting on it stops waiting.
                     self.deployment.woken_refused(&version);
@@ -410,7 +318,8 @@ impl PinStream {
         }
         loaded.sort();
         refused.sort();
-        (loaded, refused)
+        pushed.sort();
+        (loaded, refused, pushed)
     }
 
     /// **Evict per-space views** (§1.5): in each loaded version, views idle
@@ -419,20 +328,54 @@ impl PinStream {
     pub fn evict_views(&self) -> usize {
         let mut all = self.deployment.others();
         all.push(self.deployment.current());
-        let keep = self.limits.views_per_version(all.len());
-        let idle = self.deployment.guards().idle_evict.unwrap_or(u64::MAX);
+        let guards = self.deployment.guards();
+        let keep = views_per_version(guards.memory_budget, all.len());
+        let idle = guards.idle_evict.unwrap_or(u64::MAX);
         all.iter().map(|l| l.evict_views(idle, keep)).sum()
     }
 
     /// Load one version and serve it: `Some(name)` when it was installed,
-    /// `None` when it already was.
-    async fn load_one(&self, version: &str) -> Result<Option<String>, String> {
+    /// `None` when it already was; and the version pushed out to make room
+    /// for it, if one was.
+    ///
+    /// **At `versions.max_loaded`** (owner, 2026-11-25): with
+    /// `versions.at_capacity` `evict-idle`, the default, the least recently
+    /// used idle version beside the active one is pushed out
+    /// ([`Deployment::evict_for_room`]) and loads again when a signed-in
+    /// request for one of its tenants wakes it. With none idle, or with
+    /// `refuse`, the load is refused, naming both settings.
+    async fn load_one(&self, version: &str) -> Result<(Option<String>, Option<String>), String> {
+        let guards = self.deployment.guards();
         let held = self.deployment.served_versions().len();
-        if held >= self.limits.max_loaded {
-            return Err(format!(
-                "this node holds {held} versions, versions.max_loaded. Raise \
-                 {MAX_LOADED_ENV}, or move tenants off a version so it drops"
-            ));
+        let mut pushed = None;
+        if held >= guards.max_loaded {
+            let room = match guards.at_capacity {
+                crate::versions::AtCapacity::EvictIdle => self
+                    .deployment
+                    .evict_for_room(crate::runtime::now_secs(), version),
+                crate::versions::AtCapacity::Refuse => None,
+            };
+            match room {
+                Some(out) => pushed = Some(out),
+                None => {
+                    return Err(format!(
+                        "this node holds {held} versions, versions.max_loaded{}. Raise it with \
+                         `ordo versions set max-loaded <n>`, or move tenants off a version so \
+                         it drops",
+                        match guards.at_capacity {
+                            crate::versions::AtCapacity::Refuse => {
+                                ", and versions.at_capacity is `refuse`; \
+                                 `ordo versions set at-capacity evict-idle` pushes out the \
+                                 least used idle version instead"
+                            }
+                            crate::versions::AtCapacity::EvictIdle => {
+                                ", and none beside the active one is idle: each loaded within \
+                                 versions.min_residency or named by versions.new_tenant"
+                            }
+                        }
+                    ));
+                }
+            }
         }
         match deploy::load_pinned(
             &self.control,
@@ -447,8 +390,8 @@ impl PinStream {
                 Err("it does not seal through this deployment's key provider".into())
             }
             Ok(v) => match self.deployment.install(v) {
-                Swapped::Installed { to, .. } => Ok(Some(to)),
-                Swapped::AlreadyServing(_) => Ok(None),
+                Swapped::Installed { to, .. } => Ok((Some(to), pushed)),
+                Swapped::AlreadyServing(_) => Ok((None, pushed)),
                 Swapped::Refused(why) => Err(why),
             },
             Err(e) => Err(e.to_string()),
@@ -484,6 +427,13 @@ pub fn log_lines(read: &Read) -> Vec<String> {
              the next signed-in request for one of its tenants loads it again"
         ));
     }
+    for (gone, room_for) in &read.pushed_out {
+        out.push(format!(
+            "versions: {gone} unloaded here to make room for {room_for} under \
+             versions.max_loaded (versions.at_capacity is evict-idle); the next signed-in \
+             request for one of its tenants loads it again"
+        ));
+    }
     for (v, why) in &read.refused {
         out.push(format!(
             "versions: {v} is pinned and could not be loaded, so its tenants are closed: {why}"
@@ -495,43 +445,40 @@ pub fn log_lines(read: &Read) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::versions::{check_guard, parse_bytes, VersionSetting, DEFAULT_MEMORY_BUDGET};
 
     #[test]
-    fn the_node_limits_read_their_variables_and_name_a_bad_one() {
-        let (l, said) = NodeLimits::from(|_| None);
-        assert_eq!(l, NodeLimits::default());
-        assert!(said.is_empty());
-        let (l, said) = NodeLimits::from(|v| match v {
-            MAX_LOADS_ENV => Some("2".into()),
-            MAX_LOADED_ENV => Some("4".into()),
-            MEMORY_BUDGET_ENV => Some("2GB".into()),
-            _ => None,
-        });
-        assert_eq!((l.max_loads, l.max_loaded), (2, 4));
-        assert_eq!(l.memory_budget, 2 * 1024 * 1024 * 1024);
-        assert!(said.is_empty());
-        let (l, said) = NodeLimits::from(|v| match v {
-            MAX_LOADS_ENV => Some("99".into()),
-            MAX_LOADED_ENV => Some("none".into()),
-            MEMORY_BUDGET_ENV => Some("lots".into()),
-            _ => None,
-        });
-        assert_eq!(l, NodeLimits::default());
-        assert_eq!(said.len(), 3);
-        for (line, name) in said
-            .iter()
-            .zip([MAX_LOADS_ENV, MAX_LOADED_ENV, MEMORY_BUDGET_ENV])
-        {
-            assert!(line.contains(name), "{line}");
-        }
+    fn the_node_limits_are_checked_as_settings_and_a_bad_one_is_refused() {
+        assert_eq!(
+            check_guard(VersionSetting::MaxLoaded, "4"),
+            Some("4".into())
+        );
+        assert_eq!(check_guard(VersionSetting::MaxLoaded, "0"), None);
+        assert_eq!(check_guard(VersionSetting::MaxLoaded, "none"), None);
+        assert_eq!(check_guard(VersionSetting::MaxConcurrentLoads, "99"), None);
+        assert_eq!(
+            check_guard(VersionSetting::MemoryBudget, "2GB"),
+            Some("2GB".into())
+        );
+        assert_eq!(check_guard(VersionSetting::MemoryBudget, "lots"), None);
+        assert_eq!(check_guard(VersionSetting::MemoryBudget, "1KB"), None);
+        assert_eq!(
+            check_guard(VersionSetting::AtCapacity, "refuse"),
+            Some("refuse".into())
+        );
+        assert_eq!(check_guard(VersionSetting::AtCapacity, "maybe"), None);
+        assert_eq!(
+            check_guard(VersionSetting::WakeWait, "10s"),
+            Some("10s".into())
+        );
+        assert_eq!(check_guard(VersionSetting::WakeWait, "1h"), None);
     }
 
     #[test]
     fn the_budget_is_shared_between_loaded_versions() {
-        let l = NodeLimits::default();
         // 512 MB at 256 KB a view.
-        assert_eq!(l.views_per_version(1), 2048);
-        assert_eq!(l.views_per_version(4), 512);
+        assert_eq!(views_per_version(DEFAULT_MEMORY_BUDGET, 1), 2048);
+        assert_eq!(views_per_version(DEFAULT_MEMORY_BUDGET, 4), 512);
         assert_eq!(parse_bytes("256kb"), Some(256 * 1024));
         assert_eq!(parse_bytes("1 GB"), Some(1024 * 1024 * 1024));
         assert_eq!(parse_bytes("12"), Some(12));

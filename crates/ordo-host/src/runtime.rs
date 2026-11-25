@@ -7135,19 +7135,15 @@ async fn spawn_deploy_listener(
     // **Every tenant's pin, and every version they name** (`plan-versions.md`
     // §1.4, increment 3), before the first request: a tenant pinned beside
     // the active version is served its own from the start.
-    let pins = crate::pin_stream::PinStream::with_loads(
+    // `versions.max_loaded`, `.memory_budget`, `.max_concurrent_loads` and
+    // `.at_capacity` are stored in Ordo (owner, 2026-11-25) and read with
+    // the pins; their former variables were adopted above.
+    let pins = crate::pin_stream::PinStream::with_status(
         deployment.clone(),
         pool.clone(),
         pg.clone(),
         keys.clone(),
         space.clone(),
-        {
-            let (limits, said) = crate::pin_stream::NodeLimits::from_env();
-            for line in said {
-                eprintln!("versions: {line}");
-            }
-            limits
-        },
         node_status.clone(),
     );
     // `versions.new_tenant` is read from the control database with the

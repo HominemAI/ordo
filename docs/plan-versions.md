@@ -356,6 +356,30 @@ The pin this plan adds:
   idle-evict-after <value>` or `std.deployment.setVersionSetting`. A value
   that is not a duration is refused, naming the setting and the command.
 
+**No hard-coded numbers, built 2026-11-25** (owner, board
+`versions-increment-3-three-defaults-for`: *"Not number should be hard
+coded, we've been over this."*; branch `evo-settings-no-hardcoded-numbers`):
+
+- `versions.min_residency` now counts from the last tenant leaving, as
+  ruled: a node stamps when it first reads that no pin names a version
+  (`LoadClock::unpinned_for`) and drops it this long after. Before, it
+  counted from the load, so a version loaded for hours dropped at once.
+- `versions.max_loaded` (8), `versions.memory_budget` (512MB) and
+  `versions.max_concurrent_loads` (1) are stored in Ordo like the guards.
+  Their variables are adopted once at boot, as `ORDO_VERSIONS_SERVED` was.
+  Each node reads them with the pins.
+- `versions.at_capacity`, `evict-idle` by default: at `max_loaded`, the
+  least recently used version beside the active one that has been loaded
+  for `min_residency` and is not `new_tenant` is pushed out
+  (`Deployment::evict_for_room`). It joins the idle-evicted ones and loads
+  again when a signed-in request wakes it. With none such, or with
+  `refuse`, the load is refused naming both settings.
+- `versions.wake_wait` (5s, 0 to 5m) replaces the `WAKE_WAIT` constant.
+- Tests: `versions_serving.rs` (3: none idle refused; pushed out, then
+  refused under `refuse`; bad values refused and the budget evicts views),
+  `versions_background.rs` (residency counts from the leave; `wake_wait`
+  `0` answers `server_busy` at once).
+
 ### 1.5 What serving many versions costs
 
 | Cost | Size | When it is paid |
@@ -393,15 +417,15 @@ figures are approximate):
   by `versions.memory_budget`. Do schema and registry together, after
   those land.
 - What was set from it:
-  - `versions.memory_budget` (`ORDO_VERSIONS_MEMORY_BUDGET`, 512MB): a
+  - `versions.memory_budget` (stored in Ordo since 2026-11-25, 512MB): a
     view counts as 256 KB, the largest rounded up. Each loaded version
     keeps its share, the least recently used evicted first, on every pin
     read (`PinStream::evict_views`). Views idle for
     `versions.idle_evict_after` go too. A view a request holds is never
     evicted.
-  - `versions.max_loaded` (`ORDO_VERSIONS_MAX_LOADED`, 8): a load past it
-    is refused, naming the setting, and that version's tenants stay closed
-    on this node.
+  - `versions.max_loaded` (stored in Ordo since 2026-11-25, 8): a load
+    past it pushes out the least used idle version, or is refused when none
+    is idle or `versions.at_capacity` is `refuse`, naming the settings.
 - Tries: 2. The first, a counting allocator, is refused by the
   workspace's `unsafe_code = "forbid"`; the second reads resident memory.
 
@@ -984,6 +1008,11 @@ Ruled 2026-10-01: Stripe's pattern replaces the write freeze. Ruled
 - **Built 2026-11-24 (increment 11a)** for one tenant with a database of its
   own: `crate::dual_writes`, `ordo_exec::overlay`. `soak.length` is given
   per run (`--soak`), not stored in the plan (asked).
+- **Stored since 2026-11-25**: `ordo versions set soak.length <length>`,
+  in `$version_settings`. A move with no `--soak` and every rollout move
+  soak this long; before, a rollout always soaked 7 days. A reader's
+  notice counts its grant's earliest end from it
+  (`rollouts.rs`, `a_rollouts_soak_is_as_long_as_soak_length_says`).
 - **One open soak per tenant** (D11). A new step may start during a soak.
   It closes the earlier soak after the one-way confirmation.
 - A step with no reverse renders with the confirmation *"accept this one way
@@ -2131,7 +2160,8 @@ round is about 35 minutes for the full suite.
   caps as settings or recorded as fixed. Done in the remainder: `ordo
   versions show` (applied, activations) and `ordo versions tenant` (pin
   history) print times as `2026-11-05 14:02 UTC`, as revoke times
-  already did. The window caps are recorded as fixed (§7, "Fixed caps").
+  already did. The window caps were recorded as fixed (§7), then made
+  settings on 2026-11-25 (owner: *"add the knob. Keep default as is."*).
 
 What sets the pace:
 
@@ -2294,10 +2324,12 @@ refusal a setting can fix names the setting and the value.
 | `versions.minimum` | none | deployment, stored in Ordo |
 | `versions.new_tenant` | last version that finished a rollout (the active version until rollouts) | deployment, stored in Ordo |
 | `versions.idle_evict_after` | 30 minutes, or `off` (built in increment 3, stored in Ordo) | deployment |
-| `versions.min_residency` | 10 minutes (built in increment 3, stored in Ordo) | deployment |
-| `versions.max_loaded` | 8 (`ORDO_VERSIONS_MAX_LOADED`, set from increment 3's measurement) | node |
-| `versions.max_concurrent_loads` | 1 (`ORDO_VERSIONS_MAX_CONCURRENT_LOADS`, built in increment 3) | node |
-| `versions.memory_budget` | 512MB of per-space views (`ORDO_VERSIONS_MEMORY_BUDGET`, set from increment 3's measurement) | node |
+| `versions.min_residency` | 10 minutes after the last tenant leaves (built in increment 3; counted from the leave since 2026-11-25, stored in Ordo) | deployment |
+| `versions.max_loaded` | 8 (set from increment 3's measurement; stored in Ordo since 2026-11-25, `ORDO_VERSIONS_MAX_LOADED` adopted once) | deployment |
+| `versions.at_capacity` | `evict-idle`: push out the least used idle version, refuse only when none is idle; or `refuse` (ruled and built 2026-11-25) | deployment |
+| `versions.max_concurrent_loads` | 1 (built in increment 3; stored in Ordo since 2026-11-25) | deployment |
+| `versions.memory_budget` | 512MB of per-space views (set from increment 3's measurement; stored in Ordo since 2026-11-25) | deployment |
+| `versions.wake_wait` | 5 seconds, 0 to 5 minutes (stored in Ordo since 2026-11-25) | deployment |
 | `pins.reconcile_interval` | 30 seconds (`ORDO_PINS_RECONCILE_SECS`, built 2026-11-05) | deployment |
 | `forward.retry_interval` | 15 seconds | deployment |
 | `editions.load_window` | 12 months after the next edition became current, measured against the release date (built in 6b, `ordo_plan::edition::LOAD_WINDOW_MONTHS`) | Ordo release |
@@ -2327,7 +2359,7 @@ day:
   checks a change has. After that each boot logs that it is ignored and can
   be removed.
 - Environment variables stay for settings about the binary itself.
-| `soak.length` | 7 days, 0 allowed | plan |
+| `soak.length` | 7 days, 0 allowed (stored in Ordo since 2026-11-25: `ordo versions set soak.length`; a move's `--soak` overrides it) | environment |
 | `backfill.concurrency` | 8 (built with 11b: `ordo versions set backfill.concurrency`) | environment |
 | `backfill.chunk_rows` | 1,000 (stored in Ordo, built with 10: `ordo versions set backfill.chunk_rows`) | plan |
 | `backfill.chunk_timeout` | 20 seconds (stored in Ordo, built with 10) | plan |
@@ -2362,19 +2394,22 @@ day:
 Defaults not set by a ruling are proposals, checked in the increment that
 builds them.
 
-**Fixed caps** (recorded in the increment 3 remainder, not settings). Each
-bounds input or the cost of one answer, like every other text and list
-bound in Ordo. None is a policy a deployment would tune.
+**The window caps are settings** (recorded as fixed in the increment 3
+remainder; ruled settings 2026-11-25, `versions-increment-3-three-defaults-for`
+ask 3: *"add the knob. Keep default as is."*). Stored in `$version_settings`,
+set with `ordo versions set windows.<name> <n>`. A value out of range is
+refused naming the setting; a window a cap refuses names the cap
+(`tests/windows.rs`, `the_window_caps_are_settings_that_change_what_windows_do`).
 
-| Cap | Value | Why fixed |
+| Setting | Default | Range |
 |---|---|---|
-| A window's message | 2,000 characters | an input bound |
-| A skip's reason | 500 characters | an input bound |
-| A window or skip id | 64 characters | an input bound |
-| Tenants one window lists | 1,000 | more is `all` or `all except`; bounds one write |
-| The window list's reach | 12 months back and ahead | the 24-month list the owner ruled (asks 22, 24) |
-| Times one cron window gives in the list | 20,000 | about once an hour; bounds the list's cost |
-| Times one list answers | 100,000 | the list is cut and says so |
+| `windows.max_message_chars` | 2,000 characters | 1 to 100,000 |
+| `windows.max_reason_chars` | 500 characters | 1 to 10,000 |
+| `windows.max_id_chars` | 64 characters | 8 to 200 |
+| `windows.max_tenants` | 1,000 | 1 to 100,000 |
+| `windows.list_months` | 12 months back and ahead | 1 to 120 |
+| `windows.max_times_per_window` | 20,000 | 1 to 1,000,000 |
+| `windows.max_times` | 100,000 | 1 to 10,000,000 |
 
 Added by the review of 2026-11-23:
 

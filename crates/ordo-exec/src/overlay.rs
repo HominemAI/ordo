@@ -100,6 +100,30 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
         .collect())
 }
 
+/// **A write's turn alone** (Reported fix, 2026-11-24): take `"$renames"`
+/// in `EXCLUSIVE` mode as the transaction's first statement, before
+/// [`renames_in`].
+///
+/// Every write holds `"$renames"` in `ROW SHARE` mode from its first
+/// statement, so this waits for the writes in flight on this database to
+/// end, and holds new ones at their first statement until it commits.
+/// Postgres queues lock requests in order, so a write waiting here is not
+/// overtaken. Its snapshot is taken after the writes before it committed,
+/// and no write runs beside it, so no other write can make it the loser of
+/// a serialization conflict.
+///
+/// The executor takes this turn only for a write that already lost to
+/// other writes ([`crate::Executor`]'s retry loop). Without it, a stream of
+/// writes could cancel the same write on every try. Writes during a seal
+/// did: the seal overlay ([`apply_seals`]) reads back each row it wrote
+/// through the primary key, Postgres locks that read at the index page, and
+/// every other write to the table touches the same page, so two concurrent
+/// writers each depend on the other and one is cancelled.
+pub async fn take_turn(tx: &TxConn) -> Result<(), PoolError> {
+    tx.rows("LOCK TABLE \"$renames\" IN EXCLUSIVE MODE").await?;
+    Ok(())
+}
+
 /// **`$fills`**: the fills a shared database is in the middle of
 /// (increment 11b part 4). A move on the deployment's own database that
 /// fills a field (B2, a new required field; B5, an optional field made
@@ -193,8 +217,9 @@ pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
 ///
 /// - `kind` `kept` (B10 after its end): `target` (`<field>$bidx$prev`)
 ///   holds the index under the normalization the row records, the one the
-///   step replaced. Written by every sealed writer until the column is
-///   pruned; a rollback trades it back in.
+///   step replaced; `live` the one the field's own index is under. Written
+///   by every sealed writer until the column is pruned; a rollback trades
+///   it back in.
 ///
 /// The row leaves in the transaction that lands the step's end (the
 /// plaintext dropped, or the index made `NOT NULL`), under the same
@@ -214,6 +239,14 @@ CREATE TABLE IF NOT EXISTS \"$seals\" ( \
 /// The `normalize` column of [`SEALS_DDL`], on a table made before it.
 pub const SEALS_NORMALIZE_DDL: &str =
     "ALTER TABLE \"$seals\" ADD COLUMN IF NOT EXISTS \"normalize\" text NULL";
+
+/// The `live` column of [`SEALS_DDL`]: on a `kept` row, the normalization
+/// the field's own blind index is computed under now, so a trade of the
+/// two indexes knows what the kept one becomes without being told which
+/// version served before. Null on a row recorded before the column. Added
+/// under the `"$renames"` lock, as every change to `$seals` is.
+pub const SEALS_LIVE_DDL: &str =
+    "ALTER TABLE \"$seals\" ADD COLUMN IF NOT EXISTS \"live\" text NULL";
 
 /// What a sealed backfill in progress fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

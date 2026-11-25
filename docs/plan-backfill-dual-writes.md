@@ -477,6 +477,17 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   seals what it wrote into `<field>$seal` in its own transaction with its
   own custody (`overlay::apply_seals`, `Purpose::Write`). No node needs to
   have read anything.
+- **A write that lost twice runs alone** (Reported fix, 2026-11-24). The
+  overlay reads back each row it wrote through the primary key. Postgres
+  locks that read at the index page, which every other write to the table
+  also touches. So two writers to the table each depend on the other, and
+  SERIALIZABLE cancels one. A stream of writes cancelled the same edit 6
+  times on CI. Now from its third try, and on its last, a write takes
+  `"$renames"` in `EXCLUSIVE` mode before its snapshot
+  (`overlay::take_turn`): the writes in flight end, new ones wait, and it
+  cannot lose to them. Guarded by
+  `sealed_backfill::writes_during_the_seal_land_sealed_and_none_is_lost`
+  and `backoff_tests::a_write_that_lost_twice_runs_alone`.
 - Verify runs as verify under live writes: it opens every row against its
   plaintext and records the count and hash it reads. The per-chunk hashes
   are not compared, since writes reseal rows.
@@ -540,9 +551,45 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   activation of a version that declares the kept normalization trades it
   back in before its gate (`apply_op::restore_kept_indexes`), so `==`
   there finds every row; forward again trades back. Test:
-  `a_rollback_across_a_new_normalize_finds_every_row`. Only the
-  deployment's database is traded at an activation; a tenant's own
-  database is not yet (11b).
+  `a_rollback_across_a_new_normalize_finds_every_row`.
+- **A tenant's own database follows its pin across B10** (built
+  2026-11-24, branch `fix-b10-tenant-rollback`). The kept row also records
+  `live`, the normalization of the field's own index, so a trade needs no
+  version named. A node trades the kept index in before it serves a
+  tenant on the version that declares its normalization
+  (`Spaces::resolve`, once per space, version and pin epoch), whatever
+  moved the pin: `ordo versions pin`, a move off a revoked version, a
+  rollout, a tenant build, a restore, the catch-up. The trade asks the
+  normalization again under the `$renames` lock, so two nodes trade once,
+  and raises the tenant's pin fence to the epoch served, so a node still on
+  the pin before is told the pin moved and writes nothing into the index it
+  no longer reads. The catch-up's apply path and a stored step's run read a
+  kept index under the target's normalization as declared already: `ordo
+  rollback` moves the tenant back rather than refusing
+  `reindex_needs_stored_plan`, and a rollout forward again does not compute
+  the index again. A database shared with a tenant pinned to the other
+  version is refused for the tenant moved, naming the other tenant and
+  `ordo versions pin`. Tests: `crates/ordo-host/tests/kept_index_tenants.rs`
+  (each path, the fence, the shared refusal).
+- **Refused: a tenant on the deployment's own database pinned apart from
+  the active version across B10.** Its index there is under the active
+  version's normalization, and only an activation trades it, for every
+  space at once. `ordo versions pin` refuses the move, naming `ordo
+  versions pin <tenant> <active>` and `ordo rollback <version>`; a pin made
+  any other way is not served, with the same words.
+- **B10 on the deployment's own database keeps every space there
+  serving.** `ordo evolve --run` of a step that only reindexes keeps the
+  active version's index the field's own and the new one beside it as
+  `<field>$bidx$prev` (`$seals` kind `kept`, the new normalization); the
+  activation trades it in for every space at once. The own space does not
+  move ahead. A database one reindex ahead of the serving version is not
+  held as behind (`Spaces::ahead_by_reindex`, from the stored plans), so
+  a tenant there reads and writes between the run and the activation.
+  Test: `a_tenant_on_the_deployments_database_serves_between_the_run_and_the_activation`.
+- **Refused: a second B10 on a field whose first one is still kept**
+  (`reindex_kept_index`, naming `ordo evolve --prune`): its end would
+  replace the kept index. A step back to the kept normalization is not a
+  second B10: it is read as declared already, and nothing is computed.
 - **`sealed unique` by backfill.** B8 and B10 under `unique`: once the
   indexes verify, the run reads the duplicates over them and refuses the
   end, naming each space and its rows (`sealed_unique_duplicates`). The

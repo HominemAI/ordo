@@ -370,6 +370,38 @@ async fn pruning_asks_twice_then_removes_the_column_and_keeps_a_tombstone() {
         .await
         .expect("moved");
 
+    // A version a restore may still need declares it (increment 17): with
+    // `versions.restore_window` unset, every version that served is held,
+    // and the refusal names the setting. A window of `0` holds none.
+    let held = run(
+        &ops,
+        deploy_ops::PRUNE,
+        serde_json::json!({ "name": "note.size" }),
+    )
+    .await
+    .expect_err("a restore may need 1.0.0");
+    assert_eq!(held.code, ErrorCode::ApplyRefused);
+    assert!(
+        held.message.contains("prune_restorable"),
+        "{}",
+        held.message
+    );
+    assert!(held.message.contains("`1.0.0`"), "{}", held.message);
+    assert!(
+        held.message.contains("ordo versions set restore-window"),
+        "{}",
+        held.message
+    );
+    run(
+        &ops,
+        deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({
+            "setting": "versions.restore_window", "value": "0", "reason": "no backups here"
+        }),
+    )
+    .await
+    .expect("the window is set");
+
     // The first ask prunes nothing, and says what would go.
     let first = run(
         &ops,

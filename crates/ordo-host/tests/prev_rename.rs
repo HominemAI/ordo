@@ -1087,16 +1087,19 @@ async fn moving_node(pool: &Pool, db: &str, source: &str, space: &str, reverse: 
 /// path and their rows get the label by the mapping; `acme` on 1.1.0 writes
 /// its own label, which is kept. The check is not in the database: the
 /// host holds it on `acme`'s writes, and a `bad` label is refused by name.
-/// `beta` moves with no second expand. The own space, still on 1.0.0,
-/// writes a row whose mapped label breaks the check. Once every space is
-/// past 1.0.0 the close is refused, naming that row; changed, the soaks
-/// close together: the `NOT NULL` and the check land, `$fills` is empty.
+/// `beta` moves with no second expand. The own space, still on 1.0.0, is
+/// held to the check too (`$held`, 11b): a write whose mapped label breaks
+/// it is refused by name. A row that breaks it all the same, written by
+/// hand, makes the close refuse once every space is past 1.0.0, naming
+/// that row; changed, the soaks close together: the `NOT NULL` and the
+/// check land, `$fills` and `$held` are empty.
 ///
 /// A regression looks like a row a space on 1.0.0 wrote with no label (the
 /// `NOT NULL` would fail at the close), a label of `acme`'s overwritten by
-/// the mapping, a check in the database before the close (a write on 1.0.0
-/// would fail on a rule it never had), or a close that fails on the raw
-/// constraint error instead of naming the row.
+/// the mapping, a check in the database before the close (a raw constraint
+/// error on 1.0.0's writes), a write on 1.0.0 that breaks the held check
+/// and is kept, or a close that fails on the raw constraint error instead
+/// of naming the row.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_check_waits_for_the_close(
 ) {
@@ -1185,10 +1188,32 @@ async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_
     assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
     assert_eq!(moved.statements, 0, "no second expand");
 
-    // The own space, still on 1.0.0, writes a row the check refuses.
-    home.write(r#"addNote($kind: "bad")"#.into())
+    // The own space, still on 1.0.0, is held to the check 1.1.0 adds: its
+    // write is refused by name, the versions and the fix in the answer
+    // (11b, `$held`).
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$held\""), "1");
+    let err = home
+        .write(r#"addNote($kind: "bad")"#.into())
         .await
-        .expect("1.0.0 has no such rule");
+        .expect_err("held to 1.1.0's check");
+    assert!(
+        err.contains("check_violation: this space serves `1.0.0`"),
+        "{err}"
+    );
+    for want in ["holds the check", "move this space to `1.1.0`"] {
+        assert!(err.contains(want), "{want}: {err}");
+    }
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM note WHERE label = 'bad'"),
+        "0"
+    );
+    // A row that breaks it all the same (written before the move, by
+    // hand): the close still names it.
+    pg.exec(
+        "UPDATE note SET kind = 'bad', label = 'bad' WHERE \"$space\" = 'home' \
+         AND id = (SELECT min(id) FROM note WHERE \"$space\" = 'home')",
+    )
+    .expect("a bad row");
     let bad = one(&pg, "SELECT id FROM note WHERE label = 'bad'");
 
     // Every space past 1.0.0, both soaks due: the close names the row.
@@ -1224,6 +1249,7 @@ async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_
         "1"
     );
     assert_eq!(one(&pg, "SELECT count(*) FROM \"$fills\""), "0");
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$held\""), "0", "landed");
     assert_eq!(one(&pg, "SELECT count(*) FROM \"$moves\""), "0");
     assert_eq!(
         ordo_exec::spacedb::recorded_version(&pool)

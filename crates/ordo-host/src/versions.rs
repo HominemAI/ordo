@@ -127,12 +127,21 @@ pub enum VersionSetting {
     /// served no request for this long is unloaded, and loaded again on the
     /// next signed-in request for one of its tenants (§1.5).
     IdleEvictAfter,
+    /// `versions.restore_window`: how long the deployment owner keeps
+    /// database backups and exit bundles. A version some tenant or the
+    /// deployment was on within it is one a restore may still need, so it
+    /// is not removed, and a field it declares is not pruned (§1.6, §2.7,
+    /// increment 17). Unset, Ordo does not know, and holds every version
+    /// that ever served.
+    RestoreWindow,
 }
 
 /// `versions.min_residency`.
 pub const MIN_RESIDENCY_SETTING: &str = "versions.min_residency";
 /// `versions.idle_evict_after`.
 pub const IDLE_EVICT_SETTING: &str = "versions.idle_evict_after";
+/// `versions.restore_window`.
+pub const RESTORE_WINDOW_SETTING: &str = "versions.restore_window";
 /// Their defaults, in seconds: 10 minutes and 30 minutes (§7).
 pub const DEFAULT_MIN_RESIDENCY_SECS: u64 = 600;
 pub const DEFAULT_IDLE_EVICT_SECS: u64 = 1_800;
@@ -152,19 +161,22 @@ pub fn guard_secs(setting: VersionSetting, value: &str) -> Option<Option<u64>> {
 }
 
 impl VersionSetting {
-    pub const ALL: [VersionSetting; 5] = [
+    pub const ALL: [VersionSetting; 6] = [
         VersionSetting::Served,
         VersionSetting::Minimum,
         VersionSetting::NewTenant,
         VersionSetting::MinResidency,
         VersionSetting::IdleEvictAfter,
+        VersionSetting::RestoreWindow,
     ];
 
-    /// A load guard: a duration, not a version.
+    /// A duration, not a version: the load guards and the restore window.
     pub fn is_guard(self) -> bool {
         matches!(
             self,
-            VersionSetting::MinResidency | VersionSetting::IdleEvictAfter
+            VersionSetting::MinResidency
+                | VersionSetting::IdleEvictAfter
+                | VersionSetting::RestoreWindow
         )
     }
 
@@ -176,6 +188,7 @@ impl VersionSetting {
             VersionSetting::NewTenant => NEW_TENANT_SETTING,
             VersionSetting::MinResidency => MIN_RESIDENCY_SETTING,
             VersionSetting::IdleEvictAfter => IDLE_EVICT_SETTING,
+            VersionSetting::RestoreWindow => RESTORE_WINDOW_SETTING,
         }
     }
 
@@ -186,7 +199,9 @@ impl VersionSetting {
             VersionSetting::Minimum => MINIMUM_ENV,
             VersionSetting::NewTenant => NEW_TENANT_ENV,
             // Never an environment variable: stored in Ordo from the start.
-            VersionSetting::MinResidency | VersionSetting::IdleEvictAfter => "",
+            VersionSetting::MinResidency
+            | VersionSetting::IdleEvictAfter
+            | VersionSetting::RestoreWindow => "",
         }
     }
 
@@ -198,6 +213,7 @@ impl VersionSetting {
             VersionSetting::NewTenant => "ordo versions set new-tenant",
             VersionSetting::MinResidency => "ordo versions set min-residency",
             VersionSetting::IdleEvictAfter => "ordo versions set idle-evict-after",
+            VersionSetting::RestoreWindow => "ordo versions set restore-window",
         }
     }
 
@@ -209,6 +225,7 @@ impl VersionSetting {
             VersionSetting::NewTenant => "the active version",
             VersionSetting::MinResidency => "10m",
             VersionSetting::IdleEvictAfter => "30m",
+            VersionSetting::RestoreWindow => "unknown: every version that served is held",
         }
     }
 
@@ -226,6 +243,9 @@ impl VersionSetting {
             }
             "idle_evict_after" | "idle-evict-after" | "idleEvictAfter" => {
                 Some(VersionSetting::IdleEvictAfter)
+            }
+            "restore_window" | "restore-window" | "restoreWindow" => {
+                Some(VersionSetting::RestoreWindow)
             }
             _ => None,
         }
@@ -252,6 +272,8 @@ pub struct VersionSettings {
     pub min_residency: Option<String>,
     /// `versions.idle_evict_after` as stored, `None` for the default.
     pub idle_evict_after: Option<String>,
+    /// `versions.restore_window` as stored, `None` when unset.
+    pub restore_window: Option<String>,
 }
 
 impl VersionSettings {
@@ -263,7 +285,17 @@ impl VersionSettings {
             VersionSetting::NewTenant => self.new_tenant.clone(),
             VersionSetting::MinResidency => self.min_residency.clone(),
             VersionSetting::IdleEvictAfter => self.idle_evict_after.clone(),
+            VersionSetting::RestoreWindow => self.restore_window.clone(),
         }
+    }
+
+    /// `versions.restore_window` in seconds. `None` when unset: Ordo does
+    /// not know how long backups and bundles are kept.
+    pub fn restore_window_secs(&self) -> Option<u64> {
+        self.restore_window
+            .as_deref()
+            .and_then(|v| guard_secs(VersionSetting::RestoreWindow, v))
+            .flatten()
     }
 
     /// `versions.min_residency` in seconds: the stored value, or the
@@ -310,6 +342,7 @@ impl VersionSettings {
             VersionSetting::NewTenant => out.new_tenant = value,
             VersionSetting::MinResidency => out.min_residency = value,
             VersionSetting::IdleEvictAfter => out.idle_evict_after = value,
+            VersionSetting::RestoreWindow => out.restore_window = value,
         }
         out
     }
@@ -577,6 +610,31 @@ CREATE TABLE IF NOT EXISTS \"$revocations\" ( \
   \"move_to\" text NULL \
 ); \
 CREATE INDEX IF NOT EXISTS \"$revocations_version\" ON \"$revocations\" (\"version\", \"seq\")";
+
+/// `$version_removals`, beside `$artifacts`: each removal of a stored
+/// version (§1.6), append-only: who, why, where its tenants went and how
+/// many. The version's own row stays as its tombstone.
+const REMOVALS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$version_removals\" ( \
+  \"seq\" bigserial PRIMARY KEY, \
+  \"version\" text NOT NULL, \
+  \"actor\" text NOT NULL, \
+  \"reason\" text NOT NULL, \
+  \"moved_to\" text NULL, \
+  \"moved\" bigint NOT NULL, \
+  \"at\" bigint NOT NULL \
+)";
+
+/// One removal of a stored version, as `$version_removals` holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    pub version: String,
+    pub actor: String,
+    pub reason: String,
+    pub moved_to: Option<String>,
+    pub moved: u64,
+    pub at: u64,
+}
 
 /// `$move_targets`, beside `$spaces`: where one tenant goes when it moves
 /// off a revoked version, set by the deployment owner (ruled 2026-11-05).
@@ -999,6 +1057,9 @@ pub enum PinCause {
     /// A tenant build moved it: it joined or left one, or its build was set
     /// to another version (`plan-versions.md` §3.8, increment 16).
     Build,
+    /// Its version was removed, and the deployment owner named where its
+    /// tenants go (`ordo versions remove --move-to`, §1.6).
+    Remove,
 }
 
 /// Where an open move stands (`$moves.phase`, §2.1).
@@ -1216,6 +1277,7 @@ impl PinCause {
             PinCause::Rollout => "rollout",
             PinCause::Restore => "restore",
             PinCause::Build => "build",
+            PinCause::Remove => "remove",
         }
     }
 }
@@ -2278,7 +2340,8 @@ impl<'a> Versions<'a> {
             Some(Ok(n)) => self
                 .pool
                 .rows(&format!(
-                    "SELECT \"version\" FROM \"$artifacts\" WHERE \"ordinal\" = {n}"
+                    "SELECT \"version\" FROM \"$artifacts\" WHERE \"ordinal\" = {n} \
+                     AND \"removed_at\" IS NULL"
                 ))
                 .await?
                 .first()
@@ -2301,7 +2364,7 @@ impl<'a> Versions<'a> {
             .pool
             .rows(
                 "SELECT \"version\", \"ordinal\" FROM \"$artifacts\" \
-                 ORDER BY \"ordinal\" NULLS LAST, \"version\"",
+                 WHERE \"removed_at\" IS NULL ORDER BY \"ordinal\" NULLS LAST, \"version\"",
             )
             .await?;
         Ok(rows
@@ -3733,6 +3796,133 @@ impl<'a> Versions<'a> {
             .filter_map(|r| Some((r.first()?.clone()?, r.get(1)?.clone()?.parse().ok()?)))
             .collect())
     }
+
+    /// **When `version` last served**, in seconds: `now` while it is
+    /// active, the deployment's own space is on it, or a tenant is pinned
+    /// to it; else the latest of a tenant leaving it (`$pins`) and the
+    /// activation that replaced it (`$activations`). `None`: it never
+    /// served, so no backup or bundle can be at it.
+    pub async fn last_served(
+        &self,
+        version: &str,
+        now: u64,
+    ) -> Result<Option<u64>, VersionRefusal> {
+        if self.active_version().await?.as_deref() == Some(version) {
+            return Ok(Some(now));
+        }
+        if self.own_pin().await?.is_some_and(|(_, v, _)| v == version) {
+            return Ok(Some(now));
+        }
+        if self
+            .tenants_per_version()
+            .await?
+            .get(version)
+            .is_some_and(|n| *n > 0)
+        {
+            return Ok(Some(now));
+        }
+        let v = sql_lit(version);
+        let read = |sql: String| async move {
+            match self.pool.rows(&sql).await {
+                Ok(rows) => Ok(rows
+                    .first()
+                    .and_then(|r| r.first().cloned().flatten())
+                    .and_then(|s| s.parse::<u64>().ok())),
+                Err(e) if e.is_missing_table() => Ok(None),
+                Err(e) => Err(VersionRefusal::from(e)),
+            }
+        };
+        let left = read(format!(
+            "SELECT max(\"at\") FROM \"$pins\" WHERE \"from\" = {v}"
+        ))
+        .await?;
+        let replaced = read(format!(
+            "SELECT max(n.\"at\") FROM \"$activations\" a, LATERAL ( \
+               SELECT b.\"at\" FROM \"$activations\" b WHERE b.\"seq\" > a.\"seq\" \
+               ORDER BY b.\"seq\" LIMIT 1) n \
+             WHERE a.\"version\" = {v}"
+        ))
+        .await?;
+        Ok(left.max(replaced))
+    }
+
+    /// **Whether a restore may still need `version`** (increment 17, §2.7):
+    /// a database backup or an exit bundle taken while it served. Held when
+    /// it served within `versions.restore_window`, or ever, when the window
+    /// is unset. `None`: nothing can be at it, so it may be removed and a
+    /// field only it declares may be pruned.
+    pub async fn restore_hold(
+        &self,
+        version: &str,
+        now: u64,
+    ) -> Result<Option<RestoreHold>, VersionRefusal> {
+        let Some(last) = self.last_served(version, now).await? else {
+            return Ok(None);
+        };
+        let window = self.settings().await?.restore_window_secs();
+        let held = match window {
+            None => true,
+            Some(w) => last.saturating_add(w) > now,
+        };
+        Ok(held.then(|| RestoreHold {
+            version: version.to_string(),
+            last_served: last,
+            serving: last >= now,
+            window,
+        }))
+    }
+}
+
+/// A version a restore may still need ([`Versions::restore_hold`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreHold {
+    pub version: String,
+    /// When it last served, in seconds.
+    pub last_served: u64,
+    /// It serves now.
+    pub serving: bool,
+    /// `versions.restore_window` in seconds, `None` when unset.
+    pub window: Option<u64>,
+}
+
+impl RestoreHold {
+    /// The hold in words, naming the setting that frees it.
+    pub fn line(&self) -> String {
+        let since = if self.serving {
+            "serves now".to_string()
+        } else {
+            format!("last served {} UTC", utc_minute(self.last_served))
+        };
+        match self.window {
+            None => format!(
+                "`{}` {since}, and a backup or bundle taken then needs it to restore. \
+                 `{RESTORE_WINDOW_SETTING}` is unset, so Ordo holds every version that served. \
+                 Set it to how long you keep backups and bundles (`ordo versions set \
+                 restore-window 30d --reason \"...\"`; `0` holds none)",
+                self.version
+            ),
+            Some(w) => format!(
+                "`{}` {since}, and `{RESTORE_WINDOW_SETTING}` is {}, so a backup or bundle \
+                 taken then may still need it until {} UTC. Wait, or shorten the window \
+                 (`ordo versions set restore-window <duration> --reason \"...\"`; `0` holds \
+                 none)",
+                self.version,
+                duration_words(w),
+                utc_minute(self.last_served.saturating_add(w)),
+            ),
+        }
+    }
+}
+
+/// A window in seconds as a person set it: `30d`, `12h`, `0`.
+fn duration_words(secs: u64) -> String {
+    match secs {
+        0 => "0".into(),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3_600 == 0 => format!("{}h", s / 3_600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
 }
 
 impl<'a> Versions<'a> {
@@ -3898,6 +4088,91 @@ impl<'a> Versions<'a> {
         .await?;
         tx.commit().await?;
         Ok(version)
+    }
+
+    /// **The last step of removing a stored version** (§1.6): under the pin
+    /// lock, check again that it is not active and no tenant is pinned to
+    /// it, then leave its tombstone ([`registry::mark_removed`]) and a
+    /// `$version_removals` row with who, why, where its tenants went and
+    /// how many. Every other check is the caller's, before this
+    /// (`crate::version_removal`). Answers the tenants still pinned to it
+    /// when there are any, and removes nothing then.
+    pub async fn remove_stored(
+        &self,
+        version: &str,
+        reason: &str,
+        moved_to: Option<&str>,
+        moved: usize,
+        actor: &str,
+        at: u64,
+    ) -> Result<Vec<String>, VersionRefusal> {
+        self.ensure().await?;
+        self.pool.rows(REMOVALS_DDL).await?;
+        let tx = self.pool.begin().await?;
+        tx.rows(&pin_lock_sql()).await?;
+        if active_in(&tx).await?.as_deref() == Some(version) {
+            tx.rollback().await?;
+            return Err(VersionRefusal::MoveTo(format!(
+                "{} became the active version meanwhile, and the active version is not removed",
+                self.named(version).await?
+            )));
+        }
+        let left: Vec<String> = tx
+            .rows(&format!(
+                "SELECT \"$space\" FROM \"$spaces\" WHERE \"version\" = {} \
+                 AND \"state\" IN {PINNED_STATES} ORDER BY \"$space\"",
+                sql_lit(version)
+            ))
+            .await?
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .collect();
+        if !left.is_empty() {
+            tx.rollback().await?;
+            return Ok(left);
+        }
+        registry::mark_removed(&tx, version, at).await?;
+        tx.rows(&format!(
+            "INSERT INTO \"$version_removals\" \
+               (\"version\", \"actor\", \"reason\", \"moved_to\", \"moved\", \"at\") \
+             VALUES ({}, {}, {}, {}, {moved}, {at})",
+            sql_lit(version),
+            sql_lit(actor),
+            sql_lit(reason),
+            moved_to.map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        ))
+        .await?;
+        tx.commit().await?;
+        Ok(Vec::new())
+    }
+
+    /// Every removal, newest first: `(version, actor, reason, moved_to,
+    /// moved, at)`. Empty before the first.
+    pub async fn removals(&self) -> Result<Vec<Removal>, VersionRefusal> {
+        match self
+            .pool
+            .rows(
+                "SELECT \"version\", \"actor\", \"reason\", \"moved_to\", \"moved\", \"at\" \
+                 FROM \"$version_removals\" ORDER BY \"seq\" DESC",
+            )
+            .await
+        {
+            Ok(rows) => Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    Some(Removal {
+                        version: r.first()?.clone()?,
+                        actor: r.get(1)?.clone()?,
+                        reason: r.get(2)?.clone()?,
+                        moved_to: r.get(3).cloned().flatten(),
+                        moved: r.get(4)?.clone()?.parse().ok()?,
+                        at: r.get(5)?.clone()?.parse().ok()?,
+                    })
+                })
+                .collect()),
+            Err(e) if e.is_missing_table() => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Every revoked version's mark. A database with no `$revocations`
@@ -4399,13 +4674,15 @@ impl<'a> Versions<'a> {
             }
             VersionSetting::NewTenant
             | VersionSetting::MinResidency
-            | VersionSetting::IdleEvictAfter => candidate.policy.clone(),
+            | VersionSetting::IdleEvictAfter
+            | VersionSetting::RestoreWindow => candidate.policy.clone(),
         };
         let mut resolved = VersionSettings {
             policy,
             new_tenant: None,
             min_residency: candidate.min_residency.clone(),
             idle_evict_after: candidate.idle_evict_after.clone(),
+            restore_window: candidate.restore_window.clone(),
         };
         if let Some(named) = &candidate.new_tenant {
             let version = match self.resolve(named).await {

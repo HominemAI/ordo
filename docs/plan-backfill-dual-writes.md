@@ -477,6 +477,17 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   seals what it wrote into `<field>$seal` in its own transaction with its
   own custody (`overlay::apply_seals`, `Purpose::Write`). No node needs to
   have read anything.
+- **A write that lost twice runs alone** (Reported fix, 2026-11-24). The
+  overlay reads back each row it wrote through the primary key. Postgres
+  locks that read at the index page, which every other write to the table
+  also touches. So two writers to the table each depend on the other, and
+  SERIALIZABLE cancels one. A stream of writes cancelled the same edit 6
+  times on CI. Now from its third try, and on its last, a write takes
+  `"$renames"` in `EXCLUSIVE` mode before its snapshot
+  (`overlay::take_turn`): the writes in flight end, new ones wait, and it
+  cannot lose to them. Guarded by
+  `sealed_backfill::writes_during_the_seal_land_sealed_and_none_is_lost`
+  and `backoff_tests::a_write_that_lost_twice_runs_alone`.
 - Verify runs as verify under live writes: it opens every row against its
   plaintext and records the count and hash it reads. The per-chunk hashes
   are not compared, since writes reseal rows.

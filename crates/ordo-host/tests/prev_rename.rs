@@ -1352,6 +1352,31 @@ async fn a_unique_the_new_version_adds_is_checked_against_the_copy_and_lands_at_
         .await
         .expect("acme moves");
     assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+
+    // The door's revert in the soak (`std.deployment.revertSoak`, what the
+    // console's Moves screen calls): back on 1.0.0, recorded as
+    // `soak-reverted`. Then the move runs again.
+    let stream = std::sync::Arc::new(ordo_secevent::Recorder::default());
+    let ops = ordo_host::apply_op::ApplyOps::recording(
+        pool.clone(),
+        std::sync::Arc::new(ordo_exec::route::SinglePool::new(pool.clone())),
+        "home",
+        Some(stream.clone()),
+    );
+    let tenant = ordo_api::BoundParams(
+        serde_json::json!({ "tenant": "acme" })
+            .as_object()
+            .cloned()
+            .expect("an object"),
+    );
+    let back = evolve::execute(&ops, evolve::REVERT_SOAK, &tenant, OWNER)
+        .await
+        .expect("reverted");
+    assert_eq!(back["phase"], "gated", "{back}");
+    let moved = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect("acme moves again");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
     assert_eq!(one(&pg, uniques), "1", "the unique lands at the switch");
     let acme = moving_node(&pool, &pg.db, &y_src, "acme", true).await;
     acme.write(r#"addNote($kind: "k", $label: "twice")"#.into())
@@ -1372,12 +1397,26 @@ async fn a_unique_the_new_version_adds_is_checked_against_the_copy_and_lands_at_
     v.pin_own("home", "1.1.0", 0, OWNER, 20)
         .await
         .expect("the own space moves");
-    let closed = dual_writes::close(&cx, "acme", OWNER)
+    // Closed through the door (`std.deployment.closeSoak`), recorded.
+    let closed = evolve::execute(&ops, evolve::CLOSE_SOAK, &tenant, OWNER)
         .await
         .expect("the soaks close");
-    assert_eq!(closed.together, vec!["beta".to_string()]);
+    assert_eq!(
+        closed["closedWith"],
+        serde_json::json!(["beta"]),
+        "{closed}"
+    );
     assert_eq!(one(&pg, uniques), "1");
     assert_eq!(is_nullable(&pg, "label"), "NO");
+    let acts: Vec<String> = stream
+        .drain_all(ordo_commandlog::Timestamp(u64::MAX / 2))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            ordo_secevent::EventKind::Deploy { act, .. } => Some(act),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(acts, ["soak-reverted", "soak-closed"], "{acts:?}");
 }
 
 /// Increment 11b part 5: **a space still on the version before, in a

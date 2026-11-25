@@ -131,8 +131,8 @@ pub enum VersionSetting {
     /// database backups and exit bundles. A version some tenant or the
     /// deployment was on within it is one a restore may still need, so it
     /// is not removed, and a field it declares is not pruned (§1.6, §2.7,
-    /// increment 17). Unset, Ordo does not know, and holds every version
-    /// that ever served.
+    /// increment 17). Unset, it is the deployment's backup retention, or 30
+    /// days when Ordo does not know that (owner, 2026-11-25).
     RestoreWindow,
 }
 
@@ -145,6 +145,9 @@ pub const RESTORE_WINDOW_SETTING: &str = "versions.restore_window";
 /// Their defaults, in seconds: 10 minutes and 30 minutes (§7).
 pub const DEFAULT_MIN_RESIDENCY_SECS: u64 = 600;
 pub const DEFAULT_IDLE_EVICT_SECS: u64 = 1_800;
+/// `versions.restore_window` when unset and the deployment's backup
+/// retention is not known: 30 days (owner, 2026-11-25).
+pub const DEFAULT_RESTORE_WINDOW_SECS: u64 = 30 * 86_400;
 
 /// A load guard's value: a duration like `10m`, `30s` or `2h`, `0`, or
 /// for `versions.idle_evict_after` also `off`. `None` when it is none of
@@ -225,7 +228,7 @@ impl VersionSetting {
             VersionSetting::NewTenant => "the active version",
             VersionSetting::MinResidency => "10m",
             VersionSetting::IdleEvictAfter => "30m",
-            VersionSetting::RestoreWindow => "unknown: every version that served is held",
+            VersionSetting::RestoreWindow => "30d, or your backup retention when known",
         }
     }
 
@@ -289,13 +292,21 @@ impl VersionSettings {
         }
     }
 
-    /// `versions.restore_window` in seconds. `None` when unset: Ordo does
-    /// not know how long backups and bundles are kept.
-    pub fn restore_window_secs(&self) -> Option<u64> {
+    /// `versions.restore_window` in seconds, as set. `None` when unset.
+    pub fn restore_window_set_secs(&self) -> Option<u64> {
         self.restore_window
             .as_deref()
             .and_then(|v| guard_secs(VersionSetting::RestoreWindow, v))
             .flatten()
+    }
+
+    /// `versions.restore_window` in seconds: the stored value, or when
+    /// unset the deployment's backup retention (`backup_retention`, which
+    /// Ordo does not learn from any setting today), or 30 days.
+    pub fn restore_window_secs(&self, backup_retention: Option<u64>) -> u64 {
+        self.restore_window_set_secs()
+            .or(backup_retention)
+            .unwrap_or(DEFAULT_RESTORE_WINDOW_SECS)
     }
 
     /// `versions.min_residency` in seconds: the stored value, or the
@@ -3914,16 +3925,15 @@ impl<'a> Versions<'a> {
         let Some(last) = self.last_served(version, now).await? else {
             return Ok(None);
         };
-        let window = self.settings().await?.restore_window_secs();
-        let held = match window {
-            None => true,
-            Some(w) => last.saturating_add(w) > now,
-        };
+        let settings = self.settings().await?;
+        let window = settings.restore_window_secs(None);
+        let held = last.saturating_add(window) > now;
         Ok(held.then(|| RestoreHold {
             version: version.to_string(),
             last_served: last,
             serving: last >= now,
             window,
+            by_default: settings.restore_window_set_secs().is_none(),
         }))
     }
 }
@@ -3936,8 +3946,10 @@ pub struct RestoreHold {
     pub last_served: u64,
     /// It serves now.
     pub serving: bool,
-    /// `versions.restore_window` in seconds, `None` when unset.
-    pub window: Option<u64>,
+    /// The window in force, in seconds.
+    pub window: u64,
+    /// The window is the default, `versions.restore_window` being unset.
+    pub by_default: bool,
 }
 
 impl RestoreHold {
@@ -3948,24 +3960,25 @@ impl RestoreHold {
         } else {
             format!("last served {} UTC", utc_minute(self.last_served))
         };
-        match self.window {
-            None => format!(
-                "`{}` {since}, and a backup or bundle taken then needs it to restore. \
-                 `{RESTORE_WINDOW_SETTING}` is unset, so Ordo holds every version that served. \
-                 Set it to how long you keep backups and bundles (`ordo versions set \
-                 restore-window 30d --reason \"...\"`; `0` holds none)",
-                self.version
-            ),
-            Some(w) => format!(
-                "`{}` {since}, and `{RESTORE_WINDOW_SETTING}` is {}, so a backup or bundle \
-                 taken then may still need it until {} UTC. Wait, or shorten the window \
-                 (`ordo versions set restore-window <duration> --reason \"...\"`; `0` holds \
-                 none)",
-                self.version,
-                duration_words(w),
-                utc_minute(self.last_served.saturating_add(w)),
-            ),
-        }
+        let source = if self.by_default {
+            format!(
+                "`{RESTORE_WINDOW_SETTING}` is unset, so it is the default, {} (your backup \
+                 retention when Ordo knows it, else 30 days)",
+                duration_words(self.window)
+            )
+        } else {
+            format!(
+                "`{RESTORE_WINDOW_SETTING}` is {}",
+                duration_words(self.window)
+            )
+        };
+        format!(
+            "`{}` {since}, and {source}, so a backup or bundle taken then may still need it \
+             until {} UTC. Wait, or set the window to how long you keep backups and bundles \
+             (`ordo versions set restore-window <duration> --reason \"...\"`; `0` holds none)",
+            self.version,
+            utc_minute(self.last_served.saturating_add(self.window)),
+        )
     }
 }
 

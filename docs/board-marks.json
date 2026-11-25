@@ -2688,8 +2688,8 @@
   "at": "2026-10-04T03:37:01+00:00"
  },
  "unique-fields-a-new-version-adds:1": {
-  "mark": "questions",
-  "at": "2026-11-25T19:56:58+00:00"
+  "mark": "done",
+  "at": "2026-11-25T20:11:09+00:00"
  },
  "upgrading-with-an-old-compose-file:1": {
   "mark": "done",
@@ -2833,7 +2833,7 @@
  },
  "versions-three-design-choices-left-after:1": {
   "mark": "questions",
-  "at": "2026-11-25T19:56:17+00:00"
+  "at": "2026-11-25T20:12:27+00:00"
  },
  "versions-three-design-choices-left-after:2": {
   "mark": "questions",

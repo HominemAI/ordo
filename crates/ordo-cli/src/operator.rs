@@ -4306,7 +4306,7 @@ fn settings_lines(row: &serde_json::Value) -> String {
         show("newTenant", "the active version"),
         show(
             "restoreWindow",
-            "unset: every version that served is held for a restore"
+            "unset: 30d, or your backup retention when known"
         )
     ) + &row["waiting"]["line"]
         .as_str()

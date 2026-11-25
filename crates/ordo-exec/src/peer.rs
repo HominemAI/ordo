@@ -1593,6 +1593,87 @@ async fn is_member(pool: &Pool, of: &str, role: &str) -> Result<bool, SchemaRefu
     Ok(first_is_true(&rows))
 }
 
+/// **The reader tells the read app its release** (owner ruling 2026-11-25,
+/// `readers-show-the-read-app-which`). This deployment grants `USAGE` on its
+/// own schema and `SELECT` on the `release` column of its `$ordorelease`,
+/// and nothing else, to the role that owns each peer's schema, so the read
+/// app's `ordo release-check` names this deployment's Ordo release and not
+/// only its role. A peer owned by this deployment's own role (or one it is
+/// a member of) needs no grant. Nothing is sent when the catalog already
+/// agrees. Returns one line per role granted.
+pub async fn grant_release_to_peers(
+    pool: &Pool,
+    schema: &Schema,
+) -> Result<Vec<String>, SchemaRefusal> {
+    let own_schema = pool.schema().to_string();
+    if !has_table(
+        pool,
+        Some(&own_schema),
+        crate::sign_in_contract::RELEASE_TABLE,
+    )
+    .await?
+    {
+        return Ok(Vec::new());
+    }
+    let own = current_role(pool).await?;
+    let mut owners: BTreeSet<String> = BTreeSet::new();
+    for e in &schema.externals {
+        let Some(pg) = e
+            .external
+            .as_ref()
+            .and_then(|x| x.peer.as_ref())
+            .and_then(|p| p.schema.clone())
+        else {
+            continue;
+        };
+        let rows = pool
+            .rows(&format!(
+                "SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = {}",
+                sql_lit(&pg)
+            ))
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        if let Some(owner) = rows.first().and_then(|r| r.first().cloned().flatten()) {
+            owners.insert(owner);
+        }
+    }
+    let (s, t, c) = (
+        quote(&own_schema),
+        quote(crate::sign_in_contract::RELEASE_TABLE),
+        quote(crate::sign_in_contract::RELEASE_COLUMN),
+    );
+    let mut out = Vec::new();
+    for owner in owners {
+        if owner == own || is_member(pool, &own, &owner).await? {
+            continue;
+        }
+        let held = pool
+            .rows(&format!(
+                "SELECT has_schema_privilege({o}, {sl}, 'USAGE') \
+                   AND has_column_privilege({o}, {tl}, {cl}, 'SELECT')",
+                o = sql_lit(&owner),
+                sl = sql_lit(&own_schema),
+                tl = sql_lit(&format!("{s}.{t}", s = s, t = t)),
+                cl = sql_lit(crate::sign_in_contract::RELEASE_COLUMN),
+            ))
+            .await
+            .map_err(SchemaRefusal::Database)?;
+        if first_is_true(&held) {
+            continue;
+        }
+        let r = quote(&owner);
+        pool.rows(&format!(
+            "GRANT USAGE ON SCHEMA {s} TO {r}; GRANT SELECT ({c}) ON {s}.{t} TO {r}"
+        ))
+        .await
+        .map_err(SchemaRefusal::Database)?;
+        out.push(format!(
+            "release     role `{owner}` reads this deployment's Ordo release"
+        ));
+    }
+    Ok(out)
+}
+
 /// [`check_access`] with [`SHARED_ROLE_ENV`] read from this process's
 /// environment.
 pub async fn check_access_env(

@@ -371,8 +371,8 @@ async fn pruning_asks_twice_then_removes_the_column_and_keeps_a_tombstone() {
         .expect("moved");
 
     // A version a restore may still need declares it (increment 17): with
-    // `versions.restore_window` unset, every version that served is held,
-    // and the refusal names the setting. A window of `0` holds none.
+    // `versions.restore_window` unset, a version that served within the 30-day
+    // default is held, and the refusal names the setting. A window of `0` holds none.
     let held = run(
         &ops,
         deploy_ops::PRUNE,

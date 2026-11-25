@@ -36,6 +36,8 @@ exclude = ["crates/ordo-wasm"]
 
 [workspace.package]
 edition = "2021"
+# A release sets this and `RELEASE_DATE` in crates/ordo-plan/src/edition.rs
+# together: the language editions' load window is measured against it.
 version = "0.5.1"
 authors = ["Hominem"]
 license = "AGPL-3.0-only"

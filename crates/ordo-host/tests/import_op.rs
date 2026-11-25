@@ -126,7 +126,11 @@ impl Drop for Harness {
 }
 
 async fn harness(db: &str) -> Harness {
-    let fixture = Arc::new(Fixture::from_source(PROGRAM, "").expect("the program compiles"));
+    harness_with(db, PROGRAM).await
+}
+
+async fn harness_with(db: &str, program: &str) -> Harness {
+    let fixture = Arc::new(Fixture::from_source(program, "").expect("the program compiles"));
     let pg = Pg::scoped(db);
     fixture.reset(&pg).expect("the schema applies");
 
@@ -144,7 +148,7 @@ async fn harness(db: &str) -> Harness {
     let artifact = Artifact {
         version: "v_import".into(),
         artifact: "{\"stand-in\": true}\n".into(),
-        source: PROGRAM.to_string(),
+        source: program.to_string(),
         ddl: fixture.ddl.clone(),
         applied_at: ordo_commandlog::Timestamp(NOW),
         actor: "test".into(),
@@ -929,4 +933,157 @@ async fn a_profile_is_not_merged_into_a_tenant_that_has_one() {
         "{}",
         refused.message
     );
+}
+
+// ── acl rows (a Reported fix, 2026-11-24) ────────────────────────────────
+
+/// Notes with `acl`, and reminders that point into them.
+const ACL_PROGRAM: &str = "\
+entity notes (key: nte) {
+  owner -> members
+  title: text
+  acl (read, write, admin)
+}
+
+entity reminders (key: rmd) {
+  note -> notes
+  due: text
+}
+";
+
+impl Harness {
+    /// 2 notes by `AUTHOR` (each with its creator's admin row), one shared
+    /// read-only with `SRC2`, and a reminder on it.
+    async fn seed_acl_source(&self) {
+        self.pool
+            .rows(&format!(
+                "INSERT INTO \"members\" (\"$space\", \"id\", \"rev\", \"principal\", \
+                 \"displayName\", \"kind\", \"memberCount\", \"role\", \"status\", \"joined\") \
+                 VALUES ('{HERE}', '{SRC2}', 1, '{SRC2}', 'Second', 'principal', 1, 'editor', \
+                 'active', CURRENT_DATE)"
+            ))
+            .await
+            .expect("a second source member");
+        let f = self.fixture.in_space(HERE);
+        let mut log = ordo_conformance::WriteLog::default();
+        for title in ["shared", "private"] {
+            f.run_write_as(
+                &self.pg,
+                &mut log,
+                &format!("std.notes.create($owner: \"{AUTHOR}\", $title: \"{title}\")"),
+                Some(AUTHOR),
+            )
+            .expect("a source note");
+        }
+        let shared = self
+            .one(&format!(
+                "SELECT \"id\" FROM \"notes\" WHERE \"$space\" = '{HERE}' AND \"title\" = 'shared'"
+            ))
+            .await
+            .expect("the shared note");
+        f.run_write_as(
+            &self.pg,
+            &mut log,
+            &format!(
+                "grantNotesAccess($note: \"{shared}\", $member: \"{SRC2}\", $level: \"read\")"
+            ),
+            Some(AUTHOR),
+        )
+        .expect("shared with SRC2");
+        f.run_write_as(
+            &self.pg,
+            &mut log,
+            &format!("std.reminders.create($note: \"{shared}\", $due: \"monday\")"),
+            Some(AUTHOR),
+        )
+        .expect("a reminder");
+    }
+
+    /// Every access row in `space`, as `(title, member, level)`, sorted.
+    async fn access_rows(&self, space: &str) -> Vec<(String, String, String)> {
+        let mut out: Vec<(String, String, String)> = self
+            .pool
+            .rows(&format!(
+                "SELECT n.\"title\", a.\"member\", a.\"level\" FROM \"notesAccess\" a \
+                 JOIN \"notes\" n ON n.\"$space\" = a.\"$space\" AND n.\"id\" = a.\"note\" \
+                 WHERE a.\"$space\" = '{space}'"
+            ))
+            .await
+            .expect("access rows")
+            .into_iter()
+            .map(|r| {
+                let c = |i: usize| r[i].clone().unwrap_or_default();
+                (c(0), c(1), c(2))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+/// **A tenant whose notes carry acl rows imports whole** (Reported fix,
+/// 2026-11-24, found by staging clones). Before the fix the import minted
+/// its caller an access row on each note it created, then refused the
+/// bundle's own access row for the same note as `expected_absent`, and
+/// wrote nothing. Now the access rows are exactly the bundle's, mapped to
+/// the destination's people, and none is minted for the importer; the
+/// reminder pointing into a note lands too.
+#[tokio::test]
+async fn a_tenant_whose_notes_carry_acl_rows_imports_every_row() {
+    let h = harness_with("import_op_acl", ACL_PROGRAM).await;
+    h.seed_acl_source().await;
+    // The source holds 3 access rows: the author's 2 and the share.
+    assert_eq!(h.access_rows(HERE).await.len(), 3);
+    h.stage(TWIN, "acl").await;
+    h.stage_people(TWIN, "acl", &[(AUTHOR, SECOND), (SRC2, IMPORTER)]);
+
+    let report = h.import("acl", "run_acl").await.expect("the import lands");
+    // 2 notes, 3 access rows, 1 reminder.
+    assert_eq!(report["rows"], json!(6), "{report}");
+    assert_eq!(
+        h.access_rows(TWIN).await,
+        vec![
+            ("private".into(), SECOND.into(), "admin".into()),
+            ("shared".into(), IMPORTER.into(), "read".into()),
+            ("shared".into(), SECOND.into(), "admin".into()),
+        ],
+        "exactly the bundle's access rows: none minted for the importer"
+    );
+    assert_eq!(
+        h.one(&format!(
+            "SELECT n.\"title\" FROM \"reminders\" r JOIN \"notes\" n \
+             ON n.\"$space\" = r.\"$space\" AND n.\"id\" = r.\"note\" \
+             WHERE r.\"$space\" = '{TWIN}'"
+        ))
+        .await
+        .as_deref(),
+        Some("shared"),
+    );
+}
+
+/// The refusal: access rows are restored as the space's owner, so a member
+/// who is not its owner is refused by name and nothing is written.
+#[tokio::test]
+async fn an_acl_import_by_someone_not_the_owner_is_refused_and_writes_nothing() {
+    let h = harness_with("import_op_acl_owner", ACL_PROGRAM).await;
+    h.seed_acl_source().await;
+    h.stage(TWIN, "acl").await;
+    h.stage_people(TWIN, "acl", &[(AUTHOR, SECOND), (SRC2, IMPORTER)]);
+    let bound = BoundParams(
+        [
+            ("bundle".to_string(), json!("acl")),
+            ("name".to_string(), json!("run_acl")),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let e = h.ops.import(TWIN, &bound, SECOND).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::ImportRefused, "{e:?}");
+    assert!(e.message.contains("not_owner"), "{}", e.message);
+    assert!(
+        e.message.contains("Run the import as its owner"),
+        "{}",
+        e.message
+    );
+    assert!(h.access_rows(TWIN).await.is_empty());
 }

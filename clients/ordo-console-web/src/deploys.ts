@@ -102,6 +102,8 @@ export interface RevokedInUse {
   reason: string;
   actor: string;
   at: number;
+  /** Where its tenants go when they move off it; `null` is the active version. */
+  moveTo?: string | null;
   tenantCount: number;
   tenants: { space: string; name: string; state: string }[];
 }
@@ -154,6 +156,10 @@ export interface VersionSettings {
   history?: { setting: string; value: string | null; actor: string; reason: string; at: number }[];
   /** Tenants that must move off a revoked or too-old version, and those no window covers. */
   waiting?: { tenants: number; noWindow: number; line: string | null };
+  /** The rollout settings as they stand, defaults filled in (ruled 2026-11-23, Q15). Lengths in seconds. */
+  rollout?: Record<string, string | number | boolean | string[] | null>;
+  /** The backfill settings as they stand, defaults filled in. Lengths in seconds. */
+  backfill?: Record<string, string | number | boolean | null>;
 }
 
 /** What a change answers: the settings now, and whether this one changed. */
@@ -166,8 +172,11 @@ export interface SettingChanged extends VersionSettings {
 export type VersionSettingName = 'versions.served' | 'versions.minimum' | 'versions.new_tenant';
 
 export const versionSettings = (): Promise<VersionSettings> => get<VersionSettings>('deploys/settings');
+/** A rollout or backfill setting, set through the same op (`ordo rollout set`, `ordo versions set backfill.*`). */
+export type RolloutSettingName = `rollout.${string}` | `backfill.${string}`;
+
 export const setVersionSetting = (
-  setting: VersionSettingName,
+  setting: VersionSettingName | RolloutSettingName,
   value: string | null,
   reason: string,
 ): Promise<SettingChanged> => post<SettingChanged>('deploys/setting', { setting, reason, ...(value ? { value } : {}) });

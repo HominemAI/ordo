@@ -117,7 +117,8 @@ const ALLOW_HEADERS: &str = "Authorization, Content-Type, Idempotency-Key, X-Ord
      X-Ordo-Page, X-Ordo-Resume, X-Ordo-Version, X-Ordo-Human, Last-Event-ID";
 
 /// Response headers a page is allowed to read.
-const EXPOSE_HEADERS: &str = "X-Ordo-Op-Version, X-Ordo-Version-Skew, X-Ordo-Idempotent-Replay, \
+const EXPOSE_HEADERS: &str = "X-Ordo-Op-Version, X-Ordo-Tenant-Version, X-Ordo-Version-Skew, \
+     X-Ordo-Idempotent-Replay, \
      X-Ordo-Page, X-Ordo-Position, X-Ordo-Head, X-Ordo-Head-Key, X-Ordo-Head-Sig, \
      X-Ordo-Verifiable-From, X-Ordo-Cache, ETag, Retry-After, Allow, Content-Disposition";
 

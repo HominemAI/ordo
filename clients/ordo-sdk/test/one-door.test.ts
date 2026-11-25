@@ -137,6 +137,8 @@ describe('one error shape', () => {
     CallTimeout: 'the deadline, inside the helper; it reaches a caller as OrdoNetworkError',
     SchemaVersionError: "ordo-react: a descriptor file this package cannot read; the door said nothing",
     MalformedDescriptorError: 'ordo-react: as SchemaVersionError',
+    OrdoVersionChanged:
+      "a feed's end, not a refusal: the tenant moved version and the sync manager reconnects; no caller sees it",
   };
 
   const classes = files.flatMap((f) =>

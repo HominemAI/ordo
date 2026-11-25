@@ -631,12 +631,16 @@ mod tests {
             read_guard: GuardPin::Walk("project.projectMembers(member == $caller)".into()),
             write_guard: GuardPin::Every,
             caller_restricted: true,
+            sealed: Default::default(),
+            release: Default::default(),
         };
         let pins = BTreeMap::from([
             (
                 "orders.get".to_string(),
                 OpPin {
                     manifest_hash: crate::ManifestHash([7u8; 32]),
+                    version: None,
+                    contract: false,
                     unguarded: false,
                     entities: vec![listed.clone()],
                 },
@@ -645,6 +649,8 @@ mod tests {
                 "orders.list".to_string(),
                 OpPin {
                     manifest_hash: crate::ManifestHash([9u8; 32]),
+                    version: None,
+                    contract: false,
                     unguarded: true,
                     entities: Vec::new(),
                 },

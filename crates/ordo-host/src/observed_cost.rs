@@ -100,6 +100,10 @@ pub struct ObservedCost {
     pub calls: u64,
     /// Executions that ended in a refusal from the executor.
     pub errors: u64,
+    /// Of those, the ones the server answered with a 5xx: the server
+    /// failed, not the caller. A rollout's health reads these
+    /// (`crate::rollout_strategies`).
+    pub faults: u64,
     /// Summed wall time, in microseconds.
     pub total_micros: u64,
     /// The longest single execution, in microseconds.
@@ -118,6 +122,9 @@ impl ObservedCost {
         if !s.ok {
             self.errors += 1;
         }
+        if s.fault {
+            self.faults += 1;
+        }
         self.total_micros = self.total_micros.saturating_add(s.micros);
         self.max_micros = self.max_micros.max(s.micros);
         self.rows_returned = self.rows_returned.saturating_add(s.rows);
@@ -131,6 +138,7 @@ impl ObservedCost {
             "space": space,
             "calls": self.calls,
             "errors": self.errors,
+            "faults": self.faults,
             "totalMicros": self.total_micros,
             "maxMicros": self.max_micros,
             "rowsReturned": self.rows_returned,
@@ -146,6 +154,8 @@ pub struct Sample {
     pub micros: u64,
     pub rows: u64,
     pub ok: bool,
+    /// The refusal was a 5xx: a server fault.
+    pub fault: bool,
     pub registered: &'static str,
     pub effective: &'static str,
 }
@@ -229,6 +239,17 @@ impl ObservedCosts {
             .filter(|((s, _), _)| space.is_none_or(|want| want == s))
             .map(|((s, o), v)| (s.clone(), o.clone(), v.clone()))
             .collect()
+    }
+
+    /// Each tenant's calls and server faults, summed over its ops.
+    pub fn per_space_totals(&self) -> BTreeMap<String, (u64, u64)> {
+        let mut out: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        for ((s, _), c) in unpoisoned(&self.per_space).iter() {
+            let e = out.entry(s.clone()).or_default();
+            e.0 += c.calls;
+            e.1 += c.faults;
+        }
+        out
     }
 
     /// Entries a cap refused.
@@ -347,6 +368,7 @@ pub fn specs() -> Vec<OpSpec> {
             "space",
             "calls",
             "errors",
+            "faults",
             "totalMicros",
             "maxMicros",
             "rowsReturned",
@@ -435,6 +457,7 @@ mod tests {
             micros,
             rows,
             ok,
+            fault: false,
             registered: "sql",
             effective,
         }

@@ -43,6 +43,26 @@ export interface Tenant {
   /** The version it is pinned to, and that version's order number. Absent from an older host. */
   version?: string | null;
   ordinal?: number | null;
+  /** Its open move, when it is still on its version while its database is brought to another. */
+  move?: Move | null;
+}
+
+export type MovePhase = 'expanding' | 'waiting' | 'refused' | 'backfilling' | 'gated' | 'soaking';
+
+/** One open move (docs/plan-versions.md 2.1, increments 7 and 11a). */
+export interface Move {
+  from: string;
+  to: string;
+  phase: MovePhase;
+  /** Empty until a try fails. Never shown to the tenant's people. */
+  reason: string;
+  since: number;
+  /** The door's own sentence for where it stands. */
+  line: string;
+  /** A move with dual writes: its stored step. */
+  step: string | null;
+  /** The end of its soak, when soaking. */
+  soakUntil: number | null;
 }
 
 export interface TenantList {

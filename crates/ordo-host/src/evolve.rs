@@ -3286,6 +3286,17 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
 
 /// Run one of the three. The caller is the deployment owner on the home
 /// space (`deploy_ops::execute` checked).
+/// [`execute`], its future made and boxed in a frame of its own
+/// (`crate::deploy_ops::execute_boxed` says why).
+pub fn execute_boxed<'a>(
+    ops: &'a crate::apply_op::ApplyOps,
+    name: &'a str,
+    bound: &'a ordo_api::BoundParams,
+    caller: &'a str,
+) -> futures::future::BoxFuture<'a, Result<Value, ExecError>> {
+    Box::pin(execute(ops, name, bound, caller))
+}
+
 pub async fn execute(
     ops: &crate::apply_op::ApplyOps,
     name: &str,

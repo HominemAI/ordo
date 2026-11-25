@@ -2760,7 +2760,35 @@ impl PlatformOps {
     }
 
     /// Run a platform op. `caller` is the principal the door proved.
-    pub async fn execute(
+    ///
+    /// A deploy op goes straight to `crate::deploy_ops::execute_boxed`,
+    /// past [`Self::execute_all`]'s poll: an unoptimized build gives that
+    /// poll a stack slot for every arm's future, hundreds of KiB, and a
+    /// stored step's door op is deep enough without it (Reported fix,
+    /// 2026-11-25: `ordo evolve --run` overflowed a door task's 2 MiB worker
+    /// stack on CI).
+    pub fn execute<'a>(
+        &'a self,
+        op: &'a OpSpec,
+        space: &'a str,
+        bound: &'a BoundParams,
+        caller: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<ExecResult, ExecError>> {
+        let name = op.name.as_str();
+        if crate::deploy_ops::OPS.contains(&name)
+            && name != crate::apply_op::APPLY
+            && !crate::branches::OPS.contains(&name)
+        {
+            return match self.apply_ops() {
+                Ok(ops) => crate::deploy_ops::execute_boxed(ops, name, space, bound, caller),
+                Err(e) => Box::pin(async move { Err(e) }),
+            };
+        }
+        Box::pin(self.execute_all(op, space, bound, caller))
+    }
+
+    /// Every platform op but the deploy ops [`Self::execute`] sends on.
+    async fn execute_all(
         &self,
         op: &OpSpec,
         space: &str,
@@ -2833,7 +2861,8 @@ impl PlatformOps {
                 out
             }
             name if crate::deploy_ops::OPS.contains(&name) => {
-                crate::deploy_ops::execute(self.apply_ops()?, name, space, bound, caller).await
+                crate::deploy_ops::execute_boxed(self.apply_ops()?, name, space, bound, caller)
+                    .await
             }
             name if crate::clones::OPS.contains(&name) => {
                 let clones = self.clones.as_deref().ok_or_else(|| {

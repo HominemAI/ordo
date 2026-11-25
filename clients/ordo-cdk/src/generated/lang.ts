@@ -440,6 +440,10 @@ export const fn = {
   int: (a0: Value): Value => new Val({ k: 'call', name: 'int', args: [a0.node] }),
   /** `bool(…)` — 1..1 argument(s). */
   bool: (a0: Value): Value => new Val({ k: 'call', name: 'bool', args: [a0.node] }),
+  /** `date(…)` — 1..2 argument(s). */
+  date: (a0: Value, a1?: Value): Value => new Val({ k: 'call', name: 'date', args: [a0, a1].filter((x): x is Value => x !== undefined).map((x) => x.node) }),
+  /** `datetime(…)` — 1..1 argument(s). */
+  datetime: (a0: Value): Value => new Val({ k: 'call', name: 'datetime', args: [a0.node] }),
 } as const;
 
 /**

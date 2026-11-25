@@ -1011,6 +1011,15 @@ exclusively `since` or a parameter, so nondeterminism has one keyword.
   number `t` spells, spaces around it allowed; `bool(t)`, `true` or `false`
   as `t` spells it, in any case. Each is null where the value does not
   convert, never an error
+- Dates (built 2026-11-25, legal anywhere): `date(t)`, the date `t` spells
+  as `YYYY-MM-DD`; `date(t, "DD/MM/YYYY")`, the date in the format named;
+  `datetime(t)`, the ISO 8601 instant `t` spells (`2026-11-25T09:30`,
+  seconds optional, `T` or a space), at the offset it names or UTC. A
+  format is `YYYY`, `MM` and `DD`, each once, joined by `-`, `/`, `.` or a
+  space; `MM` and `DD` read 1 or 2 digits. Any other format is refused when
+  the program compiles. Each is null where the text spells no date, or a
+  day not in the calendar (`2026-02-30`). Read two formats with
+  `coalesce(date(t), date(t, "DD/MM/YYYY"))`
 
 ### Ownership [settled]
 
@@ -2093,14 +2102,15 @@ entity customers (key: cust, prev: clients) {
   changes, `qty: int = 0 prev(count)` over `count: text`, is a one-to-one
   map. Its conversion is the plan's `--fill`, never guessed:
   `--fill 'item.qty=int(count)' --reverse 'item.count=text(qty)'`.
-  - The conversions are `text(x)`, `int(t)` and `bool(t)`, and `round(x, n)`
-    for places. Each gives null where a value does not convert, so the
-    pre-check lists the row and the move waits.
+  - The conversions are `text(x)`, `int(t)`, `bool(t)`, `date(t)`,
+    `date(t, format)` and `datetime(t)`, and `round(x, n)` for places. Each
+    gives null where a value does not convert, so the pre-check lists the
+    row and the move waits: `--fill 'item.dueOn=date(due, "DD/MM/YYYY")'`.
   - A mapping that gives another kind than its field holds is refused
     (`map_cast_required`), naming the conversion. One that loses places
     names `round`: Ordo never rounds unasked.
-  - A conversion Ordo has no function for (text to a date) is refused as
-    `map_cast_not_built`.
+  - A conversion Ordo has no function for (a number to a date) is refused
+    as `map_cast_not_built`.
   - Money (built 2026-11-25): a mapping reads and gives money in major
     units, as `check` does, and a `money(p)` column stores minor ones, so
     `--fill item.price=cost` turns 12.34 into 1234 cents, and the reverse
@@ -2140,8 +2150,47 @@ entity customers (key: cust, prev: clients) {
   - A moved field must be optional or have a default: the new version's
     inserts of the whole do not name it.
   - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
-- **Not built:** moves from another entity, `prev(orders.note)`, and
-  entity merges, which are spelled with them (`prev_mapping_required`); a
+- **Moves and entity merges** (built 2026-11-25, increment 15d). A field
+  marked `prev(other.field)` moves from `other`. Merging an entity is
+  moving every field of it and removing it:
+
+  ```
+  entity person {
+    name:   text
+    street: text? prev(address.street)
+    city:   text = "" prev(address.city)
+  }
+  # `address (key: adr) { person -> person owned unique ... }` is removed
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 --correspond address.person
+  ```
+
+  - `--correspond <other>.<link>` is the rule: each `other` row gives its
+    values to the row its link names. The link is `-> <entity> owned
+    unique` and required, declared in the version serving now, so the rows
+    pair one to one: the shape a split makes, read backwards.
+  - A field keeps its name and its declaration as it moves. A required one
+    needs a default: a row no `other` row names has no value for it.
+  - The plan previews the rule on 3 rows, values where `preview.values` is
+    on.
+  - The step adds the columns and copies in chunks. Through `$renames`
+    every write keeps both shapes current: a write of `other` by the
+    version before reaches the row its link names, and deleting it puts
+    the values back to their defaults. After a merge, a write by the new
+    version reaches `other` too, making its row (`<other key>_<id>`) where
+    there was none, so a revert in the soak loses nothing.
+  - At the close a merged entity is orphaned and its references go; a
+    moved field's old column is orphaned.
+  - A move whose `other` stays is one way: a value the new version gives a
+    row no `other` row names has no place in the version before. It needs
+    `--one-way`, and its soak cannot be reverted.
+  - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
+- **Not built:** a move through a link that is not unique, several
+  related rows per row (`move_rule_not_built`; the first, the latest or all
+  are not offered yet); a mapping over two entities, `prev(a.x, b.y)`
+  (`prev_mapping_required`); moving a link field (`move_ref_not_built`); a
   split whose whole is renamed or gone (`entity_split_needs_whole`); a
   correspondence rule other than one row per row
   (`correspond_rule_not_built`).
@@ -2167,7 +2216,10 @@ serving, nothing is checked and the program is created as declared:
 |---|---|
 | `prev_unresolved` | the old name is not in the version serving now |
 | `prev_type` | a rename to or from a file: a file's handle is never computed |
-| `prev_mapping_required` | a move `prev(orders.note)`, or an entity merge spelled with moves; no rule for which related row gives the value exists yet |
+| `prev_mapping_required` | a mapping over two entities, `prev(a.x, b.y)`; a move from the entity itself; moves out of one entity into two; a move into an entity renamed in the same step |
+| `move_renamed` | a field renamed as it moves |
+| `move_rule_required`, `move_link`, `move_rule_not_built` | a move with no `--correspond`; a rule whose link is not `-> <entity> owned unique` and required; a link that is not unique |
+| `move_reshaped`, `move_sealed`, `move_ref_not_built`, `move_default_required`, `move_acl` | a field moved as it was not declared, a merge that leaves a field behind, or one still declared in `other`; a sealed or file field; a link field; a required field with no default; an `other` with `acl` or a tree |
 | `map_cast_required`, `map_cast_not_built` | a mapping that gives another kind than its field holds, or loses places (into money too); one Ordo has no conversion for |
 | `split_rule_required` | an entity split with no `--correspond` |
 | `split_entity_link` | a part whose link is not `-> whole owned unique` and required |

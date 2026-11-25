@@ -131,6 +131,8 @@ export const FUNCTIONS = [
   { name: 'text', min: 1, max: 1 },
   { name: 'int', min: 1, max: 1 },
   { name: 'bool', min: 1, max: 1 },
+  { name: 'date', min: 1, max: 2 },
+  { name: 'datetime', min: 1, max: 1 },
 ] as const;
 
 /**

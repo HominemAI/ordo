@@ -744,6 +744,175 @@ async fn the_conversions_read_in_a_projection() {
     assert!(rows[1]["n"].is_null() && rows[1]["b"].is_null(), "{text}");
 }
 
+/// `date` and `datetime` read in a projection through the planner too: a
+/// text that spells no date in the format, or a day not in the calendar,
+/// reads as null; a datetime with no offset is UTC.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_date_conversions_read_in_a_projection() {
+    let src = items(
+        "1.0.0",
+        "  stamp: text = \"\"\n",
+        "\nop dated unbounded =\n  item[id, d: date(stamp), dmy: date(stamp, \"DD.MM.YYYY\"), \
+         t: datetime(stamp)]\n  sort id\n",
+    );
+    let (pg, pool) = empty("ordo_maps_dates").await;
+    let program = Program::compile(&src).expect("compiles");
+    let (_, made) = ordo_host::schema_apply::apply(&pool, &program, "test", "test").await;
+    assert!(made.is_ok(), "{made:?}");
+    pg.exec(
+        "INSERT INTO item (\"$space\", id, rev, name, stamp) VALUES \
+         ('s', 'a', 1, 'x', ' 2026-11-25 '), ('s', 'b', 1, 'x', '25.11.2026'), \
+         ('s', 'c', 1, 'x', '2026-02-30'), ('s', 'd', 1, 'x', '2026-11-25T09:30'), \
+         ('s', 'e', 1, 'x', '2026-11-25 09:30:15+01:00'), ('s', 'f', 1, 'x', 'soon')",
+    )
+    .expect("rows");
+    let n = node(&pg.db, &src, "s").await;
+    let rows = n.exec.read_as("dated", Some("p_ada")).await.expect("reads");
+    let text = serde_json::to_string(&rows).expect("json");
+    assert_eq!(rows.len(), 6, "{text}");
+    assert_eq!(rows[0]["d"], "2026-11-25", "{text}");
+    assert!(rows[0]["dmy"].is_null() && rows[0]["t"].is_null(), "{text}");
+    assert_eq!(rows[1]["dmy"], "2026-11-25", "{text}");
+    assert!(rows[1]["d"].is_null(), "{text}");
+    assert!(rows[2]["d"].is_null(), "a day not in the calendar: {text}");
+    assert!(
+        rows[3]["t"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("2026-11-25 09:30:00+00"),
+        "{text}"
+    );
+    assert!(
+        rows[4]["t"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("2026-11-25 08:30:15+00"),
+        "{text}"
+    );
+    assert!(rows[5]["d"].is_null() && rows[5]["t"].is_null(), "{text}");
+    // A format Ordo does not read is refused when the program compiles.
+    let bad = items(
+        "1.0.1",
+        "  stamp: text = \"\"\n",
+        "\nop dated unbounded =\n  item[id, d: date(stamp, \"YYYY/DD\")]\n",
+    );
+    let err = Program::compile(&bad).expect_err("an unknown format");
+    assert!(format!("{err:?}").contains("not a date format"), "{err:?}");
+}
+
+/// **Text becomes a date by a stated format** (`forward-gaps` ask 17,
+/// owner: *"the compiler either says its allowed or says it isn't"*).
+/// `due: text` becomes `dueOn: date prev(due)`. A fill in a format Ordo does
+/// not read is refused naming the formats; the stated fill reads two
+/// formats with `coalesce`. A day not in the calendar and a text that is no
+/// date are listed by row, never by value, and the move waits. Fixed, the
+/// tenant moves and every date reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_becomes_a_date_by_a_stated_format() {
+    let x = items(
+        "1.0.0",
+        "  due: text = \"\"\n",
+        "\nop addItem($name: text, $due: text) =\n  set item { name: $name, due: $due }\n",
+    );
+    let y = items("1.1.0", "  dueOn: date = 2026-01-01 prev(due)\n", "");
+    let (pg, pool) = deployment("ordo_maps_dates_cast", &x, &y).await;
+    for (id, due) in [
+        ("a0", "2026-11-25"),
+        ("a1", "25/12/2026"),
+        ("a2", "2026-02-30"),
+        ("a3", "soon"),
+    ] {
+        pg.exec(&format!(
+            "INSERT INTO item (\"$space\", id, rev, name, due) VALUES ('acme', '{id}', 1, 'x', '{due}')"
+        ))
+        .expect("rows");
+    }
+    let render = |fill: &'static str| {
+        let pool = pool.clone();
+        async move {
+            evolve::evolve(
+                &pool,
+                "1.0.0",
+                "1.1.0",
+                &options(fill, "", true),
+                None,
+                OWNER,
+                1,
+            )
+            .await
+        }
+    };
+    let errs = errors_of(render("").await.expect_err("no fill"));
+    assert!(
+        errs[0].1.contains("--fill item.dueOn=date(due)"),
+        "{errs:?}"
+    );
+    let errs = errors_of(
+        render("item.dueOn=date(due, \"YYYY/DD\")")
+            .await
+            .expect_err("an unknown format"),
+    );
+    assert!(
+        errs.iter()
+            .any(|(c, w)| c == "mapping_invalid" && w.contains("DD/MM/YYYY")),
+        "{errs:?}"
+    );
+    let plan = render("item.dueOn=coalesce(date(due), date(due, \"DD/MM/YYYY\"))")
+        .await
+        .expect("the cast stores")
+        .plan;
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let checks = ordo_host::precheck::precheck(&pool, &shared, &plan)
+        .await
+        .expect("checked");
+    let lines = checks
+        .issues
+        .iter()
+        .flat_map(|i| i.lines.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        lines.contains("acme/a2") && lines.contains("acme/a3"),
+        "{lines}"
+    );
+    assert!(
+        !lines.contains("acme/a0") && !lines.contains("acme/a1") && !lines.contains("soon"),
+        "{lines}"
+    );
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let week = 7 * 86_400;
+    let err = dual_writes::run(&cx, "acme", &plan, &step_context(), week, OWNER)
+        .await
+        .expect_err("two rows spell no date");
+    assert_eq!(err.class(), "map_unparsed", "{err}");
+    pg.exec("UPDATE item SET due = '28/02/2026' WHERE id = 'a2'; UPDATE item SET due = '2027-01-01' WHERE id = 'a3'")
+        .expect("fixed");
+    let moved = dual_writes::run(&cx, "acme", &plan, &step_context(), week, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT string_agg(\"dueOn\"::text, ',' ORDER BY id) FROM item"
+        ),
+        "2026-11-25,2026-12-25,2026-02-28,2027-01-01"
+    );
+    // The version before keeps writing text; the new column follows.
+    let on_x = node(&pg.db, &x, "beta").await;
+    on_x.write(r#"addItem($name: "late", $due: "01/03/2026")"#)
+        .await
+        .expect("1.0.0 writes text");
+    assert_eq!(
+        one(&pg, "SELECT \"dueOn\"::text FROM item WHERE name = 'late'"),
+        "2026-03-01"
+    );
+}
+
 fn items(version: &str, fields: &str, ops: &str) -> String {
     format!(
         "domain items @ {version}\n\nentity item {{\n  name: text\n{fields}}}\n\n\
@@ -862,9 +1031,17 @@ async fn a_rename_with_a_new_type_is_converted_by_a_stated_cast() {
             )
         }
     };
+    // Text converts to a date only when stated; a number has no
+    // conversion to a date at all.
     let errs = for_other("item.due=count;item.cost=round(price, 0)").await;
+    assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
+    assert!(
+        errs[0].1.contains("--fill item.due=date(count)"),
+        "{errs:?}"
+    );
+    let errs = for_other("item.due=length(count);item.cost=round(price, 0)").await;
     assert_eq!(errs[0].0, "map_cast_not_built", "{errs:?}");
-    assert!(errs[0].1.contains("from text to a date"), "{errs:?}");
+    assert!(errs[0].1.contains("from a number to a date"), "{errs:?}");
     let errs = for_other("item.due=2026-01-01;item.cost=price").await;
     assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
     assert!(

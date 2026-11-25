@@ -2704,6 +2704,30 @@ impl Planner {
             "text" => format!("({})::text", a[0]),
             "int" => ordo_schema::check::int_sql(&format!("({})::text", a[0])),
             "bool" => ordo_schema::check::bool_sql(&a[0]),
+            // A date in the format named, or ISO's; null where the text
+            // spells none. The format is a literal, checked here.
+            "date" => {
+                let format = match args.get(1) {
+                    None => ordo_schema::check::ISO_DATE,
+                    Some(BExpr::Lit {
+                        value: ordo_syntax::Expr::StrLit { value, .. },
+                        ..
+                    }) => value.as_str(),
+                    Some(_) => {
+                        return Err(PlanError {
+                            code: "unsupported",
+                            message: "`date(t, format)` takes its format as a string literal, \
+                                      `date(t, \"DD/MM/YYYY\")`"
+                                .into(),
+                        })
+                    }
+                };
+                ordo_schema::check::date_sql(&a[0], format).map_err(|message| PlanError {
+                    code: "unsupported",
+                    message,
+                })?
+            }
+            "datetime" => ordo_schema::check::datetime_sql(&a[0]),
             other => {
                 return Err(PlanError {
                     code: "unsupported",

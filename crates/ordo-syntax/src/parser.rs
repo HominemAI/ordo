@@ -214,6 +214,11 @@ const FUNCTIONS: &[(&str, usize, usize)] = &[
     ("text", 1, 1),
     ("int", 1, 1),
     ("bool", 1, 1),
+    // `date(t)` the date `t` spells as `YYYY-MM-DD`, or in the format named
+    // second (`date(t, "DD/MM/YYYY")`); `datetime(t)` the ISO 8601 instant
+    // `t` spells, UTC where it names no offset. Null where it does not.
+    ("date", 1, 2),
+    ("datetime", 1, 1),
 ];
 
 /// The expression-function *names*, for readers outside the parser that must

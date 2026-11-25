@@ -5787,6 +5787,10 @@ fn convert_example(from: &ordo_schema::Field, to: &ordo_schema::Field) -> String
             format!("round({n}, {})", t.places.unwrap_or(0))
         }
         (Some(Family::Text), Some(t)) if t.family == Family::Bool => format!("bool({n})"),
+        (Some(Family::Text), Some(t)) if t.family == Family::Date => format!("date({n})"),
+        (Some(Family::Text), Some(t)) if t.family == Family::Datetime => {
+            format!("datetime({n})")
+        }
         _ => n.clone(),
     }
 }
@@ -5834,7 +5838,11 @@ fn mapping_fits(
     if want.family != got.family {
         let built = matches!(
             (got.family, want.family),
-            (_, Family::Text) | (Family::Text, Family::Number) | (Family::Text, Family::Bool)
+            (_, Family::Text)
+                | (Family::Text, Family::Number)
+                | (Family::Text, Family::Bool)
+                | (Family::Text, Family::Date)
+                | (Family::Text, Family::Datetime)
         );
         if !built {
             return Some((

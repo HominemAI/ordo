@@ -2006,6 +2006,85 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `prev`: renames across versions [ruled 2026-10-04, built 2026-11-23, increment 15]
+
+A `prev` mark says a field or an entity is the same thing as a name in the
+version serving now. The plan then renders a rename, never a drop and an
+add (`plan-syntax-additions.md` §5).
+
+```
+entity customers (key: cust, prev: clients) {
+  fullName: text prev(name)
+  note:     text? prev(orders.shippingNote)
+}
+```
+
+- A field takes `prev(<old>)` in its modifier tail. An entity takes
+  `prev: <old>` in its header's parenthesis, beside `key:`, in either order.
+- `prev` reaches one version back only.
+- `prev` is contextual: a field may still be named `prev`.
+- A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
+  copies every value into it, and keeps the old column with its
+  `NOT NULL`, so the version before still loads over the database. The
+  receipt's reverse copies the values back and drops the new column.
+- No write is lost between the copy and the tenant's pin switch. The
+  host's dual writes (increment 11a) run in each write's own transaction:
+  a write by the version before also sets the new column, and a write by
+  the new version also sets the old one.
+- A required field renamed needs a default (`prev_default_required`). Each
+  version's insert names only its own column, so the other takes its
+  default first, and the dual writes set it in the same write. An old
+  column with no default of its own takes the new field's.
+- `ordo apply` makes a field rename itself, as it makes an additive change.
+  A stored step copies the values with the backfill worker.
+- An entity rename (built 2026-11-24) makes the new table, copies every
+  row into it in chunks with the backfill worker, and keeps the old table
+  whole, so the version before still
+  serves. The rename is recorded in the database's `$renames`, and every
+  write copies what it writes, and deletes what it deletes, into the other
+  name's table in its own transaction. A reference another entity holds
+  into the old table is checked at commit until the rename lands.
+- An entity rename lands at a move's soak close, or when a version drops
+  the mark. Then every reference moves to the new table, the old table is
+  an orphan (§2.7 of `plan-versions.md`), and a reader app loses it. Until
+  then a reader of the new table reads the old one too.
+- Ids keep the key they were minted with. A row the new name writes takes
+  the new name's key.
+- An entity rename keeps its fields in the step that renames it
+  (`rename_entity_reshaped`). Rename in one version, change the fields in
+  the next.
+- A clean `ordo apply` names each mark whose rename has landed in every
+  environment. `ordo apply --remove-landed-prev` cuts those marks from the
+  source. A mark has landed when this deployment is the last environment of
+  its chain and every tenant is on a version with the new name. The stored
+  plan keeps the rename for any tenant still behind.
+
+Checked at compile time (the parser):
+
+| Class | Refused |
+|---|---|
+| `prev_self` | `prev` naming the field's or entity's own name |
+| `prev_still_declared` | `prev(name)` while `name` is still a field of the entity |
+| `prev_duplicate` | two fields of one entity with the same `prev`, or one name twice |
+| `external_unsupported` | `prev` on an external's field or in its header |
+
+Checked at plan time, against the version serving now. With nothing
+serving, nothing is checked and the program is created as declared:
+
+| Class | Refused |
+|---|---|
+| `prev_unresolved` | the old name is not in the version serving now |
+| `prev_type` | the old and new fields' types differ; no cast option exists yet |
+| `prev_mapping_required` | a merge `prev(first, last)` or a move `prev(orders.note)`; no mapping option exists yet |
+| `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
+| `rename_entity_sealed` | an entity rename of an entity with a sealed field: its ciphertext is bound to the entity's name |
+| `rename_entity_reshaped` | an entity rename whose new declaration has a column the old table does not hold |
+| `rename_entity_needs_stored_plan` | an entity rename by `ordo apply`: its copy runs only in a stored step (`ordo evolve`), in chunks, so no write waits for it |
+| `rename_entity_acl` | an entity rename of an entity with `acl`: its shares live in an entity named after it |
+| `prev_stale` | a warning, never a refusal: the version serving now already has the new name, so the mark can go |
+
+The CDK spells it `t.text().prev('name')` and `entity(…, { prev: 'clients' })`.
+
 ### `external`: a table another system owns [ruled 2026-11-15, built slices A, B and C]
 
 Another system can keep its own table in the database where Ordo's SQL runs:
@@ -2320,6 +2399,11 @@ holds in this deployment's schema are made equal to the line:
   `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
   `fingerprint`, `subject_claim`). Naming `members` on the line grants the
   whole table.
+- These columns are a contract between Ordo releases (owner, 2026-11-23).
+  A release that changes one keeps it granted for `editions.load_window`
+  (12 months), so a reader on an older release keeps matching `$caller`.
+- `SELECT` on `$ordorelease` (`release`): the Ordo release this deployment
+  last started under. `ordo release-check` on the reader names it.
 
 A table taken off the line is revoked at the next apply or start. So is
 everything, when the whole line is removed: `$readergrant` remembers which
@@ -3667,6 +3751,31 @@ The page calls a function with `POST /fn/<name>` or the SDK's
 reads at most `ORDO_FN_BLOB_BYTES` (20 MiB) of files. Run history is
 `ordo fn runs` and `ordo fn log`.
 
+### Edition [built 2026-11-23]
+
+One top-level line names the language edition the source is written in:
+
+```
+domain shop @ 0.1.0
+edition 1
+```
+
+- A source with no edition line is edition 1, for good (ruled 2026-11-03).
+- At most one per program. `edition` stays an ordinary name elsewhere, so
+  a field may be called `edition`.
+- What each edition means, its load window and `ordo fix` are in
+  `deploying.md` ("Language editions and `ordo fix`") and
+  `plan-versions.md` §2.8.
+- Only edition 1 is released. Edition 2 is written, unreleased: it would
+  refuse bare `money`, and `ordo fix` would write `money(0)`.
+
+| Class | Refused |
+|---|---|
+| `duplicate_edition` | a second `edition` line |
+| `edition_unknown` | an edition newer than this Ordo release knows |
+| `edition_expired` | an edition outside `editions.load_window`; the refusal names `ordo fix` |
+| `edition_rule` | a construct the named edition refuses; the refusal names `ordo fix` |
+
 ### Domain package
 
 > **Not built yet [2026-10-04]: the compiler refuses the block form today.**
@@ -3738,8 +3847,9 @@ principal ellanor    { kind: agent }
 
 > **Not built yet [2026-10-04]: the compiler refuses `principal` blocks
 > today** ("`principal` is reserved and not implemented"). The same holds for
-> `client`, `auth`, `channel` and `route` below, and for the `policy` blocks
-> further down. The design text stands.
+> `client`, `channel` and `route` below, and for the `policy` blocks
+> further down. The design text stands. `auth` is built: see "Sign-in: the
+> `auth` block" below.
 
 ### Identity clients (OIDC relying parties) [settled]
 One Ordo deployment, one OIDC issuer (horizontally scaled pods are one logical
@@ -3784,13 +3894,113 @@ Methods are pluggable and per-deployment configurable:
   platform email channel)
 - **Configurable:** OAuth providers (Google, Discord, …) per deployment
 
+The app developer chooses the methods in the `auth` block below. The
+deployment owner sets each provider's client id and secret on the instance,
+never in the file.
+
+### Sign-in: the `auth` block [parsed and checked 2026-11-14; the host reads it in a later step]
+
+The block holds the app developer's sign-in choices
+(`plan-configuration-in-the-file.md` §2). The rule (owner, 2026-11-14): the
+file sets the value, the deployment owner's ceiling wins, and the file can
+tighten and never loosen. A value that cannot change once used is set on the
+instance and never here: the deployment handle, the database, the key
+provider, the apex domain, the relying party id and the listen addresses.
+Credentials stay on the instance too.
+
 ```
 auth {
-  methods  passkey, password, email-otp        # defaults
-  method   google  { client: $GOOGLE_CLIENT }  # opt-in per deployment
-  method   discord { client: $DISCORD_CLIENT }
+  methods           passkey, email, google, work
+  provider google   preset google
+  provider work     kind oidc, label "Work account"
+  passkeyName       "Human Agent Link"
+  provisioning      domains example.com, example.org
+  selfServe         off
+  guest             on, keep 7d
+  linking           on, window 5m
+  secondFactor      optional
+  userVerification  required
+  session           token 1h, max 12h, tenants 15m to 4h
+  remember          on, idle 30d, max none
 }
 ```
+
+Grammar. One clause per line, a keyword then values, commas between list
+items. Clauses go in any order. One block per program.
+
+```text
+auth { <clause> ... }
+clause = methods <method>, ...
+       | provider <name> (preset <preset> | kind oauth2 | kind oidc) [, label "<text>"]
+       | passkeyName "<text>"
+       | provisioning invite-only | open | domains <domain>, ...
+       | selfServe on | off
+       | guest off | on [, keep <duration>]
+       | linking off | on [, window <duration>]
+       | secondFactor off | optional | required-without-passkey | required
+       | userVerification required | preferred
+       | session token <duration> [, max <duration>] [, tenants <duration> to <duration>]
+       | remember off | on [, idle <duration>] [, max <duration> | none]
+method = passkey | password | email | <provider name>
+```
+
+- A duration is `s`, `m`, `h`, `d` or `w`: `30s`, `5m`, `1h`, `30d`.
+- A domain with a hyphen or a label that starts with a digit is quoted, and an all-digit domain such as an IP address is refused:
+  `"my-co.example"`.
+- The presets are `discord`, `github`, `google` and `microsoft`.
+
+What holds when a clause is absent. Each default is the secure one.
+
+| Clause | Default |
+|---|---|
+| `methods` | none: nobody signs in |
+| `passkeyName` | the relying party id |
+| `provisioning` | `invite-only` |
+| `selfServe` | `off` |
+| `guest` | `off` |
+| `linking` | `on`, window 5m |
+| `secondFactor` | `optional` |
+| `userVerification` | `required` |
+| `session` | token 1h, max 12h, tenants inside the deployment's ceilings |
+| `remember` | `on`, idle 30d, max none |
+
+Platform ranges. A value outside one is refused and the refusal names the
+range.
+
+| Value | Range |
+|---|---|
+| `linking … window` | 1m to 15m |
+| `guest … keep` | 1m to 400d |
+| `session token`, both ends of `tenants` | 1m to 1d |
+| `session … max` | 1m to 30d, and not below `token` |
+| `remember … idle`, `max` | 1m to 400d |
+
+Refusals:
+
+| Class | Refused |
+|---|---|
+| `parse_error` | a clause the parser cannot read, a clause written twice, or a comma after the last item of a list. It points at the clause, the value or the comma |
+| `duplicate_auth` | a second `auth` block |
+| `auth_unknown_method` | a method that is not built in and names no `provider` |
+| `auth_unused_provider` | a `provider` no `methods` line names |
+| `auth_unknown_preset` | a preset the host does not ship |
+| `auth_duration_range` | a duration outside its platform range |
+| `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, an empty provider `label`, a bad or repeated domain, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards or reaches above the session `max`, a remember `max` below its `idle` |
+
+Where the values go:
+
+- The compiled program carries an `auth` section with every default filled
+  in. A program without a block keeps its document and its version.
+- The interface descriptor (`ordo.interface/2`) gains an `auth` key: the
+  methods, each provider's name, preset, kind and label, the provisioning
+  **mode**, and whether guests, linking and self-serve are on, the second
+  factor level and user verification. It never lists the provisioning
+  domains (owner, 2026-11-14). The app developer decides what a person sees.
+- The CDK writes the block with `auth({ … })`.
+
+Not yet: the host still reads sign-in from its settings. Reading the block at
+boot and on apply, the ceilings, and the migration of the old settings are
+the next step of the plan.
 
 ### Access model [settled]
 Definitions declare what exists and what it touches (field-scope manifests,

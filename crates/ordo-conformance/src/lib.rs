@@ -376,6 +376,10 @@ pub struct Fixture {
     /// write path scopes by one.
     space: ordo_crypto::SpaceId,
     seed: &'static str,
+    /// **An import restoring a bundle** (`Fixture::run_restore_on`): no
+    /// acl bootstrap row is minted for the caller, because the bundle
+    /// carries every access row. False everywhere else.
+    restoring: bool,
 }
 
 /// The space the fixture's custody lives in by default.
@@ -404,6 +408,7 @@ impl Fixture {
             keys: self.keys.clone(),
             space: self.space.clone(),
             seed: self.seed,
+            restoring: self.restoring,
         }
     }
 
@@ -438,6 +443,12 @@ impl Fixture {
     fn compile_source(src: &str, seed: &'static str) -> Result<Fixture, String> {
         let program =
             parse_program(src).map_err(|e| format!("{}: {} at {}", e.code, e.message, e.span))?;
+        // The edition gate (`plan-versions.md` §2.6): an edition outside
+        // its load window, or one this release does not know, is refused
+        // here, so a load, an apply and `ordo dev` refuse it alike.
+        ordo_plan::edition::Editions::this_release()
+            .gate(src, &program)
+            .map_err(|e| format!("{}: {} at {}", e.code, e.message, e.span))?;
         let keys = ordo_schema::KeyTable::from_env().map_err(|e| format!("keys: {e}"))?;
         let schema =
             ordo_schema::build_with_keys(&program, &keys).map_err(|e| format!("schema: {e}"))?;
@@ -459,6 +470,7 @@ impl Fixture {
             keys: std::sync::Arc::new(ordo_crypto::TestProvider::with_space(FIXTURE_SPACE)),
             space: fixture_space(),
             seed,
+            restoring: false,
         })
     }
 
@@ -478,6 +490,7 @@ impl Fixture {
             keys: self.keys.clone(),
             space: ordo_crypto::SpaceId(space.to_string()),
             seed: self.seed,
+            restoring: self.restoring,
         }
     }
 

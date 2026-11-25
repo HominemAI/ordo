@@ -67,6 +67,10 @@ export default defineConfig({
     // revoke (versions 2b), after `shares`, so two specs never hold the one
     // door link at once. It links the stack's door afresh.
     { name: 'windows', testMatch: /windows\.spec\.ts/, dependencies: ['shares'], use: { ...devices['Desktop Chrome'] } },
+    // `versions`: the Rollouts, Moves and Tenant builds screens (versions
+    // increments 7, 10, 11a and 16), after `windows`, against the versions
+    // door.spec stored. It links the stack's door afresh.
+    { name: 'versions', testMatch: /versions\.spec\.ts/, dependencies: ['windows'], use: { ...devices['Desktop Chrome'] } },
     // `identity`: the console on the identity service (identity plan, step
     // 6), against its own stack (stack-identity.sh, the second web server).
     { name: 'identity', testMatch: /identity\.spec\.ts/, use: { ...devices['Desktop Chrome'] } },

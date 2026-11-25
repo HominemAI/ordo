@@ -123,8 +123,17 @@ pub struct Tenants {
     pub boot: String,
     /// The program version whose routines this process serves.
     pub version: String,
-    /// Spaces whose listener cursors this process has registered.
-    registered: Mutex<HashSet<String>>,
+    /// Spaces whose listener cursors this process has registered, with the
+    /// version they were registered under. A tenant whose version changed
+    /// since is registered again, which hands its cursors over
+    /// ([`Tenants::register`]).
+    registered: Mutex<HashMap<String, String>>,
+    /// **Which routine keys each served version declares**
+    /// (`plan-versions.md` §1.10): a listener is drained, and a schedule
+    /// fires, only in the tenants whose version declares it. `None`: every
+    /// listener and schedule is every tenant's, which is a wiring a test
+    /// supplied by hand.
+    declared: Option<Arc<Declared>>,
     /// When this value was made, in seconds: the fallback for when the
     /// version was activated, for a database with no registry.
     made_at: u64,
@@ -139,6 +148,9 @@ pub struct Tenants {
     /// waiting for the new cursor to pass them.
     stale: Mutex<HashMap<String, Vec<Stale>>>,
 }
+
+/// Version name to the listener and clock keys that version declares.
+pub type Declared = HashMap<String, HashSet<String>>;
 
 /// The setting for [`Tenants`]' idle ceiling: the longest gap, in seconds,
 /// between two drain visits to a tenant whose chain has not moved.
@@ -234,13 +246,77 @@ impl Tenants {
             spaces,
             boot,
             version,
-            registered: Mutex::new(HashSet::new()),
+            registered: Mutex::new(HashMap::new()),
+            declared: None,
             made_at: now_secs(),
             since: Mutex::new(None),
             idle_max: DEFAULT_IDLE_MAX_SECS,
             pace: Mutex::new(HashMap::new()),
             stale: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Drain and fire per tenant version: each tenant gets only the
+    /// listeners and schedules its own version declares.
+    pub fn with_declared(mut self, declared: Declared) -> Tenants {
+        self.declared = Some(Arc::new(declared));
+        self
+    }
+
+    /// The version `space` is served, as this node holds its pin. `None`
+    /// when this value checks no versions.
+    fn version_of(&self, space: &str) -> Option<String> {
+        use ordo_api::OpRegistry;
+        self.declared.as_ref()?;
+        self.spaces.deployment().version_in(space)
+    }
+
+    /// Is `space` served a version this node has loaded and wired? Always
+    /// yes with no declared map.
+    fn wired(&self, space: &str) -> bool {
+        let Some(declared) = &self.declared else {
+            return true;
+        };
+        self.version_of(space)
+            .is_some_and(|v| declared.contains_key(&v))
+    }
+
+    /// Does `space`'s version declare the routine `key`? Always yes with no
+    /// declared map. No for a tenant pinned to a version this node has not
+    /// loaded: nothing of it runs here until it loads.
+    pub fn declares(&self, space: &str, key: &str) -> bool {
+        let Some(declared) = &self.declared else {
+            return true;
+        };
+        self.version_of(space)
+            .and_then(|v| declared.get(&v))
+            .is_some_and(|keys| keys.contains(key))
+    }
+
+    /// The listeners `space`'s version declares, out of `all`.
+    pub fn listeners_for(&self, space: &str, all: &[Listener]) -> Vec<Listener> {
+        all.iter()
+            .filter(|l| self.declares(space, &l.key()))
+            .cloned()
+            .collect()
+    }
+
+    /// Take over what `prev` knew of each tenant: the version its cursors
+    /// were registered under, its pace, and its stale cursors.
+    pub fn adopt(&self, prev: &Tenants) {
+        let registered = prev
+            .registered
+            .lock()
+            .expect("registered set is not poisoned")
+            .clone();
+        *self
+            .registered
+            .lock()
+            .expect("registered set is not poisoned") = registered;
+        let pace = prev.pace.lock().expect("pace is not poisoned").clone();
+        *self.pace.lock().expect("pace is not poisoned") = pace;
+        let stale = prev.stale.lock().expect("stale is not poisoned").clone();
+        *self.stale.lock().expect("stale is not poisoned") = stale;
     }
 
     /// Set the idle ceiling, in seconds. Zero is taken as 1.
@@ -291,6 +367,14 @@ impl Tenants {
                     continue;
                 }
             };
+            // Only the listeners the tenant's own version declares
+            // (§1.10). A tenant whose version is not loaded here keeps its
+            // cursors where they are until it is.
+            if !self.wired(&space) {
+                continue;
+            }
+            let mine = self.listeners_for(&space, listeners);
+            let listeners = &mine[..];
             self.register_on_reach(control, &pool, &tenant, listeners, now)
                 .await?;
             let id = LogSpace(space.clone());
@@ -461,12 +545,32 @@ impl Tenants {
         at
     }
 
-    /// Has this process registered `space`'s cursors?
+    /// Has this process registered `space`'s cursors, under the version it
+    /// is served now?
     pub fn is_registered(&self, space: &str) -> bool {
-        self.registered
+        let held = self
+            .registered
             .lock()
             .expect("registered set is not poisoned")
-            .contains(space)
+            .get(space)
+            .cloned();
+        match held {
+            None => false,
+            Some(v) => self.version_of(space).is_none_or(|now| now == v),
+        }
+    }
+
+    /// The version `space`'s cursors were registered under, when this
+    /// process registered them under one the tenant is no longer served.
+    fn moved_from(&self, space: &str) -> Option<String> {
+        let held = self
+            .registered
+            .lock()
+            .expect("registered set is not poisoned")
+            .get(space)
+            .cloned()?;
+        let now = self.version_of(space)?;
+        (now != held).then_some(held)
     }
 
     /// Register `space`'s cursors on the drain's first reach of it, where
@@ -485,8 +589,11 @@ impl Tenants {
         if self.is_registered(&tenant.id) {
             return Ok(());
         }
+        // A tenant whose version changed under this process: a routine the
+        // new version adds reacts from the switch on, never to the past.
         let since = self.activated_at(control).await;
-        let at_head = drain_starts_at_head(tenant.created_at, since);
+        let at_head =
+            self.moved_from(&tenant.id).is_some() || drain_starts_at_head(tenant.created_at, since);
         self.register(pool, &tenant.id, listeners, at_head, now)
             .await
     }
@@ -508,6 +615,7 @@ impl Tenants {
         if self.is_registered(space) {
             return Ok(());
         }
+        let moved_from = self.moved_from(space);
         ordo_exec::prune::ensure_tables(pool).await?;
         let id = LogSpace(space.to_string());
         let position = if at_head {
@@ -549,16 +657,53 @@ impl Tenants {
                 });
             }
         }
+        // **The hand-over at a pin switch** (§1.10). A routine both
+        // versions declare keeps its cursor: the key carries no version, so
+        // the new version's listener reads on from where the old one
+        // stopped, and a changed trigger is handed over as above. A routine
+        // the new version does not declare is no longer drained in this
+        // tenant, so its cursor is retired rather than left holding the
+        // log against pruning. Only on a switch this process saw: after a
+        // restart nothing is retired, because the pins may not be read yet.
+        if let Some(was) = &moved_from {
+            let kept: HashSet<&str> = listeners.iter().map(|l| l.routine.as_str()).collect();
+            for c in &held {
+                if c.kind != ordo_exec::prune::ConsumerKind::Listener {
+                    continue;
+                }
+                let routine = c.name.split(':').next().unwrap_or_default();
+                if kept.contains(routine) {
+                    continue;
+                }
+                triggers::retire_listener(
+                    pool,
+                    &id,
+                    &c.name,
+                    &format!("routine:{routine}@{was}"),
+                    RETIRE_OP,
+                    false,
+                    now,
+                )
+                .await
+                .map_err(PoolError::db)?;
+                eprintln!(
+                    "routines: retired listener cursor `{}` in {space}: its version moved from \
+                     {was} to one that does not declare `{routine}`",
+                    c.name
+                );
+            }
+        }
         if !stale.is_empty() {
             self.stale
                 .lock()
                 .expect("stale is not poisoned")
                 .insert(space.to_string(), stale);
         }
+        let version = self.version_of(space).unwrap_or_default();
         self.registered
             .lock()
             .expect("registered set is not poisoned")
-            .insert(space.to_string());
+            .insert(space.to_string(), version);
         Ok(())
     }
 }
@@ -597,31 +742,65 @@ pub fn wiring(
     boot: &str,
     mail: bool,
 ) -> crate::runtime::TriggerWiring {
-    if schema.routines.is_empty() {
+    wiring_served(&[(version, schema)], spaces, boot, mail)
+}
+
+/// **The union over served versions** (`plan-versions.md` §1.10): every
+/// listener and schedule some served version declares, the active version
+/// first. A routine two versions declare is one listener and one schedule;
+/// where their schedules differ, the first version's is the one the clock
+/// keeps (the key carries no version). Each tenant is then drained and
+/// fired only what its own version declares ([`Tenants::declares`]), and
+/// each run executes under its tenant's version.
+pub fn wiring_served(
+    versions: &[(&str, &ordo_schema::Schema)],
+    spaces: Arc<Spaces>,
+    boot: &str,
+    mail: bool,
+) -> crate::runtime::TriggerWiring {
+    if versions.iter().all(|(_, s)| s.routines.is_empty()) {
         return crate::runtime::TriggerWiring::default();
     }
-    let domain = schema.domain.clone().unwrap_or_default();
-    let mut listeners = Vec::new();
-    let mut clock = Vec::new();
-    for r in &schema.routines {
-        match &r.trigger {
-            RoutineTrigger::Clock(schedule) => clock.push(ClockRoutine {
-                routine: r.name.name.clone(),
-                version: version.to_string(),
-                schedule: *schedule,
-            }),
-            RoutineTrigger::Change { pattern, modifiers } => listeners.push(Listener {
-                domain: domain.clone(),
-                pattern: pattern.clone(),
-                routine: r.name.name.clone(),
-                version: version.to_string(),
-                modifiers: *modifiers,
-            }),
+    let mut listeners: Vec<Listener> = Vec::new();
+    let mut clock: Vec<ClockRoutine> = Vec::new();
+    let mut declared = Declared::new();
+    for (version, schema) in versions {
+        let domain = schema.domain.clone().unwrap_or_default();
+        let keys = declared.entry(version.to_string()).or_default();
+        for r in &schema.routines {
+            match &r.trigger {
+                RoutineTrigger::Clock(schedule) => {
+                    let c = ClockRoutine {
+                        routine: r.name.name.clone(),
+                        version: version.to_string(),
+                        schedule: *schedule,
+                    };
+                    keys.insert(c.key());
+                    if !clock.iter().any(|h| h.key() == c.key()) {
+                        clock.push(c);
+                    }
+                }
+                RoutineTrigger::Change { pattern, modifiers } => {
+                    let l = Listener {
+                        domain: domain.clone(),
+                        pattern: pattern.clone(),
+                        routine: r.name.name.clone(),
+                        version: version.to_string(),
+                        modifiers: *modifiers,
+                    };
+                    keys.insert(l.key());
+                    if !listeners.iter().any(|h| h.key() == l.key()) {
+                        listeners.push(l);
+                    }
+                }
+            }
         }
     }
+    let active = versions[0].0;
     let tenants = Arc::new(
-        Tenants::new(spaces.clone(), boot.to_string(), version.to_string())
-            .with_idle_max(idle_max_from_env()),
+        Tenants::new(spaces.clone(), boot.to_string(), active.to_string())
+            .with_idle_max(idle_max_from_env())
+            .with_declared(declared),
     );
     crate::runtime::TriggerWiring {
         listeners,
@@ -719,17 +898,59 @@ impl LiveRoutines {
             return Ok("routines: fixed by the embedding; not switched".into());
         }
         let next = wiring(schema, version, self.spaces.clone(), &self.boot, self.mail);
+        self.put(control, next).await?;
+        Ok(format!(
+            "routines: {} (version {version})",
+            describe(schema)
+        ))
+    }
+
+    /// **Every served version's routines** (§1.10), the union, put in
+    /// place when the versions this node serves change: at an active swap
+    /// and when a pin loads or drops a version beside it.
+    pub async fn switch_served(
+        &self,
+        control: &Pool,
+        deployment: &crate::deploy::Deployment,
+    ) -> Result<String, PoolError> {
+        if !self.follows_program {
+            return Ok("routines: fixed by the embedding; not switched".into());
+        }
+        let active = deployment.current();
+        let others = deployment.others();
+        let mut all: Vec<(&str, &ordo_schema::Schema)> =
+            vec![(active.version.as_str(), &active.fixture.schema)];
+        for l in &others {
+            all.push((l.version.as_str(), &l.fixture.schema));
+        }
+        let next = wiring_served(&all, self.spaces.clone(), &self.boot, self.mail);
+        let lines: Vec<String> = all
+            .iter()
+            .map(|(v, s)| format!("{} (version {v})", describe(s)))
+            .collect();
+        self.put(control, next).await?;
+        Ok(format!("routines: {}", lines.join("; ")))
+    }
+
+    async fn put(
+        &self,
+        control: &Pool,
+        next: crate::runtime::TriggerWiring,
+    ) -> Result<(), PoolError> {
         if next.handler.is_some() {
             ensure_tables(control).await?;
         }
         if !next.clock.is_empty() {
             triggers::register_clock(control, &next.clock, now_secs()).await?;
         }
+        // What the drain knows of each tenant carries over: which version
+        // its cursors were registered under (so a tenant whose version
+        // changed is handed over, §1.10), its pace, and its stale cursors.
+        if let (Some(prev), Some(new)) = (&self.current().tenants, &next.tenants) {
+            new.adopt(prev);
+        }
         *self.current.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(next);
-        Ok(format!(
-            "routines: {} (version {version})",
-            describe(schema)
-        ))
+        Ok(())
     }
 }
 
@@ -928,6 +1149,35 @@ pub async fn queue_notices(
     Ok(queued)
 }
 
+/// A clone's notices, one sink entry per person who would have been
+/// mailed, with the subject and body [`RoutineNotice`] would have written. Answers how many were recorded.
+pub async fn sink_notices(
+    control: &Pool,
+    space: &str,
+    principals: &[String],
+    text: &str,
+    now: u64,
+) -> usize {
+    let mut k = 0;
+    for p in principals {
+        match crate::sinks::record(
+            control,
+            space,
+            crate::sinks::SinkKind::Mail,
+            p,
+            text.trim(),
+            format!("{}\n\n{NOTICE_FOOTER}\n", text.trim()).as_bytes(),
+            now,
+        )
+        .await
+        {
+            Ok(()) => k += 1,
+            Err(e) => eprintln!("a notice in tenant {space} was not recorded in its sink: {e}"),
+        }
+    }
+    k
+}
+
 // ── the run handler ──────────────────────────────────────────────────────
 
 /// What a routine's run comes to when nothing needed changing. The write
@@ -948,33 +1198,56 @@ pub struct RoutineRunner {
     pub mail: bool,
 }
 
-impl RoutineRunner {
-    /// Queue a committed run's notices. A failure here is logged and not
-    /// retried: the run's writes stand, and a second run would tell twice.
-    async fn tell(
-        &self,
-        control: &Pool,
-        name: &str,
-        space: &str,
-        who: &[String],
-        text: &str,
-        now: u64,
-    ) {
-        if !self.mail {
+/// **Tell the people a committed run names**: queue each a notice, or, in a
+/// staging clone, record each in the sink (`crate::sinks`, D17) and send
+/// nothing. `mail` is whether the deployment sends mail. A failure here is
+/// logged and not retried: the run's writes stand, and a second run would
+/// tell twice. Answers how many were queued or sunk.
+pub async fn tell(
+    control: &Pool,
+    mail: bool,
+    name: &str,
+    space: &str,
+    who: &[String],
+    text: &str,
+    now: u64,
+) -> usize {
+    // A read that fails sends nothing.
+    match crate::sinks::applies(control, space).await {
+        Ok(false) => {}
+        Ok(true) => {
+            let k = sink_notices(control, space, who, text, now).await;
             eprintln!(
-                "routine {name}: {} people to tell in tenant {space}, and the deployment sends \
-                 no mail. Set {} to send it",
-                who.len(),
-                crate::mail::KIND_ENV
+                "routine {name}: {k} notices for tenant {space}, in staging, went to the sink. \
+                 Read them: `ordo clones sink {space}`"
             );
-            return;
+            return k;
         }
-        match queue_notices(control, who, text, now).await {
-            Ok(k) => eprintln!(
+        Err(e) => {
+            eprintln!("routine {name}: in tenant {space}, no notice was queued: {e}");
+            return 0;
+        }
+    }
+    if !mail {
+        eprintln!(
+            "routine {name}: {} people to tell in tenant {space}, and the deployment sends no \
+             mail. Set {} to send it",
+            who.len(),
+            crate::mail::KIND_ENV
+        );
+        return 0;
+    }
+    match queue_notices(control, who, text, now).await {
+        Ok(k) => {
+            eprintln!(
                 "routine {name}: queued {k} notices for {} people in tenant {space}",
                 who.len()
-            ),
-            Err(e) => eprintln!("routine {name}: in tenant {space}, no notice was queued: {e}"),
+            );
+            k
+        }
+        Err(e) => {
+            eprintln!("routine {name}: in tenant {space}, no notice was queued: {e}");
+            0
         }
     }
 }
@@ -1108,8 +1381,16 @@ impl RunHandler for RoutineRunner {
                     // crash between the commit and the queue loses it.
                     let who = std::mem::take(&mut *told.lock().expect("told is not poisoned"));
                     if let Some(n) = notify.as_ref().filter(|_| !who.is_empty()) {
-                        self.tell(&ctx.pool, &name, &run.space.0, &who, &n.text, ctx.now())
-                            .await;
+                        tell(
+                            &ctx.pool,
+                            self.mail,
+                            &name,
+                            &run.space.0,
+                            &who,
+                            &n.text,
+                            ctx.now(),
+                        )
+                        .await;
                     }
                 }
                 Err(ordo_exec::ExecFail::Compile(m)) if m == NOTHING_CHANGED => {}

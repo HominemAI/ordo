@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
+# X25519 for a clone sealed to staging's public key (`recipient.rs`).
+# Already in the graph through ed25519-dalek.
+curve25519-dalek = "4.1"
 # argon2id for the sealed-master KEK. One already-resolved, pure-Rust crate
 # (`ordo-identity` already depends on it), so the "no openssl, no bindgen, no
 # cc" property the distroless base and the four-target release matrix both

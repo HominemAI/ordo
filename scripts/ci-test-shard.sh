@@ -76,7 +76,8 @@ ordo-host::stored_bytes_scan
 # them out.
 PERF='(binary_id(ordo-exec::route_many_tenants) & test(=walking_many_tenants_at_boot_holds_only_a_few_connections))
   | (binary_id(ordo-host::notes_app) & test(=connections_thirty_people_sign_up_on_a_default_server))
-  | (binary_id(ordo-host::store_pool_stress) & test(=the_store_pool_stays_free_under_the_e2e_shape))'
+  | (binary_id(ordo-host::store_pool_stress) & test(=the_store_pool_stays_free_under_the_e2e_shape))
+  | binary_id(ordo-host::versions_memory)'
 
 # Unit tests that need Postgres. They run in `rest`, beside the test files
 # that need it too, and never in `unit`.

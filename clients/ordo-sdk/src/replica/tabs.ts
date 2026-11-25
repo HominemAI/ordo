@@ -101,6 +101,7 @@ type Message =
   | { readonly t: 'reconnect'; readonly from: string; readonly req: string }
   | { readonly t: 'reconnected'; readonly from: string; readonly req: string }
   | { readonly t: 'nudge'; readonly from: string }
+  | { readonly t: 'version_changed'; readonly from: string }
   | { readonly t: 'poisoned'; readonly from: string };
 
 let tabCount = 0;
@@ -310,6 +311,9 @@ export class TabLink {
       stopped: (key, refusal) => {
         if (this.#leading) this.#post({ t: 'stopped', from: this.id, key, detail: refusal.detail as RefusalDetail });
       },
+      versionChanged: () => {
+        if (this.#leading) this.#post({ t: 'version_changed', from: this.id });
+      },
     };
     return this.#link;
   }
@@ -377,6 +381,11 @@ export class TabLink {
         return;
       case 'nudge':
         if (this.#leading) this.#manager.nudge();
+        return;
+      case 'version_changed':
+        // The leader dropped the device copy (owner ruling Q7): this tab's
+        // rows in memory go too, and the leader's refill reaches it as frames.
+        if (!this.#leading) this.#manager._remoteVersionChanged();
         return;
       case 'poisoned':
         if (!this.#replica.poisoned) void this.#replica.poison();

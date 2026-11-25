@@ -491,7 +491,7 @@ async fn previews(pool: &Pool, label: &str, p: &sa::Plan, show: bool) -> Vec<Pre
             Some(v) => format!("{v:?}"),
             None => "null".to_string(),
         };
-        let lines = rows
+        let lines: Vec<String> = rows
             .iter()
             .map(|r| {
                 let at = format!(
@@ -528,6 +528,10 @@ async fn previews(pool: &Pool, label: &str, p: &sa::Plan, show: bool) -> Vec<Pre
                 }
             })
             .collect();
+        // A database with no rows has nothing to show.
+        if rows.is_empty() {
+            continue;
+        }
         out.push(Preview {
             database: label.to_string(),
             change: a.change.to_string(),

@@ -3153,7 +3153,14 @@ async fn by_stored_path(
         &ctx,
         space,
         &r.target,
-        crate::dual_writes::SOAK_DEFAULT_SECS,
+        match crate::dual_writes::stored_soak_secs(&ops.pool).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(Some(Outcome::Waiting(format!(
+                    "soak.length could not be read ({e}); it is tried again"
+                ))))
+            }
+        },
         ACTOR,
     ))
     .await;

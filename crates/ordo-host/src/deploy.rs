@@ -130,6 +130,11 @@ pub struct Loaded {
 pub struct LoadClock {
     installed_at: std::sync::atomic::AtomicU64,
     used_at: std::sync::atomic::AtomicU64,
+    /// When this node first saw no pin name it, in seconds; 0 while a pin
+    /// does. `versions.min_residency` counts from here (owner,
+    /// 2026-11-25: a version stays loaded at least 10 minutes after its
+    /// last tenant moves off it).
+    unpinned_since: std::sync::atomic::AtomicU64,
 }
 
 impl LoadClock {
@@ -142,6 +147,26 @@ impl LoadClock {
     fn touch(&self, now: u64) {
         self.used_at
             .store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A pin names it again: its residency count stops.
+    fn pinned(&self) {
+        self.unpinned_since
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// No pin names it: seconds since this node first saw that, starting
+    /// the count now when it is the first time.
+    fn unpinned_for(&self, now: u64) -> u64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let since = match self.unpinned_since.load(Relaxed) {
+            0 => {
+                self.unpinned_since.store(now.max(1), Relaxed);
+                now
+            }
+            t => t,
+        };
+        now.saturating_sub(since)
     }
 
     /// Seconds since it was installed, and since it was last used.
@@ -157,14 +182,58 @@ impl LoadClock {
 /// **The load guards** (`plan-versions.md` §1.4 step 5, §1.5, §7), as this
 /// node last read them. An embedding that sets none keeps nothing and
 /// evicts nothing, which is how a [`Deployment`] behaved before them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadGuards {
     /// `versions.min_residency`: a version stays loaded at least this
-    /// long after it is installed, pinned or not.
+    /// long after no pin names it any more, and is not pushed out within
+    /// this long of its install.
     pub min_residency: u64,
     /// `versions.idle_evict_after`: a version beside the active one that
     /// served nothing for this long is unloaded. `None`: never.
     pub idle_evict: Option<u64>,
+    /// `versions.max_loaded`: versions this node holds at once.
+    pub max_loaded: usize,
+    /// `versions.memory_budget`, in bytes, for per-space views.
+    pub memory_budget: u64,
+    /// `versions.max_concurrent_loads`: loads in one pass at once.
+    pub max_loads: usize,
+    /// `versions.at_capacity`: what a load past `max_loaded` does.
+    pub at_capacity: crate::versions::AtCapacity,
+    /// `versions.wake_wait`, in seconds: how long a request waits for a
+    /// woken version to load.
+    pub wake_wait: u64,
+}
+
+impl Default for LoadGuards {
+    /// Nothing kept and nothing evicted for idleness, which is how a
+    /// [`Deployment`] behaved before the guards; the node limits at their
+    /// stored defaults.
+    fn default() -> LoadGuards {
+        LoadGuards {
+            min_residency: 0,
+            idle_evict: None,
+            max_loaded: crate::versions::DEFAULT_MAX_LOADED,
+            memory_budget: crate::versions::DEFAULT_MEMORY_BUDGET,
+            max_loads: crate::versions::DEFAULT_MAX_CONCURRENT_LOADS,
+            at_capacity: crate::versions::AtCapacity::EvictIdle,
+            wake_wait: crate::versions::DEFAULT_WAKE_WAIT_SECS,
+        }
+    }
+}
+
+impl LoadGuards {
+    /// As the stored settings say ([`crate::versions::VersionSettings`]).
+    pub fn of(s: &crate::versions::VersionSettings) -> LoadGuards {
+        LoadGuards {
+            min_residency: s.min_residency_secs(),
+            idle_evict: s.idle_evict_secs(),
+            max_loaded: s.max_loaded(),
+            memory_budget: s.memory_budget(),
+            max_loads: s.max_concurrent_loads(),
+            at_capacity: s.at_capacity(),
+            wake_wait: s.wake_wait_secs(),
+        }
+    }
 }
 
 /// One version of the program, cut to **one space**.
@@ -1663,12 +1732,18 @@ impl Deployment {
         let residency = self.guards().min_residency;
         let now = crate::runtime::now_secs();
         let mut others = self.others.write().expect("deployment lock");
-        // A version no pin names stays until it has been loaded for
-        // `versions.min_residency`, so a pin moved away and back does not
-        // compile it twice.
+        // A version no pin names stays for `versions.min_residency` after
+        // this node first saw its last tenant leave (owner, 2026-11-25), so
+        // a pin moved away and back does not compile it twice.
         let gone: Vec<String> = others
             .iter()
-            .filter(|(v, l)| !pinned.contains(*v) && l.clock.ages(now).0 >= residency)
+            .filter(|(v, l)| {
+                if pinned.contains(*v) {
+                    l.clock.pinned();
+                    return false;
+                }
+                l.clock.unpinned_for(now) >= residency
+            })
             .map(|(v, _)| v.clone())
             .collect();
         let mut retired = self.retired.write().expect("deployment lock");
@@ -1735,6 +1810,47 @@ impl Deployment {
         let over = retired.len().saturating_sub(RETIRED_SPECS);
         retired.drain(..over);
         gone
+    }
+
+    /// **Make room for one more version** (`versions.at_capacity`
+    /// `evict-idle`, owner 2026-11-25): push out the least recently used
+    /// idle version beside the active one, and answer it. Idle:
+    /// `versions.new_tenant` does not name it, and it has been loaded for
+    /// `versions.min_residency`, so two versions never push each other out
+    /// in turn. A request in flight keeps its own `Arc` and finishes.
+    /// `None` when none is idle, or during a swap.
+    /// The version pushed out is loaded again as an idle-evicted one is:
+    /// when a signed-in request for one of its tenants wakes it.
+    pub fn evict_for_room(&self, now: u64, wanted: &str) -> Option<String> {
+        let guards = self.guards();
+        if self
+            .following()
+            .is_some_and(|v| v != self.current().version)
+        {
+            return None;
+        }
+        let keep = self.new_tenant.read().expect("pin lock").clone();
+        let mut others = self.others.write().expect("deployment lock");
+        let gone = others
+            .iter()
+            .filter(|(v, l)| {
+                v.as_str() != wanted
+                    && keep.as_deref() != Some(v.as_str())
+                    && l.clock.ages(now).0 >= guards.min_residency
+            })
+            .max_by_key(|(v, l)| (l.clock.ages(now).1, std::cmp::Reverse((*v).clone())))
+            .map(|(v, _)| v.clone())?;
+        let l = others.remove(&gone)?;
+        let mut retired = self.retired.write().expect("deployment lock");
+        retired.retain(|(name, _)| name != &gone);
+        retired.push((gone.clone(), l.specs.clone()));
+        let over = retired.len().saturating_sub(RETIRED_SPECS);
+        retired.drain(..over);
+        self.evicted
+            .write()
+            .expect("deployment lock")
+            .insert(gone.clone());
+        Some(gone)
     }
 
     /// Versions unloaded for idleness and not woken since.

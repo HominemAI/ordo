@@ -99,10 +99,12 @@ connection slot from a healthy one.
 **Version settings are not environment variables** (owner, 2026-11-05). They depend on what is applied, so Ordo stores them:
 
 - Which versions are served, the oldest version a tenant may stay on, and the version new tenants start on.
+- How many versions a node keeps loaded and for how long: `max-loaded` (8), `at-capacity` (`evict-idle`), `memory-budget` (512MB), `max-concurrent-loads` (1), `min-residency` (10m), `idle-evict-after` (30m) and `wake-wait` (5s). Since 2026-11-25 these are stored in Ordo too (owner: no number is hard coded).
+- The maintenance window caps (`windows.*`) and `soak.length` (7d), the same way.
 - Read them: `ordo versions settings`.
-- Change one: `ordo versions set served|minimum|new-tenant <value> --reason "..."`, or `--clear`. Also `std.deployment.setVersionSetting`, or the console's Deploys screen.
+- Change one: `ordo versions set <name> <value> --reason "..."`, such as `ordo versions set max-loaded 12`, or `--clear`. Also `std.deployment.setVersionSetting`, or the console's Deploys screen.
 - A value that strands a tenant, names no stored version, or names a revoked one is refused when you set it. The refusal names the setting and the value.
-- `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM` and `ORDO_VERSIONS_NEW_TENANT` are read once. On the first boot after the upgrade, a value set there is stored. The variable is then ignored and can be removed; each boot logs that while it stays set (`howto-operating.md`, "Versions and pins").
+- `ORDO_VERSIONS_SERVED`, `ORDO_VERSIONS_MINIMUM`, `ORDO_VERSIONS_NEW_TENANT`, `ORDO_VERSIONS_MAX_LOADED`, `ORDO_VERSIONS_MEMORY_BUDGET` and `ORDO_VERSIONS_MAX_CONCURRENT_LOADS` are read once. On the first boot after the upgrade, a value set there is stored. The variable is then ignored and can be removed; each boot logs that while it stays set (`howto-operating.md`, "Versions and pins").
 
 <a id="2c"></a>
 ### §2c · The attach allowlist, and why it denies by default

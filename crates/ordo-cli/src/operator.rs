@@ -3793,10 +3793,13 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...
      ordo versions revoked  --host <h> ...\n\
      ordo versions remove <version> --reason \"<text>\" [--move-to <version>]  --host <h> ...\n\
      ordo versions settings [--limit <n>]  --host <h> ...\n\
-     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window> <value> | --clear  --reason \"<text>\"  \
+     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window|max-loaded|memory-budget|max-concurrent-loads|at-capacity|wake-wait> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
      ordo versions set backfill.<chunk_rows|chunk_timeout|max_attempts|budget> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
+     ordo versions set windows.<list_months|max_tenants|max_times|max_times_per_window|max_message_chars|max_reason_chars|max_id_chars> <n> | --clear  --reason \"<text>\"  \
+     --host <h> ...\n\
+     ordo versions set soak.length <length> | --clear  --reason \"<text>\"  --host <h> ...\n\
      every `versions` command goes through the door (`--host <h>` or ORDO_HOST)\n\
      a version is its name or its order number, `#4`";
 
@@ -4296,22 +4299,41 @@ fn door_unless_direct(flags: &Flags) -> Option<Result<crate::wire::Host, String>
     }
 }
 
-/// The three settings as `ordo versions settings` and `set` print them.
+/// The version settings as `ordo versions settings` and `set` print them.
 fn settings_lines(row: &serde_json::Value) -> String {
     let show = |k: &str, unset: &str| row[k].as_str().unwrap_or(unset).to_string();
     format!(
-        "  served      {}\n  minimum     {}\n  new tenants {}\n  restore window {}\n",
+        "  served      {}\n  minimum     {}\n  new tenants {}\n  restore window {}\n  \
+         min residency {}\n  idle evict after {}\n  max loaded {}\n  memory budget {}\n  \
+         max concurrent loads {}\n  at capacity {}\n  wake wait {}\n",
         show("served", "in-use"),
         show("minimum", "none"),
         show("newTenant", "the active version"),
         show(
             "restoreWindow",
             "unset: 30d, or your backup retention when known"
-        )
-    ) + &row["waiting"]["line"]
-        .as_str()
-        .map(|l| format!("  WAITING     {l}\n"))
+        ),
+        show("minResidency", "10m"),
+        show("idleEvictAfter", "30m"),
+        show("maxLoaded", "8"),
+        show("memoryBudget", "512MB"),
+        show("maxConcurrentLoads", "1"),
+        show("atCapacity", "evict-idle"),
+        show("wakeWait", "5s"),
+    ) + &row["soakSecs"]
+        .as_u64()
+        .map(|s| {
+            format!(
+                "  soak length {}\n",
+                ordo_host::windows::format_length(s as i64)
+            )
+        })
         .unwrap_or_default()
+        + &windows_lines(&row["windows"])
+        + &row["waiting"]["line"]
+            .as_str()
+            .map(|l| format!("  WAITING     {l}\n"))
+            .unwrap_or_default()
 }
 
 /// `ordo versions settings`: `versions.served`, `versions.minimum` and
@@ -4402,12 +4424,29 @@ async fn versions_set(flags: Flags) -> Outcome {
         };
         return backfill_set(&flags, setting, value, reason).await;
     }
+    // The window caps and `soak.length` too (owner, 2026-11-25: no number
+    // is hard coded).
+    if name.trim().starts_with("windows.") {
+        let Some(setting) = ordo_host::windows::setting_name(&name) else {
+            return Outcome::usage(format!(
+                "`{name}` is not a window setting; there are {}\n",
+                ordo_host::windows::SETTINGS.map(|(n, ..)| n).join(", ")
+            ));
+        };
+        return named_set(&flags, setting, value, reason).await;
+    }
+    if name.trim() == ordo_host::dual_writes::SOAK_SETTING {
+        return named_set(&flags, ordo_host::dual_writes::SOAK_SETTING, value, reason).await;
+    }
     let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
         return Outcome::usage(format!(
-            "`{name}` is not a version setting; there are `served`, `minimum`, \
-             `new-tenant`, `min-residency`, `idle-evict-after` and `restore-window`, and the \
-             backfill settings {}\n",
-            ordo_host::backfill::SETTINGS.join(", ")
+            "`{name}` is not a version setting; there are {}, `soak.length`, the backfill \
+             settings {} and the window settings {}\n",
+            ordo_host::versions::VersionSetting::ALL
+                .map(|s| format!("`{}`", s.command().trim_start_matches("ordo versions set ")))
+                .join(", "),
+            ordo_host::backfill::SETTINGS.join(", "),
+            ordo_host::windows::SETTINGS.map(|(n, ..)| n).join(", ")
         ));
     };
     let host = match door_only(&flags) {
@@ -4472,6 +4511,61 @@ async fn backfill_set(
         format!("unchanged  {setting} is already {now}\n")
     };
     Outcome::ok(format!("{head}{}", backfill_lines(&row["backfill"])))
+}
+
+/// The window caps as the settings op answers them.
+fn windows_lines(w: &serde_json::Value) -> String {
+    if w.is_null() {
+        return String::new();
+    }
+    let n = |k: &str| {
+        w[k].as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".into())
+    };
+    format!(
+        "WINDOWS\n  list months {}  max times {}  per window {}\n  max tenants {}  \
+         message {} chars  reason {} chars  id {} chars\n",
+        n("listMonths"),
+        n("maxTimes"),
+        n("maxTimesPerWindow"),
+        n("maxTenants"),
+        n("maxMessageChars"),
+        n("maxReasonChars"),
+        n("maxIdChars"),
+    )
+}
+
+/// `ordo versions set windows.<name> <n>` and `soak.length <length>`: one
+/// setting stored beside the version settings, through the same door op.
+async fn named_set(flags: &Flags, setting: &str, value: Option<String>, reason: &str) -> Outcome {
+    let host = match door_only(flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        flags,
+        ordo_host::deploy_ops::SET_VERSION_SETTING,
+        serde_json::json!({ "setting": setting, "value": value, "reason": reason }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let now = match &row["value"] {
+        serde_json::Value::Null => "the default".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    let head = if row["changed"].as_bool() == Some(true) {
+        format!("set        {setting} = {now}\n")
+    } else {
+        format!("unchanged  {setting} is already {now}\n")
+    };
+    Outcome::ok(format!("{head}{}", settings_lines(&row)))
 }
 
 /// The backfill settings as the settings op answers them.

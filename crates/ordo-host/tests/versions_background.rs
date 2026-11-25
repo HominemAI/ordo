@@ -763,7 +763,7 @@ async fn the_version_a_node_booted_on_stays_loaded_for_min_residency() {
 /// **`versions.idle_evict_after`**: 0.1.0 serves nothing for a second and
 /// is unloaded. Nothing loads it again by itself. The next signed-in
 /// request for its tenant wakes it, waits for the load and is answered as
-/// ever, by 0.1.0. Past `WAKE_WAIT` it would answer `server_busy` with
+/// ever, by 0.1.0. Past `versions.wake_wait` it would answer `server_busy` with
 /// `Retry-After`, which the SDK retries.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
@@ -798,6 +798,80 @@ async fn an_idle_version_is_unloaded_and_a_signed_in_request_loads_it_again() {
         Some("0.1.0")
     );
     assert!(node.deployment.loaded("0.1.0").is_some());
+}
+
+/// **`versions.min_residency` counts from the last tenant leaving**
+/// (owner, 2026-11-25: "a version stays loaded at least 10 minutes after
+/// its last tenant moves off it"), not from the load. 0.1.0 has been
+/// loaded longer than the residency when its last tenant moves off; it
+/// stays all the same, and drops once the residency has passed since the
+/// move.
+///
+/// A regression looks like a version loaded long ago dropping at the
+/// first read after its last tenant leaves, so a quick move back compiles
+/// it again while its tenants answer `space_unavailable`.
+#[tokio::test(flavor = "multi_thread")]
+async fn min_residency_counts_from_when_the_last_tenant_left() {
+    let node = boot_with("ordo_vbg_residency_leave", Some("4s")).await;
+    // Loaded longer than the residency before anyone leaves.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.2.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    nudge(&node).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    nudge(&node).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        node.deployment.loaded("0.1.0").is_some(),
+        "kept for versions.min_residency after its last tenant left"
+    );
+    let dropped = eventually(20, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        node.deployment.loaded("0.1.0").is_none()
+    })
+    .await;
+    assert!(dropped, "dropped once the residency passed since the move");
+}
+
+/// **`versions.wake_wait`** (owner, 2026-11-25: no number is hard coded):
+/// at `0` a request that wakes an evicted version does not wait for the
+/// load. It answers `server_busy` with `Retry-After` at once, and the
+/// same request lands once the version has loaded. At its default, 5
+/// seconds, the test above sees the request wait and answer 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn wake_wait_sets_how_long_a_waking_request_waits() {
+    use ordo_host::versions::VersionSetting;
+    let node = boot("ordo_vbg_wake_wait").await;
+    set_guard(&node, VersionSetting::IdleEvictAfter, "1s").await;
+    let evicted = eventually(30, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        node.deployment.loaded("0.1.0").is_none()
+    })
+    .await;
+    assert!(evicted, "0.1.0 was never idle for a second");
+    set_guard(&node, VersionSetting::IdleEvictAfter, "off").await;
+    set_guard(&node, VersionSetting::WakeWait, "0").await;
+    let took = eventually(10, || async {
+        nudge(&node).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        node.deployment.guards().wake_wait == 0
+    })
+    .await;
+    assert!(took, "the node read versions.wake_wait");
+    let first = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+    assert_ne!(first.status, 200, "{}", first.body);
+    assert_eq!(first.code(), "server_busy", "{}", first.body);
+    assert!(first.header("retry-after").is_some());
+    let landed = eventually(20, || async {
+        let again = call(&node, "GET", "/op/cardList", SPC_A, "ada", None).await;
+        again.status == 200
+    })
+    .await;
+    assert!(landed, "the same request lands once 0.1.0 has loaded");
 }
 
 /// **Per-node health shows a version still loading apart from one

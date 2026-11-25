@@ -735,6 +735,11 @@ fn settings_json(s: &crate::versions::VersionSettings) -> serde_json::Value {
         "minResidency": s.value(VersionSetting::MinResidency),
         "idleEvictAfter": s.value(VersionSetting::IdleEvictAfter),
         "restoreWindow": s.value(VersionSetting::RestoreWindow),
+        "maxLoaded": s.value(VersionSetting::MaxLoaded),
+        "memoryBudget": s.value(VersionSetting::MemoryBudget),
+        "maxConcurrentLoads": s.value(VersionSetting::MaxConcurrentLoads),
+        "atCapacity": s.value(VersionSetting::AtCapacity),
+        "wakeWait": s.value(VersionSetting::WakeWait),
     })
 }
 
@@ -1275,6 +1280,14 @@ pub async fn execute(
                 .await
                 .map_err(|e| e.to_exec_error("the backfill settings could not be read"))?
                 .to_json();
+            row["windows"] = crate::windows::Windows::on(&ops.pool)
+                .limits()
+                .await
+                .map_err(|e| e.to_exec_error("the window settings could not be read"))?
+                .to_json();
+            row["soakSecs"] = json!(crate::dual_writes::stored_soak_secs(&ops.pool)
+                .await
+                .map_err(|e| e.to_exec_error("soak.length could not be read"))?);
             row["waiting"] = waiting_json(&ops.pool).await;
             row["history"] = json!(history
                 .iter()
@@ -1374,15 +1387,93 @@ pub async fn execute(
                     next_cursor: None,
                 });
             }
+            // And `soak.length` (§7; owner, 2026-11-25).
+            if named.trim() == crate::dual_writes::SOAK_SETTING {
+                let value = text(bound, "value").filter(|v| !v.is_empty());
+                let reason = text(bound, "reason").unwrap_or_default();
+                let (changed, secs) = crate::dual_writes::set_soak(
+                    &ops.pool,
+                    value,
+                    caller,
+                    reason,
+                    crate::runtime::now_secs(),
+                )
+                .await
+                .map_err(|e| e.to_exec_error("soak.length was not changed"))?;
+                if changed {
+                    ops.record(
+                        caller,
+                        SET_VERSION_SETTING,
+                        "version-setting",
+                        format!("setting=soak.length value={secs} by={caller}"),
+                    );
+                }
+                let v = crate::versions::Versions::on(&ops.pool);
+                let mut row = settings_json(
+                    &v.settings()
+                        .await
+                        .map_err(|e| e.to_exec_error("the version settings could not be read"))?,
+                );
+                row["soakSecs"] = json!(secs);
+                row["setting"] = json!(crate::dual_writes::SOAK_SETTING);
+                row["value"] = json!(secs);
+                row["changed"] = json!(changed);
+                row["waiting"] = waiting_json(&ops.pool).await;
+                return Ok(ExecResult {
+                    position: None,
+                    rows: vec![row],
+                    next_cursor: None,
+                });
+            }
+            // So are the maintenance window caps (owner, 2026-11-25: no
+            // number is hard coded).
+            if named.trim().starts_with("windows.") {
+                let value = text(bound, "value").filter(|v| !v.is_empty());
+                let reason = text(bound, "reason").unwrap_or_default();
+                let (changed, now) = crate::windows::Windows::on(&ops.pool)
+                    .set_setting(named, value, caller, reason, crate::runtime::now_secs())
+                    .await
+                    .map_err(|e| e.to_exec_error("the window setting was not changed"))?;
+                let setting = crate::windows::setting_name(named).unwrap_or_default();
+                let value = now.to_json()[crate::windows::WindowLimits::json_key(setting)].clone();
+                if changed {
+                    ops.record(
+                        caller,
+                        SET_VERSION_SETTING,
+                        "version-setting",
+                        format!("setting={setting} value={value} by={caller}"),
+                    );
+                }
+                let v = crate::versions::Versions::on(&ops.pool);
+                let mut row = settings_json(
+                    &v.settings()
+                        .await
+                        .map_err(|e| e.to_exec_error("the version settings could not be read"))?,
+                );
+                row["windows"] = now.to_json();
+                row["setting"] = json!(setting);
+                row["value"] = value;
+                row["changed"] = json!(changed);
+                row["waiting"] = waiting_json(&ops.pool).await;
+                return Ok(ExecResult {
+                    position: None,
+                    rows: vec![row],
+                    next_cursor: None,
+                });
+            }
             let Some(setting) = crate::versions::VersionSetting::parse(named) else {
                 return Err(ExecError::new(
                     ordo_api::ErrorCode::InvalidParam,
                     format!(
                         "the version setting was not changed: `{named}` is not one. There are \
-                         versions.served, versions.minimum, versions.new_tenant, the \
-                         rollout settings {}, and the backfill settings {}",
+                         {}, soak.length, the rollout settings {}, the backfill settings {}, \
+                         and the window settings {}",
+                        crate::versions::VersionSetting::ALL
+                            .map(|s| s.name())
+                            .join(", "),
                         crate::rollouts::SETTINGS.join(", "),
-                        crate::backfill::SETTINGS.join(", ")
+                        crate::backfill::SETTINGS.join(", "),
+                        crate::windows::SETTINGS.map(|(n, ..)| n).join(", ")
                     ),
                 ));
             };

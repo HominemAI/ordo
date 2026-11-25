@@ -116,6 +116,54 @@ pub const SOAK_DEFAULT_SECS: u64 = crate::evolve::SOAK_DEFAULT_DAYS * 86_400;
 /// tenant was just pinned to.
 const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// **`soak.length`, stored** (§7; owner, 2026-11-25: no number is hard
+/// coded). Kept in `$version_settings` beside the version settings and set
+/// with `ordo versions set soak.length <length> --reason "..."`. What a
+/// move with no `--soak` of its own soaks for, a rollout's moves
+/// included. Unset, [`SOAK_DEFAULT_SECS`].
+pub const SOAK_SETTING: &str = "soak.length";
+
+/// `soak.length` as stored, in seconds; the default when unset or
+/// unreadable.
+pub async fn stored_soak_secs(pool: &ordo_exec::Pool) -> Result<u64, EvolveRefusal> {
+    Ok(
+        match crate::versions::stored_named(pool, SOAK_SETTING).await? {
+            Some(v) => soak_secs(&v).unwrap_or(SOAK_DEFAULT_SECS),
+            None => SOAK_DEFAULT_SECS,
+        },
+    )
+}
+
+/// **Change `soak.length`**, or clear it with `None`, with who and why.
+/// A value that is not a length is refused, naming the setting. `true`
+/// when it changed, and the length in force after.
+pub async fn set_soak(
+    pool: &ordo_exec::Pool,
+    value: Option<&str>,
+    actor: &str,
+    reason: &str,
+    at: u64,
+) -> Result<(bool, u64), EvolveRefusal> {
+    let reason = crate::versions::check_reason(reason)?;
+    let value = match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => {
+            soak_secs(v).map_err(|_| {
+                EvolveRefusal::Options(format!(
+                    "`{SOAK_SETTING}` is a length like `7d`, `12h`, `30m`, or `0`, not `{}`. \
+                     Set it with `ordo versions set {SOAK_SETTING} <length> --reason \"...\"`",
+                    v.chars().take(40).collect::<String>()
+                ))
+            })?;
+            Some(v.to_string())
+        }
+        None => None,
+    };
+    let changed =
+        crate::versions::record_named(pool, SOAK_SETTING, value.as_deref(), actor, &reason, at)
+            .await?;
+    Ok((changed, stored_soak_secs(pool).await?))
+}
+
 /// The actor a soak closed by its time is recorded under.
 pub const SOAK_ACTOR: &str = "system:soak";
 

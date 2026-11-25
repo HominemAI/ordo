@@ -488,6 +488,15 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   cannot lose to them. Guarded by
   `sealed_backfill::writes_during_the_seal_land_sealed_and_none_is_lost`
   and `backoff_tests::a_write_that_lost_twice_runs_alone`.
+- **The seal rides the write's own statement** (the cause removed,
+  2026-11-24). While a seal runs, each `INSERT` or `UPDATE` of the sealed
+  entity also returns `ctid` and the source column
+  (`overlay::SealCapture`). The overlay seals from that value and writes
+  the target by `ctid`. A fetch by `ctid` of a row this transaction wrote
+  takes no predicate lock, so no read by key is left. Under 4 parallel
+  copies at `ORDO_WRITE_RETRIES=1`, 20 runs: 118 conflicts and 118 turns
+  before, 0 and 0 after. The turn stays as the backstop. Guarded also by
+  `overlay::tests::a_write_to_a_sealed_entity_returns_its_source_and_nothing_else_changes`.
 - Verify runs as verify under live writes: it opens every row against its
   plaintext and records the count and hash it reads. The per-chunk hashes
   are not compared, since writes reseal rows.

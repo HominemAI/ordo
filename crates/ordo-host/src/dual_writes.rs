@@ -547,6 +547,11 @@ pub async fn run(
                 statements = e.statements;
             }
         }
+        // The plain index each held unique's guard reads, once the expand
+        // has made its columns (11b part 5). Run again, it is found there.
+        index_held(&target, &overlay)
+            .await
+            .map_err(|why| cx.err(tenant, &plan.from, &plan.to, "execute_failed", why, true))?;
         if m.phase == MovePhase::Expanding {
             v.note_dual_move(tenant, MovePhase::Backfilling, "").await?;
             m.phase = MovePhase::Backfilling;
@@ -840,6 +845,10 @@ pub async fn close(
     forget_fills(&target, &filled)
         .await
         .map_err(|e| run_err("internal", format!("$fills: {e}")))?;
+    // The guards end with the move: their plain indexes go (11b part 5).
+    drop_held_indexes(&target, &overlay)
+        .await
+        .map_err(|e| run_err("internal", format!("the held indexes: {e}")))?;
     match sa::schema_state(&target, &y.schema).await {
         Ok(sa::SchemaState::Matches { .. }) => {}
         Ok(other) => {
@@ -1067,6 +1076,48 @@ fn held_in(overlay: &Value) -> Vec<sa::Held> {
         .flatten()
         .filter_map(sa::Held::from_json)
         .collect()
+}
+
+/// **The plain index each held unique's guard reads** (11b part 5): over
+/// the space and the unique's columns, built `CONCURRENTLY` so writes go on.
+/// Without it the guard reads the whole table for each row written. Made
+/// once the expand has made the columns; found there on a run again or by a
+/// later tenant's move on the same database.
+async fn index_held(target: &Pool, overlay: &Value) -> Result<(), String> {
+    let steps: Vec<sa::Step> = held_in(overlay)
+        .iter()
+        .filter_map(|h| {
+            let (name, sql) = h.index()?;
+            Some(sa::Step {
+                code: "C1",
+                phase: sa::Phase::ConcurrentIndex,
+                sql,
+                index: Some(name),
+                constraint: None,
+                table: h.entity.clone(),
+            })
+        })
+        .collect();
+    if steps.is_empty() {
+        return Ok(());
+    }
+    sa::execute(target, &steps)
+        .await
+        .map(|_| ())
+        .map_err(|f| f.to_string())
+}
+
+/// The held indexes go at the close: the unique's own index, landed at the
+/// switch, serves from then on.
+async fn drop_held_indexes(target: &Pool, overlay: &Value) -> Result<(), ordo_exec::PoolError> {
+    for h in held_in(overlay) {
+        if let Some((name, _)) = h.index() {
+            target
+                .rows_in_session(&[&format!("DROP INDEX CONCURRENTLY IF EXISTS {}", q(&name))])
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// The rows checked against each unique or check the move holds.

@@ -2949,6 +2949,7 @@ impl Executor {
                         let _ = tx.rollback().await;
                         return Err(match e {
                             overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
                             overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
                         });
                     }

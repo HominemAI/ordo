@@ -321,10 +321,20 @@ in one database and 1 in its own.
   - **Built differently:** a unique lands at the switch, after the check
     of the copied rows. The new version's `set` converges on a unique key
     with `INSERT … ON CONFLICT`, which needs the index (found by the test).
-    A space on the version before in the same database then gets the
-    database's own refusal on a duplicate.
-  - The guard of a unique reads the table per row written; there is no
-    index over the new column before it lands.
+    A space on the version before in the same database meets it through
+    its overlay's copy. Since part 5 that is refused by name: the overlay
+    reads the database client's typed `is_unique_violation` and answers
+    `duplicate` (409), naming the field, the row and `ordo evolve
+    --tenant`, never the database's own text
+    (`ordo_exec::overlay::Duplicate`).
+  - **Part 5:** the guard of a unique reads a plain index over the space
+    and its columns, `<unique>$held`, built `CONCURRENTLY` after the
+    expand and dropped at the close. The guard is spelled with `=` so the
+    index is used; a row holding a null there is asked again with `IS NOT
+    DISTINCT FROM`. Tests: `prev_rename.rs`
+    (`a_space_on_the_version_before_that_meets_the_new_unique_is_refused_by_name`,
+    `the_guard_of_a_held_unique_reads_its_plain_index_until_the_close`,
+    which reads the guard's `EXPLAIN`).
   - The pre-check of the expand skips a held constraint: it would read a
     column the expand has not made, and the copied rows are checked
     instead.

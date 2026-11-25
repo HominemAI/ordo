@@ -1377,3 +1377,149 @@ async fn a_unique_the_new_version_adds_is_checked_against_the_copy_and_lands_at_
     assert_eq!(one(&pg, uniques), "1");
     assert_eq!(is_nullable(&pg, "label"), "NO");
 }
+
+/// Increment 11b part 5: **a space still on the version before, in a
+/// shared database, that meets the unique the new version landed is
+/// refused by name.** `acme` moves to 1.1.0 (`label`, unique, filled from
+/// `kind`) and the unique lands at its switch. `beta`, still on 1.0.0,
+/// writes through the real write path; its `$fills` overlay sets `label`
+/// from `kind`. A kind another row of `beta` holds is refused as
+/// `duplicate`, naming `note.label`, the row and the command that moves the
+/// space, and nothing is written. A kind another space holds is not.
+///
+/// A regression looks like the database's own `23505` text reaching the
+/// caller (an `internal` 500), or a write that lands half.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_space_on_the_version_before_that_meets_the_new_unique_is_refused_by_name() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    let y_src = labelled(" unique");
+    let (pg, pool, plan) =
+        shared_with_fill("ordo_shared_unique_x", &y_src, "note.label=kind").await;
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    dual_writes::run(&cx, "acme", &plan, &step_context(), 7 * 86_400, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'note$label$uq'"
+        ),
+        "1"
+    );
+    let before = one(&pg, "SELECT count(*) FROM note");
+
+    let beta = node_in(&pg.db, &shared_x(), "b", "beta").await;
+    let err = beta
+        .write(r#"addNote($kind: "beta 1")"#.into())
+        .await
+        .expect_err("another row of beta holds the label");
+    assert!(err.starts_with("duplicate:"), "{err}");
+    for want in [
+        "`note.label`",
+        "ordo evolve --tenant",
+        "Nothing was written",
+    ] {
+        assert!(err.contains(want), "{want}: {err}");
+    }
+    assert!(!err.contains("23505"), "{err}");
+    let answered = ordo_host::classify(err);
+    assert_eq!(
+        answered.code,
+        ordo_api::error::ErrorCode::Duplicate,
+        "{answered:?}"
+    );
+    assert_eq!(one(&pg, "SELECT count(*) FROM note"), before);
+
+    // A label another space holds is free here.
+    beta.write(r#"addNote($kind: "acme 1")"#.into())
+        .await
+        .expect("unique within a space");
+}
+
+/// Increment 11b part 5: **the guard of a held unique reads a plain index,
+/// not the table.** 20,000 extra rows in `acme`. `acme`'s move stops at its
+/// budget, before the switch, while the guard holds the unique: the plain
+/// index `note$label$uq$held` over the space and `label` is there, and the
+/// guard's own statement, explained, reads it. At the close it is gone.
+///
+/// A regression looks like a sequential scan of `note` in the plan: every
+/// write in the move would read the whole table.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_guard_of_a_held_unique_reads_its_plain_index_until_the_close() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let y_src = labelled(" unique");
+    let (pg, pool, plan) = shared_with_fill("ordo_held_index", &y_src, "note.label=kind").await;
+    pg.exec(
+        "INSERT INTO note (\"$space\", id, rev, kind) \
+         SELECT 'acme', 'big' || i, 1, 'big ' || i FROM generate_series(1, 20000) i",
+    )
+    .expect("rows");
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let stop = evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 1000,
+            budget: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let week = 7 * 86_400;
+    let moved = dual_writes::run(&cx, "acme", &plan, &stop, week, OWNER)
+        .await
+        .expect("acme's copy starts");
+    assert_eq!(moved.phase, MovePhase::Backfilling, "{moved:?}");
+    let held_index = "SELECT count(*) FROM pg_indexes WHERE indexname = 'note$label$uq$held'";
+    assert_eq!(one(&pg, held_index), "1", "the plain index is made");
+    pg.exec("ANALYZE note").expect("analyze");
+
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).expect("receipt");
+    let held = ordo_host::schema_apply::Held::from_json(&receipt["held"][0]).expect("held");
+    let plan_text = pg
+        .query(&format!(
+            "EXPLAIN SELECT \"id\"::text FROM \"note\" WHERE \"$space\" = 'acme' \
+             AND \"id\" IN ('acme1') AND NOT coalesce(({}), false)",
+            held.holds()
+        ))
+        .expect("explain")
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan_text.contains("note$label$uq$held"), "{plan_text}");
+    assert!(!plan_text.contains("Seq Scan on note o"), "{plan_text}");
+
+    // The move ends: the switch lands the unique, the close drops the plain
+    // index.
+    dual_writes::run(&cx, "acme", &plan, &step_context(), week, OWNER)
+        .await
+        .expect("acme moves");
+    dual_writes::run(&cx, "beta", &plan, &step_context(), week, OWNER)
+        .await
+        .expect("beta moves");
+    Versions::on(&pool)
+        .pin_own("home", "1.1.0", 0, OWNER, 20)
+        .await
+        .expect("the own space moves");
+    dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect("the soaks close");
+    assert_eq!(one(&pg, held_index), "0", "the plain index is dropped");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM pg_constraint WHERE conname = 'note$label$uq'"
+        ),
+        "1"
+    );
+}

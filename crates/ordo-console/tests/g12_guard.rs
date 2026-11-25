@@ -94,6 +94,58 @@ const CALLS: &[(&str, Rule)] = &[
     ),
     // Maintenance windows (owner, 2026-11-04).
     ("std.deployment.windows", Read),
+    // The Moves screen (versions increments 7 and 11a).
+    ("std.deployment.rollbackCheck", Read),
+    (
+        "std.deployment.revertSoak",
+        Write {
+            act: "soak-reverted",
+            src: "evolve.rs",
+            test: "prev_rename.rs",
+        },
+    ),
+    (
+        "std.deployment.closeSoak",
+        Write {
+            act: "soak-closed",
+            src: "evolve.rs",
+            test: "prev_rename.rs",
+        },
+    ),
+    // The Tenant builds screen (versions increment 16).
+    ("std.deployment.tenantBuilds", Read),
+    (
+        "std.deployment.setTenantBuild",
+        Write {
+            act: "tenant-build-set",
+            src: "tenant_builds.rs",
+            test: "tenant_builds.rs",
+        },
+    ),
+    (
+        "std.deployment.joinTenantBuild",
+        Write {
+            act: "tenant-build-joined",
+            src: "tenant_builds.rs",
+            test: "tenant_builds.rs",
+        },
+    ),
+    (
+        "std.deployment.leaveTenantBuild",
+        Write {
+            act: "tenant-build-left",
+            src: "tenant_builds.rs",
+            test: "tenant_builds.rs",
+        },
+    ),
+    (
+        "std.deployment.removeTenantBuild",
+        Write {
+            act: "tenant-build-removed",
+            src: "tenant_builds.rs",
+            test: "tenant_builds.rs",
+        },
+    ),
     // Version settings (owner, 2026-11-05: they live in Ordo).
     ("std.deployment.versionSettings", Read),
     (

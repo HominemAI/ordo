@@ -357,18 +357,25 @@ impl Cache {
         credentials: &dyn DbCredentials,
         template: &PoolConfig,
     ) -> Result<Directory, String> {
-        self.build_served(reads, f, &[], control, credentials, template)
-            .await
+        self.build_served(
+            reads,
+            f,
+            &crate::Served::default(),
+            control,
+            credentials,
+            template,
+        )
+        .await
     }
 
-    /// [`Cache::build`] for a node serving `others` beside `f`: the engine
+    /// [`Cache::build`] for a node serving `served.others` beside `f`: the engine
     /// grants every served version's ops
     /// ([`crate::engine_from_directory_served`]).
     pub async fn build_served(
         &mut self,
         reads: Reads,
         f: &Fixture,
-        others: &[std::sync::Arc<Fixture>],
+        served: &crate::Served,
         control: &Pool,
         credentials: &dyn DbCredentials,
         template: &PoolConfig,
@@ -537,7 +544,7 @@ impl Cache {
             .map_err(|e| format!("tenant touches: {e}"))?;
         let engine = crate::engine_from_directory_served(
             f,
-            others,
+            served,
             &rows,
             &tenant,
             &crate::presence::current(),

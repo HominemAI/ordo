@@ -73,6 +73,7 @@ fn group(n: usize) -> CommandGroup {
             at: Timestamp(1_000 + n as u64),
         }],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }
@@ -327,6 +328,7 @@ async fn signing_refuses_a_chain_the_witness_contradicts() {
         actor: Actor::System("restore".into()),
         commands: vec![],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: Some(RestoreMarker {
             space: space(),

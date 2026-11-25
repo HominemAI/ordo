@@ -628,6 +628,19 @@ impl FnEgress {
         })
     }
 
+    /// **Every check a fetch passes before the network**, and no more: the
+    /// body cap, the URL, the method, the function's and the deployment's
+    /// host lists, each header, and each secret listed, declared and bound
+    /// to the host. No secret's value is opened and nothing is dialled.
+    ///
+    /// A staging clone's sink calls this (`ordo_host::sinks`): a call the
+    /// real kernel refuses is refused there the same way, and one it would
+    /// send is recorded instead. Answers the canonical URL and the method.
+    pub fn check_only(&self, req: &FnFetchRequest) -> Result<(String, String), FetchError> {
+        let checked = self.check(req)?;
+        Ok((checked.url.canonical(), checked.method))
+    }
+
     async fn send(
         &self,
         req: &FnFetchRequest,

@@ -34,6 +34,15 @@
 # script itself (playwright.config.ts, `webServer`) and stops it at the end.
 # It writes what tests need to know to $E2E_STATE/stack.json.
 #
+# Two images (E2E_PREVIOUS_HOST and E2E_PREVIOUS_ORDO name the previous Ordo
+# release's `ordo-host` and `ordo`, built by scripts/previous-ordo.sh): step
+# 4 starts the previous door and step 5 applies the program with the previous
+# `ordo`. The door is then swapped on demand: when a test creates
+# $E2E_STATE/swap, the previous door is stopped and this build's `ordo-host`
+# starts on the same database with the same keys and settings. The stack
+# creates $E2E_STATE/swapped when the new door answers. Only
+# playwright.ordo-upgrade.config.ts sets them; the other projects run one Ordo.
+#
 # Needs: `cargo build -p ordo-cli -p ordo-host -p ordo-identity-service`
 # done (or ORDO, ORDO_HOST_BIN and E2E_IDENTITY_BIN naming the binaries), `npm ci` in examples/notes/web, Node 20
 # or later, and PostgreSQL 15 or later binaries (ORDO_PGBIN) when no
@@ -263,13 +272,46 @@ for v in ORDO_PG_ROUTING ORDO_TENANT_CREDENTIALS ORDO_TENANT_CREDENTIALS_DIR ORD
 export ORDO_IDENTITY_URL="http://127.0.0.1:$id_port" ORDO_IDENTITY_ORIGIN="$id_origin"
 export ORDO_IDENTITY_DEPLOYMENT=main
 
-RUST_LOG=${RUST_LOG:-info} "$host" >"$state/door.log" 2>&1 &
+# Two images: the previous release's door first, and a swap to this build's
+# when a test asks (see the header). Otherwise this build's door, for good.
+prev_host=${E2E_PREVIOUS_HOST:-}
+prev_ordo=${E2E_PREVIOUS_ORDO:-}
+if [ -n "$prev_host" ]; then
+  [ -x "$prev_host" ] && [ -x "$prev_ordo" ] ||
+    { echo "stack: E2E_PREVIOUS_HOST and E2E_PREVIOUS_ORDO must name the previous release's binaries (bash scripts/previous-ordo.sh)" >&2; exit 1; }
+  (
+    door_pid=''
+    trap '[ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null; exit 0' TERM INT EXIT
+    RUST_LOG=${RUST_LOG:-info} "$prev_host" >"$state/door.log" 2>&1 &
+    door_pid=$!
+    until [ -e "$state/swap" ]; do
+      kill -0 "$door_pid" 2>/dev/null || { echo "stack: the previous door stopped" >&2; exit 1; }
+      sleep 0.2
+    done
+    kill "$door_pid" 2>/dev/null || true
+    wait "$door_pid" 2>/dev/null || true
+    echo "--- stack: swapped to this build's ordo-host ---" >>"$state/door.log"
+    RUST_LOG=${RUST_LOG:-info} "$host" >>"$state/door.log" 2>&1 &
+    door_pid=$!
+    tries=0
+    until curl -fsS "$door/health/live" >/dev/null 2>&1; do
+      kill -0 "$door_pid" 2>/dev/null || { echo "stack: this build's door stopped after the swap" >&2; exit 1; }
+      tries=$((tries + 1))
+      [ "$tries" -lt 600 ] || exit 1
+      sleep 0.2
+    done
+    touch "$state/swapped"
+    wait "$door_pid"
+  ) &
+else
+  RUST_LOG=${RUST_LOG:-info} "$host" >"$state/door.log" 2>&1 &
+fi
 last=$!
 pids="$pids $last"
 wait_for "ordo-host" "$door/health/live" "$last"
 
 # ── 5. The program ─────────────────────────────────────────────────────────
-"$ordo" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
+"${prev_ordo:-$ordo}" apply "$program" --as notes-e2e --direct >"$state/apply.log" 2>&1 ||
   { cat "$state/apply.log" >&2; echo "stack: ordo apply failed" >&2; exit 1; }
 
 # ── 5b. Staging ────────────────────────────────────────────────────────────
@@ -324,6 +366,7 @@ cat >"$state/stack.json" <<EOF
   "program": "$program",
   "pg": { "host": "$pg_host", "port": "$pg_port", "user": "$pg_user", "db": "$db" },
   "ordo": "$ordo",
+  "previousRelease": "${E2E_PREVIOUS_RELEASE:-}",
   "logs": "$state"
 }
 EOF

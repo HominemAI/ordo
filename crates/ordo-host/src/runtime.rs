@@ -2383,6 +2383,20 @@ impl ordo_commandlog::Signer for SharedSigner {
 
 // ── the door, rebuildable ────────────────────────────────────────────────
 
+/// The versions one door was built over, held weakly.
+type BuiltOver = Arc<[std::sync::Weak<crate::deploy::Loaded>]>;
+
+thread_local! {
+    /// The space of the last denial [`SwappableAccess::check`] gave on this
+    /// thread, and whether the door that gave it predated the version
+    /// serving that space. [`AccessChecker::behind`] is asked right after,
+    /// on the same thread with no await between, and reads it: a rebuild
+    /// that installs between the two must not turn a stale door's denial
+    /// into `access_denied` (reported fix new-ops-denied-during-rebuild).
+    static DENIED_BY_STALE_DOOR: std::cell::RefCell<Option<(String, bool)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The access checker the binary mounts: [`crate::IdentityAccess`] behind a
 /// lock, so a program swap can install a freshly built one.
 ///
@@ -2440,6 +2454,16 @@ pub struct SwappableAccess {
     unserved: RwLock<std::collections::BTreeSet<String>>,
     /// The deployment, asked whether a closed tenant is served now. Set once.
     deployment: std::sync::OnceLock<Arc<Deployment>>,
+    /// **The versions the door serving now was built over**, held weakly
+    /// so the door keeps no version loaded. A tenant served a version not
+    /// in it (one loaded, or swapped in, after the door was built) is
+    /// behind: the door has no policy for that version's ops, and its
+    /// verified callers are answered `server_busy` until the rebuild that
+    /// follows the load installs (reported fix
+    /// new-ops-denied-during-rebuild). `None` until the boot wires it.
+    /// Written under [`Self::inner`]'s write lock, so a reader holding its
+    /// read lock sees the pair of one install.
+    built_over: RwLock<Option<BuiltOver>>,
     /// The one recorder, held so a rebuild can reinstall it.
     pub recorder: Arc<ordo_secevent::Recorder>,
     /// The one session deny list, held for the same reason and a sharper
@@ -2556,6 +2580,7 @@ impl SwappableAccess {
             read_failed: RwLock::new(Default::default()),
             unserved: RwLock::new(Default::default()),
             deployment: std::sync::OnceLock::new(),
+            built_over: RwLock::new(None),
             directory: tokio::sync::Mutex::new(crate::directory::Cache::default()),
             not_ready: std::sync::OnceLock::new(),
             contact: std::sync::OnceLock::new(),
@@ -2588,6 +2613,12 @@ impl SwappableAccess {
         self.directory.lock().await.force_failure(passing);
     }
 
+    /// Tests only: hold every rebuild of the door until the guard drops,
+    /// as a slow rebuild over many tenants would.
+    pub async fn hold_rebuilds(&self) -> tokio::sync::MutexGuard<'_, crate::directory::Cache> {
+        self.directory.lock().await
+    }
+
     /// Tests only: move the door's cache clock forward.
     pub async fn advance_cache_clock(&self, by: std::time::Duration) {
         self.directory.lock().await.advance(by);
@@ -2616,11 +2647,54 @@ impl SwappableAccess {
         let _ = self.deployment.set(deployment);
     }
 
+    /// Record the versions the door serving now was built over. The boot
+    /// door is built over the active version alone.
+    pub fn note_built_over(&self, versions: &[Arc<crate::deploy::Loaded>]) {
+        *self.built_over.write().expect("door lock") =
+            Some(versions.iter().map(Arc::downgrade).collect());
+    }
+
+    /// The door serving now and the versions it was built over, as one
+    /// install left them.
+    fn door_and_over(&self) -> (Arc<crate::IdentityAccess>, Option<BuiltOver>) {
+        let inner = self.inner.read().expect("door lock");
+        let over = self.built_over.read().expect("door lock").clone();
+        (inner.clone(), over)
+    }
+
+    /// Whether a door built over `over` was built before the version that
+    /// serves `space` now loaded. False when that is not known.
+    fn predates_version_of(&self, over: Option<&BuiltOver>, space: &str) -> bool {
+        let Some(over) = over else {
+            return false;
+        };
+        let Some(serving) = self.deployment.get().and_then(|d| d.serving(space)) else {
+            return false;
+        };
+        !over
+            .iter()
+            .any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&serving)))
+    }
+
     pub fn current(&self) -> Arc<crate::IdentityAccess> {
         self.inner.read().expect("door lock").clone()
     }
 
-    fn install(&self, door: crate::IdentityAccess) {
+    /// Whether the door that last denied a call into `space` on this
+    /// thread was built before the version serving it loaded. Asked of the
+    /// door serving now when no such denial is held.
+    fn denied_by_stale_door(&self, space: &str) -> bool {
+        let held = DENIED_BY_STALE_DOOR.with(|d| d.borrow_mut().take());
+        match held {
+            Some((denied_in, stale)) if denied_in == space => stale,
+            _ => {
+                let (_, over) = self.door_and_over();
+                self.predates_version_of(over.as_ref(), space)
+            }
+        }
+    }
+
+    fn install(&self, door: crate::IdentityAccess, over: &[Arc<crate::deploy::Loaded>]) {
         if let Some(levels) = self.second_step.get() {
             door.wire_second_step(levels.clone());
         }
@@ -2639,7 +2713,10 @@ impl SwappableAccess {
         if let Some(clones) = self.clones.get() {
             door.wire_clones(clones.clone());
         }
-        *self.inner.write().expect("door lock") = Arc::new(door);
+        // The door and the versions it was built over change together.
+        let mut inner = self.inner.write().expect("door lock");
+        self.note_built_over(over);
+        *inner = Arc::new(door);
     }
 }
 
@@ -2652,7 +2729,13 @@ impl SwappableAccess {
 #[async_trait::async_trait]
 impl AccessChecker for SwappableAccess {
     fn check(&self, token: &str, space: &str, op: &str) -> AccessDecision {
-        self.current().check(token, space, op)
+        let (door, over) = self.door_and_over();
+        let decision = door.check(token, space, op);
+        if matches!(decision, AccessDecision::Deny) {
+            let stale = self.predates_version_of(over.as_ref(), space);
+            DENIED_BY_STALE_DOOR.with(|d| *d.borrow_mut() = Some((space.to_string(), stale)));
+        }
+        decision
     }
 
     async fn token_gate(&self, token: &str) -> ordo_api::TokenGate {
@@ -2708,7 +2791,8 @@ impl AccessChecker for SwappableAccess {
             && !self.deployment.get().is_some_and(|d| d.serves(space));
         let listed = closed
             || self.read_failed.read().expect("door lock").contains(space)
-            || self.failed.read().expect("door lock").contains(space);
+            || self.failed.read().expect("door lock").contains(space)
+            || self.denied_by_stale_door(space);
         if !listed {
             return false;
         }
@@ -4718,6 +4802,7 @@ async fn assemble_program(
         access.wire_contact(c);
     }
     access.note_unread(unread, Vec::new());
+    access.note_built_over(std::slice::from_ref(&live));
     access.wire_deployment(deployment.clone());
     let grace = crate::directory::stale_grace_from(
         std::env::var(crate::directory::STALE_GRACE_SETTING)
@@ -6497,17 +6582,18 @@ async fn rebuild_access(
     let reads = crate::directory::prefetch(w.pool, w.credentials.as_ref(), &template, scope).await;
     let mut cache = w.access.directory.lock().await;
     let live = w.deployment.current();
+    let others = w.deployment.others();
     // Named, so the engine holds each version's ops as it declares them
     // (`plan-versions.md` §1.7).
     let served = crate::Served {
         active: Some(live.version.clone()),
-        others: w
-            .deployment
-            .others()
+        others: others
             .iter()
             .map(|l| (l.version.clone(), l.fixture.clone()))
             .collect(),
     };
+    let mut over = vec![live.clone()];
+    over.extend(others.iter().cloned());
     let built = cache
         .build_served(
             reads,
@@ -6546,7 +6632,7 @@ async fn rebuild_access(
         w.delegations,
         w.access.revocations.clone(),
     );
-    w.access.install(door);
+    w.access.install(door, &over);
     // A tenant pinned to a version this node does not serve (one a release
     // no longer loads, §2.8) is closed: its verified callers are answered
     // `server_busy`, never `access_denied`, and `/health/ready` names it.

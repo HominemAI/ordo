@@ -3415,9 +3415,11 @@ async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
         json!({"tenant": ada.space, "to": to}),
     );
     assert_eq!(moved["move"]["phase"], "soaking", "{moved}");
+    // Told to retry while the node's door rebuilds over the new version
+    // (reported fix new-ops-denied-during-rebuild), then refused.
     let (status, body) = eventually("the window meets the new version", || {
         let got = read_my_notes_window(&d, &ada.space, &window);
-        (got.0 != 200).then_some(got)
+        (got.0 != 200 && got.0 != 503).then_some(got)
     })
     .0;
     // Killed at the switch: answered as a revoked share, on either version.
@@ -3438,7 +3440,11 @@ async fn a_grant_a_move_killed_stays_killed_after_the_revert() {
         (status != 200).then_some(())
     });
     let window = window_of(&d, &bo, &ada.space);
-    let (status, body) = read_my_notes_window(&d, &ada.space, &window);
+    let (status, body) = eventually("the door has rebuilt over the version before", || {
+        let got = read_my_notes_window(&d, &ada.space, &window);
+        (got.0 != 503).then_some(got)
+    })
+    .0;
     assert_eq!(status, 403, "the window stays refused: {body}");
     // Answered as a revoked share is, so a client drops its device copy.
     assert_eq!(body["error"]["code"], json!("access_denied"), "{body}");

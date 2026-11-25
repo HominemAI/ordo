@@ -115,29 +115,33 @@ async function op(request: APIRequestContext, who: Who, name: string, body?: obj
 }
 
 /**
- * The first call of an op a version adds: the node rebuilds its door over
- * every tenant once it loads a version, and until then refuses the new op.
- * Asked again until it answers, for up to 90 seconds.
+ * The first call of an op a version adds, a write with `body` or a read
+ * without. The node rebuilds its door over every tenant once it loads a
+ * version; until then it answers a member `server_busy` with a
+ * `Retry-After`, which a client honours. Any other refusal fails at once:
+ * `access_denied` here tells a person with access they have none (reported
+ * fix new-ops-denied-during-rebuild).
  */
-async function firstCall(request: APIRequestContext, who: () => Who, name: string, body: object): Promise<void> {
-  await expect
-    .poll(
-      async () => {
-        const w = who();
-        const r = await request.post(`${stack().door}/op/${name}`, {
-          data: body,
-          headers: {
-            'X-Ordo-Space': w.space,
-            Authorization: `Bearer ${w.token}`,
-            Origin: stack().page,
-            'Idempotency-Key': `e2e-${Date.now()}-${Math.random()}`,
-          },
-        });
-        return r.status();
-      },
-      { timeout: 90_000, intervals: [1_000, 2_000, 5_000] },
-    )
-    .toBe(200);
+async function firstCall(request: APIRequestContext, who: () => Who, name: string, body?: object): Promise<Row[]> {
+  const until = Date.now() + 90_000;
+  for (;;) {
+    const w = who();
+    const headers = { 'X-Ordo-Space': w.space, Authorization: `Bearer ${w.token}`, Origin: stack().page };
+    const r =
+      body === undefined
+        ? await request.get(`${stack().door}/op/${name}`, { headers })
+        : await request.post(`${stack().door}/op/${name}`, {
+            data: body,
+            headers: { ...headers, 'Idempotency-Key': `e2e-${Date.now()}-${Math.random()}` },
+          });
+    const text = await r.text();
+    if (r.status() === 200) return body === undefined ? ((JSON.parse(text) as { rows: Row[] }).rows ?? []) : [];
+    expect(r.status(), `${name}: only server_busy is retried: ${text}`).toBe(503);
+    expect(text, name).toContain('server_busy');
+    expect(Date.now(), `${name}: still busy after 90 seconds`).toBeLessThan(until);
+    const wait = Math.min(Math.max(Number(r.headers()['retry-after'] ?? '1'), 1), 5);
+    await new Promise((done) => setTimeout(done, wait * 1_000));
+  }
 }
 
 /** `note=label` for each labelled note, on either version. */
@@ -222,11 +226,10 @@ test('notes v3 merges an entity: the rule is asked for, every label reads, and a
       await page.reload();
       await signedIn(page);
       for (const t of titles) await holds(page, t);
-      // The first read of the version the tenant now serves waits for the
-      // node's door, as the first call does.
-      await expect
-        .poll(() => labels(request, session()).catch(() => []), { timeout: 90_000 })
-        .toEqual([`${first.id}=travel`]);
+      // The first read of the version the tenant now serves may be told
+      // to retry while the node's door rebuilds, as the first call may.
+      const read = await firstCall(request, session, 'labelledNotes');
+      expect(read.map((r) => `${r.note ?? r.id}=${r.label}`)).toEqual([`${first.id}=travel`]);
       const now = (await op(request, session(), 'allNotes')).find((x) => x.id === second.id);
       await firstCall(request, session, 'labelNote', { id: second.id, rev: now?.rev, label: 'shopping' });
       expect(await labels(request, session())).toEqual([`${first.id}=travel`, `${second.id}=shopping`].sort());

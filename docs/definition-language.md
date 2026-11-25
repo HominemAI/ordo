@@ -2220,6 +2220,7 @@ serving, nothing is checked and the program is created as declared:
 | `move_renamed` | a field renamed as it moves |
 | `move_rule_required`, `move_link`, `move_rule_not_built` | a move with no `--correspond`; a rule whose link is not `-> <entity> owned unique` and required; a link that is not unique |
 | `move_reshaped`, `move_sealed`, `move_ref_not_built`, `move_default_required`, `move_acl` | a field moved as it was not declared, a merge that leaves a field behind, or one still declared in `other`; a sealed or file field; a link field; a required field with no default; an `other` with `acl` or a tree |
+| `move_column_orphaned` | a moved field whose entity still holds an orphaned column of its name; prune it first (`ordo evolve --prune`) |
 | `map_cast_required`, `map_cast_not_built` | a mapping that gives another kind than its field holds, or loses places (into money too); one Ordo has no conversion for |
 | `split_rule_required` | an entity split with no `--correspond` |
 | `split_entity_link` | a part whose link is not `-> whole owned unique` and required |

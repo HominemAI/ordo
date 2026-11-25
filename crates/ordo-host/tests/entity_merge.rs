@@ -809,3 +809,60 @@ async fn a_one_way_move_refuses_the_revert_and_orphans_the_old_column() {
         "York"
     );
 }
+
+/// **A move onto a column an earlier step orphaned is refused by name.**
+/// `person` on the tenant's database still holds a `street` column nobody
+/// keeps current. The move would land the moved values beside its stale
+/// ones, so the tenant's step refuses, naming `ordo evolve --prune`, and
+/// nothing moves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_onto_an_orphaned_column_is_refused() {
+    let (_reg_pg, registry) = empty("ordo_merge_orphan_reg").await;
+    ordo_host::tenants::ensure_table(&registry)
+        .await
+        .expect("$spaces");
+    assert!(
+        ordo_host::tenants::reserve(&registry, "acme", "acme", "dev:ada", 10, None)
+            .await
+            .expect("reserved")
+    );
+    ordo_host::tenants::activate(&registry, "acme", 11)
+        .await
+        .expect("active");
+    let (tpg, tenant) = empty("ordo_merge_orphan_tenant").await;
+    let first = store(&registry, &parts()).await;
+    store(&registry, &merged()).await;
+    let (_, created) = ordo_host::schema_apply::apply(&tenant, &first, "test", "test").await;
+    assert!(
+        matches!(created, Ok(ordo_host::schema_apply::Applied::Created(_))),
+        "{created:?}"
+    );
+    tpg.exec("ALTER TABLE person ADD COLUMN street text")
+        .expect("an orphan");
+    let plan = render(&registry, "1.1.0", &options("address.person", false))
+        .await
+        .expect("stores")
+        .plan;
+    Versions::on(&registry)
+        .pin("acme", "1.0.0", OWNER, 12)
+        .await
+        .expect("acme on 1.0.0");
+    let own = ordo_exec::route::SinglePool::new(tenant.clone());
+    let cx = MoveContext {
+        control: &registry,
+        pools: &own,
+        spaces: None,
+    };
+    let err = dual_writes::run(&cx, "acme", &plan, &step_context(), 7 * 86_400, OWNER)
+        .await
+        .expect_err("an orphaned column");
+    let text = err.to_string();
+    assert!(
+        text.contains("move_column_orphaned") && text.contains("--prune person.street"),
+        "{text}"
+    );
+    assert_eq!(
+        one(&tpg, "SELECT count(*) FROM information_schema.columns WHERE table_name = 'person' AND column_name = 'city'"),
+        "0"
+    );
+}

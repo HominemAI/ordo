@@ -4066,7 +4066,7 @@ pub fn triage_counted(
                 merge,
                 source,
                 ..
-            } => match move_steps(c, schema, e, source, fields, *merge, version, choices) {
+            } => match move_steps(c, schema, e, live, source, fields, *merge, version, choices) {
                 Err(r) => refused.push(*r),
                 Ok((s, b, a)) => {
                     steps.extend(s);
@@ -4934,12 +4934,14 @@ fn split_entity_steps(
 /// `owned unique` and required), `move_rule_not_built` (a link to `e` that
 /// is not unique: several source rows per row, `forward-gaps` ask 7),
 /// `move_reshaped`, `move_sealed`, `move_ref_not_built`,
-/// `move_default_required`, `move_acl`, `one_way_unconfirmed`.
+/// `move_column_orphaned`, `move_default_required`, `move_acl`,
+/// `one_way_unconfirmed`.
 #[allow(clippy::too_many_arguments)]
 fn move_steps(
     c: &Change,
     schema: &Schema,
     e: &ordo_schema::Entity,
+    live: &LiveShape,
     source: &ordo_schema::Entity,
     moved: &[ordo_schema::Field],
     merge: bool,
@@ -5103,6 +5105,23 @@ fn move_steps(
                     "`{into}.{name}` is not declared as `{from}.{name}` was (its type, whether \
                      it is optional, or a new `unique`). A move takes fields as they are; change \
                      them in the next version"
+                ),
+            ));
+        }
+        // An orphaned column of the same name, left by an earlier step,
+        // holds values nobody keeps current: the move would read them as
+        // its own for every row no source row names.
+        if live
+            .table(into)
+            .is_some_and(|t| t.columns.contains_key(&f.column()))
+        {
+            return Err(refuse(
+                "move_column_orphaned",
+                format!(
+                    "`{into}` still holds a column `{}`, orphaned by an earlier step, so the \
+                     moved values would land beside stale ones. Prune it first: `ordo evolve \
+                     --prune {into}.{name}`, or move the field under another name",
+                    f.column()
                 ),
             ));
         }

@@ -1091,7 +1091,11 @@ fn entity_columns(
         // of entities, at its first moved field, while its columns are
         // missing here.
         if let Some(m) = renames.move_to(&e.name, &f.name) {
-            if !t.columns.contains_key(&f.column()) {
+            // A column the version the data was written under does not
+            // declare is an orphan left by an earlier step: the move is
+            // still rendered, and the plan refuses it by name.
+            let orphan = written.is_some_and(|w| w.field(&f.name).is_none());
+            if !t.columns.contains_key(&f.column()) || orphan {
                 if m.fields.first().map(|(x, _)| x) == Some(&f.name) {
                     if let Some(was) = moved_from {
                         if let Some(source) = was.native(&m.from) {

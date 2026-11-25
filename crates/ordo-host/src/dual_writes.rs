@@ -167,6 +167,22 @@ pub fn render(
         if bf.copy_from().is_some() {
             continue;
         }
+        // A move's or a merge's copy: `$renames` keeps both shapes current.
+        // A move's old columns are orphaned at the close; a merge's old
+        // entity is, whole ([`merges_of`]).
+        if let Some((from, _, columns, merge)) = bf.merge_from() {
+            if !merge {
+                let was = x.schema.native(from)?;
+                for c in columns {
+                    let old = was.fields.iter().find(|f| f.column() == *c)?;
+                    orphans.push(json!({
+                        "entity": from, "field": old.name, "columns": [old.column()],
+                        "sealed": old.sealed || old.private,
+                    }));
+                }
+            }
+            continue;
+        }
         // An entity split's copy: `$renames` keeps both shapes current, and
         // the moved columns of the whole are orphaned at the close.
         if let Some((whole, link, _)) = bf.part_of() {
@@ -279,7 +295,9 @@ pub fn render(
         "orphans": orphans,
         "held": held.iter().map(sa::Held::to_json).collect::<Vec<_>>(),
         "maps": maps.iter().map(sa::MapStep::to_json).collect::<Vec<_>>(),
-        "oneWay": maps.iter().any(|m| m.one_way),
+        // A move whose old entity stays is one way too (`--one-way`).
+        "oneWay": maps.iter().any(|m| m.one_way)
+            || backfills.iter().any(|b| matches!(b.merge_from(), Some((.., false)))),
         // Each entity the step renames, `{entity, from}`: both tables are
         // kept current through `$renames` by every write, and the rename
         // lands at the close (`schema_apply::land_entity_rename`).
@@ -292,7 +310,30 @@ pub fn render(
             let (whole, _, _) = b.part_of()?;
             Some(json!({ "entity": b.entity, "from": whole }))
         }).collect::<Vec<_>>(),
+        // Each move or merge, `{entity, from, merge}`: both shapes are kept
+        // current through `$renames` until the close.
+        "merges": backfills.iter().filter_map(|b| {
+            let (from, _, _, merge) = b.merge_from()?;
+            Some(json!({ "entity": b.entity, "from": from, "merge": merge }))
+        }).collect::<Vec<_>>(),
     }))
+}
+
+/// Each move or entity merge a move makes, `(entity, from, merge)`, from
+/// its overlays.
+fn merges_of(overlay: &Value) -> Vec<(String, String, bool)> {
+    overlay["merges"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            Some((
+                e["entity"].as_str()?.to_string(),
+                e["from"].as_str()?.to_string(),
+                e["merge"].as_bool()?,
+            ))
+        })
+        .collect()
 }
 
 /// Each entity split a move makes, `(part, whole)`, from its overlays.
@@ -1139,6 +1180,57 @@ pub async fn close(
             Ok(_) => {}
             Err(e) if e.is_missing_table() => {}
             Err(e) => return Err(run_err("internal", format!("$renames: {e}"))),
+        }
+    }
+    // Each move or merge lands: no version writes the old fields again, so
+    // it leaves `$renames`. A merged entity is an orphan, whole.
+    for (entity, from, merge) in merges_of(&overlay) {
+        match target
+            .rows(&format!(
+                "DELETE FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {}",
+                sql_lit(&from),
+                sql_lit(&entity)
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_missing_table() => {}
+            Err(e) => return Err(run_err("internal", format!("$renames: {e}"))),
+        }
+        if merge {
+            // The orphaned table's references go, so it never holds a
+            // write to the tables it named.
+            let refs: Vec<String> = x
+                .schema
+                .native(&from)
+                .map(|e| {
+                    e.fields
+                        .iter()
+                        .filter(|f| matches!(f.ty, ordo_schema::FieldTy::Ref { .. }))
+                        .map(|f| format!("{from}${}$fk", f.name))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for fk in refs {
+                target
+                    .rows(&format!(
+                        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                        q(&from),
+                        q(&fk)
+                    ))
+                    .await
+                    .map_err(|e| run_err("internal", format!("`{from}`'s references: {e}")))?;
+            }
+            let sealed = x
+                .schema
+                .native(&from)
+                .is_some_and(|e| e.fields.iter().any(|f| f.sealed || f.private));
+            left.push(ordo_exec::orphans::Left {
+                entity: from,
+                field: None,
+                columns: Vec::new(),
+                sealed,
+            });
         }
     }
     let at = crate::runtime::now_secs();

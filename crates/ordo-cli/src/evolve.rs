@@ -65,6 +65,9 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     or `bool(x)`, and --reverse.
     An entity split (`entity <part> (prev: <entity>)` while <entity> stays declared) takes
     --correspond <part>.<link>: one part row per row, its owned unique link naming it.
+    A move (`<field>: ... prev(<other>.<field>)`) takes --correspond <other>.<link>: each
+    <other> row gives its values to the row its owned unique link names. With <other>
+    removed and every field moved it is an entity merge; with <other> kept it needs --one-way.
 ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent). A step that rewrites data moves the tenant

@@ -741,6 +741,17 @@ pub enum FillMapping {
         link: String,
         key: String,
     },
+    /// A move from another entity, or an entity merge (B14): each row of
+    /// `from` gives its moved columns to the row its link names. `key` is
+    /// `from`'s id prefix, for a row the new version gives back to it.
+    Merge {
+        from: String,
+        link: String,
+        key: String,
+        columns: Vec<String>,
+        /// `from` is gone in the new version.
+        merge: bool,
+    },
 }
 
 impl FillMapping {
@@ -767,6 +778,9 @@ impl FillMapping {
             FillMapping::Copy(from) => format!("every row of {from}"),
             FillMapping::Part { whole, link, .. } => {
                 format!("one row per row of {whole}, by {link}")
+            }
+            FillMapping::Merge { from, link, .. } => {
+                format!("each row of {from}, into the row its {link} names")
             }
         }
     }
@@ -2700,7 +2714,35 @@ impl BackfillStep {
         if let FillMapping::Part { whole, link, key } = &self.mapping {
             j["partOf"] = serde_json::json!({ "whole": whole, "link": link, "key": key });
         }
+        // Present only on a move's or a merge's copy.
+        if let FillMapping::Merge {
+            from,
+            link,
+            key,
+            columns,
+            merge,
+        } = &self.mapping
+        {
+            j["mergeFrom"] = serde_json::json!({
+                "from": from, "link": link, "key": key, "columns": columns, "merge": merge,
+            });
+        }
         j
+    }
+
+    /// A move's or a merge's copy: the entity the rows come from, its link,
+    /// the moved columns, and whether it is a merge.
+    pub fn merge_from(&self) -> Option<(&str, &str, &[String], bool)> {
+        match &self.mapping {
+            FillMapping::Merge {
+                from,
+                link,
+                columns,
+                merge,
+                ..
+            } => Some((from, link, columns, *merge)),
+            _ => None,
+        }
     }
 
     /// An entity split's copy: the whole, its link and the part's key.
@@ -2727,6 +2769,7 @@ impl BackfillStep {
             "B5" => "B5",
             "B12" => "B12",
             "B13" => "B13",
+            "B14" => "B14",
             "B7" => "B7",
             "B8" => "B8",
             "B10" => "B10",
@@ -2750,6 +2793,19 @@ impl BackfillStep {
                     whole: v["partOf"]["whole"].as_str()?.to_string(),
                     link: v["partOf"]["link"].as_str()?.to_string(),
                     key: v["partOf"]["key"].as_str()?.to_string(),
+                }
+            } else if v["mergeFrom"].is_object() {
+                let m = &v["mergeFrom"];
+                FillMapping::Merge {
+                    from: m["from"].as_str()?.to_string(),
+                    link: m["link"].as_str()?.to_string(),
+                    key: m["key"].as_str()?.to_string(),
+                    columns: m["columns"]
+                        .as_array()?
+                        .iter()
+                        .map(|c| c.as_str().map(String::from))
+                        .collect::<Option<Vec<_>>>()?,
+                    merge: m["merge"].as_bool()?,
                 }
             } else {
                 FillMapping::parse(v["mapping"].as_str()?).ok()?
@@ -3589,7 +3645,8 @@ fn backfill_step(
         FillMapping::Seal
         | FillMapping::BlindIndex
         | FillMapping::Copy(_)
-        | FillMapping::Part { .. } => {
+        | FillMapping::Part { .. }
+        | FillMapping::Merge { .. } => {
             return Err(refuse(
                 "mapping_invalid",
                 format!("`seal` is not a fill: a stored plan seals `{}.{field}` when the version declares it `sealed`", e.name),
@@ -3703,6 +3760,15 @@ pub fn triage_counted(
             // its column arrives empty, and a unique over it is held to the
             // close and checked against the filled rows then (11b part 4).
             // A split's or a merge's new columns arrive empty too.
+            Change::MoveFields { entity, fields, .. } => {
+                if let Some(e) = schema.native(entity) {
+                    for f in fields {
+                        if let Some(f) = e.field(&f.name) {
+                            arriving.insert((entity.clone(), f.column()));
+                        }
+                    }
+                }
+            }
             Change::MapFields { entity, to, .. } => {
                 if let Some(e) = schema.native(entity) {
                     for t in to {
@@ -3995,6 +4061,19 @@ pub fn triage_counted(
                     }
                 }
             }
+            Change::MoveFields {
+                fields,
+                merge,
+                source,
+                ..
+            } => match move_steps(c, schema, e, source, fields, *merge, version, choices) {
+                Err(r) => refused.push(*r),
+                Ok((s, b, a)) => {
+                    steps.extend(s);
+                    backfills.extend(b);
+                    after.extend(a);
+                }
+            },
             Change::AddCheck { object, .. } => {
                 let Some(chk) = e.checks.iter().find(|k| k.name == *object) else {
                     return Err(format!("`{object}` is not a check `{}` declares", e.name));
@@ -4823,6 +4902,352 @@ fn split_entity_steps(
             ordo_schema::ddl::q(&link_fk)
         ),
     )];
+    Ok((out, copy, after))
+}
+
+/// **A move from another entity, or an entity merge** (B14; `forward-gaps`
+/// asks 7 and 8, owner: *"dev named"*, *"declared correspondence tool based
+/// on prev"*): fields of `e` each `prev(<source>.<field>)`. The rule is the
+/// stored plan's `--correspond <source>.<link>`: each `source` row gives its
+/// values to the `e` row its link names. The built link is the one a split
+/// makes, `-> e owned unique` and required, so the rows pair one to one.
+/// The step:
+///
+/// - records the move in `$renames` (`field` [`ordo_exec::overlay::MERGE_FIELD`],
+///   `column` the link, `split` the source's key, the moved columns, what
+///   each becomes in `e` when its source row goes, and whether it is a
+///   merge), under its exclusive lock, first: every write after it keeps
+///   both shapes current (`ordo_exec::overlay::split_mirrors`);
+/// - adds the moved columns to `e`, open to nulls, each with its default;
+/// - copies each source row's values with the backfill worker, in chunks.
+///
+/// A required moved column's `NOT NULL` lands at the close. An entity merge
+/// (the source is gone) keeps the source table, kept current by the new
+/// version's writes, so a revert in the soak loses nothing; it is orphaned
+/// at the close. A move whose source stays is one way: a value the new
+/// version gives an `e` row with no source row has no place in the version
+/// before, so the step needs `--one-way`, and the old columns are orphaned
+/// at the close.
+///
+/// Refused, each naming the fix: `move_needs_stored_plan`,
+/// `move_rule_required`, `move_link` (no link from the source to `e`, or not
+/// `owned unique` and required), `move_rule_not_built` (a link to `e` that
+/// is not unique: several source rows per row, `forward-gaps` ask 7),
+/// `move_reshaped`, `move_sealed`, `move_ref_not_built`,
+/// `move_default_required`, `move_acl`, `one_way_unconfirmed`.
+#[allow(clippy::too_many_arguments)]
+fn move_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    source: &ordo_schema::Entity,
+    moved: &[ordo_schema::Field],
+    merge: bool,
+    version: &str,
+    choices: &Choices,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let (into, from) = (&e.name, &source.name);
+    let is_link = |f: &ordo_schema::Field| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == into);
+    let candidate = source
+        .fields
+        .iter()
+        .find(|f| is_link(f))
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| into.to_string());
+    let what = if merge {
+        format!("`{from}` merges into `{into}`")
+    } else {
+        format!("fields of `{from}` move to `{into}`")
+    };
+    if !choices.renames_backfill {
+        return Err(refuse(
+            "move_needs_stored_plan",
+            format!(
+                "{what}. Its values are copied in chunks by the backfill worker, with every \
+                 write kept in both shapes meanwhile. `ordo apply` does not run that. Store the \
+                 version with `ordo apply --no-activate`, then move tenants with `ordo evolve \
+                 --from <version> --to <version> --correspond {from}.{candidate}` and `ordo \
+                 evolve --tenant <id>`"
+            ),
+        ));
+    }
+    let Some(link_name) = choices.correspond.get(from) else {
+        return Err(refuse(
+            "move_rule_required",
+            format!(
+                "{what}, and Ordo does not guess which `{into}` row each `{from}` row's values \
+                 go to. State it: `--correspond {from}.{candidate}`, each `{from}` row into the \
+                 `{into}` row its `{candidate}` names"
+            ),
+        ));
+    };
+    let link_fix = format!(
+        "in a version before this one, declare the link in `{from}`: `{link_name} -> {into} \
+         owned unique`, required"
+    );
+    let Some(link) = source.field(link_name) else {
+        return Err(refuse(
+            "move_link",
+            format!("`{from}` declares no `{link_name}` in the version serving now; {link_fix}"),
+        ));
+    };
+    if !is_link(link) {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{from}.{link_name}` is not a link to `{into}`. The rule built pairs each \
+                 `{from}` row with the `{into}` row its link names, `-> {into} owned unique`"
+            ),
+        ));
+    }
+    if !link.unique {
+        return Err(refuse(
+            "move_rule_not_built",
+            format!(
+                "`{from}.{link_name}` is not unique, so several `{from}` rows may name one \
+                 `{into}` row, and a rule for which one gives the value (the first, the latest) \
+                 is not built. Make the link unique in a version before this one, or fill the \
+                 field with an op"
+            ),
+        ));
+    }
+    let owned = matches!(&link.ty, ordo_schema::FieldTy::Ref { owned: true, .. });
+    if !owned || link.optional {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{from}.{link_name}` must name one `{into}` row each, and be part of it: \
+                 {link_fix}"
+            ),
+        ));
+    }
+    if source.acl_levels.is_some() || source.is_tree {
+        return Err(refuse(
+            "move_acl",
+            format!(
+                "`{from}` declares `acl` or is a tree, and its rows' access would not follow \
+                 the values into `{into}`. Drop it from `{from}` in a version before this one"
+            ),
+        ));
+    }
+    let still = schema.native(from);
+    if merge {
+        // A merge moves every field: one left behind would be dropped.
+        if let Some(left) = source
+            .declared()
+            .find(|f| f.name != *link_name && !moved.iter().any(|m| m.name == f.name))
+        {
+            return Err(refuse(
+                "move_reshaped",
+                format!(
+                    "`{from}` is gone and `{from}.{}` does not move into `{into}`. A merge moves \
+                     every field: mark it `prev({from}.{})` in `{into}`, or remove it from \
+                     `{from}` in a version before this one",
+                    left.name, left.name
+                ),
+            ));
+        }
+    }
+    let mut columns = Vec::new();
+    let mut cleared = Vec::new();
+    let mut expand = Vec::new();
+    let mut close = Vec::new();
+    let t = ordo_schema::ddl::q(into);
+    for was in moved {
+        let name = &was.name;
+        let Some(f) = e.field(name) else {
+            return Err(refuse(
+                "mapping_invalid",
+                format!("`{into}.{name}` is not declared"),
+            ));
+        };
+        if f.sealed || f.private || was.sealed || was.private || f.is_content() {
+            return Err(refuse(
+                "move_sealed",
+                format!(
+                    "`{from}.{name}` is sealed or a file. A sealed value is bound to its entity, \
+                     and a file's handle to its row, so neither moves into `{into}`. Keep it in \
+                     `{from}`"
+                ),
+            ));
+        }
+        if matches!(f.ty, ordo_schema::FieldTy::Ref { .. }) {
+            return Err(refuse(
+                "move_ref_not_built",
+                format!(
+                    "`{from}.{name}` is a link. Moving a link is not built: add it to `{into}` \
+                     as a new field and fill it with an op, then remove it from `{from}`"
+                ),
+            ));
+        }
+        let ty = |x: &ordo_schema::Field| {
+            (
+                ordo_schema::ddl::column_ty(x),
+                x.text_max,
+                x.optional,
+                x.ty.clone(),
+            )
+        };
+        if ty(f) != ty(was) || f.unique {
+            return Err(refuse(
+                "move_reshaped",
+                format!(
+                    "`{into}.{name}` is not declared as `{from}.{name}` was (its type, whether \
+                     it is optional, or a new `unique`). A move takes fields as they are; change \
+                     them in the next version"
+                ),
+            ));
+        }
+        if still.is_some_and(|s| s.field(name).is_some()) {
+            return Err(refuse(
+                "move_reshaped",
+                format!(
+                    "`{from}.{name}` is still declared, so `{into}.{name}` would copy it, not \
+                     move it. Remove it from `{from}`"
+                ),
+            ));
+        }
+        let default = ordo_schema::ddl::column_default(f)
+            .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+        if !f.optional && default.is_none() {
+            return Err(refuse(
+                "move_default_required",
+                format!(
+                    "`{into}.{name}` is required with no default. A `{into}` row no `{from}` row \
+                     names, and one the version before adds, has no value for it. Give it a \
+                     default: `{name}: {} = <value> prev({from}.{name})`",
+                    ordo_schema::ddl::column_ty(f)
+                ),
+            ));
+        }
+        if !merge && !was.optional {
+            let old_default = ordo_schema::ddl::column_default(was)
+                .map_err(|x| refuse("mapping_invalid", format!("{}: {}", x.code, x.message)))?;
+            if old_default.is_none() {
+                return Err(refuse(
+                    "move_default_required",
+                    format!(
+                        "`{from}.{name}` is required with no default, and `{from}` stays: the \
+                         new version's inserts of `{from}` do not name it, and the version \
+                         before would read a value nobody wrote. Give it a default, or make it \
+                         optional, in a version before this one"
+                    ),
+                ));
+            }
+        }
+        let col = f.column();
+        expand.push(format!(
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {} {}{};\n",
+            ordo_schema::ddl::q(&col),
+            ordo_schema::ddl::column_ty(f),
+            default
+                .as_ref()
+                .map(|d| format!(" DEFAULT {d}"))
+                .unwrap_or_default()
+        ));
+        if !f.optional {
+            close.push(format!(
+                "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+                ordo_schema::ddl::q(&col)
+            ));
+        }
+        cleared.push(serde_json::json!([
+            col,
+            default.unwrap_or_else(|| "NULL".into())
+        ]));
+        columns.push(col);
+    }
+    if !merge && !choices.one_way {
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "`{from}` stays, so a value the new version gives a `{into}` row that no `{from}` \
+                 row names has no place in the version before, and a revert in the soak could \
+                 lose it. Accept this one way change with `--one-way`; revert then requires \
+                 this or manual intervention. A merge (`{from}` removed, every field moved) \
+                 keeps both shapes and reverts"
+            ),
+        ));
+    }
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": source.key, "columns": columns, "cleared": cleared, "merge": merge,
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(from),
+            lit(into),
+            lit(ordo_exec::overlay::MERGE_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(Phase::Alter, into, sql))
+    .collect();
+    out.extend(expand.into_iter().map(|sql| step(Phase::Alter, into, sql)));
+    // After a merge the new version deletes a row of `into` with no
+    // knowledge of `from`, and the overlay deletes the `from` row naming it
+    // after: the link is checked at commit until the close drops it.
+    if merge {
+        out.push(step(
+            Phase::Alter,
+            from,
+            format!(
+                "ALTER TABLE {} ALTER CONSTRAINT {} DEFERRABLE INITIALLY DEFERRED;\n",
+                ordo_schema::ddl::q(from),
+                ordo_schema::ddl::q(&format!("{from}${link_name}$fk"))
+            ),
+        ));
+    }
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: into.clone(),
+        field: from.clone(),
+        column: columns.first().cloned().unwrap_or_default(),
+        column_ty: String::new(),
+        mapping: FillMapping::Merge {
+            from: from.clone(),
+            link: link.column(),
+            key: source.key.clone(),
+            columns: columns.clone(),
+            merge,
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    let after = close
+        .into_iter()
+        .map(|sql| step(Phase::Alter, into, sql))
+        .collect();
     Ok((out, copy, after))
 }
 

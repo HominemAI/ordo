@@ -758,24 +758,31 @@ pub async fn render_stored(
     // A rule for an entity the step does not split off another is refused
     // the same way.
     for part in options.correspond.keys() {
-        if !changes
-            .iter()
-            .any(|c| matches!(c, Change::SplitEntity { entity, .. } if entity == part))
-        {
+        if !changes.iter().any(|c| match c {
+            Change::SplitEntity { entity, .. } => entity == part,
+            // A move or a merge: the rule names the entity the fields
+            // come from, by its link.
+            Change::MoveFields { from, .. } => from == part,
+            _ => false,
+        }) {
             return Err(EvolveRefusal::Options(format!(
-                "`{part}` is not an entity the step from `{}` to `{}` splits off another; drop \
-                 it from `--correspond`",
+                "`{part}` is not an entity the step from `{}` to `{}` splits off another, or \
+                 moves fields out of; drop it from `--correspond`",
                 a.version, b.version
             )));
         }
     }
     if options.one_way
-        && !changes
-            .iter()
-            .any(|c| matches!(c, Change::MapFields { .. }))
+        && !changes.iter().any(|c| {
+            matches!(
+                c,
+                Change::MapFields { .. } | Change::MoveFields { merge: false, .. }
+            )
+        })
     {
         return Err(EvolveRefusal::Options(format!(
-            "the step from `{}` to `{}` splits and merges nothing; drop `--one-way`",
+            "the step from `{}` to `{}` splits, merges and moves nothing one way; drop \
+             `--one-way`",
             a.version, b.version
         )));
     }
@@ -1009,6 +1016,22 @@ pub async fn render_stored(
         .collect();
     if !parts.is_empty() {
         receipt["entitySplits"] = Value::Array(parts);
+    }
+    // A move or an entity merge: present only when the step makes one.
+    let moves: Vec<Value> = changes
+        .iter()
+        .filter_map(|c| match c {
+            Change::MoveFields {
+                entity,
+                from,
+                merge,
+                ..
+            } => Some(json!({ "entity": entity, "from": from, "merge": merge })),
+            _ => None,
+        })
+        .collect();
+    if !moves.is_empty() {
+        receipt["entityMoves"] = Value::Array(moves);
     }
     let digest = digest_of(&receipt);
     let readers = reader_notices(&x, &y, &changes, at);
@@ -1344,10 +1367,41 @@ fn fix_for(c: &Change, class: &str) -> String {
         (Change::SplitEntity { entity, .. }, "split_entity_acl") => {
             format!("drop `acl` and the tree from `{entity}`: it takes its access from its link")
         }
-        (Change::SplitEntity { .. }, "split_needs_stored_plan") => {
+        (Change::SplitEntity { .. }, "split_needs_stored_plan")
+        | (Change::MoveFields { .. }, "move_needs_stored_plan") => {
             "store the version with `ordo apply --no-activate`, then move tenants with \
              `ordo evolve --tenant <id>`"
                 .into()
+        }
+        (Change::MoveFields { entity, from, .. }, "move_rule_required") => format!(
+            "state the rule: `--correspond {from}.<link>`, each `{from}` row into the `{entity}` \
+             row its link names"
+        ),
+        (Change::MoveFields { entity, from, .. }, "move_link") => format!(
+            "in a version before this one, declare the link in `{from}`: `<name> -> {entity} \
+             owned unique`, required"
+        ),
+        (Change::MoveFields { from, .. }, "move_rule_not_built") => format!(
+            "make the link of `{from}` unique in a version before this one, or fill the field \
+             with an op"
+        ),
+        (Change::MoveFields { from, .. }, "move_reshaped") => format!(
+            "move the fields of `{from}` as they are, every one of them for a merge, and change \
+             them in the next version"
+        ),
+        (Change::MoveFields { from, .. }, "move_sealed" | "move_ref_not_built") => format!(
+            "keep sealed, file and link fields in `{from}`; add them to the other entity as new \
+             fields and fill them with an op"
+        ),
+        (Change::MoveFields { entity, .. }, "move_default_required") => format!(
+            "give each moved field a default in `{entity}`, or make it optional, and give a \
+             required field that stays behind a default in a version before this one"
+        ),
+        (Change::MoveFields { from, .. }, "move_acl") => {
+            format!("drop `acl` and the tree from `{from}` in a version before this one")
+        }
+        (Change::MoveFields { .. }, "one_way_unconfirmed") => {
+            "accept the one way move with `--one-way`, or merge the whole entity".into()
         }
         (_, "plan_refused") => "the change is refused by ruling; declare it another way".into(),
         // A split or a merge (15b): the refusal names the option to give.
@@ -1553,6 +1607,35 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
                 Some("the rename read backwards: the old table was kept and written by both versions, and the new one goes".into()),
             )
         }
+        // A move or a merge read backwards: the entity the fields came from
+        // kept them, kept current while the version before wrote, so the
+        // move leaves `$renames` and the new columns go.
+        Change::MoveFields {
+            entity,
+            from,
+            fields,
+            ..
+        } => {
+            let mut out = vec![
+                format!("{};", ordo_exec::overlay::RENAMES_DDL),
+                format!(
+                    "DELETE FROM \"$renames\" WHERE \"entity\" = '{}' AND \"from\" = '{}';",
+                    from.replace('\'', "''"),
+                    entity.replace('\'', "''")
+                ),
+            ];
+            for f in fields {
+                out.push(format!(
+                    "ALTER TABLE {} DROP COLUMN {};",
+                    q(entity),
+                    q(&f.column())
+                ));
+            }
+            (
+                out,
+                Some("the move read backwards: the old fields were kept, and the new columns go".into()),
+            )
+        }
         // An entity split read backwards: the whole kept the moved columns,
         // kept current by both versions, so the split leaves `$renames` and
         // the part goes.
@@ -1600,6 +1683,21 @@ fn reader_notices(x: &Program, y: &Program, changes: &[Change], at: u64) -> Vec<
             Change::DropEntity { entity } => (entity, None),
             Change::RenameEntity { from, .. } => (from, None),
             Change::SplitEntity { from, fields, .. } => (
+                from,
+                Some(
+                    fields
+                        .iter()
+                        .map(|f| f.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ),
+            // A merge orphans the whole entity at its close; a move only
+            // its fields.
+            Change::MoveFields {
+                from, merge: true, ..
+            } => (from, None),
+            Change::MoveFields { from, fields, .. } => (
                 from,
                 Some(
                     fields
@@ -2417,6 +2515,19 @@ pub async fn run_step_with(
     // A split or a merge (15b) keeps both shapes current only in a move,
     // whose overlays and soak it needs.
     let receipt_maps: Value = serde_json::from_str(&plan.receipt).unwrap_or_default();
+    if !entity_moves(&receipt_maps).is_empty() {
+        return Err(with_label(EvolveRefusal::Run {
+            database: String::new(),
+            from: String::new(),
+            to: String::new(),
+            class: "move_needs_move",
+            why: "the step moves fields from another entity, or merges one, which keeps both \
+                  shapes current only in a move: run it per tenant with `ordo evolve --tenant \
+                  <id> --to <version>`, or roll it out with `ordo rollout`"
+                .into(),
+            transient: false,
+        }));
+    }
     if !entity_splits(&receipt_maps).is_empty() {
         return Err(with_label(EvolveRefusal::Run {
             database: String::new(),
@@ -2959,11 +3070,32 @@ pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
         return false;
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
-    let entities = !entity_renames(&receipt).is_empty() || !entity_splits(&receipt).is_empty();
+    let entities = !entity_renames(&receipt).is_empty()
+        || !entity_splits(&receipt).is_empty()
+        || !entity_moves(&receipt).is_empty();
     (!fills.is_empty() || entities)
-        && fills
-            .iter()
-            .all(|b| b["sql"].is_string() || b["copyFrom"].is_string() || b["partOf"].is_object())
+        && fills.iter().all(|b| {
+            b["sql"].is_string()
+                || b["copyFrom"].is_string()
+                || b["partOf"].is_object()
+                || b["mergeFrom"].is_object()
+        })
+}
+
+/// Each move or entity merge a stored step makes, `(entity, from)`, as its
+/// receipt records it.
+pub(crate) fn entity_moves(receipt: &Value) -> Vec<(String, String)> {
+    receipt["entityMoves"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r["entity"].as_str()?.to_string(),
+                r["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Each entity a stored step splits off another, `(part, whole)`, as its

@@ -16,9 +16,14 @@
 //!   conversion is the stored plan's `--fill`, never guessed (`forward-gaps`
 //!   asks 15 and 17). `prev_type` is left for a file, whose handle no
 //!   expression computes.
-//! - `prev_mapping_required`: a move (`prev(orders.note)`), which needs a
-//!   rule the plan does not offer yet. An entity merge is spelled with
-//!   moves, so it is refused the same way.
+//! - **Moves and entity merges** (built 2026-11-25): `prev(other.field)`
+//!   moves a field from another entity, an [`EntityMove`]. The rows
+//!   correspond by the stored plan's rule (`--correspond <other>.<link>`),
+//!   a link of `other` to this entity, `owned unique`. When `other` is gone
+//!   and every field of it moves, the move is an entity merge.
+//!   `prev_mapping_required` is left for a move with a mapping
+//!   (`prev(a.x, b.y)`), a move from this entity itself, a move from one
+//!   entity into two, and a move into an entity renamed in the same step.
 //! - **Entity splits** (built 2026-11-25): an entity `(prev: whole)` while
 //!   `whole` is still declared is a part split off it, an [`EntityPart`].
 //!   It takes the fields it declares from `whole`, one row per `whole` row,
@@ -75,7 +80,8 @@ impl PrevMark {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrevIssue {
     /// `prev_unresolved`, `prev_type`, `prev_mapping_required`,
-    /// `prev_sealed`, `prev_default_required`, `prev_stale`.
+    /// `move_renamed`, `prev_sealed`, `prev_default_required`,
+    /// `prev_stale`.
     pub class: &'static str,
     pub mark: PrevMark,
     pub message: String,
@@ -102,6 +108,26 @@ pub struct Renames {
     pub maps: Vec<FieldMap>,
     /// The entity splits: each part, and the entity it is split off.
     pub parts: Vec<EntityPart>,
+    /// The moves from another entity, one per pair of entities, and the
+    /// entity merges spelled with them.
+    pub moves: Vec<EntityMove>,
+}
+
+/// **A move from another entity, or an entity merge** (`forward-gaps` asks
+/// 7 and 8): fields of `entity` each `prev(from.<field>)`. The fields keep
+/// their names. When `from` is no longer declared, every one of its rows
+/// merges into the row of `entity` its link names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityMove {
+    /// The entity the fields move into.
+    pub entity: String,
+    /// The entity they move from.
+    pub from: String,
+    /// The moved fields of `entity`, in declaration order, and the name
+    /// each had in `from`.
+    pub fields: Vec<(String, String)>,
+    /// `from` is gone: an entity merge.
+    pub merge: bool,
 }
 
 /// **An entity split** (`forward-gaps` ask 8): `part (prev: whole)` while
@@ -181,6 +207,25 @@ impl Renames {
             .find(|p| p.whole == whole && p.fields.iter().any(|f| f == field))
     }
 
+    /// The move `entity.field` is a moved field of.
+    pub fn move_to(&self, entity: &str, field: &str) -> Option<&EntityMove> {
+        self.moves
+            .iter()
+            .find(|m| m.entity == entity && m.fields.iter().any(|(f, _)| f == field))
+    }
+
+    /// The move that takes `from.field` into another entity.
+    pub fn moved_from(&self, from: &str, field: &str) -> Option<&EntityMove> {
+        self.moves
+            .iter()
+            .find(|m| m.from == from && m.fields.iter().any(|(_, old)| old == field))
+    }
+
+    /// The entity merge that takes `from` into another entity.
+    pub fn merged_into(&self, from: &str) -> Option<&EntityMove> {
+        self.moves.iter().find(|m| m.merge && m.from == from)
+    }
+
     /// The old name of `entity`, when the step renames it from one.
     pub fn entity_from(&self, entity: &str) -> Option<&str> {
         self.entities
@@ -243,6 +288,25 @@ pub fn renames(prior: Option<&Schema>, declared: &Schema) -> Renames {
             }
             None => {
                 r.entities.insert(m.prev[0].clone(), m.entity.clone());
+            }
+            Some(f) if m.prev[0].contains('.') => {
+                let Some((from, old)) = m.prev[0].split_once('.') else {
+                    continue;
+                };
+                let merge = declared.native(from).is_none();
+                match r
+                    .moves
+                    .iter_mut()
+                    .find(|x| x.entity == m.entity && x.from == from)
+                {
+                    Some(x) => x.fields.push((f.clone(), old.to_string())),
+                    None => r.moves.push(EntityMove {
+                        entity: m.entity.clone(),
+                        from: from.to_string(),
+                        fields: vec![(f.clone(), old.to_string())],
+                        merge,
+                    }),
+                }
             }
             Some(f) => {
                 // A field of a renamed entity is renamed within it: the old
@@ -425,22 +489,7 @@ fn field_mark(
         return;
     }
     if m.prev.iter().any(|p| p.contains('.')) {
-        out.errors.push(PrevIssue {
-            class: "prev_mapping_required",
-            mark: m.clone(),
-            message: format!(
-                "`{}.{f} prev({})` is a move from another entity, which needs a rule for \
-                 which related row gives the value. Moves, and entity merges spelled with \
-                 them, are not built yet",
-                e.name,
-                m.prev.join(", ")
-            ),
-            fix: format!(
-                "add `{f}` as a new field and fill it with an op, then remove the old \
-                 field in a later version. To move fields into a new entity, split it: \
-                 `entity <part> (prev: <entity>)` with a link `-> <entity> owned unique`"
-            ),
-        });
+        move_mark(prior, declared, was, e, f, m, out);
         return;
     }
     if m.prev.len() > 1 || split_of(declared, m).len() > 1 || is_cast(was, e, f, m) {
@@ -502,6 +551,133 @@ fn field_mark(
                 type_text(to)
             ),
         });
+    }
+}
+
+/// A move's mark, `prev(other.field)`: one field of an entity served now,
+/// moved into an entity that keeps its name, from an entity whose moves
+/// all go to it. The rule and the shape are the stored plan's
+/// (`--correspond`), checked by the triage.
+fn move_mark(
+    prior: &Schema,
+    declared: &Schema,
+    was: &Entity,
+    e: &Entity,
+    f: &str,
+    m: &PrevMark,
+    out: &mut PrevReport,
+) {
+    let refuse = |out: &mut PrevReport, message: String, fix: String| {
+        out.errors.push(PrevIssue {
+            class: "prev_mapping_required",
+            mark: m.clone(),
+            message,
+            fix,
+        })
+    };
+    let written = format!("`{}.{f} prev({})`", e.name, m.prev.join(", "));
+    let (from, old) = match (m.prev.as_slice(), m.prev[0].split_once('.')) {
+        ([_], Some(pair)) => pair,
+        _ => {
+            return refuse(
+                out,
+                format!(
+                    "{written} computes one field from several fields, some of another entity. \
+                     A mapping over two entities is not built"
+                ),
+                format!(
+                    "move the fields into `{}` first (`prev(<entity>.<field>)` each), and merge \
+                     them in the next version",
+                    e.name
+                ),
+            )
+        }
+    };
+    if from == e.name {
+        return refuse(
+            out,
+            format!("{written} names its own entity: that is a rename, `prev({old})`"),
+            format!("write `prev({old})`"),
+        );
+    }
+    if was.name != e.name {
+        return refuse(
+            out,
+            format!(
+                "{written} moves a field into `{}`, which this step also renames from `{}`. A \
+                 move into a renamed entity is not built",
+                e.name, was.name
+            ),
+            "rename the entity in one version, and move the field in the next".into(),
+        );
+    }
+    let Some(source) = prior.native(from) else {
+        out.errors.push(PrevIssue {
+            class: "prev_unresolved",
+            mark: m.clone(),
+            message: format!(
+                "the version serving now has no `{from}`. `prev` reaches one version back only"
+            ),
+            fix: format!(
+                "name an entity of the version serving now, or remove `prev({from}.{old})`"
+            ),
+        });
+        return;
+    };
+    if source.field(old).is_none() {
+        out.errors.push(PrevIssue {
+            class: "prev_unresolved",
+            mark: m.clone(),
+            message: format!(
+                "the version serving now has no `{from}.{old}`. `prev` reaches one version back \
+                 only"
+            ),
+            fix: format!("name a field of `{from}` that is served now, or remove the mark"),
+        });
+        return;
+    }
+    // The field keeps its name: the dual writes copy a column into the
+    // column of the same name.
+    if old != f {
+        out.errors.push(PrevIssue {
+            class: "move_renamed",
+            mark: m.clone(),
+            message: format!(
+                "{written} renames the field as it moves. A move keeps the name, so both \
+                 versions write one column name in each entity"
+            ),
+            fix: format!(
+                "write `{old}: ... prev({from}.{old})` in this version, and rename it to `{f}` \
+                 in the next"
+            ),
+        });
+        return;
+    }
+    // Every move out of one entity goes to one entity.
+    let targets: std::collections::BTreeSet<&str> = declared
+        .prev
+        .iter()
+        .filter(|x| {
+            x.field.is_some()
+                && x.prev.len() == 1
+                && x.prev[0].split_once('.').map(|(s, _)| s) == Some(from)
+        })
+        .map(|x| x.entity.as_str())
+        .collect();
+    if targets.len() > 1 {
+        refuse(
+            out,
+            format!(
+                "fields of `{from}` move into {}. Moves out of one entity go to one entity in a \
+                 step",
+                targets
+                    .iter()
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            "move them into one entity in this version, and the rest in the next".into(),
+        );
     }
 }
 

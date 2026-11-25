@@ -515,7 +515,9 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
         ),
         (
             "2.3.0",
-            "  heading: text prev(other.title)\n  body: text?\n  secret: text sealed\n",
+            // A move renders since entity merges; one over two entities
+            // is still refused.
+            "  heading: text prev(other.title, other.body)\n  body: text?\n  secret: text sealed\n",
             "prev_mapping_required",
         ),
         (

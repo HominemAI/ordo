@@ -654,6 +654,9 @@ impl<'a> Backfill<'a> {
     /// The table the cursor walks: the old table of an entity rename's
     /// copy, or the table filled.
     fn source(&self) -> String {
+        if let Some((from, ..)) = self.fill.merge_from() {
+            return q(from);
+        }
         match (self.fill.copy_from(), self.fill.part_of()) {
             (Some(from), _) | (None, Some((from, _, _))) => q(from),
             (None, None) => self.table(),
@@ -673,6 +676,12 @@ impl<'a> Backfill<'a> {
     /// What one row's content hash reads: the column filled, or a copied
     /// row whole.
     fn value(&self) -> String {
+        if let Some((_, _, columns, _)) = self.fill.merge_from() {
+            return format!(
+                "json_build_array({})::text",
+                columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ")
+            );
+        }
         match (self.fill.copy_from(), self.fill.part_of()) {
             (Some(_), _) | (None, Some(_)) => format!("row_to_json({})::text", self.table()),
             (None, None) => format!("{}::text", self.col()),
@@ -975,6 +984,38 @@ impl<'a> Backfill<'a> {
                 ))
                 .await?;
             }
+            // A move or a merge: the row each row of the chunk names takes
+            // its moved columns. The chunk's rows are locked while they are
+            // read, so a write to one waits and its dual write lands after.
+            (
+                FillMapping::Merge {
+                    from,
+                    link,
+                    columns,
+                    ..
+                },
+                _,
+            ) => {
+                let cols = |prefix: &str| {
+                    columns
+                        .iter()
+                        .map(|c| format!("{prefix}{}", q(c)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                tx.rows(&format!(
+                    "UPDATE {t} t SET ({c}) = ROW({sc}) FROM (SELECT {sp}, {l}, {c} FROM {s} \
+                     WHERE {range} ORDER BY {sp}, \"id\" FOR SHARE) s \
+                     WHERE t.{sp} = s.{sp} AND t.\"id\" = s.{l}",
+                    t = self.table(),
+                    c = cols(""),
+                    sc = cols("s."),
+                    s = q(from),
+                    l = q(link),
+                    sp = q(SPACE),
+                ))
+                .await?;
+            }
             (FillMapping::Expr(src), None) => {
                 return Err(BackfillRefusal::Store(format!(
                     "the mapping `{src}` was stored without its SQL; render the plan again"
@@ -983,14 +1024,21 @@ impl<'a> Backfill<'a> {
         }
         // Each row's new value, folded into its space's content hash. A
         // split's part rows are the chunk's by their link.
-        let at = match self.fill.part_of() {
-            Some((whole, link, _)) => format!(
+        let at = match (self.fill.part_of(), self.fill.merge_from()) {
+            (Some((whole, link, _)), _) => format!(
                 "({sp}, {l}) IN (SELECT {sp}, \"id\" FROM {w} WHERE {range})",
                 sp = q(SPACE),
                 l = q(link),
                 w = q(whole)
             ),
-            None => range.clone(),
+            // A move's rows are the ones the chunk's rows name.
+            (None, Some((from, link, _, _))) => format!(
+                "({sp}, \"id\") IN (SELECT {sp}, {l} FROM {f} WHERE {range})",
+                sp = q(SPACE),
+                l = q(link),
+                f = q(from)
+            ),
+            (None, None) => range.clone(),
         };
         let filled = tx
             .rows(&format!(
@@ -1579,6 +1627,35 @@ impl<'a> Backfill<'a> {
                 ));
             }
         }
+        // A move's or a merge's copy: each row of the entity the fields come
+        // from, and the row its link names, hold the same values. Writes
+        // during the copy kept both current.
+        if let Some((from, link, columns, _)) = self.fill.merge_from() {
+            let on = columns
+                .iter()
+                .map(|c| format!("t.{c} IS NOT DISTINCT FROM s.{c}", c = q(c)))
+                .chain(std::iter::once("TRUE".to_string()))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let off = self
+                .pool
+                .rows(&format!(
+                    "SELECT s.{sp}, s.\"id\" FROM {f} s LEFT JOIN {t} t \
+                     ON t.{sp} = s.{sp} AND t.\"id\" = s.{l} \
+                     WHERE t.\"id\" IS NULL OR NOT ({on}) LIMIT 1",
+                    sp = q(SPACE),
+                    f = q(from),
+                    l = q(link),
+                    t = self.table(),
+                ))
+                .await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    format!("has values its `{}` row does not hold", self.fill.entity),
+                ));
+            }
+        }
         // No row left null. A sealed backfill leaves a null plaintext null.
         let plain = self.plain_col();
         let sealed_src = self.sealed_col();
@@ -1591,7 +1668,10 @@ impl<'a> Backfill<'a> {
             (None, "B12", Some(sql)) => format!("{} IS NULL AND ({sql}) IS NOT NULL", self.col()),
             (None, _, _) => format!("{} IS NULL", self.col()),
         };
-        let nulls = if self.fill.copy_from().is_some() || self.fill.part_of().is_some() {
+        let nulls = if self.fill.copy_from().is_some()
+            || self.fill.part_of().is_some()
+            || self.fill.merge_from().is_some()
+        {
             Vec::new()
         } else {
             self.pool

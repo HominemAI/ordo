@@ -63,12 +63,156 @@ CREATE TABLE IF NOT EXISTS \"$renames\" ( \
 
 /// One row of `$renames`: `entity.from` renamed to `entity.field`, whose
 /// column is `column`. `from` is also the old column.
+///
+/// **An entity rename** (`(prev: from)`) has an empty `field` and
+/// `column`: `entity` is the new table and `from` the old one
+/// ([`Rename::is_entity`], [`entity_mirrors`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rename {
     pub entity: String,
     pub from: String,
     pub field: String,
     pub column: String,
+}
+
+impl Rename {
+    /// Whether the row is an entity rename: `from` is the old table and
+    /// `entity` the new one.
+    pub fn is_entity(&self) -> bool {
+        self.field.is_empty()
+    }
+}
+
+/// **An entity rename's dual write** (`plan-versions.md` increment 15,
+/// built with the move of an entity): the rows this version writes to its
+/// table, copied whole into the other name's table, and the rows it
+/// deletes, deleted there too, in the write's own transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityMirror {
+    /// The table this version writes: its entity's name.
+    pub table: String,
+    /// The table kept current beside it.
+    pub other: String,
+    /// Every physical column, the same in both tables: the step refuses an
+    /// entity rename that also changes its columns
+    /// (`rename_entity_reshaped`).
+    pub columns: Vec<String>,
+}
+
+/// The entity mirrors a version writes with, for the entity renames a
+/// database is in the middle of ([`RENAMES_DDL`]). A version that declares
+/// the new name and not the old copies into the old table, so the version
+/// before reads every row whole and a revert loses nothing; one that
+/// declares the old name and not the new copies forward.
+pub fn entity_mirrors(schema: &ordo_schema::Schema, renames: &[Rename]) -> Vec<EntityMirror> {
+    renames
+        .iter()
+        .filter(|r| r.is_entity())
+        .filter_map(|r| {
+            let (e, other) = match (schema.native(&r.entity), schema.native(&r.from)) {
+                (Some(e), None) => (e, &r.from),
+                (None, Some(e)) => (e, &r.entity),
+                _ => return None,
+            };
+            Some(EntityMirror {
+                table: e.name.clone(),
+                other: other.clone(),
+                columns: ordo_schema::ddl::physical_columns(e)
+                    .into_iter()
+                    .map(|c| c.name)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// Run each mirror over the rows this write wrote (`written`) and deleted
+/// (`deleted`), `(entity, row id)`, in `space`, inside `tx`.
+///
+/// A written row is copied whole (`INSERT … ON CONFLICT DO UPDATE`), so the
+/// worker's copy and a live write cannot disagree: whichever runs second
+/// writes the row as it stands. A deleted row leaves the other table too.
+/// A key a unique there already holds is refused by name
+/// ([`OverlayError::Duplicate`]).
+pub async fn apply_mirrors(
+    tx: &TxConn,
+    space: &str,
+    mirrors: &[EntityMirror],
+    written: &[(String, String)],
+    deleted: &[(String, String)],
+) -> Result<(), OverlayError> {
+    for m in mirrors {
+        let ids = |list: &[(String, String)]| {
+            let mut ids: Vec<String> = list
+                .iter()
+                .filter(|(entity, _)| *entity == m.table)
+                .map(|(_, id)| id.clone())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let cols = m
+            .columns
+            .iter()
+            .map(|c| quote(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sets = m
+            .columns
+            .iter()
+            .filter(|c| c.as_str() != "$space" && c.as_str() != "id")
+            .map(|c| format!("{} = EXCLUDED.{}", quote(c), quote(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let written = ids(written);
+        for chunk in written.chunks(IDS_PER_STATEMENT) {
+            let list = chunk
+                .iter()
+                .map(|i| sql_lit(i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let conflict = if sets.is_empty() {
+                "DO NOTHING".to_string()
+            } else {
+                format!("DO UPDATE SET {sets}")
+            };
+            let sql = format!(
+                "INSERT INTO {other} ({cols}) SELECT {cols} FROM {t} \
+                 WHERE \"$space\" = {} AND \"id\" IN ({list}) \
+                 ON CONFLICT (\"$space\", \"id\") {conflict}",
+                sql_lit(space),
+                other = quote(&m.other),
+                t = quote(&m.table),
+            );
+            match tx.rows(&sql).await {
+                Ok(_) => {}
+                Err(err) if err.is_unique_violation() => {
+                    return Err(OverlayError::Duplicate(Box::new(Duplicate {
+                        entity: m.other.clone(),
+                        columns: Vec::new(),
+                        rows: chunk.to_vec(),
+                    })));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        let deleted = ids(deleted);
+        for chunk in deleted.chunks(IDS_PER_STATEMENT) {
+            let list = chunk
+                .iter()
+                .map(|i| sql_lit(i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tx.rows(&format!(
+                "DELETE FROM {} WHERE \"$space\" = {} AND \"id\" IN ({list})",
+                quote(&m.other),
+                sql_lit(space),
+            ))
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Read `$renames` under a share lock, as a write's first statements.
@@ -613,6 +757,23 @@ impl std::fmt::Display for Duplicate {
             .map(|c| format!("`{}.{c}`", self.entity))
             .collect::<Vec<_>>()
             .join(", ");
+        if self.columns.is_empty() {
+            // An entity rename's copy (`apply_mirrors`): the row is copied
+            // whole into the other name's table, where a unique took it.
+            return write!(
+                f,
+                "duplicate: this tenant's table is being renamed, and `{}`, the other name, \
+                 already holds a row with a unique value row {} gives. Both names are written \
+                 until the rename lands. Nothing was written. Change the value, or finish or \
+                 revert the move (`ordo evolve --tenant <id>`)",
+                self.entity,
+                self.rows
+                    .iter()
+                    .map(|r| format!("`{r}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
         write!(
             f,
             "duplicate: {named} is unique in each space in the version after the one this \
@@ -650,7 +811,7 @@ impl MoveOverlay {
     ///   write that is legal here.
     pub fn for_renames(schema: &ordo_schema::Schema, renames: &[Rename]) -> Option<MoveOverlay> {
         let mut entities = Vec::new();
-        for r in renames {
+        for r in renames.iter().filter(|r| !r.is_entity()) {
             let Some(e) = schema.native(&r.entity) else {
                 continue;
             };
@@ -872,6 +1033,39 @@ mod tests {
             )])
         );
         assert_eq!(sets("  name: text\n  body: text?\n"), None);
+    }
+
+    /// An entity rename: the version with the new name copies into the
+    /// old table, the version with the old name copies forward, and a
+    /// version with neither or both copies nothing. A field rename's
+    /// overlay never reads an entity rename's row.
+    #[test]
+    fn each_version_keeps_the_other_table_of_an_entity_rename_current() {
+        let r = [Rename {
+            entity: "memo".into(),
+            from: "note".into(),
+            field: String::new(),
+            column: String::new(),
+        }];
+        let entity = |name: &str| {
+            ordo_conformance::Fixture::from_source(
+                &format!(
+                    "entity {name} {{\n  title: text\n}}\n\nop all unbounded =\n  {name}[title]\n"
+                ),
+                "",
+            )
+            .expect("compiles")
+            .schema
+        };
+        let m = entity_mirrors(&entity("memo"), &r);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].table.as_str(), m[0].other.as_str()), ("memo", "note"));
+        assert!(m[0].columns.contains(&"$space".to_string()));
+        assert!(m[0].columns.contains(&"title".to_string()));
+        let m = entity_mirrors(&entity("note"), &r);
+        assert_eq!((m[0].table.as_str(), m[0].other.as_str()), ("note", "memo"));
+        assert!(entity_mirrors(&entity("other"), &r).is_empty());
+        assert!(MoveOverlay::for_renames(&entity("memo"), &r).is_none());
     }
 
     #[test]

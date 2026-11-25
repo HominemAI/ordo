@@ -886,6 +886,21 @@ pub async fn render_stored(
             receipt["held"] = Value::Array(triaged.held.iter().map(sa::Held::to_json).collect());
         }
     }
+    // An entity rename (`(prev: old)`): the step keeps both tables current
+    // and lands the rename at the soak's close. Present only when the step
+    // renames an entity, so every plan stored before keeps its digest.
+    let renamed: Vec<Value> = changes
+        .iter()
+        .filter_map(|c| match c {
+            Change::RenameEntity { entity, from } => {
+                Some(json!({ "entity": entity, "from": from }))
+            }
+            _ => None,
+        })
+        .collect();
+    if !renamed.is_empty() {
+        receipt["entityRenames"] = Value::Array(renamed);
+    }
     let digest = digest_of(&receipt);
     let readers = reader_notices(&x, &y, &changes, at);
     Ok(Rendered {
@@ -1124,6 +1139,16 @@ fn fix_for(c: &Change, class: &str) -> String {
             "state how every existing row gets a value: `--fill {entity}.{field}=<expression>` \
              over the row's own fields, or `--fill {entity}.{field}=fn <function>`"
         ),
+        (Change::RenameEntity { entity, from }, "rename_entity_reshaped") => format!(
+            "rename `{from}` to `{entity}` in one version with the same fields, and change its \
+             fields in the next"
+        ),
+        (Change::RenameEntity { from, .. }, "rename_entity_sealed") => format!(
+            "keep the name `{from}`, or unseal its sealed fields in a version before the rename"
+        ),
+        (Change::RenameEntity { from, .. }, "rename_entity_acl") => {
+            format!("keep the name `{from}`: an entity with `acl` is not renamed yet")
+        }
         (_, "plan_refused") => "the change is refused by ruling; declare it another way".into(),
         _ => match c.class() {
             Class::B => "the menu does not offer this change yet (increments 10b, 11a); \
@@ -1254,6 +1279,32 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
             (
                 out,
                 Some("the rename read backwards: the old column was kept, and gets back what was written to the new one".into()),
+            )
+        }
+        // The entity rename read backwards: the old table was kept and
+        // written by both versions, so the rename leaves `$renames`, the
+        // references into the old table are checked at once again, and the
+        // new table goes.
+        Change::RenameEntity { entity, from } => {
+            let mut out = vec![
+                format!("{};", ordo_exec::overlay::RENAMES_DDL),
+                format!(
+                    "DELETE FROM \"$renames\" WHERE \"entity\" = '{}' AND \"from\" = '{}';",
+                    entity.replace('\'', "''"),
+                    from.replace('\'', "''")
+                ),
+            ];
+            for (table, fk) in sa::references_into(&x.schema, from) {
+                out.push(format!(
+                    "ALTER TABLE {} ALTER CONSTRAINT {} NOT DEFERRABLE;",
+                    q(&table),
+                    q(&fk)
+                ));
+            }
+            out.push(format!("DROP TABLE {};", q(entity)));
+            (
+                out,
+                Some("the rename read backwards: the old table was kept and written by both versions, and the new one goes".into()),
             )
         }
         Change::ChangePlaces { .. } | Change::ChangeType { .. } => (
@@ -2483,7 +2534,24 @@ pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
         return false;
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
-    !fills.is_empty() && fills.iter().all(|b| b["sql"].is_string())
+    let entities = !entity_renames(&receipt).is_empty();
+    (!fills.is_empty() || entities) && fills.iter().all(|b| b["sql"].is_string())
+}
+
+/// Each entity a stored step renames, `(new name, old name)`, as its
+/// receipt records it.
+pub(crate) fn entity_renames(receipt: &Value) -> Vec<(String, String)> {
+    receipt["entityRenames"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r["entity"].as_str()?.to_string(),
+                r["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// **A unique or a check a step holds is not probed before its copy**

@@ -2037,8 +2037,21 @@ entity customers (key: cust, prev: clients) {
   column with no default of its own takes the new field's.
 - `ordo apply` makes a field rename itself, as it makes an additive change.
   A stored step copies the values with the backfill worker.
-- An entity rename renders as a rename and is refused as
-  `rename_entity_not_built` until the backfill worker (increment 10b).
+- An entity rename (built 2026-11-24) makes the new table, copies every
+  row into it, and keeps the old table whole, so the version before still
+  serves. The rename is recorded in the database's `$renames`, and every
+  write copies what it writes, and deletes what it deletes, into the other
+  name's table in its own transaction. A reference another entity holds
+  into the old table is checked at commit until the rename lands.
+- An entity rename lands at a move's soak close, or when a version drops
+  the mark. Then every reference moves to the new table, the old table is
+  an orphan (§2.7 of `plan-versions.md`), and a reader app loses it. Until
+  then a reader of the new table reads the old one too.
+- Ids keep the key they were minted with. A row the new name writes takes
+  the new name's key.
+- An entity rename keeps its fields in the step that renames it
+  (`rename_entity_reshaped`). Rename in one version, change the fields in
+  the next.
 - A clean `ordo apply` names each mark whose rename has landed in every
   environment. `ordo apply --remove-landed-prev` cuts those marks from the
   source. A mark has landed when this deployment is the last environment of
@@ -2063,6 +2076,9 @@ serving, nothing is checked and the program is created as declared:
 | `prev_type` | the old and new fields' types differ; no cast option exists yet |
 | `prev_mapping_required` | a merge `prev(first, last)` or a move `prev(orders.note)`; no mapping option exists yet |
 | `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
+| `rename_entity_sealed` | an entity rename of an entity with a sealed field: its ciphertext is bound to the entity's name |
+| `rename_entity_reshaped` | an entity rename whose new declaration has a column the old table does not hold |
+| `rename_entity_acl` | an entity rename of an entity with `acl`: its shares live in an entity named after it |
 | `prev_stale` | a warning, never a refusal: the version serving now already has the new name, so the mark can go |
 
 The CDK spells it `t.text().prev('name')` and `entity(…, { prev: 'clients' })`.

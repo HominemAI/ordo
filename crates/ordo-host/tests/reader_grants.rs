@@ -831,6 +831,77 @@ async fn a_renamed_column_is_read_until_the_rename_lands_then_refused_naming_its
     );
 }
 
+/// **A renamed table is read under both names until the rename lands**
+/// (Q1, entity renames). `notes` becomes `memos (prev: notes)` by `ordo
+/// apply`, and the `reader` line names `memos`. While both tables are
+/// written, the reader reads both: a read app still on `notes` reads
+/// through the soak. A version that drops the mark lands the rename: the
+/// old table is an orphan, never written again, and Postgres refuses the
+/// reader it, while `memos` still reads.
+///
+/// A regression looks like a reader cut off from the old table while it is
+/// still written, or still granted it once it is frozen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_renamed_table_is_read_under_both_names_until_the_rename_lands() {
+    let w = world("ordo_rgrant_entity").await;
+    let alpha = Program::compile(ALPHA).expect("A compiles");
+    let renamed = |line: &str, mark: &str| {
+        Program::compile(&format!(
+            "{line}\n{}",
+            ALPHA.replace("entity notes {", &format!("entity memos{mark} {{"))
+        ))
+        .expect("compiles")
+    };
+    let line = "reader viewer reads memos";
+    let renaming = renamed(line, " (prev: notes)");
+    let landed = renamed(line, "");
+    peer::grant_readers_with(&w.a, &alpha_with("reader viewer reads notes"), lookup)
+        .await
+        .expect("granted");
+
+    // The rename as `ordo apply` makes it, planned against the version
+    // serving now. The apply's own grants read the role from the
+    // environment, so the line is granted below, with this test's role.
+    let mut plan = sa::plan_with(
+        &w.a,
+        &renamed("", " (prev: notes)"),
+        &sa::Choices::default(),
+        Some(&alpha.schema),
+    )
+    .await
+    .expect("a plan");
+    plan.prior = Some(alpha.schema.clone());
+    let applied = sa::apply_planned(&w.a, &plan, "t", "t").await;
+    assert!(
+        matches!(applied, Ok(sa::Applied::Additive { .. })),
+        "{applied:?}"
+    );
+    peer::grant_readers_with(&w.a, &renaming.schema, lookup)
+        .await
+        .expect("granted");
+    let rows =
+        w.b.rows("SELECT title FROM alpha.memos")
+            .await
+            .expect("the new table reads");
+    assert_eq!(rows, [[Some("hello".to_string())]], "the rows were copied");
+    w.b.rows("SELECT title FROM alpha.notes")
+        .await
+        .expect("the old table reads while it is written");
+
+    // The mark goes: the rename lands, `notes` is an orphan.
+    let names = sa::record_orphans(&w.a, &renaming.schema, &landed, Some("1.0.0"), "t")
+        .await
+        .expect("recorded");
+    assert_eq!(names, vec!["notes".to_string()]);
+    peer::grant_readers_with(&w.a, &landed.schema, lookup)
+        .await
+        .expect("granted");
+    assert!(denied(&w.b, "SELECT title FROM alpha.notes").await);
+    w.b.rows("SELECT title FROM alpha.memos")
+        .await
+        .expect("the new table still reads");
+}
+
 /// **The sign-in contract** (owner ruling 2026-11-23, Q16;
 /// `plan-evolution-federation.md` §5, step F6). Every column of
 /// `ordo_exec::sign_in_contract::CONTRACT` is in the tables a deployment

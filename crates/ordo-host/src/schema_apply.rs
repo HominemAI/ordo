@@ -555,6 +555,35 @@ pub async fn record_orphans(
             sealed: false,
         });
     }
+    // **An entity rename that has landed**: a version that drops the
+    // `(prev: old)` mark stops writing the old table. The rename lands
+    // ([`land_entity_rename`]) and the old table is an orphan from here.
+    // A move's soak lands its own at the close.
+    for m in &prior.prev {
+        let (None, [old]) = (m.field.as_deref(), m.prev.as_slice()) else {
+            continue;
+        };
+        let still = program
+            .schema
+            .prev
+            .iter()
+            .any(|n| n.entity == m.entity && n.field.is_none());
+        if still
+            || program.schema.native(old).is_some()
+            || program.schema.native(&m.entity).is_none()
+            || live.table(old).is_none()
+        {
+            continue;
+        }
+        if land_entity_rename(pool, &program.schema, &m.entity, old).await? {
+            left.push(ordo_exec::orphans::Left {
+                entity: old.clone(),
+                field: None,
+                columns: Vec::new(),
+                sealed: false,
+            });
+        }
+    }
     let schema = &program.schema;
     ordo_exec::orphans::revive(pool, &|entity: &str, field: &str| {
         schema
@@ -3233,7 +3262,7 @@ pub fn triage_counted(
     let mut arriving: BTreeSet<(String, String)> = BTreeSet::new();
     for a in assessed {
         match &a.change {
-            Change::AddEntity { entity } => {
+            Change::AddEntity { entity } | Change::RenameEntity { entity, .. } => {
                 if let Some(e) = schema.native(entity) {
                     for pc in ordo_schema::ddl::physical_columns(e) {
                         arriving.insert((entity.clone(), pc.name));
@@ -3497,19 +3526,12 @@ pub fn triage_counted(
                         .map(alter),
                 );
             }
-            Change::RenameEntity { from, .. } => refused.push(Refused {
-                change: c.clone(),
-                class: "rename_entity_not_built",
-                why: format!(
-                    "`{}` is declared `(prev: {from})`. Copying a table to a new name moves \
-                     every typed id, every ref into it and every grant on it, which is the \
-                     backfill worker's (increment 10b). Until then, keep the name `{from}`, or \
-                     add `{}` beside it, copy the rows with an op, and remove `{from}` in a \
-                     later version",
-                    e.name, e.name
-                ),
-                run: None,
-            }),
+            Change::RenameEntity { from, .. } => {
+                match rename_entity_steps(c, schema, e, live, from, version) {
+                    Err(r) => refused.push(*r),
+                    Ok(s) => steps.extend(s),
+                }
+            }
             Change::AddCheck { object, .. } => {
                 let Some(chk) = e.checks.iter().find(|k| k.name == *object) else {
                     return Err(format!("`{object}` is not a check `{}` declares", e.name));
@@ -3856,6 +3878,313 @@ fn rename_recorded(
             lit(version)
         ),
     ]
+}
+
+/// **An entity rename** (`(prev: from)`, §5 B4): the new table made as the
+/// program declares it, every row of the old one copied into it, and both
+/// kept current until the rename lands. The step:
+///
+/// - records the rename in `$renames` (empty `field`), under its exclusive
+///   lock, first: every write after it copies what it writes into the
+///   other name's table (`ordo_exec::overlay::entity_mirrors`), and every
+///   write before it has committed;
+/// - makes the new table, copies the rows, then its uniques and indexes;
+/// - adds the new table's references `NOT VALID`, validated after the
+///   step, so the order the rows were copied in never matters;
+/// - makes each reference another table holds into the old table checked
+///   at commit (`DEFERRABLE INITIALLY DEFERRED`): a write by the new
+///   version adds its row to the new table, and the dual write adds it to
+///   the old one only after the write's own statements.
+///
+/// The old table is kept whole, so the version before still serves over
+/// the database and a revert is a pin switch. The rename lands at a soak's
+/// close, or when a version drops the mark ([`land_entity_rename`]).
+///
+/// Refused: a sealed field (`rename_entity_sealed`: its ciphertext is
+/// bound to the entity's name), and a column the old table does not hold
+/// (`rename_entity_reshaped`: rename in one version, change the fields in
+/// the next). Ids keep the key they were minted with.
+fn rename_entity_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    version: &str,
+) -> Result<Vec<Step>, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    if let Some(f) = e.fields.iter().find(|f| f.sealed || f.private) {
+        return Err(refuse(
+            "rename_entity_sealed",
+            format!(
+                "`{}.{}` is sealed, and a sealed value is bound to its entity's name, so a copy \
+                 under `{}` could not be opened. Keep the name `{from}`, or unseal `{}` in a \
+                 version before the rename",
+                e.name, f.name, e.name, f.name
+            ),
+        ));
+    }
+    if e.acl_levels.is_some() {
+        return Err(refuse(
+            "rename_entity_acl",
+            format!(
+                "`{}` declares `acl`, whose access rows live in an entity named after it \
+                 (`{from}Access`). Renaming it would leave every share behind under the old \
+                 name. Keep the name `{from}`",
+                e.name
+            ),
+        ));
+    }
+    let Some(old) = live.table(from) else {
+        return Err(refuse(
+            "mapping_invalid",
+            format!("the database holds no table `{from}` to rename"),
+        ));
+    };
+    let columns: Vec<String> = ordo_schema::ddl::physical_columns(e)
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    let missing: Vec<String> = columns
+        .iter()
+        .filter(|c| !old.columns.contains_key(*c))
+        .map(|c| format!("`{c}`"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(refuse(
+            "rename_entity_reshaped",
+            format!(
+                "`{}` declares {} that `{from}` does not hold. Both names hold the same rows \
+                 while the rename runs, so the step that renames an entity keeps its fields. \
+                 Rename it in one version, and change its fields in the next",
+                e.name,
+                missing.join(", ")
+            ),
+        ));
+    }
+    let ddl_err = |x: ordo_schema::SchemaError| {
+        refuse("mapping_invalid", format!("{}: {}", x.code, x.message))
+    };
+    let t = ordo_schema::ddl::q(&e.name);
+    let list = columns
+        .iter()
+        .map(|c| ordo_schema::ddl::q(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let mut out: Vec<Step> = entity_rename_recorded(&e.name, from, version)
+        .into_iter()
+        .map(|sql| step(Phase::Alter, &e.name, sql))
+        .collect();
+    out.push(step(
+        Phase::Table,
+        &e.name,
+        ordo_schema::ddl::create_table(e).map_err(ddl_err)?,
+    ));
+    out.push(step(
+        Phase::Alter,
+        &e.name,
+        format!(
+            "INSERT INTO {t} ({list}) SELECT {list} FROM {};\n",
+            ordo_schema::ddl::q(from)
+        ),
+    ));
+    for f in &e.fields {
+        out.extend(ordo_schema::ddl::unique(e, f).map(|sql| step(Phase::Alter, &e.name, sql)));
+    }
+    for key in &e.unique_keys {
+        out.extend(
+            ordo_schema::ddl::composite_unique(e, key)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, &e.name, sql)),
+        );
+    }
+    for key in &e.all_indexes() {
+        out.extend(
+            ordo_schema::ddl::index(e, key, false)
+                .map_err(ddl_err)?
+                .map(|sql| step(Phase::Alter, &e.name, sql)),
+        );
+    }
+    for f in &e.fields {
+        if let Some(sql) = ordo_schema::ddl::foreign_key(schema, e, f) {
+            out.extend(not_valid_then_validate(
+                c,
+                e,
+                &format!("{}${}$fk", e.name, f.name),
+                &sql,
+            ));
+        }
+    }
+    for (g, fk) in references_into(schema, &e.name) {
+        if live.table(&g).is_some_and(|t| t.constraints.contains(&fk)) {
+            out.push(step(
+                Phase::Alter,
+                &g,
+                format!(
+                    "ALTER TABLE {} ALTER CONSTRAINT {} DEFERRABLE INITIALLY DEFERRED;\n",
+                    ordo_schema::ddl::q(&g),
+                    ordo_schema::ddl::q(&fk)
+                ),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Each reference another entity of `schema` holds into `entity`, as
+/// `(table, constraint)`. The constraint is named for the referring field,
+/// so it is the same name before and after a rename of `entity`.
+pub fn references_into(schema: &Schema, entity: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for g in schema.entities.iter().filter(|g| g.name != entity) {
+        for f in &g.fields {
+            if matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == entity) {
+                out.push((g.name.clone(), format!("{}${}$fk", g.name, f.name)));
+            }
+        }
+    }
+    out
+}
+
+/// An entity rename recorded in `$renames`: `entity` the new table, `from`
+/// the old one, `field` and `column` empty.
+fn entity_rename_recorded(entity: &str, from: &str, version: &str) -> Vec<String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    vec![
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \"version\") \
+             VALUES ({}, {}, '', '', {}) ON CONFLICT (\"entity\", \"from\") DO UPDATE SET \
+             \"version\" = EXCLUDED.\"version\";\n",
+            lit(entity),
+            lit(from),
+            lit(version)
+        ),
+    ]
+}
+
+/// **An entity rename lands** (`(prev: from)`): the old table is no longer
+/// written. In one transaction, under `$renames`' exclusive lock: the
+/// rename leaves `$renames`, so no write copies into the old table again;
+/// every reference into the old table moves to the new one, `NOT VALID`,
+/// then validated; the old table's own references go, so a row it keeps
+/// never holds back a delete elsewhere. The caller records the old table
+/// in `$orphans`. Nothing when the rename is not recorded there (already
+/// landed). Answers whether it landed now.
+pub async fn land_entity_rename(
+    pool: &Pool,
+    schema: &Schema,
+    entity: &str,
+    from: &str,
+) -> Result<bool, String> {
+    let recorded = match pool
+        .rows(&format!(
+            "SELECT 1 FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {} \
+             AND \"field\" = ''",
+            ordo_exec::sql_lit(entity),
+            ordo_exec::sql_lit(from)
+        ))
+        .await
+    {
+        Ok(r) => !r.is_empty(),
+        Err(e) if e.is_missing_table() => false,
+        Err(e) => return Err(format!("$renames: {e}")),
+    };
+    if !recorded {
+        return Ok(false);
+    }
+    let q = ordo_schema::ddl::q;
+    let pg = pool.schema().to_string();
+    // The references into the old table and its own, from the catalog.
+    let fks = pool
+        .rows(&format!(
+            "SELECT r.relname::text, c.conname::text, \
+             CASE WHEN c.confrelid = o.oid THEN 'in' ELSE 'out' END \
+             FROM pg_constraint c \
+             JOIN pg_class r ON r.oid = c.conrelid \
+             JOIN pg_class o ON o.relname = {} \
+             JOIN pg_namespace n ON n.oid = o.relnamespace AND n.nspname = {} \
+             WHERE c.contype = 'f' AND (c.confrelid = o.oid OR c.conrelid = o.oid) \
+             AND r.relnamespace = n.oid",
+            ordo_exec::sql_lit(from),
+            ordo_exec::sql_lit(&pg)
+        ))
+        .await
+        .map_err(|e| format!("reading the references of `{from}`: {e}"))?;
+    let mut sql = vec![
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE".to_string(),
+        format!(
+            "DELETE FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {} AND \"field\" = ''",
+            ordo_exec::sql_lit(entity),
+            ordo_exec::sql_lit(from)
+        ),
+    ];
+    let mut validate = Vec::new();
+    for r in fks {
+        let mut it = r.into_iter();
+        let (Some(Some(table)), Some(Some(name)), Some(Some(way))) =
+            (it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        sql.push(format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            q(&table),
+            q(&name)
+        ));
+        if way != "in" || table == from {
+            continue;
+        }
+        // The same reference, onto the new table, as the program declares it.
+        let declared = schema.native(&table).and_then(|g| {
+            g.fields
+                .iter()
+                .find(|f| format!("{}${}$fk", g.name, f.name) == name)
+                .and_then(|f| ordo_schema::ddl::foreign_key(schema, g, f))
+        });
+        if let Some(add) = declared {
+            sql.push(format!(
+                "{} NOT VALID",
+                add.trim_end().trim_end_matches(';')
+            ));
+            validate.push(format!(
+                "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+                q(&table),
+                q(&name)
+            ));
+        }
+    }
+    let fail = |e: PoolError| format!("landing `{from}` renamed `{entity}`: {e}");
+    let tx = pool.begin().await.map_err(fail)?;
+    for s in &sql {
+        if let Err(e) = tx.rows(s).await {
+            let _ = tx.rollback().await;
+            return Err(fail(e));
+        }
+    }
+    tx.commit().await.map_err(fail)?;
+    for v in validate {
+        pool.rows(&v)
+            .await
+            .map_err(|e| format!("validating a reference into `{entity}`: {e}"))?;
+    }
+    Ok(true)
 }
 
 /// Whether a step's statement is one of a rename's records in `$renames`,
@@ -4816,7 +5145,7 @@ pub fn safe_changes_value(v: Option<&str>) -> Option<bool> {
 /// is kept, so nothing is lost and a revert reads it again.
 fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
     match c {
-        Change::RenameField { .. } => true,
+        Change::RenameField { .. } | Change::RenameEntity { .. } => true,
         Change::AddForeignKey { entity, .. } => all
             .iter()
             .any(|o| matches!(o, Change::AddEntity { entity: e } if e == entity)),

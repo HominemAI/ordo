@@ -541,7 +541,13 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
         let lost: Vec<String> = renamed_by[&on]
             .iter()
             .filter(|r| own.contains(&space) || !shared_renames.contains(*r))
-            .map(|(e, f)| format!("{e}.{f}"))
+            .map(|(e, f)| {
+                if f.is_empty() {
+                    e.clone()
+                } else {
+                    format!("{e}.{f}")
+                }
+            })
             .collect();
         out.push(if lost.is_empty() {
             row(
@@ -562,12 +568,13 @@ pub async fn rollback_tenants(control: &Pool, version: &str) -> Result<Vec<Value
     Ok(out)
 }
 
-/// Each field a stored step renamed, `(entity, field)` by its new name.
+/// Each field a stored step renamed, `(entity, field)` by its new name,
+/// and each entity it renamed, `(entity, "")`, as `$renames` records them.
 fn renamed_fields(receipt: &str) -> Vec<(String, String)> {
     let Ok(r) = serde_json::from_str::<Value>(receipt) else {
         return Vec::new();
     };
-    r["backfills"]
+    let mut out: Vec<(String, String)> = r["backfills"]
         .as_array()
         .into_iter()
         .flatten()
@@ -578,7 +585,13 @@ fn renamed_fields(receipt: &str) -> Vec<(String, String)> {
                 b["field"].as_str()?.to_string(),
             ))
         })
-        .collect()
+        .collect();
+    out.extend(
+        crate::evolve::entity_renames(&r)
+            .into_iter()
+            .map(|(entity, _)| (entity, String::new())),
+    );
+    out
 }
 
 /// Two columns of each row `sql` reads, as a set. A table not made yet

@@ -33,6 +33,7 @@ pub mod blind;
 pub mod cost;
 pub mod download;
 pub mod each;
+pub mod edition;
 pub mod interface;
 pub mod public;
 pub mod whole;

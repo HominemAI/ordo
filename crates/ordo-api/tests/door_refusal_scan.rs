@@ -8,8 +8,9 @@
 //!
 //! 1. the bare `door_denial` is called only by the three functions that wrap
 //!    it;
-//! 2. `denied_after_check` is called only right after `check` denied or the
-//!    token gate closed a share grant, both of which recorded already;
+//! 2. `denied_after_check` is called only right after `check` denied (and the
+//!    follow-up questions asked after it, `versions_disagree` among them) or
+//!    the token gate closed a share grant, both of which recorded already;
 //! 3. an `ErrorCode::AccessDenied` built anywhere else is inside a
 //!    `recorded(` call, or is one of the few named below with the place that
 //!    records it.
@@ -39,6 +40,10 @@ const RECORDED_ELSEWHERE: &[(&str, &str)] = &[
         "ordo-api/src/router.rs",
         "ApiError::new(ErrorCode::AccessDenied, message).with_op(op_name)",
     ),
+    // A grant a move killed (`plan-versions.md` §2.5): asked only after
+    // `check` denied it, and `check` records that denial as
+    // `GrantKilledByMove`.
+    ("ordo-api/src/router.rs", "state.access.grant_killed("),
     // `GET /live` with a token nobody signed: `token_known` records it.
     ("ordo-api/src/router.rs", "state.access.token_known(token)"),
     // The platform surfaces' one answer: after `authorize_in`, which
@@ -99,7 +104,8 @@ fn every_door_refusal_is_recorded() {
                 if !(near.contains("AccessDecision::Deny")
                     || near.contains("TokenGate::ShareNotLive")
                     || near.contains("not_ready(")
-                    || near.contains("presence_required("))
+                    || near.contains("presence_required(")
+                    || near.contains("versions_disagree("))
                 {
                     problems.push(format!(
                         "{rel}:{}: denied_after_check without a check or gate denial before it",

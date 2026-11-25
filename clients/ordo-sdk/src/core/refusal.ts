@@ -38,6 +38,8 @@ export const REFUSAL_CLASSES = [
   'idempotency_in_flight',
   'idempotency_applied',
   'version_skew',
+  'op_not_in_version',
+  'versions_disagree',
   'expected_absent',
   'conflicting_identity',
   'duplicate',
@@ -202,6 +204,11 @@ const DISPOSITIONS: Partial<Record<DoorCode, Disposition>> = {
 
   // Stale cursor, stale pin: start over from page one.
   version_skew: 'restart',
+  // The app is newer or older than the tenant's version: reload it.
+  op_not_in_version: 'restart',
+  // A share pinned under another program version than the tenant now
+  // runs: the sharer shares again (`plan-versions.md` §1.7).
+  versions_disagree: 'denied',
   invalid_cursor: 'restart',
 
   idempotency_in_flight: 'retry',

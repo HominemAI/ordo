@@ -150,6 +150,11 @@ pub struct PlatformState {
     /// passing failure, named beside `access_unread` on `/health/ready`.
     #[allow(clippy::type_complexity)]
     pub access_kept_stale: Option<Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>>,
+    /// The external watcher (`crate::external_check::ExternalGate`), so
+    /// `/health/ready` names the peer columns being renamed and the
+    /// entities held (`plan-evolution-federation.md` §3.3). Neither gates
+    /// readiness: a held entity refuses only the ops that read it.
+    pub external: Option<Arc<crate::external_check::ExternalGate>>,
     /// The security-event drain's own health, when one is running.
     ///
     /// `None` means **no drainer is wired**, and `/health/deep` says so in
@@ -245,6 +250,7 @@ impl PlatformState {
             spaces: None,
             access_unread: None,
             access_kept_stale: None,
+            external: None,
             credential_labels: None,
             pools: None,
             warnings: Vec::new(),
@@ -262,6 +268,17 @@ impl PlatformState {
         let again = access.clone();
         self.access_kept_stale = Some(Arc::new(move || again.kept_stale()));
         self.access_unread = Some(Arc::new(move || access.unread()));
+        self
+    }
+
+    /// Let `/health/ready` say what the external watcher found
+    /// (`plan-evolution-federation.md` §3.3): the **same** gate the door
+    /// refuses through.
+    pub fn with_external(
+        mut self,
+        gate: Arc<crate::external_check::ExternalGate>,
+    ) -> PlatformState {
+        self.external = Some(gate);
         self
     }
 
@@ -463,6 +480,8 @@ pub fn deploy_status(version: &str, nodes: &[ordo_exec::nodes::Node]) -> Value {
                 "version": v,
                 "why": why,
             })).collect::<Vec<_>>(),
+            // A version still loading, apart from the ones that loaded.
+            "loading": n.loading,
         })).collect::<Vec<_>>(),
     })
 }
@@ -859,6 +878,15 @@ async fn health_ready(State(state): State<PlatformState>, headers: HeaderMap) ->
                 .iter()
                 .map(|(space, note)| json!({ "space": space, "note": note }))
                 .collect::<Vec<_>>(),
+            // What the external watcher found on its last pass. `changing`:
+            // a peer column its read app renamed, still written, with the
+            // new name and the fix; nothing is held for it yet. `held`: each
+            // external entity whose ops answer `external_changed` now. Not
+            // checks: a held entity refuses its own ops and nothing else.
+            "external": state.external.as_ref().map(|g| json!({
+                "changing": g.changing(),
+                "held": g.down(),
+            })),
         }),
     )
 }
@@ -1411,10 +1439,13 @@ async fn interface_route(
         })
         .map(|(_, m)| m)
         .collect();
-    let doc = ordo_plan::interface::interface_document(
+    // The program's sign-in facts ride along, the same for every asker.
+    let doc = ordo_plan::interface::interface_document_with(
         &json!(loaded.fixture.schema.domain),
         &ordo_plan::artifact::entity_artifacts(&loaded.fixture.schema),
         &allowed,
+        ordo_plan::interface::RefineLimits::default(),
+        ordo_plan::artifact::auth_artifact(&loaded.fixture.schema).as_ref(),
     );
     (StatusCode::OK, Json(doc)).into_response()
 }

@@ -97,7 +97,18 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
     await test.step(`${to} is stored, and its step runs on the deployment's own database`, () => {
       expect(ordo(['apply', renamedTitle(to, sealed, REFUSED), '--no-activate'])).toContain(to);
       expect(ordo(['evolve', '--from', from, '--to', to])).toContain('B4');
-      ordo(['evolve', '--from', from, '--to', to, '--run']);
+      // After `moves`, the deployment's own database already records that
+      // project's version, which renamed the title. `ordo apply` stages the
+      // new check there rather than add it, so the step from that version
+      // (the check alone) runs there first.
+      const run = dev.ordo(['evolve', '--from', from, '--to', to, '--run', ...door()]);
+      const ahead = /records version `([0-9.]+)`, and this step starts from/.exec(`${run.out}${run.err}`)?.[1];
+      if (run.code !== 0 && ahead) {
+        ordo(['evolve', '--from', ahead, '--to', to]);
+        ordo(['evolve', '--from', ahead, '--to', to, '--run']);
+      } else {
+        expect(run.code, `ordo evolve --run\n${run.out}\n${run.err}`).toBe(0);
+      }
       ordo(['versions', 'set', 'backfill.chunk_rows', '1', '--reason', 'one row per turn, to type during it']);
       ordo(['versions', 'set', 'backfill.budget', '1', '--reason', 'one chunk per turn, to type during it']);
       // 11b part 2: the 3 tenants' moves run at once, one per database.

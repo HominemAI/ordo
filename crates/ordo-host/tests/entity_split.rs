@@ -248,11 +248,28 @@ async fn the_render_refuses_a_split_until_its_rule_is_given() {
         errs[0].1.contains("drop it from `--correspond`"),
         "{errs:?}"
     );
+    // A rule with a condition: a split makes one row per row, so there is
+    // nothing to choose from.
+    let errs = errors_of(
+        render(
+            &pool,
+            "1.1.0",
+            &options("address.person where city != \"\""),
+        )
+        .await
+        .expect_err("a condition"),
+    );
+    assert!(
+        errs.iter()
+            .any(|(c, w)| c == "correspond_rule_not_built"
+                && w.contains("--correspond address.person")),
+        "{errs:?}"
+    );
     let mut c = Choices::default();
     let err = c
-        .parse_correspond("address.person where city != \"\"")
-        .expect_err("a condition");
-    assert!(err.contains("correspond_rule_not_built"), "{err}");
+        .parse_correspond("address.person sideways")
+        .expect_err("not a word of a rule");
+    assert!(err.contains("`sideways` is not a word of a rule"), "{err}");
 
     for (version, link, fields, class) in [
         (

@@ -20,11 +20,19 @@
  * 6. The move switches again and `--close-soak` ends it: `labels` is
  *    orphaned, and every note and both labels still read.
  *
+ * 7. A named rule (forward-gaps ask 7): 0.3.13 adds `marks`, any number
+ *    per note (`note -> notes owned`, not unique), and Vera marks a note
+ *    twice. 0.3.14 moves `mark` into `notes`. Its step is refused until
+ *    the rule names which mark gives the value; `--correspond "marks.note
+ *    latest by at" --one-way` stores it, and the move gives the note its
+ *    latest mark. The close orphans `marks.mark`.
+ *
  * A regression looks like a refused step that names no option, a label
  * lost by the copy, a label set on the new version missing after the
- * revert, or a note missing after the merge.
+ * revert, a note missing after the merge, or a note holding another mark
+ * than its latest.
  *
- * It stores 0.3.11 and 0.3.12, above `entity-split`'s 0.3.10 and below
+ * It stores 0.3.11 to 0.3.14, above `entity-split`'s 0.3.10 and below
  * `branch`'s 0.5.x, so it runs between them. Chromium only.
  */
 
@@ -41,6 +49,8 @@ test.describe.configure({ mode: 'serial' });
 
 const SPLIT = '0.3.11';
 const TO = '0.3.12';
+const MARKS = '0.3.13';
+const MARKED = '0.3.14';
 
 /**
  * Notes v3 at `version`, made from v3's own file, off the reader line:
@@ -77,6 +87,40 @@ function labelled(version: string, merged: boolean, sealed: boolean): string {
   return dir;
 }
 
+/**
+ * Notes v3 merged (0.3.12's file) at `version`, with `marks` beside `notes`,
+ * several per note (`moved` false), or its `mark` moved into `notes`.
+ */
+function marked(version: string, moved: boolean, sealed: boolean): string {
+  let source = readFileSync(join(labelled(TO, true, sealed), 'notes.ordo'), 'utf8');
+  const swaps: [string, string][] = [
+    [`domain notes @ ${TO}`, `domain notes @ ${version}`],
+    // The label landed in 0.3.12: its mark goes.
+    [' prev(labels.label)', ''],
+  ];
+  if (moved) {
+    swaps.push(['  label: text = ""\n', '  label: text = ""\n  mark: text = "" prev(marks.mark)\n']);
+    swaps.push(['entity attachments {', 'entity marks (key: mk) {\n  note -> notes owned\n  at: int = 0\n}\n\nentity attachments {']);
+  } else {
+    swaps.push([
+      'entity attachments {',
+      'entity marks (key: mk) {\n  note -> notes owned\n  mark: text = ""\n  at: int = 0\n}\n\nentity attachments {',
+    ]);
+  }
+  for (const [from, to] of swaps) {
+    expect(source, `notes ${TO} still holds \`${from}\``).toContain(from);
+    source = source.split(from).join(to);
+  }
+  source += moved
+    ? '\nop markedNotes unbounded =\n  notes(mark != "")[id, mark]\n'
+    : '\nop markNote($id: id, $mark: text, $at: int) =\n  set marks { note: $id, mark: $mark, at: $at }\n\n' +
+      'op markedNotes unbounded =\n  marks(mark != "")[id, note, mark, at]\n';
+  const dir = mkdtempSync(join(tmpdir(), `notes-${version}-`));
+  writeFileSync(join(dir, 'notes.ordo'), source);
+  cpSync(join(stack().programV3, 'fn'), join(dir, 'fn'), { recursive: true });
+  return dir;
+}
+
 type Who = { token: string; space: string };
 
 /** The token and tenant the page sends to its door, as last seen. */
@@ -97,7 +141,7 @@ function watchSession(page: Page): () => Who {
   };
 }
 
-type Row = { id: string; rev?: number; title?: string; note?: string; label?: string };
+type Row = { id: string; rev?: number; title?: string; note?: string; label?: string; mark?: string };
 
 /** One op in her tenant, as the page would call it: a read with no body. */
 async function op(request: APIRequestContext, who: Who, name: string, body?: object): Promise<Row[]> {
@@ -154,7 +198,7 @@ test('notes v3 merges an entity: the rule is asked for, every label reads, and a
   browser,
   request,
 }, testInfo) => {
-  testInfo.setTimeout(480_000);
+  testInfo.setTimeout(720_000);
   // After `entity-split`, production serves 0.3.4. Run alone, v3 is applied.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
     ensureServing(stack().programV2, '0.2.0');
@@ -258,6 +302,63 @@ test('notes v3 merges an entity: the rule is asked for, every label reads, and a
       await signedIn(page);
       for (const t of [...titles, added]) await holds(page, t);
       expect(await labels(request, session())).toEqual([`${first.id}=travel`, `${second.id}=shopping`].sort());
+    });
+
+    await test.step(`${MARKS} adds marks, several per note, and Vera marks a note twice`, async () => {
+      const stored = dev.ordo(['apply', marked(MARKS, false, sealed), '--no-activate', ...door()]);
+      expect(stored.code, `${stored.out}\n${stored.err}`).toBe(0);
+      const plan = dev.ordo(['evolve', '--from', TO, '--to', MARKS, ...door()]);
+      expect(plan.code, `${plan.out}\n${plan.err}`).toBe(0);
+      const ran = dev.ordo(['evolve', '--tenant', who.space, '--to', MARKS, ...door()]);
+      expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
+      expect(ran.out).toContain(`pinned     ${MARKS} (was ${TO})`);
+      await page.reload();
+      await signedIn(page);
+      await firstCall(request, session, 'markNote', { id: first.id, mark: 'draft', at: 1 });
+      await op(request, session(), 'markNote', { id: first.id, mark: 'final', at: 2 });
+      const rows = await op(request, session(), 'markedNotes');
+      expect(rows.map((r) => r.mark).sort()).toEqual(['draft', 'final']);
+    });
+
+    await test.step(`${MARKED} moves the mark into notes: refused until the rule names the latest`, () => {
+      const stored = dev.ordo(['apply', marked(MARKED, true, sealed), '--no-activate', ...door()]);
+      expect(stored.code, `${stored.out}\n${stored.err}`).toBe(0);
+      const refused = dev.ordo(['evolve', '--from', MARKS, '--to', MARKED, '--correspond', 'marks.note', ...door()]);
+      expect(refused.code, refused.out).not.toBe(0);
+      expect(refused.err).toContain('move_rule_required');
+      expect(refused.err).toContain('latest by <field>');
+      const plan = dev.ordo([
+        'evolve',
+        '--from',
+        MARKS,
+        '--to',
+        MARKED,
+        '--correspond',
+        'marks.note latest by at',
+        '--one-way',
+        ...door(),
+      ]);
+      expect(plan.code, `${plan.out}\n${plan.err}`).toBe(0);
+      expect(plan.out).toContain('B14');
+      expect(plan.out).toContain('PREVIEW');
+    });
+
+    await test.step(`Vera's tenant moves to ${MARKED}: the note holds its latest mark`, async () => {
+      const ran = dev.ordo(['evolve', '--tenant', who.space, '--to', MARKED, ...door()]);
+      expect(ran.code, `${ran.out}\n${ran.err}`).toBe(0);
+      expect(ran.out).toContain(`pinned     ${MARKED} (was ${MARKS})`);
+      await page.reload();
+      await signedIn(page);
+      for (const t of [...titles, added]) await holds(page, t);
+      await expect
+        .poll(async () => (await op(request, session(), 'markedNotes').catch(() => [])).map((r) => `${r.id}=${r.mark}`), {
+          timeout: 90_000,
+        })
+        .toEqual([`${first.id}=final`]);
+      const closed = dev.ordo(['evolve', '--tenant', who.space, '--close-soak', ...door()]);
+      expect(closed.code, `${closed.out}\n${closed.err}`).toBe(0);
+      expect(closed.out).toMatch(/orphaned: .*\bmarks\.mark\b/);
+      expect((await op(request, session(), 'markedNotes')).map((r) => `${r.id}=${r.mark}`)).toEqual([`${first.id}=final`]);
     });
   } finally {
     await dev.close();

@@ -151,6 +151,11 @@ pub fn data_fix(c: &Change, to: &str) -> String {
                 .join(", "),
             to = to_version
         ),
+        Change::MoveFields { entity, from, .. } => format!(
+            "add a rule the listed rows meet (a last rule with no `where` meets every row), \
+             or change the listed rows through the app's own ops, then render the step again; \
+             Ordo does not guess where their values go between `{from}` and `{entity}`"
+        ),
         _ => "correct the listed rows, or render the change in two versions".into(),
     }
 }
@@ -590,6 +595,11 @@ async fn move_preview(
     else {
         return None;
     };
+    if let Some(pick) = sa::move_pick(change, &p.program.schema, &p.live, &p.choices) {
+        // A database that holds no such table has no rows to show.
+        p.live.table(&pick.many)?;
+        return Box::pin(pick_preview(pool, label, change, &pick, show)).await;
+    }
     let link_name = p.choices.correspond.get(from)?;
     let link = source.field(link_name)?;
     let q = ordo_schema::ddl::q;
@@ -630,6 +640,77 @@ async fn move_preview(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{space}/{id} -> {entity} {to} ({link_name}): {values}")
+        })
+        .collect();
+    Some(Preview {
+        database: label.to_string(),
+        change: change.to_string(),
+        rows: lines,
+        values: show,
+        hidden: (!show).then(|| {
+            format!(
+                "the values are tenant data, hidden here: `{}` is off. To show them: `{}`",
+                crate::environments::PREVIEW_VALUES,
+                crate::environments::PREVIEW_COMMAND
+            )
+        }),
+    })
+}
+
+/// The preview of a move through a link that is not unique: what its rule
+/// gives each of 3 receiving rows, and from which row, with the values only
+/// where `show` (`preview.values`).
+async fn pick_preview(
+    pool: &Pool,
+    label: &str,
+    change: &Change,
+    p: &ordo_exec::pick::PickMove,
+    show: bool,
+) -> Option<Preview> {
+    let rows = match pool.rows(&p.preview_sql(PREVIEW_ROWS)).await {
+        Ok(r) => r,
+        Err(e) => vec![vec![Some(format!("the preview could not be read: {e}"))]],
+    };
+    if rows.is_empty() {
+        return None;
+    }
+    let lit = |v: &Option<String>| match v {
+        Some(v) => format!("{v:?}"),
+        None => "null".to_string(),
+    };
+    let g = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten();
+    let lines = rows
+        .iter()
+        .map(|r| {
+            let space = g(r, 0).unwrap_or_default();
+            let id = g(r, 1).unwrap_or_default();
+            let values = p
+                .columns
+                .iter()
+                .zip(r.iter().skip(4))
+                .map(|(c, v)| {
+                    if show {
+                        format!("{c} {}", lit(v))
+                    } else {
+                        c.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if p.into_many {
+                let one = g(r, 2).unwrap_or_default();
+                format!(
+                    "{space}/{id} <- {} {one} ({}.{}): {values}",
+                    p.one, p.many, p.link
+                )
+            } else {
+                match (g(r, 2), g(r, 3)) {
+                    (Some(from), Some(rule)) => {
+                        format!("{space}/{id} <- {} {from} (rule {rule}): {values}", p.many)
+                    }
+                    _ => format!("{space}/{id} <- no `{}` row: the defaults", p.many),
+                }
+            }
         })
         .collect();
     Some(Preview {

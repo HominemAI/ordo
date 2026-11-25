@@ -481,8 +481,16 @@ pub fn options_text(c: &Choices) -> String {
         out.push_str("\none-way");
     }
     // An entity split's rule: present only when stated.
+    // A named rule (`forward-gaps` ask 7) is written whole, one per line,
+    // in the order given: a row is in the first rule it meets.
     for (part, link) in &c.correspond {
-        out.push_str(&format!("\ncorrespond {part}.{link}"));
+        let rules = c.rules_for(part);
+        if rules.is_empty() {
+            out.push_str(&format!("\ncorrespond {part}.{link}"));
+        }
+        for r in rules {
+            out.push_str(&format!("\ncorrespond {}", r.text()));
+        }
     }
     out
 }
@@ -507,8 +515,13 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
             continue;
         }
         if let Some(spec) = line.strip_prefix("correspond ") {
-            c.parse_correspond(spec)
-                .map_err(|e| EvolveRefusal::Options(format!("--correspond {e}")))?;
+            // One rule per line; a list of plain rules reads as one too.
+            if spec.trim().contains(char::is_whitespace) {
+                c.add_correspond_rule(spec)
+            } else {
+                c.parse_correspond(spec)
+            }
+            .map_err(|e| EvolveRefusal::Options(format!("--correspond {e}")))?;
             continue;
         }
         if let Some(spec) = line.strip_prefix("reverse ") {
@@ -761,8 +774,9 @@ pub async fn render_stored(
         if !changes.iter().any(|c| match c {
             Change::SplitEntity { entity, .. } => entity == part,
             // A move or a merge: the rule names the entity the fields
-            // come from, by its link.
-            Change::MoveFields { from, .. } => from == part,
+            // come from, by its link; or, into the many side of a link
+            // that is not unique, the entity they move into.
+            Change::MoveFields { from, entity, .. } => from == part || entity == part,
             _ => false,
         }) {
             return Err(EvolveRefusal::Options(format!(
@@ -1375,15 +1389,25 @@ fn fix_for(c: &Change, class: &str) -> String {
         }
         (Change::MoveFields { entity, from, .. }, "move_rule_required") => format!(
             "state the rule: `--correspond {from}.<link>`, each `{from}` row into the `{entity}` \
-             row its link names"
+             row its link names; through a link that is not unique, name the pick: \
+             `--correspond \"<entity>.<link> latest by <field>\"`, `first by <field>`, or \
+             `all` into the many side"
         ),
+        (Change::MoveFields { .. } | Change::SplitEntity { .. }, "correspond_rule_invalid") => {
+            "write the rule as `<entity>.<link> first|latest|all [by <field>] [where \
+             <condition>]`: `first` and `latest` name the field that orders the rows, `all` \
+             only into the many side, the condition over the fields of the entity holding the \
+             link"
+                .into()
+        }
+        (Change::MoveFields { .. } | Change::SplitEntity { .. }, "correspond_rule_not_built") => {
+            "state the plain rule, `--correspond <entity>.<link>`, or keep the old entity and \
+             move the fields one way (`--one-way`), removing it in the next version"
+                .into()
+        }
         (Change::MoveFields { entity, from, .. }, "move_link") => format!(
             "in a version before this one, declare the link in `{from}`: `<name> -> {entity} \
              owned unique`, required"
-        ),
-        (Change::MoveFields { from, .. }, "move_rule_not_built") => format!(
-            "make the link of `{from}` unique in a version before this one, or fill the field \
-             with an op"
         ),
         (Change::MoveFields { from, .. }, "move_reshaped") => format!(
             "move the fields of `{from}` as they are, every one of them for a merge, and change \

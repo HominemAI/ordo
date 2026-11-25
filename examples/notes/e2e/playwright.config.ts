@@ -222,8 +222,9 @@ export default defineConfig({
     },
     // Notes v3 merges an entity (plan-versions.md, increment 15d): labels
     // added beside notes, then merged back with the rule asked for, the
-    // move, a revert in the soak and the close. It stores 0.3.11 and
-    // 0.3.12, above `entity-split`'s 0.3.10 and below `branch`'s 0.5.x, so
+    // move, a revert in the soak and the close; then a mark moved through a
+    // link that is not unique by a named rule (15e). It stores 0.3.11 to
+    // 0.3.14, above `entity-split`'s 0.3.10 and below `branch`'s 0.5.x, so
     // it runs between them. Locally, `--project=entity-merge --no-deps`.
     {
       name: 'entity-merge',

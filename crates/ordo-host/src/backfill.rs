@@ -654,6 +654,11 @@ impl<'a> Backfill<'a> {
     /// The table the cursor walks: the old table of an entity rename's
     /// copy, or the table filled.
     fn source(&self) -> String {
+        // A move through a link that is not unique walks the one side: each
+        // chunk is a set of groups.
+        if let Some(p) = self.fill.pick() {
+            return q(&p.one);
+        }
         if let Some((from, ..)) = self.fill.merge_from() {
             return q(from);
         }
@@ -984,6 +989,23 @@ impl<'a> Backfill<'a> {
                 ))
                 .await?;
             }
+            // A move through a link that is not unique: the chunk's rows of
+            // the one side are locked, then each group's receiving rows take
+            // what the rule gives them, in a new statement, so a write that
+            // waited on a lock is seen. The dual writes run the same
+            // statement.
+            (FillMapping::Merge { pick: Some(_), .. }, _) => {
+                let p = self.fill.pick().ok_or_else(|| {
+                    BackfillRefusal::Store("the move's rule does not read back".into())
+                })?;
+                let groups = format!(
+                    "(g.{sp}, g.\"id\") IN (SELECT {sp}, \"id\" FROM {one} WHERE {range})",
+                    sp = q(SPACE),
+                    one = q(&p.one),
+                );
+                tx.rows(&p.lock_sql(&groups)).await?;
+                tx.rows(&p.update_sql(&groups, false)).await?;
+            }
             // A move or a merge: the row each row of the chunk names takes
             // its moved columns. The chunk's rows are locked while they are
             // read, so a write to one waits and its dual write lands after.
@@ -1025,6 +1047,18 @@ impl<'a> Backfill<'a> {
         // Each row's new value, folded into its space's content hash. A
         // split's part rows are the chunk's by their link.
         let at = match (self.fill.part_of(), self.fill.merge_from()) {
+            // A move through a link that is not unique: the receiving rows
+            // of the chunk's groups.
+            (None, Some(_)) if self.fill.pick().is_some_and(|p| p.into_many) => {
+                let p = self.fill.pick().expect("matched just above");
+                format!(
+                    "({sp}, {l}) IN (SELECT {sp}, \"id\" FROM {one} WHERE {range})",
+                    sp = q(SPACE),
+                    l = q(&p.link),
+                    one = q(&p.one)
+                )
+            }
+            (None, Some(_)) if self.fill.pick().is_some() => range.clone(),
             (Some((whole, link, _)), _) => format!(
                 "({sp}, {l}) IN (SELECT {sp}, \"id\" FROM {w} WHERE {range})",
                 sp = q(SPACE),
@@ -1630,7 +1664,18 @@ impl<'a> Backfill<'a> {
         // A move's or a merge's copy: each row of the entity the fields come
         // from, and the row its link names, hold the same values. Writes
         // during the copy kept both current.
-        if let Some((from, link, columns, _)) = self.fill.merge_from() {
+        // A move through a link that is not unique: each receiving row
+        // holds what the rule gives it now.
+        if let Some(p) = self.fill.pick() {
+            let off = self.pool.rows(&p.mismatch_sql()).await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    "holds other values than its rule gives it".to_string(),
+                ));
+            }
+        }
+        if let (Some((from, link, columns, _)), None) = (self.fill.merge_from(), self.fill.pick()) {
             let on = columns
                 .iter()
                 .map(|c| format!("t.{c} IS NOT DISTINCT FROM s.{c}", c = q(c)))

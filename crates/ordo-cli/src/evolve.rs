@@ -41,7 +41,7 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
             [--fill <entity>.<field>=<expression>|fn <name> [secrets a,b] [hosts h,i][;...]]
             [--audit-images <entity>.<field>[,...]] [--keep-plaintext <entity>.<field>[,...]]
             [--reverse <entity>.<old field>=<expression>[;...]] [--one-way]
-            [--correspond <part>.<link>[,...]]
+            [--correspond '<entity>.<link> [first|latest|all] [by <field>] [where <condition>][;...]']
             [--digest <sha256:...>] [--run]
             [--approve-sign-in-removal <count>]  --host <h> ...
     render the step, refuse it if it has errors, store it; print the receipt and its digest,
@@ -68,6 +68,12 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     A move (`<field>: ... prev(<other>.<field>)`) takes --correspond <other>.<link>: each
     <other> row gives its values to the row its owned unique link names. With <other>
     removed and every field moved it is an entity merge; with <other> kept it needs --one-way.
+    Through a link that is not unique, the rule names its pick: `latest by <field>` or
+    `first by <field>`, the row that gives the value; into the many side, `all`, or the first
+    or latest row, takes it. A rule may end `where <condition>`, over the fields of the
+    entity holding the link. Rules separated by `;` are tried in order: a row is in the first
+    it meets. The pre-checks list the rows that meet none, and the step waits for them. Such
+    a move is one way (--one-way).
 ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent). A step that rewrites data moves the tenant

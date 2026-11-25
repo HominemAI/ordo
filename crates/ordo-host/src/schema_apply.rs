@@ -698,6 +698,107 @@ pub struct Choices {
     /// part to the link field naming the whole row each of its rows comes
     /// from. One part row per whole row.
     pub correspond: BTreeMap<String, String>,
+    /// The rules that name more than a link (`forward-gaps` ask 7): a pick
+    /// (`first`, `latest`, `all`), its field, a condition. In the order
+    /// written: a row is in the first rule whose condition it meets. Each
+    /// rule's entity and link are in [`Choices::correspond`] too.
+    pub rules: Vec<CorrespondRule>,
+}
+
+/// **A named correspondence rule** (`forward-gaps` ask 7, owner: *"dev
+/// named"*): `<entity>.<link> [first|latest|all] [by <field>] [where
+/// <condition>]`. `entity` holds the link; the condition is an Ordo
+/// condition over its fields, in the version serving now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrespondRule {
+    pub entity: String,
+    pub link: String,
+    pub pick: Option<ordo_exec::pick::Pick>,
+    pub by: Option<String>,
+    pub condition: Option<String>,
+}
+
+impl CorrespondRule {
+    /// The rule as it is written, and stored.
+    pub fn text(&self) -> String {
+        let mut s = format!("{}.{}", self.entity, self.link);
+        if let Some(p) = self.pick {
+            s.push_str(&format!(" {}", p.as_str()));
+        }
+        if let Some(b) = &self.by {
+            s.push_str(&format!(" by {b}"));
+        }
+        if let Some(c) = &self.condition {
+            s.push_str(&format!(" where {c}"));
+        }
+        s
+    }
+
+    /// Read one rule. The words are `first`, `latest`, `all`, `by` and
+    /// `where`, in that order; everything after `where` is the condition.
+    pub fn parse(rule: &str) -> Result<CorrespondRule, String> {
+        let rule = rule.trim();
+        let form = "write `<entity>.<link> [first|latest|all] [by <field>] [where <condition>]`";
+        let (head, rest) = match rule.split_once(char::is_whitespace) {
+            Some((h, r)) => (h, r.trim_start()),
+            None => (rule, ""),
+        };
+        let (entity, link) = head
+            .split_once('.')
+            .ok_or_else(|| format!("`{rule}`: name the link as `<entity>.<link>`; {form}"))?;
+        let word = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !word(entity) || !word(link) {
+            return Err(format!("`{rule}`: {form}"));
+        }
+        // `where` as a word of its own: everything after it is the
+        // condition.
+        let at = rest.match_indices("where").map(|(i, _)| i).find(|&i| {
+            (i == 0 || rest[..i].ends_with(char::is_whitespace))
+                && rest[i + 5..].starts_with(char::is_whitespace)
+        });
+        let (before, condition) = match at {
+            Some(i) => (rest[..i].trim(), Some(rest[i + 5..].trim().to_string())),
+            None => (rest.trim(), None),
+        };
+        if condition.as_deref() == Some("") {
+            return Err(format!("`{rule}`: `where` takes a condition; {form}"));
+        }
+        let mut words = before.split_whitespace();
+        let mut pick = None;
+        let mut by = None;
+        let mut next = words.next();
+        if let Some(w) = next {
+            if let Some(p) = ordo_exec::pick::Pick::parse(w) {
+                pick = Some(p);
+                next = words.next();
+            }
+        }
+        if let Some(w) = next {
+            if w != "by" {
+                return Err(format!("`{rule}`: `{w}` is not a word of a rule; {form}"));
+            }
+            let f = words
+                .next()
+                .filter(|f| word(f))
+                .ok_or_else(|| format!("`{rule}`: `by` names a field; {form}"))?;
+            by = Some(f.to_string());
+            if let Some(w) = words.next() {
+                return Err(format!("`{rule}`: `{w}` is not a word of a rule; {form}"));
+            }
+        }
+        Ok(CorrespondRule {
+            entity: entity.to_string(),
+            link: link.to_string(),
+            pick,
+            by,
+            condition,
+        })
+    }
+
+    /// A rule that names only its link: the one row per row rule.
+    pub fn is_plain(&self) -> bool {
+        self.pick.is_none() && self.by.is_none() && self.condition.is_none()
+    }
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -751,6 +852,9 @@ pub enum FillMapping {
         columns: Vec<String>,
         /// `from` is gone in the new version.
         merge: bool,
+        /// A move through a link that is not unique: its rule, as
+        /// [`ordo_exec::pick::PickMove`] JSON. `None` pairs rows one to one.
+        pick: Option<String>,
     },
 }
 
@@ -779,9 +883,41 @@ impl FillMapping {
             FillMapping::Part { whole, link, .. } => {
                 format!("one row per row of {whole}, by {link}")
             }
-            FillMapping::Merge { from, link, .. } => {
+            FillMapping::Merge {
+                from,
+                link,
+                pick: None,
+                ..
+            } => {
                 format!("each row of {from}, into the row its {link} names")
             }
+            FillMapping::Merge {
+                from,
+                pick: Some(_),
+                ..
+            } => match self.pick() {
+                Some(p) => format!(
+                    "the values of {from}, by the rule over {}.{} ({})",
+                    p.many,
+                    p.link,
+                    p.rules
+                        .iter()
+                        .map(|r| r.pick.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => format!("the values of {from}, by a rule"),
+            },
+        }
+    }
+
+    /// A move through a link that is not unique: its rule.
+    pub fn pick(&self) -> Option<ordo_exec::pick::PickMove> {
+        match self {
+            FillMapping::Merge { pick: Some(p), .. } => {
+                ordo_exec::pick::PickMove::from_json(&serde_json::from_str(p).ok()?)
+            }
+            _ => None,
         }
     }
 
@@ -895,28 +1031,54 @@ impl Choices {
         Ok(())
     }
 
-    /// Parse `address.person,...` into [`Choices::correspond`]: for each
-    /// part of an entity split, the link field its rows name the whole by.
-    /// That is the one rule built: one part row per whole row.
+    /// Parse `--correspond` into [`Choices::correspond`] and
+    /// [`Choices::rules`]. Rules are separated by `;`; a list of plain
+    /// rules may also be separated by `,` (`stars.note,address.person`).
+    /// A plain rule names a link: one row per row. A rule with a pick, a
+    /// field or a condition is a named rule (`forward-gaps` ask 7).
     pub fn parse_correspond(&mut self, spec: &str) -> Result<(), String> {
-        for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-            let (entity, link) = part.split_once('.').ok_or_else(|| {
-                format!(
-                    "`{part}`: name the part's link to the entity it is split off, `<part>.<link>`"
-                )
-            })?;
-            let link = link.trim();
-            if link.is_empty() || link.contains(|c: char| !c.is_alphanumeric()) {
-                return Err(format!(
-                    "`{part}`: the rule built is one part row per row, named by a link field \
-                     (`<part>.<link>`); a condition or another rule is not built yet \
-                     (correspond_rule_not_built)"
-                ));
-            }
-            self.correspond
-                .insert(entity.trim().to_string(), link.to_string());
+        let parts: Vec<&str> = if spec.contains(';') || spec.trim().contains(char::is_whitespace) {
+            spec.split(';').collect()
+        } else {
+            spec.split(',').collect()
+        };
+        for part in parts.into_iter().map(str::trim).filter(|p| !p.is_empty()) {
+            self.add_correspond_rule(part)?;
         }
         Ok(())
+    }
+
+    /// Add one rule, as a stored plan holds it: the whole line, so a
+    /// condition may hold any character.
+    pub fn add_correspond_rule(&mut self, part: &str) -> Result<(), String> {
+        let rule = CorrespondRule::parse(part)?;
+        match self.correspond.get(&rule.entity) {
+            Some(l) if *l != rule.link => {
+                return Err(format!(
+                    "`{part}`: the rules for `{}` name one link, and an earlier rule names `{l}`",
+                    rule.entity
+                ))
+            }
+            Some(_) if rule.is_plain() != self.rules_for(&rule.entity).is_empty() => {
+                return Err(format!(
+                    "`{part}`: `{}` has a plain rule and a named one. Write every rule for it \
+                     with its pick (`first`, `latest`, `all`), or one plain rule",
+                    rule.entity
+                ))
+            }
+            _ => {}
+        }
+        self.correspond
+            .insert(rule.entity.clone(), rule.link.clone());
+        if !rule.is_plain() {
+            self.rules.push(rule);
+        }
+        Ok(())
+    }
+
+    /// The named rules for `entity`, in the order written.
+    pub fn rules_for(&self, entity: &str) -> Vec<&CorrespondRule> {
+        self.rules.iter().filter(|r| r.entity == entity).collect()
     }
 
     /// Parse `notes.body,notes.title` into [`Choices::keep_plaintext`].
@@ -1239,6 +1401,27 @@ pub async fn assess_with(
             }
             out.push(a);
             continue;
+        }
+        // A move through a link that is not unique in a stored plan: every
+        // row of the many side that meets no rule is listed, by row, and
+        // the step waits for them (`forward-gaps` ask 7).
+        if let (Change::MoveFields { .. }, true) = (&a.change, choices.stored) {
+            // A database that holds no such table (a control database
+            // whose tenants have their own) has no rows to list.
+            if let Some(p) = move_pick(&a.change, schema, live, choices)
+                .filter(|p| live.table(&p.many).is_some())
+            {
+                let probed = Box::pin(unmatched(pool, &p)).await;
+                if matches!(probed, Ok(Probe::Dirty { .. })) {
+                    a.refused.push("probe_not_empty".into());
+                }
+                if let Err(e) = &probed {
+                    a.refused.push(format!("probe_unavailable — {e}"));
+                }
+                a.probe = Some(probed.map_err(|e| e.to_string()));
+                out.push(a);
+                continue;
+            }
         }
         // B8 in a stored plan (increment 13): the worker opens every sealed
         // value under custody, so a destroyed epoch refuses the backfill
@@ -2721,11 +2904,16 @@ impl BackfillStep {
             key,
             columns,
             merge,
+            pick,
         } = &self.mapping
         {
             j["mergeFrom"] = serde_json::json!({
                 "from": from, "link": link, "key": key, "columns": columns, "merge": merge,
             });
+            // Present only on a move through a link that is not unique.
+            if let Some(p) = pick {
+                j["mergeFrom"]["pick"] = serde_json::json!(p);
+            }
         }
         j
     }
@@ -2743,6 +2931,11 @@ impl BackfillStep {
             } => Some((from, link, columns, *merge)),
             _ => None,
         }
+    }
+
+    /// A move through a link that is not unique: its rule.
+    pub fn pick(&self) -> Option<ordo_exec::pick::PickMove> {
+        self.mapping.pick()
     }
 
     /// An entity split's copy: the whole, its link and the part's key.
@@ -2806,6 +2999,7 @@ impl BackfillStep {
                         .map(|c| c.as_str().map(String::from))
                         .collect::<Option<Vec<_>>>()?,
                     merge: m["merge"].as_bool()?,
+                    pick: m["pick"].as_str().map(String::from),
                 }
             } else {
                 FillMapping::parse(v["mapping"].as_str()?).ok()?
@@ -4695,6 +4889,17 @@ fn split_entity_steps(
             ),
         ));
     };
+    if let Some(r) = choices.rules_for(part).first() {
+        return Err(refuse(
+            "correspond_rule_not_built",
+            format!(
+                "`{}`: a split makes one `{part}` row per `{whole}` row, so a pick or a \
+                 condition has nothing to choose from. State the plain rule: `--correspond \
+                 {part}.{link_name}`",
+                r.text()
+            ),
+        ));
+    }
     let link_fix =
         format!("declare the link in `{part}`: `{link_name} -> {whole} owned unique`, required");
     let Some(link) = e.field(link_name) else {
@@ -4981,13 +5186,58 @@ fn move_steps(
             ),
         ));
     }
+    // Into the many side: the rule names a link of `into` to `from`, and
+    // which of its rows take the values.
+    let back = e
+        .fields
+        .iter()
+        .find(|f| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == from));
+    if let (None, Some(link_name)) = (choices.correspond.get(from), choices.correspond.get(into)) {
+        let rules = choices.rules_for(into);
+        let Some(link) = e.field(link_name).filter(
+            |f| matches!(&f.ty, ordo_schema::FieldTy::Ref { target, .. } if target == from),
+        ) else {
+            return Err(refuse(
+                "move_link",
+                format!(
+                    "`{into}.{link_name}` is not a link to `{from}`. A rule names the link that \
+                     pairs the rows: `--correspond {into}.<link> all`, the link `-> {from} \
+                     owned`, required"
+                ),
+            ));
+        };
+        if rules.is_empty() {
+            return Err(refuse(
+                "move_rule_required",
+                format!(
+                    "{what}, and several `{into}` rows may name one `{from}` row. Name which of \
+                     them take its values: `--correspond \"{into}.{link_name} all\"`, or \
+                     `first by <field>` or `latest by <field>` in place of `all`"
+                ),
+            ));
+        }
+        return pick_move_steps(
+            c, schema, e, live, source, moved, merge, version, choices, link, &rules, true,
+        );
+    }
     let Some(link_name) = choices.correspond.get(from) else {
+        let hint = match (source.fields.iter().find(|f| is_link(f)), back) {
+            (None, Some(b)) => format!(
+                "`--correspond \"{into}.{} all\"`, every `{into}` row taking the values of the \
+                 `{from}` row it names, or `first by <field>` or `latest by <field>` in place of \
+                 `all`",
+                b.name
+            ),
+            _ => format!(
+                "`--correspond {from}.{candidate}`, each `{from}` row into the `{into}` row its \
+                 `{candidate}` names"
+            ),
+        };
         return Err(refuse(
             "move_rule_required",
             format!(
                 "{what}, and Ordo does not guess which `{into}` row each `{from}` row's values \
-                 go to. State it: `--correspond {from}.{candidate}`, each `{from}` row into the \
-                 `{into}` row its `{candidate}` names"
+                 go to. State it: {hint}"
             ),
         ));
     };
@@ -5010,14 +5260,31 @@ fn move_steps(
             ),
         ));
     }
+    let rules = choices.rules_for(from);
     if !link.unique {
+        if rules.is_empty() {
+            return Err(refuse(
+                "move_rule_required",
+                format!(
+                    "`{from}.{link_name}` is not unique, so several `{from}` rows may name one \
+                     `{into}` row. Name which one gives the values: `--correspond \
+                     \"{from}.{link_name} latest by <field>\"`, or `first by <field>`, the \
+                     field ordering the rows"
+                ),
+            ));
+        }
+        return pick_move_steps(
+            c, schema, e, live, source, moved, merge, version, choices, link, &rules, false,
+        );
+    }
+    if let Some(r) = rules.first() {
         return Err(refuse(
-            "move_rule_not_built",
+            "correspond_rule_not_built",
             format!(
-                "`{from}.{link_name}` is not unique, so several `{from}` rows may name one \
-                 `{into}` row, and a rule for which one gives the value (the first, the latest) \
-                 is not built. Make the link unique in a version before this one, or fill the \
-                 field with an op"
+                "`{}`: `{from}.{link_name}` is unique, so each `{into}` row has at most one \
+                 `{from}` row, and a pick or a condition has nothing to choose from. State the \
+                 plain rule: `--correspond {from}.{link_name}`",
+                r.text()
             ),
         ));
     }
@@ -5040,7 +5307,6 @@ fn move_steps(
             ),
         ));
     }
-    let still = schema.native(from);
     if merge {
         // A merge moves every field: one left behind would be dropped.
         if let Some(left) = source
@@ -5058,6 +5324,392 @@ fn move_steps(
             ));
         }
     }
+    let MovedColumns {
+        columns,
+        cleared,
+        expand,
+        close,
+    } = move_columns(c, schema, e, live, from, moved, merge)?;
+    if !merge && !choices.one_way {
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "`{from}` stays, so a value the new version gives a `{into}` row that no `{from}` \
+                 row names has no place in the version before, and a revert in the soak could \
+                 lose it. Accept this one way change with `--one-way`; revert then requires \
+                 this or manual intervention. A merge (`{from}` removed, every field moved) \
+                 keeps both shapes and reverts"
+            ),
+        ));
+    }
+    let step = |phase: Phase, table: &str, sql: String| Step {
+        code: c.code(),
+        phase,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": source.key, "columns": columns, "cleared": cleared, "merge": merge,
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(from),
+            lit(into),
+            lit(ordo_exec::overlay::MERGE_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(Phase::Alter, into, sql))
+    .collect();
+    out.extend(expand.into_iter().map(|sql| step(Phase::Alter, into, sql)));
+    // After a merge the new version deletes a row of `into` with no
+    // knowledge of `from`, and the overlay deletes the `from` row naming it
+    // after: the link is checked at commit until the close drops it.
+    if merge {
+        out.push(step(
+            Phase::Alter,
+            from,
+            format!(
+                "ALTER TABLE {} ALTER CONSTRAINT {} DEFERRABLE INITIALLY DEFERRED;\n",
+                ordo_schema::ddl::q(from),
+                ordo_schema::ddl::q(&format!("{from}${link_name}$fk"))
+            ),
+        ));
+    }
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: into.clone(),
+        field: from.clone(),
+        column: columns.first().cloned().unwrap_or_default(),
+        column_ty: String::new(),
+        mapping: FillMapping::Merge {
+            from: from.clone(),
+            link: link.column(),
+            key: source.key.clone(),
+            columns: columns.clone(),
+            merge,
+            pick: None,
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    let after = close
+        .into_iter()
+        .map(|sql| step(Phase::Alter, into, sql))
+        .collect();
+    Ok((out, copy, after))
+}
+
+/// **A move through a link that is not unique** (B14 with a named rule;
+/// `forward-gaps` ask 7, owner: *"dev named"*; [`ordo_exec::pick`]). The
+/// link is a field of the many side naming a row of the one side:
+///
+/// - into the one side (`into_many` false, the link a field of `source`):
+///   each rule picks the row that gives the values, `first` or `latest`
+///   `by` a field;
+/// - into the many side (`into_many` true, the link a field of `e`): each
+///   rule picks the rows that take them, `all`, or the `first` or `latest`.
+///
+/// Each rule may carry a condition over the many side's fields, in Ordo's
+/// own expression language; a row is in the first rule it meets, and the
+/// pre-check lists the rows that meet none. The step records the move in
+/// `$renames` (as a move's row, its shape holding `pick`), adds the
+/// columns, and the backfill worker sets each group in chunks. The version
+/// before keeps them current in each write's own transaction; the version
+/// after writes nothing back, so the step is one way (`--one-way`), and a
+/// merge is not built this way.
+///
+/// Refused, each naming the fix: `correspond_rule_not_built` (a merge),
+/// `correspond_rule_invalid` (a rule with no pick, `all` into the one
+/// side, `first` or `latest` with no `by`, a field or a condition Ordo
+/// cannot read), `move_link`, `move_acl`, and what [`move_columns`]
+/// refuses.
+#[allow(clippy::too_many_arguments)]
+fn pick_move_steps(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    source: &ordo_schema::Entity,
+    moved: &[ordo_schema::Field],
+    merge: bool,
+    version: &str,
+    choices: &Choices,
+    link: &ordo_schema::Field,
+    rules: &[&CorrespondRule],
+    into_many: bool,
+) -> Result<EntityRenameParts, Box<Refused>> {
+    use ordo_exec::pick::Pick;
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let (into, from) = (&e.name, &source.name);
+    let (one, many) = if into_many {
+        (from, into)
+    } else {
+        (into, from)
+    };
+    let link_name = &link.name;
+    if merge {
+        return Err(refuse(
+            "correspond_rule_not_built",
+            format!(
+                "`{from}` is gone, and several `{many}` rows name one `{one}` row: a merge keeps \
+                 both shapes so a revert loses nothing, and the rows a rule leaves out would be \
+                 lost. Keep `{from}` in this version and move the fields one way (`--one-way`), \
+                 then remove `{from}` in the next"
+            ),
+        ));
+    }
+    let owned = matches!(&link.ty, ordo_schema::FieldTy::Ref { owned: true, .. });
+    if !owned || link.optional {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{many}.{link_name}` must name one `{one}` row each, and be part of it. In a \
+                 version before this one, declare it `{link_name} -> {one} owned`, required"
+            ),
+        ));
+    }
+    if into_many
+        && !live
+            .table(many)
+            .is_some_and(|t| t.columns.contains_key(&link.column()))
+    {
+        return Err(refuse(
+            "move_link",
+            format!(
+                "`{many}.{link_name}` is not in the version serving now. Declare the link in a \
+                 version before this one, then move the fields"
+            ),
+        ));
+    }
+    // The many side is part of the one side (`owned`), so both read alike;
+    // its own `acl` or tree would not follow the values.
+    let many_entity = if into_many { e } else { source };
+    if many_entity.acl_levels.is_some() || many_entity.is_tree {
+        return Err(refuse(
+            "move_acl",
+            format!(
+                "`{many}` declares `acl` or is a tree, and its rows' access would not follow the \
+                 values. Drop it from `{many}` in a version before this one"
+            ),
+        ));
+    }
+    // The many side's fields a rule may read, as served now. Into the many
+    // side, the moved fields are not among them yet.
+    let fields: Vec<ordo_schema::Field> = if into_many {
+        e.fields
+            .iter()
+            .filter(|f| !moved.iter().any(|m| m.name == f.name))
+            .cloned()
+            .collect()
+    } else {
+        source.fields.clone()
+    };
+    let words = if into_many {
+        "`all`, `first by <field>` or `latest by <field>`"
+    } else {
+        "`first by <field>` or `latest by <field>`"
+    };
+    let mut picked = Vec::new();
+    for r in rules {
+        let invalid =
+            |why: String| refuse("correspond_rule_invalid", format!("`{}`: {why}", r.text()));
+        let Some(pick) = r.pick else {
+            return Err(invalid(format!(
+                "name which `{many}` rows the rule pairs: {words}"
+            )));
+        };
+        if pick == Pick::All && !into_many {
+            return Err(invalid(format!(
+                "several `{many}` rows cannot all give one `{one}` row its value. Name one: \
+                 {words}"
+            )));
+        }
+        let by = match (&r.by, pick) {
+            (Some(_), Pick::All) => {
+                return Err(invalid("`all` takes every row, so it takes no `by`".into()))
+            }
+            (None, Pick::All) => None,
+            (None, _) => {
+                return Err(invalid(format!(
+                    "Ordo keeps no creation time for a row, so `{p}` needs the field that \
+                     orders the rows: `{p} by <field>`",
+                    p = pick.as_str()
+                )))
+            }
+            (Some(b), _) => {
+                let f = fields.iter().find(|f| f.name == *b).ok_or_else(|| {
+                    invalid(format!(
+                        "`{many}` has no field `{b}` in the version serving now"
+                    ))
+                })?;
+                if f.sealed || f.private || ordo_schema::check::field_type(f).is_none() {
+                    return Err(invalid(format!(
+                        "`{many}.{b}` does not order its rows: name a text, number, date or \
+                         time field that is not sealed"
+                    )));
+                }
+                Some(f.column())
+            }
+        };
+        let when = match &r.condition {
+            None => None,
+            Some(src) => {
+                let cond = ordo_syntax::parse_condition(src).map_err(|err| {
+                    invalid(format!("the condition `{src}` does not parse: {err}"))
+                })?;
+                Some(
+                    ordo_schema::check::render_condition(many, &fields, &cond)
+                        .map_err(|err| invalid(format!("{}: {}", err.code, err.message)))?,
+                )
+            }
+        };
+        picked.push(ordo_exec::pick::PickRule { pick, by, when });
+    }
+    let MovedColumns {
+        columns,
+        cleared,
+        expand,
+        close,
+    } = move_columns(c, schema, e, live, from, moved, false)?;
+    if !choices.one_way {
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "`{from}` stays, and a value the new version gives a `{into}` row has no place \
+                 in the version before, so a revert in the soak could lose it. Accept this one \
+                 way change with `--one-way`; revert then requires this or manual intervention"
+            ),
+        ));
+    }
+    let pick = ordo_exec::pick::PickMove {
+        one: one.clone(),
+        many: many.clone(),
+        link: link.column(),
+        into_many,
+        columns: columns.clone(),
+        cleared: cleared
+            .iter()
+            .filter_map(|v| Some((v[0].as_str()?.to_string(), v[1].as_str()?.to_string())))
+            .collect(),
+        rules: picked,
+    };
+    let step = |table: &str, sql: String| Step {
+        code: c.code(),
+        phase: Phase::Alter,
+        sql,
+        index: None,
+        constraint: None,
+        table: table.to_string(),
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let shape = serde_json::json!({
+        "key": source.key, "columns": columns, "cleared": cleared, "merge": false,
+        "pick": pick.to_json(),
+    })
+    .to_string();
+    let mut out: Vec<Step> = [
+        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
+        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
+        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
+        format!(
+            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
+             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
+             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
+             \"split\" = EXCLUDED.\"split\";\n",
+            lit(from),
+            lit(into),
+            lit(ordo_exec::overlay::MERGE_FIELD),
+            lit(&link.column()),
+            lit(version),
+            lit(&shape)
+        ),
+    ]
+    .into_iter()
+    .map(|sql| step(into, sql))
+    .collect();
+    out.extend(expand.into_iter().map(|sql| step(into, sql)));
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: into.clone(),
+        field: from.clone(),
+        column: columns.first().cloned().unwrap_or_default(),
+        column_ty: String::new(),
+        mapping: FillMapping::Merge {
+            from: from.clone(),
+            link: link.column(),
+            key: source.key.clone(),
+            columns,
+            merge: false,
+            pick: Some(pick.to_json().to_string()),
+        },
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
+    let after = close.into_iter().map(|sql| step(into, sql)).collect();
+    Ok((out, copy, after))
+}
+
+/// What a move's fields come to: the moved columns, each with what it
+/// holds when no row gives it a value, the statements that add them, and
+/// the `NOT NULL`s that land at the close.
+struct MovedColumns {
+    columns: Vec<String>,
+    cleared: Vec<serde_json::Value>,
+    expand: Vec<String>,
+    close: Vec<String>,
+}
+
+/// Each moved field checked and its column made, for a move into `e` from
+/// `from` (B14): refused, each naming the fix, as `move_sealed`,
+/// `move_ref_not_built`, `move_reshaped`, `move_column_orphaned`,
+/// `move_default_required`.
+fn move_columns(
+    c: &Change,
+    schema: &Schema,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &str,
+    moved: &[ordo_schema::Field],
+    merge: bool,
+) -> Result<MovedColumns, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let into = &e.name;
+    let still = schema.native(from);
     let mut columns = Vec::new();
     let mut cleared = Vec::new();
     let mut expand = Vec::new();
@@ -5184,90 +5836,12 @@ fn move_steps(
         ]));
         columns.push(col);
     }
-    if !merge && !choices.one_way {
-        return Err(refuse(
-            "one_way_unconfirmed",
-            format!(
-                "`{from}` stays, so a value the new version gives a `{into}` row that no `{from}` \
-                 row names has no place in the version before, and a revert in the soak could \
-                 lose it. Accept this one way change with `--one-way`; revert then requires \
-                 this or manual intervention. A merge (`{from}` removed, every field moved) \
-                 keeps both shapes and reverts"
-            ),
-        ));
-    }
-    let step = |phase: Phase, table: &str, sql: String| Step {
-        code: c.code(),
-        phase,
-        sql,
-        index: None,
-        constraint: None,
-        table: table.to_string(),
-    };
-    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let shape = serde_json::json!({
-        "key": source.key, "columns": columns, "cleared": cleared, "merge": merge,
+    Ok(MovedColumns {
+        columns,
+        cleared,
+        expand,
+        close,
     })
-    .to_string();
-    let mut out: Vec<Step> = [
-        format!("{};\n", ordo_exec::overlay::RENAMES_DDL),
-        "ALTER TABLE \"$renames\" ADD COLUMN IF NOT EXISTS \"split\" text;\n".to_string(),
-        "LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n".to_string(),
-        format!(
-            "INSERT INTO \"$renames\" (\"entity\", \"from\", \"field\", \"column\", \
-             \"version\", \"split\") VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \
-             \"from\") DO UPDATE SET \"version\" = EXCLUDED.\"version\", \
-             \"split\" = EXCLUDED.\"split\";\n",
-            lit(from),
-            lit(into),
-            lit(ordo_exec::overlay::MERGE_FIELD),
-            lit(&link.column()),
-            lit(version),
-            lit(&shape)
-        ),
-    ]
-    .into_iter()
-    .map(|sql| step(Phase::Alter, into, sql))
-    .collect();
-    out.extend(expand.into_iter().map(|sql| step(Phase::Alter, into, sql)));
-    // After a merge the new version deletes a row of `into` with no
-    // knowledge of `from`, and the overlay deletes the `from` row naming it
-    // after: the link is checked at commit until the close drops it.
-    if merge {
-        out.push(step(
-            Phase::Alter,
-            from,
-            format!(
-                "ALTER TABLE {} ALTER CONSTRAINT {} DEFERRABLE INITIALLY DEFERRED;\n",
-                ordo_schema::ddl::q(from),
-                ordo_schema::ddl::q(&format!("{from}${link_name}$fk"))
-            ),
-        ));
-    }
-    let copy = vec![BackfillStep {
-        code: c.code(),
-        entity: into.clone(),
-        field: from.clone(),
-        column: columns.first().cloned().unwrap_or_default(),
-        column_ty: String::new(),
-        mapping: FillMapping::Merge {
-            from: from.clone(),
-            link: link.column(),
-            key: source.key.clone(),
-            columns: columns.clone(),
-            merge,
-        },
-        sql: None,
-        audit: ordo_commandlog::BackfillAudit::Summarised,
-        sealing_from: None,
-        kept_plaintext: None,
-        indexing_from: None,
-    }];
-    let after = close
-        .into_iter()
-        .map(|sql| step(Phase::Alter, into, sql))
-        .collect();
-    Ok((out, copy, after))
 }
 
 /// An entity rename's statements, its copy when a stored step runs it with
@@ -5453,6 +6027,70 @@ fn rename_old_default(
 }
 
 /// **The rows a split's or a merge's mapping does not parse** (15b): for
+/// A move's rule, when it moves through a link that is not unique and
+/// renders: what the pre-check and the preview read.
+pub fn move_pick(
+    c: &Change,
+    schema: &Schema,
+    live: &LiveShape,
+    choices: &Choices,
+) -> Option<ordo_exec::pick::PickMove> {
+    let Change::MoveFields {
+        entity,
+        fields,
+        merge,
+        source,
+        ..
+    } = c
+    else {
+        return None;
+    };
+    let e = schema.native(entity)?;
+    let mut c2 = choices.clone();
+    c2.renames_backfill = true;
+    let (_, bfs, _) = move_steps(c, schema, e, live, source, fields, *merge, "", &c2).ok()?;
+    bfs.first().and_then(BackfillStep::pick)
+}
+
+/// **The rows a move's rules leave out** (`forward-gaps` ask 7): each row
+/// of the many side that meets no rule, listed as `space/id` (never its
+/// values), up to [`SAMPLE`], with the count. The move does not start
+/// while any remain.
+pub async fn unmatched(
+    pool: &Pool,
+    p: &ordo_exec::pick::PickMove,
+) -> Result<Probe, ordo_exec::PoolError> {
+    let what = format!(
+        "rows of `{}` that meet no rule of the correspondence",
+        p.many
+    );
+    let rows = pool.rows(&p.unmatched_sql(SAMPLE)).await?;
+    if rows.is_empty() {
+        return Ok(Probe::Clean(format!(
+            "every row of `{}` meets a rule of the correspondence",
+            p.many
+        )));
+    }
+    let g = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+    let count: usize = rows
+        .first()
+        .and_then(|r| g(r, 2).parse().ok())
+        .unwrap_or(rows.len());
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|r| format!("{}/{}", g(r, 0), g(r, 1)))
+        .collect();
+    Ok(Probe::Dirty {
+        what,
+        lines: vec![format!(
+            "`{}`: {count} row(s) meet no rule: {}{}",
+            p.many,
+            ids.join(", "),
+            if count > ids.len() { ", ..." } else { "" }
+        )],
+    })
+}
+
 /// each new field the program requires, the rows whose mapping is null,
 /// listed as `space/id` (never their values), up to [`SAMPLE`] per field,
 /// with the count.

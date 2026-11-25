@@ -170,6 +170,40 @@ pub fn render_mapping(entity: &str, fields: &[Field], expr: &Expr) -> Result<Str
     })
 }
 
+/// **A correspondence rule's condition** (`forward-gaps` ask 7): an Ordo
+/// condition over one row's own fields, lowered to SQL over its columns,
+/// unqualified. The same row-local slice a mapping uses, so the same
+/// refusals hold, each named `mapping_*`.
+pub fn render_condition(
+    entity: &str,
+    fields: &[Field],
+    cond: &Condition,
+) -> Result<String, SchemaError> {
+    render_cond(
+        entity,
+        &Cx {
+            fields,
+            mapping: true,
+        },
+        cond,
+    )
+    .map_err(|e| SchemaError {
+        code: match e.code {
+            "check_beyond_row" => "mapping_beyond_row",
+            "check_time_dependent" => "mapping_time_dependent",
+            "check_unknown_field" => "mapping_unknown_field",
+            "check_sealed_field" => "mapping_sealed_field",
+            "json_opaque" => "mapping_json_opaque",
+            _ => "mapping_unsupported",
+        },
+        message: e
+            .message
+            .replace("a CHECK constraint", "a correspondence rule")
+            .replace("`check` on", "the correspondence rule on"),
+        span: e.span,
+    })
+}
+
 /// `{entity}$chk{i}$<condensed source>`, truncated to Postgres's 63-byte
 /// identifier limit on a UTF-8 boundary. The prefix alone is unique, so
 /// truncation can never collide two checks.

@@ -566,6 +566,7 @@
     "crates/ordo-host/src/tightened.rs": [
       "runtime"
     ],
+    "crates/ordo-host/src/version_removal.rs": "all",
     "crates/ordo-host/src/versions.rs": "all",
     "crates/ordo-host/src/versions_diff.rs": "all",
     "crates/ordo-host/src/window_ops.rs": "all",

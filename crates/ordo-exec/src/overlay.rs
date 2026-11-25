@@ -189,6 +189,67 @@ pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
         .collect())
 }
 
+/// **`$held`**: the checks a new version adds that a shared database holds
+/// to its close (increment 11b, `plan-backfill-dual-writes.md` §4). A move
+/// on a database several spaces share records each one here, under
+/// `"$renames"` in `EXCLUSIVE` mode, before its expand, as a fill records
+/// itself ([`FILLS_DDL`]). Every write there reads it under the same fence
+/// ([`held_in`]), so a space still on the version before is held to the
+/// check on each row it writes, and refused by name, rather than leaving a
+/// row the close would refuse. The row leaves when the check lands.
+///
+/// `holds` is SQL over the row's own columns in `"<entity>"`; `rule` and
+/// `field` are the words a refusal uses.
+pub const HELD_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$held\" ( \
+  \"entity\" text NOT NULL, \
+  \"name\" text NOT NULL, \
+  \"holds\" text NOT NULL, \
+  \"field\" text NOT NULL, \
+  \"rule\" text NOT NULL, \
+  \"from\" text NOT NULL, \
+  \"to\" text NOT NULL, \
+  PRIMARY KEY (\"entity\", \"name\") \
+)";
+
+/// One row of `$held`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCheck {
+    pub entity: String,
+    pub name: String,
+    pub holds: String,
+    pub field: String,
+    pub rule: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Read `$held`. Run after [`renames_in`], whose lock fences this table
+/// too.
+pub async fn held_in(tx: &TxConn) -> Result<Vec<HeldCheck>, PoolError> {
+    let rows = tx
+        .rows(
+            "SELECT \"entity\", \"name\", \"holds\", \"field\", \"rule\", \"from\", \"to\" \
+             FROM \"$held\" ORDER BY \"entity\", \"name\"",
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some(HeldCheck {
+                entity: it.next()??,
+                name: it.next()??,
+                holds: it.next()??,
+                field: it.next()??,
+                rule: it.next()??,
+                from: it.next()??,
+                to: it.next()??,
+            })
+        })
+        .collect())
+}
+
 /// **`$seals`**: the sealed backfills a database is in the middle of
 /// (increment 13): a field being sealed (B7), or a sealed field gaining its
 /// blind index (B8). Recorded the way a rename is ([`RENAMES_DDL`]): the
@@ -382,11 +443,226 @@ pub fn seals_for<'a>(schema: &ordo_schema::Schema, seals: &'a [Seal]) -> Vec<&'a
         .collect()
 }
 
+/// **What a write's own statements returned, for the seal overlay**
+/// (Reported fix, 2026-11-24, part 2).
+///
+/// While a seal runs, each `INSERT` or `UPDATE` the write sends to an
+/// entity being sealed also returns `ctid`, `$space`, `id` and the seal's
+/// source columns ([`SealCapture::rewrite`]). The overlay then seals from
+/// those values and writes the target by `ctid` ([`apply_seals`]).
+///
+/// Why: reading the row back by primary key under SERIALIZABLE locks the
+/// index page, and every other write to the table touches that page. Two
+/// concurrent writers then each depend on the other, and one is cancelled.
+/// A fetch by `ctid` of a row this transaction wrote takes no predicate
+/// lock. A row not captured (a statement shape this does not rewrite)
+/// falls back to the read by key.
+#[derive(Debug, Default)]
+pub struct SealCapture {
+    /// Entity to the source columns returned for it.
+    entities: std::collections::BTreeMap<String, Vec<String>>,
+    /// `(entity, id)` to the row as last returned.
+    rows: std::collections::BTreeMap<(String, String), CapturedRow>,
+}
+
+#[derive(Debug, Clone)]
+struct CapturedRow {
+    space: String,
+    ctid: String,
+    /// Source column to its value as text.
+    values: std::collections::BTreeMap<String, Option<String>>,
+}
+
+impl SealCapture {
+    /// The capture for the seals this version writes into. Empty when none.
+    pub fn for_seals(seals: &[&Seal]) -> SealCapture {
+        let mut entities: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for s in seals {
+            let cols = entities.entry(s.entity.clone()).or_default();
+            if !cols.contains(&s.source) {
+                cols.push(s.source.clone());
+            }
+        }
+        SealCapture {
+            entities,
+            rows: Default::default(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    /// How many rows were captured.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// `(entity, sql with a RETURNING clause)` when `sql` is one
+    /// `INSERT INTO` or `UPDATE` of an entity being sealed and returns
+    /// nothing yet. `None` leaves the statement as it is.
+    pub fn rewrite(&self, sql: &str) -> Option<(String, String)> {
+        if self.entities.is_empty() {
+            return None;
+        }
+        let body = single_statement(sql)?;
+        let (entity, cols) = self.entities.iter().find(|(e, _)| {
+            let t = quote(e);
+            body.starts_with(&format!("INSERT INTO {t} "))
+                || body.starts_with(&format!("UPDATE {t} "))
+        })?;
+        let mut ret = format!(
+            "{body} RETURNING ctid::text, {}::text, \"id\"::text",
+            quote(ordo_schema::SPACE_COLUMN)
+        );
+        for c in cols {
+            ret.push_str(&format!(", {}::text", quote(c)));
+        }
+        Some((entity.clone(), ret))
+    }
+
+    /// Record what a rewritten statement returned.
+    pub fn record(&mut self, entity: &str, rows: &[Vec<Option<String>>]) {
+        let Some(cols) = self.entities.get(entity) else {
+            return;
+        };
+        for r in rows {
+            let (Some(ctid), Some(space), Some(id)) = (
+                r.first().cloned().flatten(),
+                r.get(1).cloned().flatten(),
+                r.get(2).cloned().flatten(),
+            ) else {
+                continue;
+            };
+            let values = cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.clone(), r.get(3 + i).cloned().flatten()))
+                .collect();
+            self.rows.insert(
+                (entity.to_string(), id),
+                CapturedRow {
+                    space,
+                    ctid,
+                    values,
+                },
+            );
+        }
+    }
+}
+
+/// The statement without its final `;`, when `sql` is one statement with
+/// no `RETURNING` and no escape-string literal. Quotes are tracked, so a
+/// `;` inside a literal or an identifier is not taken for a statement end.
+fn single_statement(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim();
+    let body = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+    let (mut single, mut double) = (false, false);
+    let mut prev = ' ';
+    let mut top = String::with_capacity(body.len());
+    for c in body.chars() {
+        match c {
+            '\'' if !double => {
+                if !single && (prev == 'E' || prev == 'e') {
+                    return None;
+                }
+                single = !single;
+            }
+            '"' if !single => double = !double,
+            ';' if !single && !double => return None,
+            _ => {}
+        }
+        if !single && !double {
+            top.push(c.to_ascii_uppercase());
+        }
+        prev = c;
+    }
+    if single || double || top.contains("RETURNING") {
+        return None;
+    }
+    Some(body)
+}
+
+/// One sealed target's value for one row, from its source as text.
+struct SealValue<'a> {
+    keys: &'a dyn ordo_crypto::KeyProvider,
+    sid: ordo_crypto::SpaceId,
+    lease: Option<ordo_crypto::KeyLease>,
+}
+
+impl SealValue<'_> {
+    fn lease(&mut self) -> Result<&ordo_crypto::KeyLease, SealOverlayError> {
+        if self.lease.is_none() {
+            self.lease = Some(
+                self.keys
+                    .release(&self.sid, ordo_crypto::Purpose::Write, "seal")?,
+            );
+        }
+        Ok(self.lease.as_ref().expect("taken just above"))
+    }
+
+    fn of(
+        &mut self,
+        s: &Seal,
+        normalize: Option<&str>,
+        id: &str,
+        source: Option<String>,
+    ) -> Result<String, SealOverlayError> {
+        let keys = self.keys;
+        let value: Option<Vec<u8>> = match (s.kind, source) {
+            (SealKind::Seal, None) => None,
+            (SealKind::Seal, Some(text)) => {
+                let l = self.lease()?;
+                Some(keys.seal_at(
+                    l,
+                    &s.entity,
+                    &s.field,
+                    ordo_crypto::Anchor::Row(id),
+                    text.as_bytes(),
+                )?)
+            }
+            (SealKind::Index | SealKind::Reindex | SealKind::Kept, sealed) => {
+                let plain = match sealed {
+                    None => None,
+                    Some(hexed) => {
+                        let l = self.lease()?;
+                        let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(&hexed));
+                        let open = keys.open_at(
+                            l,
+                            &s.entity,
+                            &s.field,
+                            ordo_crypto::Anchor::Row(id),
+                            &bytes,
+                        )?;
+                        Some(String::from_utf8_lossy(&open).into_owned())
+                    }
+                };
+                let normalized = plain.map(|v| match normalize {
+                    Some("lower") => v.to_lowercase(),
+                    _ => v,
+                });
+                Some(
+                    keys.blind_index(&self.sid, &s.entity, &s.field, normalized.as_deref().into())?
+                        .to_vec(),
+                )
+            }
+        };
+        Ok(match value {
+            None => "NULL".to_string(),
+            Some(b) => format!("'\\x{}'::bytea", ordo_crypto::hex(&b)),
+        })
+    }
+}
+
 /// **The seal overlay** (increment 13 under live writes): every row this
 /// write wrote, `(entity, id)`, gets the column a sealed backfill in
 /// progress fills, computed from the row as it now stands, in this
 /// transaction. One `Purpose::Write` lease per write. A column the
 /// database does not hold yet is skipped under a savepoint.
+///
+/// A row the write's own statements returned ([`SealCapture`]) is sealed
+/// from those values and written by `ctid`, with no read by key. Any other
+/// row is read by key.
 ///
 /// Why the worker and a write cannot disagree: both compute the target
 /// from the row's own source column under the row's lock, and verify
@@ -398,9 +674,13 @@ pub async fn apply_seals(
     space: &str,
     seals: &[&Seal],
     written: &[(String, String)],
+    captured: &mut SealCapture,
 ) -> Result<(), SealOverlayError> {
-    let sid = ordo_crypto::SpaceId(space.to_string());
-    let mut lease: Option<ordo_crypto::KeyLease> = None;
+    let mut sealer = SealValue {
+        keys,
+        sid: ordo_crypto::SpaceId(space.to_string()),
+        lease: None,
+    };
     for s in seals {
         let mut ids: Vec<&str> = written
             .iter()
@@ -412,6 +692,15 @@ pub async fn apply_seals(
         if ids.is_empty() {
             continue;
         }
+        // The target is named so a database without it skips here.
+        let probe = format!(
+            "SELECT {} FROM {} WHERE FALSE",
+            quote(&s.target),
+            quote(&s.entity)
+        );
+        if !guarded(tx, &probe).await? {
+            continue;
+        }
         // The normalization the step recorded, which is the coming
         // version's; the writer's own when the row does not say.
         let normalize = match &s.normalize {
@@ -421,99 +710,65 @@ pub async fn apply_seals(
                 .and_then(|e| e.field(&s.field))
                 .and_then(|f| f.normalize.clone()),
         };
-        for chunk in ids.chunks(IDS_PER_STATEMENT) {
+        let (t, c) = (quote(&s.entity), quote(&s.target));
+        // The rows this write's own statements returned: sealed from those
+        // values and written by `ctid`. A row whose `ctid` moved since
+        // (another overlay statement wrote it) is read by key below.
+        let mut by_key: Vec<&str> = Vec::new();
+        for id in ids {
+            let key = (s.entity.clone(), id.to_string());
+            let Some(source) = captured
+                .rows
+                .get(&key)
+                .filter(|r| r.space == space)
+                .and_then(|r| Some((r.ctid.clone(), r.values.get(&s.source)?.clone())))
+            else {
+                by_key.push(id);
+                continue;
+            };
+            let (ctid, value) = source;
+            let lit = sealer.of(s, normalize.as_deref(), id, value)?;
+            let moved = tx
+                .rows(&format!(
+                    "UPDATE {t} SET {c} = {lit} WHERE ctid = {}::tid AND \"id\" = {} \
+                     RETURNING ctid::text",
+                    sql_lit(&ctid),
+                    sql_lit(id),
+                ))
+                .await?;
+            match moved.first().and_then(|r| r.first().cloned().flatten()) {
+                Some(now) => {
+                    if let Some(r) = captured.rows.get_mut(&key) {
+                        r.ctid = now;
+                    }
+                }
+                None => by_key.push(id),
+            }
+        }
+        for chunk in by_key.chunks(IDS_PER_STATEMENT) {
             let list = chunk
                 .iter()
                 .map(|i| sql_lit(i))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let read = format!(
-                "SELECT \"id\"::text, {src}::text FROM {t} WHERE \"$space\" = {} \
-                 AND \"id\" IN ({list})",
-                sql_lit(space),
-                src = quote(&s.source),
-                t = quote(&s.entity),
-            );
-            // The target is named so a database without it skips here.
-            let probe = format!(
-                "SELECT {} FROM {} WHERE FALSE",
-                quote(&s.target),
-                quote(&s.entity)
-            );
-            if !guarded(tx, &probe).await? {
-                continue;
-            }
-            let rows = tx.rows(&read).await?;
+            let rows = tx
+                .rows(&format!(
+                    "SELECT \"id\"::text, {src}::text FROM {t} WHERE \"$space\" = {} \
+                     AND \"id\" IN ({list})",
+                    sql_lit(space),
+                    src = quote(&s.source),
+                ))
+                .await?;
             for r in rows {
                 let mut it = r.into_iter();
                 let Some(id) = it.next().flatten() else {
                     continue;
                 };
-                let source = it.next().flatten();
-                let value: Option<Vec<u8>> = match (s.kind, source) {
-                    (SealKind::Seal, None) => None,
-                    (SealKind::Seal, Some(text)) => {
-                        if lease.is_none() {
-                            lease =
-                                Some(keys.release(&sid, ordo_crypto::Purpose::Write, "seal")?);
-                        }
-                        let l = lease.as_ref().expect("taken just above");
-                        Some(keys.seal_at(
-                            l,
-                            &s.entity,
-                            &s.field,
-                            ordo_crypto::Anchor::Row(&id),
-                            text.as_bytes(),
-                        )?)
-                    }
-                    (SealKind::Index | SealKind::Reindex | SealKind::Kept, sealed) => {
-                        let plain = match sealed {
-                            None => None,
-                            Some(hexed) => {
-                                if lease.is_none() {
-                                    lease = Some(keys.release(
-                                        &sid,
-                                        ordo_crypto::Purpose::Write,
-                                        "seal",
-                                    )?);
-                                }
-                                let l = lease.as_ref().expect("taken just above");
-                                let bytes = unhex(hexed.strip_prefix("\\x").unwrap_or(&hexed));
-                                let open = keys.open_at(
-                                    l,
-                                    &s.entity,
-                                    &s.field,
-                                    ordo_crypto::Anchor::Row(&id),
-                                    &bytes,
-                                )?;
-                                Some(String::from_utf8_lossy(&open).into_owned())
-                            }
-                        };
-                        let normalized = plain.map(|v| match normalize.as_deref() {
-                            Some("lower") => v.to_lowercase(),
-                            _ => v,
-                        });
-                        Some(
-                            keys.blind_index(
-                                &sid,
-                                &s.entity,
-                                &s.field,
-                                normalized.as_deref().into(),
-                            )?
-                            .to_vec(),
-                        )
-                    }
-                };
-                let lit = match value {
-                    None => "NULL".to_string(),
-                    Some(b) => format!("'\\x{}'::bytea", ordo_crypto::hex(&b)),
-                };
+                let lit = sealer.of(s, normalize.as_deref(), &id, it.next().flatten())?;
                 tx.rows(&format!(
                     "UPDATE {t} SET {c} = {lit} WHERE \"$space\" = {} AND \"id\" = {}",
                     sql_lit(space),
                     sql_lit(&id),
-                    t = quote(&s.entity),
-                    c = quote(&s.target),
                 ))
                 .await?;
             }
@@ -578,10 +833,26 @@ pub struct Refused {
     pub field: String,
     pub rule: String,
     pub row: String,
+    /// The writing space is in a move of its own. `false`: it serves the
+    /// version before, in a database another space's move holds to a rule
+    /// of the version after ([`HELD_DDL`]).
+    pub moving: bool,
 }
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rule != "is required" && !self.moving {
+            // A space on the version before, in a database a move holds to
+            // the version after's check (11b).
+            return write!(
+                f,
+                "check_violation: this space serves `{}`, in a database moving to `{}`, which \
+                 adds a rule every space there now writes under: `{}` {}. This write breaks it \
+                 on row `{}` ({}). Nothing was written. Change the value, or move this space to \
+                 `{}` (`ordo evolve --tenant <id>`, or a rollout)",
+                self.serving, self.other, self.entity, self.rule, self.row, self.field, self.other,
+            );
+        }
         if self.rule != "is required" {
             // A unique or a check the new version adds, held by the host
             // until the soak's close (increment 11b part 4).
@@ -723,6 +994,7 @@ impl MoveOverlay {
         schema: &ordo_schema::Schema,
         renames: &[Rename],
         fills: &[Fill],
+        held: &[HeldCheck],
     ) -> Option<MoveOverlay> {
         let mut out = MoveOverlay::for_renames(schema, renames).unwrap_or(MoveOverlay {
             step: "prev".into(),
@@ -752,6 +1024,30 @@ impl MoveOverlay {
                 None => out.entities.push(OverlayEntity {
                     entity: f.entity.clone(),
                     sets: vec![(f.column.clone(), f.sql.clone())],
+                    guards: vec![guard],
+                }),
+            }
+        }
+        // A check the version after adds, held to the close: every space
+        // here writes under it, whatever version it serves (11b).
+        for h in held {
+            if schema.native(&h.entity).is_none() {
+                continue;
+            }
+            if out.serving.is_empty() {
+                out.serving.clone_from(&h.from);
+                out.other.clone_from(&h.to);
+            }
+            let guard = Guard {
+                holds: h.holds.clone(),
+                field: h.field.clone(),
+                rule: h.rule.clone(),
+            };
+            match out.entities.iter_mut().find(|x| x.entity == h.entity) {
+                Some(x) => x.guards.push(guard),
+                None => out.entities.push(OverlayEntity {
+                    entity: h.entity.clone(),
+                    sets: Vec::new(),
                     guards: vec![guard],
                 }),
             }
@@ -830,6 +1126,8 @@ impl MoveOverlay {
                         field: g.field.clone(),
                         rule: g.rule.clone(),
                         row: found.into_iter().next().flatten().unwrap_or_default(),
+                        // The database's own overlays are named `prev`.
+                        moving: self.step != "prev",
                     })));
                 }
             }
@@ -907,6 +1205,47 @@ mod tests {
         assert_eq!(sets("  name: text\n  body: text?\n"), None);
     }
 
+    /// While a seal runs, one `INSERT` or `UPDATE` of the sealed entity
+    /// returns what the overlay needs; any other statement is left alone.
+    #[test]
+    fn a_write_to_a_sealed_entity_returns_its_source_and_nothing_else_changes() {
+        let seal = Seal {
+            entity: "note".into(),
+            field: "body".into(),
+            kind: SealKind::Seal,
+            source: "body".into(),
+            target: "body$seal".into(),
+            normalize: None,
+        };
+        let c = SealCapture::for_seals(&[&seal]);
+        let (e, sql) = c
+            .rewrite("INSERT INTO \"note\" (\"id\", \"body\") VALUES ('n1', 'a;b');")
+            .expect("rewritten");
+        assert_eq!(e, "note");
+        assert_eq!(
+            sql,
+            "INSERT INTO \"note\" (\"id\", \"body\") VALUES ('n1', 'a;b') RETURNING \
+             ctid::text, \"$space\"::text, \"id\"::text, \"body\"::text"
+        );
+        assert!(c
+            .rewrite("UPDATE \"note\" SET \"body\" = 'x' WHERE \"id\" = 'n1';")
+            .is_some());
+        for left in [
+            "UPDATE \"other\" SET \"body\" = 'x';",
+            "SELECT 1 FROM \"note\"",
+            "UPDATE \"note\" SET \"body\" = 'x'; UPDATE \"note\" SET \"body\" = 'y';",
+            "INSERT INTO \"note\" (\"id\") VALUES ('n1') RETURNING \"id\";",
+            "UPDATE \"note\" SET \"body\" = E'it\\'s';",
+            "UPDATE \"note\" SET \"body\" = 'open",
+        ] {
+            assert_eq!(c.rewrite(left), None, "{left}");
+        }
+        assert_eq!(
+            SealCapture::default().rewrite("UPDATE \"note\" SET x = 1;"),
+            None
+        );
+    }
+
     #[test]
     fn a_refusal_names_both_versions_the_field_and_the_row() {
         let r = Refused {
@@ -916,6 +1255,7 @@ mod tests {
             field: "text".into(),
             rule: "is required".into(),
             row: "n1".into(),
+            moving: true,
         };
         let s = r.to_string();
         assert!(s.starts_with("check_violation: "), "{s}");
@@ -926,6 +1266,54 @@ mod tests {
             "`n1`",
             "ordo evolve --tenant",
         ] {
+            assert!(s.contains(want), "{want}: {s}");
+        }
+    }
+
+    /// A space on the version before, in a database a move holds to a
+    /// check of the version after: every space there writes under it.
+    #[test]
+    fn a_held_check_guards_every_writer_and_names_the_version_after() {
+        let held = [HeldCheck {
+            entity: "note".into(),
+            name: "note_body_short".into(),
+            holds: "coalesce((length(\"body\") < 10), true)".into(),
+            field: "check length(body) < 10".into(),
+            rule: "holds the check `note_body_short` that `0.3.2` adds".into(),
+            from: "0.3.0".into(),
+            to: "0.3.2".into(),
+        }];
+        let o = MoveOverlay::for_database(&schema("  body: text?\n"), &[], &[], &held)
+            .expect("an overlay");
+        assert_eq!(o.entities[0].guards[0].holds, held[0].holds);
+        assert!(o.entities[0].sets.is_empty());
+        assert_eq!((o.serving.as_str(), o.other.as_str()), ("0.3.0", "0.3.2"));
+        // An entity this version does not declare writes nothing there.
+        assert!(MoveOverlay::for_database(
+            &schema("  title: text?\n"),
+            &[],
+            &[],
+            &[HeldCheck {
+                entity: "other".into(),
+                ..held[0].clone()
+            }]
+        )
+        .is_none());
+        let s = Refused {
+            serving: "0.3.0".into(),
+            other: "0.3.2".into(),
+            entity: "note".into(),
+            field: held[0].field.clone(),
+            rule: held[0].rule.clone(),
+            row: "n1".into(),
+            moving: false,
+        }
+        .to_string();
+        assert!(
+            s.starts_with("check_violation: this space serves `0.3.0`"),
+            "{s}"
+        );
+        for want in ["note_body_short", "`n1`", "move this space to `0.3.2`"] {
             assert!(s.contains(want), "{want}: {s}");
         }
     }

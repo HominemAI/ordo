@@ -2320,6 +2320,10 @@ pub async fn run_step_with(
     crate::dual_writes::forget_fills(target, &backfills)
         .await
         .map_err(|e| run_err("internal", e.to_string(), true))?;
+    // A check a move held there has landed too.
+    crate::dual_writes::forget_held(target, &held)
+        .await
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     // `seal.keep_plaintext`: the kept plaintext column is an orphan, for
     // erasure, export and pruning (increment 14's table).
     // B10's old blind index too: kept and written until it is pruned, so a

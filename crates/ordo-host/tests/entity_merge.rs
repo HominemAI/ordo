@@ -261,8 +261,13 @@ async fn the_render_refuses_a_move_until_its_rule_is_given() {
             .await
             .expect_err("a stray rule"),
     );
+    // A rule for the entity the fields move into names a link of it.
     assert!(
-        has(&errs, "options", "drop it from `--correspond`"),
+        has(
+            &errs,
+            "move_link",
+            "`person.person` is not a link to `address`"
+        ),
         "{errs:?}"
     );
     let errs = errors_of(
@@ -366,11 +371,13 @@ async fn the_render_refuses_a_move_until_its_rule_is_given() {
         .expect_err("a merge moves");
     assert_eq!(err.class(), "move_needs_move", "{err}");
 
-    // A link that is not unique: several addresses per person, and a rule
-    // for which one gives the value is not built (`forward-gaps` ask 7).
+    // A link that is not unique: several addresses per person, and the
+    // rule must name which one gives the value (`forward-gaps` ask 7).
+    // Named, a merge through it is not built: the rows left out would be
+    // lost.
     let (_pg2, many) = deployment(
         "ordo_merge_many",
-        &parts_with("person -> person", ADDRESS),
+        &parts_with("person -> person owned", ADDRESS),
         &merged(),
     )
     .await;
@@ -380,7 +387,24 @@ async fn the_render_refuses_a_move_until_its_rule_is_given() {
             .expect_err("not unique"),
     );
     assert!(
-        has(&errs, "move_rule_not_built", "the first, the latest"),
+        has(&errs, "move_rule_required", "latest by <field>"),
+        "{errs:?}"
+    );
+    let errs = errors_of(
+        render(
+            &many,
+            "1.1.0",
+            &options("address.person latest by city", false),
+        )
+        .await
+        .expect_err("a merge"),
+    );
+    assert!(
+        has(
+            &errs,
+            "correspond_rule_not_built",
+            "Keep `address` in this version"
+        ),
         "{errs:?}"
     );
 

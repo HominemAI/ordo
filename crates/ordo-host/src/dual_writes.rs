@@ -689,6 +689,37 @@ pub async fn run(
                     ));
                 }
             }
+            // A move through a link that is not unique (`forward-gaps` ask
+            // 7): a row its rules leave out stops the move before it opens.
+            for p in backfills.iter().filter_map(BackfillStep::pick) {
+                let probed = Box::pin(sa::unmatched(&target, &p)).await.map_err(|e| {
+                    cx.err(
+                        tenant,
+                        &plan.from,
+                        &plan.to,
+                        "internal",
+                        e.to_string(),
+                        true,
+                    )
+                })?;
+                if let sa::Probe::Dirty { lines, .. } = probed {
+                    return Err(cx.err(
+                        tenant,
+                        &plan.from,
+                        &plan.to,
+                        "move_unmatched",
+                        format!(
+                            "{}. Nothing moved. Render the step with a rule those rows meet (a \
+                             last rule with no `where` meets every row), or change them through \
+                             the app's own ops, then run the move again (`ordo evolve --tenant \
+                             {tenant} --to {}`)",
+                            lines.join("; "),
+                            plan.to
+                        ),
+                        false,
+                    ));
+                }
+            }
             let Some(overlay) = render(
                 &x,
                 &y,

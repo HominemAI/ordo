@@ -158,6 +158,11 @@ pub fn split_mirrors(schema: &ordo_schema::Schema, renames: &[Rename]) -> Vec<Sp
         .filter(|r| r.is_split() || r.is_merge())
         .filter_map(|r| {
             let v: serde_json::Value = serde_json::from_str(r.split.as_deref()?).ok()?;
+            // A move through a link that is not unique is no split read
+            // backwards: `crate::pick` keeps it current.
+            if v.get("pick").is_some() {
+                return None;
+            }
             let reverse = if r.is_merge() {
                 let first = v["columns"].as_array()?.first()?.as_str()?;
                 match schema.native(&r.entity) {
@@ -988,6 +993,25 @@ impl RowCapture {
             self.entities.entry(t.clone()).or_default();
         }
         self
+    }
+
+    /// Also capture the `many` tables of the moves through a link that is
+    /// not unique ([`crate::pick`]).
+    pub fn with_picks(mut self, moves: &[crate::pick::PickMove]) -> RowCapture {
+        for p in moves {
+            self.entities.entry(p.many.clone()).or_default();
+        }
+        self
+    }
+
+    /// The captured `ctid` of each of `ids` in `space`; the rest by key.
+    pub(crate) fn split_rows<'a>(
+        &self,
+        entity: &str,
+        space: &str,
+        ids: &[&'a str],
+    ) -> (Vec<(&'a str, String)>, Vec<&'a str>) {
+        self.split(entity, space, ids)
     }
 
     /// Also capture the tables entity-rename mirrors copy from.

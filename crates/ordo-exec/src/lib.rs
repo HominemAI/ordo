@@ -60,6 +60,7 @@ pub mod nodes;
 pub mod orphans;
 pub mod overlay;
 pub mod peer;
+pub mod pick;
 mod pool_error;
 pub mod prune;
 pub mod registry;
@@ -2984,7 +2985,11 @@ impl Executor {
         // An entity rename's dual writes (below), worked out here too.
         let mirrors = overlay::entity_mirrors(&self.schema, &renames);
         let splits = overlay::split_mirrors(&self.schema, &renames);
-        let capture = capture.with_mirrors(&mirrors).with_splits(&splits);
+        let picks = pick::pick_mirrors(&self.schema, &renames);
+        let capture = capture
+            .with_mirrors(&mirrors)
+            .with_splits(&splits)
+            .with_picks(&picks);
         let (result, tx, mut scratch, mut capture) = tokio::task::spawn_blocking(move || {
             let db = BlockingTx {
                 tx,
@@ -3133,6 +3138,38 @@ impl Executor {
                             overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
                             overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
                         });
+                    }
+                }
+                // **A move through a link that is not unique**: each group
+                // of rows the version before wrote takes what its rule
+                // gives, in this transaction, until the soak closes.
+                if let (false, Some(group)) = (picks.is_empty(), scratch.pending()) {
+                    let written: Vec<(String, String)> = group
+                        .commands
+                        .iter()
+                        .filter(|c| c.kind != ordo_commandlog::CommandKind::Delete)
+                        .map(|c| (c.entity.clone(), c.row_id.clone()))
+                        .collect();
+                    // The link each row of `many` held before this write.
+                    let before: Vec<(String, String)> = group
+                        .commands
+                        .iter()
+                        .filter_map(|c| {
+                            let p = picks.iter().find(|p| p.many == c.entity)?;
+                            match c.before.as_ref()?.get(&p.link)? {
+                                ordo_commandlog::Value::Id(s) | ordo_commandlog::Value::Text(s) => {
+                                    Some((c.entity.clone(), s.clone()))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    if let Err(e) =
+                        pick::apply_picks(&tx, &self.space.0, &picks, &written, &before, &capture)
+                            .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(ExecFail::Pool(e));
                     }
                 }
                 // **The seal overlay** (increment 13): a field this version

@@ -2187,13 +2187,63 @@ entity customers (key: cust, prev: clients) {
     row no `other` row names has no place in the version before. It needs
     `--one-way`, and its soak cannot be reverted.
   - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
-- **Not built:** a move through a link that is not unique, several
-  related rows per row (`move_rule_not_built`; the first, the latest or all
-  are not offered yet); a mapping over two entities, `prev(a.x, b.y)`
+- **Moves through a link that is not unique** (built 2026-11-25,
+  increment 15e; `forward-gaps` ask 7, owner: *"dev named"*). A person
+  with several addresses, `person -> person owned` in `address`:
+
+  ```
+  entity person {
+    name:   text
+    street: text? prev(address.street)    # into the one side
+  }
+  entity address (key: adr) {
+    person -> person owned
+    kind:   text = "home"
+    at:     int = 0
+    city:   text = "" prev(person.city)   # into the many side
+  }
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 --one-way \
+    --correspond 'address.person latest by at where kind == "home"; address.person first by at'
+  ```
+
+  - A rule is `<entity>.<link> first|latest|all [by <field>] [where
+    <condition>]`. `<entity>` holds the link. The step is refused until
+    the rule names its rows (`move_rule_required`).
+  - Into the one side, the rule names the row that gives the values:
+    `first` or `latest` by a field of `<entity>`, a null last, the id
+    breaking ties. `all` is refused there: several rows cannot give one
+    value.
+  - Into the many side, the rule names the rows that take the values:
+    `all`, or the `first` or `latest`. The rest take the field's default.
+  - Ordo keeps no creation time for a row, so `first` and `latest` name
+    their field.
+  - `where` takes a condition in Ordo's own expression language, over the
+    fields of `<entity>` in the version serving now.
+  - Rules separated by `;` are tried in order. A row is in the first rule
+    whose condition it meets. Into the one side, the first rule with a row
+    for it gives the value.
+  - The pre-check lists the rows that meet no rule, by id, never their
+    values. The move does not start while any remain (`move_unmatched`).
+    A last rule with no `where` meets every row.
+  - The plan previews the rule on 3 rows: the row each takes its values
+    from, values where `preview.values` is on.
+  - The step adds the columns and copies in chunks. Each write by the
+    version before sets the values again for the rows it touches, in its
+    own transaction, under the lock of their row of the one side.
+  - Such a move is one way (`--one-way`): the version after writes nothing
+    back. At the close the old column is orphaned.
+  - A merge through such a link is not built (`correspond_rule_not_built`):
+    the rows a rule leaves out would be lost. Keep the old entity, move
+    one way, and remove it in the next version.
+- **Not built:** a mapping over two entities, `prev(a.x, b.y)`
   (`prev_mapping_required`); moving a link field (`move_ref_not_built`); a
-  split whose whole is renamed or gone (`entity_split_needs_whole`); a
-  correspondence rule other than one row per row
-  (`correspond_rule_not_built`).
+  split whose whole is renamed or gone (`entity_split_needs_whole`); a pick
+  or a condition on a split or on a link that is unique, where each row has
+  at most one other (`correspond_rule_not_built`); a merge through a link
+  that is not unique.
 - A clean `ordo apply` names each mark whose rename has landed in every
   environment. `ordo apply --remove-landed-prev` cuts those marks from the
   source. A mark has landed when this deployment is the last environment of
@@ -2218,7 +2268,9 @@ serving, nothing is checked and the program is created as declared:
 | `prev_type` | a rename to or from a file: a file's handle is never computed |
 | `prev_mapping_required` | a mapping over two entities, `prev(a.x, b.y)`; a move from the entity itself; moves out of one entity into two; a move into an entity renamed in the same step |
 | `move_renamed` | a field renamed as it moves |
-| `move_rule_required`, `move_link`, `move_rule_not_built` | a move with no `--correspond`; a rule whose link is not `-> <entity> owned unique` and required; a link that is not unique |
+| `move_rule_required`, `move_link` | a move with no `--correspond`, or through a link that is not unique with no pick; a rule whose link is not `-> <entity> owned` (and `unique` for one row per row) and required |
+| `correspond_rule_invalid` | a rule with no pick, `all` into the one side, `first` or `latest` with no `by`, a field or a condition Ordo cannot read |
+| `correspond_rule_not_built` | a pick or a condition on a split or a unique link; a merge through a link that is not unique |
 | `move_reshaped`, `move_sealed`, `move_ref_not_built`, `move_default_required`, `move_acl` | a field moved as it was not declared, a merge that leaves a field behind, or one still declared in `other`; a sealed or file field; a link field; a required field with no default; an `other` with `acl` or a tree |
 | `move_column_orphaned` | a moved field whose entity still holds an orphaned column of its name; prune it first (`ordo evolve --prune`) |
 | `map_cast_required`, `map_cast_not_built` | a mapping that gives another kind than its field holds, or loses places (into money too); one Ordo has no conversion for |

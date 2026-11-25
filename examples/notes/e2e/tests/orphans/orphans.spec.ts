@@ -12,7 +12,11 @@
  *    orphaned size under `orphans/`.
  * 3. Ada erases her notes (`std.space.delete`): the answer names the orphan
  *    it reached, and the rows holding a size drop by hers.
- * 4. The developer prunes the column. `ordo evolve --prune` alone prunes
+ * 4. The prune is refused while 0.2.0, which declares the size, is a
+ *    version a restore may still need (increment 17): the restore window
+ *    is unset, and the refusal names `ordo versions set restore-window`.
+ *    The developer sets it to `0`.
+ * 5. The developer prunes the column. `ordo evolve --prune` alone prunes
  *    nothing and says what would go; the name typed again without the
  *    deployment's name is refused in production; asked with both, the
  *    column is gone and `--orphans` shows its tombstone.
@@ -190,6 +194,20 @@ test('attachments.size is orphaned by v3: exported and erased with Ada, then pru
 
     const turnedOn = dev.ordo(['environments', 'set', 'prune', 'on', '--reason', 'the e2e prunes', ...door()]);
     expect(turnedOn.code, `${turnedOn.out}\n${turnedOn.err}`).toBe(0);
+
+    await test.step('a version a restore may need holds the column until the restore window is set', () => {
+      // 0.2.0 declares the size and served a moment ago. With
+      // `versions.restore_window` unset, a backup or bundle at it could
+      // still need the column, so the prune names the setting.
+      const held = dev.ordo(['evolve', '--prune', 'attachments.size', ...door()]);
+      expect(held.code, held.out).not.toBe(0);
+      expect(`${held.out}${held.err}`).toContain('prune_restorable');
+      expect(`${held.out}${held.err}`).toContain('ordo versions set restore-window');
+      const set = dev.ordo(['versions', 'set', 'restore-window', '0', '--reason', 'the e2e keeps no backups', ...door()]);
+      expect(set.code, `${set.out}\n${set.err}`).toBe(0);
+      expect(set.out).toContain('restore window 0');
+    });
+
     const before = dev.ordo(['evolve', '--prune', 'attachments.size', ...door()]);
     expect(before.code, `${before.out}\n${before.err}`).toBe(0);
     expect(before.out).toContain('nothing was pruned');

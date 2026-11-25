@@ -381,6 +381,22 @@ async fn name_version_with(
             });
         }
     }
+    // **A removed version applied again** (`plan-versions.md` §1.6) keeps
+    // its name and number: the store brings its tombstone back, and
+    // refuses another program under the name as a collision.
+    let own_name = declared.unwrap_or(&program.version);
+    if ordo_exec::registry::is_removed(pool, own_name)
+        .await
+        .map_err(|e| NameRefusal::Registry(e.to_string()))?
+    {
+        return Ok(Naming {
+            version: own_name.to_string(),
+            existing: false,
+            note: Some(format!(
+                "`{own_name}` was removed here, and is stored again under its number"
+            )),
+        });
+    }
     let Some(d) = declared else {
         // The digest names one compiled program, so a row stored under it
         // already is this program.

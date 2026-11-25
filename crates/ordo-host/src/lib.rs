@@ -169,6 +169,7 @@ pub mod tenant_touches;
 pub mod tenants;
 pub mod tickets;
 pub mod tightened;
+pub mod version_removal;
 pub mod versions;
 pub mod versions_diff;
 pub mod window_ops;

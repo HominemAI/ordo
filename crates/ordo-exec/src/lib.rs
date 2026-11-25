@@ -1235,6 +1235,10 @@ impl Pool {
             // The fills a shared database is in the middle of (increment
             // 11b part 4), read under the same fence ([`overlay::FILLS_DDL`]).
             overlay::FILLS_DDL,
+            // The checks a shared database holds every space to until a
+            // move's close (increment 11b), under the same fence
+            // ([`overlay::HELD_DDL`]).
+            overlay::HELD_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -2866,6 +2870,27 @@ impl Executor {
                 return Err(ExecFail::Pool(e));
             }
         };
+        // The checks a move holds every space here to (increment 11b),
+        // under the same lock.
+        let held = match overlay::held_in(&tx).await {
+            Ok(h) => h,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::HELD_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the held checks table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
         // The pin fence next: a node whose pin of this tenant is older
         // than one another node already wrote under writes nothing.
         if let Err(e) = self.check_pin_fence(&tx).await {
@@ -2931,7 +2956,9 @@ impl Executor {
                 // middle of, as this version reads them.
                 let by_renames = match self.pool.overlay() {
                     Some(_) => None,
-                    None => overlay::MoveOverlay::for_database(&self.schema, &renames, &fills),
+                    None => {
+                        overlay::MoveOverlay::for_database(&self.schema, &renames, &fills, &held)
+                    }
                 };
                 let run = self
                     .pool

@@ -383,6 +383,82 @@ async fn images_write_a_group_per_space_per_chunk() {
     }
 }
 
+/// **`ordo revert` of a backfill group is refused by name**
+/// (`plan-schema-evolution.md` §7.2, increment 10b). An image group would
+/// write the values from before the migration into one chunk of rows; a
+/// summary holds no images at all. Both answer `unrevertable_backfill`,
+/// naming the step and the field and what undoes a migration, and no row
+/// changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revert_of_a_backfill_group_is_refused_by_name() {
+    use ordo_exec::undo;
+    for (stem, images) in [
+        ("ordo_backfill_revert_images", "note.heading"),
+        ("ordo_backfill_revert_summary", ""),
+    ] {
+        let choices = fills("note.heading=title", images);
+        let (_rpg, registry, tpg, tenant, plan) = setup(stem, &v2(), &choices).await;
+        let ran =
+            evolve::run_step_with(&registry, &tenant, "db", &plan, OWNER, &settings(100, None))
+                .await
+                .expect("runs");
+        assert!(matches!(ran, StepRun::Ran { .. }), "{ran:?}");
+        let schema = Program::compile(&v2()).expect("compiles").schema;
+        let g = backfill_groups(&tpg, "acme").remove(0);
+        let rec = g.backfill.clone().unwrap();
+        let before = one(&tpg, "SELECT count(*) FROM note WHERE heading = title");
+        for dry in [true, false] {
+            let e = if dry {
+                undo::plan_revert(
+                    &tenant,
+                    &schema,
+                    None,
+                    &rec.space,
+                    &g.correlation,
+                    "dev:ada",
+                    ordo_commandlog::Timestamp(9),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                undo::revert(
+                    &tenant,
+                    &schema,
+                    None,
+                    None,
+                    None,
+                    &rec.space,
+                    &g.correlation,
+                    "dev:ada",
+                    ordo_commandlog::Timestamp(9),
+                )
+                .await
+                .map(|_| ())
+            }
+            .unwrap_err()
+            .to_string();
+            assert!(e.starts_with("unrevertable_backfill: "), "{stem}: {e}");
+            for want in [
+                plan.digest.as_str(),
+                "`note.heading`",
+                "ordo evolve",
+                "--revert",
+            ] {
+                assert!(e.contains(want), "{stem} {want}: {e}");
+            }
+        }
+        assert_eq!(
+            one(&tpg, "SELECT count(*) FROM note WHERE heading = title"),
+            before,
+            "{stem}: no row changed"
+        );
+        assert_eq!(
+            backfill_groups(&tpg, "acme").len(),
+            if images.is_empty() { 1 } else { 2 }
+        );
+    }
+}
+
 /// **Verify catches a value changed after its chunk**, names the space,
 /// and makes nothing required.
 #[tokio::test(flavor = "multi_thread")]

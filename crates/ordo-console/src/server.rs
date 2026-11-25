@@ -397,9 +397,13 @@ action!(restart_route, "runtime.restart", runtime_restart);
 // The Deploys screen (step 4), in its own file.
 /// The Deployment people screen's routes (identity service, step 6).
 mod admins;
+/// The Tenant builds screen's routes (versions increment 16).
+mod builds;
 mod deploys;
 /// The People screen's routes (step 8).
 mod people;
+/// The Rollouts and Moves screens' routes (versions increments 7, 10, 11a).
+mod rollouts;
 /// The settings screens' route (step 6).
 mod settings;
 mod shares; // Shares and links, and the security log (step 9).
@@ -707,6 +711,8 @@ impl Console {
             .merge(shares::routes())
             .merge(admins::routes())
             .merge(windows::routes())
+            .merge(rollouts::routes())
+            .merge(builds::routes())
             .layer(axum::middleware::map_response_with_state(
                 self.clone(),
                 strict_headers,

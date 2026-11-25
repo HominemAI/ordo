@@ -20,6 +20,16 @@
 //! (stack.sh makes it fresh). `/health/deploy` answers for one node that
 //! serves whatever is active when asked.
 //!
+//! So are the rollout ops, the rollback check, the soak ops and the tenant
+//! build ops (versions increments 10, 11a and 16). `E2E_DOOR_APP_TENANTS`
+//! (`a,b,...`) registers those tenants in that database at start, with the
+//! ids the memory tenants have, so a rollout has tenants to move; the
+//! door's `std.deployment.tenants` then carries each one's real version and
+//! open move. One node ticks the rollouts every second, as `ordo-host`'s
+//! leading worker does. `POST /e2e/move` records an open move for a tenant,
+//! as an activation does for a tenant with a database of its own, which
+//! this stack does not build.
+//!
 //! With `ORDO_IDENTITY_URL`, `ORDO_IDENTITY_ORIGIN` and
 //! `ORDO_IDENTITY_DEPLOYMENT` set, it also verifies the identity service's
 //! tokens, as a deployment does (`ordo_host::identity_keys`), and answers
@@ -51,12 +61,19 @@ use ordo_host::auth::AuthState;
 use ordo_host::console_keys::{ConsoleKeyOps, ConsoleKeyStore, ConsoleKeys, ADD, LIST, REVOKE};
 use ordo_host::deploy_ops::{ACTIVATE, PLAN, REVOKED, VERSIONS};
 use ordo_host::window_ops;
+use ordo_host::{rollouts, tenant_builds};
 
 /// The revoke ops: `ordo-host`'s own, as the deploy ops are.
 const VERSION_OPS: [&str; 3] = [
     ordo_host::deploy_ops::REVOKE,
     ordo_host::deploy_ops::UNREVOKE,
     REVOKED,
+];
+/// The moves' read and soak ops (increments 7 and 11a).
+const MOVE_OPS: [&str; 3] = [
+    ordo_host::deploy_ops::ROLLBACK_CHECK,
+    ordo_host::deploy_ops::REVERT_SOAK,
+    ordo_host::deploy_ops::CLOSE_SOAK,
 ];
 use ordo_host::node_status::NodeStatus;
 use ordo_identity::directory::{Directory, Provisioning};
@@ -144,18 +161,35 @@ impl Door {
                     .allow(Role::Owner, SETTINGS),
             ))),
         );
-        // The revoke ops and the maintenance window ops (versions 2b).
-        let profile = engine.profile(&space).cloned().map(|p| {
+        // The revoke ops and the maintenance window ops (versions 2b); the
+        // rollouts, the moves and the tenant builds (10, 11a, 16).
+        let versioned = || {
             VERSION_OPS
                 .iter()
                 .chain(window_ops::OPS.iter())
-                .fold(p, |p, op| p.allow(Role::Owner, op))
-        });
+                .chain(MOVE_OPS.iter())
+                .chain(rollouts::OPS.iter())
+                .chain(tenant_builds::OPS.iter())
+        };
+        let profile = engine
+            .profile(&space)
+            .cloned()
+            .map(|p| versioned().fold(p, |p, op| p.allow(Role::Owner, op)));
         if let Some(p) = profile {
             engine.set_profile(&space, p);
         }
-        for op in VERSION_OPS.iter().chain(window_ops::OPS.iter()) {
-            if ![REVOKED, window_ops::WINDOWS].contains(op) {
+        // Every change but a rollout's controls is marked step-up, as at a
+        // deployment (owner, 2026-11-05: moves ask no touch). The console's
+        // key may still be asked for one here; the screens relay it.
+        let reads = [
+            REVOKED,
+            window_ops::WINDOWS,
+            ordo_host::deploy_ops::ROLLBACK_CHECK,
+            rollouts::STATUS,
+            tenant_builds::BUILDS,
+        ];
+        for op in versioned() {
+            if !reads.contains(op) && !ordo_host::deploy_ops::NO_PRESENCE.contains(op) {
                 engine.require_step_up(op);
             }
         }
@@ -239,7 +273,8 @@ async fn op(
     }
     let deploy_op = name == APPLY
         || ordo_host::deploy_ops::OPS.contains(&name.as_str())
-        || window_ops::OPS.contains(&name.as_str());
+        || window_ops::OPS.contains(&name.as_str())
+        || tenant_builds::OPS.contains(&name.as_str());
     if shares_door::OPS.contains(&name.as_str()) {
         return match d.shares.execute(&name, &params) {
             Ok(rows) => Json(json!({"rows": rows})).into_response(),
@@ -260,6 +295,10 @@ async fn op(
     }
     if !deploy_op && ![ADD, LIST, REVOKE].contains(&name.as_str()) {
         return match d.tenants.execute(&name, &space, &params, &principal) {
+            Ok(mut rows) if name == tenants_door::LIST => {
+                d.with_versions(&mut rows).await;
+                Json(json!({"rows": rows})).into_response()
+            }
             Ok(rows) => Json(json!({"rows": rows})).into_response(),
             Err((code, message)) => door_error(StatusCode::CONFLICT, &code, &message),
         };
@@ -269,6 +308,8 @@ async fn op(
         d.deploys.apply(&space, &bound, &principal).await
     } else if window_ops::OPS.contains(&name.as_str()) {
         window_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
+    } else if tenant_builds::OPS.contains(&name.as_str()) {
+        tenant_builds::execute(&d.deploys, &name, &space, &bound, &principal).await
     } else if deploy_op {
         ordo_host::deploy_ops::execute(&d.deploys, &name, &space, &bound, &principal).await
     } else {
@@ -277,6 +318,76 @@ async fn op(
     match done {
         Ok(r) => Json(json!({"rows": r.rows})).into_response(),
         Err(e) => door_error(StatusCode::CONFLICT, e.code.as_str(), &e.message),
+    }
+}
+
+impl Door {
+    /// Each memory tenant's real version and open move, from the app
+    /// database, as `ordo-host`'s `std.deployment.tenants` reads them.
+    async fn with_versions(&self, rows: &mut [Value]) {
+        let v = ordo_host::versions::Versions::on(&self.deploys.pool);
+        let pins: HashMap<String, String> = v
+            .all_pins()
+            .await
+            .map(|p| p.0.into_iter().map(|(s, ver, _)| (s, ver)).collect())
+            .unwrap_or_default();
+        let ordinals = v.ordinals().await.unwrap_or_default();
+        let moves = v.moves().await.unwrap_or_default();
+        for r in rows.iter_mut() {
+            let id = r["id"].as_str().unwrap_or_default().to_string();
+            r["version"] = json!(pins.get(&id));
+            r["ordinal"] = json!(pins.get(&id).and_then(|ver| ordinals.get(ver)));
+            r["move"] = moves
+                .iter()
+                .find(|m| m.space == id)
+                .map(|m| {
+                    json!({
+                        "from": m.from, "to": m.to, "phase": m.phase.as_str(),
+                        "reason": m.reason, "since": m.started_at, "line": m.line(),
+                        "step": (!m.step.is_empty()).then_some(&m.step),
+                        "soakUntil": (m.soak_until > 0).then_some(m.soak_until),
+                    })
+                })
+                .unwrap_or(Value::Null);
+        }
+    }
+}
+
+/// `POST /e2e/move`: record an open move for a tenant, from its version to
+/// `to`, in `phase` (`refused`, `waiting`, `soaking`, ...), as an
+/// activation does for a tenant with a database of its own. A stand-in for
+/// what this stack cannot build; the ops that act on the move are real.
+async fn seed_move(State(d): State<Arc<Door>>, Json(body): Json<Value>) -> Response {
+    let pool = &d.deploys.pool;
+    let v = ordo_host::versions::Versions::on(pool);
+    // Makes the table, as the first read of moves does.
+    let _ = v.moves().await;
+    let text = |k: &str| body[k].as_str().unwrap_or_default().to_string();
+    let tenant = text("tenant");
+    let from = match v.pin_of(&tenant).await {
+        Ok(Some(p)) => p.version.unwrap_or_default(),
+        _ => return door_error(StatusCode::BAD_REQUEST, "invalid_param", "no such tenant"),
+    };
+    let to = match v.resolve(&text("to")).await {
+        Ok(to) => to,
+        Err(e) => return door_error(StatusCode::BAD_REQUEST, "invalid_param", &e.to_string()),
+    };
+    let soak_until = body["soakSecs"].as_u64().map(|s| now() + s).unwrap_or(0);
+    let lit = ordo_exec::sql_lit;
+    let sql = format!(
+        "DELETE FROM \"$moves\" WHERE \"space\" = {t}; \
+         INSERT INTO \"$moves\" (\"space\", \"from\", \"to\", \"phase\", \"reason\", \
+           \"soak_until\", \"started_at\") VALUES ({t}, {f}, {to}, {p}, {r}, {soak_until}, {at})",
+        t = lit(&tenant),
+        f = lit(&from),
+        to = lit(&to),
+        p = lit(&text("phase")),
+        r = lit(&text("reason")),
+        at = now(),
+    );
+    match pool.rows(&sql).await {
+        Ok(_) => Json(json!({"tenant": tenant, "from": from, "to": to})).into_response(),
+        Err(e) => door_error(StatusCode::CONFLICT, "store", &e.to_string()),
     }
 }
 
@@ -462,6 +573,36 @@ async fn main() {
         Arc::new(ordo_exec::route::SinglePool::new(app.clone())),
         HOME,
     );
+    // The tenants a rollout moves, registered in the app database with the
+    // memory tenants' ids.
+    ordo_host::tenants::ensure_table(&app)
+        .await
+        .expect("e2e door: $spaces");
+    for id in std::env::var("E2E_DOOR_APP_TENANTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        ordo_host::tenants::reserve(&app, id, id, "e2e", now(), None)
+            .await
+            .expect("e2e door: a tenant reserved");
+        ordo_host::tenants::activate(&app, id, now())
+            .await
+            .expect("e2e door: a tenant active");
+    }
+    // The leading worker: one node, a tick a second.
+    {
+        let deploys = deploys.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if let Err(e) = rollouts::tick(&deploys, "node-1", now()).await {
+                    eprintln!("e2e door: rollout tick: {e}");
+                }
+            }
+        });
+    }
     let node = NodeStatus::new(app, "node-1".into(), std::time::Duration::from_secs(5));
     let identity = match ordo_host::identity_keys::IdentitySettings::from_env() {
         Ok(Some(settings)) => {
@@ -526,6 +667,7 @@ async fn main() {
         .route("/usage", get(usage))
         .route("/security/events", get(security_events))
         .route("/health/deploy", get(health_deploy))
+        .route("/e2e/move", post(seed_move))
         .with_state(door.clone())
         .fallback_service(door.auth_router.clone());
     let listener = tokio::net::TcpListener::bind(&addr)

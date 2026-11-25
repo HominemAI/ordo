@@ -224,7 +224,7 @@ between them is needed.
   `$renames` row has an empty `field`. The step makes the new table and
   copies every row with the backfill worker, in chunks (`FillMapping::Copy`),
   each chunk's rows read `FOR SHARE` so a write to one waits for that chunk
-  only. `ordo apply` copies in its step. Every write, in
+  only. `ordo apply` refuses an entity rename, naming `ordo evolve`. Every write, in
   a move or not, copies each row it wrote and deletes each row it deleted
   in the other name's table (`entity_mirrors`, `INSERT … ON CONFLICT`). A
   reference into the old table is checked at commit until the rename

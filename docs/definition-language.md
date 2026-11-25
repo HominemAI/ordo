@@ -2038,8 +2038,8 @@ entity customers (key: cust, prev: clients) {
 - `ordo apply` makes a field rename itself, as it makes an additive change.
   A stored step copies the values with the backfill worker.
 - An entity rename (built 2026-11-24) makes the new table, copies every
-  row into it (a stored step in chunks, with the backfill worker; `ordo
-  apply` in its step), and keeps the old table whole, so the version before still
+  row into it in chunks with the backfill worker, and keeps the old table
+  whole, so the version before still
   serves. The rename is recorded in the database's `$renames`, and every
   write copies what it writes, and deletes what it deletes, into the other
   name's table in its own transaction. A reference another entity holds
@@ -2079,6 +2079,7 @@ serving, nothing is checked and the program is created as declared:
 | `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
 | `rename_entity_sealed` | an entity rename of an entity with a sealed field: its ciphertext is bound to the entity's name |
 | `rename_entity_reshaped` | an entity rename whose new declaration has a column the old table does not hold |
+| `rename_entity_needs_stored_plan` | an entity rename by `ordo apply`: its copy runs only in a stored step (`ordo evolve`), in chunks, so no write waits for it |
 | `rename_entity_acl` | an entity rename of an entity with `acl`: its shares live in an entity named after it |
 | `prev_stale` | a warning, never a refusal: the version serving now already has the new name, so the mark can go |
 

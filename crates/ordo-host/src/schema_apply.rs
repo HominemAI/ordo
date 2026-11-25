@@ -3995,12 +3995,6 @@ fn rename_entity_steps(
     let ddl_err = |x: ordo_schema::SchemaError| {
         refuse("mapping_invalid", format!("{}: {}", x.code, x.message))
     };
-    let t = ordo_schema::ddl::q(&e.name);
-    let list = columns
-        .iter()
-        .map(|c| ordo_schema::ddl::q(c))
-        .collect::<Vec<_>>()
-        .join(", ");
     let step = |phase: Phase, table: &str, sql: String| Step {
         code: c.code(),
         phase,
@@ -4021,32 +4015,37 @@ fn rename_entity_steps(
     // `ordo apply` copies in the step. A stored step copies with the
     // backfill worker, in chunks, while `$renames` keeps every row written
     // meanwhile current in both tables.
-    let stored = choices.renames_backfill;
-    let mut copy = Vec::new();
-    if stored {
-        copy.push(BackfillStep {
-            code: c.code(),
-            entity: e.name.clone(),
-            field: String::new(),
-            column: String::new(),
-            column_ty: String::new(),
-            mapping: FillMapping::Copy(from.to_string()),
-            sql: None,
-            audit: ordo_commandlog::BackfillAudit::Summarised,
-            sealing_from: None,
-            kept_plaintext: None,
-            indexing_from: None,
-        });
-    } else {
-        out.push(step(
-            Phase::Alter,
-            &e.name,
+    // **Only a stored step renames an entity**: its copy runs in chunks with
+    // the backfill worker while `$renames` keeps every write current in
+    // both tables. `ordo apply` runs no worker, and a copy in its step would
+    // hold every write for its length.
+    if !choices.renames_backfill {
+        return Err(refuse(
+            "rename_entity_needs_stored_plan",
             format!(
-                "INSERT INTO {t} ({list}) SELECT {list} FROM {};\n",
-                ordo_schema::ddl::q(from)
+                "`{}` renames `{from}`. The rows are copied in chunks by the backfill worker, \
+                 with every write kept in both tables meanwhile. `ordo apply` does not run that. \
+                 Store the version with `ordo apply --no-activate`, then run the step with \
+                 `ordo evolve --from <version> --to <version> --run`, or move tenants with \
+                 `ordo evolve --tenant <id>`",
+                e.name
             ),
         ));
     }
+    let stored = true;
+    let copy = vec![BackfillStep {
+        code: c.code(),
+        entity: e.name.clone(),
+        field: String::new(),
+        column: String::new(),
+        column_ty: String::new(),
+        mapping: FillMapping::Copy(from.to_string()),
+        sql: None,
+        audit: ordo_commandlog::BackfillAudit::Summarised,
+        sealing_from: None,
+        kept_plaintext: None,
+        indexing_from: None,
+    }];
     let mut later = Vec::new();
     for f in &e.fields {
         out.extend(ordo_schema::ddl::unique(e, f).map(|sql| step(Phase::Alter, &e.name, sql)));
@@ -5206,7 +5205,7 @@ pub fn safe_changes_value(v: Option<&str>) -> Option<bool> {
 /// is kept, so nothing is lost and a revert reads it again.
 fn is_safe_change(c: &Change, all: &[&Change]) -> bool {
     match c {
-        Change::RenameField { .. } | Change::RenameEntity { .. } => true,
+        Change::RenameField { .. } => true,
         Change::AddForeignKey { entity, .. } => all
             .iter()
             .any(|o| matches!(o, Change::AddEntity { entity: e } if e == entity)),

@@ -859,13 +859,19 @@ async fn a_renamed_table_is_read_under_both_names_until_the_rename_lands() {
         .await
         .expect("granted");
 
-    // The rename as `ordo apply` makes it, planned against the version
-    // serving now. The apply's own grants read the role from the
+    // The rename's expand, as a stored step makes it, planned against the
+    // version serving now; its copy is the backfill worker's, done here in
+    // one statement. The apply's own grants read the role from the
     // environment, so the line is granted below, with this test's role.
+    let stored = sa::Choices {
+        renames_backfill: true,
+        stored: true,
+        ..Default::default()
+    };
     let mut plan = sa::plan_with(
         &w.a,
         &renamed("", " (prev: notes)"),
-        &sa::Choices::default(),
+        &stored,
         Some(&alpha.schema),
     )
     .await
@@ -876,6 +882,8 @@ async fn a_renamed_table_is_read_under_both_names_until_the_rename_lands() {
         matches!(applied, Ok(sa::Applied::Additive { .. })),
         "{applied:?}"
     );
+    w.pg.exec("INSERT INTO alpha.memos SELECT * FROM alpha.notes")
+        .expect("the copy");
     peer::grant_readers_with(&w.a, &renaming.schema, lookup)
         .await
         .expect("granted");

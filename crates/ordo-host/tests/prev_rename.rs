@@ -740,11 +740,14 @@ async fn apply_source(pool: &Pool, source: &str) {
     .expect("applies");
 }
 
-/// **An entity rename by `ordo apply`, under live writes on two nodes,
-/// loses no write, and lands when a version drops the mark.** 1.0.0 has
-/// `note` and `pin`, whose `note` references it. Node A and node B serve
-/// 1.0.0 through the real write path and write without pause while
-/// 1.1.0, `memo (prev: note)`, applies; node B is never told. Every row is
+/// **An entity rename, refused by `ordo apply` and run as a stored step
+/// (`ordo evolve --run`), under live writes on two nodes, loses no write,
+/// and lands when a version drops the mark.** 1.0.0 has `note` and `pin`,
+/// whose `note` references it. `ordo apply` of 1.1.0, `memo (prev: note)`,
+/// is refused naming `ordo evolve`: it would copy in its step and hold
+/// every write. Node A and node B serve 1.0.0 through the real write path
+/// and write without pause while the stored step's worker copies the
+/// table; node B is never told. Every row is
 /// in both tables. A node on 1.1.0 writes a memo and pins it, and deletes
 /// another: both tables follow. 1.2.0 drops the mark: the rename lands.
 /// `$renames` is empty, `note` is an orphan, `pin`'s reference points at
@@ -755,7 +758,8 @@ async fn apply_source(pool: &Pool, source: &str) {
 /// refused because its memo is not yet in `note`, or a reference still
 /// pointing at the orphan after the rename lands.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_entity_rename_by_apply_keeps_both_tables_current_and_lands_when_the_mark_goes() {
+async fn an_entity_rename_run_as_a_stored_step_keeps_both_tables_current_and_lands_when_the_mark_goes(
+) {
     let (pg, pool) = empty("ordo_prev_entity_apply").await;
     let (x_src, y_src, z_src) = (
         pinned("1.0.0", "note", false),
@@ -787,9 +791,39 @@ async fn an_entity_rename_by_apply_keeps_both_tables_current_and_lands_when_the_
             ok
         })
     };
+    // `ordo apply` refuses the rename, naming the stored step.
+    let x = Program::compile(&x_src).expect("1.0.0");
+    let y = Program::compile(&y_src).expect("1.1.0");
+    let mut plan = sa::plan_with(&pool, &y, &Choices::default(), Some(&x.schema))
+        .await
+        .expect("a plan");
+    plan.prior = Some(x.schema.clone());
+    match sa::apply_planned(&pool, &plan, "test", "test").await {
+        Err(sa::ApplyRefusal::NotApplied(t)) => {
+            let r = t
+                .refused
+                .iter()
+                .find(|r| r.class == "rename_entity_needs_stored_plan")
+                .unwrap_or_else(|| panic!("{:?}", t.refused));
+            assert!(r.why.contains("ordo evolve"), "{}", r.why);
+        }
+        other => panic!("the apply is refused: {other:?}"),
+    }
+    assert_eq!(one(&pg, "SELECT to_regclass('memo') IS NULL"), "t");
+    store(&pool, &y_src).await;
+    let step = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+
     let (wa, wb) = (writer(a.clone(), "a"), writer(b.clone(), "b"));
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    apply_source(&pool, &y_src).await;
+    let ran = evolve::run_step(&pool, &pool, "deployment", &step, OWNER).await;
+    assert!(ran.is_ok(), "the step runs: {ran:?}");
+    Versions::on(&pool)
+        .activate("1.1.0", OWNER, ordo_commandlog::Timestamp(5))
+        .await
+        .expect("1.1.0 is active");
     assert_eq!(
         one(&pg, "SELECT count(*) FROM \"$renames\" WHERE field = ''"),
         "1",
@@ -1394,6 +1428,105 @@ async fn a_large_entity_rename_copies_in_chunks_while_writes_keep_landing() {
         "0",
         "no deleted row is copied back"
     );
+}
+
+/// **The path `ordo apply` points to copies a large table in chunks while
+/// writes keep landing** (`ordo evolve --run` on the deployment's own
+/// database). It holds 20,000 notes. `ordo apply` of the rename is refused
+/// (above); the stored step runs instead, 500 rows a run (`--chunk-rows
+/// 500 --budget 1`). A node on 1.0.0 adds and deletes notes between and
+/// during the runs. Every write lands while the copy is still
+/// backfilling, none waits for the whole copy, and once verify passes the
+/// database records 1.1.0 with every row in both tables.
+///
+/// A regression looks like a write refused or timed out during the copy, a
+/// row in one table only, or a deleted row back in `memo`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_entity_rename_run_on_the_deployments_own_database_copies_in_chunks_under_writes() {
+    use ordo_host::evolve::StepRun;
+    let (pg, pool) = empty("ordo_prev_entity_big_run").await;
+    let (x_src, y_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+    );
+    apply_source(&pool, &x_src).await;
+    pg.exec(
+        "INSERT INTO note (\"$space\", id, rev, kind) \
+         SELECT 'home', 'home' || lpad(i::text, 5, '0'), 1, 'home ' || i \
+         FROM generate_series(1, 20000) i",
+    )
+    .expect("20,000 rows");
+    store(&pool, &y_src).await;
+    let step = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+    let ctx = evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 500,
+            budget: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let run = || evolve::run_step_with(&pool, &pool, "deployment", &step, OWNER, &ctx);
+    let first = run().await.expect("the step starts");
+    assert!(matches!(first, StepRun::Backfilling { .. }), "{first:?}");
+    assert_eq!(one(&pg, "SELECT count(*) FROM memo"), "500");
+
+    let writer = std::sync::Arc::new(node_in(&pg.db, &x_src, "w", "home").await);
+    let w = writer.clone();
+    let writes = tokio::spawn(async move {
+        let mut bad = Vec::new();
+        let mut slowest = std::time::Duration::ZERO;
+        for i in 0..150 {
+            let started = std::time::Instant::now();
+            if let Err(e) = w.write(format!(r#"addNote($kind: "live {i}")"#)).await {
+                bad.push(format!("add {i}: {e}"));
+            }
+            if i % 5 == 0 {
+                for id in [format!("home{:05}", 20000 - i), format!("home{:05}", i + 1)] {
+                    if let Err(e) = w.write(format!(r#"dropNote($id: "{id}")"#)).await {
+                        bad.push(format!("drop {id}: {e}"));
+                    }
+                }
+            }
+            slowest = slowest.max(started.elapsed());
+        }
+        (bad, slowest)
+    });
+    let mut runs = 1;
+    let mut during = 0;
+    loop {
+        let r = run().await.expect("a run");
+        runs += 1;
+        if !matches!(r, StepRun::Backfilling { .. }) {
+            break;
+        }
+        if !writes.is_finished() {
+            during += 1;
+        }
+        assert!(runs < 200, "the copy ends");
+    }
+    let (bad, slowest) = writes.await.unwrap();
+    assert!(bad.is_empty(), "every write landed: {bad:?}");
+    assert!(during > 0, "the writes ran while the copy was backfilling");
+    assert!(
+        slowest < std::time::Duration::from_secs(5),
+        "no write waited for the copy: {slowest:?}"
+    );
+    assert!(runs >= 40, "the copy ran in chunks: {runs} runs");
+    assert_eq!(
+        ordo_exec::spacedb::recorded_version(&pool)
+            .await
+            .expect("recorded"),
+        ordo_exec::spacedb::TargetVersion::At("1.1.0".into())
+    );
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM memo"),
+        (20000 + 150 - 60).to_string()
+    );
+    assert_eq!(one(&pg, TABLES_DIFFER), "0", "every row is in both tables");
 }
 
 /// **The offer to remove a landed mark** names it in the chain's last

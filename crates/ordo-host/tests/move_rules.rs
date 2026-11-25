@@ -622,3 +622,55 @@ async fn a_move_into_the_many_side_gives_each_row_its_value() {
         closed.orphaned
     );
 }
+
+/// **A row written during the move that meets no rule is not resolved
+/// silently.** The write itself goes through, and its person takes the
+/// default; the close then refuses, `move_unmatched`, naming the row by id
+/// and the rule to add, and closes once no such row remains.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_written_during_the_move_that_meets_no_rule_blocks_the_close() {
+    let (registry, tpg, own) = tenant(
+        "ordo_rules_late",
+        "INSERT INTO person (\"$space\", id, rev, name) VALUES ('acme', 'p1', 1, 'Ada'), \
+         ('acme', 'p2', 1, 'Bob'); \
+         INSERT INTO address (\"$space\", id, rev, person, kind, at, street) VALUES \
+         ('acme', 'a1', 1, 'p1', 'home', 1, 'Home')",
+    )
+    .await;
+    let shared = ordo_exec::route::SinglePool::new(own.clone());
+    let cx = MoveContext {
+        control: &registry,
+        pools: &shared,
+        spaces: None,
+    };
+    let plan = render(&registry, "1.1.0", &options(HOME_THEN_WORK, true))
+        .await
+        .expect("stores")
+        .plan;
+    let moved = dual_writes::run(&cx, "acme", &plan, &step_context(), 7 * 86_400, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    let on_x = node(&tpg.db, MANY, "acme").await;
+    on_x.write(r#"addAddress($person: "p2", $kind: "other", $at: 1, $street: "Elsewhere")"#)
+        .await;
+    assert_eq!(values(&tpg, "person", "street"), "p1=Home p2=null");
+    let late = one(&tpg, "SELECT id FROM address WHERE kind = 'other'");
+    let err = dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect_err("a row meets no rule");
+    assert_eq!(err.class(), "move_unmatched", "{err}");
+    let why = err.to_string();
+    assert!(why.contains(&format!("acme/{late}")), "{why}");
+    assert!(why.contains("address.person first by <field>"), "{why}");
+    assert!(!why.contains("Elsewhere"), "{why}");
+    on_x.write(&format!(r#"dropAddress($id: "{late}")"#)).await;
+    let closed = dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect("closes");
+    assert!(
+        closed.orphaned.contains(&"address.street".to_string()),
+        "{:?}",
+        closed.orphaned
+    );
+}

@@ -1102,6 +1102,35 @@ pub async fn close(
         "close the soak again (`ordo evolve --tenant {tenant} --close-soak`), or revert it \
          (`--revert`)"
     );
+    // A move through a link that is not unique (`forward-gaps` ask 7): a
+    // row written during the move that meets no rule took the default, and
+    // is not resolved silently. The close lists each by id and waits, as
+    // the start does; the writes themselves were never refused.
+    for p in overlay["backfills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(BackfillStep::from_json)
+        .filter_map(|b| b.pick())
+    {
+        let probed = Box::pin(sa::unmatched(&target, &p))
+            .await
+            .map_err(|e| run_err("internal", e.to_string()))?;
+        if let sa::Probe::Dirty { lines, .. } = probed {
+            return Err(run_err(
+                "move_unmatched",
+                format!(
+                    "{}, written during the move, took the default. Nothing closed. Add a rule \
+                     those rows meet (a last rule with no `where` meets every row: `--correspond \
+                     \"{}.{} first by <field>\"`) and render the step again, or change or remove \
+                     the rows through the app's own ops, then {fix}",
+                    lines.join("; "),
+                    p.many,
+                    p.link
+                ),
+            ));
+        }
+    }
     check_held(&target, &overlay, &m.to, &fix)
         .await
         .map_err(|why| run_err("held_constraint_broken", why))?;

@@ -2227,7 +2227,10 @@ entity customers (key: cust, prev: clients) {
     for it gives the value.
   - The pre-check lists the rows that meet no rule, by id, never their
     values. The move does not start while any remain (`move_unmatched`).
-    A last rule with no `where` meets every row.
+    A last rule with no `where` meets every row. A row written during the
+    move that meets no rule is not refused; it takes the default, and the
+    soak's close refuses (`move_unmatched`) while any such row remains,
+    listing it by id.
   - The plan previews the rule on 3 rows: the row each takes its values
     from, values where `preview.values` is on.
   - The step adds the columns and copies in chunks. Each write by the

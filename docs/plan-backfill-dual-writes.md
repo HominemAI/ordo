@@ -529,6 +529,15 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   `prev_rename::an_entity_rename_run_as_a_stored_step_keeps_both_tables_current_and_lands_when_the_mark_goes`
   the same way: 58 and 14 conflicts in two runs before, 12, 0, 0 and 6
   in four runs after. Every run passed.
+- **The overlays never scan** (2026-11-25). The conflicts left were the
+  `ctid` reads themselves. On a table analyzed while it has 2 or 3 pages,
+  Postgres prices a sequential scan below a `ctid` fetch, and a scan reads
+  every other writer's rows. While any overlay runs, the write turns
+  `enable_seqscan` off for the overlay statements and puts it back after
+  (`overlay::scans_off`, `scans_back`). The fallback by key and the
+  mirror's delete in the other table take the index for the same reason.
+  The same measure, 3 sets of 20 runs: 0 conflicts and 0 turns each. The
+  field-rename and seal tests: 0 and 0.
 - Verify runs as verify under live writes: it opens every row against its
   plaintext and records the count and hash it reads. The per-chunk hashes
   are not compared, since writes reseal rows.

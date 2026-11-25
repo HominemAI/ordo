@@ -1451,6 +1451,40 @@ impl MoveOverlay {
     }
 }
 
+/// **No table scans for the overlays** (Reported fix, 2026-11-25): turn
+/// `enable_seqscan` off for the rest of the transaction, and answer what
+/// it was, for [`scans_back`].
+///
+/// The overlays reach rows by `ctid` ([`RowCapture`]) or by key. On a table
+/// analyzed while it is small, Postgres prices a sequential scan below
+/// either, and plans one. Under SERIALIZABLE a scan reads every other
+/// writer's rows and locks the whole table, so concurrent writers each
+/// depend on the other and one is cancelled. Off, the planner takes the
+/// `ctid` or the index whatever the statistics say.
+pub async fn scans_off(tx: &TxConn) -> Result<String, PoolError> {
+    let rows = tx
+        .rows(
+            "SELECT current_setting('enable_seqscan'), \
+             set_config('enable_seqscan', 'off', true)",
+        )
+        .await?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .unwrap_or_else(|| "on".into()))
+}
+
+/// Put `enable_seqscan` back to what [`scans_off`] found, for the rest of
+/// the transaction.
+pub async fn scans_back(tx: &TxConn, prev: &str) -> Result<(), PoolError> {
+    tx.rows(&format!(
+        "SELECT set_config('enable_seqscan', {}, true)",
+        sql_lit(prev)
+    ))
+    .await?;
+    Ok(())
+}
+
 /// Run `sql` under a savepoint. `false` when the database lacks a column
 /// it names, which leaves the transaction as it was.
 async fn guarded(tx: &TxConn, sql: &str) -> Result<bool, PoolError> {

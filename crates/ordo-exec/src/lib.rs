@@ -3011,6 +3011,20 @@ impl Executor {
         }
         match result {
             Ok(v) => {
+                // The overlays below never scan a table
+                // (`overlay::scans_off`): a scan under SERIALIZABLE reads
+                // every other writer's rows.
+                let scans = if capture.is_empty() {
+                    None
+                } else {
+                    match overlay::scans_off(&tx).await {
+                        Ok(prev) => Some(prev),
+                        Err(e) => {
+                            let _ = tx.rollback().await;
+                            return Err(ExecFail::Pool(e));
+                        }
+                    }
+                };
                 // **The move overlay** (increment 11a): the other version's
                 // columns and guards on every row this write touched, in
                 // this transaction, before the chain append. A row it
@@ -3104,6 +3118,12 @@ impl Executor {
                                 ExecFail::Compile(k.to_string())
                             }
                         });
+                    }
+                }
+                if let Some(prev) = scans {
+                    if let Err(e) = overlay::scans_back(&tx, &prev).await {
+                        let _ = tx.rollback().await;
+                        return Err(ExecFail::Pool(e));
                     }
                 }
                 // The completion record joins the effect in this

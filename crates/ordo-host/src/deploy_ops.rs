@@ -752,7 +752,13 @@ async fn refuse_pin_apart_from_kept(
     };
     let due = crate::schema_apply::kept_indexes_due(&pool, &schema)
         .await
-        .map_err(|e| ExecError::new(ordo_api::ErrorCode::SpaceUnavailable, e))?;
+        .map_err(|e| {
+            ExecError::of_fault(
+                e.class(),
+                ordo_api::ErrorCode::SpaceUnavailable,
+                format!("{WHAT}: its database could not be read: {e}"),
+            )
+        })?;
     match due.first() {
         Some(k) => Err(ExecError::new(
             ordo_api::ErrorCode::ApplyRefused,

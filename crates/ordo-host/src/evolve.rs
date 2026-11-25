@@ -1813,13 +1813,13 @@ pub(crate) async fn expand_step(
     // own database, the activation does.
     let kept = sa::kept_indexes_due(target, &y.schema)
         .await
-        .map_err(|e| run_err("internal", e, true))?;
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     // **A second B10 on a field whose first one is still kept** is
     // refused: the end would keep the index it replaces under the name the
     // first one's kept index holds. The close prunes it.
     let held = sa::kept_indexes(target)
         .await
-        .map_err(|e| run_err("internal", e, true))?;
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     for b in again.receipt["backfills"].as_array().into_iter().flatten() {
         let (Some(entity), Some(field)) = (b["entity"].as_str(), b["field"].as_str()) else {
             continue;

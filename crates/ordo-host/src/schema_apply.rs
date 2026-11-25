@@ -2682,7 +2682,10 @@ pub async fn restore_kept_indexes(
 ) -> Result<Vec<String>, String> {
     let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let mut done = Vec::new();
-    for k in kept_indexes_due(pool, schema).await? {
+    for k in kept_indexes_due(pool, schema)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         let (Some(e), entity, field) = (schema.native(&k.entity), &k.entity, &k.field) else {
             continue;
         };
@@ -2802,7 +2805,11 @@ pub struct KeptIndex {
 
 /// The kept blind indexes [`restore_kept_indexes`] would trade in for
 /// `schema`. Reads; changes nothing. Empty on a database with no `$seals`.
-pub async fn kept_indexes_due(pool: &Pool, schema: &Schema) -> Result<Vec<KeptIndex>, String> {
+/// The database's own error, so a caller can tell a busy pool apart.
+pub async fn kept_indexes_due(
+    pool: &Pool,
+    schema: &Schema,
+) -> Result<Vec<KeptIndex>, ordo_exec::PoolError> {
     Ok(kept_indexes(pool)
         .await?
         .into_iter()
@@ -2821,7 +2828,7 @@ pub async fn kept_indexes_due(pool: &Pool, schema: &Schema) -> Result<Vec<KeptIn
 
 /// Every blind index B10 kept on this database whose column is still
 /// there, with the normalization it is under, due or not.
-pub async fn kept_indexes(pool: &Pool) -> Result<Vec<(KeptIndex, String)>, String> {
+pub async fn kept_indexes(pool: &Pool) -> Result<Vec<(KeptIndex, String)>, ordo_exec::PoolError> {
     let rows = match pool
         .rows(
             "SELECT s.\"entity\", s.\"field\", s.\"target\", coalesce(to_jsonb(s) ->> \
@@ -2834,7 +2841,7 @@ pub async fn kept_indexes(pool: &Pool) -> Result<Vec<(KeptIndex, String)>, Strin
     {
         Ok(r) => r,
         Err(e) if e.is_missing_table() => return Ok(Vec::new()),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(e),
     };
     let mut due = Vec::new();
     for r in rows {
@@ -5088,7 +5095,7 @@ pub async fn bring_forward_from(
         Some(w) => {
             let kept = kept_indexes_due(pool, &program.schema)
                 .await
-                .map_err(internal)?;
+                .map_err(|e| internal(e.to_string()))?;
             Some(as_kept(&w, &program.schema, &kept))
         }
         None => None,

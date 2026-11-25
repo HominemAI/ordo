@@ -663,12 +663,10 @@ impl Spaces {
         };
         // A blind index B10 kept for the version this tenant is pinned to
         // is traded in before anything is read or written under it.
-        if let Err(reason) = self.kept_indexes(space, &pool, &live, epoch).await {
-            return Err(self.note(SpaceRefusal::Unfit {
-                space: space.to_string(),
-                version: live.version.clone(),
-                reason,
-            }));
+        match self.kept_indexes(space, &pool, &live, epoch).await {
+            Ok(()) => {}
+            Err(e) if e.is_busy() => return Err(e),
+            Err(e) => return Err(self.note(e)),
         }
         // Every write on this handle checks the pin fence (§1.3).
         let pool = match epoch {
@@ -1185,26 +1183,44 @@ impl Spaces {
         pool: &Pool,
         live: &Loaded,
         epoch: Option<i64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SpaceRefusal> {
         let key = (space.to_string(), live.version.clone(), epoch.unwrap_or(-1));
         if self.kept.lock().expect("kept cache").contains(&key) {
             return Ok(());
         }
+        let unfit = |reason: String| SpaceRefusal::Unfit {
+            space: space.to_string(),
+            version: live.version.clone(),
+            reason,
+        };
         let control = self.witness.pool();
         let schema = &live.fixture.schema;
+        // A read that failed is the database's fault, told as one: a full
+        // pool answers busy, as every other read here does (25z).
         let due = crate::schema_apply::kept_indexes_due(pool, schema)
             .await
-            .map_err(|e| format!("its kept blind indexes could not be read: {e}"))?;
+            .map_err(|e| SpaceRefusal::Unroutable {
+                space: space.to_string(),
+                reason: format!("its kept blind indexes could not be read: {e}"),
+                class: e.class(),
+            })?;
         if crate::dual_writes::same_database(pool, control) {
             if let Some(k) = due.first() {
-                return Err(kept_on_shared(&k.entity, &k.field, &live.version, space));
+                return Err(unfit(kept_on_shared(
+                    &k.entity,
+                    &k.field,
+                    &live.version,
+                    space,
+                )));
             }
         } else if !due.is_empty() {
             self.alone_on_its_database(space, pool, &live.version)
-                .await?;
+                .await
+                .map_err(unfit)?;
             let fence = epoch.map(|e| (space, e));
-            let traded =
-                crate::schema_apply::restore_kept_indexes(pool, schema, None, fence).await?;
+            let traded = crate::schema_apply::restore_kept_indexes(pool, schema, None, fence)
+                .await
+                .map_err(unfit)?;
             if !traded.is_empty() {
                 println!(
                     "space {space}: the blind index kept for version {} traded in on its \

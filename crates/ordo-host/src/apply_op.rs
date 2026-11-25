@@ -1483,7 +1483,7 @@ async fn restore_kept_indexes(pool: &Pool, version: &str) -> Result<(), ApplyRef
             .and_then(|a| compile(&a.source)),
         _ => None,
     };
-    sa::restore_kept_indexes(pool, &target, leaving.as_ref())
+    sa::restore_kept_indexes(pool, &target, leaving.as_ref(), None)
         .await
         .map(|_| ())
         .map_err(ApplyRefused::Internal)

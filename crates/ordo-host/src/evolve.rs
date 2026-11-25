@@ -1868,9 +1868,65 @@ pub(crate) async fn expand_step(
     options.indexing_live = indexing_in(target)
         .await
         .map_err(|e| run_err("internal", e.to_string(), true))?;
-    let mut p = sa::plan_with(target, &y, &options, Some(&x.schema))
-        .await
-        .map_err(|e| run_err("internal", e, true))?;
+    // **Forward again across B10** (increment 13): a blind index this
+    // database keeps under `y`'s normalization is whole, so the step's
+    // reindex of that field is not run. The node trades the index in before
+    // it serves `y` (`crate::spaces::Spaces::resolve`); on the deployment's
+    // own database, the activation does.
+    // Asked only of a step that reindexes: no other step reads them.
+    let reindexes = again.receipt["backfills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|b| b["code"] == "B10");
+    let held = if reindexes {
+        sa::kept_indexes(target)
+            .await
+            .map_err(|e| run_err("internal", e.to_string(), true))?
+    } else {
+        Vec::new()
+    };
+    let kept = sa::kept_due_in(&held, &y.schema);
+    // **A second B10 on a field whose first one is still kept** is
+    // refused: the end would keep the index it replaces under the name the
+    // first one's kept index holds. The close prunes it.
+    for b in again.receipt["backfills"].as_array().into_iter().flatten() {
+        let (Some(entity), Some(field)) = (b["entity"].as_str(), b["field"].as_str()) else {
+            continue;
+        };
+        if b["code"] != "B10" || kept.iter().any(|k| k.entity == entity && k.field == field) {
+            continue;
+        }
+        if let Some((k, norm)) = held
+            .iter()
+            .find(|(k, _)| k.entity == entity && k.field == field)
+        {
+            return Err(run_err(
+                "reindex_kept_index",
+                format!(
+                    "`{entity}.{field}` still keeps the blind index its last normalize change \
+                     replaced (`{}`, under `{}`), so a rollback across that change reads a \
+                     whole index. A second change of its `normalize` would replace it. Close \
+                     the first one with `ordo evolve --prune`, then run this step again",
+                    k.target,
+                    if norm.is_empty() {
+                        "no normalization"
+                    } else {
+                        norm
+                    },
+                ),
+                false,
+            ));
+        }
+    }
+    let mut p = sa::plan_with(
+        target,
+        &y,
+        &options,
+        Some(&sa::as_kept(&x.schema, &y.schema, &kept)),
+    )
+    .await
+    .map_err(|e| run_err("internal", e, true))?;
     // The step starts from X on every database: X is the baseline its
     // drift is measured against and the version its record says it left.
     p.prior = Some(x.schema.clone());
@@ -1945,12 +2001,21 @@ pub(crate) async fn expand_step(
     // A step run again after its expand finds its new columns there, so
     // the triage on this database no longer names their backfills or what
     // lands after them. The stored receipt does (increment 11a).
+    // A reindex a kept index covers stays out of it too.
+    let covered =
+        |entity: &str, field: &str| kept.iter().any(|k| k.entity == entity && k.field == field);
+    let reindexing: Vec<String> = kept
+        .iter()
+        .filter_map(|k| y.schema.native(&k.entity)?.field(&k.field))
+        .map(|f| ordo_schema::ddl::q(&sa::reindex_column(f)))
+        .collect();
     let mut backfills = backfills;
     for r in again.receipt["backfills"].as_array().into_iter().flatten() {
         if let Some(bf) = sa::BackfillStep::from_json(r) {
-            if !backfills
-                .iter()
-                .any(|b| b.entity == bf.entity && b.field == bf.field)
+            if !covered(&bf.entity, &bf.field)
+                && !backfills
+                    .iter()
+                    .any(|b| b.entity == bf.entity && b.field == bf.field)
             {
                 backfills.push(bf);
             }
@@ -1959,8 +2024,47 @@ pub(crate) async fn expand_step(
     let mut after = after;
     for r in again.receipt["after"].as_array().into_iter().flatten() {
         let Some(sql) = r.as_str() else { continue };
+        if reindexing.iter().any(|c| sql.contains(c.as_str())) {
+            continue;
+        }
         if !after.iter().any(|s| s.sql.trim_end() == sql) {
             after.push(sa::after_step(sql));
+        }
+    }
+    // **B10 on the deployment's own database** keeps the active version's
+    // index the field's own until the activation, so every space there
+    // keeps serving the active version through the step; the new index is
+    // kept beside it, and the activation trades it in for all of them
+    // (`sa::reindex_end`).
+    if crate::dual_writes::same_database(target, registry) {
+        for b in again.receipt["backfills"].as_array().into_iter().flatten() {
+            let (Some(entity), Some(field)) = (b["entity"].as_str(), b["field"].as_str()) else {
+                continue;
+            };
+            if b["code"] != "B10" || covered(entity, field) {
+                continue;
+            }
+            let (Some(e), Some(f)) = (
+                y.schema.native(entity),
+                y.schema.native(entity).and_then(|e| e.field(field)),
+            ) else {
+                continue;
+            };
+            let from = x
+                .schema
+                .native(entity)
+                .and_then(|e| e.field(field))
+                .and_then(|f| f.normalize.clone());
+            let column = ordo_schema::ddl::q(&sa::reindex_column(f));
+            after.retain(|s| !s.sql.contains(column.as_str()));
+            after.push(sa::Step {
+                code: "B10",
+                phase: sa::Phase::Alter,
+                sql: sa::reindex_end(e, f, &plan.to, from.as_deref(), true),
+                index: None,
+                constraint: None,
+                table: e.name.clone(),
+            });
         }
     }
     Ok(Some(Expanded {
@@ -2636,6 +2740,16 @@ pub(crate) fn sealing_step(p: &StoredPlan) -> bool {
     })
 }
 
+/// A stored step whose every backfill is B10, a blind index computed again
+/// under a new `normalize`.
+pub(crate) fn reindex_only(p: &StoredPlan) -> bool {
+    serde_json::from_str::<Value>(&p.receipt).is_ok_and(|r| {
+        r["backfills"]
+            .as_array()
+            .is_some_and(|b| !b.is_empty() && b.iter().all(|x| x["code"] == "B10"))
+    })
+}
+
 /// What a move command runs its backfills with: the step's settings, with
 /// the caller's `budget` and `chunkRows` when given.
 async fn move_context(
@@ -2942,7 +3056,11 @@ pub async fn execute(
                 // version before, and the own space then moves to the
                 // version the database holds, first, as a rollout moves it
                 // (Q4). Its writes are accepted and sealed by that version.
-                let sealing = sealing_step(&done.plan);
+                // A step that only reindexes (B10) keeps the active
+                // version's index on this database until the activation
+                // (`sa::reindex_end`): every space here, the own space
+                // included, stays on the active version and needs no fence.
+                let sealing = sealing_step(&done.plan) && !reindex_only(&done.plan);
                 if sealing {
                     let own = Versions::on(pool)
                         .own_pin_made(&ops.home, caller, crate::runtime::now_secs())

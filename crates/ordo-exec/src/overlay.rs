@@ -212,8 +212,9 @@ pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
 ///
 /// - `kind` `kept` (B10 after its end): `target` (`<field>$bidx$prev`)
 ///   holds the index under the normalization the row records, the one the
-///   step replaced. Written by every sealed writer until the column is
-///   pruned; a rollback trades it back in.
+///   step replaced; `live` the one the field's own index is under. Written
+///   by every sealed writer until the column is pruned; a rollback trades
+///   it back in.
 ///
 /// The row leaves in the transaction that lands the step's end (the
 /// plaintext dropped, or the index made `NOT NULL`), under the same
@@ -233,6 +234,14 @@ CREATE TABLE IF NOT EXISTS \"$seals\" ( \
 /// The `normalize` column of [`SEALS_DDL`], on a table made before it.
 pub const SEALS_NORMALIZE_DDL: &str =
     "ALTER TABLE \"$seals\" ADD COLUMN IF NOT EXISTS \"normalize\" text NULL";
+
+/// The `live` column of [`SEALS_DDL`]: on a `kept` row, the normalization
+/// the field's own blind index is computed under now, so a trade of the
+/// two indexes knows what the kept one becomes without being told which
+/// version served before. Null on a row recorded before the column. Added
+/// under the `"$renames"` lock, as every change to `$seals` is.
+pub const SEALS_LIVE_DDL: &str =
+    "ALTER TABLE \"$seals\" ADD COLUMN IF NOT EXISTS \"live\" text NULL";
 
 /// What a sealed backfill in progress fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

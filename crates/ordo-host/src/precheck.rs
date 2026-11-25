@@ -593,8 +593,22 @@ async fn previews(pool: &Pool, label: &str, p: &sa::Plan, show: bool) -> Vec<Pre
             .map(|f| format!("{}::text", q(&f.column())))
             .collect();
         cols.extend(
-            bfs.iter()
-                .map(|b| format!("({})::text", b.sql.clone().unwrap_or_else(|| "NULL".into()))),
+            // A money field's stored minor units, shown in major ones as
+            // the developer wrote the mapping.
+            bfs.iter().map(|b| {
+                let sql = b.sql.clone().unwrap_or_else(|| "NULL".into());
+                match e.field(&b.field).map(|f| &f.ty) {
+                    Some(ordo_schema::FieldTy::Scalar(ordo_syntax::ScalarTy::Money(p)))
+                        if *p > 0 =>
+                    {
+                        format!(
+                            "round(({sql})::numeric / 1{}, {p})::text",
+                            "0".repeat(usize::from(*p))
+                        )
+                    }
+                    _ => format!("({sql})::text"),
+                }
+            }),
         );
         let sql = format!(
             "SELECT \"$space\", \"id\"::text, {} FROM {} ORDER BY \"$space\", \"id\" LIMIT {PREVIEW_ROWS}",

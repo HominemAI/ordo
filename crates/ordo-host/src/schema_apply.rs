@@ -3574,11 +3574,16 @@ fn backfill_step(
                 .filter(|x| x.name != field)
                 .cloned()
                 .collect();
-            Some(
+            let sql =
                 ordo_schema::check::render_mapping(&e.name, &fields, &expr).map_err(|err| {
                     refuse("mapping_invalid", format!("{}: {}", err.code, err.message))
-                })?,
-            )
+                })?;
+            if money_places(f).is_some() {
+                if let Some((class, why)) = mapping_fits(&e.name, f, &fields, &expr, src, "") {
+                    return Err(refuse(class, why));
+                }
+            }
+            Some(stored_sql(f, &sql))
         }
         FillMapping::Function { .. } => None,
         FillMapping::Seal
@@ -5192,6 +5197,7 @@ pub fn map_step(
         if let Some((class, why)) = mapping_fits(&e.name, f, &over, &expr, src, &example) {
             return Err(refuse(class, why));
         }
+        let sql = stored_sql(f, &sql);
         let col = f.column();
         let ty = ordo_schema::ddl::column_ty(f);
         expand.push(format!(
@@ -5251,6 +5257,7 @@ pub fn map_step(
         if let Some((class, why)) = mapping_fits(&e.name, old, &e.fields, &expr, src, &back) {
             return Err(refuse(class, why.replace("--fill", "--reverse")));
         }
+        let sql = stored_sql(old, &sql);
         reverse.push(ReverseSet {
             field: old.name.clone(),
             column: old.column(),
@@ -5377,24 +5384,27 @@ fn mapping_fits(
     example: &str,
 ) -> Option<(&'static str, String)> {
     use ordo_schema::check::Family;
-    if matches!(
-        f.ty,
-        ordo_schema::FieldTy::Scalar(ordo_syntax::ScalarTy::Money(_))
-    ) {
-        return Some((
-            "map_type_not_built",
-            format!(
-                "`{entity}.{}` is money, stored in minor units, and a mapping gives major ones. Keep its type in this version, and change it in a version of its own with `ordo apply`",
-                f.name
-            ),
-        ));
-    }
     let want = ordo_schema::check::field_type(f)?;
-    let got = ordo_schema::check::mapping_type(over, expr)?;
     let fix = if example.is_empty() || example == src {
         String::new()
     } else {
         format!(", for example `--fill {entity}.{}={example}`", f.name)
+    };
+    // A money field is stored in minor units and a mapping gives major
+    // ones, converted exactly ([`stored_sql`]): only a value whose places
+    // are known to fit converts without rounding.
+    let money = money_places(f);
+    let Some(got) = ordo_schema::check::mapping_type(over, expr) else {
+        return money.map(|p| {
+            (
+                "map_cast_required",
+                format!(
+                    "`{entity}.{}` is money with {p} place(s), and Ordo cannot tell how many \
+                     `{src}` gives. State it: `--fill {entity}.{}=round({src}, {p})`",
+                    f.name, f.name
+                ),
+            )
+        });
     };
     if want.family != got.family {
         let built = matches!(
@@ -5418,7 +5428,7 @@ fn mapping_fits(
         return Some((
             "map_cast_required",
             format!(
-                "`{entity}.{}` holds {} and `{src}` gives {}. Ordo does not convert unasked:                  state the conversion{fix}",
+                "`{entity}.{}` holds {} and `{src}` gives {}. Ordo does not convert unasked: state the conversion{fix}",
                 f.name,
                 want.family.as_str(),
                 got.family.as_str()
@@ -5430,13 +5440,45 @@ fn mapping_fits(
             return Some((
                 "map_cast_required",
                 format!(
-                    "`{entity}.{}` keeps {keep} place(s) and `{src}` gives {has}. Ordo never rounds unasked: state it with `round`{fix}",
+                    "`{entity}.{}` keeps {keep} place(s) and `{src}` gives {has}. Ordo never \
+                     rounds unasked: state it with `round`{fix}",
                     f.name
                 ),
             ));
         }
     }
+    if let (Some(p), None) = (money, got.places) {
+        return Some((
+            "map_cast_required",
+            format!(
+                "`{entity}.{}` is money with {p} place(s), and Ordo cannot tell how many `{src}` \
+                 gives. State it: `--fill {entity}.{}=round({src}, {p})`",
+                f.name, f.name
+            ),
+        ));
+    }
     None
+}
+
+/// The places of a `money` field, or `None` for any other.
+fn money_places(f: &ordo_schema::Field) -> Option<u8> {
+    match f.ty {
+        ordo_schema::FieldTy::Scalar(ordo_syntax::ScalarTy::Money(p)) if !f.sealed => Some(p),
+        _ => None,
+    }
+}
+
+/// A mapping's SQL as `f`'s column stores it. A mapping reads and gives
+/// money in major units (`check` does too, 27ak); a `money(p)` column holds
+/// minor ones, so the value is multiplied by `10^p`, which rounds nothing,
+/// and stored as the column's integer. [`mapping_fits`] has already refused
+/// a value with more places than `p`.
+pub fn stored_sql(f: &ordo_schema::Field, sql: &str) -> String {
+    match money_places(f) {
+        Some(0) => format!("(({sql}))::bigint"),
+        Some(p) => format!("(({sql}) * 1{})::bigint", "0".repeat(usize::from(p))),
+        None => sql.to_string(),
+    }
 }
 
 /// A declared rename in a stored plan (increment 11a): the statements of

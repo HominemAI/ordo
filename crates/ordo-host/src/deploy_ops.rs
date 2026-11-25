@@ -174,8 +174,10 @@ pub const ROLLOUT_HOLD: &str = crate::rollouts::HOLD;
 pub const ORPHANS: &str = crate::orphan_ops::ORPHANS;
 /// Remove one orphan from every database, once asked twice.
 pub const PRUNE: &str = crate::orphan_ops::PRUNE;
+/// Remove a stored version, moving its tenants first (§1.6).
+pub const REMOVE_VERSION: &str = crate::version_removal::REMOVE_VERSION;
 
-pub const OPS: [&str; 39] = [
+pub const OPS: [&str; 40] = [
     VERSIONS,
     ACTIVATE,
     PLAN,
@@ -215,6 +217,7 @@ pub const OPS: [&str; 39] = [
     ROLLOUT_HOLD,
     ORPHANS,
     PRUNE,
+    REMOVE_VERSION,
 ];
 
 /// The ops that move tenants between versions and ask no passkey touch, of
@@ -380,6 +383,22 @@ pub fn specs() -> Vec<OpSpec> {
             OpKind::Write,
             vec![version_param("version"), reason_param()],
             &["version", "ordinal", "revoked"],
+        ),
+        spec(
+            REMOVE_VERSION,
+            OpKind::Write,
+            vec![
+                version_param("version"),
+                reason_param(),
+                ParamSpec {
+                    // Required when tenants are pinned to `version`.
+                    name: "moveTo".to_string(),
+                    ty: ParamTy::Text { max_len: Some(128) },
+                    required: false,
+                    bounds: None,
+                },
+            ],
+            &["version", "ordinal", "movedTo", "moved"],
         ),
         spec(REVOKED, OpKind::Read, vec![], &["versions"]),
         spec(
@@ -715,6 +734,7 @@ fn settings_json(s: &crate::versions::VersionSettings) -> serde_json::Value {
         "newTenant": s.value(VersionSetting::NewTenant),
         "minResidency": s.value(VersionSetting::MinResidency),
         "idleEvictAfter": s.value(VersionSetting::IdleEvictAfter),
+        "restoreWindow": s.value(VersionSetting::RestoreWindow),
     })
 }
 
@@ -1016,6 +1036,39 @@ pub async fn execute(
             crate::rollouts::execute(ops, name, bound, caller).await?
         }
         ORPHANS | PRUNE => crate::orphan_ops::execute(ops, name, bound, caller).await?,
+        REMOVE_VERSION => {
+            let version = text(bound, "version").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let move_to = text(bound, "moveTo").filter(|m| !m.is_empty());
+            let r = crate::version_removal::remove(
+                ops,
+                version,
+                move_to,
+                reason,
+                caller,
+                crate::runtime::now_secs(),
+            )
+            .await
+            .map_err(|e| e.to_exec_error())?;
+            // One act on the stream, `--move-to` with it (Q9).
+            ops.record(
+                caller,
+                REMOVE_VERSION,
+                "version-removed",
+                format!(
+                    "version={} moved_to={} tenants={} by={caller} reason={reason}",
+                    r.version,
+                    r.moved_to.as_deref().unwrap_or("none"),
+                    r.moved.len()
+                ),
+            );
+            json!({
+                "version": r.version,
+                "ordinal": r.ordinal,
+                "movedTo": r.moved_to,
+                "moved": r.moved,
+            })
+        }
         PIN => {
             let tenant = text(bound, "tenant").unwrap_or_default();
             let version = text(bound, "version").unwrap_or_default();

@@ -13,8 +13,10 @@
 //!   `prev_mapping_required` (a move), `map_fill_required` (a merge with no
 //!   mapping), `prev_sealed`, `prev_default_required`, and
 //!   `prev_stale` as a warning;
-//! - an entity rename renders as a rename and is refused until the backfill
-//!   worker, naming the way round;
+//! - an entity rename renders as a rename with its reverse, keeps both
+//!   tables current under live writes (`$renames`), and lands when a
+//!   version drops the mark or a move's soak closes; a sealed, reshaped or
+//!   `acl` entity is refused, naming the fix;
 //! - the offer to remove a landed mark, only in the chain's last
 //!   environment.
 //!
@@ -577,28 +579,956 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
     );
 }
 
-/// **An entity rename renders as a rename**, and is refused until the
-/// backfill worker can copy a table, naming the way round.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_entity_rename_renders_as_one_and_is_refused_with_the_way_round() {
-    let (_pg, pool) = empty("ordo_prev_entity").await;
-    store(&pool, &notes("1.0.0", V1)).await;
-    store(
-        &pool,
-        "domain notes @ 1.1.0\n\nentity memo (prev: note) {\n  title: text\n  body: text?\n}\n\n\
-         op allNotes unbounded =\n  memo[body]\n",
+/// Notes and the pins that reference them, at `version`. With `memo`, the
+/// note entity is `memo`, declared `(prev: note)` when `mark` is set.
+fn pinned(version: &str, entity: &str, mark: bool) -> String {
+    let header = if mark {
+        format!("{entity} (prev: note)")
+    } else {
+        entity.to_string()
+    };
+    format!(
+        "domain notes @ {version}\n\n\
+         entity {header} {{\n  kind: text = \"\"\n}}\n\n\
+         entity pin {{\n  note -> {entity}\n  label: text = \"\"\n}}\n\n\
+         op addNote($kind: text) =\n  set {entity} {{ kind: $kind }}\n\n\
+         op addPin($note: id, $label: text) =\n  set pin {{ note: $note, label: $label }}\n\n\
+         op dropPin($id: id) =\n  del pin {{ id: $id }}\n\n\
+         op dropNote($id: id) =\n  del {entity} {{ id: $id }}\n\n\
+         op allNotes unbounded =\n  {entity}[kind]\n"
     )
-    .await;
-    let errs = errors(evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default(), 1).await);
-    let (_, why, _) = errs
-        .iter()
-        .find(|(c, _, _)| c == "rename_entity_not_built")
-        .unwrap_or_else(|| panic!("{errs:?}"));
-    assert!(why.contains("add `memo` beside it"), "{why}");
-    assert!(
-        !errs.iter().any(|(c, _, _)| c == "not_class_a"),
-        "no drop and add: {errs:?}"
+}
+
+/// Rows of `note` and `memo` that differ, by `($space, id)`, counted.
+const TABLES_DIFFER: &str = "SELECT count(*) FROM note n FULL JOIN memo m \
+     ON n.\"$space\" = m.\"$space\" AND n.id = m.id \
+     WHERE n.id IS NULL OR m.id IS NULL OR n.kind IS DISTINCT FROM m.kind \
+     OR n.rev IS DISTINCT FROM m.rev";
+
+/// The table a reference constraint points at.
+fn references(pg: &Pg, constraint: &str) -> String {
+    one(
+        pg,
+        &format!(
+            "SELECT confrelid::regclass::text FROM pg_constraint WHERE conname = '{constraint}'"
+        ),
+    )
+}
+
+/// **An entity rename renders as a rename** (B4), never a drop and an
+/// add. The receipt names it, and its reverse drops the new table and
+/// leaves `$renames`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_rename_renders_as_one_with_its_reverse() {
+    let (_pg, pool) = empty("ordo_prev_entity").await;
+    store(&pool, &pinned("1.0.0", "note", false)).await;
+    store(&pool, &pinned("1.1.0", "memo", true)).await;
+    let r = evolve::render(&pool, "1.0.0", "1.1.0", &Choices::default(), 1)
+        .await
+        .expect("an entity rename renders");
+    assert_eq!(
+        r.receipt["entityRenames"],
+        serde_json::json!([{ "entity": "memo", "from": "note" }])
     );
+    let change = r.receipt["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .find(|c| c["code"] == "B4")
+        .unwrap_or_else(|| panic!("{}", r.receipt["changes"]));
+    let reverse = change["reverse"].to_string();
+    assert!(reverse.contains("DROP TABLE \\\"memo\\\""), "{reverse}");
+    assert!(reverse.contains("$renames"), "{reverse}");
+    assert!(reverse.contains("NOT DEFERRABLE"), "{reverse}");
+    let codes: Vec<&str> = r.receipt["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|c| c["code"].as_str())
+        .collect();
+    assert!(
+        !codes.contains(&"A1") && !codes.contains(&"D2"),
+        "no add and drop: {codes:?}"
+    );
+}
+
+/// **An entity rename the step cannot make is refused, naming the fix**:
+/// a sealed field (its ciphertext is bound to the entity's name), new
+/// fields in the same step, and an entity with `acl` (its shares live in an
+/// entity named after it).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_rename_is_refused_when_sealed_reshaped_or_under_acl() {
+    let (_pg, pool) = empty("ordo_prev_entity_refused").await;
+    let src = |version: &str, header: &str, fields: &str, extra: &str| {
+        format!(
+            "domain notes @ {version}\n\nentity {header} {{\n{fields}{extra}}}\n\n\
+             op allNotes unbounded =\n  {}[title]\n",
+            header.split(' ').next().unwrap_or(header)
+        )
+    };
+    let cases = [
+        (
+            "  title: text\n  secret: text sealed\n",
+            "",
+            "rename_entity_sealed",
+            "`memo.secret` is sealed",
+        ),
+        (
+            "  title: text\n",
+            "  extra: text?\n",
+            "rename_entity_reshaped",
+            "`extra`",
+        ),
+        (
+            "  title: text\n  acl (read, write, admin)\n",
+            "",
+            "rename_entity_acl",
+            "`noteAccess`",
+        ),
+    ];
+    for (i, (fields, extra, class, says)) in cases.into_iter().enumerate() {
+        let x = format!("1.{i}.0");
+        let y = format!("1.{i}.1");
+        store(&pool, &src(&x, "note", fields, "")).await;
+        store(&pool, &src(&y, "memo (prev: note)", fields, extra)).await;
+        let errs = errors(evolve::render(&pool, &x, &y, &Choices::default(), 1).await);
+        let (_, why, fix) = errs
+            .iter()
+            .find(|(c, _, _)| c == class)
+            .unwrap_or_else(|| panic!("{class}: {errs:?}"));
+        assert!(why.contains(says), "{class}: {why}");
+        assert!(
+            fix.contains("note"),
+            "{class}: the fix names the old name: {fix}"
+        );
+        assert!(
+            !errs.iter().any(|(c, _, _)| c == "not_class_a"),
+            "no drop and add: {errs:?}"
+        );
+    }
+}
+
+/// What a node's load gate finds different between `source` and the
+/// database (`Pool::live_drift`).
+async fn drift(pg: &Pg, source: &str) -> Vec<String> {
+    let p = Program::compile(source).expect("compiles");
+    let f = ordo_conformance::Fixture::from_source(source, "").expect("compiles");
+    let cfg = PoolConfig {
+        db: pg.db.clone(),
+        ..PoolConfig::from_env()
+    };
+    ordo_host::shape::verify_registry(&f, &cfg, &p.ddl)
+        .await
+        .expect("the gate runs")
+        .drift
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect()
+}
+
+/// A deployment's own database, applied and activated by `ordo apply`.
+async fn apply_source(pool: &Pool, source: &str) {
+    let program = Program::compile(source).expect("compiles");
+    ordo_host::apply_op::run_program(
+        pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &program,
+        vec![],
+        OWNER,
+        "t",
+        true,
+    )
+    .await
+    .expect("applies");
+}
+
+/// **An entity rename, refused by `ordo apply` and run as a stored step
+/// (`ordo evolve --run`), under live writes on two nodes, loses no write,
+/// and lands when a version drops the mark.** 1.0.0 has `note` and `pin`,
+/// whose `note` references it. `ordo apply` of 1.1.0, `memo (prev: note)`,
+/// is refused naming `ordo evolve`: it would copy in its step and hold
+/// every write. Node A and node B serve 1.0.0 through the real write path
+/// and write without pause while the stored step's worker copies the
+/// table; node B is never told. Every row is
+/// in both tables. A node on 1.1.0 writes a memo and pins it, and deletes
+/// another: both tables follow. 1.2.0 drops the mark: the rename lands.
+/// `$renames` is empty, `note` is an orphan, `pin`'s reference points at
+/// `memo`, and `note` holds no reference of its own, so 1.2.0 deletes
+/// freely and writes nothing more to `note`.
+///
+/// A regression looks like a row in one table and not the other, a pin
+/// refused because its memo is not yet in `note`, or a reference still
+/// pointing at the orphan after the rename lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_rename_run_as_a_stored_step_keeps_both_tables_current_and_lands_when_the_mark_goes(
+) {
+    let (pg, pool) = empty("ordo_prev_entity_apply").await;
+    let (x_src, y_src, z_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+        pinned("1.2.0", "memo", false),
+    );
+    apply_source(&pool, &x_src).await;
+    let a = std::sync::Arc::new(node(&pg.db, &x_src, "a").await);
+    let b = std::sync::Arc::new(node(&pg.db, &x_src, "b").await);
+    for i in 0..20 {
+        a.write(format!(r#"addNote($kind: "a-before-{i}")"#))
+            .await
+            .expect("a write before");
+    }
+    let first = one(&pg, "SELECT id FROM note WHERE kind = 'a-before-0'");
+    a.write(format!(r#"addPin($note: "{first}", $label: "kept")"#))
+        .await
+        .expect("a pin before");
+
+    let writer = |n: std::sync::Arc<Node>, tag: &'static str| {
+        tokio::spawn(async move {
+            let mut ok = 0usize;
+            for i in 0..120 {
+                match n.write(format!(r#"addNote($kind: "{tag}-{i}")"#)).await {
+                    Ok(()) => ok += 1,
+                    Err(e) => eprintln!("node {tag}, write {i}: {e}"),
+                }
+            }
+            ok
+        })
+    };
+    // `ordo apply` refuses the rename, naming the stored step.
+    let x = Program::compile(&x_src).expect("1.0.0");
+    let y = Program::compile(&y_src).expect("1.1.0");
+    let mut plan = sa::plan_with(&pool, &y, &Choices::default(), Some(&x.schema))
+        .await
+        .expect("a plan");
+    plan.prior = Some(x.schema.clone());
+    match sa::apply_planned(&pool, &plan, "test", "test").await {
+        Err(sa::ApplyRefusal::NotApplied(t)) => {
+            let r = t
+                .refused
+                .iter()
+                .find(|r| r.class == "rename_entity_needs_stored_plan")
+                .unwrap_or_else(|| panic!("{:?}", t.refused));
+            assert!(r.why.contains("ordo evolve"), "{}", r.why);
+        }
+        other => panic!("the apply is refused: {other:?}"),
+    }
+    assert_eq!(one(&pg, "SELECT to_regclass('memo') IS NULL"), "t");
+    store(&pool, &y_src).await;
+    let step = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+
+    let (wa, wb) = (writer(a.clone(), "a"), writer(b.clone(), "b"));
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let ran = evolve::run_step(&pool, &pool, "deployment", &step, OWNER).await;
+    assert!(ran.is_ok(), "the step runs: {ran:?}");
+    Versions::on(&pool)
+        .activate("1.1.0", OWNER, ordo_commandlog::Timestamp(5))
+        .await
+        .expect("1.1.0 is active");
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM \"$renames\" WHERE field = ''"),
+        "1",
+        "the rename is recorded where it was made"
+    );
+    assert_eq!(wa.await.unwrap(), 120, "every write of node A landed");
+    assert_eq!(wb.await.unwrap(), 120, "every write of node B landed");
+    for i in 0..10 {
+        b.write(format!(r#"addNote($kind: "b-after-{i}")"#))
+            .await
+            .expect("node B, never told, writes after");
+    }
+    assert_eq!(one(&pg, "SELECT count(*) FROM memo"), "270");
+    assert_eq!(one(&pg, TABLES_DIFFER), "0", "every row is in both tables");
+
+    // 1.1.0 writes a memo and pins it; the pin's reference into `note` is
+    // checked at commit, after the dual write put the memo there too.
+    let on_y = node(&pg.db, &y_src, "y").await;
+    on_y.write(r#"addNote($kind: "y-0")"#.into())
+        .await
+        .expect("a write on 1.1.0");
+    let y0 = one(&pg, "SELECT id FROM memo WHERE kind = 'y-0'");
+    on_y.write(format!(r#"addPin($note: "{y0}", $label: "new")"#))
+        .await
+        .expect("a pin on a memo 1.1.0 wrote");
+    let gone = one(&pg, "SELECT id FROM memo WHERE kind = 'a-before-5'");
+    on_y.write(format!(r#"dropNote($id: "{gone}")"#))
+        .await
+        .expect("a delete on 1.1.0");
+    assert_eq!(one(&pg, TABLES_DIFFER), "0", "both tables follow 1.1.0");
+    assert_eq!(
+        one(
+            &pg,
+            &format!("SELECT count(*) FROM note WHERE id = '{gone}'")
+        ),
+        "0"
+    );
+    assert_eq!(
+        references(&pg, "pin$note$fk"),
+        "note",
+        "kept until it lands"
+    );
+    // Both versions' load gates pass over the database mid-rename: the
+    // reference into `note`, checked at commit, is the same reference to
+    // each of them.
+    for src in [&x_src, &y_src] {
+        assert_eq!(drift(&pg, src).await, Vec::<String>::new(), "{src}");
+    }
+
+    // 1.2.0 drops the mark: the rename lands.
+    apply_source(&pool, &z_src).await;
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$renames\""), "0");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM \"$orphans\" WHERE entity = 'note' AND field = ''"
+        ),
+        "1",
+        "the old table is an orphan"
+    );
+    assert_eq!(references(&pg, "pin$note$fk"), "memo");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM pg_constraint WHERE contype = 'f' \
+             AND (conrelid = 'note'::regclass OR confrelid = 'note'::regclass)"
+        ),
+        "0",
+        "no reference holds the orphan"
+    );
+    assert_eq!(drift(&pg, &z_src).await, Vec::<String>::new());
+    let on_z = node(&pg.db, &z_src, "z").await;
+    on_z.write(r#"addNote($kind: "z-0")"#.into())
+        .await
+        .expect("a write on 1.2.0");
+    let z0 = one(&pg, "SELECT id FROM memo WHERE kind = 'z-0'");
+    on_z.write(format!(r#"addPin($note: "{z0}", $label: "z")"#))
+        .await
+        .expect("a pin on 1.2.0");
+    let pin = one(&pg, &format!("SELECT id FROM pin WHERE note = '{first}'"));
+    on_z.write(format!(r#"dropPin($id: "{pin}")"#))
+        .await
+        .expect("the old pin goes");
+    on_z.write(format!(r#"dropNote($id: "{first}")"#))
+        .await
+        .expect("a memo the orphan still holds is deleted freely");
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM note WHERE kind = 'z-0'"),
+        "0",
+        "1.2.0 writes nothing more to the old table"
+    );
+}
+
+/// Increment 11b with an entity rename (`plan-versions.md` §2.2, §2.5;
+/// Q1): **tenants on the deployment's own database move through an entity
+/// rename with dual writes, a revert in the soak keeps every write, and
+/// the soaks close together and land the rename.** `acme` and `beta` keep
+/// their rows in the deployment's own database. 1.1.0 renames `note` to
+/// `memo`; `pin` references it. `acme` moves: the expand makes `memo` and
+/// copies every space's rows once, and its pin switches. `beta` on 1.0.0
+/// and `acme` on 1.1.0 write through the real write path: both tables hold
+/// every row. `acme` is reverted in the soak and writes as 1.0.0: nothing
+/// is lost. It moves again, then `beta` moves with no second expand. Once
+/// the own space moves too, the soaks close together: `$renames` is empty,
+/// `note` is an orphan, `pin`'s reference points at `memo`.
+///
+/// A regression looks like a row in one table and not the other, a second
+/// copy, or the rename landing while a space there still writes `note`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entity_rename_moves_tenants_on_the_deployments_own_database_and_lands_at_the_close() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let (pg, pool) = empty("ordo_prev_entity_shared").await;
+    ordo_host::tenants::ensure_table(&pool)
+        .await
+        .expect("$spaces");
+    for t in ["acme", "beta"] {
+        assert!(
+            ordo_host::tenants::reserve(&pool, t, t, "dev:ada", 10, None)
+                .await
+                .expect("reserved")
+        );
+        ordo_host::tenants::activate(&pool, t, 11)
+            .await
+            .expect("active");
+    }
+    let (x_src, y_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+    );
+    apply_source(&pool, &x_src).await;
+    store(&pool, &y_src).await;
+    let plan = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+    for s in ["acme", "beta", "home"] {
+        pg.exec(&format!(
+            "INSERT INTO note (\"$space\", id, rev, kind) \
+             SELECT '{s}', '{s}' || i, 1, '{s} ' || i FROM generate_series(1, 30) i; \
+             INSERT INTO pin (\"$space\", id, rev, note) \
+             SELECT '{s}', '{s}-pin' || i, 1, '{s}' || i FROM generate_series(1, 5) i"
+        ))
+        .expect("rows");
+    }
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let ctx = step_context();
+    let week = 7 * 86_400;
+    let v = Versions::on(&pool);
+
+    // `acme` moves: one expand and one copy for the whole database.
+    let moved = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(one(&pg, "SELECT count(*) FROM memo"), "90");
+    assert_eq!(
+        one(&pg, TABLES_DIFFER),
+        "0",
+        "every space's rows are copied"
+    );
+    for src in [&x_src, &y_src] {
+        assert_eq!(drift(&pg, src).await, Vec::<String>::new(), "{src}");
+    }
+
+    // `beta` on 1.0.0 and `acme` soaking on 1.1.0 write through the real
+    // path.
+    let on_x = node_in(&pg.db, &x_src, "b", "beta").await;
+    let on_y = soaking_node(&pool, &pg.db, &y_src, "acme").await;
+    for i in 0..10 {
+        on_x.write(format!(r#"addNote($kind: "beta wrote {i}")"#))
+            .await
+            .expect("beta writes as 1.0.0");
+        on_y.write(format!(r#"addNote($kind: "acme wrote {i}")"#))
+            .await
+            .expect("acme writes as 1.1.0");
+    }
+    on_y.write(r#"dropNote($id: "acme30")"#.into())
+        .await
+        .expect("acme deletes as 1.1.0");
+    assert_eq!(
+        one(&pg, TABLES_DIFFER),
+        "0",
+        "each write reached both tables"
+    );
+
+    // A revert in the soak: `acme` is back on 1.0.0 with every write.
+    dual_writes::revert(&cx, "acme", OWNER)
+        .await
+        .expect("acme reverts");
+    assert_eq!(
+        v.pin_of("acme")
+            .await
+            .expect("read")
+            .and_then(|p| p.version),
+        Some("1.0.0".to_string())
+    );
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE kind LIKE 'acme wrote %'"
+        ),
+        "10",
+        "what acme wrote on 1.1.0 is there on 1.0.0"
+    );
+    let back = node_in(&pg.db, &x_src, "c", "acme").await;
+    back.write(r#"addNote($kind: "acme back")"#.into())
+        .await
+        .expect("acme writes as 1.0.0 again");
+    assert_eq!(one(&pg, TABLES_DIFFER), "0");
+
+    // `acme` moves again, then `beta`: their expand and copy are done.
+    let moved = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect("acme moves again");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    let moved = dual_writes::run(&cx, "beta", &plan, &ctx, week, OWNER)
+        .await
+        .expect("beta moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(moved.statements, 0, "no second expand");
+
+    // The own space is on 1.0.0: no close yet.
+    let err = dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect_err("the own space is on 1.0.0");
+    assert_eq!(err.class(), "soak_shared", "{err}");
+    assert_eq!(references(&pg, "pin$note$fk"), "note");
+
+    v.pin_own("home", "1.1.0", 0, OWNER, 20)
+        .await
+        .expect("the own space moves");
+    pg.exec("UPDATE \"$moves\" SET soak_until = 1")
+        .expect("both due");
+    let mut closed = dual_writes::close_due(&cx).await;
+    closed.sort();
+    assert_eq!(closed, vec!["acme".to_string(), "beta".to_string()]);
+
+    // Landed: `$renames`, the orphan, the reference, the record.
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$renames\""), "0");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM \"$orphans\" WHERE entity = 'note' AND field = ''"
+        ),
+        "1"
+    );
+    assert_eq!(references(&pg, "pin$note$fk"), "memo");
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$moves\""), "0");
+    assert_eq!(
+        ordo_exec::spacedb::recorded_version(&pool)
+            .await
+            .expect("recorded"),
+        ordo_exec::spacedb::TargetVersion::At("1.1.0".into())
+    );
+    let after = node_in(&pg.db, &y_src, "d", "acme").await;
+    after
+        .write(r#"addNote($kind: "after the close")"#.into())
+        .await
+        .expect("a write after the close");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE kind = 'after the close'"
+        ),
+        "0",
+        "the orphan is not written"
+    );
+}
+
+/// The deployment's own database, and one database per tenant.
+struct PerTenant {
+    control: Pool,
+    tenants: Vec<(String, Pool)>,
+}
+
+impl ordo_exec::route::PoolResolver for PerTenant {
+    fn resolve<'a>(&'a self, space: &'a ordo_crypto::SpaceId) -> ordo_exec::route::Resolving<'a> {
+        Box::pin(async move {
+            Ok(self
+                .tenants
+                .iter()
+                .find(|(n, _)| *n == space.0)
+                .map(|(_, p)| p.clone())
+                .unwrap_or_else(|| self.control.clone()))
+        })
+    }
+
+    fn targets<'a>(&'a self) -> ordo_exec::route::Targets<'a> {
+        Box::pin(async move {
+            let mut out = vec![ordo_exec::route::Target {
+                label: "default".into(),
+                pool: Ok(self.control.clone()),
+            }];
+            out.extend(self.tenants.iter().map(|(n, p)| ordo_exec::route::Target {
+                label: n.clone(),
+                pool: Ok(p.clone()),
+            }));
+            Ok(out)
+        })
+    }
+}
+
+/// Increment 11b with an entity rename, **a tenant with a database of its
+/// own**, as a rollout moves it (`every_tenant::forward_tenant`): the step
+/// is a move with dual writes. `ordo rollback` in the soak puts it back
+/// with every write (`revert_soaks_from`). Moved again, its soak closes
+/// alone and lands the rename in its own database. The rollback's dry run
+/// then says what moving back would lose: `memo`.
+///
+/// A regression looks like the step replayed with no soak, a write on
+/// 1.1.0 missing after the rollback, or a dry run that promises every
+/// write after the rename landed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_with_its_own_database_moves_through_an_entity_rename_and_rolls_back_in_the_soak()
+{
+    use ordo_host::dual_writes::MoveContext;
+    use ordo_host::every_tenant::{self, Forward};
+    let (_cpg, control) = empty("ordo_prev_entity_ctl").await;
+    let (tpg, solo) = empty("ordo_prev_entity_solo").await;
+    ordo_host::tenants::ensure_table(&control)
+        .await
+        .expect("$spaces");
+    assert!(
+        ordo_host::tenants::reserve(&control, "solo", "solo", "dev:ada", 10, None)
+            .await
+            .expect("reserved")
+    );
+    ordo_host::tenants::activate(&control, "solo", 11)
+        .await
+        .expect("active");
+    let (x_src, y_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+    );
+    apply_source(&control, &x_src).await;
+    let x = Program::compile(&x_src).expect("1.0.0");
+    let (_, created) = sa::apply(&solo, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    tpg.exec(
+        "INSERT INTO note (\"$space\", id, rev, kind) \
+         SELECT 'solo', 'solo' || i, 1, 'solo ' || i FROM generate_series(1, 40) i",
+    )
+    .expect("rows");
+    store(&control, &y_src).await;
+    evolve::evolve(
+        &control,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("the step stores");
+    let pools = PerTenant {
+        control: control.clone(),
+        tenants: vec![("solo".into(), solo.clone())],
+    };
+    let cx = MoveContext {
+        control: &control,
+        pools: &pools,
+        spaces: None,
+    };
+    let ctx = step_context();
+    let week = 7 * 86_400;
+    let v = Versions::on(&control);
+
+    let moved = every_tenant::forward_tenant(&cx, &ctx, "solo", "1.1.0", week, OWNER)
+        .await
+        .expect("solo moves");
+    assert!(
+        matches!(&moved, Forward::Switched(m) if !m.closed),
+        "a move with a soak"
+    );
+    assert_eq!(one(&tpg, TABLES_DIFFER), "0", "every row is copied");
+    let on_y = soaking_node(&control, &tpg.db, &y_src, "solo").await;
+    for i in 0..5 {
+        on_y.write(format!(r#"addNote($kind: "on 1.1.0 {i}")"#))
+            .await
+            .expect("solo writes as 1.1.0");
+    }
+
+    // `ordo rollback` in the soak: back on 1.0.0, every write kept.
+    let back = every_tenant::revert_soaks_from(&control, Some(&pools), None, "1.0.0", OWNER)
+        .await
+        .expect("rolled back");
+    assert_eq!(back, vec!["solo".to_string()]);
+    assert_eq!(
+        v.pin_of("solo")
+            .await
+            .expect("read")
+            .and_then(|p| p.version),
+        Some("1.0.0".to_string())
+    );
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT count(*) FROM note WHERE kind LIKE 'on 1.1.0 %'"
+        ),
+        "5"
+    );
+
+    // Moved again, and its soak closes alone: the rename lands there.
+    every_tenant::forward_tenant(&cx, &ctx, "solo", "1.1.0", week, OWNER)
+        .await
+        .expect("solo moves again");
+    let closed = ordo_host::dual_writes::close(&cx, "solo", OWNER)
+        .await
+        .expect("the soak closes");
+    assert!(closed.closed);
+    assert!(closed.orphaned.contains(&"note".to_string()), "{closed:?}");
+    assert_eq!(one(&tpg, "SELECT count(*) FROM \"$renames\""), "0");
+    assert_eq!(
+        v.pin_of("solo")
+            .await
+            .expect("read")
+            .and_then(|p| p.version),
+        Some("1.1.0".to_string())
+    );
+    v.activate("1.1.0", OWNER, ordo_commandlog::Timestamp(30))
+        .await
+        .expect("1.1.0 is active");
+    let dry = every_tenant::rollback_tenants(&control, "1.0.0")
+        .await
+        .expect("a dry run");
+    let solo_line = dry
+        .iter()
+        .find(|r| r["tenant"] == "solo")
+        .unwrap_or_else(|| panic!("{dry:?}"));
+    assert_eq!(solo_line["kept"], false, "{solo_line}");
+    assert!(
+        solo_line["note"].as_str().unwrap_or("").contains("memo"),
+        "{solo_line}"
+    );
+}
+
+/// **A large entity rename copies in chunks while writes keep landing**
+/// (the backfill worker, 10b, with `$renames`' dual writes). `solo` has a
+/// database of its own holding 20,000 notes. The stored step's move copies
+/// `note` into `memo` 500 rows a turn (`backfill.chunk_rows`, a budget of
+/// 1). Between turns, and while each turn runs, a node on 1.0.0 adds notes
+/// and deletes old ones, both ahead of the cursor and behind it. Every
+/// write lands while the copy is still `backfilling`, none waits for the
+/// whole copy, and once verify passes and the pin switches, every row is in
+/// both tables with the same columns, with no deleted row copied back.
+///
+/// A regression looks like a write refused or timed out during the copy (a
+/// copy held under the `$renames` lock), a row in one table only, or a
+/// deleted row back in `memo`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_entity_rename_copies_in_chunks_while_writes_keep_landing() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let (_cpg, control) = empty("ordo_prev_entity_big_ctl").await;
+    let (tpg, solo) = empty("ordo_prev_entity_big").await;
+    ordo_host::tenants::ensure_table(&control)
+        .await
+        .expect("$spaces");
+    assert!(
+        ordo_host::tenants::reserve(&control, "solo", "solo", "dev:ada", 10, None)
+            .await
+            .expect("reserved")
+    );
+    ordo_host::tenants::activate(&control, "solo", 11)
+        .await
+        .expect("active");
+    let (x_src, y_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+    );
+    apply_source(&control, &x_src).await;
+    let x = Program::compile(&x_src).expect("1.0.0");
+    let (_, created) = sa::apply(&solo, &x, "test", "test").await;
+    assert!(
+        matches!(created, Ok(sa::Applied::Created(_))),
+        "{created:?}"
+    );
+    tpg.exec(
+        "INSERT INTO note (\"$space\", id, rev, kind) \
+         SELECT 'solo', 'solo' || lpad(i::text, 5, '0'), 1, 'solo ' || i \
+         FROM generate_series(1, 20000) i",
+    )
+    .expect("20,000 rows");
+    store(&control, &y_src).await;
+    let plan = evolve::evolve(
+        &control,
+        "1.0.0",
+        "1.1.0",
+        &Choices::default(),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect("the step stores")
+    .plan;
+    assert!(
+        plan.receipt.contains("copyFrom"),
+        "the copy is the worker's: {}",
+        plan.receipt
+    );
+    let pools = PerTenant {
+        control: control.clone(),
+        tenants: vec![("solo".into(), solo.clone())],
+    };
+    let cx = MoveContext {
+        control: &control,
+        pools: &pools,
+        spaces: None,
+    };
+    let ctx = evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 500,
+            budget: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let week = 7 * 86_400;
+
+    // The first turn: the expand and one chunk. Writes go on.
+    let first = dual_writes::run(&cx, "solo", &plan, &ctx, week, OWNER)
+        .await
+        .expect("the move starts");
+    assert_eq!(first.phase, MovePhase::Backfilling, "{first:?}");
+    let copied = one(&tpg, "SELECT count(*) FROM memo");
+    assert_eq!(copied, "500", "one chunk, not the table");
+
+    let writer = std::sync::Arc::new(node_in(&tpg.db, &x_src, "w", "solo").await);
+    let w = writer.clone();
+    let writes = tokio::spawn(async move {
+        let mut bad = Vec::new();
+        let mut slowest = std::time::Duration::ZERO;
+        for i in 0..150 {
+            let started = std::time::Instant::now();
+            if let Err(e) = w.write(format!(r#"addNote($kind: "live {i}")"#)).await {
+                bad.push(format!("add {i}: {e}"));
+            }
+            if i % 5 == 0 {
+                // One ahead of the cursor, one behind it.
+                for id in [format!("solo{:05}", 20000 - i), format!("solo{:05}", i + 1)] {
+                    if let Err(e) = w.write(format!(r#"dropNote($id: "{id}")"#)).await {
+                        bad.push(format!("drop {id}: {e}"));
+                    }
+                }
+            }
+            slowest = slowest.max(started.elapsed());
+        }
+        (bad, slowest)
+    });
+
+    // The worker's turns, beside the writes.
+    let mut turns = 1;
+    let mut during = 0;
+    loop {
+        let m = dual_writes::run(&cx, "solo", &plan, &ctx, week, OWNER)
+            .await
+            .expect("a turn");
+        turns += 1;
+        if m.phase != MovePhase::Backfilling {
+            assert_eq!(m.phase, MovePhase::Soaking, "{m:?}");
+            break;
+        }
+        if !writes.is_finished() {
+            during += 1;
+        }
+        assert!(turns < 200, "the copy ends");
+    }
+    let (bad, slowest) = writes.await.unwrap();
+    assert!(bad.is_empty(), "every write landed: {bad:?}");
+    assert!(during > 0, "the writes ran while the copy was backfilling");
+    assert!(
+        slowest < std::time::Duration::from_secs(5),
+        "no write waited for the copy: {slowest:?}"
+    );
+    assert!(turns >= 40, "the copy ran in chunks: {turns} turns");
+    // Writes the node makes after the switch, on 1.0.0 still: kept too.
+    writer
+        .write(r#"addNote($kind: "after the switch")"#.into())
+        .await
+        .expect("a write after the copy");
+    assert_eq!(
+        one(&tpg, "SELECT count(*) FROM note"),
+        (20000 + 150 + 1 - 60).to_string()
+    );
+    assert_eq!(one(&tpg, TABLES_DIFFER), "0", "every row is in both tables");
+    assert_eq!(
+        one(
+            &tpg,
+            "SELECT count(*) FROM memo WHERE id IN ('solo20000', 'solo00001')"
+        ),
+        "0",
+        "no deleted row is copied back"
+    );
+}
+
+/// **The path `ordo apply` points to copies a large table in chunks while
+/// writes keep landing** (`ordo evolve --run` on the deployment's own
+/// database). It holds 20,000 notes. `ordo apply` of the rename is refused
+/// (above); the stored step runs instead, 500 rows a run (`--chunk-rows
+/// 500 --budget 1`). A node on 1.0.0 adds and deletes notes between and
+/// during the runs. Every write lands while the copy is still
+/// backfilling, none waits for the whole copy, and once verify passes the
+/// database records 1.1.0 with every row in both tables.
+///
+/// A regression looks like a write refused or timed out during the copy, a
+/// row in one table only, or a deleted row back in `memo`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_entity_rename_run_on_the_deployments_own_database_copies_in_chunks_under_writes() {
+    use ordo_host::evolve::StepRun;
+    let (pg, pool) = empty("ordo_prev_entity_big_run").await;
+    let (x_src, y_src) = (
+        pinned("1.0.0", "note", false),
+        pinned("1.1.0", "memo", true),
+    );
+    apply_source(&pool, &x_src).await;
+    pg.exec(
+        "INSERT INTO note (\"$space\", id, rev, kind) \
+         SELECT 'home', 'home' || lpad(i::text, 5, '0'), 1, 'home ' || i \
+         FROM generate_series(1, 20000) i",
+    )
+    .expect("20,000 rows");
+    store(&pool, &y_src).await;
+    let step = evolve::evolve(&pool, "1.0.0", "1.1.0", &Choices::default(), None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+    let ctx = evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 500,
+            budget: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let run = || evolve::run_step_with(&pool, &pool, "deployment", &step, OWNER, &ctx);
+    let first = run().await.expect("the step starts");
+    assert!(matches!(first, StepRun::Backfilling { .. }), "{first:?}");
+    assert_eq!(one(&pg, "SELECT count(*) FROM memo"), "500");
+
+    let writer = std::sync::Arc::new(node_in(&pg.db, &x_src, "w", "home").await);
+    let w = writer.clone();
+    let writes = tokio::spawn(async move {
+        let mut bad = Vec::new();
+        let mut slowest = std::time::Duration::ZERO;
+        for i in 0..150 {
+            let started = std::time::Instant::now();
+            if let Err(e) = w.write(format!(r#"addNote($kind: "live {i}")"#)).await {
+                bad.push(format!("add {i}: {e}"));
+            }
+            if i % 5 == 0 {
+                for id in [format!("home{:05}", 20000 - i), format!("home{:05}", i + 1)] {
+                    if let Err(e) = w.write(format!(r#"dropNote($id: "{id}")"#)).await {
+                        bad.push(format!("drop {id}: {e}"));
+                    }
+                }
+            }
+            slowest = slowest.max(started.elapsed());
+        }
+        (bad, slowest)
+    });
+    let mut runs = 1;
+    let mut during = 0;
+    loop {
+        let r = run().await.expect("a run");
+        runs += 1;
+        if !matches!(r, StepRun::Backfilling { .. }) {
+            break;
+        }
+        if !writes.is_finished() {
+            during += 1;
+        }
+        assert!(runs < 200, "the copy ends");
+    }
+    let (bad, slowest) = writes.await.unwrap();
+    assert!(bad.is_empty(), "every write landed: {bad:?}");
+    assert!(during > 0, "the writes ran while the copy was backfilling");
+    assert!(
+        slowest < std::time::Duration::from_secs(5),
+        "no write waited for the copy: {slowest:?}"
+    );
+    assert!(runs >= 40, "the copy ran in chunks: {runs} runs");
+    assert_eq!(
+        ordo_exec::spacedb::recorded_version(&pool)
+            .await
+            .expect("recorded"),
+        ordo_exec::spacedb::TargetVersion::At("1.1.0".into())
+    );
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM memo"),
+        (20000 + 150 - 60).to_string()
+    );
+    assert_eq!(one(&pg, TABLES_DIFFER), "0", "every row is in both tables");
 }
 
 /// **The offer to remove a landed mark** names it in the chain's last
@@ -1089,16 +2019,19 @@ async fn moving_node(pool: &Pool, db: &str, source: &str, space: &str, reverse: 
 /// path and their rows get the label by the mapping; `acme` on 1.1.0 writes
 /// its own label, which is kept. The check is not in the database: the
 /// host holds it on `acme`'s writes, and a `bad` label is refused by name.
-/// `beta` moves with no second expand. The own space, still on 1.0.0,
-/// writes a row whose mapped label breaks the check. Once every space is
-/// past 1.0.0 the close is refused, naming that row; changed, the soaks
-/// close together: the `NOT NULL` and the check land, `$fills` is empty.
+/// `beta` moves with no second expand. The own space, still on 1.0.0, is
+/// held to the check too (`$held`, 11b): a write whose mapped label breaks
+/// it is refused by name. A row that breaks it all the same, written by
+/// hand, makes the close refuse once every space is past 1.0.0, naming
+/// that row; changed, the soaks close together: the `NOT NULL` and the
+/// check land, `$fills` and `$held` are empty.
 ///
 /// A regression looks like a row a space on 1.0.0 wrote with no label (the
 /// `NOT NULL` would fail at the close), a label of `acme`'s overwritten by
-/// the mapping, a check in the database before the close (a write on 1.0.0
-/// would fail on a rule it never had), or a close that fails on the raw
-/// constraint error instead of naming the row.
+/// the mapping, a check in the database before the close (a raw constraint
+/// error on 1.0.0's writes), a write on 1.0.0 that breaks the held check
+/// and is kept, or a close that fails on the raw constraint error instead
+/// of naming the row.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_check_waits_for_the_close(
 ) {
@@ -1187,10 +2120,32 @@ async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_
     assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
     assert_eq!(moved.statements, 0, "no second expand");
 
-    // The own space, still on 1.0.0, writes a row the check refuses.
-    home.write(r#"addNote($kind: "bad")"#.into())
+    // The own space, still on 1.0.0, is held to the check 1.1.0 adds: its
+    // write is refused by name, the versions and the fix in the answer
+    // (11b, `$held`).
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$held\""), "1");
+    let err = home
+        .write(r#"addNote($kind: "bad")"#.into())
         .await
-        .expect("1.0.0 has no such rule");
+        .expect_err("held to 1.1.0's check");
+    assert!(
+        err.contains("check_violation: this space serves `1.0.0`"),
+        "{err}"
+    );
+    for want in ["holds the check", "move this space to `1.1.0`"] {
+        assert!(err.contains(want), "{want}: {err}");
+    }
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM note WHERE label = 'bad'"),
+        "0"
+    );
+    // A row that breaks it all the same (written before the move, by
+    // hand): the close still names it.
+    pg.exec(
+        "UPDATE note SET kind = 'bad', label = 'bad' WHERE \"$space\" = 'home' \
+         AND id = (SELECT min(id) FROM note WHERE \"$space\" = 'home')",
+    )
+    .expect("a bad row");
     let bad = one(&pg, "SELECT id FROM note WHERE label = 'bad'");
 
     // Every space past 1.0.0, both soaks due: the close names the row.
@@ -1226,6 +2181,7 @@ async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_
         "1"
     );
     assert_eq!(one(&pg, "SELECT count(*) FROM \"$fills\""), "0");
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$held\""), "0", "landed");
     assert_eq!(one(&pg, "SELECT count(*) FROM \"$moves\""), "0");
     assert_eq!(
         ordo_exec::spacedb::recorded_version(&pool)

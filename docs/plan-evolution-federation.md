@@ -184,6 +184,10 @@ In a shared database, tenants move one at a time and share the table.
   for people who used it. They read nothing; nothing leaks. The pre-check
   on that version says: "this version removes `google`, the only provider
   shared with peer `journal`."
+  **Built 2026-11-24** (branch `evo-small-remainders`): the note names each
+  peer either version reads. It cannot say "the only provider shared",
+  because a peer's `auth` block is not readable from here, so it says the
+  peer matches people by their sign-in and whose owner to tell.
 
 ---
 

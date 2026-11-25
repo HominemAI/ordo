@@ -298,7 +298,10 @@ fn usage() -> ! {
          and the revoke are one change.\n  \
          ordo versions  unrevoke <version> --reason \"<text>\"\n      \
          lift the mark. Both acts stay on record with who, why and when.\n  \
-         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear --reason \"<text>\"\n      \
+         ordo versions  remove <version> --reason \"<text>\" [--move-to <version>]\n      \
+         remove a stored version, moving its tenants first. Refused when it\n      \
+         is active, a build serves it, or a restore may still need it.\n  \
+         ordo versions  settings | set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window> <value> | --clear --reason \"<text>\"\n      \
          read or change which versions are served, the oldest a tenant may\n      \
          stay on, and the version new tenants start on. Stored in Ordo,\n      \
          through the door only (`--host ...`); a refused value is named.\n  \
@@ -318,14 +321,16 @@ fn usage() -> ! {
          promotion.skip_staging: promote past staging from the step before it.\n  \
          ordo environments set release-mismatch refuse|warn | attestation-max-age <n>d --reason \"<text>\"\n      \
          what production accepts of a signed rehearsal (default refuse, 7d).\n  \
-         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks <value>\n      \
+         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks|max-size <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
          seals each clone to it. clone.mask names the fields that leave\n      \
          production unmasked (deny by default, `off` to opt out);\n      \
          clone.readers names who besides staging's admins opens a clone.\n      \
          clone.sinks: `on` (default) sends every staging tenant's mail and\n      \
-         function calls to the sink, `clones` only the clones'; `sink` reads it.\n  \
+         function calls to the sink, `clones` only the clones'; `sink` reads it.\n      \
+         clone.max_size: the most a clone may weigh as it travels, `<n>MiB`\n      \
+         from 1 to 1024 (default 64MiB), read on staging.\n  \
          ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \

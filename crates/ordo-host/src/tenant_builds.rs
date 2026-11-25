@@ -517,6 +517,34 @@ impl<'a> TenantBuilds<'a> {
     /// brought forward and gated, the deployment's own is checked. Nothing
     /// is pinned here.
     async fn ready_all(&self, spaces: &[String], version: &str) -> Result<(), BuildRefusal> {
+        ready_for(self.ops, spaces, version, OP, SET_BUILD).await
+    }
+}
+
+/// **Each tenant's database holds `version`**, before any pin moves: a
+/// database of its own is brought forward and gated under the apply lock,
+/// the deployment's own is checked. `actor` and `op` are what the bring
+/// forward records. Shared by the tenant builds and the removal of a
+/// version (`crate::version_removal`).
+pub(crate) async fn ready_for(
+    ops: &ApplyOps,
+    spaces: &[String],
+    version: &str,
+    actor: &str,
+    op: &str,
+) -> Result<(), BuildRefusal> {
+    let this = TenantBuilds { ops };
+    this.ready_with(spaces, version, actor, op).await
+}
+
+impl<'a> TenantBuilds<'a> {
+    async fn ready_with(
+        &self,
+        spaces: &[String],
+        version: &str,
+        actor: &str,
+        op: &str,
+    ) -> Result<(), BuildRefusal> {
         if spaces.is_empty() {
             return Ok(());
         }
@@ -572,7 +600,7 @@ impl<'a> TenantBuilds<'a> {
                 .resolve(&id)
                 .await
                 .map_err(|e| behind(format!("its database cannot be reached ({e})"), true))?;
-            sa::bring_forward_from(&target, Some(self.pool()), &program, OP, SET_BUILD)
+            sa::bring_forward_from(&target, Some(self.pool()), &program, actor, op)
                 .await
                 .map_err(|e| behind(format!("{}: {}", e.class, e.why), e.transient))?;
             match sa::schema_state(&target, &program.schema).await {

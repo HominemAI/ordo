@@ -17,6 +17,9 @@ ordo branches list
     every branch, its tenant, version and when it was last applied. A branch
     not applied to for branch.idle_list_after (ORDO_BRANCH_IDLE_LIST_AFTER on
     the host, 30d by default) is marked idle. Nothing is removed for it.
+ordo branches set idle-list-after <n>d|<n>h|<n>m|<n>s|default --reason \"...\"
+    store branch.idle_list_after; it replaces the environment variable.
+    `default` clears it, so the variable (then 30d) reads again.
 ordo branches delete <name> --reason \"...\"
     remove a branch's tenant: its database is dropped and its keys destroyed.
     The only way a branch goes; a merge never removes one.
@@ -216,6 +219,30 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 b::IDLE_SETTING
             ));
             Outcome::ok(out)
+        }
+        ["set", "idle-list-after", value] => {
+            let Some(reason) = flags.named_value("--reason") else {
+                return Outcome::usage(
+                    "`--reason \"<text>\"` says why, and is kept with the change\n".into(),
+                );
+            };
+            let row = match crate::wire::door_op(
+                &host,
+                &flags,
+                b::SET_SETTING,
+                json!({ "value": value, "reason": reason }),
+                true,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(o) => return o,
+            };
+            Outcome::ok(format!(
+                "set        {} is {} (kept with who, when and why)\n",
+                b::IDLE_SETTING,
+                idle_words(row["idleAfter"].as_u64().unwrap_or(b::IDLE_DEFAULT_SECS))
+            ))
         }
         ["delete", name] => {
             let Some(reason) = flags.named_value("--reason") else {

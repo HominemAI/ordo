@@ -640,7 +640,18 @@ async fn a_failed_batch_pauses_and_an_unreachable_database_waits() {
     r.skip("spc_dup", OWNER, Some("data to fix by hand"), NOW + 20)
         .await
         .expect("skipped");
-    r.resume(NOW + 21).await.expect("resumed");
+    // Resumed through the door (`std.deployment.rollout.resume`, what the
+    // console's Rollouts screen calls), recorded as `rollout-resumed`.
+    let resumed = deploy_ops::execute(
+        &ops,
+        deploy_ops::ROLLOUT_RESUME,
+        "home",
+        &BoundParams(serde_json::Map::new()),
+        OWNER,
+    )
+    .await
+    .expect("resumed");
+    assert_eq!(resumed.rows[0]["state"], "running");
     let t = rollouts::tick(&ops, "n", NOW + 22).await.unwrap();
     assert!(!t.paused && !t.finished, "{t:?}");
     assert_eq!(t.waiting.len(), 1, "{t:?}");
@@ -652,7 +663,10 @@ async fn a_failed_batch_pauses_and_an_unreachable_database_waits() {
     assert_eq!(t.moved, ["spc_gone"], "{t:?}");
     assert!(t.finished, "{t:?}");
     assert_eq!(on(&control, "spc_dup").await.as_deref(), Some("0.1.0"));
-    assert_eq!(acts(&stream), ["rollout-paused", "rollout-finished"]);
+    assert_eq!(
+        acts(&stream),
+        ["rollout-paused", "rollout-resumed", "rollout-finished"]
+    );
 }
 
 // ── the leader ──────────────────────────────────────────────────────────
@@ -1140,9 +1154,26 @@ async fn retry_reopens_a_refused_move() {
     )
     .await
     .unwrap();
+    // Through the door (`std.deployment.rollout.retry`, what the console's
+    // Moves screen calls), recorded as `rollout-retried`.
+    let (ops, stream) = shared_ops(&pool);
+    let done = deploy_ops::execute(
+        &ops,
+        deploy_ops::ROLLOUT_RETRY,
+        "home",
+        &BoundParams(
+            serde_json::json!({"tenant": "spc_a"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        OWNER,
+    )
+    .await
+    .expect("reopened");
+    assert_eq!(done.rows[0]["move"]["to"], "0.2.0", "{:?}", done.rows);
+    assert_eq!(acts(&stream), ["rollout-retried"]);
     let r = Rollouts::on(&pool);
-    let done = r.retry("spc_a", NOW).await.expect("reopened");
-    assert_eq!(done, rollouts::Retried::Move { to: "0.2.0".into() });
     let m = Versions::on(&pool).moves().await.unwrap();
     assert_eq!(m[0].phase, ordo_host::versions::MovePhase::Expanding);
     assert_eq!(m[0].reason, "");

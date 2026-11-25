@@ -94,6 +94,65 @@ const CALLS: &[(&str, Rule)] = &[
     ),
     // Maintenance windows (owner, 2026-11-04).
     ("std.deployment.windows", Read),
+    // The Rollouts screen (versions increments 10 and 10c). Four-part
+    // names: the scan finds every `std.` name, whatever its length.
+    ("std.deployment.rollout.status", Read),
+    (
+        "std.deployment.rollout.start",
+        Write {
+            act: "rollout-started",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
+    (
+        "std.deployment.rollout.resume",
+        Write {
+            act: "rollout-resumed",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
+    (
+        "std.deployment.rollout.skip",
+        Write {
+            act: "rollout-skipped",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
+    (
+        "std.deployment.rollout.retry",
+        Write {
+            act: "rollout-retried",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
+    (
+        "std.deployment.rollout.abort",
+        Write {
+            act: "rollout-aborted",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
+    (
+        "std.deployment.rollout.finish",
+        Write {
+            act: "rollout-finished",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
+    (
+        "std.deployment.rollout.hold",
+        Write {
+            act: "rollout-held",
+            src: "rollouts.rs",
+            test: "rollouts.rs",
+        },
+    ),
     // The Moves screen (versions increments 7 and 11a).
     ("std.deployment.rollbackCheck", Read),
     (
@@ -560,8 +619,29 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every `"std.<...>"` literal in the console's own source, outside its
-/// unit tests.
+/// Every op-shaped `"std.<...>"` literal in `code`: `std.` then two or
+/// more dot-separated names of letters, digits and `_`, so a name of any
+/// length (`std.deployment.rollout.start`) is found.
+fn ops_in(code: &str) -> BTreeSet<String> {
+    let mut ops = BTreeSet::new();
+    for (i, _) in code.match_indices("\"std.") {
+        let rest = &code[i + 1..];
+        let end = rest.find('"').unwrap_or(0);
+        let lit = &rest[..end];
+        let parts: Vec<&str> = lit.split('.').collect();
+        let op_shaped = parts.len() >= 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        if op_shaped {
+            ops.insert(lit.to_string());
+        }
+    }
+    ops
+}
+
+/// Every op-shaped literal in the console's own source, outside its unit
+/// tests.
 fn ops_the_console_calls() -> BTreeSet<String> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
@@ -570,20 +650,18 @@ fn ops_the_console_calls() -> BTreeSet<String> {
     for f in files {
         let text = std::fs::read_to_string(&f).expect("readable");
         let code = text.split("#[cfg(test)]").next().unwrap_or("");
-        for (i, _) in code.match_indices("\"std.") {
-            let rest = &code[i + 1..];
-            let end = rest.find('"').unwrap_or(0);
-            let lit = &rest[..end];
-            let op_shaped = lit.split('.').count() == 3
-                && lit
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
-            if op_shaped {
-                ops.insert(lit.to_string());
-            }
-        }
+        ops.extend(ops_in(code));
     }
     ops
+}
+
+/// The ops in `called` that [`CALLS`] does not place.
+fn unplaced(called: BTreeSet<String>) -> Vec<String> {
+    let placed: BTreeSet<&str> = CALLS.iter().map(|(op, _)| *op).collect();
+    called
+        .into_iter()
+        .filter(|op| !placed.contains(op.as_str()))
+        .collect()
 }
 
 fn host(path: &str) -> String {
@@ -595,17 +673,50 @@ fn host(path: &str) -> String {
 
 #[test]
 fn every_door_op_the_console_calls_is_placed() {
-    let placed: BTreeSet<&str> = CALLS.iter().map(|(op, _)| *op).collect();
-    let unplaced: Vec<String> = ops_the_console_calls()
-        .into_iter()
-        .filter(|op| !placed.contains(op.as_str()))
-        .collect();
+    let unplaced = unplaced(ops_the_console_calls());
     assert!(
         unplaced.is_empty(),
         "the console calls door ops G12's guard has not placed: {unplaced:?}. Add each to \
          CALLS as a read, or as a write with the act it records and the ordo-host test that \
          asserts the record"
     );
+}
+
+/// **No op name's shape escapes the scan.** A three-part and a four-part
+/// name are found; a name the list does not place fails the guard, whatever
+/// its length. Text that is not an op name is not taken for one.
+#[test]
+fn an_op_of_any_length_missing_from_the_list_fails_the_guard() {
+    let code = r#"
+        pub const A: &str = "std.deployment.rollout.pause";
+        pub const B: &str = "std.space.members";
+        pub const C: &str = "std.deployment.rollout.start";
+        let not = "std.";
+        let nor = "std..x.y";
+        let prose = "std.deployment.tenants lists them";
+    "#;
+    let found = ops_in(code);
+    assert_eq!(
+        found.iter().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "std.deployment.rollout.pause",
+            "std.deployment.rollout.start",
+            "std.space.members"
+        ],
+    );
+    assert_eq!(unplaced(found), ["std.deployment.rollout.pause"]);
+    // The console's own rollout ops are found by the scan, so each is held.
+    let called = ops_the_console_calls();
+    for op in [
+        "std.deployment.rollout.status",
+        "std.deployment.rollout.start",
+        "std.deployment.rollout.hold",
+    ] {
+        assert!(
+            called.contains(op),
+            "{op} not found in the console's source"
+        );
+    }
 }
 
 #[test]

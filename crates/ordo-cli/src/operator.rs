@@ -3750,6 +3750,7 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "revoke" => versions_revoke(flags).await,
         "unrevoke" => versions_unrevoke(flags).await,
         "revoked" => versions_revoked(flags).await,
+        "remove" => versions_remove(flags).await,
         "pin" => versions_pin(flags).await,
         "move" => versions_move(flags).await,
         "target" => versions_target(flags).await,
@@ -3757,8 +3758,8 @@ async fn versions_cmd(flags: Flags) -> Outcome {
         "set" => versions_set(flags).await,
         other => Outcome::usage(format!(
             "unknown `ordo versions` subcommand `{other}`; there are `list`, `show`, \
-             `label`, `diff`, `revoke`, `unrevoke`, `revoked`, `pin`, `move`, `target`, \
-             `settings` and `set`\n"
+             `label`, `diff`, `revoke`, `unrevoke`, `revoked`, `remove`, `pin`, `move`, \
+             `target`, `settings` and `set`\n"
         )),
     }
 }
@@ -3773,8 +3774,9 @@ const VERSIONS_USAGE: &str = "ordo versions list [--tenant <id>]  --host <h> ...
      ordo versions revoke <version> --reason \"<text>\" [--move-to <version>]  --host <h> ...\n\
      ordo versions unrevoke <version> --reason \"<text>\"  --host <h> ...\n\
      ordo versions revoked  --host <h> ...\n\
+     ordo versions remove <version> --reason \"<text>\" [--move-to <version>]  --host <h> ...\n\
      ordo versions settings [--limit <n>]  --host <h> ...\n\
-     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after> <value> | --clear  --reason \"<text>\"  \
+     ordo versions set <served|minimum|new-tenant|min-residency|idle-evict-after|restore-window> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
      ordo versions set backfill.<chunk_rows|chunk_timeout|max_attempts|budget> <value> | --clear  --reason \"<text>\"  \
      --host <h> ...\n\
@@ -4038,6 +4040,64 @@ async fn versions_revoked(flags: Flags) -> Outcome {
     }
 }
 
+/// `ordo versions remove <version> --reason "..." [--move-to <w>]`: remove
+/// a stored version, moving its tenants to `<w>` first
+/// (`plan-versions.md` §1.6), through `std.deployment.removeVersion`,
+/// deployment owner only. Refused by name when it is active, a tenant build
+/// serves it, a restore may still need it, or a tenant cannot move.
+async fn versions_remove(flags: Flags) -> Outcome {
+    let mut allowed = vec!["--reason", "--move-to"];
+    allowed.extend(DOOR_FLAGS);
+    if let Err(e) = flags.only(&allowed) {
+        return Outcome::usage(e);
+    }
+    let [version] = flags.positional.as_slice() else {
+        return Outcome::usage(format!("{VERSIONS_USAGE}\n"));
+    };
+    let reason = match flags.require("--reason") {
+        Ok(r) => r.to_string(),
+        Err(e) => return Outcome::usage(format!("{e}: a removal says why, and stays on record\n")),
+    };
+    let move_to = flags.named_value("--move-to").map(str::to_string);
+    let host = match door_only(&flags) {
+        Ok(h) => h,
+        Err(o) => return o,
+    };
+    let row = match crate::wire::door_op(
+        &host,
+        &flags,
+        ordo_host::deploy_ops::REMOVE_VERSION,
+        serde_json::json!({ "version": version, "reason": reason, "moveTo": move_to }),
+        true,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(o) => return o,
+    };
+    let moved: Vec<&str> = row["moved"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+        .unwrap_or_default();
+    let mut out = String::new();
+    if let Some(to) = row["movedTo"].as_str() {
+        out.push_str(&format!(
+            "moved      {} tenant{} to {to}: {}\n",
+            moved.len(),
+            if moved.len() == 1 { "" } else { "s" },
+            moved.join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "removed    {}  \"{reason}\"\n",
+        numbered(
+            row["ordinal"].as_u64(),
+            row["version"].as_str().unwrap_or(version)
+        )
+    ));
+    Outcome::ok(out)
+}
+
 /// `ordo versions move <tenant>`: move one tenant off the revoked version
 /// it is on, now, to the target the app developer chose (ruled
 /// 2026-11-05). Locally through `Versions::move_off_revoked`, or over the
@@ -4223,10 +4283,14 @@ fn door_unless_direct(flags: &Flags) -> Option<Result<crate::wire::Host, String>
 fn settings_lines(row: &serde_json::Value) -> String {
     let show = |k: &str, unset: &str| row[k].as_str().unwrap_or(unset).to_string();
     format!(
-        "  served      {}\n  minimum     {}\n  new tenants {}\n",
+        "  served      {}\n  minimum     {}\n  new tenants {}\n  restore window {}\n",
         show("served", "in-use"),
         show("minimum", "none"),
-        show("newTenant", "the active version")
+        show("newTenant", "the active version"),
+        show(
+            "restoreWindow",
+            "unset: every version that served is held for a restore"
+        )
     ) + &row["waiting"]["line"]
         .as_str()
         .map(|l| format!("  WAITING     {l}\n"))
@@ -4324,8 +4388,8 @@ async fn versions_set(flags: Flags) -> Outcome {
     let Some(setting) = ordo_host::versions::VersionSetting::parse(&name) else {
         return Outcome::usage(format!(
             "`{name}` is not a version setting; there are `served`, `minimum`, \
-             `new-tenant`, `min-residency` and `idle-evict-after`, and the backfill \
-             settings {}\n",
+             `new-tenant`, `min-residency`, `idle-evict-after` and `restore-window`, and the \
+             backfill settings {}\n",
             ordo_host::backfill::SETTINGS.join(", ")
         ));
     };

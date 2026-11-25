@@ -187,7 +187,7 @@ pub enum EvolveRefusal {
     /// deployment owner has not approved it for this count (ruled
     /// 2026-11-23, Q6). Nothing was stored.
     SignInRemoval {
-        removal: crate::precheck::SignInRemoval,
+        removal: Box<crate::precheck::SignInRemoval>,
         /// The count an approval named, when one was given.
         approved: Option<u64>,
     },
@@ -959,6 +959,21 @@ pub async fn render_stored(
             receipt["maps"] = Value::Array(triaged.maps.iter().map(sa::MapStep::to_json).collect());
         }
     }
+    // An entity rename (`(prev: old)`): the step keeps both tables current
+    // and lands the rename at the soak's close. Present only when the step
+    // renames an entity, so every plan stored before keeps its digest.
+    let renamed: Vec<Value> = changes
+        .iter()
+        .filter_map(|c| match c {
+            Change::RenameEntity { entity, from } => {
+                Some(json!({ "entity": entity, "from": from }))
+            }
+            _ => None,
+        })
+        .collect();
+    if !renamed.is_empty() {
+        receipt["entityRenames"] = Value::Array(renamed);
+    }
     let digest = digest_of(&receipt);
     let readers = reader_notices(&x, &y, &changes, at);
     Ok(Rendered {
@@ -1264,6 +1279,16 @@ fn fix_for(c: &Change, class: &str) -> String {
             "state how every existing row gets a value: `--fill {entity}.{field}=<expression>` \
              over the row's own fields, or `--fill {entity}.{field}=fn <function>`"
         ),
+        (Change::RenameEntity { entity, from }, "rename_entity_reshaped") => format!(
+            "rename `{from}` to `{entity}` in one version with the same fields, and change its \
+             fields in the next"
+        ),
+        (Change::RenameEntity { from, .. }, "rename_entity_sealed") => format!(
+            "keep the name `{from}`, or unseal its sealed fields in a version before the rename"
+        ),
+        (Change::RenameEntity { from, .. }, "rename_entity_acl") => {
+            format!("keep the name `{from}`: an entity with `acl` is not renamed yet")
+        }
         (_, "plan_refused") => "the change is refused by ruling; declare it another way".into(),
         // A split or a merge (15b): the refusal names the option to give.
         (
@@ -1440,6 +1465,32 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
             (
                 out,
                 Some("the old columns were kept and, with a reverse for each, kept current through the soak; the new columns go. With no reverse it is one way: accept this one way change; revert requires this or manual intervention".into()),
+            )
+        }
+        // The entity rename read backwards: the old table was kept and
+        // written by both versions, so the rename leaves `$renames`, the
+        // references into the old table are checked at once again, and the
+        // new table goes.
+        Change::RenameEntity { entity, from } => {
+            let mut out = vec![
+                format!("{};", ordo_exec::overlay::RENAMES_DDL),
+                format!(
+                    "DELETE FROM \"$renames\" WHERE \"entity\" = '{}' AND \"from\" = '{}';",
+                    entity.replace('\'', "''"),
+                    from.replace('\'', "''")
+                ),
+            ];
+            for (table, fk) in sa::references_into(&x.schema, from) {
+                out.push(format!(
+                    "ALTER TABLE {} ALTER CONSTRAINT {} NOT DEFERRABLE;",
+                    q(&table),
+                    q(&fk)
+                ));
+            }
+            out.push(format!("DROP TABLE {};", q(entity)));
+            (
+                out,
+                Some("the rename read backwards: the old table was kept and written by both versions, and the new one goes".into()),
             )
         }
         Change::ChangePlaces { .. } | Change::ChangeType { .. } => (
@@ -1757,7 +1808,7 @@ pub async fn evolve_approved(
     if let Some(removal) = &sign_in {
         if removal.people > 0 && approved != Some(removal.people) {
             return Err(EvolveRefusal::SignInRemoval {
-                removal: removal.clone(),
+                removal: Box::new(removal.clone()),
                 approved,
             });
         }
@@ -2533,6 +2584,10 @@ pub async fn run_step_with(
     crate::dual_writes::forget_fills(target, &backfills)
         .await
         .map_err(|e| run_err("internal", e.to_string(), true))?;
+    // A check a move held there has landed too.
+    crate::dual_writes::forget_held(target, &held)
+        .await
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     // `seal.keep_plaintext`: the kept plaintext column is an orphan, for
     // erasure, export and pruning (increment 14's table).
     // B10's old blind index too: kept and written until it is pruned, so a
@@ -2720,10 +2775,16 @@ pub fn receipt_lines(receipt: &Value) -> Vec<String> {
         out.push(format!("forward: {}", s.as_str().unwrap_or_default()));
     }
     for b in receipt["backfills"].as_array().into_iter().flatten() {
+        let target = match b["field"].as_str() {
+            Some("") => b["entity"].as_str().unwrap_or("?").to_string(),
+            f => format!(
+                "{}.{}",
+                b["entity"].as_str().unwrap_or("?"),
+                f.unwrap_or("?")
+            ),
+        };
         let mut line = format!(
-            "backfill: {}.{} = {} · audit: {}",
-            b["entity"].as_str().unwrap_or("?"),
-            b["field"].as_str().unwrap_or("?"),
+            "backfill: {target} = {} · audit: {}",
             b["mapping"].as_str().unwrap_or("?"),
             b["audit"].as_str().unwrap_or("?"),
         );
@@ -2800,7 +2861,27 @@ pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
         return false;
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
-    !fills.is_empty() && fills.iter().all(|b| b["sql"].is_string())
+    let entities = !entity_renames(&receipt).is_empty();
+    (!fills.is_empty() || entities)
+        && fills
+            .iter()
+            .all(|b| b["sql"].is_string() || b["copyFrom"].is_string())
+}
+
+/// Each entity a stored step renames, `(new name, old name)`, as its
+/// receipt records it.
+pub(crate) fn entity_renames(receipt: &Value) -> Vec<(String, String)> {
+    receipt["entityRenames"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some((
+                r["entity"].as_str()?.to_string(),
+                r["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// **A unique or a check a step holds is not probed before its copy**

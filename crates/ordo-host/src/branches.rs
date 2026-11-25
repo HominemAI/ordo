@@ -54,10 +54,12 @@ use crate::environments::{EnvironmentRefusal, Environments};
 pub const BRANCHES: &str = "std.deployment.branches";
 /// Remove one branch's tenant: its database and its keys.
 pub const DELETE_BRANCH: &str = "std.deployment.deleteBranch";
+/// Set `branch.idle_list_after`, with a reason.
+pub const SET_SETTING: &str = "std.deployment.setBranchSetting";
 
 /// Every op of this module. `std.deployment.apply` with `branch` is the
 /// apply's own op.
-pub const OPS: [&str; 2] = [BRANCHES, DELETE_BRANCH];
+pub const OPS: [&str; 3] = [BRANCHES, DELETE_BRANCH, SET_SETTING];
 
 /// The apply's parameter that names a branch.
 pub const BRANCH_PARAM: &str = "branch";
@@ -153,6 +155,8 @@ pub enum BranchRefusal {
     Tenant(String),
     /// A reason is missing or too long.
     Reason(String),
+    /// A setting value that does not read.
+    Setting(String),
     /// The database failed. Retry.
     Store(PoolError),
 }
@@ -160,7 +164,9 @@ pub enum BranchRefusal {
 impl std::fmt::Display for BranchRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BranchRefusal::Name(why) | BranchRefusal::Reason(why) => write!(f, "{why}"),
+            BranchRefusal::Name(why) | BranchRefusal::Reason(why) | BranchRefusal::Setting(why) => {
+                write!(f, "{why}")
+            }
             BranchRefusal::Collision {
                 branch,
                 other,
@@ -210,7 +216,7 @@ impl BranchRefusal {
     pub fn to_exec_error(&self, what: &str) -> ExecError {
         let message = format!("{what}: {self}");
         match self {
-            BranchRefusal::Name(_) | BranchRefusal::Reason(_) => {
+            BranchRefusal::Name(_) | BranchRefusal::Reason(_) | BranchRefusal::Setting(_) => {
                 ExecError::new(ErrorCode::InvalidParam, message)
             }
             BranchRefusal::Collision { .. } | BranchRefusal::TenantTaken { .. } => {
@@ -352,14 +358,15 @@ pub fn parse_idle(value: &str) -> Option<u64> {
     (n > 0).then_some(n * per)
 }
 
-/// The idle setting in force: [`IDLE_ENV`] when it reads, else 30 days.
+/// The idle setting from [`IDLE_ENV`] alone: the default a stored value
+/// replaces. 30 days when unset.
 pub fn idle_after_from_env() -> u64 {
-    idle_setting().0
+    idle_from_env().0
 }
 
-/// The idle setting, and what is wrong with the value set when it does
-/// not read (the list names the setting and the default it used).
-pub fn idle_setting() -> (u64, Option<String>) {
+/// [`IDLE_ENV`], and what is wrong with it when it does not read (the list
+/// names the setting and the default it used).
+pub fn idle_from_env() -> (u64, Option<String>) {
     match std::env::var(IDLE_ENV) {
         Ok(v) if !v.trim().is_empty() => match parse_idle(&v) {
             Some(secs) => (secs, None),
@@ -373,6 +380,81 @@ pub fn idle_setting() -> (u64, Option<String>) {
         },
         _ => (IDLE_DEFAULT_SECS, None),
     }
+}
+
+/// The value stored for `branch.idle_list_after` in `$version_settings`,
+/// the latest change; `None` when never set or cleared.
+pub async fn stored_idle(pool: &Pool) -> Result<Option<String>, PoolError> {
+    let rows = match pool
+        .rows(&format!(
+            "SELECT \"value\" FROM \"$version_settings\" WHERE \"setting\" = {} \
+             ORDER BY \"seq\" DESC LIMIT 1",
+            sql_lit(IDLE_SETTING)
+        ))
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_missing_table() => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(rows.first().and_then(|r| r.first().cloned().flatten()))
+}
+
+/// **The idle setting in force**: the stored value, else [`IDLE_ENV`],
+/// else 30 days. With what is wrong with the value that did not read.
+pub async fn idle_setting(pool: &Pool) -> Result<(u64, Option<String>), PoolError> {
+    if let Some(v) = stored_idle(pool).await? {
+        return Ok(match parse_idle(&v) {
+            Some(secs) => (secs, None),
+            None => {
+                let (secs, _) = idle_from_env();
+                (
+                    secs,
+                    Some(format!(
+                        "{IDLE_SETTING} is stored as `{v}`, which does not read. Set it: \
+                         `ordo branches set idle-list-after <n>d --reason \"...\"`"
+                    )),
+                )
+            }
+        });
+    }
+    Ok(idle_from_env())
+}
+
+/// **Set `branch.idle_list_after`**, or clear it with `default` (the
+/// environment variable, then 30 days again), with who and why. Checked
+/// first; kept in `$version_settings` beside the version settings.
+pub async fn set_idle(
+    pool: &Pool,
+    value: &str,
+    actor: &str,
+    reason: &str,
+    at: u64,
+) -> Result<(u64, Option<String>), BranchRefusal> {
+    let reason =
+        crate::versions::check_reason(reason).map_err(|e| BranchRefusal::Reason(e.to_string()))?;
+    let v = value.trim();
+    let stored = if v == "default" {
+        None
+    } else if parse_idle(v).is_some() {
+        Some(v.to_string())
+    } else {
+        return Err(BranchRefusal::Setting(format!(
+            "`{v}` is not a value for {IDLE_SETTING}: use <n>d, <n>h, <n>m or <n>s, from 1, or \
+             `default` to read {IDLE_ENV} again"
+        )));
+    };
+    pool.rows(crate::versions::SETTINGS_DDL).await?;
+    pool.rows(&format!(
+        "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \"at\") \
+         VALUES ({}, {}, {}, {}, {at})",
+        sql_lit(IDLE_SETTING),
+        stored.as_deref().map(sql_lit).unwrap_or_else(|| "NULL".into()),
+        sql_lit(actor),
+        sql_lit(&reason),
+    ))
+    .await?;
+    Ok(idle_setting(pool).await?)
 }
 
 /// The checks that need no write, in order: the name, the chain, tenant
@@ -710,7 +792,9 @@ pub async fn execute(
     let text = |k: &str| bound.0.get(k).and_then(|v| v.as_str()).unwrap_or_default();
     let row = match name {
         BRANCHES => {
-            let (idle_after, problem) = idle_setting();
+            let (idle_after, problem) = idle_setting(&ops.pool).await.map_err(|e| {
+                BranchRefusal::Store(e).to_exec_error("the idle setting could not be read")
+            })?;
             let all = list(&ops.pool)
                 .await
                 .map_err(|e| e.to_exec_error("the branches could not be read"))?;
@@ -719,6 +803,25 @@ pub async fn execute(
                 "idleAfter": idle_after,
                 "idleSetting": IDLE_SETTING,
                 "idleProblem": problem,
+            })
+        }
+        SET_SETTING => {
+            let (idle_after, problem) =
+                set_idle(&ops.pool, text("value"), caller, text("reason"), now)
+                    .await
+                    .map_err(|e| e.to_exec_error("the branch setting was not set"))?;
+            ops.record(
+                caller,
+                SET_SETTING,
+                "branch-setting",
+                format!(
+                    "setting={IDLE_SETTING} value={} by={caller} reason={}",
+                    text("value").trim(),
+                    text("reason").trim()
+                ),
+            );
+            json!({
+                "setting": IDLE_SETTING, "idleAfter": idle_after, "idleProblem": problem,
             })
         }
         DELETE_BRANCH => {
@@ -730,7 +833,10 @@ pub async fn execute(
             let (b, reaped) = delete(ops, reap, text("branch"), text("reason"), caller, now)
                 .await
                 .map_err(|e| e.to_exec_error("the branch was not deleted"))?;
-            json!({ "branch": b.to_json(now, idle_after_from_env()), "reaped": reaped })
+            let (idle_after, _) = idle_setting(&ops.pool)
+                .await
+                .unwrap_or((IDLE_DEFAULT_SECS, None));
+            json!({ "branch": b.to_json(now, idle_after), "reaped": reaped })
         }
         other => return Err(ExecError::internal(format!("`{other}` is not a branch op"))),
     };
@@ -787,6 +893,12 @@ pub fn specs() -> Vec<OpSpec> {
                 param("reason", 4096, true),
             ],
             &["branch", "reaped"],
+        ),
+        spec(
+            SET_SETTING,
+            OpKind::Write,
+            vec![param("value", 64, true), param("reason", 4096, true)],
+            &["setting", "idleAfter", "idleProblem"],
         ),
     ]
 }

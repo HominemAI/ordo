@@ -593,7 +593,12 @@ for creates, and a backfill is all converges. See §9.
   `system:migration:*` with a typed reason naming the migration. This is a
   new refusal class beside the existing `unrevertable_image` /
   `unrevertable_sealed` / `unrevertable_tree` family in
-  `crates/ordo-exec/src/undo.rs:955`.
+  `crates/ordo-exec/src/undo.rs:955`. **Built 2026-11-24** (branch
+  `evo-versions-remove`): a group carrying the backfill record (trailer
+  `0x04`, actor `system:backfill`) is refused as `unrevertable_backfill`,
+  naming the step, the field and the mapping, on `--dry-run` too
+  (`undo::refuse_backfill`; test `backfill.rs`
+  `a_revert_of_a_backfill_group_is_refused_by_name`).
 - **A drop truncates the undo horizon, silently, today.** `undo.rs` already
   refuses `unrevertable_image` when a logged image names a field the schema
   no longer declares. So D1 makes every retained group touching that entity

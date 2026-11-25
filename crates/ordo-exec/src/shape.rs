@@ -389,6 +389,39 @@ struct Obj {
     def: String,
 }
 
+/// Whether a live object is the one the artifact declares.
+///
+/// The same text, or, for a reference while an entity rename runs
+/// (`$renames`, `renamed` as `(new, old)`), the same reference once two
+/// things the rename does to it are read through:
+///
+/// - it is checked at commit (`DEFERRABLE INITIALLY DEFERRED`), so a write
+///   by the new name lands its row in the old table, by the dual write,
+///   before the check;
+/// - it still points at the old table, which both versions keep whole,
+///   until the rename lands and moves it to the new one.
+///
+/// A reference made `NOT VALID` is not yet validated; a step validates it
+/// after its transaction.
+fn same_definition(want: &Obj, have: &Obj, renamed: &[(String, String)]) -> bool {
+    if want.def == have.def {
+        return true;
+    }
+    if have.kind != "foreign key" {
+        return false;
+    }
+    let plain = have
+        .def
+        .replace(" DEFERRABLE INITIALLY DEFERRED", "")
+        .replace(" NOT VALID", "");
+    if want.def == plain {
+        return true;
+    }
+    renamed.iter().any(|(new, old)| {
+        want.def == plain.replace(&format!("REFERENCES {old}("), &format!("REFERENCES {new}("))
+    })
+}
+
 impl Pool {
     /// Compare the shadow schema against the **live** one, and name every
     /// way the database the ops will actually run against is not the shape
@@ -503,6 +536,7 @@ impl Pool {
         // ── the constraint half ──
         let want_obj = self.objects_of(shadow).await?;
         let have_obj = self.objects_of(live).await?;
+        let renamed = self.entity_renames_in(live).await?;
         for w in &want_obj {
             // A constraint on a table the live schema does not have is
             // already reported once, as the missing table. Saying it again
@@ -523,7 +557,7 @@ impl Pool {
                         w.kind, w.def
                     ),
                 )),
-                Some(h) if h.def != w.def => drift.push(Drift::object(
+                Some(h) if !same_definition(w, h, &renamed) => drift.push(Drift::object(
                     &w.table,
                     &w.name,
                     format!(
@@ -535,6 +569,30 @@ impl Pool {
             }
         }
         Ok(drift)
+    }
+
+    /// The entity renames `schema` is in the middle of (`$renames` rows
+    /// with an empty `field`), as `(new, old)`, each quoted as
+    /// `pg_get_constraintdef` quotes a table. Empty with no `$renames`.
+    async fn entity_renames_in(&self, schema: &str) -> Result<Vec<(String, String)>, PoolError> {
+        match self
+            .rows(&format!(
+                "SELECT quote_ident(\"entity\"), quote_ident(\"from\") FROM \"{}\".\"$renames\" \
+                 WHERE \"field\" = ''",
+                schema.replace('"', "\"\"")
+            ))
+            .await
+        {
+            Ok(rows) => Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    let mut it = r.into_iter();
+                    Some((it.next()??, it.next()??))
+                })
+                .collect()),
+            Err(e) if e.is_missing_table() => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Every constraint and every free-standing index of one schema, with

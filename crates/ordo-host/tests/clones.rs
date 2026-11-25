@@ -2422,3 +2422,106 @@ async fn break_glass_runs_one_step_when_staging_is_down_and_nothing_else() {
     .await;
     assert_eq!(listed["rows"][0]["brokenGlass"][0]["active"], false);
 }
+
+// ── the size cap ─────────────────────────────────────────────────────────
+
+/// **A clone over `clone.max_size` is refused by name, and nothing is
+/// made.** Production holds a note whose title, a safe field, weighs about 2 MiB.
+/// Staging's cap is set to 1 MiB through its door: the clone is refused
+/// naming the setting and the command that raises it, and staging holds no
+/// clone. A value that is no size is refused naming the forms. Raised to
+/// 8 MiB through the door, the same clone arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clone_over_the_cap_is_refused_naming_the_setting_that_raises_it() {
+    let p = pair("cap", PROGRAM).await;
+    let prod_token = || p.issuer.token(ADA, "production");
+    let staging_token = || p.issuer.token(ADA, "staging");
+
+    // The field is carried (safe), and weighs about 2 MiB.
+    let (status, body) = post(
+        &p.prod_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.mask", "value": "notes.title", "reason": "titles are safe here"}),
+        &prod_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    p.prod
+        .rows(
+            "UPDATE \"notes\" SET \"title\" = \
+             (SELECT string_agg(md5(g::text), '') FROM generate_series(1, 60000) g) \
+             WHERE \"id\" = 'not_1'",
+        )
+        .await
+        .expect("a heavy field");
+
+    // The default cap is 64 MiB.
+    let (status, body) = call(
+        &p.staging_address,
+        "GET",
+        clones::CLONES,
+        HOME,
+        None,
+        &staging_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["maxSize"], "64MiB", "{body}");
+
+    // A cap that is no size is refused naming the forms it takes.
+    for bad in ["0", "big", "2048MiB", "-1", ""] {
+        let (status, body) = post(
+            &p.staging_address,
+            clones::SET_CLONE_SETTING,
+            json!({"setting": "clone.max_size", "value": bad, "reason": "x"}),
+            &staging_token(),
+        )
+        .await;
+        assert_eq!(status, 400, "{bad}: {body}");
+        assert!(body.to_string().contains("<n>MiB"), "{bad}: {body}");
+    }
+
+    // Capped at 1 MiB, the clone is refused, naming the setting and the fix.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "max-size", "value": "1MiB", "reason": "a small staging"}),
+        &staging_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["rows"][0]["maxSize"], "1MiB", "{body}");
+    let e = clone_as(&p, ADA, prod_token()).await.unwrap_err();
+    assert!(
+        matches!(e, CloneRefusal::TooLarge { max_mib: 1, .. }),
+        "{e}"
+    );
+    let said = e.to_string();
+    assert!(said.contains("clone.max_size"), "{said}");
+    assert!(said.contains("ordo clones set max-size"), "{said}");
+    assert!(
+        clones::clones(&p.staging).await.unwrap().is_empty(),
+        "nothing is made for a clone that was refused"
+    );
+
+    // Raised through the door, the same clone arrives with its field whole.
+    let (status, body) = post(
+        &p.staging_address,
+        clones::SET_CLONE_SETTING,
+        json!({"setting": "clone.max_size", "value": "8MiB", "reason": "this one is big"}),
+        &staging_token(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let done = clone_as(&p, ADA, prod_token()).await.expect("cloned");
+    let weight = p
+        .staging
+        .rows(&format!(
+            "SELECT max(length(\"title\")) FROM \"notes\" WHERE \"$space\" = '{}'",
+            done.record.space
+        ))
+        .await
+        .unwrap();
+    let weight: u64 = weight[0][0].clone().unwrap().parse().unwrap();
+    assert!(weight > 1_500_000, "the field arrived whole: {weight}");
+}

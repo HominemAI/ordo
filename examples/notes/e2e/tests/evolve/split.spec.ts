@@ -20,7 +20,7 @@
  * missing or misread after the split, or a revert that loses the note added
  * on the new version.
  *
- * It stores 0.3.8, above `rollout-moves`' 0.3.7 and below `branch`'s 0.5.x,
+ * It stores 0.3.9, above `fill`'s 0.3.8 and below `branch`'s 0.5.x,
  * so it runs between them. Chromium only.
  */
 
@@ -35,9 +35,9 @@ import { holds, openV2, watchTenant } from './moves.js';
 
 test.describe.configure({ mode: 'serial' });
 
-const TO = '0.3.8';
+const TO = '0.3.9';
 
-/** Notes v3 at 0.3.8 with `title` split, made from v3's own file. */
+/** Notes v3 at 0.3.9 with `title` split, made from v3's own file. */
 function splitTitle(sealed: boolean): string {
   const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swaps: [string, string][] = [
@@ -70,7 +70,7 @@ test('notes v3 splits a field: the mapping is asked for, every note reads, and a
   browser,
 }, testInfo) => {
   testInfo.setTimeout(420_000);
-  // After `rollout-moves`, production serves 0.3.4. Run alone, v3 is applied.
+  // After `fill`, production serves 0.3.4. Run alone, v3 is applied.
   if (!['0.3.0', '0.3.4'].includes(servingVersion() ?? '')) {
     ensureServing(stack().programV2, '0.2.0');
     applyProgram(stack().programV3);

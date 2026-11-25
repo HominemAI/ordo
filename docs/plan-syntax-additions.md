@@ -586,8 +586,9 @@ At issue time the door refuses `$ops` outside the profile
 the 3 compile checks, the plan checks, the CDK, and the offer to remove a
 landed mark. Added in the build: `prev_sealed` (a sealed field cannot be
 copied under a new name) and `prev_mapping_required` (a merge or a move,
-refused until the plan offers a mapping). An entity rename renders and is
-refused until increment 10b. See `definition-language.md`, "`prev`".
+refused until the plan offers a mapping). An entity rename is built
+2026-11-24 (`plan-versions.md` increment 15). See
+`definition-language.md`, "`prev`".
 
 **Splits and merges built 2026-11-25** (`plan-versions.md` increment 15b),
 as the spelling below says: two fields each `prev(name)` is a split,

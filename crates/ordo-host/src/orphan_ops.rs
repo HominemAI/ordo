@@ -21,6 +21,10 @@
 //! - A name no database records as an orphan.
 //! - A field a served version still declares: the active version, or one a
 //!   tenant is pinned to. Move the tenants first.
+//! - A field a version a restore may still need declares (increment 17):
+//!   one that served within `versions.restore_window`, or ever, when that
+//!   is unset. A backup or bundle at it serves only on a database that
+//!   still holds the column.
 //!
 //! Each database keeps a **tombstone**: its `$orphans` row with `pruned_at`
 //! and `pruned_by`. The act is `orphan-pruned` on the deployment's stream.
@@ -47,6 +51,13 @@ pub enum PruneRefusal {
     NotAnOrphan { name: String, orphans: Vec<String> },
     /// A served version still declares it.
     StillServed { name: String, versions: Vec<String> },
+    /// A version that declares it is one a restore may still need
+    /// (increment 17): a bundle or backup at it imports or serves only on
+    /// a database that still holds the column.
+    Restorable {
+        name: String,
+        holds: Vec<crate::versions::RestoreHold>,
+    },
     /// In production, the deployment's name was not typed back.
     DeploymentUnconfirmed { expected: String },
     /// The typed confirmation is not the name.
@@ -69,6 +80,7 @@ impl PruneRefusal {
             PruneRefusal::Disabled { .. } => "prune_disabled",
             PruneRefusal::NotAnOrphan { .. } => "not_an_orphan",
             PruneRefusal::StillServed { .. } => "prune_still_served",
+            PruneRefusal::Restorable { .. } => "prune_restorable",
             PruneRefusal::DeploymentUnconfirmed { .. } => "prune_deployment_unconfirmed",
             PruneRefusal::Unconfirmed { .. } => "prune_unconfirmed",
             PruneRefusal::Busy => "apply_in_progress",
@@ -129,6 +141,17 @@ impl std::fmt::Display for PruneRefusal {
                     .map(|v| format!("`{v}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            PruneRefusal::Restorable { name, holds } => write!(
+                f,
+                "{class}: `{name}` is declared by a version a restore may still need, and a \
+                 backup or bundle at it serves only on a database that still holds the column. \
+                 {}",
+                holds
+                    .iter()
+                    .map(|h| h.line())
+                    .collect::<Vec<_>>()
+                    .join(". ")
             ),
             PruneRefusal::DeploymentUnconfirmed { expected } => write!(
                 f,
@@ -231,18 +254,43 @@ async fn served_declaring(pool: &Pool, o: &Orphan) -> Result<Vec<String>, PruneR
     served.dedup();
     let mut out = Vec::new();
     for name in served {
-        let Some(a) = v.get(&name).await.map_err(store)? else {
-            continue;
-        };
-        let Ok(p) = crate::schema_apply::Program::from_artifact(&a) else {
-            continue;
-        };
-        let declares = p
-            .schema
-            .native(&o.entity)
-            .is_some_and(|e| o.is_entity() || e.field(&o.field).is_some());
-        if declares {
+        if declares(&v, &name, o).await? {
             out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether stored version `name` declares `entity.field` (or `entity`).
+async fn declares(v: &Versions<'_>, name: &str, o: &Orphan) -> Result<bool, PruneRefusal> {
+    let store = |e: crate::versions::VersionRefusal| PruneRefusal::Store(e.to_string());
+    let Some(a) = v.get(name).await.map_err(store)? else {
+        return Ok(false);
+    };
+    let Ok(p) = crate::schema_apply::Program::from_artifact(&a) else {
+        return Ok(false);
+    };
+    Ok(p.schema
+        .native(&o.entity)
+        .is_some_and(|e| o.is_entity() || e.field(&o.field).is_some()))
+}
+
+/// **The stored versions that declare it and a restore may still need**
+/// (increment 17, [`Versions::restore_hold`]).
+async fn restorable_declaring(
+    pool: &Pool,
+    o: &Orphan,
+    now: u64,
+) -> Result<Vec<crate::versions::RestoreHold>, PruneRefusal> {
+    let v = Versions::on(pool);
+    let store = |e: crate::versions::VersionRefusal| PruneRefusal::Store(e.to_string());
+    let mut out = Vec::new();
+    for (name, _, _) in v.stored().await.map_err(store)? {
+        if !declares(&v, &name, o).await? {
+            continue;
+        }
+        if let Some(hold) = v.restore_hold(&name, now).await.map_err(store)? {
+            out.push(hold);
         }
     }
     Ok(out)
@@ -351,6 +399,13 @@ pub async fn prune(
         return Err(PruneRefusal::StillServed {
             name: name.to_string(),
             versions: still,
+        });
+    }
+    let holds = restorable_declaring(pool, first, crate::runtime::now_secs()).await?;
+    if !holds.is_empty() {
+        return Err(PruneRefusal::Restorable {
+            name: name.to_string(),
+            holds,
         });
     }
     let active = crate::schema_apply::active_schema(pool).await;

@@ -463,3 +463,110 @@ async fn a_branch_number_never_refuses_mains_lower_one() {
 
     drop_db(&d, &database_of(&d, &b.branch.space).await);
 }
+
+async fn door(d: &Dev, op: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let bound = ordo_api::BoundParams(params.as_object().unwrap().clone());
+    branches::execute(&d.apply, Some(&d.reap), op, HOME, &bound, ADA)
+        .await
+        .map(|r| r.rows[0].clone())
+        .map_err(|e| e.message)
+}
+
+/// **`branch.idle_list_after` is a stored setting.** The stored value
+/// replaces the environment variable and the 30 day default; a bad value
+/// and a missing reason are refused naming the fix; `default` clears it. A
+/// branch is marked idle once unused for the stored time.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_idle_setting_is_stored_and_decides_which_branches_are_idle() {
+    let d = dev("ordo_branches_idle", true).await;
+    let a = apply(&d, "feature/a", &branch_a("0.2.0")).await.expect("a");
+
+    let row = door(&d, branches::BRANCHES, serde_json::json!({}))
+        .await
+        .unwrap();
+    let default = branches::idle_from_env().0;
+    assert_eq!(row["idleAfter"], default, "{row}");
+    assert_eq!(row["branches"][0]["idle"], false, "{row}");
+
+    // Refusals: each names what fixes it, and nothing is stored.
+    for bad in ["3w", "0d", "soon", ""] {
+        let e = door(
+            &d,
+            branches::SET_SETTING,
+            serde_json::json!({"value": bad, "reason": "tighter"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("<n>d") && e.contains("default"), "{bad}: {e}");
+        assert!(e.contains(branches::IDLE_ENV), "{bad}: {e}");
+    }
+    let e = door(
+        &d,
+        branches::SET_SETTING,
+        serde_json::json!({"value": "1s", "reason": " "}),
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("reason"), "{e}");
+    assert_eq!(branches::stored_idle(&d.pool).await.unwrap(), None);
+
+    // Stored: it decides, and the branch is idle after it.
+    let set = door(
+        &d,
+        branches::SET_SETTING,
+        serde_json::json!({"value": "1s", "reason": "short while testing"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(set["idleAfter"], 1, "{set}");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let row = door(&d, branches::BRANCHES, serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(row["idleAfter"], 1, "{row}");
+    assert_eq!(row["branches"][0]["idle"], true, "{row}");
+    assert_eq!(row["idleProblem"], serde_json::Value::Null, "{row}");
+    // Kept with who and why.
+    let who = d
+        .pool
+        .rows(
+            "SELECT \"actor\", \"reason\" FROM \"$version_settings\" \
+             WHERE \"setting\" = 'branch.idle_list_after'",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        who[0].iter().flatten().cloned().collect::<Vec<_>>(),
+        vec![ADA.to_string(), "short while testing".to_string()]
+    );
+
+    // A stored value that does not read is listed with a problem.
+    d.pool
+        .rows(
+            "INSERT INTO \"$version_settings\" (\"setting\", \"value\", \"actor\", \"reason\", \
+             \"at\") VALUES ('branch.idle_list_after', 'junk', 'x', 'x', 1)",
+        )
+        .await
+        .unwrap();
+    let row = door(&d, branches::BRANCHES, serde_json::json!({}))
+        .await
+        .unwrap();
+    let problem = row["idleProblem"].as_str().expect("a problem");
+    assert!(
+        problem.contains("ordo branches set idle-list-after"),
+        "{problem}"
+    );
+
+    // `default` clears it: the environment variable, then 30 days, read again.
+    let cleared = door(
+        &d,
+        branches::SET_SETTING,
+        serde_json::json!({"value": "default", "reason": "back to the default"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cleared["idleAfter"], default, "{cleared}");
+    assert_eq!(branches::stored_idle(&d.pool).await.unwrap(), None);
+
+    drop_db(&d, &database_of(&d, &a.branch.space).await);
+}

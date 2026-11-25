@@ -189,14 +189,25 @@ export default defineConfig({
       dependencies: ['moves'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // A `--fill` backfill on one tenant under live writes (plan-versions.md
+    // increment 10b): the person types while the fill runs, and every row
+    // ends filled. It stores 0.3.8, above `rollout-moves`' 0.3.7 and below
+    // `branch`'s 0.5.x, so it runs between them. Locally,
+    // `--project=fill --no-deps`.
+    {
+      name: 'fill',
+      testMatch: /evolve\/fill\.spec\.ts/,
+      dependencies: ['rollout-moves'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Notes v3 splits a field (plan-versions.md, increment 15b): the
     // mapping asked for, the move, a revert in the soak and the close. It
-    // stores 0.3.8, above `rollout-moves`' 0.3.7 and below `branch`'s 0.5.x,
-    // so it runs between them. Locally, `--project=split --no-deps`.
+    // stores 0.3.9, above `fill`'s 0.3.8 and below `branch`'s 0.5.x, so it
+    // runs between them. Locally, `--project=split --no-deps`.
     {
       name: 'split',
       testMatch: /evolve\/split\.spec\.ts/,
-      dependencies: ['rollout-moves'],
+      dependencies: ['fill'],
       use: { ...devices['Desktop Chrome'] },
     },
     // Dev branches as tenants on their own version (plan-versions.md

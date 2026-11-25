@@ -80,7 +80,7 @@ test('roll out, hold, skip, abort and finish; retry a move, check a rollback; se
   // A group naming a tenant the deployment does not serve: the door's
   // refusal, as given, names where the tenants are listed.
   await chooseVersion(page, 'Version', 2);
-  await page.getByLabel('Strategy').selectOption('group');
+  await page.getByLabel('Strategy', { exact: true }).selectOption('group');
   await page.getByLabel('Tenants first (ids, comma separated)').fill('spc_nobody');
   await page.getByRole('button', { name: 'Start the rollout' }).click();
   await touchIfAsked(page);
@@ -88,7 +88,7 @@ test('roll out, hold, skip, abort and finish; retry a move, check a rollback; se
   await expect(page.getByRole('alert')).toContainText('std.deployment.tenants');
 
   // A rolling rollout, one tenant an hour: the first batch moves, the rest wait.
-  await page.getByLabel('Strategy').selectOption('rolling');
+  await page.getByLabel('Strategy', { exact: true }).selectOption('rolling');
   await page.getByText('Batches and limits').click();
   await page.getByLabel('Batch every (like 5m)').fill('1h');
   await page.getByLabel('Tenants per batch').fill('1');
@@ -131,7 +131,7 @@ test('roll out, hold, skip, abort and finish; retry a move, check a rollback; se
 
   // Every tenant at once: it finishes, and #2 becomes the active version.
   await chooseVersion(page, 'Version', 2);
-  await page.getByLabel('Strategy').selectOption('all');
+  await page.getByLabel('Strategy', { exact: true }).selectOption('all');
   await page.getByRole('button', { name: 'Start the rollout' }).click();
   await touchIfAsked(page);
   await expect(page.getByRole('status')).toContainText('Started rollout #');
@@ -149,6 +149,34 @@ test('roll out, hold, skip, abort and finish; retry a move, check a rollback; se
     await page.getByRole('button', { name: 'Refresh' }).click();
     await expect(rollout.getByText('finished', { exact: true })).toBeVisible({ timeout: 1000 });
   }).toPass({ timeout: 30_000 });
+
+  // The rollout settings, through the op `ordo rollout set` uses: a good
+  // value is stored, a bad one is refused in the door's words, naming the
+  // setting, and a cleared one takes its default.
+  const settings = page.getByRole('region', { name: 'Rollout settings' }).getByRole('list', { name: 'Settings' });
+  const threshold = settings.getByRole('listitem').filter({ hasText: 'rollout.failure_threshold' });
+  await threshold.getByRole('button', { name: 'Change rollout.failure_threshold' }).click();
+  await threshold.getByLabel('New value').fill('3');
+  await threshold.getByLabel('Reason').fill('three before a pause');
+  await threshold.getByRole('button', { name: 'Save' }).click();
+  await touchIfAsked(page);
+  await expect(page.getByRole('status')).toContainText('Set rollout.failure_threshold.');
+  await expect(threshold).toContainText('3');
+  const interval = settings.getByRole('listitem').filter({ hasText: 'rollout.batch_interval' });
+  await interval.getByRole('button', { name: 'Change rollout.batch_interval' }).click();
+  await interval.getByLabel('New value').fill('soon');
+  await interval.getByLabel('Reason').fill('faster');
+  await interval.getByRole('button', { name: 'Save' }).click();
+  await touchIfAsked(page);
+  await expect(page.getByRole('alert')).toContainText('rollout.batch_interval');
+  await expect(page.getByRole('alert')).toContainText('soon');
+  await interval.getByRole('button', { name: 'Cancel' }).click();
+  await expect(interval).toContainText('5 min');
+  await threshold.getByRole('button', { name: 'Change rollout.failure_threshold' }).click();
+  await threshold.getByLabel('Reason').fill('back to the default');
+  await threshold.getByRole('button', { name: 'Clear to the default' }).click();
+  await touchIfAsked(page);
+  await expect(page.getByRole('status')).toContainText('Cleared rollout.failure_threshold');
   await fitsAPhone(page);
 
   // ── Moves ───────────────────────────────────────────────────────────

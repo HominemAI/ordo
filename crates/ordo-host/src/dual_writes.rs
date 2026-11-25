@@ -75,7 +75,10 @@
 //! In a step with dual writes the version before keeps writing until the
 //! soaks close, so a unique or a check Y adds leaves the expand
 //! (`schema_apply::Triaged::held`). The move's overlays hold it on every
-//! row the moving tenant writes. The copied rows are checked against it
+//! row the moving tenant writes. On a shared database a held check is
+//! recorded in `$held` after the expand ([`record_held`]), so every space
+//! there, the ones still on the version before too, writes under it and is
+//! refused by name. The copied rows are checked against it
 //! before the switch, and every row again at the close; one that breaks it
 //! refuses by name (`held_constraint_broken`), naming the rows. A check
 //! lands at the close. A unique lands at the switch ([`land_uniques`]):
@@ -143,6 +146,7 @@ pub fn render(
     after: &[String],
     held: &[sa::Held],
     maps: &[sa::MapStep],
+    entities: &[(String, String)],
 ) -> Option<Value> {
     let mut forward: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
     let mut reverse: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
@@ -158,6 +162,10 @@ pub fn render(
         list.last_mut().expect("just pushed")
     }
     for bf in backfills {
+        // An entity rename's copy: `$renames` keeps both tables current.
+        if bf.copy_from().is_some() {
+            continue;
+        }
         let sql = bf.sql.as_ref()?;
         let col = q(&bf.column);
         let set = match bf.code {
@@ -257,7 +265,28 @@ pub fn render(
         "held": held.iter().map(sa::Held::to_json).collect::<Vec<_>>(),
         "maps": maps.iter().map(sa::MapStep::to_json).collect::<Vec<_>>(),
         "oneWay": maps.iter().any(|m| m.one_way),
+        // Each entity the step renames, `{entity, from}`: both tables are
+        // kept current through `$renames` by every write, and the rename
+        // lands at the close (`schema_apply::land_entity_rename`).
+        "entities": entities.iter().map(|(entity, from)| json!({
+            "entity": entity, "from": from,
+        })).collect::<Vec<_>>(),
     }))
+}
+
+/// Each entity a move renames, `(new name, old name)`, from its overlays.
+fn entities_of(overlay: &Value) -> Vec<(String, String)> {
+    overlay["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            Some((
+                e["entity"].as_str()?.to_string(),
+                e["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn overlay_of(v: &Value) -> Option<MoveOverlay> {
@@ -334,8 +363,11 @@ async fn expanded(target: &Pool, overlay: &Value) -> Result<bool, EvolveRefusal>
         .filter_map(BackfillStep::from_json)
         .all(|bf| {
             live.table(&bf.entity)
-                .is_some_and(|t| t.columns.contains_key(&bf.column))
-        }))
+                .is_some_and(|t| bf.copy_from().is_some() || t.columns.contains_key(&bf.column))
+        })
+        && entities_of(overlay)
+            .iter()
+            .all(|(entity, _)| live.table(entity).is_some()))
 }
 
 /// Raise the pin fence in the tenant's database to `epoch`: a node still
@@ -523,6 +555,7 @@ pub async fn run(
                 .collect();
             let held = crate::evolve::held_of(&receipt);
             let maps = sa::MapStep::all_of(&receipt);
+            let entities = crate::evolve::entity_renames(&receipt);
             // A split or a merge (15b): a row whose required new field the
             // mapping does not parse stops the move before it opens.
             if !maps.is_empty() {
@@ -555,8 +588,16 @@ pub async fn run(
                     ));
                 }
             }
-            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after, &held, &maps)
-            else {
+            let Some(overlay) = render(
+                &x,
+                &y,
+                &plan.digest,
+                &backfills,
+                &after,
+                &held,
+                &maps,
+                &entities,
+            ) else {
                 return Err(cx.err(
                     tenant,
                     &plan.from,
@@ -617,6 +658,14 @@ pub async fn run(
         index_held(&target, &overlay)
             .await
             .map_err(|why| cx.err(tenant, &plan.from, &plan.to, "execute_failed", why, true))?;
+        if shared {
+            // Every space there writes under a check the step holds, once
+            // the expand has made the columns it reads (11b): a space on
+            // the version before is refused by name, not named at the close.
+            record_held(&target, &overlay, &plan.from, &plan.to)
+                .await
+                .map_err(|e| cx.err(tenant, &plan.from, &plan.to, "internal", e, true))?;
+        }
         if m.phase == MovePhase::Expanding {
             v.note_dual_move(tenant, MovePhase::Backfilling, "").await?;
             m.phase = MovePhase::Backfilling;
@@ -963,6 +1012,10 @@ pub async fn close(
             }
         }
     }
+    // Each held check has landed: the database holds every space to it.
+    forget_held(&target, &held_in(&overlay))
+        .await
+        .map_err(|e| run_err("internal", format!("$held: {e}")))?;
     // The guards end with the move: their plain indexes go (11b part 5).
     drop_held_indexes(&target, &overlay)
         .await
@@ -1001,7 +1054,7 @@ pub async fn close(
         .map_err(|e| run_err("internal", e))?;
     }
     // The old columns: kept, never written again, and recorded (§2.7).
-    let left: Vec<ordo_exec::orphans::Left> = overlay["orphans"]
+    let mut left: Vec<ordo_exec::orphans::Left> = overlay["orphans"]
         .as_array()
         .into_iter()
         .flatten()
@@ -1018,6 +1071,21 @@ pub async fn close(
             })
         })
         .collect();
+    // Each entity rename lands: the references move to the new table, the
+    // rename leaves `$renames`, and the old table is an orphan.
+    for (entity, from) in entities_of(&overlay) {
+        let landed = sa::land_entity_rename(&target, &y.schema, &entity, &from)
+            .await
+            .map_err(|e| run_err("execute_failed", e))?;
+        if landed {
+            left.push(ordo_exec::orphans::Left {
+                entity: from,
+                field: None,
+                columns: Vec::new(),
+                sealed: false,
+            });
+        }
+    }
     let at = crate::runtime::now_secs();
     ordo_exec::orphans::record(&target, &left, Some(&m.from), &m.to, actor, at)
         .await
@@ -1041,7 +1109,10 @@ pub async fn close(
     }
     let mut orphaned: Vec<String> = left
         .iter()
-        .map(|l| format!("{}.{}", l.entity, l.field.as_deref().unwrap_or("")))
+        .map(|l| match &l.field {
+            Some(f) => format!("{}.{f}", l.entity),
+            None => l.entity.clone(),
+        })
         .collect();
     orphaned.extend(
         sa::record_orphans(&target, &x.schema, &y, Some(&m.from), actor)
@@ -1208,6 +1279,81 @@ async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> R
         .map_err(e)?;
     }
     tx.commit().await.map_err(e)
+}
+
+/// **A check the step holds binds every space on a shared database**
+/// (11b): each held check is recorded in that database's `$held`
+/// ([`ordo_exec::overlay::HELD_DDL`]), under `"$renames"` in `EXCLUSIVE`
+/// mode as a fill is, so a write that read the table before has committed,
+/// and every write after is held to it, whatever version it serves. A
+/// held unique is not recorded: it lands at the switch, and a space on the
+/// version before meets it there (11b part 5). Run again, it records the
+/// same rows.
+async fn record_held(target: &Pool, overlay: &Value, from: &str, to: &str) -> Result<(), String> {
+    let checks: Vec<sa::Held> = held_in(overlay)
+        .into_iter()
+        .filter(|h| matches!(h.kind, sa::HeldKind::Check { .. }))
+        .collect();
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let e = |x: ordo_exec::PoolError| x.to_string();
+    target
+        .rows(ordo_exec::overlay::RENAMES_DDL)
+        .await
+        .map_err(e)?;
+    target.rows(ordo_exec::overlay::HELD_DDL).await.map_err(e)?;
+    let tx = target
+        .begin_for(ordo_exec::OpClass::AddressedWrite)
+        .await
+        .map_err(e)?;
+    tx.rows("LOCK TABLE \"$renames\" IN EXCLUSIVE MODE")
+        .await
+        .map_err(e)?;
+    for h in &checks {
+        let (rule, field) = h.rule(to);
+        tx.rows(&format!(
+            "INSERT INTO \"$held\" (\"entity\", \"name\", \"holds\", \"field\", \"rule\", \
+               \"from\", \"to\") VALUES ({}, {}, {}, {}, {}, {}, {}) \
+             ON CONFLICT (\"entity\", \"name\") DO UPDATE SET \"holds\" = EXCLUDED.\"holds\", \
+               \"field\" = EXCLUDED.\"field\", \"rule\" = EXCLUDED.\"rule\", \
+               \"from\" = EXCLUDED.\"from\", \"to\" = EXCLUDED.\"to\"",
+            sql_lit(&h.entity),
+            sql_lit(&h.name),
+            sql_lit(&h.holds()),
+            sql_lit(&field),
+            sql_lit(&rule),
+            sql_lit(from),
+            sql_lit(to),
+        ))
+        .await
+        .map_err(e)?;
+    }
+    tx.commit().await.map_err(e)
+}
+
+/// **A held check leaves `$held`** once it has landed: at the close of the
+/// step's soaks on a shared database, or at the end of the step run there
+/// with `ordo evolve --run`. Nothing when none was recorded.
+pub(crate) async fn forget_held(
+    target: &Pool,
+    held: &[sa::Held],
+) -> Result<(), ordo_exec::PoolError> {
+    for h in held {
+        match target
+            .rows(&format!(
+                "DELETE FROM \"$held\" WHERE \"entity\" = {} AND \"name\" = {}",
+                sql_lit(&h.entity),
+                sql_lit(&h.name)
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_missing_table() => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// **A fill's record leaves `$fills`** once its `NOT NULL` has landed: at

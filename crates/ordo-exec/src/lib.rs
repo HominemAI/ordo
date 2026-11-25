@@ -1232,6 +1232,9 @@ impl Pool {
             // The sealed backfills it is in the middle of (increment 13),
             // read under the same fence ([`overlay::SEALS_DDL`]).
             overlay::SEALS_DDL,
+            // The fills a shared database is in the middle of (increment
+            // 11b part 4), read under the same fence ([`overlay::FILLS_DDL`]).
+            overlay::FILLS_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -2841,6 +2844,28 @@ impl Executor {
                 return Err(ExecFail::Pool(e));
             }
         };
+        // The fills a shared database is in the middle of (increment 11b
+        // part 4), under the same lock: a fill records itself under
+        // `"$renames"` too.
+        let fills = match overlay::fills_in(&tx).await {
+            Ok(f) => f,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::FILLS_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the fills table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
         // The pin fence next: a node whose pin of this tenant is older
         // than one another node already wrote under writes nothing.
         if let Err(e) = self.check_pin_fence(&tx).await {
@@ -2902,11 +2927,11 @@ impl Executor {
                 // columns and guards on every row this write touched, in
                 // this transaction, before the chain append. A row it
                 // refuses refuses the whole write.
-                // Outside a move, the renames this database is in the
+                // Outside a move, the renames and fills this database is in the
                 // middle of, as this version reads them.
                 let by_renames = match self.pool.overlay() {
                     Some(_) => None,
-                    None => overlay::MoveOverlay::for_renames(&self.schema, &renames),
+                    None => overlay::MoveOverlay::for_database(&self.schema, &renames, &fills),
                 };
                 let run = self
                     .pool

@@ -880,6 +880,11 @@ pub async fn render_stored(
                 .map(|s| Value::String(s.sql.trim_end().to_string()))
                 .collect(),
         );
+        // Present only when the step holds a unique or a check to its
+        // close (11b part 4), so every plan stored before keeps its digest.
+        if !triaged.held.is_empty() {
+            receipt["held"] = Value::Array(triaged.held.iter().map(sa::Held::to_json).collect());
+        }
     }
     let digest = digest_of(&receipt);
     let readers = reader_notices(&x, &y, &changes, at);
@@ -1790,6 +1795,12 @@ pub(crate) async fn expand_step(
     }
     // Past staging, only a digest staging signed runs (§3.2, 12b).
     crate::rehearsals::require_rehearsed(registry, plan).await?;
+    // A unique or a check the step holds to its close stays held on a run
+    // again, which finds the new columns there and no backfill (11b part 4).
+    options.held = held_of(&again.receipt)
+        .into_iter()
+        .map(|h| h.name)
+        .collect();
     let x = compiled(&a)?;
     let y = compiled(&b)?;
     let run_err = |class: &'static str, why: String, transient: bool| EvolveRefusal::Run {
@@ -1820,6 +1831,7 @@ pub(crate) async fn expand_step(
     for a in &mut p.assessed {
         a.readers.clear();
         a.refused.retain(|r| r != "drop_read_by_active_op");
+        release_held(a, &options.held);
         for r in &a.refused {
             let class = r.split(" — ").next().unwrap_or(r);
             refusals.push(format!("{class} on `{}`", a.change.entity()));
@@ -1897,14 +1909,7 @@ pub(crate) async fn expand_step(
     for r in again.receipt["after"].as_array().into_iter().flatten() {
         let Some(sql) = r.as_str() else { continue };
         if !after.iter().any(|s| s.sql.trim_end() == sql) {
-            after.push(sa::Step {
-                code: "B",
-                phase: sa::Phase::Alter,
-                sql: format!("{sql}\n"),
-                index: None,
-                constraint: None,
-                table: String::new(),
-            });
+            after.push(sa::after_step(sql));
         }
     }
     Ok(Some(Expanded {
@@ -2185,11 +2190,32 @@ pub async fn run_step_with(
             table: String::new(),
         });
     }
+    // A unique or a check the step held lands with `after`: the rows are
+    // checked first, so one that would not land is named (11b part 4).
+    let held = held_of(&receipt);
+    if !held.is_empty() {
+        check_held(
+            target,
+            &held,
+            &plan.to,
+            &format!(
+                "run the step again (`ordo evolve --from {} --to {} --run`)",
+                plan.from, plan.to
+            ),
+        )
+        .await
+        .map_err(|why| run_err("held_constraint_broken", why, false))?;
+    }
     if !after.is_empty() {
         sa::execute(target, &after)
             .await
             .map_err(|f| run_err("execute_failed", f.to_string(), false))?;
     }
+    // A fill a move on this database recorded is done: its `NOT NULL` has
+    // landed (11b part 4).
+    crate::dual_writes::forget_fills(target, &backfills)
+        .await
+        .map_err(|e| run_err("internal", e.to_string(), true))?;
     // `seal.keep_plaintext`: the kept plaintext column is an orphan, for
     // erasure, export and pruning (increment 14's table).
     // B10's old blind index too: kept and written until it is pruned, so a
@@ -2458,6 +2484,67 @@ pub(crate) fn dual_writes_step(p: &StoredPlan) -> bool {
     };
     let fills = receipt["backfills"].as_array().cloned().unwrap_or_default();
     !fills.is_empty() && fills.iter().all(|b| b["sql"].is_string())
+}
+
+/// **A unique or a check a step holds is not probed before its copy**
+/// (11b part 4): its probe would read a column the expand has not made,
+/// and the copied rows are checked against it instead ([`check_held`]).
+pub(crate) fn release_held(a: &mut sa::Assessed, held: &std::collections::BTreeSet<String>) {
+    let is_held = match &a.change {
+        Change::AddUnique { object, .. }
+        | Change::AddCompositeUnique { object, .. }
+        | Change::AddCheck { object, .. } => held.contains(object),
+        _ => false,
+    };
+    if is_held {
+        a.probe = None;
+        a.refused
+            .retain(|r| r != "probe_not_empty" && !r.starts_with("probe_unavailable"));
+    }
+}
+
+/// The uniques and checks a stored step holds to its close (increment 11b
+/// part 4), from its receipt.
+pub(crate) fn held_of(receipt: &Value) -> Vec<sa::Held> {
+    receipt["held"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(sa::Held::from_json)
+        .collect()
+}
+
+/// **The rows checked against what a step held**, before the uniques and
+/// checks land: one that would not land refuses, naming it and the first
+/// rows that break it, `space/id`, with `fix`. Nothing lands then.
+pub(crate) async fn check_held(
+    target: &Pool,
+    held: &[sa::Held],
+    to: &str,
+    fix: &str,
+) -> Result<(), String> {
+    for h in held {
+        let rows = h.breaking(target, 5).await?;
+        if rows.is_empty() {
+            continue;
+        }
+        let (rule, asks) = h.rule(to);
+        return Err(format!(
+            "`{}` {rule} ({asks}), and it cannot land: {} break{} it: {}. Nothing \
+             landed. Change those rows, then {fix}",
+            h.entity,
+            if rows.len() >= 5 {
+                "these rows and maybe more".to_string()
+            } else if rows.len() == 1 {
+                "1 row".to_string()
+            } else {
+                format!("{} rows", rows.len())
+            },
+            if rows.len() == 1 { "s" } else { "" },
+            rows.join(", "),
+        ));
+    }
+    Ok(())
 }
 
 /// A stored step that seals a field (increment 13). Its end drops the

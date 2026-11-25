@@ -478,7 +478,10 @@ async fn check_one(
         }
     }
     match sa::plan_with(&pool, y, options, Some(&x.schema)).await {
-        Ok(p) => {
+        Ok(mut p) => {
+            for a in &mut p.assessed {
+                crate::evolve::release_held(a, &options.held);
+            }
             let issues = issues_of(&label, &p, &plan.to);
             (label, Answer::Checked(issues))
         }
@@ -512,7 +515,14 @@ pub async fn precheck(
     };
     let x = crate::evolve::compiled(&a)?;
     let y = crate::evolve::compiled(&b)?;
-    let options = crate::evolve::parse_options(&plan.options)?;
+    let mut options = crate::evolve::parse_options(&plan.options)?;
+    // What the step holds to its close is checked against the copied rows,
+    // not probed here (11b part 4).
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).unwrap_or_default();
+    options.held = crate::evolve::held_of(&receipt)
+        .into_iter()
+        .map(|h| h.name)
+        .collect();
     let targets = resolver
         .targets()
         .await

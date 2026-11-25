@@ -100,6 +100,30 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
         .collect())
 }
 
+/// **A write's turn alone** (Reported fix, 2026-11-24): take `"$renames"`
+/// in `EXCLUSIVE` mode as the transaction's first statement, before
+/// [`renames_in`].
+///
+/// Every write holds `"$renames"` in `ROW SHARE` mode from its first
+/// statement, so this waits for the writes in flight on this database to
+/// end, and holds new ones at their first statement until it commits.
+/// Postgres queues lock requests in order, so a write waiting here is not
+/// overtaken. Its snapshot is taken after the writes before it committed,
+/// and no write runs beside it, so no other write can make it the loser of
+/// a serialization conflict.
+///
+/// The executor takes this turn only for a write that already lost to
+/// other writes ([`crate::Executor`]'s retry loop). Without it, a stream of
+/// writes could cancel the same write on every try. Writes during a seal
+/// did: the seal overlay ([`apply_seals`]) reads back each row it wrote
+/// through the primary key, Postgres locks that read at the index page, and
+/// every other write to the table touches the same page, so two concurrent
+/// writers each depend on the other and one is cancelled.
+pub async fn take_turn(tx: &TxConn) -> Result<(), PoolError> {
+    tx.rows("LOCK TABLE \"$renames\" IN EXCLUSIVE MODE").await?;
+    Ok(())
+}
+
 /// **`$fills`**: the fills a shared database is in the middle of
 /// (increment 11b part 4). A move on the deployment's own database that
 /// fills a field (B2, a new required field; B5, an optional field made

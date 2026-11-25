@@ -1945,6 +1945,16 @@ impl Pool {
     }
 }
 
+/// Whether try `attempt` of `attempts` takes its turn alone
+/// (`overlay::take_turn`): from the third try, and always the last try
+/// when there is more than one. Two lost tries is the point where losing
+/// again is no longer bad luck: the writes beside it keep winning
+/// (writes during a seal, Reported fix 2026-11-24). A first try never
+/// waits for anyone.
+fn runs_alone(attempt: u32, attempts: u32) -> bool {
+    attempt > 1 && (attempt >= 3 || attempt == attempts)
+}
+
 /// The first pause window, doubled on each try after it. It is the scale of
 /// one short write transaction, so the first retry spreads writers over a
 /// few of them.
@@ -2622,6 +2632,7 @@ impl Executor {
                     log.clone(),
                     lease.clone(),
                     Some(self.chain_space()),
+                    runs_alone(attempt, attempts),
                     move |db, wlog| w(db, wlog),
                 )
                 .await;
@@ -2677,6 +2688,7 @@ impl Executor {
                     agent.clone(),
                     lease.clone(),
                     append_to.clone(),
+                    runs_alone(attempt, attempts),
                 )
                 .await;
             match out {
@@ -2708,8 +2720,9 @@ impl Executor {
         agent: Option<String>,
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
+        alone: bool,
     ) -> Result<Option<serde_json::Value>, ExecFail> {
-        self.attempt(log, lease, append_to, move |db, log| {
+        self.attempt(log, lease, append_to, alone, move |db, log| {
             log.act_for(agent);
             fixture.run_write_on(db, log, &call, Some(&caller))
         })
@@ -2774,6 +2787,7 @@ impl Executor {
         log: std::sync::Arc<std::sync::Mutex<ordo_conformance::WriteLog>>,
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
+        alone: bool,
         work: W,
     ) -> Result<Option<serde_json::Value>, ExecFail>
     where
@@ -2806,7 +2820,19 @@ impl Executor {
         // that has not started waits for this write to commit. A write
         // can therefore never land between a rename's new column and its
         // dual writes, whatever this node has read.
-        let renames = match overlay::renames_in(&tx).await {
+        // **A turn alone** for a write that already lost to other writes:
+        // the in-flight writes end first and new ones wait, so this try
+        // cannot be cancelled by them (`overlay::take_turn`).
+        let turn = if alone {
+            overlay::take_turn(&tx).await
+        } else {
+            Ok(())
+        };
+        let renames = match turn {
+            Ok(()) => overlay::renames_in(&tx).await,
+            Err(e) => Err(e),
+        };
+        let renames = match renames {
             Ok(r) => r,
             Err(e) if e.is_missing_table() => {
                 // A database no dial of this build reached yet: make the
@@ -3171,10 +3197,16 @@ impl Executor {
         // Appended to this executor's own chain, always. Its one caller is
         // the blob door, and an upload is revertible only because the revert
         // applier finds its group in the durable chain.
-        self.attempt(log, None, Some(self.chain_space()), move |db, log| {
-            log.act_for(agent);
-            fixture.run_platform_converge(db, log, value, &caller)
-        })
+        self.attempt(
+            log,
+            None,
+            Some(self.chain_space()),
+            false,
+            move |db, log| {
+                log.act_for(agent);
+                fixture.run_platform_converge(db, log, value, &caller)
+            },
+        )
         .await
         .map(|o| o.unwrap_or_else(|| serde_json::Value::Array(Vec::new())))
     }
@@ -3211,9 +3243,13 @@ impl Executor {
             + Send
             + 'static,
     {
-        self.attempt(log, None, Some(self.chain_space()), move |db, log| {
-            work(db, log)
-        })
+        self.attempt(
+            log,
+            None,
+            Some(self.chain_space()),
+            false,
+            move |db, log| work(db, log),
+        )
         .await
         .map(|o| o.unwrap_or_else(|| serde_json::Value::Array(Vec::new())))
     }
@@ -3703,5 +3739,17 @@ mod backoff_tests {
     fn the_draw_is_random() {
         let draws: std::collections::HashSet<u64> = (0..64).map(|_| random_u64()).collect();
         assert!(draws.len() > 60, "{}", draws.len());
+    }
+
+    /// A first try never runs alone; from the third try every try does, and
+    /// a budget of one retry gives its last try the turn.
+    #[test]
+    fn a_write_that_lost_twice_runs_alone() {
+        let alone = |attempts: u32| -> Vec<bool> {
+            (1..=attempts).map(|a| runs_alone(a, attempts)).collect()
+        };
+        assert_eq!(alone(1), [false]);
+        assert_eq!(alone(2), [false, true]);
+        assert_eq!(alone(6), [false, false, true, true, true, true]);
     }
 }

@@ -1059,6 +1059,7 @@ fn a_capability_token_can_never_step_up() {
         "transfer.approve".to_string(),
         crate::pins::OpPin {
             manifest_hash: ManifestHash([0u8; 32]),
+            version: None,
             unguarded: false,
             entities: Vec::new(),
         },

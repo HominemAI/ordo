@@ -1811,15 +1811,23 @@ pub(crate) async fn expand_step(
     // reindex of that field is not run. The node trades the index in before
     // it serves `y` (`crate::spaces::Spaces::resolve`); on the deployment's
     // own database, the activation does.
-    let kept = sa::kept_indexes_due(target, &y.schema)
-        .await
-        .map_err(|e| run_err("internal", e.to_string(), true))?;
+    // Asked only of a step that reindexes: no other step reads them.
+    let reindexes = again.receipt["backfills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|b| b["code"] == "B10");
+    let held = if reindexes {
+        sa::kept_indexes(target)
+            .await
+            .map_err(|e| run_err("internal", e.to_string(), true))?
+    } else {
+        Vec::new()
+    };
+    let kept = sa::kept_due_in(&held, &y.schema);
     // **A second B10 on a field whose first one is still kept** is
     // refused: the end would keep the index it replaces under the name the
     // first one's kept index holds. The close prunes it.
-    let held = sa::kept_indexes(target)
-        .await
-        .map_err(|e| run_err("internal", e.to_string(), true))?;
     for b in again.receipt["backfills"].as_array().into_iter().flatten() {
         let (Some(entity), Some(field)) = (b["entity"].as_str(), b["field"].as_str()) else {
             continue;

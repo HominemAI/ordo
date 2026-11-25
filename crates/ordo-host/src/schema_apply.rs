@@ -2810,9 +2810,12 @@ pub async fn kept_indexes_due(
     pool: &Pool,
     schema: &Schema,
 ) -> Result<Vec<KeptIndex>, ordo_exec::PoolError> {
-    Ok(kept_indexes(pool)
-        .await?
-        .into_iter()
+    Ok(kept_due_in(&kept_indexes(pool).await?, schema))
+}
+
+/// Of `held` ([`kept_indexes`]), those `schema` reads.
+pub fn kept_due_in(held: &[(KeptIndex, String)], schema: &Schema) -> Vec<KeptIndex> {
+    held.iter()
         .filter(|(k, norm)| {
             schema
                 .native(&k.entity)
@@ -2822,8 +2825,8 @@ pub async fn kept_indexes_due(
                 .as_deref()
                 == Some(norm.as_str())
         })
-        .map(|(k, _)| k)
-        .collect())
+        .map(|(k, _)| k.clone())
+        .collect()
 }
 
 /// Every blind index B10 kept on this database whose column is still

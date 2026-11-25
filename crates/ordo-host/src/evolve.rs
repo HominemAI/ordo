@@ -187,7 +187,7 @@ pub enum EvolveRefusal {
     /// deployment owner has not approved it for this count (ruled
     /// 2026-11-23, Q6). Nothing was stored.
     SignInRemoval {
-        removal: crate::precheck::SignInRemoval,
+        removal: Box<crate::precheck::SignInRemoval>,
         /// The count an approval named, when one was given.
         approved: Option<u64>,
     },
@@ -1562,7 +1562,7 @@ pub async fn evolve_approved(
     if let Some(removal) = &sign_in {
         if removal.people > 0 && approved != Some(removal.people) {
             return Err(EvolveRefusal::SignInRemoval {
-                removal: removal.clone(),
+                removal: Box::new(removal.clone()),
                 approved,
             });
         }

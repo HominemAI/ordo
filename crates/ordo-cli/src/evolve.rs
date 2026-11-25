@@ -190,6 +190,14 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
                 ""
             }
         ));
+        for n in s
+            .get("peerNotes")
+            .and_then(|n| n.as_array())
+            .into_iter()
+            .flatten()
+        {
+            out.push_str(&format!("PEER       {}\n", n.as_str().unwrap_or("?")));
+        }
     }
     out.push_str(&precheck_lines(&row["prechecks"]));
     if let Some(dir) = flags.positional.first() {

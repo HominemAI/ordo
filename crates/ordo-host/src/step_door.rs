@@ -53,8 +53,8 @@ pub const MAX_ANSWER_BYTES: usize = 4 * 1024 * 1024;
 /// How long one read may take, connect to last byte.
 pub const READ_SECS: u64 = 30;
 
-/// The largest clone answer read from production: the sealed bundle,
-/// base64, with its record.
+/// The largest clone answer read from production unless `clone.max_size`
+/// says otherwise: the sealed bundle, base64, with its record.
 pub const MAX_CLONE_BYTES: usize = 64 * 1024 * 1024;
 
 /// How long a clone may take, connect to last byte: production masks and
@@ -85,6 +85,8 @@ pub enum StepDoorError {
     NoVersion { address: String, message: String },
     /// The step before answered something this cannot read.
     Answer { address: String, why: String },
+    /// The answer was longer than the most this reads, `max` bytes.
+    TooLarge { address: String, max: usize },
 }
 
 impl StepDoorError {
@@ -124,6 +126,11 @@ impl fmt::Display for StepDoorError {
             StepDoorError::Answer { address, why } => {
                 write!(f, "the deployment at {address} answered {why}")
             }
+            StepDoorError::TooLarge { address, max } => write!(
+                f,
+                "the deployment at {address} answered more than {} MiB",
+                max / (1024 * 1024)
+            ),
         }
     }
 }
@@ -198,6 +205,7 @@ impl StepDoor {
         bearer: &str,
         tenant: &str,
         env: &str,
+        max: usize,
     ) -> Result<Value, StepDoorError> {
         let body = serde_json::json!({ "$space": space, "tenant": tenant, "env": env });
         let path = format!("/op/{}", crate::clones::CLONE_OUT);
@@ -207,7 +215,7 @@ impl StepDoor {
             space,
             bearer,
             Some(body.to_string().into_bytes()),
-            MAX_CLONE_BYTES,
+            max,
         );
         self.first_row(read, CLONE_SECS).await
     }
@@ -360,9 +368,9 @@ impl StepDoor {
         while let Some(chunk) = stream.next().await {
             out.extend_from_slice(&chunk.map_err(|e| unreachable(e.to_string()))?);
             if out.len() > max {
-                return Err(StepDoorError::Answer {
+                return Err(StepDoorError::TooLarge {
                     address: self.address.clone(),
-                    why: format!("more than {} MiB", max / (1024 * 1024)),
+                    max,
                 });
             }
         }

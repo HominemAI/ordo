@@ -99,6 +99,29 @@ pub const MASK_SETTING: &str = "clone.mask";
 pub const READERS_SETTING: &str = "clone.readers";
 /// Which tenants' mail, push and egress go to the sink (`crate::sinks`).
 pub const SINKS_SETTING: &str = "clone.sinks";
+/// The most a clone may weigh as it travels, in MiB.
+pub const MAX_SIZE_SETTING: &str = "clone.max_size";
+/// `clone.max_size` when unset: 64 MiB.
+pub const MAX_SIZE_DEFAULT_MIB: u64 = 64;
+/// The most `clone.max_size` may be set to, in MiB.
+pub const MAX_SIZE_CEILING_MIB: u64 = 1024;
+
+/// `clone.max_size` in MiB: `<n>MiB` or a bare `<n>`, 1 to 1024.
+pub fn parse_max_size(value: &str) -> Result<u64, CloneRefusal> {
+    let v = value.trim();
+    let digits = v
+        .strip_suffix("MiB")
+        .or_else(|| v.strip_suffix("mib"))
+        .unwrap_or(v)
+        .trim();
+    match digits.parse::<u64>() {
+        Ok(n) if (1..=MAX_SIZE_CEILING_MIB).contains(&n) => Ok(n),
+        _ => Err(CloneRefusal::Setting(format!(
+            "`{v}` is not a value for {MAX_SIZE_SETTING}: a whole number of MiB, `<n>MiB`, from \
+             1 to {MAX_SIZE_CEILING_MIB}. The default is {MAX_SIZE_DEFAULT_MIB}MiB"
+        ))),
+    }
+}
 
 /// The sealed bundle's format tag, also bound into its associated data.
 pub const FORMAT: &str = "ordo.clone.v1";
@@ -218,6 +241,12 @@ pub enum CloneRefusal {
     },
     /// The sealed bundle did not open, or its contents are not a clone.
     Bundle(String),
+    /// The clone is over `clone.max_size`: it is not taken, and nothing is
+    /// made here. Raise the setting on this deployment, or clone less.
+    TooLarge {
+        env: String,
+        max_mib: u64,
+    },
     /// The clone's version, which staging did not hold, did not pass the
     /// promotion gate on its way down.
     Version {
@@ -284,6 +313,13 @@ impl std::fmt::Display for CloneRefusal {
                  token for `{env}`"
             ),
             CloneRefusal::Bundle(why) => write!(f, "the clone did not arrive whole: {why}"),
+            CloneRefusal::TooLarge { env, max_mib } => write!(
+                f,
+                "the clone from `{env}` is over {max_mib} MiB, the most this deployment takes \
+                 ({MAX_SIZE_SETTING}), so nothing was made. Raise it, up to \
+                 {MAX_SIZE_CEILING_MIB} MiB: `ordo clones set max-size <n>MiB --reason \"...\"`. \
+                 Or clone a smaller tenant"
+            ),
             CloneRefusal::Version {
                 version,
                 from,
@@ -422,7 +458,7 @@ impl Mask {
 }
 
 /// The clone settings this deployment holds.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloneSettings {
     /// `clone.mask`, read on the deployment a clone leaves.
     pub mask: Mask,
@@ -430,6 +466,19 @@ pub struct CloneSettings {
     pub readers: BTreeSet<String>,
     /// `clone.sinks`, read on the deployment a clone lands in.
     pub sinks: crate::sinks::SinkScope,
+    /// `clone.max_size` in MiB, read on the deployment a clone lands in.
+    pub max_size_mib: u64,
+}
+
+impl Default for CloneSettings {
+    fn default() -> Self {
+        CloneSettings {
+            mask: Mask::default(),
+            readers: BTreeSet::new(),
+            sinks: Default::default(),
+            max_size_mib: MAX_SIZE_DEFAULT_MIB,
+        }
+    }
 }
 
 fn parse_readers(value: &str) -> Result<BTreeSet<String>, CloneRefusal> {
@@ -459,10 +508,11 @@ fn parse_readers(value: &str) -> Result<BTreeSet<String>, CloneRefusal> {
 pub async fn settings(pool: &Pool) -> Result<CloneSettings, CloneRefusal> {
     let sql = format!(
         "SELECT DISTINCT ON (\"setting\") \"setting\", \"value\" FROM \"$version_settings\" \
-         WHERE \"setting\" IN ({}, {}, {}) ORDER BY \"setting\", \"seq\" DESC",
+         WHERE \"setting\" IN ({}, {}, {}, {}) ORDER BY \"setting\", \"seq\" DESC",
         sql_lit(MASK_SETTING),
         sql_lit(READERS_SETTING),
-        sql_lit(SINKS_SETTING)
+        sql_lit(SINKS_SETTING),
+        sql_lit(MAX_SIZE_SETTING)
     );
     let rows = match pool.rows(&sql).await {
         Ok(rows) => rows,
@@ -479,6 +529,8 @@ pub async fn settings(pool: &Pool) -> Result<CloneSettings, CloneRefusal> {
             out.readers = parse_readers(&value)?;
         } else if name == SINKS_SETTING {
             out.sinks = crate::sinks::SinkScope::parse(&value).map_err(CloneRefusal::Setting)?;
+        } else if name == MAX_SIZE_SETTING {
+            out.max_size_mib = parse_max_size(&value)?;
         }
     }
     Ok(out)
@@ -499,15 +551,18 @@ pub async fn set_setting(
         MASK_SETTING | "mask" => MASK_SETTING,
         READERS_SETTING | "readers" => READERS_SETTING,
         SINKS_SETTING | "sinks" => SINKS_SETTING,
+        MAX_SIZE_SETTING | "max-size" => MAX_SIZE_SETTING,
         other => {
             return Err(CloneRefusal::Setting(format!(
                 "`{other}` is not a clone setting. There are {MASK_SETTING}, \
-                 {READERS_SETTING} and {SINKS_SETTING}"
+                 {READERS_SETTING}, {SINKS_SETTING} and {MAX_SIZE_SETTING}"
             )))
         }
     };
     let stored = if name == MASK_SETTING {
         Mask::parse(value)?.value()
+    } else if name == MAX_SIZE_SETTING {
+        format!("{}MiB", parse_max_size(value)?)
     } else if name == SINKS_SETTING {
         crate::sinks::SinkScope::parse(value)
             .map_err(CloneRefusal::Setting)?
@@ -1400,14 +1455,27 @@ pub async fn clone_in(
         Some(n) if !n.trim().is_empty() => Some(check_tenant_name(n)?),
         _ => None,
     };
-    let source = |error| CloneRefusal::Source {
-        env: from.name.clone(),
-        error,
+    let source = |error| match error {
+        StepDoorError::TooLarge { max, .. } if max >= 1024 * 1024 => CloneRefusal::TooLarge {
+            env: from.name.clone(),
+            max_mib: (max / (1024 * 1024)) as u64,
+        },
+        error => CloneRefusal::Source {
+            env: from.name.clone(),
+            error,
+        },
     };
+    let max_mib = settings(pool).await?.max_size_mib;
     let client =
         StepDoor::parse(&door.address, crate::step_door::plain_http_allowed()).map_err(source)?;
     let row = client
-        .clone_out(&door.space, req.token, req.tenant, &own.name)
+        .clone_out(
+            &door.space,
+            req.token,
+            req.tenant,
+            &own.name,
+            max_mib as usize * 1024 * 1024,
+        )
         .await
         .map_err(source)?;
     let out = CloneOut::from_json(&row).map_err(|why| {
@@ -2119,6 +2187,7 @@ impl CloneOps {
                     "mask": s.mask.value(),
                     "readers": s.readers.iter().collect::<Vec<_>>(),
                     "sinks": s.sinks.word(),
+                    "maxSize": format!("{}MiB", s.max_size_mib),
                 })
             }
             SINKS => {
@@ -2169,6 +2238,7 @@ impl CloneOps {
                     "setting": setting.trim(), "mask": s.mask.value(),
                     "readers": s.readers.iter().collect::<Vec<_>>(),
                     "sinks": s.sinks.word(),
+                    "maxSize": format!("{}MiB", s.max_size_mib),
                 })
             }
             other => return Err(ExecError::internal(format!("`{other}` is not a clone op"))),

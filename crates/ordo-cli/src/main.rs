@@ -318,14 +318,16 @@ fn usage() -> ! {
          promotion.skip_staging: promote past staging from the step before it.\n  \
          ordo environments set release-mismatch refuse|warn | attestation-max-age <n>d --reason \"<text>\"\n      \
          what production accepts of a signed rehearsal (default refuse, 7d).\n  \
-         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks <value>\n      \
+         ordo clones key | set-key <env> <key> | list | sink [<tenant>] | set mask|readers|sinks|max-size <value>\n      \
          staging clones of named production tenants. `key` prints this\n      \
          deployment's clone key; `set-key` records it on production, which\n      \
          seals each clone to it. clone.mask names the fields that leave\n      \
          production unmasked (deny by default, `off` to opt out);\n      \
          clone.readers names who besides staging's admins opens a clone.\n      \
          clone.sinks: `on` (default) sends every staging tenant's mail and\n      \
-         function calls to the sink, `clones` only the clones'; `sink` reads it.\n  \
+         function calls to the sink, `clones` only the clones'; `sink` reads it.\n      \
+         clone.max_size: the most a clone may weigh as it travels, `<n>MiB`\n      \
+         from 1 to 1024 (default 64MiB), read on staging.\n  \
          ordo clones clone <tenant> [--from <env>] [--name <n>] [--from-token <t>] --reason \"<text>\"\n      \
          on staging: production masks the tenant, seals it to staging's key,\n      \
          and staging imports it under its own keys, pinned to its version.\n      \

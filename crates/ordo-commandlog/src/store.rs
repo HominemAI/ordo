@@ -570,6 +570,7 @@ pub fn invert_group(
         // flag across would put a claim in the chain that no door ever
         // made. The reverted group keeps its own flag, where it is true.
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     })

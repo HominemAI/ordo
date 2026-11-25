@@ -4508,14 +4508,28 @@ pub fn map_step(
         ));
     }
     // An old required column the new version's inserts do not name takes
-    // a placeholder its type's zero; the reverse sets the real value in
-    // the same write, and a one way step leaves it to the orphan.
+    // a placeholder its type's zero, only where the reverse sets the real
+    // value in the same write. With no reverse the placeholder would stay,
+    // where the version before can read it as data (a share read by a space
+    // on it, a later rollback), so it is refused by name.
     for old in from.iter().filter(|o| !o.optional) {
         let held = live
             .table(&e.name)
             .and_then(|lt| lt.columns.get(&old.column()));
         if !held.is_some_and(|c| !c.nullable && !c.has_default) {
             continue;
+        }
+        if missing.contains(&old.name) {
+            return Err(refuse(
+                "map_default_required",
+                format!(
+                    "`{}.{}` is required with no default and has no reverse, so the new \
+                     version's inserts would leave it a value nobody wrote, which the \
+                     version before reads as data. Give a reverse (`--reverse {}.{}=<expression>`), \
+                     or give `{}` a default in a version before this one",
+                    e.name, old.name, e.name, old.name, old.name
+                ),
+            ));
         }
         let zero = match ordo_schema::ddl::column_ty(old).as_str() {
             "text" => "''",

@@ -61,11 +61,11 @@ fn split() -> String {
     )
 }
 
-/// 1.0.0: `first` and `last`.
+/// 1.0.0: `first` and `last`, each with a default of its own.
 fn parts() -> String {
     people(
         "1.0.0",
-        "  first: text\n  last: text\n",
+        "  first: text = \"\"\n  last: text = \"\"\n",
         "\nop addPerson($first: text, $last: text) =\n  \
          set person { first: $first, last: $last }\n",
     )
@@ -555,7 +555,8 @@ async fn a_split_lists_what_it_cannot_parse_and_keeps_both_shapes_through_a_reve
     );
 }
 
-/// **A one way merge on a tenant's own database.** `first` and `last`
+/// **A one way merge on a tenant's own database.** With no default, a
+/// one way merge is refused (`map_default_required`). With defaults, `first` and `last`
 /// merge into `fullName` with no reverse, accepted by `--one-way`. The
 /// tenant moves; a write on 1.1.0 lands; a revert in the soak and a
 /// rollback are refused, naming the close; the close lands `fullName`'s
@@ -605,6 +606,34 @@ async fn a_one_way_merge_moves_and_refuses_the_revert() {
         errs[0].1.contains("--reverse person.first=before(fullName"),
         "{errs:?}"
     );
+    // With no default of their own, `first` and `last` would hold a value
+    // nobody wrote on every row 1.1.0 inserts: refused by name.
+    let (_bare_pg, bare) = empty("ordo_maps_merge_bare").await;
+    store(
+        &bare,
+        &people(
+            "1.0.0",
+            "  first: text\n  last: text\n",
+            "\nop addPerson($first: text, $last: text) =\n  \
+             set person { first: $first, last: $last }\n",
+        ),
+    )
+    .await;
+    store(&bare, &merged()).await;
+    let err = evolve::evolve(
+        &bare,
+        "1.0.0",
+        "1.1.0",
+        &options(fill, "", true),
+        None,
+        OWNER,
+        1,
+    )
+    .await
+    .expect_err("no default and no reverse");
+    let errs = errors_of(err);
+    assert_eq!(errs[0].0, "map_default_required", "{errs:?}");
+    assert!(errs[0].1.contains("--reverse person.first="), "{errs:?}");
     let plan = evolve::evolve(
         &registry,
         "1.0.0",
@@ -640,7 +669,7 @@ async fn a_one_way_merge_moves_and_refuses_the_revert() {
     let on_y = moving_node(&registry, &tpg.db, &merged(), "acme", true).await;
     on_y.write(r#"addPerson($name: "Joan Clarke")"#)
         .await
-        .expect("a write on 1.1.0 lands: the old columns take their placeholder");
+        .expect("a write on 1.1.0 lands: the old columns take their own defaults");
 
     let err = dual_writes::revert(&cx, "acme", OWNER)
         .await

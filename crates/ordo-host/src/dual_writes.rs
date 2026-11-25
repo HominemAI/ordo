@@ -138,6 +138,7 @@ pub fn soak_secs(text: &str) -> Result<u64, EvolveRefusal> {
 /// Render the move's overlays and what its close needs, as `$moves.overlay`
 /// keeps them. `None` when a backfill has no per-row mapping (a backfill
 /// function): such a step runs with no dual writes.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     x: &Program,
     y: &Program,

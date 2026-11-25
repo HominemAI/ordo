@@ -2700,6 +2700,10 @@ impl Planner {
             // separator is not there, so a split's unparsed rows show.
             "before" => ordo_schema::check::before_sql(&a[0], &a[1]),
             "after" => ordo_schema::check::after_sql(&a[0], &a[1]),
+            // Conversions: null where the value does not convert.
+            "text" => format!("({})::text", a[0]),
+            "int" => ordo_schema::check::int_sql(&format!("({})::text", a[0])),
+            "bool" => ordo_schema::check::bool_sql(&a[0]),
             other => {
                 return Err(PlanError {
                     code: "unsupported",

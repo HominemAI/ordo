@@ -841,6 +841,41 @@ fn flag_param(name: &str) -> ParamSpec {
 }
 
 /// Run one of them. `caller` is the principal the door proved.
+/// [`execute`], boxed, with a stored step's ops sent straight to
+/// `crate::evolve`, past [`execute`]'s own poll.
+///
+/// **Why** (Reported fix, 2026-11-25): an unoptimized build gives an
+/// `async fn`'s poll one stack slot for each future any of its arms makes,
+/// so a dispatcher with many arms has a poll frame of hundreds of KiB, and a
+/// step's door op ran 3 of them deep on a door task's 2 MiB worker stack
+/// (`ordo-cli` `schema_apply` overflowed on CI). A future made in this plain
+/// function lives in its short frame, popped before the step is polled.
+pub fn execute_boxed<'a>(
+    ops: &'a ApplyOps,
+    name: &'a str,
+    space: &'a str,
+    bound: &'a BoundParams,
+    caller: &'a str,
+) -> futures::future::BoxFuture<'a, Result<ExecResult, ExecError>> {
+    if !matches!(
+        name,
+        EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK | REVERT_SOAK | CLOSE_SOAK
+    ) {
+        return Box::pin(execute(ops, name, space, bound, caller));
+    }
+    if let Err(e) = ops.home_only(space) {
+        return Box::pin(async move { Err(e) });
+    }
+    let step = crate::evolve::execute_boxed(ops, name, bound, caller);
+    Box::pin(async move {
+        Ok(ExecResult {
+            position: None,
+            rows: vec![step.await?],
+            next_cursor: None,
+        })
+    })
+}
+
 pub async fn execute(
     ops: &ApplyOps,
     name: &str,
@@ -1030,7 +1065,7 @@ pub async fn execute(
         EVOLVE | PLANS | REPLAY | ROLLBACK_CHECK | REVERT_SOAK | CLOSE_SOAK => {
             // Boxed: a step's future is deep, and a door task's stack is
             // not (a move overflowed it on CI's runners).
-            Box::pin(crate::evolve::execute(ops, name, bound, caller)).await?
+            crate::evolve::execute_boxed(ops, name, bound, caller).await?
         }
         name if crate::rollouts::OPS.contains(&name) => {
             crate::rollouts::execute(ops, name, bound, caller).await?

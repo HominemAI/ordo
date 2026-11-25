@@ -502,7 +502,9 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
         ),
         (
             "2.1.0",
-            "  heading: int prev(title)\n  body: text?\n  secret: text sealed\n",
+            // A type change renders as a cast since entity maps; a file
+            // is never computed, so it stays refused.
+            "  heading: blob? prev(title)\n  body: text?\n  secret: text sealed\n",
             "prev_type",
         ),
         (

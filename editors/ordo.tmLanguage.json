@@ -53,7 +53,7 @@
       "support.function.ordo": [
         "year", "month", "week", "day", "hour", "dow", "abs", "round", "floor",
         "ceil", "mod", "least", "greatest", "hash", "allocate", "coalesce",
-        "lower", "length", "trim", "before", "after"
+        "lower", "length", "trim", "before", "after", "text", "int", "bool"
       ],
       "support.function.aggregate.ordo": [
         "count", "sum", "avg", "min", "max", "median", "percentile", "distinct", "joined"
@@ -449,7 +449,7 @@
 
     "function": {
       "comment": "The closed expression-function set, with its arities checked by the parser. Coloured only when a `(` follows, so a field named `round` stays a field.",
-      "match": "\\b(year|month|week|day|hour|dow|abs|round|floor|ceil|mod|least|greatest|hash|allocate|coalesce|lower|length|trim|before|after)\\b\\s*(?=\\()",
+      "match": "\\b(year|month|week|day|hour|dow|abs|round|floor|ceil|mod|least|greatest|hash|allocate|coalesce|lower|length|trim|before|after|text|int|bool)\\b\\s*(?=\\()",
       "captures": { "1": { "name": "support.function.ordo" } }
     },
 

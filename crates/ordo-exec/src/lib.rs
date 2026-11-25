@@ -2983,7 +2983,8 @@ impl Executor {
             .with_move(run);
         // An entity rename's dual writes (below), worked out here too.
         let mirrors = overlay::entity_mirrors(&self.schema, &renames);
-        let capture = capture.with_mirrors(&mirrors);
+        let splits = overlay::split_mirrors(&self.schema, &renames);
+        let capture = capture.with_mirrors(&mirrors).with_splits(&splits);
         let (result, tx, mut scratch, mut capture) = tokio::task::spawn_blocking(move || {
             let db = BlockingTx {
                 tx,
@@ -3076,6 +3077,52 @@ impl Executor {
                                 .filter(|c| c.kind == ordo_commandlog::CommandKind::Create)
                                 .collect(),
                         ),
+                        &capture,
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
+                            overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
+                // **An entity split's dual writes**: the part kept current
+                // from the whole by the version before, the whole's moved
+                // columns from the part by the version after, in this
+                // transaction, until the split's soak closes.
+                if let (false, Some(group)) = (splits.is_empty(), scratch.pending()) {
+                    let (deleted, written): (Vec<_>, Vec<_>) = group
+                        .commands
+                        .iter()
+                        .partition(|c| c.kind == ordo_commandlog::CommandKind::Delete);
+                    let pairs = |cs: &[&ordo_commandlog::Command]| -> Vec<(String, String)> {
+                        cs.iter()
+                            .map(|c| (c.entity.clone(), c.row_id.clone()))
+                            .collect()
+                    };
+                    // Each deleted part row's link, from its before image.
+                    let links: Vec<(String, String)> = deleted
+                        .iter()
+                        .filter_map(|c| {
+                            let m = splits.iter().find(|m| m.reverse && m.part == c.entity)?;
+                            match c.before.as_ref()?.get(&m.link)? {
+                                ordo_commandlog::Value::Id(s) | ordo_commandlog::Value::Text(s) => {
+                                    Some((c.entity.clone(), s.clone()))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    if let Err(e) = overlay::apply_splits(
+                        &tx,
+                        &self.space.0,
+                        &splits,
+                        &pairs(&written),
+                        &pairs(&deleted),
+                        &links,
                         &capture,
                     )
                     .await

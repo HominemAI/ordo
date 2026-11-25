@@ -434,6 +434,12 @@ export const fn = {
   before: (a0: Value, a1: Value): Value => new Val({ k: 'call', name: 'before', args: [a0.node, a1.node] }),
   /** `after(…)` — 2..2 argument(s). */
   after: (a0: Value, a1: Value): Value => new Val({ k: 'call', name: 'after', args: [a0.node, a1.node] }),
+  /** `text(…)` — 1..1 argument(s). */
+  text: (a0: Value): Value => new Val({ k: 'call', name: 'text', args: [a0.node] }),
+  /** `int(…)` — 1..1 argument(s). */
+  int: (a0: Value): Value => new Val({ k: 'call', name: 'int', args: [a0.node] }),
+  /** `bool(…)` — 1..1 argument(s). */
+  bool: (a0: Value): Value => new Val({ k: 'call', name: 'bool', args: [a0.node] }),
 } as const;
 
 /**

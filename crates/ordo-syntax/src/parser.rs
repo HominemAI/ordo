@@ -207,6 +207,13 @@ const FUNCTIONS: &[(&str, usize, usize)] = &[
     // increment 15b), and legal anywhere fields are.
     ("before", 2, 2),
     ("after", 2, 2),
+    // Conversions, null where the value does not convert: a type cast on a
+    // rename (`prev`), and legal anywhere fields are. `text(x)` is the
+    // value's canonical text; `int(t)` the whole number `t` spells;
+    // `bool(t)` `true` or `false` as `t` spells it.
+    ("text", 1, 1),
+    ("int", 1, 1),
+    ("bool", 1, 1),
 ];
 
 /// The expression-function *names*, for readers outside the parser that must

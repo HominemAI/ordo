@@ -596,6 +596,13 @@ as the spelling below says: two fields each `prev(name)` is a split,
 each new field and `--reverse` for each old one, or `--one-way`. The
 compile check `prev_duplicate` no longer refuses a split.
 
+**Type casts and entity splits built 2026-11-25** (`plan-versions.md`
+increment 15c). A rename whose type changes is a one-to-one map, converted
+by the plan's `--fill` (`int(count)`, `text(qty)`, `bool(t)`). An entity
+`(prev: whole)` while `whole` stays declared is a part split off it, with
+the rule `--correspond <part>.<link>`: one part row per whole row. Moves
+(`prev(orders.note)`) and entity merges are still refused.
+
 **What it is.** A declaration that a renamed entity or field is the same
 thing as a name in the previous version, so the plan renders a rename and
 never a drop-and-add. Ruled 2026-10-01 (`forward-gaps` asks 6, 8, 18;

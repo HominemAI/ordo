@@ -654,18 +654,28 @@ impl<'a> Backfill<'a> {
     /// The table the cursor walks: the old table of an entity rename's
     /// copy, or the table filled.
     fn source(&self) -> String {
-        match self.fill.copy_from() {
-            Some(from) => q(from),
-            None => self.table(),
+        match (self.fill.copy_from(), self.fill.part_of()) {
+            (Some(from), _) | (None, Some((from, _, _))) => q(from),
+            (None, None) => self.table(),
         }
+    }
+
+    /// An entity split's moved columns: the part's physical columns but
+    /// its key, its revision and its link.
+    fn moved_columns(&self, link: &str) -> Vec<String> {
+        ordo_schema::ddl::physical_columns(self.entity)
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|c| c != SPACE && c != "id" && c != "rev" && c != link)
+            .collect()
     }
 
     /// What one row's content hash reads: the column filled, or a copied
     /// row whole.
     fn value(&self) -> String {
-        match self.fill.copy_from() {
-            Some(_) => format!("row_to_json({})::text", self.table()),
-            None => format!("{}::text", self.col()),
+        match (self.fill.copy_from(), self.fill.part_of()) {
+            (Some(_), _) | (None, Some(_)) => format!("row_to_json({})::text", self.table()),
+            (None, None) => format!("{}::text", self.col()),
         }
     }
 
@@ -942,16 +952,49 @@ impl<'a> Backfill<'a> {
                 ))
                 .await?;
             }
+            // An entity split: one part row per whole row in the chunk, each
+            // whole row locked while it is read, so a write to it waits and
+            // its dual write lands after. A part row a write already made
+            // for it is newer, and kept.
+            (FillMapping::Part { whole, link, key }, _) => {
+                let cols = self
+                    .moved_columns(link)
+                    .iter()
+                    .map(|c| q(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tx.rows(&format!(
+                    "INSERT INTO {t} ({sp}, \"id\", \"rev\", {cols}, {l}) \
+                     SELECT {sp}, {pid}, 1, {cols}, \"id\" FROM {w} WHERE {range} \
+                     ORDER BY {sp}, \"id\" FOR SHARE ON CONFLICT ({sp}, {l}) DO NOTHING",
+                    t = self.table(),
+                    w = q(whole),
+                    l = q(link),
+                    sp = q(SPACE),
+                    pid = ordo_exec::overlay::part_id_sql(key, "\"id\""),
+                ))
+                .await?;
+            }
             (FillMapping::Expr(src), None) => {
                 return Err(BackfillRefusal::Store(format!(
                     "the mapping `{src}` was stored without its SQL; render the plan again"
                 )))
             }
         }
-        // Each row's new value, folded into its space's content hash.
+        // Each row's new value, folded into its space's content hash. A
+        // split's part rows are the chunk's by their link.
+        let at = match self.fill.part_of() {
+            Some((whole, link, _)) => format!(
+                "({sp}, {l}) IN (SELECT {sp}, \"id\" FROM {w} WHERE {range})",
+                sp = q(SPACE),
+                l = q(link),
+                w = q(whole)
+            ),
+            None => range.clone(),
+        };
         let filled = tx
             .rows(&format!(
-                "SELECT {sp}, \"id\", {v} FROM {t} WHERE {range} ORDER BY {sp}, \"id\"",
+                "SELECT {sp}, \"id\", {v} FROM {t} WHERE {at} ORDER BY {sp}, \"id\"",
                 sp = q(SPACE),
                 v = self.value(),
                 t = self.table(),
@@ -1506,6 +1549,36 @@ impl<'a> Backfill<'a> {
                 ));
             }
         }
+        // An entity split's copy: one part row per whole row, holding the
+        // whole row's moved columns. Writes during the copy kept both
+        // shapes current.
+        if let Some((whole, link, _)) = self.fill.part_of() {
+            let on = self
+                .moved_columns(link)
+                .iter()
+                .map(|c| format!("w.{c} IS NOT DISTINCT FROM p.{c}", c = q(c)))
+                .chain(std::iter::once("TRUE".to_string()))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let off = self
+                .pool
+                .rows(&format!(
+                    "SELECT w.{sp}, w.\"id\" FROM {w} w LEFT JOIN {t} p \
+                     ON p.{sp} = w.{sp} AND p.{l} = w.\"id\" \
+                     WHERE p.\"id\" IS NULL OR NOT ({on}) LIMIT 1",
+                    sp = q(SPACE),
+                    w = q(whole),
+                    l = q(link),
+                    t = self.table(),
+                ))
+                .await?;
+            if let Some(row) = first(off) {
+                return Err(fail(
+                    Some(row),
+                    format!("has no row in `{}` that holds its values", self.fill.entity),
+                ));
+            }
+        }
         // No row left null. A sealed backfill leaves a null plaintext null.
         let plain = self.plain_col();
         let sealed_src = self.sealed_col();
@@ -1518,7 +1591,7 @@ impl<'a> Backfill<'a> {
             (None, "B12", Some(sql)) => format!("{} IS NULL AND ({sql}) IS NOT NULL", self.col()),
             (None, _, _) => format!("{} IS NULL", self.col()),
         };
-        let nulls = if self.fill.copy_from().is_some() {
+        let nulls = if self.fill.copy_from().is_some() || self.fill.part_of().is_some() {
             Vec::new()
         } else {
             self.pool

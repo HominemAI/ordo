@@ -167,6 +167,20 @@ pub fn render(
         if bf.copy_from().is_some() {
             continue;
         }
+        // An entity split's copy: `$renames` keeps both shapes current, and
+        // the moved columns of the whole are orphaned at the close.
+        if let Some((whole, link, _)) = bf.part_of() {
+            let part = y.schema.native(&bf.entity)?;
+            let was = x.schema.native(whole)?;
+            for f in part.declared().filter(|f| f.column() != link) {
+                let old = was.field(&f.name)?;
+                orphans.push(json!({
+                    "entity": whole, "field": f.name, "columns": [old.column()],
+                    "sealed": old.sealed || old.private,
+                }));
+            }
+            continue;
+        }
         let sql = bf.sql.as_ref()?;
         let col = q(&bf.column);
         let set = match bf.code {
@@ -272,7 +286,28 @@ pub fn render(
         "entities": entities.iter().map(|(entity, from)| json!({
             "entity": entity, "from": from,
         })).collect::<Vec<_>>(),
+        // Each part an entity split makes, `{entity, from}`: both shapes
+        // are kept current through `$renames` until the close.
+        "parts": backfills.iter().filter_map(|b| {
+            let (whole, _, _) = b.part_of()?;
+            Some(json!({ "entity": b.entity, "from": whole }))
+        }).collect::<Vec<_>>(),
     }))
+}
+
+/// Each entity split a move makes, `(part, whole)`, from its overlays.
+fn parts_of(overlay: &Value) -> Vec<(String, String)> {
+    overlay["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            Some((
+                e["entity"].as_str()?.to_string(),
+                e["from"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Each entity a move renames, `(new name, old name)`, from its overlays.
@@ -363,8 +398,11 @@ async fn expanded(target: &Pool, overlay: &Value) -> Result<bool, EvolveRefusal>
         .flatten()
         .filter_map(BackfillStep::from_json)
         .all(|bf| {
-            live.table(&bf.entity)
-                .is_some_and(|t| bf.copy_from().is_some() || t.columns.contains_key(&bf.column))
+            live.table(&bf.entity).is_some_and(|t| {
+                bf.copy_from().is_some()
+                    || bf.part_of().is_some()
+                    || t.columns.contains_key(&bf.column)
+            })
         })
         && entities_of(overlay)
             .iter()
@@ -1085,6 +1123,22 @@ pub async fn close(
                 columns: Vec::new(),
                 sealed: false,
             });
+        }
+    }
+    // Each entity split lands: no version writes the whole's moved
+    // columns again, so the split leaves `$renames`.
+    for (part, whole) in parts_of(&overlay) {
+        match target
+            .rows(&format!(
+                "DELETE FROM \"$renames\" WHERE \"entity\" = {} AND \"from\" = {}",
+                sql_lit(&part),
+                sql_lit(&whole)
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_missing_table() => {}
+            Err(e) => return Err(run_err("internal", format!("$renames: {e}"))),
         }
     }
     let at = crate::runtime::now_secs();

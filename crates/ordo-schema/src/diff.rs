@@ -298,6 +298,16 @@ pub enum Change {
         entity: String,
         from: String,
     },
+    /// An entity split (B13): `entity (prev: from)` while `from` stays
+    /// declared. A new table, one row per `from` row by the stored plan's
+    /// correspondence rule, with the fields it takes from `from`; those
+    /// columns are kept in `from`, kept current, and orphaned at the close.
+    SplitEntity {
+        entity: String,
+        from: String,
+        /// The fields that move, as the version serving now declares them.
+        fields: Vec<crate::Field>,
+    },
     /// A field split or merge (B12, `plan-versions.md` increment 15b):
     /// several new fields each `prev(name)`, or one `prev(a, b)`. Each new
     /// column is filled by the stored plan's mapping over the old fields;
@@ -423,6 +433,7 @@ impl Change {
             Change::ChangePlaces { .. } => "B11",
             Change::RenameField { .. } | Change::RenameEntity { .. } => "B4",
             Change::MapFields { .. } => "B12",
+            Change::SplitEntity { .. } => "B13",
             Change::AddUnique { .. } => "C1",
             Change::AddCompositeUnique { .. } => "C2",
             Change::AddEnum { .. } => "C3",
@@ -472,6 +483,7 @@ impl Change {
             | Change::ChangePlaces { entity, .. }
             | Change::RenameField { entity, .. }
             | Change::RenameEntity { entity, .. }
+            | Change::SplitEntity { entity, .. }
             | Change::MapFields { entity, .. }
             | Change::AddUnique { entity, .. }
             | Change::AddCompositeUnique { entity, .. }
@@ -569,6 +581,7 @@ impl Change {
             | Change::ChangePlaces { .. }
             | Change::RenameField { .. }
             | Change::RenameEntity { .. }
+            | Change::SplitEntity { .. }
             | Change::MapFields { .. }
             | Change::AddUnique { .. }
             | Change::AddCompositeUnique { .. }
@@ -664,6 +677,16 @@ impl std::fmt::Display for Change {
             Change::RenameEntity { from, .. } => {
                 write!(f, "entity `{from}` is renamed to `{e}`")
             }
+            Change::SplitEntity { from, fields, .. } => write!(
+                f,
+                "entity `{from}` is split: `{e}` takes {} from it, one row per `{from}` row by \
+                 the plan's rule, the old columns kept",
+                fields
+                    .iter()
+                    .map(|x| format!("`{from}.{}`", x.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Change::MapFields { from, to, .. } => {
                 let names = |v: Vec<&str>| {
                     v.iter()
@@ -678,6 +701,12 @@ impl std::fmt::Display for Change {
                         f,
                         "{old} is split into {new}: each filled by the plan's mapping, the old \
                          column kept"
+                    )
+                } else if from.len() == 1 {
+                    write!(
+                        f,
+                        "{old} is renamed to {new} with a new type: converted by the plan's \
+                         mapping, the old column kept"
                     )
                 } else {
                     write!(
@@ -847,6 +876,23 @@ pub fn diff_with(
 
     for e in &declared.entities {
         let Some(t) = live.table(&e.name) else {
+            if let Some(part) = renames.part_of(&e.name) {
+                if let (Some(_), Some(was)) = (
+                    live.table(&part.whole),
+                    prior.or(written).and_then(|p| p.native(&part.whole)),
+                ) {
+                    out.push(Change::SplitEntity {
+                        entity: e.name.clone(),
+                        from: part.whole.clone(),
+                        fields: part
+                            .fields
+                            .iter()
+                            .filter_map(|f| was.field(f).cloned())
+                            .collect(),
+                    });
+                    continue;
+                }
+            }
             if let Some(from) = renames.entity_from(&e.name) {
                 if live.table(from).is_some() {
                     out.push(Change::RenameEntity {
@@ -909,6 +955,9 @@ pub fn diff_with(
                     None if renames.field_to(&p.name, &f.name).is_some() => {}
                     // Split or merged: kept, and orphaned at the close.
                     None if renames.map_from(&p.name, &f.name).is_some() => {}
+                    // Moved into a part split off this entity: kept, kept
+                    // current, and orphaned at the close.
+                    None if renames.moved_to(&p.name, &f.name).is_some() => {}
                     None => {
                         if t.columns.contains_key(&f.column()) {
                             out.push(Change::DropField {

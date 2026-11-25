@@ -73,7 +73,15 @@ pub struct Rename {
     pub from: String,
     pub field: String,
     pub column: String,
+    /// An entity split's shape ([`Rename::is_split`]), as JSON: the part's
+    /// key, the columns it takes, and what each becomes in the whole when
+    /// its part row goes. `None` on every other row.
+    pub split: Option<String>,
 }
+
+/// The `field` of an entity split's row in `$renames`: no field has a name
+/// with `$`.
+pub const SPLIT_FIELD: &str = "$part";
 
 impl Rename {
     /// Whether the row is an entity rename: `from` is the old table and
@@ -81,6 +89,238 @@ impl Rename {
     pub fn is_entity(&self) -> bool {
         self.field.is_empty()
     }
+
+    /// Whether the row is an entity split: `entity` is the part, `from`
+    /// the whole it is split off, and `column` the part's link to it.
+    pub fn is_split(&self) -> bool {
+        self.field == SPLIT_FIELD
+    }
+}
+
+/// **An entity split's dual write** (`(prev: whole)` while `whole` stays
+/// declared; built 2026-11-25). The part holds one row per whole row, its
+/// link naming it.
+///
+/// - **Forward**, a version that declares the whole with the moved columns
+///   and not the part: each whole row it writes is copied into the part
+///   (`INSERT … ON CONFLICT` on the link's unique), and each whole row it
+///   deletes takes its part row with it.
+/// - **Reverse**, a version that declares the part: each part row it
+///   writes sets the moved columns of the whole row its link names, and
+///   each part row it deletes puts them back to their defaults, so the
+///   version before reads the whole as the new version left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitMirror {
+    pub whole: String,
+    pub part: String,
+    /// The part's link to the whole, a column of the part.
+    pub link: String,
+    /// The part's id prefix: a row copied from the whole is
+    /// `<key>_<whole id>`.
+    pub key: String,
+    /// The moved columns, one name in both tables.
+    pub columns: Vec<String>,
+    /// Each moved column of the whole, and what it is set to when its part
+    /// row goes: its default, or `NULL`.
+    pub cleared: Vec<(String, String)>,
+    /// This version declares the part.
+    pub reverse: bool,
+}
+
+/// The split mirrors a version writes with, for the entity splits a
+/// database is in the middle of.
+pub fn split_mirrors(schema: &ordo_schema::Schema, renames: &[Rename]) -> Vec<SplitMirror> {
+    renames
+        .iter()
+        .filter(|r| r.is_split())
+        .filter_map(|r| {
+            let reverse = match (schema.native(&r.entity), schema.native(&r.from)) {
+                (Some(_), _) => true,
+                (None, Some(_)) => false,
+                (None, None) => return None,
+            };
+            let v: serde_json::Value = serde_json::from_str(r.split.as_deref()?).ok()?;
+            let strings = |k: &str| -> Option<Vec<String>> {
+                v[k].as_array()?
+                    .iter()
+                    .map(|c| c.as_str().map(String::from))
+                    .collect()
+            };
+            Some(SplitMirror {
+                whole: r.from.clone(),
+                part: r.entity.clone(),
+                link: r.column.clone(),
+                key: v["key"].as_str()?.to_string(),
+                columns: strings("columns")?,
+                cleared: v["cleared"]
+                    .as_array()?
+                    .iter()
+                    .map(|c| Some((c[0].as_str()?.to_string(), c[1].as_str()?.to_string())))
+                    .collect::<Option<Vec<_>>>()?,
+                reverse,
+            })
+        })
+        .collect()
+}
+
+/// The part row's id for a whole row's `id` column: `<key>_<id>`.
+pub fn part_id_sql(key: &str, id: &str) -> String {
+    format!("({} || {id})", sql_lit(&format!("{key}_")))
+}
+
+/// Run each split mirror over the rows this write wrote and deleted,
+/// `(entity, row id)`, in `space`, inside `tx`. `links` are the link
+/// values of the part rows it deleted, read from their before images.
+///
+/// A row the write's own statements returned ([`RowCapture`]) is read by
+/// `ctid`; any other by key.
+pub async fn apply_splits(
+    tx: &TxConn,
+    space: &str,
+    mirrors: &[SplitMirror],
+    written: &[(String, String)],
+    deleted: &[(String, String)],
+    links: &[(String, String)],
+    captured: &RowCapture,
+) -> Result<(), OverlayError> {
+    for m in mirrors {
+        let ids = |list: &[(String, String)], table: &str| {
+            let mut ids: Vec<String> = list
+                .iter()
+                .filter(|(entity, _)| entity == table)
+                .map(|(_, id)| id.clone())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let cols = |prefix: &str| {
+            m.columns
+                .iter()
+                .map(|c| format!("{prefix}{}", quote(c)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (w, p, sp, link) = (
+            quote(&m.whole),
+            quote(&m.part),
+            quote(ordo_schema::SPACE_COLUMN),
+            quote(&m.link),
+        );
+        let table = if m.reverse { &m.part } else { &m.whole };
+        let written = ids(written, table);
+        let refs: Vec<&str> = written.iter().map(String::as_str).collect();
+        let (by_ctid, by_key) = captured.split(table, space, &refs);
+        let mut ats = Vec::new();
+        for chunk in by_ctid.chunks(IDS_PER_STATEMENT) {
+            let tids = chunk
+                .iter()
+                .map(|(_, t)| sql_lit(t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ats.push(format!("ctid = ANY(ARRAY[{tids}]::tid[])"));
+        }
+        for chunk in by_key.chunks(IDS_PER_STATEMENT) {
+            let list = chunk
+                .iter()
+                .map(|i| sql_lit(i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ats.push(format!("{sp} = {} AND \"id\" IN ({list})", sql_lit(space)));
+        }
+        if m.reverse {
+            // The whole row each written part row names takes its values.
+            for at in &ats {
+                let at = at
+                    .replace("ctid", "p.ctid")
+                    .replace(&format!("{sp} ="), &format!("p.{sp} ="))
+                    .replace("\"id\" IN", "p.\"id\" IN");
+                tx.rows(&format!(
+                    "UPDATE {w} w SET ({c}) = ROW({pc}), \"rev\" = w.\"rev\" + 1 FROM {p} p \
+                     WHERE {at} AND w.{sp} = p.{sp} AND w.\"id\" = p.{link} \
+                     AND ROW({wc}) IS DISTINCT FROM ROW({pc})",
+                    c = cols(""),
+                    pc = cols("p."),
+                    wc = cols("w."),
+                ))
+                .await?;
+            }
+            // A part row deleted: the whole row it named reads as having
+            // none, its moved columns back to their defaults.
+            let gone: Vec<String> = {
+                let mut v: Vec<String> = links
+                    .iter()
+                    .filter(|(entity, _)| *entity == m.part)
+                    .map(|(_, l)| l.clone())
+                    .collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            };
+            if !ids(deleted, &m.part).is_empty() && !gone.is_empty() && !m.cleared.is_empty() {
+                let sets = m
+                    .cleared
+                    .iter()
+                    .map(|(c, d)| format!("{} = {d}", quote(c)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for chunk in gone.chunks(IDS_PER_STATEMENT) {
+                    let list = chunk
+                        .iter()
+                        .map(|i| sql_lit(i))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    tx.rows(&format!(
+                        "UPDATE {w} SET {sets}, \"rev\" = \"rev\" + 1 \
+                         WHERE {sp} = {} AND \"id\" IN ({list})",
+                        sql_lit(space)
+                    ))
+                    .await?;
+                }
+            }
+            continue;
+        }
+        // Forward: each written whole row's part row, made or brought up to
+        // date. A part row the new version made for the same whole row is
+        // the one kept: the link is unique.
+        for at in &ats {
+            let sql = format!(
+                "INSERT INTO {p} ({sp}, \"id\", \"rev\", {c}, {link}) \
+                 SELECT {sp}, {pid}, 1, {c}, \"id\" FROM {w} WHERE {at} \
+                 ON CONFLICT ({sp}, {link}) DO UPDATE SET ({c}) = ROW({ex}), \
+                 \"rev\" = {p}.\"rev\" + 1 WHERE ROW({pc}) IS DISTINCT FROM ROW({ex})",
+                c = cols(""),
+                ex = cols("EXCLUDED."),
+                pc = cols(&format!("{p}.")),
+                pid = part_id_sql(&m.key, "\"id\""),
+            );
+            match tx.rows(&sql).await {
+                Ok(_) => {}
+                Err(err) if err.is_unique_violation() => {
+                    return Err(OverlayError::Duplicate(Box::new(Duplicate {
+                        entity: m.part.clone(),
+                        columns: Vec::new(),
+                        rows: written.clone(),
+                    })))
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        let gone = ids(deleted, &m.whole);
+        for chunk in gone.chunks(IDS_PER_STATEMENT) {
+            let list = chunk
+                .iter()
+                .map(|i| sql_lit(i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tx.rows(&format!(
+                "DELETE FROM {p} WHERE {sp} = {} AND {link} IN ({list})",
+                sql_lit(space)
+            ))
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 /// **An entity rename's dual write** (`plan-versions.md` increment 15,
@@ -266,8 +506,8 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
     tx.rows("LOCK TABLE \"$renames\" IN ROW SHARE MODE").await?;
     let rows = tx
         .rows(
-            "SELECT \"entity\", \"from\", \"field\", \"column\" FROM \"$renames\" \
-             ORDER BY \"entity\", \"from\"",
+            "SELECT \"entity\", \"from\", \"field\", \"column\", \
+             to_jsonb(r) ->> 'split' FROM \"$renames\" r ORDER BY \"entity\", \"from\"",
         )
         .await?;
     Ok(rows
@@ -279,6 +519,7 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
                 from: it.next()??,
                 field: it.next()??,
                 column: it.next()??,
+                split: it.next().flatten(),
             })
         })
         .collect())
@@ -699,6 +940,15 @@ impl RowCapture {
     pub fn with_move(mut self, overlay: Option<&MoveOverlay>) -> RowCapture {
         for e in overlay.map(|o| o.entities.as_slice()).unwrap_or_default() {
             self.entities.entry(e.entity.clone()).or_default();
+        }
+        self
+    }
+
+    /// Also capture the tables entity-split mirrors read.
+    pub fn with_splits(mut self, mirrors: &[SplitMirror]) -> RowCapture {
+        for m in mirrors {
+            let t = if m.reverse { &m.part } else { &m.whole };
+            self.entities.entry(t.clone()).or_default();
         }
         self
     }
@@ -1219,7 +1469,7 @@ impl MoveOverlay {
     ///   write that is legal here.
     pub fn for_renames(schema: &ordo_schema::Schema, renames: &[Rename]) -> Option<MoveOverlay> {
         let mut entities = Vec::new();
-        for r in renames.iter().filter(|r| !r.is_entity()) {
+        for r in renames.iter().filter(|r| !r.is_entity() && !r.is_split()) {
             let Some(e) = schema.native(&r.entity) else {
                 continue;
             };
@@ -1560,6 +1810,7 @@ mod tests {
             from: "title".into(),
             field: "heading".into(),
             column: "heading".into(),
+            split: None,
         }];
         let sets = |fields: &str| {
             MoveOverlay::for_renames(&schema(fields), &r).map(|o| o.entities[0].sets.clone())
@@ -1593,6 +1844,7 @@ mod tests {
             from: "note".into(),
             field: String::new(),
             column: String::new(),
+            split: None,
         }];
         let entity = |name: &str| {
             ordo_conformance::Fixture::from_source(
@@ -1613,6 +1865,50 @@ mod tests {
         assert_eq!((m[0].table.as_str(), m[0].other.as_str()), ("note", "memo"));
         assert!(entity_mirrors(&entity("other"), &r).is_empty());
         assert!(MoveOverlay::for_renames(&entity("memo"), &r).is_none());
+    }
+
+    /// An entity split: a version that declares the part writes it back
+    /// into the whole, one that declares only the whole copies forward, and
+    /// neither reads a split's row as a field rename or an entity rename.
+    #[test]
+    fn each_version_keeps_the_other_shape_of_an_entity_split_current() {
+        let r = [Rename {
+            entity: "address".into(),
+            from: "person".into(),
+            field: SPLIT_FIELD.into(),
+            column: "person".into(),
+            split: Some(
+                r#"{"key":"adr","columns":["street"],"cleared":[["street","NULL"]]}"#.into(),
+            ),
+        }];
+        let schema = |src: &str| {
+            ordo_conformance::Fixture::from_source(src, "")
+                .expect("compiles")
+                .schema
+        };
+        let after = schema(
+            "entity person {\n  name: text\n}\n\n\
+             entity address (key: adr, prev: person) {\n  person -> person owned unique\n  \
+             street: text?\n}\n\nop all unbounded =\n  person[name]\n",
+        );
+        let m = split_mirrors(&after, &r);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].reverse);
+        assert_eq!(
+            (m[0].whole.as_str(), m[0].part.as_str(), m[0].link.as_str()),
+            ("person", "address", "person")
+        );
+        assert_eq!(m[0].columns, ["street"]);
+        assert_eq!(m[0].cleared, [("street".to_string(), "NULL".to_string())]);
+        let before = schema(
+            "entity person {\n  name: text\n  street: text?\n}\n\n\
+             op all unbounded =\n  person[name]\n",
+        );
+        let m = split_mirrors(&before, &r);
+        assert!(!m[0].reverse);
+        assert!(MoveOverlay::for_renames(&before, &r).is_none());
+        assert!(entity_mirrors(&after, &r).is_empty());
+        assert_eq!(part_id_sql("adr", "\"id\""), "('adr_' || \"id\")");
     }
 
     /// While a seal runs, one `INSERT` or `UPDATE` of the sealed entity

@@ -11,7 +11,7 @@
 //! - a tenant with a database of its own has it brought to `--move-to`
 //!   before its pin moves;
 //! - a version a restore may still need is refused by name, naming
-//!   `versions.restore_window`: unset holds every version that served, a
+//!   `versions.restore_window`: unset is 30 days, a
 //!   window holds what served within it, `0` holds none, and a version
 //!   that never served is never held;
 //! - the refusals, each naming its fix: the active version, a version a
@@ -243,7 +243,7 @@ async fn a_removal_moves_its_tenants_and_leaves_a_tombstone() {
 }
 
 /// **A version a restore may still need is not removed** (increment 17).
-/// Unset, the window holds every version that served; a window holds what
+/// Unset, the window is 30 days; a window holds what
 /// served within it; `0` holds none. A version that never served is
 /// never held.
 #[tokio::test(flavor = "multi_thread")]
@@ -254,7 +254,9 @@ async fn a_version_a_restore_may_need_is_refused_naming_the_window() {
     apply(&pool, V2, true).await;
     let ops = shared(&pool);
 
-    // Unset: 0.1.0 served, so it is held, naming the setting.
+    // Unset, the window is the default, 30 days (owner, 2026-11-25): 0.1.0
+    // served a moment ago, so it is held, naming the setting and the
+    // default.
     let e = refused(
         vr::remove(&ops, "0.1.0", None, "old", OWNER, now_secs())
             .await
@@ -262,7 +264,21 @@ async fn a_version_a_restore_may_need_is_refused_naming_the_window() {
     );
     assert!(e.starts_with("remove_restorable"), "{e}");
     assert!(e.contains("versions.restore_window"), "{e}");
+    assert!(e.contains("is unset") && e.contains("30d"), "{e}");
     assert!(e.contains("ordo versions set restore-window"), "{e}");
+    // One day short of the default it is still held; past it, unset no
+    // longer blocks the removal.
+    assert!(
+        vr::remove(&ops, "0.1.0", None, "old", OWNER, now_secs() + 29 * 86_400)
+            .await
+            .is_err()
+    );
+    window(&pool, Some("30d")).await;
+    window(&pool, None).await;
+    vr::remove(&ops, "0.1.0", None, "old", OWNER, now_secs() + 31 * 86_400)
+        .await
+        .expect("unset, a version older than the default is removed");
+    apply(&pool, V1, false).await;
 
     // A window of 30 days: it served a moment ago, so it is held until
     // then, and the answer says until when.
@@ -478,4 +494,52 @@ async fn a_tenant_database_is_brought_to_the_named_version_through_the_door() {
         })
         .collect();
     assert_eq!(acts, ["version-removed"]);
+}
+
+/// **Unset, `versions.restore_window` is 30 days** (owner, 2026-11-25).
+/// `ordo evolve --prune` and `ordo versions remove` both read
+/// `Versions::restore_hold`: with the setting unset, a version that served
+/// 31 days ago is free and one that served 29 days ago is held, the line
+/// naming the setting and the default. A regression looks like unset
+/// blocking every prune again, or holding nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn unset_the_restore_window_is_30_days_for_prune_and_removal_alike() {
+    let pool = fresh("ordo_vr_default_window").await;
+    tenant(&pool, "spc_a").await;
+    apply(&pool, V1, true).await;
+    apply(&pool, V2, true).await;
+    let v = Versions::on(&pool);
+    let now = now_secs();
+
+    let held = v
+        .restore_hold("0.1.0", now + 29 * 86_400)
+        .await
+        .expect("reads")
+        .expect("served 29 days ago: held");
+    assert!(held.by_default && held.window == 30 * 86_400, "{held:?}");
+    let line = held.line();
+    assert!(line.contains("versions.restore_window"), "{line}");
+    assert!(line.contains("is unset") && line.contains("30d"), "{line}");
+    assert!(line.contains("ordo versions set restore-window"), "{line}");
+
+    assert!(
+        v.restore_hold("0.1.0", now + 31 * 86_400)
+            .await
+            .expect("reads")
+            .is_none(),
+        "served 31 days ago: free"
+    );
+    // A window the deployment owner sets replaces the default.
+    window(&pool, Some("2d")).await;
+    assert!(v
+        .restore_hold("0.1.0", now + 3 * 86_400)
+        .await
+        .expect("reads")
+        .is_none());
+    let held = v
+        .restore_hold("0.1.0", now + 86_400)
+        .await
+        .expect("reads")
+        .expect("held");
+    assert!(!held.by_default && held.line().contains("is 2d"));
 }

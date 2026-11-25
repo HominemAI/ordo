@@ -1317,11 +1317,11 @@ impl RuntimeConfig {
                 });
             }
         }
-        // `orphans.personal_drop_after`: an orphan's drop date, in days.
-        if let Ok(v) = std::env::var(ordo_exec::orphans::DROP_AFTER_ENV) {
+        // `orphans.drop_after`: an orphan's drop date, in days.
+        if let Ok(v) = std::env::var(ordo_exec::orphans::drop_after_var()) {
             if ordo_exec::orphans::drop_after_value(Some(&v)).is_none() {
                 return Err(BootRefusal::Invalid {
-                    var: ordo_exec::orphans::DROP_AFTER_ENV,
+                    var: ordo_exec::orphans::drop_after_var(),
                     detail: format!(
                         "`{v}` is not a number of days, such as `30` or `30d`; unset it for \
                          the default, {}",

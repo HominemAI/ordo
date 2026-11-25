@@ -109,8 +109,8 @@ sign-ins are never carried.
 
 - In staging, a routine's mail and a function's calls go to a sink, read
   with `ordo clones sink`. `clone.sinks` is `on` by default: every staging
-  tenant and every clone. `clones` narrows it to the clones. Whether D17's
-  "in staging" means clones only is an open owner question.
+  tenant and every clone. `clones` narrows it to the clones. D17's
+  "in staging" means all of staging (owner, 2026-11-25).
 - A version staging does not hold comes down with the clone through the
   promotion gate, stored and not activated, recorded as a clone.
 - A tenant with a database of its own gets one on staging, made by

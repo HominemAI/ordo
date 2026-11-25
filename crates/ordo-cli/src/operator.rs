@@ -4294,7 +4294,7 @@ fn settings_lines(row: &serde_json::Value) -> String {
         show("newTenant", "the active version"),
         show(
             "restoreWindow",
-            "unset: every version that served is held for a restore"
+            "unset: 30d, or your backup retention when known"
         ),
         show("minResidency", "10m"),
         show("idleEvictAfter", "30m"),

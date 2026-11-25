@@ -952,6 +952,15 @@ async fn gate_fixture(
     ordo_exec::peer::check(pool, &fixture.schema)
         .await
         .map_err(schema_refusal)?;
+    // As a reader, tell each read app which Ordo release this deployment
+    // runs: the one column of `$ordorelease`, granted to the role that
+    // owns the peer's schema (owner ruling 2026-11-25).
+    for line in ordo_exec::peer::grant_release_to_peers(pool, &fixture.schema)
+        .await
+        .map_err(schema_refusal)?
+    {
+        println!("  {line}");
+    }
     // Who is the same person in each peer: the map of shared providers,
     // built here and every minute after (`runtime::refresh_peer_links`).
     for links in link_peers(pool, &fixture, ordo_exec::peer::Pass::Start)

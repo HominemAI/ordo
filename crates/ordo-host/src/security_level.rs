@@ -223,6 +223,9 @@ pub fn situation_of(op: &str) -> Option<Situation> {
     let (family, name) = op.rsplit_once('.')?;
     Some(match (family, name) {
         ("std.deployment", "addConsoleKey" | "revokeConsoleKey") => ConsoleKeys,
+        // Breaking glass on the rehearsal gate always asks the deployment
+        // owner to reauth, at every level (owner, 2026-11-25).
+        ("std.deployment", "breakGlassRehearsal") => ConsoleKeys,
         // Every other act on the deployment is deploying, versions or the
         // deployment's settings, the ruling's first row. Moving a tenant's
         // version (`pin`) asks no touch at any level

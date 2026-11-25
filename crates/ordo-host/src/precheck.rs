@@ -570,11 +570,92 @@ async fn split_preview(
     })
 }
 
+/// The preview of a move or an entity merge on this database: the row each
+/// of 3 rows of the entity the fields come from gives its values to, by the
+/// stated rule, with the values only where `show` (`preview.values`).
+async fn move_preview(
+    pool: &Pool,
+    label: &str,
+    p: &sa::Plan,
+    change: &Change,
+    show: bool,
+) -> Option<Preview> {
+    let Change::MoveFields {
+        entity,
+        from,
+        fields,
+        source,
+        ..
+    } = change
+    else {
+        return None;
+    };
+    let link_name = p.choices.correspond.get(from)?;
+    let link = source.field(link_name)?;
+    let q = ordo_schema::ddl::q;
+    let mut cols = vec![format!("{}::text", q(&link.column()))];
+    cols.extend(fields.iter().map(|f| format!("{}::text", q(&f.column()))));
+    let sql = format!(
+        "SELECT \"$space\", \"id\"::text, {} FROM {} ORDER BY \"$space\", \"id\" LIMIT {PREVIEW_ROWS}",
+        cols.join(", "),
+        q(from)
+    );
+    let rows = match pool.rows(&sql).await {
+        Ok(r) => r,
+        Err(e) => vec![vec![Some(format!("the preview could not be read: {e}"))]],
+    };
+    if rows.is_empty() {
+        return None;
+    }
+    let lit = |v: &Option<String>| match v {
+        Some(v) => format!("{v:?}"),
+        None => "null".to_string(),
+    };
+    let lines = rows
+        .iter()
+        .map(|r| {
+            let space = r.first().cloned().flatten().unwrap_or_default();
+            let id = r.get(1).cloned().flatten().unwrap_or_default();
+            let to = r.get(2).cloned().flatten().unwrap_or_default();
+            let values = fields
+                .iter()
+                .zip(r.iter().skip(3))
+                .map(|(f, v)| {
+                    if show {
+                        format!("{} {}", f.name, lit(v))
+                    } else {
+                        f.name.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{space}/{id} -> {entity} {to} ({link_name}): {values}")
+        })
+        .collect();
+    Some(Preview {
+        database: label.to_string(),
+        change: change.to_string(),
+        rows: lines,
+        values: show,
+        hidden: (!show).then(|| {
+            format!(
+                "the values are tenant data, hidden here: `{}` is off. To show them: `{}`",
+                crate::environments::PREVIEW_VALUES,
+                crate::environments::PREVIEW_COMMAND
+            )
+        }),
+    })
+}
+
 /// The preview of each split or merge the plan holds, on this database.
 async fn previews(pool: &Pool, label: &str, p: &sa::Plan, show: bool) -> Vec<Preview> {
     let mut out = Vec::new();
     for a in &p.assessed {
         if let Some(v) = split_preview(pool, label, p, &a.change, show).await {
+            out.push(v);
+            continue;
+        }
+        if let Some(v) = move_preview(pool, label, p, &a.change, show).await {
             out.push(v);
             continue;
         }

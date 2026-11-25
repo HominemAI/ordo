@@ -220,14 +220,25 @@ export default defineConfig({
       dependencies: ['split'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // Notes v3 merges an entity (plan-versions.md, increment 15d): labels
+    // added beside notes, then merged back with the rule asked for, the
+    // move, a revert in the soak and the close. It stores 0.3.11 and
+    // 0.3.12, above `entity-split`'s 0.3.10 and below `branch`'s 0.5.x, so
+    // it runs between them. Locally, `--project=entity-merge --no-deps`.
+    {
+      name: 'entity-merge',
+      testMatch: /evolve\/entity-merge\.spec\.ts/,
+      dependencies: ['entity-split'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Dev branches as tenants on their own version (plan-versions.md
     // increment 5): 2 branches served side by side while the stack serves
-    // its own. It applies programs, so it runs after `entity-split`.
+    // its own. It applies programs, so it runs after `entity-merge`.
     // Locally, `--project=branch --no-deps`.
     {
       name: 'branch',
       testMatch: /branch\/.*\.spec\.ts/,
-      dependencies: ['entity-split'],
+      dependencies: ['entity-merge'],
       use: { ...devices['Desktop Chrome'] },
     },
     // Tenant builds (plan-versions.md increment 16): a beta tenant serves the

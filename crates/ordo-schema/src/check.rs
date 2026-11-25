@@ -540,6 +540,24 @@ fn render_expr(entity: &str, cx: &Cx, e: &Expr) -> Result<String, SchemaError> {
                     }
                 },
                 ("bool", [x]) => bool_sql(x),
+                ("date", [x, ..]) => {
+                    let format = match args.get(1) {
+                        None => ISO_DATE,
+                        Some(Expr::StrLit { value, .. }) => value.as_str(),
+                        Some(_) => {
+                            return Err(err(
+                                "check_unsupported",
+                                *span,
+                                format!(
+                                    "the backfill mapping on `{entity}` gives `date()` a format \
+                                     that is not a string: write `date(t, \"DD/MM/YYYY\")`"
+                                ),
+                            ))
+                        }
+                    };
+                    date_sql(x, format).map_err(|why| err("check_unsupported", *span, why))?
+                }
+                ("datetime", [x]) => datetime_sql(x),
                 ("round", [x, n]) => match &args[1] {
                     Expr::IntLit { value, .. } if (0..=30).contains(value) => {
                         format!("round(({x})::numeric, {n})")
@@ -562,8 +580,8 @@ fn render_expr(entity: &str, cx: &Cx, e: &Expr) -> Result<String, SchemaError> {
                         format!(
                             "the backfill mapping on `{entity}` calls `{other}()`; a mapping \
                              takes `lower`, `trim`, `length`, `coalesce`, `before`, `after`, \
-                             the conversions `text`, `int`, `bool` and `round(x, n)`, and `+` \
-                             over text"
+                             the conversions `text`, `int`, `bool`, `date`, `datetime` and \
+                             `round(x, n)`, and `+` over text"
                         ),
                     ))
                 }
@@ -604,6 +622,79 @@ pub fn int_sql(t: &str) -> String {
 /// it allowed, or null.
 pub fn bool_sql(t: &str) -> String {
     format!("(CASE lower(btrim(({t})::text)) WHEN 'true' THEN true WHEN 'false' THEN false END)")
+}
+
+/// The format `date(t)` reads with none named: ISO 8601's.
+pub const ISO_DATE: &str = "YYYY-MM-DD";
+
+/// `date(t, format)`: the date `t` spells in `format`, spaces around it
+/// allowed, or null, also where the day is not in the calendar
+/// (`2026-02-30`). A format is `YYYY`, `MM` and `DD`, each once, in any
+/// order, joined by one of `-`, `/`, `.` or a space, the same each time
+/// (`DD/MM/YYYY`, `MM-DD-YYYY`, `DD.MM.YYYY`). `MM` and `DD` read one or
+/// two digits. Any other format is refused, naming the rule; formats are
+/// added as they are asked for (`forward-gaps` ask 17).
+pub fn date_sql(t: &str, format: &str) -> Result<String, String> {
+    let refuse = || {
+        format!(
+            "`{format}` is not a date format Ordo reads. A format is `YYYY`, `MM` and `DD`, \
+             each once, joined by `-`, `/`, `.` or a space: `YYYY-MM-DD` (the default), \
+             `DD/MM/YYYY`, `MM/DD/YYYY`, `DD.MM.YYYY`"
+        )
+    };
+    let sep = format
+        .chars()
+        .find(|c| matches!(c, '-' | '/' | '.' | ' '))
+        .ok_or_else(refuse)?;
+    let parts: Vec<&str> = format.split(sep).collect();
+    let mut order = Vec::new();
+    for p in &parts {
+        match *p {
+            "YYYY" | "MM" | "DD" if !order.contains(p) => order.push(*p),
+            _ => return Err(refuse()),
+        }
+    }
+    if order.len() != 3 {
+        return Err(refuse());
+    }
+    let sep_re = if sep == '.' {
+        "\\.".to_string()
+    } else {
+        sep.to_string()
+    };
+    let re = order
+        .iter()
+        .map(|p| match *p {
+            "YYYY" => "([0-9]{4})",
+            _ => "([0-9]{1,2})",
+        })
+        .collect::<Vec<_>>()
+        .join(&sep_re);
+    let at = |p: &str| order.iter().position(|x| *x == p).map_or(0, |i| i + 1);
+    let iso = format!(
+        "m[{}] || '-' || lpad(m[{}], 2, '0') || '-' || lpad(m[{}], 2, '0')",
+        at("YYYY"),
+        at("MM"),
+        at("DD")
+    );
+    Ok(format!(
+        "(SELECT CASE WHEN m IS NOT NULL AND pg_input_is_valid({iso}, 'date') \
+         THEN ({iso})::date END FROM regexp_match(btrim(({t})::text), '^{re}$') AS r(m))"
+    ))
+}
+
+/// `datetime(t)`: the ISO 8601 instant `t` spells (`2026-11-25T09:30`,
+/// seconds and a fraction optional, `T` or a space), at the offset it
+/// names (`Z`, `+01:00`) or UTC where it names none; spaces around it
+/// allowed. Null where it spells none.
+pub fn datetime_sql(t: &str) -> String {
+    let re = "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]{1,6})?)?\
+              (Z|[+-][0-9]{2}(:?[0-9]{2})?)?$";
+    let utc = "CASE WHEN s ~ '(Z|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN s ELSE s || 'Z' END";
+    format!(
+        "(SELECT CASE WHEN s ~ '{re}' AND pg_input_is_valid({utc}, 'timestamptz') \
+         THEN ({utc})::timestamptz END FROM (SELECT btrim(({t})::text) AS s) AS r)"
+    )
 }
 
 /// A mapping value's kind, for the check that it fits the field it fills.
@@ -696,6 +787,8 @@ pub fn mapping_type(fields: &[Field], e: &Expr) -> Option<MapTy> {
             "lower" | "trim" | "before" | "after" | "text" => t(Family::Text, None),
             "length" | "int" => t(Family::Number, Some(0)),
             "bool" => t(Family::Bool, None),
+            "date" => t(Family::Date, None),
+            "datetime" => t(Family::Datetime, None),
             "round" => match args.get(1) {
                 Some(Expr::IntLit { value, .. }) => t(Family::Number, u32::try_from(*value).ok()),
                 _ => None,

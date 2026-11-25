@@ -7548,6 +7548,7 @@ fn fn_domain(name: &str, position: usize) -> Option<&'static [ScalarTy]> {
         ("lower" | "trim" | "length", 0) => Some(TEXTUAL),
         ("before" | "after", _) => Some(TEXTUAL),
         ("bool", 0) => Some(TEXTUAL),
+        ("date" | "datetime", _) => Some(TEXTUAL),
         ("hash", 0) => Some(HASHABLE),
         _ => None,
     }
@@ -7706,6 +7707,8 @@ fn fn_ty(name: &str, args: &[BExpr]) -> ScalarTy {
         "lower" | "trim" | "before" | "after" | "text" => ScalarTy::Text,
         "int" => ScalarTy::Int,
         "bool" => ScalarTy::Bool,
+        "date" => ScalarTy::Date,
+        "datetime" => ScalarTy::Datetime,
         _ => args.first().map(|a| a.ty()).unwrap_or(ScalarTy::Int),
     }
 }

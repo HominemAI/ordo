@@ -600,8 +600,16 @@ compile check `prev_duplicate` no longer refuses a split.
 increment 15c). A rename whose type changes is a one-to-one map, converted
 by the plan's `--fill` (`int(count)`, `text(qty)`, `bool(t)`). An entity
 `(prev: whole)` while `whole` stays declared is a part split off it, with
-the rule `--correspond <part>.<link>`: one part row per whole row. Moves
-(`prev(orders.note)`) and entity merges are still refused.
+the rule `--correspond <part>.<link>`: one part row per whole row.
+
+**Moves and entity merges built 2026-11-25** (`plan-versions.md`
+increment 15d). `prev(other.field)` moves a field, with the rule
+`--correspond <other>.<link>`: each `other` row gives its values to the
+row its `owned unique` link names. With `other` removed and every field
+moved it is an entity merge, which keeps both shapes and reverts; with
+`other` kept it is one way (`--one-way`). A link that is not unique is
+refused (`move_rule_not_built`): the first, latest or all rule of
+`forward-gaps` ask 7 is not built.
 
 **What it is.** A declaration that a renamed entity or field is the same
 thing as a name in the previous version, so the plan renders a rename and

@@ -621,6 +621,24 @@ fn renamed_fields(receipt: &str) -> Vec<(String, String)> {
             .into_iter()
             .map(|(part, _)| (part, String::new())),
     );
+    // A move or a merge: each moved field of the entity it moved into.
+    out.extend(
+        r["backfills"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| {
+                let entity = b["entity"].as_str()?.to_string();
+                let columns = b["mergeFrom"]["columns"].as_array()?;
+                Some(
+                    columns
+                        .iter()
+                        .filter_map(|c| Some((entity.clone(), c.as_str()?.to_string())))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten(),
+    );
     out
 }
 

@@ -83,6 +83,10 @@ pub struct Rename {
 /// with `$`.
 pub const SPLIT_FIELD: &str = "$part";
 
+/// The `field` of a move's or an entity merge's row in `$renames`
+/// ([`Rename::is_merge`]).
+pub const MERGE_FIELD: &str = "$merge";
+
 impl Rename {
     /// Whether the row is an entity rename: `from` is the old table and
     /// `entity` the new one.
@@ -94,6 +98,14 @@ impl Rename {
     /// the whole it is split off, and `column` the part's link to it.
     pub fn is_split(&self) -> bool {
         self.field == SPLIT_FIELD
+    }
+
+    /// Whether the row is a move from another entity or an entity merge
+    /// (B14): `entity` is the entity the fields come from, `from` the one
+    /// they move into, and `column` the link of `entity` naming its row.
+    /// Its `split` holds the same shape as a split's, plus `merge`.
+    pub fn is_merge(&self) -> bool {
+        self.field == MERGE_FIELD
     }
 }
 
@@ -129,17 +141,42 @@ pub struct SplitMirror {
 
 /// The split mirrors a version writes with, for the entity splits a
 /// database is in the middle of.
+///
+/// **A move or an entity merge** (B14) is the same pair of shapes read the
+/// other way: the entity the fields come from is the part, the entity they
+/// move into the whole, and the link the part's. So the version before,
+/// which declares the moved fields where they were, writes as a split's new
+/// version does: each row it writes there sets the moved columns of the row
+/// its link names, and each it deletes puts them back to their defaults.
+/// After an entity merge the new version writes as a split's version before
+/// does: each row it writes into the merged entity is copied back to its
+/// row of the old one. After a move whose old entity stays, the new version
+/// writes nothing back: such a step is one way (`--one-way`).
 pub fn split_mirrors(schema: &ordo_schema::Schema, renames: &[Rename]) -> Vec<SplitMirror> {
     renames
         .iter()
-        .filter(|r| r.is_split())
+        .filter(|r| r.is_split() || r.is_merge())
         .filter_map(|r| {
-            let reverse = match (schema.native(&r.entity), schema.native(&r.from)) {
-                (Some(_), _) => true,
-                (None, Some(_)) => false,
-                (None, None) => return None,
-            };
             let v: serde_json::Value = serde_json::from_str(r.split.as_deref()?).ok()?;
+            let reverse = if r.is_merge() {
+                let first = v["columns"].as_array()?.first()?.as_str()?;
+                match schema.native(&r.entity) {
+                    // The version before: the fields are still where they
+                    // were.
+                    Some(e) if e.fields.iter().any(|f| f.column() == first) => true,
+                    // A move's new version: the old entity stays, without
+                    // the fields.
+                    Some(_) => return None,
+                    None if schema.native(&r.from).is_some() => false,
+                    None => return None,
+                }
+            } else {
+                match (schema.native(&r.entity), schema.native(&r.from)) {
+                    (Some(_), _) => true,
+                    (None, Some(_)) => false,
+                    (None, None) => return None,
+                }
+            };
             let strings = |k: &str| -> Option<Vec<String>> {
                 v[k].as_array()?
                     .iter()
@@ -1469,7 +1506,10 @@ impl MoveOverlay {
     ///   write that is legal here.
     pub fn for_renames(schema: &ordo_schema::Schema, renames: &[Rename]) -> Option<MoveOverlay> {
         let mut entities = Vec::new();
-        for r in renames.iter().filter(|r| !r.is_entity() && !r.is_split()) {
+        for r in renames
+            .iter()
+            .filter(|r| !r.is_entity() && !r.is_split() && !r.is_merge())
+        {
             let Some(e) = schema.native(&r.entity) else {
                 continue;
             };
@@ -1909,6 +1949,54 @@ mod tests {
         assert!(MoveOverlay::for_renames(&before, &r).is_none());
         assert!(entity_mirrors(&after, &r).is_empty());
         assert_eq!(part_id_sql("adr", "\"id\""), "('adr_' || \"id\")");
+    }
+
+    /// A merge is a split read the other way: the version before, which
+    /// declares `address` with the fields, writes them into `person`; the
+    /// merged version writes `person` back into `address`; the new version
+    /// of a move whose `address` stays writes nothing back.
+    #[test]
+    fn each_version_keeps_the_other_shape_of_a_merge_current() {
+        let r = [Rename {
+            entity: "address".into(),
+            from: "person".into(),
+            field: MERGE_FIELD.into(),
+            column: "person".into(),
+            split: Some(
+                r#"{"key":"adr","columns":["street"],"cleared":[["street","NULL"]],"merge":true}"#
+                    .into(),
+            ),
+        }];
+        let schema = |src: &str| {
+            ordo_conformance::Fixture::from_source(src, "")
+                .expect("compiles")
+                .schema
+        };
+        let before = schema(
+            "entity person {\n  name: text\n}\n\n\
+             entity address (key: adr) {\n  person -> person owned unique\n  \
+             street: text?\n}\n\nop all unbounded =\n  person[name]\n",
+        );
+        let m = split_mirrors(&before, &r);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].reverse);
+        assert_eq!(
+            (m[0].whole.as_str(), m[0].part.as_str()),
+            ("person", "address")
+        );
+        let merged = schema(
+            "entity person {\n  name: text\n  street: text?\n}\n\n\
+             op all unbounded =\n  person[name]\n",
+        );
+        let m = split_mirrors(&merged, &r);
+        assert!(!m[0].reverse);
+        assert!(MoveOverlay::for_renames(&merged, &r).is_none());
+        let kept = schema(
+            "entity person {\n  name: text\n  street: text?\n}\n\n\
+             entity address (key: adr) {\n  person -> person owned unique\n  \
+             city: text?\n}\n\nop all unbounded =\n  person[name]\n",
+        );
+        assert!(split_mirrors(&kept, &r).is_empty());
     }
 
     /// While a seal runs, one `INSERT` or `UPDATE` of the sealed entity

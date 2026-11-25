@@ -294,7 +294,11 @@ impl World {
     }
 
     async fn write(&self, title: &str, body: &str) {
-        let b = match self.spaces.resolve(T).await {
+        self.write_in(T, title, body).await
+    }
+
+    async fn write_in(&self, space: &str, title: &str, body: &str) {
+        let b = match self.spaces.resolve(space).await {
             Ok(b) => b,
             Err(e) => panic!(
                 "the tenant is served: {e:?}; pinned {} at the control, current {}",
@@ -316,7 +320,14 @@ impl World {
 
     /// The titles `==` finds, on the version the node serves the tenant.
     async fn found(&self, body: &str) -> (String, Vec<String>) {
-        let b = self.spaces.resolve(T).await.expect("the tenant is served");
+        self.found_in(T, body).await
+    }
+
+    async fn found_in(&self, space: &str, body: &str) -> (String, Vec<String>) {
+        let b = match self.spaces.resolve(space).await {
+            Ok(b) => b,
+            Err(e) => panic!("`{space}` is served: {e}"),
+        };
         let rows = b
             .view
             .exec
@@ -741,4 +752,61 @@ async fn a_tenant_on_the_deployments_database_pinned_apart_across_b10_is_refused
         panic!("served over an index 1.0.0 does not read");
     };
     assert!(e.to_string().contains("ordo rollback 1.0.0"), "{e}");
+}
+
+/// **A tenant on the deployment's own database keeps serving through B10
+/// there, until the activation.** `ordo evolve --run` computes the new
+/// index and keeps it beside the active version's, which stays the
+/// field's own: `zed`, on the active 1.0.0, reads every note by its exact
+/// value and writes between the run and the activation. The activation of
+/// 1.1.0 trades the new index in for every space at once, and `zed` then
+/// finds every note in any case, the one written in between too.
+///
+/// A regression looks like `zed` refused or missing a row between the run
+/// and the activation, or a note written then missing after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_on_the_deployments_database_serves_between_the_run_and_the_activation() {
+    let _serial = SERIAL.lock().await;
+    let w = World::new("between").await;
+    w.keys
+        .create_space(&SpaceId("zed".into()))
+        .expect("custody");
+    w.spaces.reload_pin("zed").await;
+    for (title, body) in [("a", "Mixed-A"), ("b", "mixed-b")] {
+        w.write_in("zed", title, body).await;
+    }
+    let row = w
+        .door(
+            ordo_host::deploy_ops::EVOLVE,
+            json!({ "from": "1.0.0", "to": "1.1.0", "run": true }),
+        )
+        .await;
+    assert!(
+        row["ran"]["ownSpace"].is_null(),
+        "the own space stays: {row}"
+    );
+    for (body, title) in [("Mixed-A", "a"), ("mixed-b", "b")] {
+        assert_eq!(
+            w.found_in("zed", body).await,
+            ("1.0.0".into(), vec![title.to_string()]),
+            "`{body}` between the run and the activation"
+        );
+    }
+    w.write_in("zed", "c", "Between-C").await;
+    assert_eq!(w.found_in("zed", "Between-C").await.1, ["c"]);
+
+    apply_op::activate(&w.control, "1.1.0", "dev:ada")
+        .await
+        .expect("1.1.0 active");
+    w.swap_to("1.1.0").await;
+    w.spaces.reload_pin("zed").await;
+    for (body, title) in [("MIXED-A", "a"), ("MIXED-B", "b"), ("between-c", "c")] {
+        assert_eq!(
+            w.found_in("zed", body).await,
+            ("1.1.0".into(), vec![title.to_string()]),
+            "`{body}` after the activation"
+        );
+    }
+    w.write_in("zed", "d", "After-D").await;
+    assert_eq!(w.found_in("zed", "AFTER-d").await.1, ["d"]);
 }

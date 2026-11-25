@@ -425,6 +425,9 @@ pub struct Spaces {
     /// `(space, version, pin epoch)` whose kept blind indexes were asked
     /// about on this node ([`Spaces::kept_indexes`]).
     kept: Mutex<HashSet<(String, String, i64)>>,
+    /// `(serving, recorded)` pairs and whether the database is ahead by a
+    /// reindex only ([`Spaces::ahead_by_reindex`]).
+    ahead: Mutex<HashMap<(String, String), bool>>,
     /// Told the name of an evicted version a signed-in request woke
     /// ([`Spaces::wake`]); the node's pin stream loads it.
     waker: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
@@ -460,6 +463,7 @@ impl Spaces {
             pause_answers: Mutex::new(crate::pause::PauseAnswers::default()),
             fits: Mutex::new(HashSet::new()),
             kept: Mutex::new(HashSet::new()),
+            ahead: Mutex::new(HashMap::new()),
             waker: std::sync::OnceLock::new(),
         })
     }
@@ -844,6 +848,9 @@ impl Spaces {
         }
         match ordo_exec::spacedb::recorded_version(pool).await {
             Ok(ordo_exec::spacedb::TargetVersion::At(at)) if at != serving => {
+                if self.ahead_by_reindex(&serving, &at).await {
+                    return None;
+                }
                 Some(Reconciled::SchemaBehind {
                     space: space.to_string(),
                     at,
@@ -859,6 +866,28 @@ impl Spaces {
             // verdict out of an error.
             Err(_) => None,
         }
+    }
+
+    /// **A database one reindex ahead of the serving version serves it**
+    /// (increment 13). `ordo evolve --run` of a step that only computes a
+    /// blind index again (B10) records the step's version on the
+    /// deployment's database before the activation, and keeps the serving
+    /// version's index the field's own until then (`sa::reindex_end`), so
+    /// every space there keeps serving through the step. Read from the
+    /// stored plans, once per pair per node.
+    async fn ahead_by_reindex(&self, serving: &str, at: &str) -> bool {
+        let key = (serving.to_string(), at.to_string());
+        if let Some(ok) = self.ahead.lock().expect("ahead cache").get(&key) {
+            return *ok;
+        }
+        let Ok(plans) = crate::evolve::Plans::on(self.witness.pool()).all().await else {
+            return false;
+        };
+        let ok = plans
+            .iter()
+            .any(|p| p.from == serving && p.to == at && crate::evolve::reindex_only(p));
+        self.ahead.lock().expect("ahead cache").insert(key, ok);
+        ok
     }
 
     /// **Write a failing resolve into the quarantine register, and hand

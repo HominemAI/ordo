@@ -1975,6 +1975,42 @@ pub(crate) async fn expand_step(
             });
         }
     }
+    // **B10 on the deployment's own database** keeps the active version's
+    // index the field's own until the activation, so every space there
+    // keeps serving the active version through the step; the new index is
+    // kept beside it, and the activation trades it in for all of them
+    // (`sa::reindex_end`).
+    if crate::dual_writes::same_database(target, registry) {
+        for b in again.receipt["backfills"].as_array().into_iter().flatten() {
+            let (Some(entity), Some(field)) = (b["entity"].as_str(), b["field"].as_str()) else {
+                continue;
+            };
+            if b["code"] != "B10" || covered(entity, field) {
+                continue;
+            }
+            let (Some(e), Some(f)) = (
+                y.schema.native(entity),
+                y.schema.native(entity).and_then(|e| e.field(field)),
+            ) else {
+                continue;
+            };
+            let from = x
+                .schema
+                .native(entity)
+                .and_then(|e| e.field(field))
+                .and_then(|f| f.normalize.clone());
+            let column = ordo_schema::ddl::q(&sa::reindex_column(f));
+            after.retain(|s| !s.sql.contains(column.as_str()));
+            after.push(sa::Step {
+                code: "B10",
+                phase: sa::Phase::Alter,
+                sql: sa::reindex_end(e, f, &plan.to, from.as_deref(), true),
+                index: None,
+                constraint: None,
+                table: e.name.clone(),
+            });
+        }
+    }
     Ok(Some(Expanded {
         statements,
         backfills,
@@ -2540,6 +2576,16 @@ pub(crate) fn sealing_step(p: &StoredPlan) -> bool {
     })
 }
 
+/// A stored step whose every backfill is B10, a blind index computed again
+/// under a new `normalize`.
+pub(crate) fn reindex_only(p: &StoredPlan) -> bool {
+    serde_json::from_str::<Value>(&p.receipt).is_ok_and(|r| {
+        r["backfills"]
+            .as_array()
+            .is_some_and(|b| !b.is_empty() && b.iter().all(|x| x["code"] == "B10"))
+    })
+}
+
 /// What a move command runs its backfills with: the step's settings, with
 /// the caller's `budget` and `chunkRows` when given.
 async fn move_context(
@@ -2846,7 +2892,11 @@ pub async fn execute(
                 // version before, and the own space then moves to the
                 // version the database holds, first, as a rollout moves it
                 // (Q4). Its writes are accepted and sealed by that version.
-                let sealing = sealing_step(&done.plan);
+                // A step that only reindexes (B10) keeps the active
+                // version's index on this database until the activation
+                // (`sa::reindex_end`): every space here, the own space
+                // included, stays on the active version and needs no fence.
+                let sealing = sealing_step(&done.plan) && !reindex_only(&done.plan);
                 if sealing {
                     let own = Versions::on(pool)
                         .own_pin_made(&ops.home, caller, crate::runtime::now_secs())

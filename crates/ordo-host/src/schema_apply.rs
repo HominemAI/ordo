@@ -2898,44 +2898,9 @@ fn reindex_step(
             run: None,
         }));
     };
-    let table = ordo_schema::ddl::q(&e.name);
     let next = reindex_column(f);
-    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let record = index_record(e, f, "reindex", &next, version);
-    let prev = kept_index_column(f);
-    // The old index is kept, as `<field>$bidx$prev`, and written by every
-    // write under its own normalization (`$seals` kind `kept`), until its
-    // orphan is pruned: a rollback swaps it back
-    // ([`restore_kept_indexes`]) and reads a whole index.
-    let mut end = format!(
-        "{};\n\
-         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
-         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {n} IS NULL) THEN RAISE \
-         EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
-         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n",
-        ordo_exec::overlay::RENAMES_DDL,
-        n = ordo_schema::ddl::q(&next),
-        name = e.name,
-    );
-    end.push_str(&swap_index_columns(e, f, &next, &prev));
-    end.push_str(&format!(
-        "{live_ddl};\n\
-         DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
-         'reindex';\n\
-         INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
-         \"version\", \"normalize\", \"live\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}, \
-         {l}) ON CONFLICT (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = \
-         EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\", \"normalize\" = \
-         EXCLUDED.\"normalize\", \"live\" = EXCLUDED.\"live\";\n",
-        live_ddl = ordo_exec::overlay::SEALS_LIVE_DDL,
-        e = lit(&e.name),
-        fl = lit(field),
-        s = lit(&f.column()),
-        p = lit(&prev),
-        v = lit(version),
-        o = lit(from_normalize.unwrap_or("")),
-        l = lit(f.normalize.as_deref().unwrap_or("")),
-    ));
+    let end = reindex_end(e, f, version, from_normalize, false);
     Ok(SealStep {
         backfill: BackfillStep {
             code: "B10",
@@ -2953,6 +2918,76 @@ fn reindex_step(
         record,
         after: vec![end],
     })
+}
+
+/// **B10's end** (increment 13), under the `"$renames"` lock, once every
+/// row has its index under the new normalization in `<field>$bidx$next`.
+///
+/// On a tenant's database the new index takes the field's name, and the
+/// old one is kept as `<field>$bidx$prev`, written by every write under its
+/// own normalization (`$seals` kind `kept`) until its orphan is pruned: a
+/// move back trades it in ([`restore_kept_indexes`]) and reads a whole
+/// index.
+///
+/// With `keep_live`, on the deployment's own database, every space there
+/// serves the active version until the activation: the old index stays the
+/// field's, and the new one is kept as `<field>$bidx$prev` under the new
+/// normalization. The activation of the version declaring it trades it in
+/// for every space at once, so no space there reads the other index
+/// meanwhile.
+pub fn reindex_end(
+    e: &ordo_schema::Entity,
+    f: &ordo_schema::Field,
+    version: &str,
+    from_normalize: Option<&str>,
+    keep_live: bool,
+) -> String {
+    let table = ordo_schema::ddl::q(&e.name);
+    let field = f.name.as_str();
+    let next = reindex_column(f);
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let prev = kept_index_column(f);
+    let old = from_normalize.unwrap_or("").to_string();
+    let new = f.normalize.clone().unwrap_or_default();
+    let (kept, live) = if keep_live { (new, old) } else { (old, new) };
+    let mut end = format!(
+        "{};\n\
+         LOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n\
+         DO $ordo$ BEGIN IF EXISTS (SELECT 1 FROM {table} WHERE {n} IS NULL) THEN RAISE \
+         EXCEPTION 'index_unfinished: a row of {name}.{field} was written outside the write \
+         path after verify and has no blind index; run the step again'; END IF; END $ordo$;\n",
+        ordo_exec::overlay::RENAMES_DDL,
+        n = ordo_schema::ddl::q(&next),
+        name = e.name,
+    );
+    if keep_live {
+        end.push_str(&format!(
+            "ALTER TABLE {table} RENAME COLUMN {n} TO {p};\n",
+            n = ordo_schema::ddl::q(&next),
+            p = ordo_schema::ddl::q(&prev),
+        ));
+    } else {
+        end.push_str(&swap_index_columns(e, f, &next, &prev));
+    }
+    end.push_str(&format!(
+        "{live_ddl};\n\
+         DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
+         'reindex';\n\
+         INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
+         \"version\", \"normalize\", \"live\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}, \
+         {l}) ON CONFLICT (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = \
+         EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\", \"normalize\" = \
+         EXCLUDED.\"normalize\", \"live\" = EXCLUDED.\"live\";\n",
+        live_ddl = ordo_exec::overlay::SEALS_LIVE_DDL,
+        e = lit(&e.name),
+        fl = lit(field),
+        s = lit(&f.column()),
+        p = lit(&prev),
+        v = lit(version),
+        o = lit(&kept),
+        l = lit(&live),
+    ));
+    end
 }
 
 /// A seal's statements (increment 13): its record in `$seals`, the

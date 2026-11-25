@@ -519,9 +519,16 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   version's normalization, and only an activation trades it, for every
   space at once. `ordo versions pin` refuses the move, naming `ordo
   versions pin <tenant> <active>` and `ordo rollback <version>`; a pin made
-  any other way is not served, with the same words. So between `ordo
-  evolve --run` of a B10 and the activation, a tenant there still on the
-  active version is not served; before, it read the wrong index.
+  any other way is not served, with the same words.
+- **B10 on the deployment's own database keeps every space there
+  serving.** `ordo evolve --run` of a step that only reindexes keeps the
+  active version's index the field's own and the new one beside it as
+  `<field>$bidx$prev` (`$seals` kind `kept`, the new normalization); the
+  activation trades it in for every space at once. The own space does not
+  move ahead. A database one reindex ahead of the serving version is not
+  held as behind (`Spaces::ahead_by_reindex`, from the stored plans), so
+  a tenant there reads and writes between the run and the activation.
+  Test: `a_tenant_on_the_deployments_database_serves_between_the_run_and_the_activation`.
 - **Refused: a second B10 on a field whose first one is still kept**
   (`reindex_kept_index`, naming `ordo evolve --prune`): its end would
   replace the kept index. A step back to the kept normalization is not a

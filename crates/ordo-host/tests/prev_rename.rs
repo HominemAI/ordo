@@ -121,9 +121,14 @@ async fn write(
         let done = async {
             tx.rows(sql).await.map_err(|e| format!("{e:?}"))?;
             if let Some(o) = MoveOverlay::for_renames(schema, &renames) {
-                o.apply(&tx, "acme", &[("note".to_string(), id.to_string())])
-                    .await
-                    .map_err(|e| format!("{e:?}"))?;
+                o.apply(
+                    &tx,
+                    "acme",
+                    &[("note".to_string(), id.to_string())],
+                    &mut Default::default(),
+                )
+                .await
+                .map_err(|e| format!("{e:?}"))?;
             }
             Ok::<(), String>(())
         }

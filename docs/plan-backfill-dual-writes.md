@@ -497,6 +497,17 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   copies at `ORDO_WRITE_RETRIES=1`, 20 runs: 118 conflicts and 118 turns
   before, 0 and 0 after. The turn stays as the backstop. Guarded also by
   `overlay::tests::a_write_to_a_sealed_entity_returns_its_source_and_nothing_else_changes`.
+- **The rename overlay writes by `ctid` too** (2026-11-24). The move
+  overlay set its columns with `UPDATE … WHERE "$space" = … AND "id" IN
+  (…)`. Once autovacuum analyzes the table while it is small, Postgres
+  plans that as a sequential scan. Under SERIALIZABLE that scan locks the
+  whole table and reads every other writer's rows, so concurrent writers
+  conflict (`prev_rename::two_nodes_one_never_told_lose_no_write_across_a_rename`
+  on CI). The move overlay now captures its entities' rows like the seal
+  overlay (`overlay::RowCapture`), and sets and checks them by `ctid`.
+  With `ANALYZE note` every 0.3 s, 4 parallel copies at
+  `ORDO_WRITE_RETRIES=1`, 20 runs: 133 conflicts and 133 turns before, 0
+  and 0 after. No turn was cancelled.
 - Verify runs as verify under live writes: it opens every row against its
   plaintext and records the count and hash it reads. The per-chunk hashes
   are not compared, since writes reseal rows.

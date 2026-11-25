@@ -2480,18 +2480,18 @@ pub struct BlockingTx {
     /// rule reads it to tell "rows still stand in the way" from an outage.
     constraint: std::sync::atomic::AtomicBool,
     /// While a seal runs: what this write's own statements returned for
-    /// the seal overlay (`overlay::SealCapture`).
-    seal_capture: std::sync::Mutex<overlay::SealCapture>,
+    /// the seal overlay (`overlay::RowCapture`).
+    row_capture: std::sync::Mutex<overlay::RowCapture>,
 }
 
 impl ordo_conformance::write::WriteDb for BlockingTx {
     fn rows(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
-        let rewritten = self.seal_capture.lock().expect("seal capture").rewrite(sql);
+        let rewritten = self.row_capture.lock().expect("seal capture").rewrite(sql);
         if let Some((entity, with_returning)) = rewritten {
             // The statement answered no rows before its `RETURNING`; the
             // rows returned are the overlay's, and the caller sees none.
             let rows = self.run(&with_returning)?;
-            self.seal_capture
+            self.row_capture
                 .lock()
                 .expect("seal capture")
                 .record(&entity, &rows);
@@ -2969,17 +2969,28 @@ impl Executor {
         let log_after = log;
         let conflict = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conflict_seen = conflict.clone();
-        let capture = overlay::SealCapture::for_seals(&overlay::seals_for(&self.schema, &seals));
+        // The move overlay this write runs (increment 11a): the stored
+        // step's, or outside a move the renames and fills this database is
+        // in the middle of, as this version reads them. Worked out before
+        // the write, so its own statements return what the overlays need.
+        let by_renames = match self.pool.overlay() {
+            Some(_) => None,
+            None => overlay::MoveOverlay::for_database(&self.schema, &renames, &fills, &held),
+        };
+        let pool_overlay = self.pool.overlay();
+        let run = pool_overlay.map(|o| o.as_ref()).or(by_renames.as_ref());
+        let capture = overlay::RowCapture::for_seals(&overlay::seals_for(&self.schema, &seals))
+            .with_move(run);
         let (result, tx, mut scratch, mut capture) = tokio::task::spawn_blocking(move || {
             let db = BlockingTx {
                 tx,
                 handle,
                 conflict,
                 constraint: std::sync::atomic::AtomicBool::new(false),
-                seal_capture: std::sync::Mutex::new(capture),
+                row_capture: std::sync::Mutex::new(capture),
             };
             let out = work(&db, &mut scratch);
-            let capture = db.seal_capture.into_inner().expect("seal capture");
+            let capture = db.row_capture.into_inner().expect("seal capture");
             (out, db.tx, scratch, capture)
         })
         .await
@@ -3001,19 +3012,6 @@ impl Executor {
                 // columns and guards on every row this write touched, in
                 // this transaction, before the chain append. A row it
                 // refuses refuses the whole write.
-                // Outside a move, the renames and fills this database is in the
-                // middle of, as this version reads them.
-                let by_renames = match self.pool.overlay() {
-                    Some(_) => None,
-                    None => {
-                        overlay::MoveOverlay::for_database(&self.schema, &renames, &fills, &held)
-                    }
-                };
-                let run = self
-                    .pool
-                    .overlay()
-                    .map(|o| o.as_ref())
-                    .or(by_renames.as_ref());
                 if let (Some(overlay), Some(group)) = (run, scratch.pending()) {
                     let written: Vec<(String, String)> = group
                         .commands
@@ -3021,7 +3019,10 @@ impl Executor {
                         .filter(|c| c.kind != ordo_commandlog::CommandKind::Delete)
                         .map(|c| (c.entity.clone(), c.row_id.clone()))
                         .collect();
-                    if let Err(e) = overlay.apply(&tx, &self.space.0, &written).await {
+                    if let Err(e) = overlay
+                        .apply(&tx, &self.space.0, &written, &mut capture)
+                        .await
+                    {
                         let _ = tx.rollback().await;
                         return Err(match e {
                             overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),

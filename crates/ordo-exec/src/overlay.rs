@@ -333,6 +333,67 @@ pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
         .collect())
 }
 
+/// **`$held`**: the checks a new version adds that a shared database holds
+/// to its close (increment 11b, `plan-backfill-dual-writes.md` §4). A move
+/// on a database several spaces share records each one here, under
+/// `"$renames"` in `EXCLUSIVE` mode, before its expand, as a fill records
+/// itself ([`FILLS_DDL`]). Every write there reads it under the same fence
+/// ([`held_in`]), so a space still on the version before is held to the
+/// check on each row it writes, and refused by name, rather than leaving a
+/// row the close would refuse. The row leaves when the check lands.
+///
+/// `holds` is SQL over the row's own columns in `"<entity>"`; `rule` and
+/// `field` are the words a refusal uses.
+pub const HELD_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$held\" ( \
+  \"entity\" text NOT NULL, \
+  \"name\" text NOT NULL, \
+  \"holds\" text NOT NULL, \
+  \"field\" text NOT NULL, \
+  \"rule\" text NOT NULL, \
+  \"from\" text NOT NULL, \
+  \"to\" text NOT NULL, \
+  PRIMARY KEY (\"entity\", \"name\") \
+)";
+
+/// One row of `$held`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCheck {
+    pub entity: String,
+    pub name: String,
+    pub holds: String,
+    pub field: String,
+    pub rule: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Read `$held`. Run after [`renames_in`], whose lock fences this table
+/// too.
+pub async fn held_in(tx: &TxConn) -> Result<Vec<HeldCheck>, PoolError> {
+    let rows = tx
+        .rows(
+            "SELECT \"entity\", \"name\", \"holds\", \"field\", \"rule\", \"from\", \"to\" \
+             FROM \"$held\" ORDER BY \"entity\", \"name\"",
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some(HeldCheck {
+                entity: it.next()??,
+                name: it.next()??,
+                holds: it.next()??,
+                field: it.next()??,
+                rule: it.next()??,
+                from: it.next()??,
+                to: it.next()??,
+            })
+        })
+        .collect())
+}
+
 /// **`$seals`**: the sealed backfills a database is in the middle of
 /// (increment 13): a field being sealed (B7), or a sealed field gaining its
 /// blind index (B8). Recorded the way a rename is ([`RENAMES_DDL`]): the
@@ -916,10 +977,26 @@ pub struct Refused {
     pub field: String,
     pub rule: String,
     pub row: String,
+    /// The writing space is in a move of its own. `false`: it serves the
+    /// version before, in a database another space's move holds to a rule
+    /// of the version after ([`HELD_DDL`]).
+    pub moving: bool,
 }
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rule != "is required" && !self.moving {
+            // A space on the version before, in a database a move holds to
+            // the version after's check (11b).
+            return write!(
+                f,
+                "check_violation: this space serves `{}`, in a database moving to `{}`, which \
+                 adds a rule every space there now writes under: `{}` {}. This write breaks it \
+                 on row `{}` ({}). Nothing was written. Change the value, or move this space to \
+                 `{}` (`ordo evolve --tenant <id>`, or a rollout)",
+                self.serving, self.other, self.entity, self.rule, self.row, self.field, self.other,
+            );
+        }
         if self.rule != "is required" {
             // A unique or a check the new version adds, held by the host
             // until the soak's close (increment 11b part 4).
@@ -1078,6 +1155,7 @@ impl MoveOverlay {
         schema: &ordo_schema::Schema,
         renames: &[Rename],
         fills: &[Fill],
+        held: &[HeldCheck],
     ) -> Option<MoveOverlay> {
         let mut out = MoveOverlay::for_renames(schema, renames).unwrap_or(MoveOverlay {
             step: "prev".into(),
@@ -1107,6 +1185,30 @@ impl MoveOverlay {
                 None => out.entities.push(OverlayEntity {
                     entity: f.entity.clone(),
                     sets: vec![(f.column.clone(), f.sql.clone())],
+                    guards: vec![guard],
+                }),
+            }
+        }
+        // A check the version after adds, held to the close: every space
+        // here writes under it, whatever version it serves (11b).
+        for h in held {
+            if schema.native(&h.entity).is_none() {
+                continue;
+            }
+            if out.serving.is_empty() {
+                out.serving.clone_from(&h.from);
+                out.other.clone_from(&h.to);
+            }
+            let guard = Guard {
+                holds: h.holds.clone(),
+                field: h.field.clone(),
+                rule: h.rule.clone(),
+            };
+            match out.entities.iter_mut().find(|x| x.entity == h.entity) {
+                Some(x) => x.guards.push(guard),
+                None => out.entities.push(OverlayEntity {
+                    entity: h.entity.clone(),
+                    sets: Vec::new(),
                     guards: vec![guard],
                 }),
             }
@@ -1185,6 +1287,8 @@ impl MoveOverlay {
                         field: g.field.clone(),
                         rule: g.rule.clone(),
                         row: found.into_iter().next().flatten().unwrap_or_default(),
+                        // The database's own overlays are named `prev`.
+                        moving: self.step != "prev",
                     })));
                 }
             }
@@ -1345,6 +1449,7 @@ mod tests {
             field: "text".into(),
             rule: "is required".into(),
             row: "n1".into(),
+            moving: true,
         };
         let s = r.to_string();
         assert!(s.starts_with("check_violation: "), "{s}");
@@ -1355,6 +1460,54 @@ mod tests {
             "`n1`",
             "ordo evolve --tenant",
         ] {
+            assert!(s.contains(want), "{want}: {s}");
+        }
+    }
+
+    /// A space on the version before, in a database a move holds to a
+    /// check of the version after: every space there writes under it.
+    #[test]
+    fn a_held_check_guards_every_writer_and_names_the_version_after() {
+        let held = [HeldCheck {
+            entity: "note".into(),
+            name: "note_body_short".into(),
+            holds: "coalesce((length(\"body\") < 10), true)".into(),
+            field: "check length(body) < 10".into(),
+            rule: "holds the check `note_body_short` that `0.3.2` adds".into(),
+            from: "0.3.0".into(),
+            to: "0.3.2".into(),
+        }];
+        let o = MoveOverlay::for_database(&schema("  body: text?\n"), &[], &[], &held)
+            .expect("an overlay");
+        assert_eq!(o.entities[0].guards[0].holds, held[0].holds);
+        assert!(o.entities[0].sets.is_empty());
+        assert_eq!((o.serving.as_str(), o.other.as_str()), ("0.3.0", "0.3.2"));
+        // An entity this version does not declare writes nothing there.
+        assert!(MoveOverlay::for_database(
+            &schema("  title: text?\n"),
+            &[],
+            &[],
+            &[HeldCheck {
+                entity: "other".into(),
+                ..held[0].clone()
+            }]
+        )
+        .is_none());
+        let s = Refused {
+            serving: "0.3.0".into(),
+            other: "0.3.2".into(),
+            entity: "note".into(),
+            field: held[0].field.clone(),
+            rule: held[0].rule.clone(),
+            row: "n1".into(),
+            moving: false,
+        }
+        .to_string();
+        assert!(
+            s.starts_with("check_violation: this space serves `0.3.0`"),
+            "{s}"
+        );
+        for want in ["note_body_short", "`n1`", "move this space to `0.3.2`"] {
             assert!(s.contains(want), "{want}: {s}");
         }
     }

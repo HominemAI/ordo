@@ -75,7 +75,10 @@
 //! In a step with dual writes the version before keeps writing until the
 //! soaks close, so a unique or a check Y adds leaves the expand
 //! (`schema_apply::Triaged::held`). The move's overlays hold it on every
-//! row the moving tenant writes. The copied rows are checked against it
+//! row the moving tenant writes. On a shared database a held check is
+//! recorded in `$held` after the expand ([`record_held`]), so every space
+//! there, the ones still on the version before too, writes under it and is
+//! refused by name. The copied rows are checked against it
 //! before the switch, and every row again at the close; one that breaks it
 //! refuses by name (`held_constraint_broken`), naming the rows. A check
 //! lands at the close. A unique lands at the switch ([`land_uniques`]):
@@ -583,6 +586,14 @@ pub async fn run(
         index_held(&target, &overlay)
             .await
             .map_err(|why| cx.err(tenant, &plan.from, &plan.to, "execute_failed", why, true))?;
+        if shared {
+            // Every space there writes under a check the step holds, once
+            // the expand has made the columns it reads (11b): a space on
+            // the version before is refused by name, not named at the close.
+            record_held(&target, &overlay, &plan.from, &plan.to)
+                .await
+                .map_err(|e| cx.err(tenant, &plan.from, &plan.to, "internal", e, true))?;
+        }
         if m.phase == MovePhase::Expanding {
             v.note_dual_move(tenant, MovePhase::Backfilling, "").await?;
             m.phase = MovePhase::Backfilling;
@@ -876,6 +887,10 @@ pub async fn close(
     forget_fills(&target, &filled)
         .await
         .map_err(|e| run_err("internal", format!("$fills: {e}")))?;
+    // Each held check has landed: the database holds every space to it.
+    forget_held(&target, &held_in(&overlay))
+        .await
+        .map_err(|e| run_err("internal", format!("$held: {e}")))?;
     // The guards end with the move: their plain indexes go (11b part 5).
     drop_held_indexes(&target, &overlay)
         .await
@@ -1091,6 +1106,81 @@ async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> R
         .map_err(e)?;
     }
     tx.commit().await.map_err(e)
+}
+
+/// **A check the step holds binds every space on a shared database**
+/// (11b): each held check is recorded in that database's `$held`
+/// ([`ordo_exec::overlay::HELD_DDL`]), under `"$renames"` in `EXCLUSIVE`
+/// mode as a fill is, so a write that read the table before has committed,
+/// and every write after is held to it, whatever version it serves. A
+/// held unique is not recorded: it lands at the switch, and a space on the
+/// version before meets it there (11b part 5). Run again, it records the
+/// same rows.
+async fn record_held(target: &Pool, overlay: &Value, from: &str, to: &str) -> Result<(), String> {
+    let checks: Vec<sa::Held> = held_in(overlay)
+        .into_iter()
+        .filter(|h| matches!(h.kind, sa::HeldKind::Check { .. }))
+        .collect();
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let e = |x: ordo_exec::PoolError| x.to_string();
+    target
+        .rows(ordo_exec::overlay::RENAMES_DDL)
+        .await
+        .map_err(e)?;
+    target.rows(ordo_exec::overlay::HELD_DDL).await.map_err(e)?;
+    let tx = target
+        .begin_for(ordo_exec::OpClass::AddressedWrite)
+        .await
+        .map_err(e)?;
+    tx.rows("LOCK TABLE \"$renames\" IN EXCLUSIVE MODE")
+        .await
+        .map_err(e)?;
+    for h in &checks {
+        let (rule, field) = h.rule(to);
+        tx.rows(&format!(
+            "INSERT INTO \"$held\" (\"entity\", \"name\", \"holds\", \"field\", \"rule\", \
+               \"from\", \"to\") VALUES ({}, {}, {}, {}, {}, {}, {}) \
+             ON CONFLICT (\"entity\", \"name\") DO UPDATE SET \"holds\" = EXCLUDED.\"holds\", \
+               \"field\" = EXCLUDED.\"field\", \"rule\" = EXCLUDED.\"rule\", \
+               \"from\" = EXCLUDED.\"from\", \"to\" = EXCLUDED.\"to\"",
+            sql_lit(&h.entity),
+            sql_lit(&h.name),
+            sql_lit(&h.holds()),
+            sql_lit(&field),
+            sql_lit(&rule),
+            sql_lit(from),
+            sql_lit(to),
+        ))
+        .await
+        .map_err(e)?;
+    }
+    tx.commit().await.map_err(e)
+}
+
+/// **A held check leaves `$held`** once it has landed: at the close of the
+/// step's soaks on a shared database, or at the end of the step run there
+/// with `ordo evolve --run`. Nothing when none was recorded.
+pub(crate) async fn forget_held(
+    target: &Pool,
+    held: &[sa::Held],
+) -> Result<(), ordo_exec::PoolError> {
+    for h in held {
+        match target
+            .rows(&format!(
+                "DELETE FROM \"$held\" WHERE \"entity\" = {} AND \"name\" = {}",
+                sql_lit(&h.entity),
+                sql_lit(&h.name)
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_missing_table() => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// **A fill's record leaves `$fills`** once its `NOT NULL` has landed: at

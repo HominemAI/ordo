@@ -21,11 +21,12 @@
 //!
 //! # The drop date
 //!
-//! Every orphan gets a drop date, `orphans.personal_drop_after` after it was
-//! orphaned (`ORDO_ORPHANS_PERSONAL_DROP_AFTER`, in days, 30 by default).
-//! The language cannot yet say which fields are personal, so every orphan is
-//! treated as personal. The date is recorded and shown as due. Nothing drops
-//! by itself: pruning is always the deployment owner's act.
+//! Every orphan gets a drop date, `orphans.drop_after` after it was
+//! orphaned (`ORDO_ORPHANS_DROP_AFTER`, in days, 30 by default). Ordo has no
+//! idea of personal data (owner, 2026-11-25): every orphan is treated alike,
+//! and what counts as personal is the app developer's call. The date is
+//! recorded and shown as due. Nothing drops by itself: pruning is always the
+//! deployment owner's act.
 //!
 //! # A field declared again
 //!
@@ -56,8 +57,23 @@ CREATE TABLE IF NOT EXISTS \"$orphans\" ( \
   PRIMARY KEY (\"entity\", \"field\") \
 )";
 
-/// `orphans.personal_drop_after`, in days.
-pub const DROP_AFTER_ENV: &str = "ORDO_ORPHANS_PERSONAL_DROP_AFTER";
+/// `orphans.drop_after`, in days.
+pub const DROP_AFTER_ENV: &str = "ORDO_ORPHANS_DROP_AFTER";
+
+/// The name this setting had until 2026-11-25. A deployment built on
+/// 2026-11-23 or later may have it set, so it is still read when the new
+/// name is not set.
+pub const DROP_AFTER_OLD_ENV: &str = "ORDO_ORPHANS_PERSONAL_DROP_AFTER";
+
+/// The variable in force: the new name when set, else the old one when
+/// that is set, else the new name.
+pub fn drop_after_var() -> &'static str {
+    if std::env::var(DROP_AFTER_ENV).is_err() && std::env::var(DROP_AFTER_OLD_ENV).is_ok() {
+        DROP_AFTER_OLD_ENV
+    } else {
+        DROP_AFTER_ENV
+    }
+}
 
 /// Its default: 30 days.
 pub const DROP_AFTER_DEFAULT_DAYS: u64 = 30;
@@ -65,7 +81,7 @@ pub const DROP_AFTER_DEFAULT_DAYS: u64 = 30;
 /// The drop date's distance, in seconds. A value that is not a whole number
 /// of days reads as the default; the boot refuses it ([`drop_after_value`]).
 pub fn drop_after_secs() -> u64 {
-    drop_after_value(std::env::var(DROP_AFTER_ENV).ok().as_deref())
+    drop_after_value(std::env::var(drop_after_var()).ok().as_deref())
         .unwrap_or(DROP_AFTER_DEFAULT_DAYS)
         * 86_400
 }
@@ -296,6 +312,24 @@ pub fn drop_sql(pg: &str, orphan: &Orphan) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `orphans.drop_after` is `ORDO_ORPHANS_DROP_AFTER` (owner,
+    /// 2026-11-25). The old name is read only while the new one is unset.
+    /// The one test that sets these variables.
+    #[test]
+    fn the_new_name_sets_the_drop_date_and_the_old_name_is_still_read() {
+        std::env::remove_var(DROP_AFTER_ENV);
+        std::env::remove_var(DROP_AFTER_OLD_ENV);
+        assert_eq!(drop_after_secs(), 30 * 86_400);
+        std::env::set_var(DROP_AFTER_OLD_ENV, "9");
+        assert_eq!(drop_after_secs(), 9 * 86_400);
+        assert_eq!(drop_after_var(), DROP_AFTER_OLD_ENV);
+        std::env::set_var(DROP_AFTER_ENV, "7d");
+        assert_eq!(drop_after_secs(), 7 * 86_400, "the new name wins");
+        assert_eq!(drop_after_var(), DROP_AFTER_ENV);
+        std::env::remove_var(DROP_AFTER_ENV);
+        std::env::remove_var(DROP_AFTER_OLD_ENV);
+    }
 
     #[test]
     fn the_drop_date_setting_reads_days_and_refuses_anything_else() {

@@ -65,8 +65,10 @@
 //! §5, owner ruling 2026-11-23, Q16). Each peer a checked version names is
 //! listed with the Ordo release it last started under (its `$ordorelease`,
 //! granted to its readers), and each reader this deployment grants to is
-//! listed by its role. A reader's release is not visible from here: it
-//! grants this deployment nothing. Neither fails the check: the sign-in
+//! listed by its role and, when it has granted it (owner ruling 2026-11-25,
+//! `ordo_exec::peer::grant_release_to_peers`: the `release` column of its
+//! `$ordorelease`, to the role that owns this deployment's schema), the
+//! Ordo release it runs. Neither fails the check: the sign-in
 //! columns a reader reads are a contract (`ordo_exec::sign_in_contract`),
 //! kept for `editions.load_window` after a release changes one. A column
 //! this release retires is named with the date it stops being granted.
@@ -439,14 +441,42 @@ pub async fn neighbours(
         let (Some(name), Some(role)) = (col(&r, 0), col(&r, 1)) else {
             continue;
         };
+        // The reader grants its release column to the role that owns this
+        // deployment's schema (owner ruling 2026-11-25), so its schema is
+        // the one its role owns a `$ordorelease` in.
+        let own = pool.schema().to_string();
+        let schemas: Vec<String> = ordo_exec::sign_in_contract::schemas_owned_by(pool, &role)
+            .await?
+            .into_iter()
+            .filter(|s| *s != own)
+            .collect();
+        let (found, unknown) = match schemas.first() {
+            None => (
+                None,
+                "it records no release this deployment can find; it records one at its \
+                 next start"
+                    .to_string(),
+            ),
+            Some(pg) => match release_of(pool, pg).await? {
+                PeerRelease::Known(r) => (Some(r), String::new()),
+                PeerRelease::Unrecorded => (
+                    None,
+                    format!("an Ordo release before {}, which records none", release()),
+                ),
+                PeerRelease::NotGranted => (
+                    None,
+                    "it has not granted its release to this deployment yet; it grants it \
+                     at its next start"
+                        .to_string(),
+                ),
+            },
+        };
         out.push(Neighbour {
             kind: "reader",
             name,
             at: role,
-            release: None,
-            unknown: "its release is not visible from this deployment, which it grants \
-                      nothing"
-                .into(),
+            release: found,
+            unknown,
         });
     }
     Ok(out)

@@ -71,6 +71,7 @@ fn create_group(correlation: &str) -> CommandGroup {
             ])),
         )],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }
@@ -304,6 +305,7 @@ fn revert_inverts_all_three_kinds_in_reverse_order() {
             cmd("c-del", CommandKind::Delete, Some(deleted.clone()), None),
         ],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };
@@ -390,6 +392,7 @@ fn inversion_carries_a_sealed_handle_through_for_the_applier_to_resolve() {
             ])),
         )],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };
@@ -504,6 +507,7 @@ fn malformed_image_shapes_rejected_at_append() {
             Some(img(&[])),
         )],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };
@@ -521,6 +525,7 @@ fn malformed_image_shapes_rejected_at_append() {
         actor: Actor::User("usr_x".into()),
         commands: vec![],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     };
@@ -822,6 +827,10 @@ fn the_second_tag_alone_decodes_as_restored_unverified_alone() {
 /// by a payload, so a bare `0x03` still refuses, as a payload cut short
 /// (`Truncated`) rather than as an unknown tag. The unknown-tag claim moves
 /// to `0x04`, the next future tag, with the same assertion it made before.
+///
+/// **Amended by B3 (`plan-backfill-dual-writes.md`).** `0x04` is now the
+/// backfill record, so the future tag is `0x05`, and a bare `0x04` refuses
+/// as a payload cut short.
 #[test]
 fn an_unknown_trailer_tag_still_refuses() {
     use crate::chain::{decode_group, DecodeError};
@@ -838,12 +847,15 @@ fn an_unknown_trailer_tag_still_refuses() {
     both.restored_unverified = true;
     let both_bytes = crate::chain::encode_group(&both);
     let mut next = both_bytes.clone();
-    next.push(0x04);
+    next.push(0x05);
     assert_eq!(
         decode_group(&next),
         Err(DecodeError::TrailingBytes),
         "an unrecognized tag after the real ones must still refuse"
     );
+    let mut bare_backfill = both_bytes.clone();
+    bare_backfill.push(0x04);
+    assert_eq!(decode_group(&bare_backfill), Err(DecodeError::Truncated));
 
     // What this test used to push, `0x03` with nothing after it, still
     // refuses: the restore tag without its payload is a group cut short.
@@ -1228,6 +1240,7 @@ fn marker_group(correlation: &str) -> CommandGroup {
         actor: Actor::System("restore".into()),
         commands: vec![],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: Some(marker(crate::command::RestoreSource::Bundle {
             manifest_sha256: [0x5a; 32],
@@ -1464,6 +1477,7 @@ fn every_old_tag_group() -> CommandGroup {
             Some(image),
         )],
         owner_administration: false,
+        backfill: None,
         restored_unverified: false,
         restore: None,
     }
@@ -1562,4 +1576,164 @@ fn a_non_canonical_decimal_spelling_does_not_decode() {
         crate::chain::decode_group(&forged),
         Err(crate::chain::DecodeError::BadDecimal(_))
     ));
+}
+
+// ───────────── before the backfill trailer (`plan-backfill-dual-writes.md` B3) ─────────────
+
+/// **The fourth backward-compatibility proof**, taken before the backfill
+/// trailer (`0x04`) existed, against the encoder that knew three trailer
+/// tags. Three goldens, one per kind of group already written: a group with
+/// no trailer, one with both flag tags, and a restore marker. If adding the
+/// backfill trailer moved a byte of any of them, every chain already
+/// written over that kind of group would be void.
+///
+/// Pinned rather than derived, for the reason `PRE_FLAG_GOLDEN` states.
+const PRE_BACKFILL_GOLDEN: &str =
+    "6b1ed3eb99091ffcb83318478f4f95491ae7c3b8666d6aed4323edde78896e68";
+const PRE_BACKFILL_LEN: usize = 165;
+const PRE_BACKFILL_BOTH_TAGS_GOLDEN: &str =
+    "571bbbd45a4af9edcf7edbcdfe64b57025c740ec02fa412d3a6bbcbb36198aea";
+const PRE_BACKFILL_MARKER_GOLDEN: &str =
+    "89fd272c65f16baa87752df1abec4b9c9fefde7d5c081a55305b6a9a072e7331";
+
+#[test]
+fn every_kind_of_group_hashes_where_it_did_before_the_backfill_trailer() {
+    let plain = create_group("grp-b3");
+    let bytes = crate::chain::encode_group(&plain);
+    assert_eq!(bytes.len(), PRE_BACKFILL_LEN, "not one byte more");
+    assert_eq!(
+        crate::chain::hash_group(ChainHash::GENESIS, &plain).to_string(),
+        PRE_BACKFILL_GOLDEN,
+        "the backfill trailer moved a group with no trailer"
+    );
+    let mut both = create_group("grp-b3-both");
+    both.owner_administration = true;
+    both.restored_unverified = true;
+    assert_eq!(
+        crate::chain::hash_group(ChainHash::GENESIS, &both).to_string(),
+        PRE_BACKFILL_BOTH_TAGS_GOLDEN,
+        "the backfill trailer moved a flagged group"
+    );
+    let marker = marker_group("grp-b3-restore");
+    assert_eq!(
+        crate::chain::hash_group(ChainHash::GENESIS, &marker).to_string(),
+        PRE_BACKFILL_MARKER_GOLDEN,
+        "the backfill trailer moved a restore marker"
+    );
+    // Each still decodes to itself.
+    for g in [plain, both, marker] {
+        let bytes = crate::chain::encode_group(&g);
+        let decoded = crate::chain::decode_group(&bytes).expect("decodes");
+        assert_eq!(decoded, g);
+        assert_eq!(crate::chain::encode_group(&decoded), bytes);
+    }
+}
+
+fn backfill_record(
+    kind: crate::command::BackfillAudit,
+    rows: u64,
+) -> crate::command::BackfillRecord {
+    crate::command::BackfillRecord {
+        space: space(),
+        kind,
+        step: "sha256:step".into(),
+        entity: "notes".into(),
+        field: "heading".into(),
+        mapping: "title".into(),
+        rows,
+        content: [0x7e; 32],
+    }
+}
+
+fn summary_group(correlation: &str) -> CommandGroup {
+    CommandGroup {
+        correlation: CorrelationId(correlation.into()),
+        actor: Actor::System(crate::command::BACKFILL_COMPONENT.into()),
+        commands: vec![],
+        owner_administration: false,
+        restored_unverified: false,
+        restore: None,
+        backfill: Some(backfill_record(
+            crate::command::BackfillAudit::Summarised,
+            500,
+        )),
+    }
+}
+
+#[test]
+fn a_summarised_backfill_record_round_trips_and_is_valid() {
+    let g = summary_group("grp-bf");
+    assert_eq!(g.validate().unwrap(), &space());
+    let bytes = crate::chain::encode_group(&g);
+    let mut plain = g.clone();
+    plain.backfill = None;
+    let at = crate::chain::encode_group(&plain).len();
+    assert_eq!(bytes[at], 0x04, "the trailer tag follows the group");
+    assert_eq!(bytes[at + 1], 0x00, "summarised says so in the bytes");
+    let decoded = crate::chain::decode_group(&bytes).expect("decodes");
+    assert_eq!(decoded, g);
+    assert_eq!(crate::chain::encode_group(&decoded), bytes);
+}
+
+#[test]
+fn an_image_backfill_group_carries_its_converges() {
+    let mut g = create_group("grp-bf-img");
+    g.actor = Actor::System("backfill".into());
+    g.commands[0].kind = CommandKind::Converge;
+    g.commands[0].before = g.commands[0].after.clone();
+    g.backfill = Some(backfill_record(crate::command::BackfillAudit::Images, 1));
+    assert!(g.validate().is_ok());
+    let bytes = crate::chain::encode_group(&g);
+    assert_eq!(crate::chain::decode_group(&bytes).expect("decodes"), g);
+    // The count must match the commands it covers.
+    g.backfill = Some(backfill_record(crate::command::BackfillAudit::Images, 2));
+    assert!(matches!(
+        g.validate(),
+        Err(GroupShapeError::BadBackfill { .. })
+    ));
+}
+
+#[test]
+fn a_backfill_record_refuses_every_other_shape() {
+    let bad = |g: &CommandGroup| matches!(g.validate(), Err(GroupShapeError::BadBackfill { .. }));
+    // Commands in a summary.
+    let mut g = summary_group("grp-bf-1");
+    g.commands = create_group("grp-bf-1").commands;
+    assert!(bad(&g));
+    // Another actor.
+    let mut g = summary_group("grp-bf-2");
+    g.actor = Actor::User("usr_x".into());
+    assert!(bad(&g));
+    // A restore marker as well.
+    let mut g = summary_group("grp-bf-3");
+    g.restore = marker_group("grp-bf-3").restore;
+    assert!(bad(&g));
+    // An unknown kind byte, and a byte after the payload.
+    let bytes = crate::chain::encode_group(&summary_group("grp-bf-4"));
+    let mut plain = summary_group("grp-bf-4");
+    plain.backfill = None;
+    let at = crate::chain::encode_group(&plain).len();
+    let mut forged = bytes.clone();
+    forged[at + 1] = 0x02;
+    assert!(matches!(
+        crate::chain::decode_group(&forged),
+        Err(crate::chain::DecodeError::BadTag(0x02))
+    ));
+    let mut longer = bytes.clone();
+    longer.push(0x01);
+    assert!(crate::chain::decode_group(&longer).is_err());
+}
+
+#[test]
+fn the_backfill_row_hash_is_chained_and_sees_every_part() {
+    use crate::chain::backfill_row_hash as h;
+    let z = [0u8; 32];
+    let a = h(&z, "spc_01", "n1", Some("Hello"));
+    assert_ne!(a, h(&z, "spc_01", "n1", None));
+    assert_ne!(a, h(&z, "spc_02", "n1", Some("Hello")));
+    assert_ne!(a, h(&z, "spc_01", "n2", Some("Hello")));
+    // Every part is length-prefixed: `a ‖ bc` is not `ab ‖ c`.
+    assert_ne!(h(&z, "a", "bc", None), h(&z, "ab", "c", None));
+    let b = h(&a, "spc_01", "n2", Some("x"));
+    assert_ne!(b, h(&z, "spc_01", "n2", Some("x")));
 }

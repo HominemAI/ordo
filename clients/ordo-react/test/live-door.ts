@@ -97,7 +97,7 @@ export class LiveDoor {
   /** When set, answers every ordinary call from its URL instead of the reply queue. */
   answer: ((url: URL) => unknown) | null = null;
   /** Answers for ordinary calls, consumed in order; the last one repeats. */
-  #replies: { status?: number; body: unknown }[] = [];
+  #replies: { status?: number; body: unknown; headers?: Record<string, string> }[] = [];
   /** Refusals for the next stream opens, consumed in order. */
   #streamRefusals: { status: number; code: string }[] = [];
   /** Refusals for added reads, by op, consumed in order. */
@@ -115,7 +115,7 @@ export class LiveDoor {
     return this;
   }
 
-  reply(...replies: { status?: number; body: unknown }[]): this {
+  reply(...replies: { status?: number; body: unknown; headers?: Record<string, string> }[]): this {
     this.#replies.push(...replies);
     return this;
   }
@@ -163,10 +163,10 @@ export class LiveDoor {
     const parsed = new URL(url, 'http://door.test');
     const method = init?.method ?? 'GET';
     const headers = (init?.headers ?? {}) as Record<string, string>;
-    const json = (status: number, body: unknown) =>
+    const json = (status: number, body: unknown, extra: Record<string, string> = {}) =>
       new Response(body === null ? null : JSON.stringify(body), {
         status,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...extra },
       });
     const refusal = (status: number, code: string) => json(status, { error: { code, message: `${code} at the door` } });
 
@@ -229,7 +229,7 @@ export class LiveDoor {
     });
     if (this.answer) return json(200, this.answer(parsed));
     const next = this.#replies.length > 1 ? this.#replies.shift()! : (this.#replies[0] ?? { body: { rows: [] } });
-    return json(next.status ?? 200, next.body);
+    return json(next.status ?? 200, next.body, next.headers);
   };
 
   client(extra: Partial<DescriptorClientOptions> = {}): DescriptorClient {

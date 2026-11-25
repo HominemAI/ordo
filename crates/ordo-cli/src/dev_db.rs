@@ -23,7 +23,7 @@
 //! literal: *"`ordo dev` never runs a migration production would not run.
 //! Class A goes through the production apply path unchanged."* The
 //! production path is [`ordo_host::schema_apply`], and the loop calls its
-//! `assess`, `triage` and `execute` exactly as `ordo migrate --apply` does,
+//! `assess`, `triage` and `execute` exactly as `ordo apply` does,
 //! skipping only the registry and the `$migrations` row, which is the
 //! version-history bookkeeping §4.3 keeps as dev's one relaxation.
 //!

@@ -22,6 +22,7 @@ import type { OpDescriptor, ParamDescriptor } from './descriptor.js';
 import type { OrdoInterface } from './load.js';
 import { OrdoLocalRefusal, type RefusalClass } from '@hominemai/ordo-sdk/core/refusal.js';
 import { busyRetryOf, conflictRetryOf } from '@hominemai/ordo-sdk/core/busy.js';
+import { TenantVersions } from '@hominemai/ordo-sdk/core/versions.js';
 import type {
   OnRetry,
   ResolvedBusyRetry,
@@ -113,6 +114,7 @@ export class DescriptorClient {
   readonly #newKey: () => string;
   readonly #busyRetry: ResolvedBusyRetry;
   readonly #conflictRetry: ResolvedConflictRetry;
+  readonly #versions: TenantVersions;
 
   constructor(options: DescriptorClientOptions) {
     this.iface = options.iface;
@@ -130,6 +132,7 @@ export class DescriptorClient {
       timeoutMs: options.callTimeoutMs ?? DEFAULT_CLIENT_CALL_TIMEOUT_MS,
     };
     this.#newKey = options.newIdempotencyKey ?? (() => crypto.randomUUID());
+    this.#versions = options.tenantVersions ?? new TenantVersions();
     this.#busyRetry = busyRetryOf(options.busyRetry, options.busyRetries);
     this.#conflictRetry = conflictRetryOf(options.conflictRetry, options.conflictRetries);
   }
@@ -168,6 +171,7 @@ export class DescriptorClient {
       newIdempotencyKey: this.#newKey,
       busyRetry: this.#busyRetry,
       conflictRetry: this.#conflictRetry,
+      tenantVersions: this.#versions,
     });
   }
 
@@ -385,9 +389,31 @@ export class DescriptorClient {
     return t === undefined ? undefined : typeof t === 'function' ? await t() : t;
   }
 
-  /** One call through the SDK's request helper. */
-  #send(url: string, init: RequestInit, retry: RetryPolicy, onRetry?: OnRetry): Promise<Response> {
-    return doorRequest(this.#site, url, init, { retry, onRetry });
+  /**
+   * The program version the door last said it serves this tenant
+   * (`x-ordo-tenant-version`, `plan-versions.md` §1.4), or `null` before any
+   * answer carried one.
+   */
+  get tenantVersion(): string | null {
+    return this.#versions.last(this.space);
+  }
+
+  /**
+   * Call `listener(from, to)` when an answer names another version than the
+   * last one seen. The first answer sets the baseline and fires nothing.
+   * Returns the stop function.
+   */
+  onVersionChange(listener: (from: string, to: string) => void): () => void {
+    return this.#versions.onChange((c) => {
+      if (c.space === this.space) listener(c.from, c.to);
+    });
+  }
+
+  /** One call through the SDK's request helper; reads the version header off the answer. */
+  async #send(url: string, init: RequestInit, retry: RetryPolicy, onRetry?: OnRetry): Promise<Response> {
+    const response = await doorRequest(this.#site, url, init, { retry, onRetry });
+    this.#versions.sawResponse(this.space, response);
+    return response;
   }
 
   async #call<R>(op: OpDescriptor, options: DescriptorCallOptions): Promise<OpResponse<R>> {

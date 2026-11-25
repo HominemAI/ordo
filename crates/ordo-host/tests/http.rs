@@ -1278,6 +1278,7 @@ async fn a_capability_token_is_confined_and_dies_when_its_scope_changes() {
                 ordo_identity::OpPin {
                     manifest_hash: ManifestHash([0u8; 32]),
                     version: None,
+                    contract: false,
                     // A pin naming a field the served op does not read:
                     // an expansion, and therefore fatal. A bare hash
                     // change is no longer enough to kill a grant, which

@@ -71,6 +71,7 @@ fn ng(
                     OpPin {
                         manifest_hash: *manifest_hash,
                         version: None,
+                        contract: false,
                         unguarded: false,
                         entities: Vec::new(),
                     },

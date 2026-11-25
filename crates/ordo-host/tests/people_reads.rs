@@ -437,6 +437,7 @@ async fn plant(h: &Harness, id: &str, principal: &str, ops: &[&str], expires: u6
                         ordo_identity::OpPin {
                             manifest_hash: ordo_identity::ManifestHash([9; 32]),
                             version: None,
+                            contract: false,
                             unguarded: false,
                             entities: Vec::new(),
                         },

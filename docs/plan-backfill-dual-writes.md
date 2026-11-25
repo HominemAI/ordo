@@ -505,12 +505,63 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   `a_blind_index_outside_a_stored_plan_or_unique_is_refused_by_name`);
   notes e2e project `seal`: Ada edits a note and writes one while her seal
   stops at its budget; both land sealed; the page reads them after.
+
+**Built (13, 2026-11-24, third part: 949c9879, branch `evo-13-part3`).**
+
+- **B10, a sealed indexed field's `normalize` changes.** Every row's blind
+  index is computed again by the worker under the new normalization into
+  `<field>$bidx$next`, one `Purpose::Migration` lease per space per chunk.
+  The step is recorded in `$seals` as kind `reindex`, with the
+  normalization (`$seals.normalize`, new). Every sealed writer fills the
+  new index under it, beside its own. Verify computes every index again.
+  The end, under the lock: a row left without one refuses it, the old
+  index is dropped, the new one takes its name and becomes required, and
+  the field's unique, composite keys and indexes are made again over it.
+- `ordo apply` refuses B10 (`reindex_needs_stored_plan`). A `normalize`
+  change on a field with no stored blind index changes nothing stored and
+  is applied. The `normalize` probe no longer runs `lower()` over
+  ciphertext.
+- The diff compares declarations against the version a tenant's data was
+  written under too, so a tenant's own database sees the change.
+- **A rollback reads a whole index** (owner, 2026-11-24, PR 80). The end
+  keeps the old index as `<field>$bidx$prev`, recorded in `$seals` as kind
+  `kept` with the old normalization and in `$orphans`. Every write keeps it
+  current until `ordo evolve --prune` removes it (the close). An
+  activation of a version that declares the kept normalization trades it
+  back in before its gate (`apply_op::restore_kept_indexes`), so `==`
+  there finds every row; forward again trades back. Test:
+  `a_rollback_across_a_new_normalize_finds_every_row`. Only the
+  deployment's database is traded at an activation; a tenant's own
+  database is not yet (11b).
+- **`sealed unique` by backfill.** B8 and B10 under `unique`: once the
+  indexes verify, the run reads the duplicates over them and refuses the
+  end, naming each space and its rows (`sealed_unique_duplicates`). The
+  step stays recorded, so writes keep the index current while the rows are
+  fixed; a run again ends it. The constraint lands in the end's
+  transaction, which asks again under the lock. A `unique` gained with the
+  index is folded into the backfill's end; a run again reads the backfill
+  in progress from `$seals` (`Choices::indexing_live`).
+- **The deployment's own space through a seal on its database.** `ordo
+  evolve --run` of a sealing step (B7, B8, B10) first gives the own space a
+  pin at the active version (`Versions::own_pin_made`, a `$pins` row and
+  the nudge), so its writes carry an epoch. The end raises its pin fence
+  in the end's transaction. The own space then moves to the version the
+  database holds (`Versions::pin_own_for_step`), first, as a rollout moves
+  it (Q4). "Active" waits for the activation. A node still on the version
+  before is told the pin moved (503, retried); the new version's writes
+  land sealed.
+- Tests: `sealed_backfill.rs`
+  (`sealed_unique_by_backfill_refuses_duplicates_by_row_then_lands`,
+  `a_new_normalize_computes_every_index_again_under_live_writes`,
+  `a_new_normalize_under_unique_refuses_collisions_naming_the_rows`,
+  `a_new_normalize_outside_a_stored_plan_is_refused_by_name`,
+  `the_own_space_moves_with_a_seal_on_its_database_and_its_writes_land_sealed`);
+  notes e2e project `seal`: `--run` names the own space on 0.3.4 while
+  0.3.3 stays active.
 - Not built: activating a version that runs a tenant's stored seal on a
-  shared database (11b); the deployment's own space still serves the
-  version before between `--run` and the activation, and its writes to the
-  sealed field fail after the end until then; B10; `sealed unique` by
-  backfill; a seal's end killed between the drop and the record (a run
-  again does not find the sealed column).
+  shared database, and tenants that share the deployment's database during
+  its seal (11b); a seal's end killed between the drop and the record (a
+  run again does not find the sealed column).
 - **Blobs.** An object's key is `<space>/<handle>`
   (`plan-tenant-storage.md`). It holds no field name. A renamed blob field
   moves no object, in the deployment's bucket or a tenant's own.

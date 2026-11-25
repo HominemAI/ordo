@@ -830,7 +830,10 @@ pub fn diff_with(
         let written_as = written.and_then(|w| w.native(&e.name));
         entity_columns(e, t, written_as, &live.places, &renames, &mut out);
         entity_objects(declared, e, t, &mut out);
-        if let Some(p) = prior.and_then(|p| p.native(&e.name)) {
+        // Against the version its data was written under too: a tenant's
+        // database holds no registry, and its blind indexes are computed
+        // under that version's `normalize` (B10).
+        if let Some(p) = prior.or(written).and_then(|p| p.native(&e.name)) {
             declaration_only(p, e, &mut out);
         }
     }

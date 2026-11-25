@@ -1427,6 +1427,7 @@ async fn activate_locked(
         .ensure()
         .await
         .map_err(|e| ApplyRefused::Internal(format!("registry tables: {e}")))?;
+    restore_kept_indexes(pool, version).await?;
     gate(pool, version).await?;
     // The same re-point as an apply's, pins included.
     match Versions::on(pool)
@@ -1449,6 +1450,43 @@ async fn activate_locked(
         }
         Err(e) => Err(ApplyRefused::Internal(e.to_string())),
     }
+}
+
+/// **A rollback across B10** (increment 13): a blind index the step kept
+/// under the normalization `version` declares is traded back in before the
+/// gate, so `==` under `version` finds every row
+/// ([`sa::restore_kept_indexes`]). Nothing when no index was kept.
+async fn restore_kept_indexes(pool: &Pool, version: &str) -> Result<(), ApplyRefused> {
+    let v = Versions::on(pool);
+    let compile = |source: &str| {
+        crate::Fixture::from_source(source, "")
+            .ok()
+            .map(|f| f.schema)
+    };
+    let Some(target) = v
+        .get(version)
+        .await
+        .map_err(|e| ApplyRefused::Internal(e.to_string()))?
+        .and_then(|a| compile(&a.source))
+    else {
+        return Ok(());
+    };
+    let leaving = match v
+        .active_version()
+        .await
+        .map_err(|e| ApplyRefused::Internal(e.to_string()))?
+    {
+        Some(a) if a != version => v
+            .get(&a)
+            .await
+            .map_err(|e| ApplyRefused::Internal(e.to_string()))?
+            .and_then(|a| compile(&a.source)),
+        _ => None,
+    };
+    sa::restore_kept_indexes(pool, &target, leaving.as_ref())
+        .await
+        .map(|_| ())
+        .map_err(ApplyRefused::Internal)
 }
 
 /// The load gate an activation passes: a stored version whose tables this

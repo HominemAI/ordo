@@ -2247,26 +2247,62 @@ impl Held {
                 distinct_nulls,
                 ..
             } => {
-                let same = columns
-                    .iter()
-                    .map(|c| {
-                        let c = ordo_schema::ddl::q(c);
-                        if *distinct_nulls {
-                            format!("o.{c} = {t}.{c}")
-                        } else {
-                            format!("o.{c} IS NOT DISTINCT FROM {t}.{c}")
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
-                format!(
-                    "NOT EXISTS (SELECT 1 FROM {t} AS o WHERE o.\"$space\" = {t}.\"$space\" \
-                     AND o.\"id\" <> {t}.\"id\" AND {same})"
-                )
+                let cols: Vec<String> = columns.iter().map(|c| ordo_schema::ddl::q(c)).collect();
+                let join = |op: &dyn Fn(&str) -> String| {
+                    cols.iter().map(|c| op(c)).collect::<Vec<_>>().join(" AND ")
+                };
+                let other = |same: String| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM {t} AS o WHERE o.\"$space\" = {t}.\"$space\" \
+                         AND o.\"id\" <> {t}.\"id\" AND {same})"
+                    )
+                };
+                // Spelled with `=` so the held index ([`Held::index`]) is
+                // read: `IS NOT DISTINCT FROM`, or an `OR` for the nulls, is
+                // not indexable, and the table would be read for each row.
+                let equal = other(join(&|c| format!("o.{c} = {t}.{c}")));
+                if *distinct_nulls {
+                    format!("NOT {equal}")
+                } else {
+                    // Two nulls collide too. Asked only of a row that holds
+                    // a null there, which a required field never does.
+                    let present = join(&|c| format!("{t}.{c} IS NOT NULL"));
+                    let alike = other(join(&|c| format!("o.{c} IS NOT DISTINCT FROM {t}.{c}")));
+                    format!("NOT {equal} AND ({present} OR NOT {alike})")
+                }
             }
             // Postgres passes a check whose result is null.
             HeldKind::Check { sql, .. } => format!("coalesce(({sql}), true)"),
         }
+    }
+
+    /// **The plain index a held unique's guard reads** (11b part 5):
+    /// `(index name, CREATE INDEX CONCURRENTLY …)` over the space and the
+    /// unique's columns, made once the expand has made them and dropped at
+    /// the close. Without it the guard reads the whole table for each row
+    /// written. `None` for a check, whose guard reads the row alone.
+    pub fn index(&self) -> Option<(String, String)> {
+        let HeldKind::Unique { columns, .. } = &self.kind else {
+            return None;
+        };
+        let mut name = format!("{}$held", self.name);
+        if name.len() > 63 {
+            let mut cut = 63;
+            while !name.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            name.truncate(cut);
+        }
+        let cols = std::iter::once(ordo_schema::ddl::q(ordo_schema::SPACE_COLUMN))
+            .chain(columns.iter().map(|c| ordo_schema::ddl::q(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({cols});\n",
+            ordo_schema::ddl::q(&name),
+            ordo_schema::ddl::q(&self.entity)
+        );
+        Some((name, sql))
     }
 
     /// The guard's rule, and what it asks, in words. `to` is the version

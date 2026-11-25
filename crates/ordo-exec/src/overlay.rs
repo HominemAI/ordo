@@ -584,8 +584,49 @@ impl std::fmt::Display for Refused {
 pub enum OverlayError {
     /// A row broke the other version's rule.
     Refused(Box<Refused>),
+    /// A value this write keeps current for the other version is taken by
+    /// another row under a unique that version added (11b part 5).
+    Duplicate(Box<Duplicate>),
     /// The database refused a statement.
     Pool(PoolError),
+}
+
+/// **A unique the other version added refused this write.** A space still
+/// on the version before writes the new columns only through the overlay
+/// (a rename's copy, a fill's mapping); when such a column is under a
+/// unique the new version added, a value another row of the space holds
+/// is refused here by name, never as the database's own duplicate error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Duplicate {
+    pub entity: String,
+    /// The columns the overlay set on the entity.
+    pub columns: Vec<String>,
+    /// The rows this write wrote there.
+    pub rows: Vec<String>,
+}
+
+impl std::fmt::Display for Duplicate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let named = self
+            .columns
+            .iter()
+            .map(|c| format!("`{}.{c}`", self.entity))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "duplicate: {named} is unique in each space in the version after the one this \
+             space serves, and another row of this space already holds the value this write \
+             gives row {}. This space's writes keep that field current until it moves. Nothing \
+             was written. Change the value, or move this space to the new version (`ordo evolve \
+             --tenant <id>`, or a rollout)",
+            self.rows
+                .iter()
+                .map(|r| format!("`{r}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
 }
 
 impl From<PoolError> for OverlayError {
@@ -725,9 +766,18 @@ impl MoveOverlay {
                         .collect::<Vec<_>>()
                         .join(", ");
                     let sql = format!("UPDATE {} SET {sets} WHERE {rows}", quote(&e.entity));
-                    if !guarded(tx, &sql).await? {
+                    match guarded(tx, &sql).await {
+                        Ok(true) => {}
                         // The expand has not landed: nothing to keep current.
-                        continue;
+                        Ok(false) => continue,
+                        Err(err) if err.is_unique_violation() => {
+                            return Err(OverlayError::Duplicate(Box::new(Duplicate {
+                                entity: e.entity.clone(),
+                                columns: e.sets.iter().map(|(c, _)| c.clone()).collect(),
+                                rows: chunk.iter().map(|i| i.to_string()).collect(),
+                            })));
+                        }
+                        Err(err) => return Err(err.into()),
                     }
                 }
                 for g in &e.guards {

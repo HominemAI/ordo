@@ -4,8 +4,8 @@
 #
 #     eval "$(bash scripts/previous-ordo.sh)"
 #
-# The previous release is the newest `v*` tag (`E2E_PREVIOUS_TAG` names
-# another). Its source is exported with `git archive` and built into a target
+# The previous release is the newest `v*` tag that does not point at HEAD, so
+# on a release tag it is the one before (`E2E_PREVIOUS_TAG` names another). Its source is exported with `git archive` and built into a target
 # folder of its own, by scripts/upgrade-continuity.sh `build`, so this
 # checkout's build is not touched. It needs the tags (CI checks out with
 # fetch-depth 0) and no secret and no registry login: the published image is
@@ -18,7 +18,17 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-tag=${E2E_PREVIOUS_TAG:-$(git -C "$repo" tag --list 'v[0-9]*' --sort=-v:refname | head -1)}
+tag=${E2E_PREVIOUS_TAG:-}
+if [ -z "$tag" ]; then
+  # The newest tag that does not point at HEAD: on a release tag, the one before.
+  head_commit=$(git -C "$repo" rev-parse HEAD)
+  for t in $(git -C "$repo" tag --list 'v[0-9]*' --sort=-v:refname); do
+    if [ "$(git -C "$repo" rev-parse "$t^{commit}")" != "$head_commit" ]; then
+      tag=$t
+      break
+    fi
+  done
+fi
 [ -n "$tag" ] || { echo "previous-ordo: no v* tag here; fetch the tags (git fetch --tags)" >&2; exit 1; }
 work=${ORDO_UPGRADE_DIR:-$HOME/.ordo-upgrade-$tag}
 

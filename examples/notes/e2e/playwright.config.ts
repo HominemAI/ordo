@@ -200,14 +200,24 @@ export default defineConfig({
       dependencies: ['rollout-moves'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // Notes v3 splits a field (plan-versions.md, increment 15b): the
+    // mapping asked for, the move, a revert in the soak and the close. It
+    // stores 0.3.9, above `fill`'s 0.3.8 and below `branch`'s 0.5.x, so it
+    // runs between them. Locally, `--project=split --no-deps`.
+    {
+      name: 'split',
+      testMatch: /evolve\/split\.spec\.ts/,
+      dependencies: ['fill'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     // Dev branches as tenants on their own version (plan-versions.md
     // increment 5): 2 branches served side by side while the stack serves
-    // its own. It applies programs, so it runs after `fill`.
+    // its own. It applies programs, so it runs after `split`.
     // Locally, `--project=branch --no-deps`.
     {
       name: 'branch',
       testMatch: /branch\/.*\.spec\.ts/,
-      dependencies: ['fill'],
+      dependencies: ['split'],
       use: { ...devices['Desktop Chrome'] },
     },
     // Tenant builds (plan-versions.md increment 16): a beta tenant serves the

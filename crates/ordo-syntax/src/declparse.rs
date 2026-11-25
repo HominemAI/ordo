@@ -1386,16 +1386,21 @@ fn prev_checks(p: &Parser, fields: &[FieldDecl]) -> Result<(), ParseError> {
                 ));
             }
             let text = n.text();
+            // A split: several fields each `prev(name)`, one name alone,
+            // within the entity. A name a merge or a move also claims is
+            // refused: one old field becomes one set of new ones.
+            let split = |g: &FieldDecl| g.prev.len() == 1 && g.prev[0].entity.is_none();
             if let Some((_, other)) = claimed
                 .iter()
-                .find(|(t, g)| *t == text && g.name.name != f.name.name)
+                .find(|(t, g)| *t == text && g.name.name != f.name.name && !(split(g) && split(f)))
             {
                 return Err(p.err_class_at(
                     parser::PREV_DUPLICATE,
                     n.field.span,
                     format!(
-                        "both `{}` and `{}` claim `{text}`. A split needs the plan's mapping; \
-                         keep `prev({text})` on one of them",
+                        "both `{}` and `{}` claim `{text}`, and one of them merges or moves it. \
+                         A split is each new field with `prev({text})` alone; a merge is one \
+                         field with `prev(a, b)`",
                         other.name.name, f.name.name
                     ),
                 ));

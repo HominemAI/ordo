@@ -1001,7 +1001,9 @@ exclusively `since` or a parameter, so nondeterminism has one keyword.
   expressions are: projections, write RHS (per-row values in bulk writes and
   rules), aggregate arguments, sort keys.
 - Text: `lower(t)`, `length(t)`, `trim(t)` (strips leading/trailing Unicode
-  whitespace), and `+` for concatenation
+  whitespace), `before(t, sep)` and `after(t, sep)` (the part before or
+  after the first `sep`, null when `sep` is not in `t`; built 2026-11-25
+  for field splits, legal anywhere), and `+` for concatenation
   (`"lease ends " + end`; non-text operands render canonically); matching
   stays in operators
 
@@ -2053,6 +2055,35 @@ entity customers (key: cust, prev: clients) {
 - An entity rename keeps its fields in the step that renames it
   (`rename_entity_reshaped`). Rename in one version, change the fields in
   the next.
+- **Splits and merges** (built 2026-11-25, increment 15b). Two or more
+  fields each `prev(name)` split `name`; one field `prev(a, b)` merges two.
+  The rule for each value is the stored plan's, never guessed:
+
+  ```
+  entity person {
+    first: text prev(fullName)
+    last:  text prev(fullName)
+  }
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 \
+    --fill 'person.first=before(fullName, " ");person.last=after(fullName, " ")' \
+    --reverse 'person.fullName=first + " " + last'
+  ```
+
+  - `--fill` gives each new field's value, an expression over the old
+    fields and the fields both versions share.
+  - `--reverse` gives each old field's value from the new fields. It keeps
+    the old column current through the soak, so a revert loses nothing.
+    With no reverse the step is one way, and `--one-way` must accept it;
+    its soak then cannot be reverted.
+  - A row a required new field's mapping does not parse (null) is listed
+    by `space/id`, and the move waits for it.
+  - The plan previews the mapping on 3 rows. The values show where
+    `preview.values` is on: off in production, on elsewhere.
+  - It runs as a move (`ordo evolve --tenant`, or a rollout). `ordo apply`
+    and `ordo evolve --run` refuse it.
 - A clean `ordo apply` names each mark whose rename has landed in every
   environment. `ordo apply --remove-landed-prev` cuts those marks from the
   source. A mark has landed when this deployment is the last environment of
@@ -2065,7 +2096,7 @@ Checked at compile time (the parser):
 |---|---|
 | `prev_self` | `prev` naming the field's or entity's own name |
 | `prev_still_declared` | `prev(name)` while `name` is still a field of the entity |
-| `prev_duplicate` | two fields of one entity with the same `prev`, or one name twice |
+| `prev_duplicate` | a name a merge or a move claims beside another field, or one name twice in one `prev` (two fields each `prev(name)` alone are a split) |
 | `external_unsupported` | `prev` on an external's field or in its header |
 
 Checked at plan time, against the version serving now. With nothing
@@ -2075,7 +2106,10 @@ serving, nothing is checked and the program is created as declared:
 |---|---|
 | `prev_unresolved` | the old name is not in the version serving now |
 | `prev_type` | the old and new fields' types differ; no cast option exists yet |
-| `prev_mapping_required` | a merge `prev(first, last)` or a move `prev(orders.note)`; no mapping option exists yet |
+| `prev_mapping_required` | a move `prev(orders.note)`; no rule for which related row gives the value exists yet |
+| `map_fill_required` | a split's or a merge's new field with no `--fill` |
+| `one_way_unconfirmed` | an old field with no `--reverse`, and no `--one-way` |
+| `map_needs_stored_plan`, `map_needs_move` | a split or a merge through `ordo apply`, or `ordo evolve --run` |
 | `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
 | `rename_entity_sealed` | an entity rename of an entity with a sealed field: its ciphertext is bound to the entity's name |
 | `rename_entity_reshaped` | an entity rename whose new declaration has a column the old table does not hold |

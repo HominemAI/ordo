@@ -590,6 +590,12 @@ refused until the plan offers a mapping). An entity rename is built
 2026-11-24 (`plan-versions.md` increment 15). See
 `definition-language.md`, "`prev`".
 
+**Splits and merges built 2026-11-25** (`plan-versions.md` increment 15b),
+as the spelling below says: two fields each `prev(name)` is a split,
+`prev(first, last)` a merge. The mapping is the stored plan's: `--fill` for
+each new field and `--reverse` for each old one, or `--one-way`. The
+compile check `prev_duplicate` no longer refuses a split.
+
 **What it is.** A declaration that a renamed entity or field is the same
 thing as a name in the previous version, so the plan renders a rename and
 never a drop-and-add. Ruled 2026-10-01 (`forward-gaps` asks 6, 8, 18;

@@ -10,7 +10,8 @@
 //! - both versions' writes reach both columns through the dual writes
 //!   (increment 11a), and no database trigger is made;
 //! - the plan checks: `prev_unresolved`, `prev_type`,
-//!   `prev_mapping_required`, `prev_sealed`, `prev_default_required`, and
+//!   `prev_mapping_required` (a move), `map_fill_required` (a merge with no
+//!   mapping), `prev_sealed`, `prev_default_required`, and
 //!   `prev_stale` as a warning;
 //! - an entity rename renders as a rename with its reverse, keeps both
 //!   tables current under live writes (`$renames`), and lands when a
@@ -507,7 +508,8 @@ async fn the_plan_checks_refuse_with_the_fix_and_a_landed_mark_warns() {
         (
             "2.2.0",
             "  heading: text prev(title, body)\n  secret: text sealed\n",
-            "prev_mapping_required",
+            // A merge renders since 15b, and asks for its mapping.
+            "map_fill_required",
         ),
         (
             "2.3.0",

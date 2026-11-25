@@ -7546,6 +7546,7 @@ fn fn_domain(name: &str, position: usize) -> Option<&'static [ScalarTy]> {
         // describes.
         ("mod", _) => Some(INTEGRAL),
         ("lower" | "trim" | "length", 0) => Some(TEXTUAL),
+        ("before" | "after", _) => Some(TEXTUAL),
         ("hash", 0) => Some(HASHABLE),
         _ => None,
     }
@@ -7701,7 +7702,7 @@ fn fn_ty(name: &str, args: &[BExpr]) -> ScalarTy {
         "year" | "dow" | "length" | "hash" => ScalarTy::Int,
         "month" | "week" | "hour" => ScalarTy::Text,
         "day" => ScalarTy::Date,
-        "lower" | "trim" => ScalarTy::Text,
+        "lower" | "trim" | "before" | "after" => ScalarTy::Text,
         _ => args.first().map(|a| a.ty()).unwrap_or(ScalarTy::Int),
     }
 }

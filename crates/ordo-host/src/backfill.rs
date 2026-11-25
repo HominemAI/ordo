@@ -898,7 +898,7 @@ impl<'a> Backfill<'a> {
                 // A rename (B4) copies every row: its new column may hold
                 // the default it was added with. A new or newly required
                 // field fills only what is empty.
-                let only_empty = if self.fill.code == "B4" {
+                let only_empty = if matches!(self.fill.code, "B4" | "B12") {
                     String::new()
                 } else {
                     format!(" AND {} IS NULL", self.col())
@@ -1509,9 +1509,14 @@ impl<'a> Backfill<'a> {
         // No row left null. A sealed backfill leaves a null plaintext null.
         let plain = self.plain_col();
         let sealed_src = self.sealed_col();
-        let unfilled = match &plain {
-            Some(p) => format!("{} IS NULL AND {p} IS NOT NULL", self.col()),
-            None => format!("{} IS NULL", self.col()),
+        let unfilled = match (&plain, self.fill.code, &self.fill.sql) {
+            (Some(p), _, _) => format!("{} IS NULL AND {p} IS NOT NULL", self.col()),
+            // A split's or a merge's new field (B12) may be optional, and a
+            // row its mapping does not parse stays null: only a row the
+            // mapping gives a value to must hold one. A required one's
+            // unparsed rows are refused before the step (the pre-check).
+            (None, "B12", Some(sql)) => format!("{} IS NULL AND ({sql}) IS NOT NULL", self.col()),
+            (None, _, _) => format!("{} IS NULL", self.col()),
         };
         let nulls = if self.fill.copy_from().is_some() {
             Vec::new()
@@ -1529,7 +1534,7 @@ impl<'a> Backfill<'a> {
         }
         // A new column (B2) filled by an expression holds the mapping on
         // every row. A B5 field kept what its rows already held.
-        if let (FillMapping::Expr(_), Some(sql), "B2" | "B4") =
+        if let (FillMapping::Expr(_), Some(sql), "B2" | "B4" | "B12") =
             (&self.fill.mapping, &self.fill.sql, self.fill.code)
         {
             let off = self

@@ -472,6 +472,14 @@ pub fn options_text(c: &Choices) -> String {
     for (e, f) in &c.keep_plaintext {
         out.push_str(&format!("\nkeep-plaintext {e}.{f}"));
     }
+    // A split's or a merge's reverses and its one way acceptance (15b):
+    // present only when stated.
+    for ((e, f), mapping) in &c.reverses {
+        out.push_str(&format!("\nreverse {e}.{f}={mapping}"));
+    }
+    if c.one_way {
+        out.push_str("\none-way");
+    }
     out
 }
 
@@ -490,6 +498,15 @@ pub fn parse_options(text: &str) -> Result<Choices, EvolveRefusal> {
     c.stored = true;
     for line in lines.map(str::trim).filter(|l| !l.is_empty()) {
         let bad = || EvolveRefusal::Options(format!("a stored fill does not read back: `{line}`"));
+        if line == "one-way" {
+            c.one_way = true;
+            continue;
+        }
+        if let Some(spec) = line.strip_prefix("reverse ") {
+            c.parse_reverses(spec)
+                .map_err(|e| EvolveRefusal::Options(format!("--reverse {e}")))?;
+            continue;
+        }
         if let Some(target) = line.strip_prefix("keep-plaintext ") {
             c.parse_keep_plaintext(target)
                 .map_err(|e| EvolveRefusal::Options(format!("--keep-plaintext {e}")))?;
@@ -521,6 +538,24 @@ pub fn typed_options(
         .map_err(|e| EvolveRefusal::Options(format!("--fill {e}")))?;
     c.parse_keep_plaintext(keep_plaintext)
         .map_err(|e| EvolveRefusal::Options(format!("--keep-plaintext {e}")))?;
+    Ok(c)
+}
+
+/// [`typed_options`], with a split's or a merge's `--reverse` (`;`
+/// separated, `<entity>.<old field>=<expression>`) and `--one-way`
+/// (increment 15b).
+pub fn typed_options_with(
+    places: &str,
+    fill: &str,
+    images: &str,
+    keep_plaintext: &str,
+    reverse: &str,
+    one_way: bool,
+) -> Result<Choices, EvolveRefusal> {
+    let mut c = typed_options(places, fill, images, keep_plaintext)?;
+    c.parse_reverses(reverse)
+        .map_err(|e| EvolveRefusal::Options(format!("--reverse {e}")))?;
+    c.one_way = one_way;
     Ok(c)
 }
 
@@ -676,17 +711,50 @@ pub async fn render_stored(
     // A fill for a field the step neither adds required nor makes required
     // is refused, as a stray `--places` is.
     for (entity, field) in options.fills.keys() {
-        let named = changes.iter().any(|c| {
-            matches!(c, Change::AddRequiredField { entity: e, field: f }
-                | Change::RequireField { entity: e, field: f } if e == entity && f == field)
+        let named = changes.iter().any(|c| match c {
+            Change::AddRequiredField {
+                entity: e,
+                field: f,
+            }
+            | Change::RequireField {
+                entity: e,
+                field: f,
+            } => e == entity && f == field,
+            Change::MapFields { entity: e, to, .. } => e == entity && to.contains(field),
+            _ => false,
         });
         if !named {
             return Err(EvolveRefusal::Options(format!(
-                "`{entity}.{field}` is not a field the step from `{}` to `{}` makes required; \
-                 drop it from `--fill`",
+                "`{entity}.{field}` is not a field the step from `{}` to `{}` makes required, \
+                 splits or merges into; drop it from `--fill`",
                 a.version, b.version
             )));
         }
+    }
+    // A reverse for a field the step does not split or merge is refused
+    // the same way (15b).
+    for (entity, field) in options.reverses.keys() {
+        let named = changes.iter().any(|c| {
+            matches!(c, Change::MapFields { entity: e, from, .. }
+                if e == entity && from.iter().any(|f| &f.name == field))
+        });
+        if !named {
+            return Err(EvolveRefusal::Options(format!(
+                "`{entity}.{field}` is not a field the step from `{}` to `{}` splits or merges; \
+                 drop it from `--reverse`",
+                a.version, b.version
+            )));
+        }
+    }
+    if options.one_way
+        && !changes
+            .iter()
+            .any(|c| matches!(c, Change::MapFields { .. }))
+    {
+        return Err(EvolveRefusal::Options(format!(
+            "the step from `{}` to `{}` splits and merges nothing; drop `--one-way`",
+            a.version, b.version
+        )));
     }
 
     // Every change, assessed by the rulings alone: probes are the run's,
@@ -757,6 +825,7 @@ pub async fn render_stored(
     }
 
     let mut errors = mapping_errors(pool, &a.ddl, &triaged.backfills).await?;
+    errors.extend(reverse_errors(pool, &a.ddl, &triaged.backfills, &triaged.maps).await?);
     errors.extend(sealed_under_readers(&x, &y, &triaged.backfills));
     let mut functions = Vec::new();
     for bf in &triaged.backfills {
@@ -885,6 +954,10 @@ pub async fn render_stored(
         if !triaged.held.is_empty() {
             receipt["held"] = Value::Array(triaged.held.iter().map(sa::Held::to_json).collect());
         }
+        // A split or a merge (15b): its reverses, and whether it is one way.
+        if !triaged.maps.is_empty() {
+            receipt["maps"] = Value::Array(triaged.maps.iter().map(sa::MapStep::to_json).collect());
+        }
     }
     // An entity rename (`(prev: old)`): the step keeps both tables current
     // and lands the rename at the soak's close. Present only when the step
@@ -1004,6 +1077,73 @@ async fn mapping_errors(
             fix: format!(
                 "state a mapping over fields the version before declares, of the field's \
                  type: `--fill {entity}.{field}=<expression>`"
+            ),
+        })
+        .collect())
+}
+
+/// Each split's or merge's reverse (15b), typed by the database against an
+/// empty database of X with the new columns added: a reverse whose value
+/// the old column cannot take is a plan error.
+async fn reverse_errors(
+    pool: &Pool,
+    ddl: &str,
+    backfills: &[sa::BackfillStep],
+    maps: &[sa::MapStep],
+) -> Result<Vec<PlanError>, EvolveRefusal> {
+    // `(entity, old column, the new columns and their types, reverse SQL)`.
+    type Check = (String, String, Vec<(String, String)>, String);
+    let mut checks: Vec<Check> = Vec::new();
+    for m in maps {
+        let added: Vec<(String, String)> = backfills
+            .iter()
+            .filter(|b| b.code == "B12" && b.entity == m.entity)
+            .map(|b| (b.column.clone(), b.column_ty.clone()))
+            .collect();
+        for r in &m.reverse {
+            checks.push((
+                m.entity.clone(),
+                r.column.clone(),
+                added.clone(),
+                r.sql.clone(),
+            ));
+        }
+    }
+    if checks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found = in_shadow(pool, ddl, |ns| async move {
+        let mut errs = Vec::new();
+        for (entity, column, added, sql) in &checks {
+            let t = format!("{ns}.{}", ordo_schema::ddl::q(entity));
+            let mut probe = String::new();
+            for (c, ty) in added {
+                probe.push_str(&format!(
+                    "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {} {ty}; ",
+                    ordo_schema::ddl::q(c)
+                ));
+            }
+            probe.push_str(&format!(
+                "EXPLAIN UPDATE {t} SET {} = ({sql})",
+                ordo_schema::ddl::q(column)
+            ));
+            if let Err(e) = pool.rows(&probe).await {
+                errs.push((entity.clone(), column.clone(), e.to_string()));
+            }
+        }
+        Ok(errs)
+    })
+    .await??;
+    Ok(found
+        .into_iter()
+        .map(|(entity, field, why)| PlanError {
+            code: "B12".into(),
+            change: format!("the reverse of `{entity}.{field}`"),
+            class: "mapping_invalid".into(),
+            why: format!("the database refuses the reverse over the new version's fields: {why}"),
+            fix: format!(
+                "state a reverse over the new version's fields, of the old field's type: \
+                 `--reverse {entity}.{field}=<expression>`"
             ),
         })
         .collect())
@@ -1150,6 +1290,19 @@ fn fix_for(c: &Change, class: &str) -> String {
             format!("keep the name `{from}`: an entity with `acl` is not renamed yet")
         }
         (_, "plan_refused") => "the change is refused by ruling; declare it another way".into(),
+        // A split or a merge (15b): the refusal names the option to give.
+        (
+            Change::MapFields {
+                entity, from, to, ..
+            },
+            _,
+        ) => format!(
+            "state each new field's mapping, `--fill {entity}.{}=<expression>`, and each old \
+             field's reverse, `--reverse {entity}.{}=<expression>`, or accept a one way change \
+             with `--one-way`",
+            to.first().map(String::as_str).unwrap_or_default(),
+            from.first().map(|f| f.name.as_str()).unwrap_or_default()
+        ),
         _ => match c.class() {
             Class::B => "the menu does not offer this change yet (increments 10b, 11a); \
                          split it into an additive version first, or wait for the backfill"
@@ -1281,6 +1434,39 @@ fn reverse_of(c: &Change, x: &Program, y: &Program) -> (Vec<String>, Option<Stri
                 Some("the rename read backwards: the old column was kept, and gets back what was written to the new one".into()),
             )
         }
+        // A split or a merge read backwards (15b): the old columns were kept
+        // and kept current by the reverses through the soak; the new ones
+        // go. With no reverse, the step is one way.
+        Change::MapFields { entity, from, to } => {
+            let t = q(entity);
+            let mut out = Vec::new();
+            for f in from {
+                out.push(format!(
+                    "ALTER TABLE {t} ALTER COLUMN {} DROP DEFAULT;",
+                    q(&f.column())
+                ));
+                if let Some(d) = ordo_schema::ddl::column_default(f).ok().flatten() {
+                    out.push(format!(
+                        "ALTER TABLE {t} ALTER COLUMN {} SET DEFAULT {d};",
+                        q(&f.column())
+                    ));
+                }
+            }
+            for n in to {
+                let col = y
+                    .schema
+                    .native(entity)
+                    .and_then(|e| e.field(n))
+                    .map(|f| f.column())
+                    .unwrap_or_else(|| n.clone());
+                out.push(format!("ALTER TABLE {t} DROP COLUMN {};", q(&col)));
+            }
+            let _ = x;
+            (
+                out,
+                Some("the old columns were kept and, with a reverse for each, kept current through the soak; the new columns go. With no reverse it is one way: accept this one way change; revert requires this or manual intervention".into()),
+            )
+        }
         // The entity rename read backwards: the old table was kept and
         // written by both versions, so the rename leaves `$renames`, the
         // references into the old table are checked at once again, and the
@@ -1338,6 +1524,15 @@ fn reader_notices(x: &Program, y: &Program, changes: &[Change], at: u64) -> Vec<
             | Change::UnsealField { entity, field } => (entity, Some(field.clone())),
             Change::DropEntity { entity } => (entity, None),
             Change::RenameEntity { from, .. } => (from, None),
+            Change::MapFields { entity, from, .. } => (
+                entity,
+                Some(
+                    from.iter()
+                        .map(|f| f.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ),
             _ => continue,
         };
         for r in x.schema.readers.iter().chain(y.schema.readers.iter()) {
@@ -2134,6 +2329,22 @@ pub async fn run_step_with(
         }
         e
     };
+    // A split or a merge (15b) keeps both shapes current only in a move,
+    // whose overlays and soak it needs.
+    let receipt_maps: Value = serde_json::from_str(&plan.receipt).unwrap_or_default();
+    if !sa::MapStep::all_of(&receipt_maps).is_empty() {
+        return Err(with_label(EvolveRefusal::Run {
+            database: String::new(),
+            from: String::new(),
+            to: String::new(),
+            class: "map_needs_move",
+            why: "the step splits or merges a field, which keeps both shapes current only in a \
+                  move: run it per tenant with `ordo evolve --tenant <id> --to <version>`, or \
+                  roll it out with `ordo rollout`"
+                .into(),
+            transient: false,
+        }));
+    }
     // On the deployment's own database, a tenant there in a move through
     // this step holds its constraints until the soaks close together
     // (increment 11b part 2): the step is not run over it.
@@ -2254,7 +2465,9 @@ pub async fn run_step_with(
         // index (increment 13): every write seals what it wrote (`$seals`),
         // and verify opens every row. A fill has no overlay outside a move,
         // and verify checks the chunks too.
-        let live = bf.code == "B4" || bf.sealing_from.is_some() || bf.indexing_from.is_some();
+        let live = matches!(bf.code, "B4" | "B12")
+            || bf.sealing_from.is_some()
+            || bf.indexing_from.is_some();
         let verified = if live {
             Box::pin(worker.verify_live_and_close()).await
         } else {
@@ -2886,6 +3099,11 @@ pub fn specs() -> Vec<ordo_api::OpSpec> {
                 // `entity.field`, comma-separated: seals that keep the
                 // plaintext column, orphaned (`seal.keep_plaintext`, D9).
                 text("keepPlaintext", 1024, false),
+                // `entity.field=<expression>`, `;`-separated: a split's or a
+                // merge's reverse for each old field (15b).
+                text("reverse", 4096, false),
+                // Accept a split or a merge with no reverse: one way.
+                flag("oneWay"),
                 // The digest the step rendered to where it was rehearsed.
                 text("expectDigest", 128, false),
                 // Run the stored plan on the deployment's own database.
@@ -2970,11 +3188,17 @@ pub async fn execute(
     match name {
         EVOLVE => {
             const WHAT: &str = "the plan was not stored";
-            let options = typed_options(
+            let options = typed_options_with(
                 text("places").unwrap_or_default(),
                 text("fill").unwrap_or_default(),
                 text("auditImages").unwrap_or_default(),
                 text("keepPlaintext").unwrap_or_default(),
+                text("reverse").unwrap_or_default(),
+                bound
+                    .0
+                    .get("oneWay")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             )
             .map_err(|e| e.to_exec_error(WHAT))?;
             let run = bound
@@ -2997,7 +3221,9 @@ pub async fn execute(
                     .to_exec_error(WHAT)
                 })?),
             };
-            let done = evolve_approved(
+            // Boxed, as each large step below is: the door's task runs on a
+            // worker's own stack.
+            let done = Box::pin(evolve_approved(
                 pool,
                 text("from").unwrap_or_default(),
                 text("to").unwrap_or_default(),
@@ -3006,7 +3232,7 @@ pub async fn execute(
                 approved,
                 caller,
                 crate::runtime::now_secs(),
-            )
+            ))
             .await
             .map_err(|e| e.to_exec_error(WHAT))?;
             if let Some(removal) = done.sign_in.as_ref().filter(|r| r.people > 0) {
@@ -3039,9 +3265,13 @@ pub async fn execute(
             row["ran"] = Value::Null;
             // The pre-checks on every database (27w). The plan is stored
             // either way: it is the same everywhere, and the data is not.
-            let checks = crate::precheck::precheck(pool, ops.pools.as_ref(), &done.plan)
-                .await
-                .map_err(|e| e.to_exec_error("the plan was stored and not checked"))?;
+            let checks = Box::pin(crate::precheck::precheck(
+                pool,
+                ops.pools.as_ref(),
+                &done.plan,
+            ))
+            .await
+            .map_err(|e| e.to_exec_error("the plan was stored and not checked"))?;
             row["prechecks"] = checks.to_json();
             if run && !checks.issues.is_empty() {
                 return Err(EvolveRefusal::PreChecks {
@@ -3075,9 +3305,11 @@ pub async fn execute(
                         ctx.fence = Some((ops.home.clone(), epoch + 1));
                     }
                 }
-                let ran = run_step_with(pool, pool, "default", &done.plan, caller, &ctx)
-                    .await
-                    .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
+                let ran = Box::pin(run_step_with(
+                    pool, pool, "default", &done.plan, caller, &ctx,
+                ))
+                .await
+                .map_err(|e| e.to_exec_error("the plan was stored and not run"))?;
                 let own_moved = if sealing && !matches!(ran, StepRun::Backfilling { .. }) {
                     let at = crate::runtime::now_secs();
                     Versions::on(pool)

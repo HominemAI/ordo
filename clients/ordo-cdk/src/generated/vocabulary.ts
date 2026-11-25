@@ -126,6 +126,8 @@ export const FUNCTIONS = [
   { name: 'lower', min: 1, max: 1 },
   { name: 'length', min: 1, max: 1 },
   { name: 'trim', min: 1, max: 1 },
+  { name: 'before', min: 2, max: 2 },
+  { name: 'after', min: 2, max: 2 },
 ] as const;
 
 /**

@@ -337,6 +337,18 @@ CREATE TABLE IF NOT EXISTS \"$fills\" ( \
   PRIMARY KEY (\"entity\", \"field\") \
 )";
 
+/// The columns a split or a merge (increment 15b) adds to `$fills`, on a
+/// table made before them: `required`, whether a write must leave the
+/// column set (null reads as yes), and `absent`, whether only a version
+/// that does not declare the field sets it (null reads as no: a B5 fill is
+/// set by the version that declares the field optional).
+///
+/// A split or merge records each new field (set by the version before,
+/// which does not declare it) and each old field it keeps current (set by
+/// the new version, which does not declare it, by the reverse).
+pub const FILLS_MAP_DDL: &str = "ALTER TABLE \"$fills\" ADD COLUMN IF NOT EXISTS \"required\" \
+     boolean NULL, ADD COLUMN IF NOT EXISTS \"absent\" boolean NULL";
+
 /// One row of `$fills`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fill {
@@ -346,6 +358,10 @@ pub struct Fill {
     pub sql: String,
     pub from: String,
     pub to: String,
+    /// A write must leave the column set ([`FILLS_MAP_DDL`]).
+    pub required: bool,
+    /// Only a version that does not declare the field sets it.
+    pub absent: bool,
 }
 
 /// Read `$fills`. Run after [`renames_in`], whose lock fences this table
@@ -353,8 +369,9 @@ pub struct Fill {
 pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
     let rows = tx
         .rows(
-            "SELECT \"entity\", \"field\", \"column\", \"sql\", \"from\", \"to\" FROM \"$fills\" \
-             ORDER BY \"entity\", \"field\"",
+            "SELECT f.\"entity\", f.\"field\", f.\"column\", f.\"sql\", f.\"from\", f.\"to\", \
+             to_jsonb(f) ->> 'required', to_jsonb(f) ->> 'absent' FROM \"$fills\" f \
+             ORDER BY f.\"entity\", f.\"field\"",
         )
         .await?;
     Ok(rows
@@ -368,6 +385,8 @@ pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
                 sql: it.next()??,
                 from: it.next()??,
                 to: it.next()??,
+                required: it.next().flatten().is_none_or(|v| v != "false"),
+                absent: it.next().flatten().is_some_and(|v| v == "true"),
             })
         })
         .collect())
@@ -1252,25 +1271,26 @@ impl MoveOverlay {
             let Some(e) = schema.native(&f.entity) else {
                 continue;
             };
-            if e.field(&f.field).is_some_and(|x| !x.optional) {
+            let declared = e.field(&f.field);
+            if declared.is_some_and(|x| !x.optional) || (f.absent && declared.is_some()) {
                 continue;
             }
             out.serving.clone_from(&f.from);
             out.other.clone_from(&f.to);
-            let guard = Guard {
+            let guard = f.required.then(|| Guard {
                 holds: format!("{} IS NOT NULL", quote(&f.column)),
                 field: f.field.clone(),
                 rule: "is required".into(),
-            };
+            });
             match out.entities.iter_mut().find(|x| x.entity == f.entity) {
                 Some(x) => {
                     x.sets.push((f.column.clone(), f.sql.clone()));
-                    x.guards.push(guard);
+                    x.guards.extend(guard);
                 }
                 None => out.entities.push(OverlayEntity {
                     entity: f.entity.clone(),
                     sets: vec![(f.column.clone(), f.sql.clone())],
-                    guards: vec![guard],
+                    guards: guard.into_iter().collect(),
                 }),
             }
         }

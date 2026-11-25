@@ -1627,6 +1627,40 @@ pub async fn execute(
                 "changed": changed, "skipStaging": skip.skip_staging,
             })
         }
+        SET_PROMOTION_SETTING
+            if crate::environments::is_preview_setting(
+                text(bound, "setting").unwrap_or_default(),
+            ) =>
+        {
+            let value = text(bound, "value").unwrap_or_default();
+            let reason = text(bound, "reason").unwrap_or_default();
+            let envs = crate::environments::Environments::on(&ops.pool);
+            let (on, changed) = envs
+                .set_preview_values(value, caller, reason, crate::runtime::now_secs())
+                .await
+                .map_err(|e| e.to_exec_error("the preview setting was not changed"))?;
+            let shown = if on { "on" } else { "off" };
+            if changed {
+                ops.record(
+                    caller,
+                    SET_PROMOTION_SETTING,
+                    "preview-setting",
+                    format!(
+                        "setting={} value={shown} by={caller} reason={}",
+                        crate::environments::PREVIEW_VALUES,
+                        reason.trim()
+                    ),
+                );
+            }
+            let skip = envs
+                .promotion_settings()
+                .await
+                .map_err(|e| e.to_exec_error("the settings could not be read"))?;
+            json!({
+                "setting": crate::environments::PREVIEW_VALUES, "value": shown,
+                "changed": changed, "skipStaging": skip.skip_staging,
+            })
+        }
         SET_PROMOTION_SETTING => {
             let setting = text(bound, "setting").unwrap_or_default();
             let value = text(bound, "value").unwrap_or_default();

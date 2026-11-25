@@ -996,6 +996,12 @@ pub async fn export_space(
         );
     }
 
+    // **What earlier versions left behind** (`plan-versions.md` §2.7). An
+    // orphaned column or table still holds what the person wrote, so the
+    // bundle carries it, beside the declared entities and never inside them.
+    let orphans = write_orphans(pool, req, sink).await?;
+    members.extend(orphans.iter().map(|o| o.member.clone()));
+
     sink.open("commandlog.jsonl")?;
     let log_groups = write_commandlog(pool, req.space, sink).await?;
     sink.close()?;
@@ -1031,6 +1037,7 @@ pub async fn export_space(
         &digests,
         &objects,
         profile_counts,
+        &orphans,
     );
     let manifest_bytes =
         serde_json::to_string_pretty(&manifest).expect("a Value always serialises") + "\n";
@@ -1046,6 +1053,102 @@ pub async fn export_space(
         members,
         manifest_sha256,
     })
+}
+
+/// One orphan's member in a bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedOrphan {
+    /// `entity.field`, or `entity`.
+    pub name: String,
+    pub member: String,
+    pub rows: u64,
+    pub sealed: bool,
+}
+
+/// Write every orphan this database records (`$orphans`) that the schema
+/// does not declare again: `orphans/<entity>.<field>.jsonl`, each row's `id`
+/// and the orphan's columns, for the rows holding a value; or
+/// `orphans/<entity>.jsonl`, the space's whole rows of an orphaned table.
+async fn write_orphans(
+    pool: &Pool,
+    req: &ExportRequest<'_>,
+    sink: &mut dyn BundleSink,
+) -> Result<Vec<ExportedOrphan>, ExportError> {
+    let q = ordo_schema::ddl::q;
+    let space_col = q(ordo_schema::SPACE_COLUMN);
+    let space = sql_lit(&req.space.0);
+    let mut out = Vec::new();
+    for o in crate::orphans::live(pool).await? {
+        let declared = match req.schema.native(&o.entity) {
+            Some(e) => o.is_entity() || e.field(&o.field).is_some(),
+            None => false,
+        };
+        if declared {
+            continue;
+        }
+        let present = pool
+            .rows(&format!(
+                "SELECT column_name::text FROM information_schema.columns \
+                 WHERE table_schema = {} AND table_name = {}",
+                pool.schema_lit(),
+                sql_lit(&o.entity)
+            ))
+            .await?;
+        let present: Vec<String> = present
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .collect();
+        if !present.iter().any(|c| c == ordo_schema::SPACE_COLUMN) {
+            continue;
+        }
+        let sql = if o.is_entity() {
+            format!(
+                "SELECT (to_jsonb(t) - {})::text FROM {} t WHERE {space_col} = {space} \
+                 ORDER BY \"id\" COLLATE \"C\"",
+                sql_lit(ordo_schema::SPACE_COLUMN),
+                q(&o.entity)
+            )
+        } else {
+            let cols: Vec<&String> = o.columns.iter().filter(|c| present.contains(c)).collect();
+            if cols.is_empty() {
+                continue;
+            }
+            let pairs = cols
+                .iter()
+                .map(|c| format!("{}, {}", sql_lit(c), q(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let any = cols
+                .iter()
+                .map(|c| format!("{} IS NOT NULL", q(c)))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            format!(
+                "SELECT jsonb_build_object('id', \"id\", {pairs})::text FROM {} \
+                 WHERE {space_col} = {space} AND ({any}) ORDER BY \"id\" COLLATE \"C\"",
+                q(&o.entity)
+            )
+        };
+        let rows = pool.rows(&sql).await?;
+        let member = format!("orphans/{}.jsonl", o.name());
+        sink.open(&member)?;
+        let mut body = String::new();
+        for r in &rows {
+            if let Some(Some(line)) = r.first() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        sink.write(&body)?;
+        sink.close()?;
+        out.push(ExportedOrphan {
+            name: o.name(),
+            member,
+            rows: rows.len() as u64,
+            sealed: o.sealed,
+        });
+    }
+    Ok(out)
 }
 
 /// Build the artifact's shadow and refuse if the live schema is not it.
@@ -1577,6 +1680,7 @@ fn manifest_json(
     digests: &BTreeMap<String, (u64, String)>,
     objects: &[ExportedObject],
     profile: [u64; 4],
+    orphans: &[ExportedOrphan],
 ) -> serde_json::Value {
     let entities: Vec<serde_json::Value> = counts
         .iter()
@@ -1613,6 +1717,15 @@ fn manifest_json(
         "ordering": "rows by `id` under the C collation; object keys sorted; no clock \
                      anywhere, so two exports of one unchanged space are byte-identical",
         "entities": entities,
+        "orphans": orphans.iter().map(|o| serde_json::json!({
+            "name": o.name,
+            "file": o.member,
+            "rows": o.rows,
+            "sealed": o.sealed,
+        })).collect::<Vec<_>>(),
+        "orphansNote": "columns and tables a version stopped declaring, kept with what was \
+                        written to them (plan-versions.md §2.7). One JSON object per row, \
+                        with its `id`; values as stored, so a sealed one is ciphertext",
         "load": {
             "order": order,
             "cyclic": cyclic,

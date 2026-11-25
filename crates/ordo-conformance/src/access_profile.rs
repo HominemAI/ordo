@@ -337,6 +337,7 @@ impl Fixture {
             actor: Actor::User(actor.to_string()),
             commands: vec![command],
             owner_administration: false,
+            backfill: None,
             restored_unverified: false,
             restore: None,
         })

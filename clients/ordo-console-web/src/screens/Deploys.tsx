@@ -54,8 +54,8 @@ function wouldWords(w: Would, p: Preview): string {
       return `The database is behind by safe changes only. Applying makes them for you (${p.safeChangesSetting} is on), then serves this version.`;
     case 'held':
       return p.safeChanges
-        ? 'The database is behind by changes that need your say. Applying can store this version but not make it serve: run ordo migrate --apply first.'
-        : `The database is behind. ${p.safeChangesSetting} is off, so applying can store this version but not make it serve. Set ${p.safeChangesSetting}=on, or run ordo migrate --apply first.`;
+        ? 'The database is behind by changes that need your say. Applying can store this version but not make it serve: run ordo evolve --run first.'
+        : `The database is behind. ${p.safeChangesSetting} is off, so applying can store this version but not make it serve. Set ${p.safeChangesSetting}=on, or run ordo evolve --run first.`;
     case 'refused':
       return `The deployment would refuse it: ${w.message}`;
   }
@@ -200,7 +200,7 @@ export function Deploys(props: { onSignedOut: () => void }) {
         await atDeployment(() => unrevoke(v.version, reason.trim()));
         setDone(`Lifted the revoke on ${short(v.version)}.`);
       } else {
-        const r = await atDeployment(() => revoke(v.version, reason.trim(), v.serving ? moveTo : null));
+        const r = await atDeployment(() => revoke(v.version, reason.trim(), moveTo || null));
         setDone(
           r.moved
             ? `Revoked ${short(v.version)}. The deployment moved to ${short(r.moved)}.`
@@ -354,7 +354,8 @@ export function Deploys(props: { onSignedOut: () => void }) {
                       {r.ordinal ? `#${r.ordinal} ` : ''}
                       {short(r.version)}
                     </span>
-                    : {r.tenantCount} tenant(s) on it. Revoked: {r.reason}
+                    : {r.tenantCount} tenant(s) on it. Revoked: {r.reason}. They move to{' '}
+                    {r.moveTo ? short(r.moveTo) : 'the active version'}.
                     {r.tenants.length > 0 && (
                       <span className="muted small"> ({r.tenants.map((t) => t.name || t.space).join(', ')})</span>
                     )}
@@ -441,6 +442,33 @@ export function Deploys(props: { onSignedOut: () => void }) {
                                 </option>
                               ))}
                           </select>
+                        </>
+                      )}
+                      {!marking.lift && !v.serving && (
+                        <>
+                          {/* Optional: where its tenants go when they move off it, in their
+                              window or on demand (plan-versions.md 1.11). Never at once. */}
+                          <label htmlFor={`move-to-${v.version}`}>Its tenants move to</label>
+                          <select
+                            id={`move-to-${v.version}`}
+                            name="moveTo"
+                            value={moveTo}
+                            aria-describedby={`move-to-help-${v.version}`}
+                            onChange={(e) => setMoveTo(e.target.value)}
+                          >
+                            <option value="">The active version</option>
+                            {past.stored
+                              .filter((o) => o.version !== v.version && !o.revoked && !o.serving)
+                              .map((o) => (
+                                <option key={o.version} value={o.version}>
+                                  {[named(o), short(o.version)].filter(Boolean).join(' ')}
+                                </option>
+                              ))}
+                          </select>
+                          <p className="muted small" id={`move-to-help-${v.version}`}>
+                            They move in their maintenance window, or when moved now from Tenants. A tenant's
+                            own target, set there, comes first.
+                          </p>
                         </>
                       )}
                       <label htmlFor={`reason-${v.version}`}>Reason</label>

@@ -444,20 +444,21 @@ schema changed — applied through the production class-A path (plan-dev-loop.md
 A2 — new optional field `notes.priority`
 ```
 
-Against a deployed database, the same change is three commands. `plan` asks
-the running deployment through its door. `migrate` and the first `apply` open
-the deployment's database (the one `ORDO_PG_DB` points at) and name `--direct`;
-once you can sign in, `ordo apply --host` does the last step through the door:
+Against a deployed database, the same change is two commands through the
+door. `plan` asks the running deployment what would move. `apply` makes a
+safe additive change itself, then activates:
 
 ```
-ordo plan ./notes --host http://127.0.0.1:4000   # read-only: what would move, classified
-ordo migrate ./notes --apply --direct --as you
-ordo apply ./notes --direct --as you             # store and activate the new artifact
+ordo plan ./notes --host http://127.0.0.1:4000    # read-only: what would move, classified
+ordo apply ./notes --host http://127.0.0.1:4000   # make the safe changes, store and activate
 ```
 
-`plan` lists `A2  new optional field notes.priority` as class A, `migrate`
+`plan` lists `A2  new optional field notes.priority` as class A, `apply`
 runs `ALTER TABLE "notes" ADD COLUMN "priority" text` in one transaction, and
-`apply` prints `activated ... (was <old hash>)`. Tenant databases follow by
+prints `activated ... (was <old hash>)`. A change that needs your say (a new
+`unique`, a required field) is stored and not activated: `ordo evolve --from
+<serving> --to <new> --run --host ...` runs it, after its pre-checks
+(`docs/howto-operating.md`, "Changing the Schema"). Tenant databases follow by
 themselves (the catch-up worker, `docs/deploying.md` §1).
 
 An additive change (a new entity, a new optional or constant-defaulted

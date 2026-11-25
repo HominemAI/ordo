@@ -422,6 +422,9 @@ pub struct Spaces {
     /// fingerprint on this node (§1.4 step 6). Asked once per pair per
     /// process, like continuity.
     fits: Mutex<HashSet<(String, String)>>,
+    /// `(space, version, pin epoch)` whose kept blind indexes were asked
+    /// about on this node ([`Spaces::kept_indexes`]).
+    kept: Mutex<HashSet<(String, String, i64)>>,
     /// Told the name of an evicted version a signed-in request woke
     /// ([`Spaces::wake`]); the node's pin stream loads it.
     waker: std::sync::OnceLock<Arc<dyn Fn(String) + Send + Sync>>,
@@ -456,6 +459,7 @@ impl Spaces {
             paused: Mutex::new(BTreeMap::new()),
             pause_answers: Mutex::new(crate::pause::PauseAnswers::default()),
             fits: Mutex::new(HashSet::new()),
+            kept: Mutex::new(HashSet::new()),
             waker: std::sync::OnceLock::new(),
         })
     }
@@ -657,6 +661,15 @@ impl Spaces {
             Ok(p) => p,
             Err(e) => return Err(self.note(e)),
         };
+        // A blind index B10 kept for the version this tenant is pinned to
+        // is traded in before anything is read or written under it.
+        if let Err(reason) = self.kept_indexes(space, &pool, &live, epoch).await {
+            return Err(self.note(SpaceRefusal::Unfit {
+                space: space.to_string(),
+                version: live.version.clone(),
+                reason,
+            }));
+        }
         // Every write on this handle checks the pin fence (§1.3).
         let pool = match epoch {
             Some(e) => pool.with_pin_epoch(e),
@@ -1144,6 +1157,96 @@ impl Spaces {
             ));
         }
         self.fits.lock().expect("fit cache").insert(key);
+        Ok(())
+    }
+
+    /// **A tenant's blind indexes follow its pin across B10** (increment
+    /// 13, PR 80's gap). B10 keeps the index it replaced as
+    /// `<field>$bidx$prev`, and every write keeps both current. A tenant
+    /// with a database of its own moves back across the step by `ordo
+    /// versions pin`, a move off a revoked version, a tenant build, a
+    /// restore, or a catch-up, and forward again by a rollout. Whatever
+    /// moved it, the node trades the kept index in here before it serves
+    /// the tenant on the version that declares its normalization
+    /// ([`crate::schema_apply::restore_kept_indexes`]), so `==` finds every
+    /// row. Asked once per `(space, version, epoch)`: every pin move raises
+    /// the epoch.
+    ///
+    /// The deployment's own database is traded by the activation
+    /// (`crate::apply_op`), which every space there follows. A database
+    /// shared with a tenant pinned to another version cannot hold both
+    /// indexes under one name, so this tenant is refused, naming the fix.
+    async fn kept_indexes(
+        &self,
+        space: &str,
+        pool: &Pool,
+        live: &Loaded,
+        epoch: Option<i64>,
+    ) -> Result<(), String> {
+        let key = (space.to_string(), live.version.clone(), epoch.unwrap_or(-1));
+        if self.kept.lock().expect("kept cache").contains(&key) {
+            return Ok(());
+        }
+        let control = self.witness.pool();
+        if !crate::dual_writes::same_database(pool, control) {
+            let schema = &live.fixture.schema;
+            let due = crate::schema_apply::kept_indexes_due(pool, schema)
+                .await
+                .map_err(|e| format!("its kept blind indexes could not be read: {e}"))?;
+            if !due.is_empty() {
+                self.alone_on_its_database(space, pool, &live.version)
+                    .await?;
+                let fence = epoch.map(|e| (space, e));
+                let traded =
+                    crate::schema_apply::restore_kept_indexes(pool, schema, None, fence).await?;
+                if !traded.is_empty() {
+                    println!(
+                        "space {space}: the blind index kept for version {} traded in on its \
+                         database ({})",
+                        live.version,
+                        traded.join(", ")
+                    );
+                }
+            }
+        }
+        self.kept.lock().expect("kept cache").insert(key);
+        Ok(())
+    }
+
+    /// Refused when another tenant on `space`'s database is pinned to a
+    /// version other than `version`.
+    async fn alone_on_its_database(
+        &self,
+        space: &str,
+        pool: &Pool,
+        version: &str,
+    ) -> Result<(), String> {
+        let control = self.witness.pool();
+        let all = match ordo_exec::spacedb::all(control).await {
+            Ok(a) => a,
+            Err(e) if e.is_missing_table() => return Ok(()),
+            Err(e) => return Err(format!("the tenant databases could not be read: {e}")),
+        };
+        let c = pool.config();
+        let v = crate::versions::Versions::on(control);
+        for (other, a) in all {
+            if other.0 == space || a.host != c.host || a.port != c.port || a.db != c.db {
+                continue;
+            }
+            let on = v
+                .pin_of(&other.0)
+                .await
+                .map_err(|e| format!("the pin of `{}` could not be read: {e}", other.0))?
+                .and_then(|p| p.version);
+            if let Some(on) = on.filter(|on| on != version) {
+                return Err(format!(
+                    "its database keeps a blind index for version `{version}`, and tenant `{}` \
+                     on the same database is pinned to `{on}`, which reads the other one. Pin \
+                     both to one version (`ordo versions pin <tenant> <version>`)",
+                    other.0
+                ));
+            }
+        }
         Ok(())
     }
 

@@ -494,9 +494,28 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   activation of a version that declares the kept normalization trades it
   back in before its gate (`apply_op::restore_kept_indexes`), so `==`
   there finds every row; forward again trades back. Test:
-  `a_rollback_across_a_new_normalize_finds_every_row`. Only the
-  deployment's database is traded at an activation; a tenant's own
-  database is not yet (11b).
+  `a_rollback_across_a_new_normalize_finds_every_row`.
+- **A tenant's own database follows its pin across B10** (built
+  2026-11-24, branch `fix-b10-tenant-rollback`). The kept row also records
+  `live`, the normalization of the field's own index, so a trade needs no
+  version named. A node trades the kept index in before it serves a
+  tenant on the version that declares its normalization
+  (`Spaces::resolve`, once per space, version and pin epoch), whatever
+  moved the pin: `ordo versions pin`, a move off a revoked version, a
+  rollout, a tenant build, a restore, the catch-up. The trade asks the
+  normalization again under the `$renames` lock, so two nodes trade once,
+  and raises the tenant's pin fence to the epoch served, so a node still on
+  the pin before is told the pin moved and writes nothing into the index it
+  no longer reads. The catch-up's apply path and a stored step's run read a
+  kept index under the target's normalization as declared already: `ordo
+  rollback` moves the tenant back rather than refusing
+  `reindex_needs_stored_plan`, and a rollout forward again does not compute
+  the index again. A database shared with a tenant pinned to the other
+  version is refused for the tenant moved, naming the other tenant and
+  `ordo versions pin`. Tests: `crates/ordo-host/tests/kept_index_tenants.rs`
+  (each path, the fence, the shared refusal). Not covered: a tenant on the
+  deployment's own database pinned apart from the active version; a second
+  B10 on one field before the first is pruned.
 - **`sealed unique` by backfill.** B8 and B10 under `unique`: once the
   indexes verify, the run reads the duplicates over them and refuses the
   end, naming each space and its rows (`sealed_unique_duplicates`). The

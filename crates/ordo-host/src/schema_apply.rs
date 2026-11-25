@@ -2661,17 +2661,155 @@ fn swap_index_columns(
 /// field's index trade places under the `"$renames"` lock, and the row
 /// records the normalization of the index now kept: `leaving`'s, the
 /// version that served before. Every write kept both current, so `==`
-/// under `schema` finds every row. Run before an activation's gate. The
-/// fields swapped, `entity.field`.
+/// under `schema` finds every row. Run before an activation's gate, and by
+/// a node before it serves a tenant with a database of its own on a pin
+/// (`crate::spaces::Spaces::resolve`), so every path that moves a tenant
+/// back across B10, or forward again, reads a whole index.
+///
+/// The kept row's `live` says what the field's own index is under, and so
+/// what the kept one becomes. A row recorded before that column takes
+/// `leaving`'s declaration; with neither it is refused, not guessed. The
+/// normalization is asked again under the lock, so two nodes trading at
+/// once trade once. With `fence`, `(space, epoch)`, the space's pin fence
+/// rises to the epoch in the trade's transaction, so a node still on the
+/// pin before writes nothing more into the index it no longer reads. The
+/// fields traded, `entity.field`.
 pub async fn restore_kept_indexes(
     pool: &Pool,
     schema: &Schema,
     leaving: Option<&Schema>,
+    fence: Option<(&str, i64)>,
 ) -> Result<Vec<String>, String> {
+    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let mut done = Vec::new();
+    for k in kept_indexes_due(pool, schema).await? {
+        let (Some(e), entity, field) = (schema.native(&k.entity), &k.entity, &k.field) else {
+            continue;
+        };
+        let Some(f) = e.field(field) else {
+            continue;
+        };
+        let norm = f.normalize.clone().unwrap_or_default();
+        let other = match k.live.clone().or_else(|| {
+            leaving
+                .and_then(|s| s.native(entity))
+                .and_then(|e| e.field(field))
+                .map(|f| f.normalize.clone().unwrap_or_default())
+        }) {
+            Some(o) => o,
+            None => {
+                return Err(format!(
+                    "the kept index of `{entity}.{field}` does not record the normalization \
+                     of the index it would replace, so it is not traded in. `ordo rollback` \
+                     on the deployment trades it, or `ordo evolve --prune` drops it"
+                ))
+            }
+        };
+        let tx = pool.begin().await.map_err(|e| e.to_string())?;
+        let traded = async {
+            tx.rows(&format!(
+                "{};\nLOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n{};\n",
+                ordo_exec::overlay::RENAMES_DDL,
+                ordo_exec::overlay::SEALS_LIVE_DDL,
+            ))
+            .await?;
+            let now = tx
+                .rows(&format!(
+                    "SELECT coalesce(to_jsonb(s) ->> 'normalize', '') FROM \"$seals\" s WHERE \
+                     s.\"entity\" = {} AND s.\"field\" = {} AND s.\"kind\" = 'kept'",
+                    lit(entity),
+                    lit(field),
+                ))
+                .await?;
+            if now.first().and_then(|r| r.first().cloned().flatten()) != Some(norm.clone()) {
+                return Ok(false); // traded by another node meanwhile
+            }
+            tx.rows(&format!(
+                "{}UPDATE \"$seals\" SET \"normalize\" = {}, \"live\" = {} WHERE \"entity\" = \
+                 {} AND \"field\" = {} AND \"kind\" = 'kept';\n",
+                swap_index_columns(e, f, &k.target, &k.target),
+                lit(&other),
+                lit(&norm),
+                lit(entity),
+                lit(field),
+            ))
+            .await?;
+            if let Some((space, epoch)) = fence {
+                tx.rows(&format!(
+                    "{};\nINSERT INTO \"$pin_fence\" (\"space\", \"epoch\") VALUES ({}, {epoch}) \
+                     ON CONFLICT (\"space\") DO UPDATE SET \"epoch\" = \
+                     GREATEST(\"$pin_fence\".\"epoch\", EXCLUDED.\"epoch\");\n",
+                    ordo_exec::PIN_FENCE_DDL,
+                    lit(space),
+                ))
+                .await?;
+            }
+            Ok::<bool, ordo_exec::PoolError>(true)
+        }
+        .await;
+        match traded {
+            Ok(true) => {
+                tx.commit().await.map_err(|e| e.to_string())?;
+                done.push(format!("{entity}.{field}"));
+            }
+            Ok(false) => {
+                let _ = tx.rollback().await;
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(format!("the kept index of `{entity}.{field}`: {e}"));
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// `prior` with each field in `kept` declaring the normalization `program`
+/// does: what a database keeping that index whole holds, so a diff from
+/// `prior` to `program` sees no `normalize` change to compute again. The
+/// node trades the kept index in before it serves `program`.
+pub fn as_kept(prior: &Schema, program: &Schema, kept: &[KeptIndex]) -> Schema {
+    let mut out = prior.clone();
+    for k in kept {
+        let declared = program
+            .native(&k.entity)
+            .and_then(|e| e.field(&k.field))
+            .and_then(|f| f.normalize.clone());
+        if let Some(f) = out
+            .entities
+            .iter_mut()
+            .find(|e| e.name == k.entity)
+            .and_then(|e| e.fields.iter_mut().find(|f| f.name == k.field))
+        {
+            f.normalize = declared;
+        }
+    }
+    out
+}
+
+/// One blind index B10 kept that `schema` reads: its normalization is the
+/// one `schema` declares, and its column is still there.
+#[derive(Debug, Clone)]
+pub struct KeptIndex {
+    pub entity: String,
+    pub field: String,
+    /// `<field>$bidx$prev`.
+    pub target: String,
+    /// The normalization the field's own index is under, when the row
+    /// records it.
+    pub live: Option<String>,
+}
+
+/// The kept blind indexes [`restore_kept_indexes`] would trade in for
+/// `schema`. Reads; changes nothing. Empty on a database with no `$seals`.
+pub async fn kept_indexes_due(pool: &Pool, schema: &Schema) -> Result<Vec<KeptIndex>, String> {
     let rows = match pool
         .rows(
             "SELECT s.\"entity\", s.\"field\", s.\"target\", coalesce(to_jsonb(s) ->> \
-             'normalize', '') FROM \"$seals\" s WHERE s.\"kind\" = 'kept'",
+             'normalize', ''), to_jsonb(s) ->> 'live', EXISTS (SELECT 1 FROM \
+             information_schema.columns c WHERE c.table_schema = current_schema() AND \
+             c.table_name = s.\"entity\" AND c.column_name = s.\"target\") FROM \"$seals\" s \
+             WHERE s.\"kind\" = 'kept'",
         )
         .await
     {
@@ -2679,8 +2817,7 @@ pub async fn restore_kept_indexes(
         Err(e) if e.is_missing_table() => return Ok(Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
-    let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let mut done = Vec::new();
+    let mut due = Vec::new();
     for r in rows {
         let (Some(entity), Some(field), Some(target), Some(norm)) = (
             r.first().cloned().flatten(),
@@ -2690,51 +2827,26 @@ pub async fn restore_kept_indexes(
         ) else {
             continue;
         };
-        let Some(e) = schema.native(&entity) else {
-            continue;
-        };
-        let Some(f) = e.field(&field).filter(|f| f.sealed && f.indexed) else {
-            continue;
-        };
-        if f.normalize.as_deref().unwrap_or("") != norm {
+        // Pruned: the column is gone, and the version before with it.
+        if !matches!(r.get(5).cloned().flatten().as_deref(), Some("t" | "true")) {
             continue;
         }
-        let there = pool
-            .rows(&format!(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = {} AND \
-                 column_name = {}",
-                lit(&entity),
-                lit(&target)
-            ))
-            .await
-            .map_err(|e| e.to_string())?;
-        if there.is_empty() {
-            continue; // pruned: the soak closed
-        }
-        let other = leaving
-            .and_then(|s| s.native(&entity))
+        let declared = schema
+            .native(&entity)
             .and_then(|e| e.field(&field))
-            .and_then(|f| f.normalize.clone())
-            .unwrap_or_default();
-        let sql = format!(
-            "{};\nLOCK TABLE \"$renames\" IN EXCLUSIVE MODE;\n{}\
-             UPDATE \"$seals\" SET \"normalize\" = {} WHERE \"entity\" = {} AND \"field\" = {} \
-             AND \"kind\" = 'kept';\n",
-            ordo_exec::overlay::RENAMES_DDL,
-            swap_index_columns(e, f, &target, &target),
-            lit(&other),
-            lit(&entity),
-            lit(&field),
-        );
-        let tx = pool.begin().await.map_err(|e| e.to_string())?;
-        if let Err(e) = tx.rows(&sql).await {
-            let _ = tx.rollback().await;
-            return Err(format!("the kept index of `{entity}.{field}`: {e}"));
+            .filter(|f| f.sealed && f.indexed)
+            .map(|f| f.normalize.clone().unwrap_or_default());
+        if declared.as_deref() != Some(norm.as_str()) {
+            continue;
         }
-        tx.commit().await.map_err(|e| e.to_string())?;
-        done.push(format!("{entity}.{field}"));
+        due.push(KeptIndex {
+            entity,
+            field,
+            target,
+            live: r.get(4).cloned().flatten(),
+        });
     }
-    Ok(done)
+    Ok(due)
 }
 
 /// **B10: a sealed indexed field's `normalize` changes.** Every row's blind
@@ -2783,18 +2895,22 @@ fn reindex_step(
     );
     end.push_str(&swap_index_columns(e, f, &next, &prev));
     end.push_str(&format!(
-        "DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
+        "{live_ddl};\n\
+         DELETE FROM \"$seals\" WHERE \"entity\" = {e} AND \"field\" = {fl} AND \"kind\" = \
          'reindex';\n\
          INSERT INTO \"$seals\" (\"entity\", \"field\", \"kind\", \"source\", \"target\", \
-         \"version\", \"normalize\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}) ON CONFLICT \
-         (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = EXCLUDED.\"target\", \
-         \"version\" = EXCLUDED.\"version\", \"normalize\" = EXCLUDED.\"normalize\";\n",
+         \"version\", \"normalize\", \"live\") VALUES ({e}, {fl}, 'kept', {s}, {p}, {v}, {o}, \
+         {l}) ON CONFLICT (\"entity\", \"field\", \"kind\") DO UPDATE SET \"target\" = \
+         EXCLUDED.\"target\", \"version\" = EXCLUDED.\"version\", \"normalize\" = \
+         EXCLUDED.\"normalize\", \"live\" = EXCLUDED.\"live\";\n",
+        live_ddl = ordo_exec::overlay::SEALS_LIVE_DDL,
         e = lit(&e.name),
         fl = lit(field),
         s = lit(&f.column()),
         p = lit(&prev),
         v = lit(version),
         o = lit(from_normalize.unwrap_or("")),
+        l = lit(f.normalize.as_deref().unwrap_or("")),
     ));
     Ok(SealStep {
         backfill: BackfillStep {
@@ -4946,6 +5062,22 @@ pub async fn bring_forward_from(
             }
             (written, choices)
         }
+    };
+    // **Back across B10, or forward again** (increment 13): a blind index
+    // this database keeps under the normalization `program` declares is
+    // whole, so the change of `normalize` needs no reindex. The diff reads
+    // it as declared already; the node trades the index in before it
+    // serves the tenant on `program` ([`restore_kept_indexes`]), under the
+    // epoch of the pin that follows, so nothing written before the pin
+    // moves reads or writes the other one.
+    let written = match written {
+        Some(w) => {
+            let kept = kept_indexes_due(pool, &program.schema)
+                .await
+                .map_err(internal)?;
+            Some(as_kept(&w, &program.schema, &kept))
+        }
+        None => None,
     };
     let plan = self::plan_with(pool, program, &choices, written.as_ref())
         .await

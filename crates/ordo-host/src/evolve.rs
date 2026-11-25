@@ -1806,9 +1806,22 @@ pub(crate) async fn expand_step(
     options.indexing_live = indexing_in(target)
         .await
         .map_err(|e| run_err("internal", e.to_string(), true))?;
-    let mut p = sa::plan_with(target, &y, &options, Some(&x.schema))
+    // **Forward again across B10** (increment 13): a blind index this
+    // database keeps under `y`'s normalization is whole, so the step's
+    // reindex of that field is not run. The node trades the index in before
+    // it serves `y` (`crate::spaces::Spaces::resolve`); on the deployment's
+    // own database, the activation does.
+    let kept = sa::kept_indexes_due(target, &y.schema)
         .await
         .map_err(|e| run_err("internal", e, true))?;
+    let mut p = sa::plan_with(
+        target,
+        &y,
+        &options,
+        Some(&sa::as_kept(&x.schema, &y.schema, &kept)),
+    )
+    .await
+    .map_err(|e| run_err("internal", e, true))?;
     // The step starts from X on every database: X is the baseline its
     // drift is measured against and the version its record says it left.
     p.prior = Some(x.schema.clone());
@@ -1882,12 +1895,21 @@ pub(crate) async fn expand_step(
     // A step run again after its expand finds its new columns there, so
     // the triage on this database no longer names their backfills or what
     // lands after them. The stored receipt does (increment 11a).
+    // A reindex a kept index covers stays out of it too.
+    let covered =
+        |entity: &str, field: &str| kept.iter().any(|k| k.entity == entity && k.field == field);
+    let reindexing: Vec<String> = kept
+        .iter()
+        .filter_map(|k| y.schema.native(&k.entity)?.field(&k.field))
+        .map(|f| ordo_schema::ddl::q(&sa::reindex_column(f)))
+        .collect();
     let mut backfills = backfills;
     for r in again.receipt["backfills"].as_array().into_iter().flatten() {
         if let Some(bf) = sa::BackfillStep::from_json(r) {
-            if !backfills
-                .iter()
-                .any(|b| b.entity == bf.entity && b.field == bf.field)
+            if !covered(&bf.entity, &bf.field)
+                && !backfills
+                    .iter()
+                    .any(|b| b.entity == bf.entity && b.field == bf.field)
             {
                 backfills.push(bf);
             }
@@ -1896,6 +1918,9 @@ pub(crate) async fn expand_step(
     let mut after = after;
     for r in again.receipt["after"].as_array().into_iter().flatten() {
         let Some(sql) = r.as_str() else { continue };
+        if reindexing.iter().any(|c| sql.contains(c.as_str())) {
+            continue;
+        }
         if !after.iter().any(|s| s.sql.trim_end() == sql) {
             after.push(sa::Step {
                 code: "B",

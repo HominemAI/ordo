@@ -1021,3 +1021,84 @@ async fn the_sign_in_contract_is_granted_and_the_release_check_names_the_peer_on
     );
     let _ = &w.pg;
 }
+
+/// **A reader tells the read app its release** (owner ruling 2026-11-25,
+/// `readers-show-the-read-app-which`). The reader grants `SELECT` on the
+/// `release` column of its `$ordorelease`, and `USAGE` on its schema, to the
+/// role that owns the read app's schema; the read app's release check then
+/// names the reader's Ordo release, not only its role. The grant is that
+/// column and nothing else.
+///
+/// A regression looks like the reader line saying "not visible" or "has not
+/// granted its release", or the read app reading another column or table of
+/// the reader.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reader_grants_its_release_to_the_read_app_and_nothing_else() {
+    use ordo_exec::sign_in_contract as contract;
+    use ordo_host::release_check;
+
+    let w = world("ordo_rgrant_reader_release").await;
+    let alpha = alpha_with("reader viewer reads notes");
+    peer::grant_readers_with(&w.a, &alpha, lookup)
+        .await
+        .expect("granted");
+    let (beta, _) = beta();
+
+    // The reader has started under an Ordo release and holds a table of its
+    // own the read app has no business reading.
+    contract::record_release(&w.b, "0.4.1", 10)
+        .await
+        .expect("recorded");
+    w.pg.exec("CREATE TABLE beta.private (id text); INSERT INTO beta.private VALUES ('x')")
+        .expect("a private table");
+
+    // Before the reader grants it, the check says so and names the fix.
+    let n = release_check::neighbours(&w.a, std::slice::from_ref(&alpha), |_| None)
+        .await
+        .expect("reads");
+    let line = n[0].line(release_check::release());
+    assert!(line.contains("has not granted its release"), "{line}");
+
+    // The reader's start grants it, once.
+    let lines = peer::grant_release_to_peers(&w.b, &beta)
+        .await
+        .expect("granted");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains(WRITER), "{lines:?}");
+    assert!(
+        peer::grant_release_to_peers(&w.b, &beta)
+            .await
+            .expect("again")
+            .is_empty(),
+        "an unchanged deployment grants nothing"
+    );
+
+    // The read app's release check names the reader's release.
+    let n = release_check::neighbours(&w.a, std::slice::from_ref(&alpha), |_| None)
+        .await
+        .expect("reads");
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert_eq!(
+        n[0].line(release_check::release()),
+        format!("reader viewer (role `{READER}`): Ordo 0.4.1, ANOTHER RELEASE")
+    );
+    assert_eq!(
+        contract::release_of(&w.a, "beta").await.expect("reads"),
+        contract::PeerRelease::Known("0.4.1".into())
+    );
+
+    // Nothing beyond that column: not the row's other column, not the
+    // whole row, not another table, not a write.
+    assert!(denied(&w.a, "SELECT started_at FROM beta.\"$ordorelease\"").await);
+    assert!(denied(&w.a, "SELECT * FROM beta.\"$ordorelease\"").await);
+    assert!(denied(&w.a, "SELECT * FROM beta.private").await);
+    assert!(
+        denied(
+            &w.a,
+            "UPDATE beta.\"$ordorelease\" SET release = 'x' WHERE true"
+        )
+        .await
+    );
+    assert!(denied(&w.a, "CREATE TABLE beta.mine (id text)").await);
+    let _ = &w.pg;
+}

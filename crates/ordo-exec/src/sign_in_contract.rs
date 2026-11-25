@@ -165,6 +165,26 @@ pub enum PeerRelease {
     NotGranted,
 }
 
+/// The schemas whose `$ordorelease` is owned by `role`: where a reader
+/// that connects as `role` keeps its release. The read app finds its
+/// readers' releases there (owner ruling 2026-11-25).
+pub async fn schemas_owned_by(pool: &Pool, role: &str) -> Result<Vec<String>, PoolError> {
+    Ok(pool
+        .rows(&format!(
+            "SELECT n.nspname::text FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname = {} AND c.relkind = 'r' \
+               AND pg_get_userbyid(c.relowner) = {} \
+             ORDER BY 1",
+            sql_lit(RELEASE_TABLE),
+            sql_lit(role)
+        ))
+        .await?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect())
+}
+
 /// Read the release a deployment in schema `pg` last started under.
 pub async fn release_of(pool: &Pool, pg: &str) -> Result<PeerRelease, PoolError> {
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));

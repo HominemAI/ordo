@@ -608,3 +608,31 @@ fn the_per_action_lists_override_the_level() {
     assert!(line.contains("ORDO_SECURITY_LEVEL=low"), "{line}");
     assert!(line.contains("ORDO_STEP_UP_REQUIRED_OPS"), "{line}");
 }
+
+/// **Breaking glass always asks the deployment owner to reauth** (owner,
+/// 2026-11-25, `signed-rehearsals-three-defaults-to-confirm`): at every
+/// level, with or without `ORDO_STEP_UP_EXEMPT_OPS`. A regression looks
+/// like `ordo rehearsals break-glass` running on a bare session at the
+/// standard level.
+#[test]
+fn breaking_glass_asks_for_reauth_at_every_level() {
+    let glass = ordo_host::rehearsals::BREAK_GLASS;
+    for level in [
+        SecurityLevel::Low,
+        SecurityLevel::Standard,
+        SecurityLevel::High,
+    ] {
+        let d = door(&PresencePolicy::standard().with_level(level));
+        assert!(
+            !allowed(&d, "usr_owner", false, glass),
+            "{level:?}: break-glass ran with no reauth"
+        );
+        assert!(allowed(&d, "usr_owner", true, glass), "{level:?}");
+    }
+    // The exemption list cannot name it, by name or by prefix.
+    let by_prefix = PresencePolicy::parse("std.deployment.*", &names()).expect("prefix");
+    assert!(by_prefix.requires(glass, OpKind::Write));
+    assert!(PresencePolicy::parse(glass, &names())
+        .expect_err("named")
+        .contains(glass));
+}

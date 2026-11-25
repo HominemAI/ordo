@@ -1173,7 +1173,10 @@ impl Spaces {
     /// the epoch.
     ///
     /// The deployment's own database is traded by the activation
-    /// (`crate::apply_op`), which every space there follows. A database
+    /// (`crate::apply_op`), which every space there follows. A tenant there
+    /// pinned to a version whose normalization only the kept index holds is
+    /// refused, naming the fix: trading it would take the index from every
+    /// other space there. A database
     /// shared with a tenant pinned to another version cannot hold both
     /// indexes under one name, so this tenant is refused, naming the fix.
     async fn kept_indexes(
@@ -1188,25 +1191,27 @@ impl Spaces {
             return Ok(());
         }
         let control = self.witness.pool();
-        if !crate::dual_writes::same_database(pool, control) {
-            let schema = &live.fixture.schema;
-            let due = crate::schema_apply::kept_indexes_due(pool, schema)
-                .await
-                .map_err(|e| format!("its kept blind indexes could not be read: {e}"))?;
-            if !due.is_empty() {
-                self.alone_on_its_database(space, pool, &live.version)
-                    .await?;
-                let fence = epoch.map(|e| (space, e));
-                let traded =
-                    crate::schema_apply::restore_kept_indexes(pool, schema, None, fence).await?;
-                if !traded.is_empty() {
-                    println!(
-                        "space {space}: the blind index kept for version {} traded in on its \
-                         database ({})",
-                        live.version,
-                        traded.join(", ")
-                    );
-                }
+        let schema = &live.fixture.schema;
+        let due = crate::schema_apply::kept_indexes_due(pool, schema)
+            .await
+            .map_err(|e| format!("its kept blind indexes could not be read: {e}"))?;
+        if crate::dual_writes::same_database(pool, control) {
+            if let Some(k) = due.first() {
+                return Err(kept_on_shared(&k.entity, &k.field, &live.version, space));
+            }
+        } else if !due.is_empty() {
+            self.alone_on_its_database(space, pool, &live.version)
+                .await?;
+            let fence = epoch.map(|e| (space, e));
+            let traded =
+                crate::schema_apply::restore_kept_indexes(pool, schema, None, fence).await?;
+            if !traded.is_empty() {
+                println!(
+                    "space {space}: the blind index kept for version {} traded in on its \
+                     database ({})",
+                    live.version,
+                    traded.join(", ")
+                );
             }
         }
         self.kept.lock().expect("kept cache").insert(key);
@@ -1325,5 +1330,19 @@ fn serving_log() -> WriteLog {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         }),
+    )
+}
+
+/// Why a tenant on the deployment's own database is not served, or not
+/// pinned, on `version`: only B10's kept index holds `version`'s
+/// normalization of `entity.field` there, and the activation trades it
+/// for every space at once.
+pub(crate) fn kept_on_shared(entity: &str, field: &str, version: &str, space: &str) -> String {
+    format!(
+        "`{entity}.{field}` on the deployment's own database is indexed under the active \
+         version's normalization; version `{version}` reads the index kept beside it, which \
+         only an activation trades in for every space there. Pin the tenant to the active \
+         version (`ordo versions pin {space} <active>`), or activate `{version}` (`ordo \
+         rollback {version}`)"
     )
 }

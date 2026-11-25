@@ -1814,6 +1814,41 @@ pub(crate) async fn expand_step(
     let kept = sa::kept_indexes_due(target, &y.schema)
         .await
         .map_err(|e| run_err("internal", e, true))?;
+    // **A second B10 on a field whose first one is still kept** is
+    // refused: the end would keep the index it replaces under the name the
+    // first one's kept index holds. The close prunes it.
+    let held = sa::kept_indexes(target)
+        .await
+        .map_err(|e| run_err("internal", e, true))?;
+    for b in again.receipt["backfills"].as_array().into_iter().flatten() {
+        let (Some(entity), Some(field)) = (b["entity"].as_str(), b["field"].as_str()) else {
+            continue;
+        };
+        if b["code"] != "B10" || kept.iter().any(|k| k.entity == entity && k.field == field) {
+            continue;
+        }
+        if let Some((k, norm)) = held
+            .iter()
+            .find(|(k, _)| k.entity == entity && k.field == field)
+        {
+            return Err(run_err(
+                "reindex_kept_index",
+                format!(
+                    "`{entity}.{field}` still keeps the blind index its last normalize change \
+                     replaced (`{}`, under `{}`), so a rollback across that change reads a \
+                     whole index. A second change of its `normalize` would replace it. Close \
+                     the first one with `ordo evolve --prune`, then run this step again",
+                    k.target,
+                    if norm.is_empty() {
+                        "no normalization"
+                    } else {
+                        norm
+                    },
+                ),
+                false,
+            ));
+        }
+    }
     let mut p = sa::plan_with(
         target,
         &y,

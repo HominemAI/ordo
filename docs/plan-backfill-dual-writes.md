@@ -513,9 +513,19 @@ recorded, so sharing again reads. Test: `notes_app.rs`
   the index again. A database shared with a tenant pinned to the other
   version is refused for the tenant moved, naming the other tenant and
   `ordo versions pin`. Tests: `crates/ordo-host/tests/kept_index_tenants.rs`
-  (each path, the fence, the shared refusal). Not covered: a tenant on the
-  deployment's own database pinned apart from the active version; a second
-  B10 on one field before the first is pruned.
+  (each path, the fence, the shared refusal).
+- **Refused: a tenant on the deployment's own database pinned apart from
+  the active version across B10.** Its index there is under the active
+  version's normalization, and only an activation trades it, for every
+  space at once. `ordo versions pin` refuses the move, naming `ordo
+  versions pin <tenant> <active>` and `ordo rollback <version>`; a pin made
+  any other way is not served, with the same words. So between `ordo
+  evolve --run` of a B10 and the activation, a tenant there still on the
+  active version is not served; before, it read the wrong index.
+- **Refused: a second B10 on a field whose first one is still kept**
+  (`reindex_kept_index`, naming `ordo evolve --prune`): its end would
+  replace the kept index. A step back to the kept normalization is not a
+  second B10: it is read as declared already, and nothing is computed.
 - **`sealed unique` by backfill.** B8 and B10 under `unique`: once the
   indexes verify, the run reads the duplicates over them and refuses the
   end, naming each space and its rows (`sealed_unique_duplicates`). The

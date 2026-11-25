@@ -624,3 +624,121 @@ async fn a_tenant_sharing_its_database_with_the_other_version_is_refused_naming_
         "nothing traded"
     );
 }
+
+/// **Refused: a second B10 on a field whose first one is still kept.** The
+/// tenant is moved back across B10, which trades the indexes; its kept
+/// row is then made to name a normalization no version declares, as a
+/// third `normalize` would leave it. The stored step's run would replace
+/// the kept index, so it is refused naming `ordo evolve --prune`, and
+/// nothing on the database changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_b10_while_an_index_is_kept_is_refused_naming_prune() {
+    let _serial = SERIAL.lock().await;
+    let w = World::new("second").await;
+    w.across_b10().await;
+    w.pin_door("1.0.0").await;
+    assert_eq!(w.found("Mixed-A").await.1, ["a"]);
+    w.tenant_pg
+        .exec("UPDATE \"$seals\" SET normalize = 'upper' WHERE kind = 'kept'")
+        .expect("a kept index under a third normalization");
+    let b = ordo_api::BoundParams(
+        json!({ "tenant": T, "to": "1.1.0" })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let err =
+        ordo_host::deploy_ops::execute(&w.ops, ordo_host::deploy_ops::REPLAY, "home", &b, OWNER)
+            .await
+            .expect_err("a second reindex over a kept index is refused");
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("reindex_kept_index") && text.contains("ordo evolve --prune"),
+        "{text}"
+    );
+    let one = |sql: &str| {
+        w.tenant_pg.query(sql).expect("query")[0][0]
+            .clone()
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        one(
+            "SELECT to_version FROM \"$migrations\" WHERE phase <> 'failed' \
+             ORDER BY seq DESC LIMIT 1"
+        ),
+        "1.0.0",
+        "the database stays on 1.0.0"
+    );
+    assert_eq!(
+        one("SELECT count(*) FROM information_schema.columns \
+             WHERE table_name = 'note' AND column_name = 'body$bidx$next'"),
+        "0",
+        "nothing was computed"
+    );
+    assert_eq!(w.pinned().await, "1.0.0");
+}
+
+/// **Refused: a tenant on the deployment's own database pinned apart
+/// from the active version across B10.** There the field's index is under
+/// the active version's normalization, and only an activation trades the
+/// kept one in, for every space at once. `ordo versions pin` refuses the
+/// move by name; a pin made any other way is not served, with the same
+/// words. The tenant on the active version is served.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_on_the_deployments_database_pinned_apart_across_b10_is_refused() {
+    let _serial = SERIAL.lock().await;
+    let w = World::new("own_db").await;
+    w.keys
+        .create_space(&SpaceId("zed".into()))
+        .expect("custody");
+    w.door(
+        ordo_host::deploy_ops::EVOLVE,
+        json!({ "from": "1.0.0", "to": "1.1.0", "run": true }),
+    )
+    .await;
+    apply_op::activate(&w.control, "1.1.0", "dev:ada")
+        .await
+        .expect("1.1.0 active");
+    w.swap_to("1.1.0").await;
+    w.spaces.reload_pin("zed").await;
+    if let Err(e) = w.spaces.resolve("zed").await {
+        panic!("zed on 1.1.0 serves: {e}");
+    }
+
+    let b = ordo_api::BoundParams(
+        json!({ "tenant": "zed", "version": "1.0.0" })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let err = ordo_host::deploy_ops::execute(&w.ops, ordo_host::deploy_ops::PIN, "home", &b, OWNER)
+        .await
+        .expect_err("the pin apart is refused");
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("ordo versions pin zed <active>") && text.contains("ordo rollback 1.0.0"),
+        "{text}"
+    );
+    assert_eq!(
+        Versions::on(&w.control)
+            .pin_of("zed")
+            .await
+            .expect("read")
+            .and_then(|p| p.version)
+            .as_deref(),
+        Some("1.1.0"),
+        "zed stays"
+    );
+
+    // A pin made around the door is not served on the wrong index.
+    Versions::on(&w.control)
+        .pin("zed", "1.0.0", "dev:ada", 30)
+        .await
+        .expect("pinned around the door");
+    w.load("1.0.0").await;
+    w.spaces.reload_pin("zed").await;
+    let Err(e) = w.spaces.resolve("zed").await else {
+        panic!("served over an index 1.0.0 does not read");
+    };
+    assert!(e.to_string().contains("ordo rollback 1.0.0"), "{e}");
+}

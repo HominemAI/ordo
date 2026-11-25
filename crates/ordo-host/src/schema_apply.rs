@@ -2803,6 +2803,25 @@ pub struct KeptIndex {
 /// The kept blind indexes [`restore_kept_indexes`] would trade in for
 /// `schema`. Reads; changes nothing. Empty on a database with no `$seals`.
 pub async fn kept_indexes_due(pool: &Pool, schema: &Schema) -> Result<Vec<KeptIndex>, String> {
+    Ok(kept_indexes(pool)
+        .await?
+        .into_iter()
+        .filter(|(k, norm)| {
+            schema
+                .native(&k.entity)
+                .and_then(|e| e.field(&k.field))
+                .filter(|f| f.sealed && f.indexed)
+                .map(|f| f.normalize.clone().unwrap_or_default())
+                .as_deref()
+                == Some(norm.as_str())
+        })
+        .map(|(k, _)| k)
+        .collect())
+}
+
+/// Every blind index B10 kept on this database whose column is still
+/// there, with the normalization it is under, due or not.
+pub async fn kept_indexes(pool: &Pool) -> Result<Vec<(KeptIndex, String)>, String> {
     let rows = match pool
         .rows(
             "SELECT s.\"entity\", s.\"field\", s.\"target\", coalesce(to_jsonb(s) ->> \
@@ -2831,20 +2850,15 @@ pub async fn kept_indexes_due(pool: &Pool, schema: &Schema) -> Result<Vec<KeptIn
         if !matches!(r.get(5).cloned().flatten().as_deref(), Some("t" | "true")) {
             continue;
         }
-        let declared = schema
-            .native(&entity)
-            .and_then(|e| e.field(&field))
-            .filter(|f| f.sealed && f.indexed)
-            .map(|f| f.normalize.clone().unwrap_or_default());
-        if declared.as_deref() != Some(norm.as_str()) {
-            continue;
-        }
-        due.push(KeptIndex {
-            entity,
-            field,
-            target,
-            live: r.get(4).cloned().flatten(),
-        });
+        due.push((
+            KeptIndex {
+                entity,
+                field,
+                target,
+                live: r.get(4).cloned().flatten(),
+            },
+            norm,
+        ));
     }
     Ok(due)
 }

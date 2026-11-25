@@ -679,6 +679,12 @@ impl std::fmt::Display for Change {
                         "{old} is split into {new}: each filled by the plan's mapping, the old \
                          column kept"
                     )
+                } else if from.len() == 1 {
+                    write!(
+                        f,
+                        "{old} is renamed to {new} with a new type: converted by the plan's \
+                         mapping, the old column kept"
+                    )
                 } else {
                     write!(
                         f,

@@ -513,14 +513,57 @@ fn render_expr(entity: &str, cx: &Cx, e: &Expr) -> Result<String, SchemaError> {
                 ("coalesce", [x, y]) => format!("coalesce({x}, {y})"),
                 ("before", [t, sep]) => before_sql(t, sep),
                 ("after", [t, sep]) => after_sql(t, sep),
+                // The conversions (type casts on a rename, `forward-gaps`
+                // asks 15 and 17): each is null where the value does not
+                // convert, so the pre-check lists the row and never a
+                // chunk fails half way.
+                ("text", [x]) => format!("({x})::text"),
+                ("int", [x]) => match mapping_type(cx.fields, &args[0]) {
+                    Some(MapTy {
+                        family: Family::Number,
+                        places: Some(0),
+                    }) => x.clone(),
+                    Some(MapTy {
+                        family: Family::Text,
+                        ..
+                    }) => int_sql(x),
+                    _ => {
+                        return Err(err(
+                            "check_unsupported",
+                            *span,
+                            format!(
+                                "the backfill mapping on `{entity}` calls `int()` on a value \
+                                 that is not text. A decimal does not become an int without \
+                                 rounding, and Ordo never rounds unasked: write `round(x, 0)`"
+                            ),
+                        ))
+                    }
+                },
+                ("bool", [x]) => bool_sql(x),
+                ("round", [x, n]) => match &args[1] {
+                    Expr::IntLit { value, .. } if (0..=30).contains(value) => {
+                        format!("round(({x})::numeric, {n})")
+                    }
+                    _ => {
+                        return Err(err(
+                            "check_unsupported",
+                            *span,
+                            format!(
+                                "the backfill mapping on `{entity}` calls `round(x, n)` with an \
+                                 `n` that is not a whole number from 0 to 30"
+                            ),
+                        ))
+                    }
+                },
                 (other, _) => {
                     return Err(err(
                         "check_unsupported",
                         *span,
                         format!(
                             "the backfill mapping on `{entity}` calls `{other}()`; a mapping \
-                             takes `lower`, `trim`, `length`, `coalesce`, `before` and `after`, \
-                             and `+` over text"
+                             takes `lower`, `trim`, `length`, `coalesce`, `before`, `after`, \
+                             the conversions `text`, `int`, `bool` and `round(x, n)`, and `+` \
+                             over text"
                         ),
                     ))
                 }
@@ -551,6 +594,119 @@ fn render_expr(entity: &str, cx: &Cx, e: &Expr) -> Result<String, SchemaError> {
     })
 }
 
+/// `int(t)` over text: the whole number `t` spells, spaces around it
+/// allowed, or null. 18 digits at most, so it always fits a `bigint`.
+pub fn int_sql(t: &str) -> String {
+    format!("(CASE WHEN btrim({t}) ~ '^[+-]?[0-9]{{1,18}}$' THEN btrim({t})::bigint END)")
+}
+
+/// `bool(t)`: `true` or `false` as `t` spells it, any case, spaces around
+/// it allowed, or null.
+pub fn bool_sql(t: &str) -> String {
+    format!("(CASE lower(btrim(({t})::text)) WHEN 'true' THEN true WHEN 'false' THEN false END)")
+}
+
+/// A mapping value's kind, for the check that it fits the field it fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    Text,
+    Number,
+    Bool,
+    Date,
+    Datetime,
+}
+
+impl Family {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Family::Text => "text",
+            Family::Number => "a number",
+            Family::Bool => "a bool",
+            Family::Date => "a date",
+            Family::Datetime => "a datetime",
+        }
+    }
+}
+
+/// What a mapping gives: its kind, and for a number its places when known
+/// (`0` for an int).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapTy {
+    pub family: Family,
+    pub places: Option<u32>,
+}
+
+/// The kind a field holds, as a mapping reads it. `None` for a kind no
+/// mapping converts (a file, a document, a duration).
+pub fn field_type(f: &Field) -> Option<MapTy> {
+    use ordo_syntax::ScalarTy as S;
+    let t = |family, places| Some(MapTy { family, places });
+    if f.sealed {
+        return None;
+    }
+    match &f.ty {
+        FieldTy::Ref { .. } => t(Family::Text, None),
+        FieldTy::Scalar(s) => match s {
+            S::Text | S::Id | S::Uri => t(Family::Text, None),
+            S::Int => t(Family::Number, Some(0)),
+            S::Money(p) | S::Decimal(p) => t(Family::Number, Some(u32::from(*p))),
+            S::Bool => t(Family::Bool, None),
+            S::Date => t(Family::Date, None),
+            S::Datetime => t(Family::Datetime, None),
+            _ => None,
+        },
+    }
+}
+
+/// What a mapping gives, when it can be told without the database. `None`
+/// when it cannot (a null, a mix).
+pub fn mapping_type(fields: &[Field], e: &Expr) -> Option<MapTy> {
+    let t = |family, places| Some(MapTy { family, places });
+    match e {
+        Expr::Path { segments, .. } if segments.len() == 1 => fields
+            .iter()
+            .find(|f| f.name == segments[0].name)
+            .and_then(field_type),
+        Expr::IntLit { .. } => t(Family::Number, Some(0)),
+        Expr::DecimalLit { digits, .. } => t(
+            Family::Number,
+            Some(digits.split_once('.').map_or(0, |(_, d)| d.len() as u32)),
+        ),
+        Expr::StrLit { .. } => t(Family::Text, None),
+        Expr::BoolLit { .. } => t(Family::Bool, None),
+        Expr::DateLit { .. } => t(Family::Date, None),
+        Expr::DatetimeLit { .. } => t(Family::Datetime, None),
+        Expr::Neg { expr, .. } => mapping_type(fields, expr),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            use ordo_syntax::ast::BinOp;
+            let (l, r) = (mapping_type(fields, lhs)?, mapping_type(fields, rhs)?);
+            if matches!(op, BinOp::Add) && (l.family == Family::Text || r.family == Family::Text) {
+                return t(Family::Text, None);
+            }
+            if l.family != Family::Number || r.family != Family::Number {
+                return None;
+            }
+            let places = match op {
+                BinOp::Mul => Some(l.places? + r.places?),
+                _ => Some(l.places?.max(r.places?)),
+            };
+            t(Family::Number, places)
+        }
+        Expr::FnCall { name, args, .. } => match name.name.as_str() {
+            "lower" | "trim" | "before" | "after" | "text" => t(Family::Text, None),
+            "length" | "int" => t(Family::Number, Some(0)),
+            "bool" => t(Family::Bool, None),
+            "round" => match args.get(1) {
+                Some(Expr::IntLit { value, .. }) => t(Family::Number, u32::try_from(*value).ok()),
+                _ => None,
+            },
+            "coalesce" => args.iter().find_map(|a| mapping_type(fields, a)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Whether `e` is text, for `+` in a mapping: a text field, a string, or
 /// a text function of either.
 fn is_text(cx: &Cx, e: &Expr) -> bool {
@@ -564,7 +720,7 @@ fn is_text(cx: &Cx, e: &Expr) -> bool {
                 })
         }
         Expr::FnCall { name, args, .. } => match name.name.as_str() {
-            "lower" | "trim" | "before" | "after" => true,
+            "lower" | "trim" | "before" | "after" | "text" => true,
             "coalesce" => args.iter().any(|a| is_text(cx, a)),
             _ => false,
         },

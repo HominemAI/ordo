@@ -710,3 +710,242 @@ fn before_and_after_compile_in_a_projection() {
     );
     Program::compile(&src).expect("compiles");
 }
+
+/// The conversions are expression functions anywhere fields are too, and a
+/// projection reads them through the planner: a count that is no whole
+/// number reads as null, never as an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_conversions_read_in_a_projection() {
+    let src = items(
+        "1.0.0",
+        "  count: text = \"0\"\n  price: decimal(2) = 0\n",
+        "\nop converted unbounded =\n  item[id, n: int(count), t: text(price), b: bool(name)]\n  sort id\n",
+    );
+    let (pg, pool) = empty("ordo_maps_convert").await;
+    let program = Program::compile(&src).expect("compiles");
+    let (_, made) = ordo_host::schema_apply::apply(&pool, &program, "test", "test").await;
+    assert!(made.is_ok(), "{made:?}");
+    pg.exec(
+        "INSERT INTO item (\"$space\", id, rev, name, count, price) VALUES \
+         ('s', 'a', 1, ' TRUE ', ' 12 ', 3.5), ('s', 'b', 1, 'no', 'lots', 0)",
+    )
+    .expect("rows");
+    let n = node(&pg.db, &src, "s").await;
+    let rows = n
+        .exec
+        .read_as("converted", Some("p_ada"))
+        .await
+        .expect("reads");
+    let text = serde_json::to_string(&rows).expect("json");
+    assert_eq!(rows.len(), 2, "{text}");
+    assert_eq!(rows[0]["n"], 12, "{text}");
+    assert_eq!(rows[0]["t"], "3.50", "{text}");
+    assert_eq!(rows[0]["b"], true, "{text}");
+    assert!(rows[1]["n"].is_null() && rows[1]["b"].is_null(), "{text}");
+}
+
+fn items(version: &str, fields: &str, ops: &str) -> String {
+    format!(
+        "domain items @ {version}\n\nentity item {{\n  name: text\n{fields}}}\n\n\
+         op everything unbounded =\n  item[id]\n{ops}"
+    )
+}
+
+/// 1.0.0: `count` held as text.
+fn counted_as_text() -> String {
+    items(
+        "1.0.0",
+        "  count: text = \"0\"\n  price: decimal(2) = 0\n",
+        "\nop addItem($name: text, $count: text) =\n  set item { name: $name, count: $count }\n",
+    )
+}
+
+/// 1.1.0: `count` renamed to `qty` and made an `int`.
+fn counted_as_int() -> String {
+    items(
+        "1.1.0",
+        "  qty: int = 0 prev(count)\n  price: decimal(2) = 0\n",
+        "\nop addItem($name: text, $qty: int) =\n  set item { name: $name, qty: $qty }\n",
+    )
+}
+
+/// **A rename that changes the type is a cast, stated on paper.** `count:
+/// text` becomes `qty: int prev(count)`. It renders as one B12 change. With
+/// no `--fill` it is refused naming `int(count)`; a fill that gives text is
+/// refused (`map_cast_required`) naming the same; with no reverse it is one
+/// way, and a reverse that gives a number is refused naming
+/// `--reverse item.count=text(qty)`. A conversion Ordo has none for (text
+/// to a date) is refused as `map_cast_not_built`, and one that drops places
+/// names `round`. `lots` does not convert: the pre-check lists its row by
+/// id and the move waits. Fixed, `acme` moves: every count is an int, and
+/// both versions write through the real path, each shape kept current. A
+/// revert keeps the row 1.1.0 wrote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_with_a_new_type_is_converted_by_a_stated_cast() {
+    let (pg, pool) = deployment("ordo_maps_cast", &counted_as_text(), &counted_as_int()).await;
+    for (s, rows) in [
+        ("acme", [("a0", "12"), ("a1", " 7 ")]),
+        ("home", [("h0", "lots"), ("h1", "-3")]),
+    ] {
+        for (id, n) in rows {
+            pg.exec(&format!(
+                "INSERT INTO item (\"$space\", id, rev, name, count) \
+                 VALUES ('{s}', '{id}', 1, 'x', '{n}')"
+            ))
+            .expect("rows");
+        }
+    }
+    let render = |fill: &'static str, reverse: &'static str| {
+        let pool = pool.clone();
+        async move {
+            evolve::evolve(
+                &pool,
+                "1.0.0",
+                "1.1.0",
+                &options(fill, reverse, false),
+                None,
+                OWNER,
+                1,
+            )
+            .await
+        }
+    };
+    let errs = errors_of(render("", "").await.expect_err("no fill"));
+    assert_eq!(errs[0].0, "map_fill_required", "{errs:?}");
+    assert!(errs[0].1.contains("--fill item.qty=int(count)"), "{errs:?}");
+    let errs = errors_of(render("item.qty=count", "").await.expect_err("text"));
+    assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
+    assert!(errs[0].1.contains("--fill item.qty=int(count)"), "{errs:?}");
+    let errs = errors_of(
+        render("item.qty=int(count)", "")
+            .await
+            .expect_err("no reverse"),
+    );
+    assert_eq!(errs[0].0, "one_way_unconfirmed", "{errs:?}");
+    let errs = errors_of(
+        render("item.qty=int(count)", "item.count=qty")
+            .await
+            .expect_err("a number into text"),
+    );
+    assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
+    assert!(
+        errs[0].1.contains("--reverse item.count=text(qty)"),
+        "{errs:?}"
+    );
+
+    // What Ordo has no conversion for, and what would round.
+    let (_pg2, other) = deployment(
+        "ordo_maps_cast_refused",
+        &counted_as_text(),
+        &items(
+            "1.1.0",
+            "  due: date = 2026-01-01 prev(count)\n  cost: int = 0 prev(price)\n",
+            "",
+        ),
+    )
+    .await;
+    let for_other = |fill: &'static str| {
+        let other = other.clone();
+        async move {
+            errors_of(
+                evolve::evolve(
+                    &other,
+                    "1.0.0",
+                    "1.1.0",
+                    &options(fill, "", true),
+                    None,
+                    OWNER,
+                    1,
+                )
+                .await
+                .expect_err("refused"),
+            )
+        }
+    };
+    let errs = for_other("item.due=count;item.cost=round(price, 0)").await;
+    assert_eq!(errs[0].0, "map_cast_not_built", "{errs:?}");
+    assert!(errs[0].1.contains("from text to a date"), "{errs:?}");
+    let errs = for_other("item.due=2026-01-01;item.cost=price").await;
+    assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
+    assert!(
+        errs[0].1.contains("--fill item.cost=round(price, 0)"),
+        "{errs:?}"
+    );
+
+    let plan = render("item.qty=int(count)", "item.count=text(qty)")
+        .await
+        .expect("the cast stores")
+        .plan;
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).expect("receipt");
+    let codes: Vec<&str> = receipt["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter_map(|c| c["code"].as_str())
+        .collect();
+    assert_eq!(codes, ["B12"], "{receipt}");
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let checks = ordo_host::precheck::precheck(&pool, &shared, &plan)
+        .await
+        .expect("checked");
+    let lines = checks
+        .issues
+        .iter()
+        .flat_map(|i| i.lines.clone())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(lines.contains("home/h0"), "{lines}");
+    assert!(!lines.contains("lots"), "{lines}");
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let week = 7 * 86_400;
+    let err = dual_writes::run(&cx, "acme", &plan, &step_context(), week, OWNER)
+        .await
+        .expect_err("lots does not convert");
+    assert_eq!(err.class(), "map_unparsed", "{err}");
+    pg.exec("UPDATE item SET count = '40' WHERE id = 'h0'")
+        .expect("fixed");
+    let moved = dual_writes::run(&cx, "acme", &plan, &step_context(), week, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT string_agg(qty::text, ',' ORDER BY id) FROM item"
+        ),
+        "12,7,40,-3"
+    );
+    let on_x = node(&pg.db, &counted_as_text(), "beta").await;
+    let on_y = node(&pg.db, &counted_as_int(), "acme").await;
+    on_x.write(r#"addItem($name: "bolt", $count: "5")"#)
+        .await
+        .expect("1.0.0 writes text");
+    on_y.write(r#"addItem($name: "nut", $qty: 9)"#)
+        .await
+        .expect("1.1.0 writes an int");
+    assert_eq!(
+        one(&pg, "SELECT qty::text FROM item WHERE name = 'bolt'"),
+        "5"
+    );
+    assert_eq!(one(&pg, "SELECT count FROM item WHERE name = 'nut'"), "9");
+    let err = on_x
+        .write(r#"addItem($name: "washer", $count: "many")"#)
+        .await
+        .expect_err("1.1.0 requires qty, and many is no int");
+    assert!(err.contains("`item.qty` is required in `1.1.0`"), "{err}");
+
+    dual_writes::revert(&cx, "acme", OWNER)
+        .await
+        .expect("reverts");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count FROM item WHERE \"$space\" = 'acme' AND name = 'nut'"
+        ),
+        "9"
+    );
+}

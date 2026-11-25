@@ -11,8 +11,11 @@
 //!
 //! - `prev_unresolved`: the named thing is not in the version serving now.
 //!   `prev` reaches one version back only.
-//! - `prev_type`: a rename whose type differs. No cast option exists yet, so
-//!   it is refused, naming the two types.
+//! - **Type casts** (built 2026-11-25): a rename whose type differs is a
+//!   one-to-one map, a [`FieldMap`] with one old and one new field. Its
+//!   conversion is the stored plan's `--fill`, never guessed (`forward-gaps`
+//!   asks 15 and 17). `prev_type` is left for a file, whose handle no
+//!   expression computes.
 //! - `prev_mapping_required`: a move (`prev(orders.note)`), which needs a
 //!   rule the plan does not offer yet.
 //! - **Splits and merges** (increment 15b): several fields each
@@ -211,7 +214,10 @@ pub fn renames(prior: Option<&Schema>, declared: &Schema) -> Renames {
                     continue;
                 };
                 let split = split_of(declared, m);
-                if m.prev.len() > 1 || split.len() > 1 {
+                let cast = declared
+                    .native(&m.entity)
+                    .is_some_and(|e| is_cast(was, e, f, m));
+                if m.prev.len() > 1 || split.len() > 1 || cast {
                     if r.map_to(&m.entity, f).is_some() {
                         continue;
                     }
@@ -251,6 +257,19 @@ fn split_of<'a>(declared: &'a Schema, m: &PrevMark) -> Vec<&'a PrevMark> {
         .iter()
         .filter(|x| x.entity == m.entity && x.field.is_some() && x.prev == m.prev)
         .collect()
+}
+
+/// Whether `m`, one old field renamed to `f`, changes its type: a cast,
+/// which the plan maps like a split or a merge.
+fn is_cast(was: &Entity, e: &Entity, f: &str, m: &PrevMark) -> bool {
+    if m.prev.len() != 1 || m.prev[0].contains('.') {
+        return false;
+    }
+    let (Some(from), Some(to)) = (was.field(&m.prev[0]), e.field(f)) else {
+        return false;
+    };
+    let ty = |x: &crate::Field| (crate::ddl::column_ty(x), x.text_max);
+    ty(from) != ty(to) || from.ty != to.ty
 }
 
 /// The entity in `prior` that `declared`'s `name` was: itself, or its
@@ -351,7 +370,7 @@ fn field_mark(
         });
         return;
     }
-    if m.prev.len() > 1 || split_of(declared, m).len() > 1 {
+    if m.prev.len() > 1 || split_of(declared, m).len() > 1 || is_cast(was, e, f, m) {
         map_mark(was, e, f, m, out);
         return;
     }
@@ -387,25 +406,6 @@ fn field_mark(
             fix: "keep the name for now: renaming a sealed field re-seals every row, which \
                   is the backfill worker's (increment 10b)"
                 .into(),
-        });
-        return;
-    }
-    let ty = |x: &crate::Field| (crate::ddl::column_ty(x), x.text_max);
-    if ty(from) != ty(to) || from.ty != to.ty {
-        out.errors.push(PrevIssue {
-            class: "prev_type",
-            mark: m.clone(),
-            message: format!(
-                "`{}.{old}` was `{}` and `{}.{f}` is `{}`; a rename keeps the type",
-                was.name,
-                type_text(from),
-                e.name,
-                type_text(to)
-            ),
-            fix: format!(
-                "rename it in one version with the type `{}`, and change the type in the next",
-                type_text(from)
-            ),
         });
         return;
     }
@@ -461,8 +461,8 @@ fn map_mark(was: &Entity, e: &Entity, f: &str, m: &PrevMark, out: &mut PrevRepor
                 class: if sealed { "prev_sealed" } else { "prev_type" },
                 mark: m.clone(),
                 message: format!(
-                    "`{}.{f} prev({})` maps {}: a split or a merge computes values with an \
-                     expression over the row, and {}",
+                    "`{}.{f} prev({})` maps {}: a split, a merge or a type change computes \
+                     values with an expression over the row, and {}",
                     e.name,
                     m.prev.join(", "),
                     if sealed { "a sealed field" } else { "a file" },

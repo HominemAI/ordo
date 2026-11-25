@@ -64,7 +64,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::versions::{self as registry, Versions};
+use crate::versions::{self as registry, RestorePin as registry_pin, Versions};
 use ordo_api::{BoundParams, ErrorCode, ExecError, ExecResult};
 use ordo_crypto::{KeyProvider, SpaceId};
 use ordo_exec::cadence::LogPolicy;
@@ -174,8 +174,40 @@ impl ExitOps {
             .map_err(|e| store_fault("the space's database", e.class(), &e))
     }
 
-    /// The deployed artifact, and the program compiled from its own stored
-    /// source.
+    /// **The version `space` is served**: the one it is pinned to, or the
+    /// active version for a space with no pin (`plan-versions.md` §1.3).
+    ///
+    /// The tenant's own version and never the active one: a tenant pinned
+    /// to an older version holds rows of that version's shape, and reading
+    /// them with the active version's columns fails on a column its
+    /// database never had (Reported fix, 2026-11-24).
+    async fn stored_for(&self, space: &str) -> Result<registry::Artifact, ExecError> {
+        let v = Versions::on(&self.pool);
+        let pinned = match v.pin_of(space).await {
+            Ok(p) => p.and_then(|p| p.version),
+            Err(e) if e.is_missing_table() => None,
+            Err(e) => return Err(store_fault("the tenant's pin", e.class(), &e)),
+        };
+        let stored = match pinned {
+            Some(version) => v
+                .get(&version)
+                .await
+                .map_err(|e| store_fault("the artifact registry", e.class(), &e))?,
+            None => v
+                .active()
+                .await
+                .map_err(|e| store_fault("the artifact registry", e.class(), &e))?,
+        };
+        stored.ok_or_else(|| {
+            ExecError::internal(
+                "this deployment has no active artifact, so there is no schema to \
+                 read this space with — run `ordo apply` against this database",
+            )
+        })
+    }
+
+    /// The space's version ([`ExitOps::stored_for`]), and the program
+    /// compiled from its own stored source.
     ///
     /// Compiled here rather than borrowed from the live `Deployment`, and
     /// the difference matters: the bundle ships `artifact.json` and
@@ -184,29 +216,23 @@ impl ExitOps {
     /// Reading the serving deployment's schema instead would be right
     /// almost always and wrong exactly during a swap, which is the moment
     /// nobody would be watching.
-    async fn deployed(&self) -> Result<(registry::Artifact, ordo_schema::Schema), ExecError> {
-        let stored = Versions::on(&self.pool)
-            .active()
-            .await
-            .map_err(|e| store_fault("the artifact registry", e.class(), &e))?
-            .ok_or_else(|| {
-                ExecError::internal(
-                    "this deployment has no active artifact, so there is no schema to \
-                     export against — run `ordo apply` against this database",
-                )
-            })?;
+    async fn deployed(
+        &self,
+        space: &str,
+    ) -> Result<(registry::Artifact, ordo_schema::Schema), ExecError> {
+        let stored = self.stored_for(space).await?;
         let fixture = crate::Fixture::from_source(&stored.source, "").map_err(|e| {
             ExecError::internal(format!(
-                "the active artifact `{}` no longer compiles under this binary, so its \
-                 shape cannot be read: {e}",
+                "version `{}` no longer compiles under this binary, so its shape cannot \
+                 be read: {e}",
                 stored.version
             ))
         })?;
         Ok((stored, fixture.schema))
     }
 
-    /// The deployed artifact and its **whole** program, bound to one space
-    /// and to this deployment's custody.
+    /// One stored version's **whole** program, bound to one space and to
+    /// this deployment's custody.
     ///
     /// [`ExitOps::deployed`] keeps only the schema, because export reads
     /// columns and needs nothing else. An import writes through the Stage-5
@@ -221,30 +247,159 @@ impl ExitOps {
     ///
     /// Tenancy first, then custody, in that order, so which of the two
     /// carries across cannot silently matter.
-    async fn deployed_fixture(
+    fn fixture_of(
         &self,
+        stored: &registry::Artifact,
         space: &str,
-    ) -> Result<(registry::Artifact, Arc<crate::Fixture>), ExecError> {
-        let stored = Versions::on(&self.pool)
-            .active()
-            .await
-            .map_err(|e| store_fault("the artifact registry", e.class(), &e))?
-            .ok_or_else(|| {
-                ExecError::internal(
-                    "this deployment has no active artifact, so there is no schema to \
-                     import against — run `ordo apply` against this database",
-                )
-            })?;
+    ) -> Result<Arc<crate::Fixture>, ExecError> {
         let compiled = crate::Fixture::from_source(&stored.source, "").map_err(|e| {
             ExecError::internal(format!(
-                "the active artifact `{}` no longer compiles under this binary, so nothing \
-                 can be imported against it: {e}",
+                "version `{}` no longer compiles under this binary, so nothing can be \
+                 imported against it: {e}",
                 stored.version
             ))
         })?;
         let mut fixture = compiled.in_space(space);
         fixture.keys = self.keys.clone();
-        Ok((stored, Arc::new(fixture)))
+        Ok(Arc::new(fixture))
+    }
+
+    /// **The version an import writes under** (`plan-versions.md` §2.9,
+    /// V2), and the pin it moved, if any.
+    ///
+    /// A bundle exported on the version the space is served loads as it
+    /// always did. One exported on another version X:
+    ///
+    /// - X stored, not revoked, served and not below `versions.minimum`,
+    ///   the space holds no rows, and its database is the shape of X: the
+    ///   space is pinned to X, cause `restore`, before a row is written,
+    ///   and the rows load under X. It serves X and moves on like any
+    ///   tenant behind. A resumed import finds the pin on X already.
+    /// - X not stored: refused, naming the version.
+    /// - X revoked, not served or below the minimum: refused, naming the
+    ///   fix. An import writes through the door's protocol, so a tenant
+    ///   held closed could not take its rows.
+    /// - Newer than every stored version, or another domain: left to
+    ///   `import_space`, which refuses it as `artifact_mismatch`.
+    async fn import_version(
+        &self,
+        space: &str,
+        dir: &std::path::Path,
+        pool: &Pool,
+        caller: &str,
+    ) -> Result<(registry::Artifact, Option<serde_json::Value>), ExecError> {
+        let current = self.stored_for(space).await?;
+        // An unreadable manifest is `import_space`'s to refuse, by name.
+        let wanted = std::fs::read(dir.join("manifest.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|m| m["artifact"]["version"].as_str().map(str::to_string));
+        let Some(wanted) = wanted else {
+            return Ok((current, None));
+        };
+        if wanted == current.version {
+            return Ok((current, None));
+        }
+        let refused = |text: String| ExecError::new(ErrorCode::ImportRefused, text);
+        let v = Versions::on(&self.pool);
+        match v.restore_check(space, &wanted).await {
+            Ok(registry_pin::Held { why, .. }) => {
+                return Err(refused(format!(
+                    "version_not_served: the bundle was exported from {wanted}, and this \
+                     space cannot be pinned to it now: {why}. Nothing was written"
+                )))
+            }
+            Ok(_) => {}
+            // Newer than every version, or a space with no pin to move:
+            // the import's own version check refuses it.
+            Err(registry::VersionRefusal::RestoreNotStored { newer: true, .. })
+            | Err(registry::VersionRefusal::NoTenant { .. }) => return Ok((current, None)),
+            Err(registry::VersionRefusal::RestoreNotStored { stored, .. }) => {
+                return Err(refused(format!(
+                    "version_not_stored: the bundle was exported from {wanted}, which this \
+                     deployment does not store (stored: {}). Bring it here first (`ordo \
+                     promote {wanted}`, or `ordo apply` its source), then import again. \
+                     Nothing was written",
+                    stored.join(", ")
+                )))
+            }
+            Err(e) => return Err(store_fault("the tenant's pin", e.class(), &e)),
+        }
+        let stored = v
+            .get(&wanted)
+            .await
+            .map_err(|e| store_fault("the artifact registry", e.class(), &e))?
+            .ok_or_else(|| refused(format!("version_not_stored: {wanted} is not stored")))?;
+        let schema = crate::Fixture::from_source(&stored.source, "")
+            .map_err(|e| {
+                ExecError::internal(format!("version `{wanted}` does not compile here: {e}"))
+            })?
+            .schema;
+        // **Empty first.** The pin moves before a row is written, so a
+        // space that holds rows is refused while nothing has moved.
+        for e in schema.entities.iter().filter(|e| !e.platform) {
+            let table = ordo_exec::sql_lit(&format!("{}.\"{}\"", pool.schema_ident(), e.name));
+            let there = pool
+                .rows(&format!("SELECT to_regclass({table}) IS NOT NULL"))
+                .await
+                .map_err(|e| store_fault("the space's database", e.class(), &e))?;
+            if there
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .as_deref()
+                != Some("t")
+            {
+                continue;
+            }
+            let rows = pool
+                .rows(&format!(
+                    "SELECT count(*) FROM \"{}\" WHERE \"$space\" = {}",
+                    e.name,
+                    ordo_exec::sql_lit(space)
+                ))
+                .await
+                .map_err(|e| store_fault("the space's database", e.class(), &e))?;
+            let n: i64 = rows
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            if n > 0 {
+                return Err(refused(format!(
+                    "space_not_empty: the bundle was exported from {wanted} and this space is \
+                     served {}; it holds {n} `{}` row(s), and an import onto another version \
+                     goes only into an empty space. Nothing was written",
+                    current.version, e.name
+                )));
+            }
+        }
+        // **The database takes X's rows.** The question `Spaces::fits` asks
+        // before it serves a tenant on a version that is not active.
+        let shape = ordo_exec::migrate::live_shape(pool, pool.schema())
+            .await
+            .map_err(|e| store_fault("the space's database", e.class(), &e))?;
+        let changes = ordo_schema::diff(&shape, None, &schema);
+        if let Some(first) = changes.first() {
+            return Err(refused(format!(
+                "version_unfit: the bundle was exported from {wanted}, and this space's \
+                 database is not that version's shape ({first}). Restore it as a database \
+                 instead (`ordo restore --record --tenant`), or export it again from a \
+                 tenant on {}. Nothing was written",
+                current.version
+            )));
+        }
+        let pin = v
+            .restore_pin(space, &wanted, caller, (self.now)())
+            .await
+            .map_err(|e| e.to_exec_error("the space was not pinned to the bundle's version"))?;
+        let moved = match pin {
+            registry_pin::Pinned { change } => Some(json!({
+                "from": change.from, "to": change.to, "epoch": change.epoch,
+                "cause": change.cause,
+            })),
+            _ => None,
+        };
+        Ok((stored, moved))
     }
 
     /// A fresh directory for one bundle: `<root>/<space>/<n>`, numbered
@@ -323,7 +478,7 @@ impl ExitOps {
             _ => SealedMode::Open,
         };
 
-        let (artifact, schema) = self.deployed().await?;
+        let (artifact, schema) = self.deployed(space).await?;
         let sid = SpaceId(space.to_string());
         let correlation = format!("exp_{space}_{}", artifact.version);
         let dir = self.bundle_dir(space)?;
@@ -539,9 +694,10 @@ impl ExitOps {
         let dir = self.staged(root, space, bundle)?;
         let people = self.people_for(root, space, bundle)?;
 
-        let (artifact, fixture) = self.deployed_fixture(space).await?;
         let sid = SpaceId(space.to_string());
         let pool = self.space_pool(&sid).await?;
+        let (artifact, pinned) = self.import_version(space, &dir, &pool, caller).await?;
+        let fixture = self.fixture_of(&artifact, space)?;
         let exec = ordo_exec::Executor {
             pool,
             schema: fixture.schema.clone(),
@@ -598,6 +754,7 @@ impl ExitOps {
                 "objectsSkipped": report.objects_skipped,
                 "peopleMapped": report.people_mapped,
                 "profileRows": report.profile_rows,
+                "pinned": pinned,
             })],
             next_cursor: None,
         })
@@ -615,7 +772,7 @@ impl ExitOps {
             .get("confirm")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let (_, schema) = self.deployed().await?;
+        let (_, schema) = self.deployed(space).await?;
         let sid = SpaceId(space.to_string());
         let now = (self.now)();
 
@@ -670,6 +827,9 @@ impl ExitOps {
             rows: vec![json!({
                 "space": erased.space,
                 "rowsDeleted": erased.total_deleted(),
+                // What versions left behind here, reached with the rest
+                // (`$orphans`, plan-versions.md §2.7).
+                "orphans": erased.orphans,
                 "deleted": erased.deleted.iter().map(|(t, n)| json!({
                     "table": t, "rows": n,
                 })).collect::<Vec<_>>(),
@@ -800,7 +960,9 @@ fn import_refusal(e: ordo_exec::import::ImportError) -> ExecError {
         // A profile that cannot be restored faithfully: an op the program no
         // longer has, a member the map cannot place, or a destination that
         // already has a profile. Each is repaired outside the request.
-        | E::ProfileRefused { .. } => ExecError::new(ErrorCode::ImportRefused, message),
+        | E::ProfileRefused { .. }
+        // Access rows are restored as the space's owner: the owner runs it.
+        | E::NotOwner { .. } => ExecError::new(ErrorCode::ImportRefused, message),
         _ => ExecError::internal(message),
     }
 }

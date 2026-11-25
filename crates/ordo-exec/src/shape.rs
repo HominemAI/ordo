@@ -53,6 +53,134 @@ pub const SHADOW: &str = "ordo_shadow";
 /// `pg_namespace` when an operator is looking.
 pub const EXPORT_SHADOW: &str = "ordo_shadow_export";
 
+/// The shadow one load gate builds (`ordo_host::shape::verify_registry`):
+/// `ordo_shadow_<nonce>`, or `ordo_shadow_<nonce>_of_<schema>` by
+/// [`shadow_for`]'s rule, where `nonce` is 6 hex characters the gate drew.
+/// Two gates over one database at once (the boot's release check beside a
+/// pinned version's load, two pinned versions loading, two replicas
+/// booting) each build and drop their own, so neither deletes the other's
+/// mid-verification (reported fix versions-background-busy-flake). A hex
+/// nonce never begins `of_`, `export` or `diff_`, so it is never another
+/// shadow's name, and the longest schema name [`crate::check_schema_name`]
+/// allows keeps it within Postgres's 63 bytes.
+pub fn gate_shadow_for(schema: &str, nonce: &str) -> String {
+    if schema == crate::DEFAULT_SCHEMA {
+        format!("{SHADOW}_{nonce}")
+    } else {
+        format!("{SHADOW}_{nonce}_of_{schema}")
+    }
+}
+
+/// The advisory-lock namespace a live load gate holds its shadow under
+/// ("ORSH"), keyed by `hashtext(<shadow name>)`. Apart from every other
+/// namespace Ordo locks in.
+pub const GATE_SHADOW_LOCK_NS: i32 = 0x4F52_5348;
+
+/// A load gate's claim on its shadow ([`gate_shadow_for`]): a session
+/// advisory lock on a connection of its own, held while the gate lives.
+/// A shadow whose lock nobody holds was left by a gate that died, and the
+/// next gate drops it ([`ShadowHold::sweep`]). Dropping the hold closes
+/// the connection, which releases the lock.
+pub struct ShadowHold {
+    client: tokio_postgres::Client,
+    shadow: String,
+}
+
+impl ShadowHold {
+    /// Take the lock on `shadow` before it is built, so a sweeping gate
+    /// never sees it unheld while it exists.
+    pub async fn take(cfg: &crate::PoolConfig, shadow: &str) -> Result<ShadowHold, String> {
+        let (client, conn) = cfg
+            .connect_config()
+            .connect(tokio_postgres::NoTls)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        client
+            .execute(
+                "SELECT pg_advisory_lock($1, hashtext($2))",
+                &[&GATE_SHADOW_LOCK_NS, &shadow],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(ShadowHold {
+            client,
+            shadow: shadow.to_string(),
+        })
+    }
+
+    /// Drop every gate shadow of the deployment in `schema` that no live
+    /// gate holds: one a crashed or killed gate left. A shadow whose lock
+    /// is held is a gate running now and is kept. The names dropped.
+    pub async fn sweep(&self, schema: &str) -> Result<Vec<String>, String> {
+        // `_` is a LIKE wildcard, so the shape is checked again below.
+        let rows = self
+            .client
+            .query(
+                "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'ordo\\_shadow\\_%'",
+                &[],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut dropped = Vec::new();
+        for row in rows {
+            let name: String = row.get(0);
+            if name == self.shadow || !is_gate_shadow_of(&name, schema) {
+                continue;
+            }
+            let free: bool = self
+                .client
+                .query_one(
+                    "SELECT pg_try_advisory_lock($1, hashtext($2))",
+                    &[&GATE_SHADOW_LOCK_NS, &name],
+                )
+                .await
+                .map_err(|e| e.to_string())?
+                .get(0);
+            if !free {
+                continue;
+            }
+            let gone = self
+                .client
+                .batch_execute(&format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    ordo_schema::ddl::q(&name)
+                ))
+                .await;
+            let _ = self
+                .client
+                .execute(
+                    "SELECT pg_advisory_unlock($1, hashtext($2))",
+                    &[&GATE_SHADOW_LOCK_NS, &name],
+                )
+                .await;
+            gone.map_err(|e| e.to_string())?;
+            dropped.push(name);
+        }
+        Ok(dropped)
+    }
+}
+
+/// Is `name` a [`gate_shadow_for`] name of the deployment in `schema`?
+fn is_gate_shadow_of(name: &str, schema: &str) -> bool {
+    let Some(rest) = name.strip_prefix(&format!("{SHADOW}_")) else {
+        return false;
+    };
+    let (Some(nonce), Some(tail)) = (rest.get(..6), rest.get(6..)) else {
+        return false;
+    };
+    let hex = nonce
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    hex && if schema == crate::DEFAULT_SCHEMA {
+        tail.is_empty()
+    } else {
+        tail.strip_prefix("_of_") == Some(schema)
+    }
+}
+
 /// The prefix of the shadow `ordo versions diff` builds a stored version's
 /// schema in, to read its shape back (`ordo_host::versions_diff`). Each
 /// diff adds a random hex suffix and drops the namespace after, so two
@@ -149,8 +277,19 @@ impl Pool {
     /// effects and free of data: the server still resolves every
     /// expression and reports the row type, but evaluates nothing.
     pub async fn observed_shape(&self, sql: &str) -> Result<Vec<(String, String)>, PoolError> {
+        self.observed_shape_in(&self.shadow(), sql).await
+    }
+
+    /// [`Pool::observed_shape`] against a shadow built under a
+    /// caller-chosen name ([`Pool::build_shadow_in`]). The same rule holds
+    /// for `shadow`: one of this module's own names, never caller data.
+    pub async fn observed_shape_in(
+        &self,
+        shadow: &str,
+        sql: &str,
+    ) -> Result<Vec<(String, String)>, PoolError> {
         let inner = sql.trim().trim_end_matches(';');
-        let shadow = ordo_schema::ddl::q(&self.shadow());
+        let shadow = ordo_schema::ddl::q(shadow);
         let probe = format!(
             // DROP then CREATE, never CREATE OR REPLACE: replacing a view
             // may not change its column list, and every op has a different
@@ -248,6 +387,39 @@ struct Obj {
     kind: String,
     /// Postgres' canonical rendering, schema qualification stripped.
     def: String,
+}
+
+/// Whether a live object is the one the artifact declares.
+///
+/// The same text, or, for a reference while an entity rename runs
+/// (`$renames`, `renamed` as `(new, old)`), the same reference once two
+/// things the rename does to it are read through:
+///
+/// - it is checked at commit (`DEFERRABLE INITIALLY DEFERRED`), so a write
+///   by the new name lands its row in the old table, by the dual write,
+///   before the check;
+/// - it still points at the old table, which both versions keep whole,
+///   until the rename lands and moves it to the new one.
+///
+/// A reference made `NOT VALID` is not yet validated; a step validates it
+/// after its transaction.
+fn same_definition(want: &Obj, have: &Obj, renamed: &[(String, String)]) -> bool {
+    if want.def == have.def {
+        return true;
+    }
+    if have.kind != "foreign key" {
+        return false;
+    }
+    let plain = have
+        .def
+        .replace(" DEFERRABLE INITIALLY DEFERRED", "")
+        .replace(" NOT VALID", "");
+    if want.def == plain {
+        return true;
+    }
+    renamed.iter().any(|(new, old)| {
+        want.def == plain.replace(&format!("REFERENCES {old}("), &format!("REFERENCES {new}("))
+    })
 }
 
 impl Pool {
@@ -364,6 +536,7 @@ impl Pool {
         // ── the constraint half ──
         let want_obj = self.objects_of(shadow).await?;
         let have_obj = self.objects_of(live).await?;
+        let renamed = self.entity_renames_in(live).await?;
         for w in &want_obj {
             // A constraint on a table the live schema does not have is
             // already reported once, as the missing table. Saying it again
@@ -384,7 +557,7 @@ impl Pool {
                         w.kind, w.def
                     ),
                 )),
-                Some(h) if h.def != w.def => drift.push(Drift::object(
+                Some(h) if !same_definition(w, h, &renamed) => drift.push(Drift::object(
                     &w.table,
                     &w.name,
                     format!(
@@ -396,6 +569,30 @@ impl Pool {
             }
         }
         Ok(drift)
+    }
+
+    /// The entity renames `schema` is in the middle of (`$renames` rows
+    /// with an empty `field`), as `(new, old)`, each quoted as
+    /// `pg_get_constraintdef` quotes a table. Empty with no `$renames`.
+    async fn entity_renames_in(&self, schema: &str) -> Result<Vec<(String, String)>, PoolError> {
+        match self
+            .rows(&format!(
+                "SELECT quote_ident(\"entity\"), quote_ident(\"from\") FROM \"{}\".\"$renames\" \
+                 WHERE \"field\" = ''",
+                schema.replace('"', "\"\"")
+            ))
+            .await
+        {
+            Ok(rows) => Ok(rows
+                .into_iter()
+                .filter_map(|r| {
+                    let mut it = r.into_iter();
+                    Some((it.next()??, it.next()??))
+                })
+                .collect()),
+            Err(e) if e.is_missing_table() => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Every constraint and every free-standing index of one schema, with

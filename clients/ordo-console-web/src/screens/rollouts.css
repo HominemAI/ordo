@@ -1,0 +1,121 @@
+/* The Rollouts, Moves and Tenant builds screens. A reason or a door's
+   sentence is any text: its long words break so a phone never scrolls
+   sideways. */
+
+.rollouts .rollout-reason {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+}
+
+.rollouts .heading-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0 12px;
+}
+
+.rollouts .rollout {
+  margin: 8px 0 16px;
+}
+
+.rollouts .rollout h3 {
+  margin: 16px 0 0;
+  font-size: 1rem;
+}
+
+.rollouts .counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+.rollouts .counts .count {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.rollouts .row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.rollouts .row-actions button,
+.rollouts .kv button {
+  margin-top: 0;
+}
+
+.rollouts .kv li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  overflow-wrap: anywhere;
+}
+
+.rollouts .confirm {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.rollouts select {
+  display: block;
+  inline-size: 100%;
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.rollouts .rollout-form {
+  max-inline-size: 36rem;
+}
+
+.rollouts .more {
+  margin-top: 16px;
+}
+
+.rollouts .more summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+/* States that ask for the owner: words carry them, colour only adds. */
+.rollouts .rollout-paused,
+.rollouts .state-failed,
+.rollouts .move-refused {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.rollouts .rollout-running,
+.rollouts .state-moved {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.rollouts .rollback-check {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+}
+
+.rollouts input:user-invalid,
+.rollouts select:user-invalid {
+  border-color: var(--danger);
+}

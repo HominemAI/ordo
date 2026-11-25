@@ -349,7 +349,7 @@ async fn a_refused_tenant_is_held_and_the_others_are_brought_forward() {
     )
     .expect("v2 compiles");
     // The deployment's own database is empty, so it takes the change first,
-    // as `ordo migrate --apply` does before an `ordo apply`.
+    // as `ordo evolve --run` does before an `ordo apply`.
     let (_, applied) = ordo_host::schema_apply::apply(&control, &v2, "t", "t").await;
     applied.expect("the empty control database takes the unique title");
     let report = ordo_host::apply_op::run_program(&control, &fleet, &v2, vec![], "t", "t", true)

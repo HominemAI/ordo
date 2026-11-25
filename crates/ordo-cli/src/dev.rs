@@ -175,7 +175,7 @@ fn dev_version(root: &Path, text: &str, schema: &ordo_schema::Schema) -> String 
     let code = crate::function_code(root, schema)
         .map(|c| c.hashes)
         .unwrap_or_default();
-    let print = a::source_identity(text, a::FIRST_EDITION, &code);
+    let print = a::source_identity(text, ordo_plan::edition::of_source(text), &code);
     format!(
         "{}+dev.{}",
         a::declared_version(text).as_deref().unwrap_or("0.0.0"),
@@ -554,8 +554,8 @@ fn run_generator(cmd: &str, interface_path: &Path) -> (bool, String) {
 
 /// The D2 half of a save: classify the schema delta and settle it. A delta
 /// the production apply path takes whole is applied through it
-/// (`ordo_host::schema_apply::execute`, the same function `ordo migrate
-/// --apply` calls) and the rows survive; anything else, and an empty
+/// (`ordo_host::schema_apply::execute`, the same function `ordo apply`
+/// and `ordo evolve --run` call) and the rows survive; anything else, and an empty
 /// database, is a reset (§4.3). Appends `delta` and then `apply` or
 /// `reset` phases to `timing` in place and returns the message naming what
 /// changed, when there was one. Factored out so the pre-boot call (D3 has

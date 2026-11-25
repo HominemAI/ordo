@@ -1040,6 +1040,7 @@ async fn signed_state(db: &str) -> (ApiState, std::sync::Arc<ordo_host::Identity
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
     });
     let pool = ordo_exec::Pool::connect(ordo_exec::PoolConfig {
         db: db.to_string(),
@@ -1200,6 +1201,7 @@ async fn suspension_stops_a_valid_token_immediately() {
         second_step: Default::default(),
         console_home: Default::default(),
         deployment: Default::default(),
+        clones: Default::default(),
     });
     state.access = access.clone();
 
@@ -1275,6 +1277,8 @@ async fn a_capability_token_is_confined_and_dies_when_its_scope_changes() {
                 op.clone(),
                 ordo_identity::OpPin {
                     manifest_hash: ManifestHash([0u8; 32]),
+                    version: None,
+                    contract: false,
                     // A pin naming a field the served op does not read:
                     // an expansion, and therefore fatal. A bare hash
                     // change is no longer enough to kill a grant, which

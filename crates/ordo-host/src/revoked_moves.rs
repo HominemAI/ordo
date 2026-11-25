@@ -45,7 +45,13 @@ use crate::windows::Windows;
 /// [`ROLES_ENV`] names, none by default.
 pub const MOVE_SELF: &str = "std.space.moveOffRevoked";
 
-pub const OPS: [&str; 1] = [MOVE_SELF];
+/// **The tenant admin's view of its version** (`plan-versions.md` §1.9):
+/// the version serving the tenant, its order number and the app
+/// developer's label, and whether it is revoked. A tenant's managers and
+/// owner, as the other tenant settings are.
+pub const VERSION_SELF: &str = "std.space.version";
+
+pub const OPS: [&str; 2] = [MOVE_SELF, VERSION_SELF];
 
 /// The setting naming the tenant roles that may move their own tenant off
 /// a revoked version.
@@ -172,7 +178,13 @@ pub async fn sweep_paged(
     if open.is_empty() {
         return Ok(out);
     }
-    let only = window_filter(open.iter().map(|(w, _, _)| &w.target));
+    // A tenant a tenant build holds moves with its build (increment 16).
+    crate::versions::ensure_build_tables(pool).await?;
+    let only = format!(
+        "{} {}",
+        window_filter(open.iter().map(|(w, _, _)| &w.target)),
+        crate::versions::NOT_IN_A_BUILD
+    );
     let mut after: Option<String> = None;
     while out.moved.len() < batch {
         let page = v.on_revoked(batch, after.as_deref(), Some(&only)).await?;
@@ -318,9 +330,67 @@ pub fn log_lines(s: &Swept) -> Vec<String> {
 
 // ── the tenant's own op ──────────────────────────────────────────────────
 
-/// The spec of [`MOVE_SELF`].
+/// The specs of [`MOVE_SELF`] and [`VERSION_SELF`].
 pub fn specs() -> Vec<OpSpec> {
-    vec![OpSpec {
+    vec![move_spec(), version_spec()]
+}
+
+fn version_spec() -> OpSpec {
+    OpSpec {
+        name: VERSION_SELF.to_string(),
+        version_hash: crate::platform_ops::PLATFORM_VERSION.to_string(),
+        kind: OpKind::Read,
+        params: vec![],
+        output_fields: ["tenant", "version", "ordinal", "label", "revoked"]
+            .iter()
+            .map(|f| FieldSpec::new(*f))
+            .collect(),
+        live_capable: false,
+        reads_external: false,
+        sync: Syncability::NotSyncable(NotSyncable::NotARead),
+        requires_idempotency_key: false,
+        public: Default::default(),
+        refinable: RefineTier::None,
+        aggregate_only: false,
+        mode_label: None,
+        cost: OpCost::default(),
+    }
+}
+
+/// Answer [`VERSION_SELF`] for the tenant `space` the call is bound to: its
+/// version as pinned, the order number, the label, and whether it is
+/// revoked. Nothing about other versions or tenants.
+pub async fn version(ops: &ApplyOps, space: &str) -> Result<ExecResult, ExecError> {
+    let v = Versions::on(&ops.pool);
+    let read = |e: VersionRefusal| e.to_exec_error("the tenant's version could not be read");
+    let pinned = v.pin_of(space).await.map_err(read)?.and_then(|p| p.version);
+    let version = match pinned {
+        Some(p) => Some(p),
+        None => v.active_version().await.map_err(read)?,
+    };
+    let (ordinal, label, revoked) = match &version {
+        Some(name) => (
+            v.ordinal_of(name).await.map_err(read)?,
+            v.provenance(name).await.map_err(read)?.label,
+            v.revocation_of(name).await.map_err(read)?.is_some(),
+        ),
+        None => (None, None, false),
+    };
+    Ok(ExecResult {
+        position: None,
+        rows: vec![json!({
+            "tenant": space,
+            "version": version,
+            "ordinal": ordinal,
+            "label": label,
+            "revoked": revoked,
+        })],
+        next_cursor: None,
+    })
+}
+
+fn move_spec() -> OpSpec {
+    OpSpec {
         name: MOVE_SELF.to_string(),
         version_hash: crate::platform_ops::PLATFORM_VERSION.to_string(),
         kind: OpKind::Write,
@@ -338,7 +408,7 @@ pub fn specs() -> Vec<OpSpec> {
         aggregate_only: false,
         mode_label: None,
         cost: OpCost::default(),
-    }]
+    }
 }
 
 /// Run [`MOVE_SELF`] for the tenant `space` the call is bound to. The door

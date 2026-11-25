@@ -6,6 +6,8 @@ Status: **B1, B3 and B6 built 2026-11-23** (`plan-versions.md` increment
 `crates/ordo-exec/src/overlay.rs`). **B5 part 1 built 2026-11-24** (increment
 11b; `crates/ordo-host/src/every_tenant.rs`). **B5 part 2 built 2026-11-24**: §4 on
 the deployment's own database, `backfill.concurrency`, grants that stay killed.
+**B5 part 4 built 2026-11-24**: fills on the deployment's own database, and
+the new shape's uniques and checks held (§4).
 What was built differs from the text below in the places marked
 "Built". Written by the review
 of the evolution plans (`review-evolution-plans-2026-11-23.md`). It is the
@@ -297,8 +299,52 @@ in one database and 1 in its own.
   own database with dual writes too. It may start with that database on
   the version before when the stored path is one rewriting step; the own
   space waits for the first move's copy.
-- Not built: a fill there; a unique index or a check held to the close (no step on the menu adds one
-  with dual writes yet); dropping an orphaned column per tenant.
+- **Part 4 (2026-11-24): a fill there.** The move records each fill in
+  that database's `$fills` (`ordo_exec::overlay::FILLS_DDL`) under
+  `"$renames"` in `EXCLUSIVE` mode, before the expand and the copy. Every
+  write reads it under the same fence and, while its version does not
+  require the field, sets the column by the mapping and checks it is set
+  (`MoveOverlay::for_database`). So the copy runs once, and every space
+  there keeps the column current, as `$renames` keeps a rename. The close
+  removes the row after the `NOT NULL` lands; so does a `--run` step's end.
+- **Part 4: uniques and checks of the new shape.** In a step with dual
+  writes a unique or a check the new version adds leaves the expand for
+  `after` (`schema_apply::Triaged::held`; the receipt's `held`, present
+  only then, so older digests hold). The move's overlays guard it on every
+  row the moving tenant writes, on either version, refused by name. The
+  copied rows are checked before the switch, and every row at the close
+  and at a `--run` step's end: a row that breaks it refuses as
+  `held_constraint_broken`, naming up to 5 rows as `space/id` and the
+  command to run again. Nothing lands then.
+  - A check lands at the close, `NOT VALID` then `VALIDATE`, which takes
+    no long lock.
+  - **Built differently:** a unique lands at the switch, after the check
+    of the copied rows. The new version's `set` converges on a unique key
+    with `INSERT … ON CONFLICT`, which needs the index (found by the test).
+    A space on the version before in the same database meets it through
+    its overlay's copy. Since part 5 that is refused by name: the overlay
+    reads the database client's typed `is_unique_violation` and answers
+    `duplicate` (409), naming the field, the row and `ordo evolve
+    --tenant`, never the database's own text
+    (`ordo_exec::overlay::Duplicate`).
+  - **Part 5:** the guard of a unique reads a plain index over the space
+    and its columns, `<unique>$held`, built `CONCURRENTLY` after the
+    expand and dropped at the close. The guard is spelled with `=` so the
+    index is used; a row holding a null there is asked again with `IS NOT
+    DISTINCT FROM`. Tests: `prev_rename.rs`
+    (`a_space_on_the_version_before_that_meets_the_new_unique_is_refused_by_name`,
+    `the_guard_of_a_held_unique_reads_its_plain_index_until_the_close`,
+    which reads the guard's `EXPLAIN`).
+  - The pre-check of the expand skips a held constraint: it would read a
+    column the expand has not made, and the copied rows are checked
+    instead.
+- Tests: `prev_rename.rs`
+  (`a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_check_waits_for_the_close`,
+  `a_unique_the_new_version_adds_is_checked_against_the_copy_and_lands_at_the_switch`,
+  `a_step_run_with_a_held_check_names_the_rows_that_break_it`); notes e2e
+  `rollout-moves` (the new version's check refuses Cat's title in the
+  soak, by name).
+- Not built: dropping an orphaned column per tenant.
 
 **Grants a move killed stay killed (V-53, built 2026-11-24).** The door
 decides from the token, so a grant Y refuses would read again after a

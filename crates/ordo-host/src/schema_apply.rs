@@ -628,6 +628,11 @@ pub struct Choices {
     /// `<column>$plaintext` and orphaned, instead of dropping it. Off by
     /// default; stated by name with `--keep-plaintext <entity>.<field>`.
     pub keep_plaintext: std::collections::BTreeSet<(String, String)>,
+    /// The uniques and checks, by constraint name, a stored step holds to
+    /// its close ([`Triaged::held`]), as its receipt says. A run again of
+    /// the step, which finds its new columns there and so no backfill,
+    /// still holds them. Not part of the stored options.
+    pub held: std::collections::BTreeSet<String>,
     /// The blind-index backfills (B8, B10) the database being planned is
     /// in the middle of, `(entity, field)`, read from its `$seals` by a
     /// stored step's run. A run again after the expand no longer sees the
@@ -2157,6 +2162,250 @@ pub struct Triaged {
     /// filled field declares. Never sent by [`execute`]; the backfill's
     /// caller sends it ([`crate::backfill`]).
     pub after: Vec<Step>,
+    /// The uniques and checks the new version adds, held to `after` in a
+    /// step with dual writes (increment 11b part 4): the version before
+    /// still writes until the step's soaks close, so the database cannot
+    /// hold them yet. The host holds them on the moving versions' writes,
+    /// and the rows are checked against them before they land.
+    pub held: Vec<Held>,
+}
+
+/// One unique or check held to a step's close ([`Triaged::held`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub entity: String,
+    /// The constraint's name in the database.
+    pub name: String,
+    pub kind: HeldKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeldKind {
+    /// A unique over `columns`, within a space. `distinct_nulls`: two nulls
+    /// do not collide (a blind index); otherwise they do.
+    Unique {
+        fields: Vec<String>,
+        columns: Vec<String>,
+        distinct_nulls: bool,
+    },
+    /// A row invariant: `sql` over the row's own columns.
+    Check { source: String, sql: String },
+}
+
+impl Held {
+    pub fn to_json(&self) -> serde_json::Value {
+        match &self.kind {
+            HeldKind::Unique {
+                fields,
+                columns,
+                distinct_nulls,
+            } => serde_json::json!({
+                "entity": self.entity, "name": self.name, "kind": "unique",
+                "fields": fields, "columns": columns, "distinctNulls": distinct_nulls,
+            }),
+            HeldKind::Check { source, sql } => serde_json::json!({
+                "entity": self.entity, "name": self.name, "kind": "check",
+                "source": source, "sql": sql,
+            }),
+        }
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<Held> {
+        let strings = |k: &str| -> Option<Vec<String>> {
+            v[k].as_array()?
+                .iter()
+                .map(|c| c.as_str().map(String::from))
+                .collect()
+        };
+        let kind = match v["kind"].as_str()? {
+            "unique" => HeldKind::Unique {
+                fields: strings("fields")?,
+                columns: strings("columns")?,
+                distinct_nulls: v["distinctNulls"].as_bool()?,
+            },
+            "check" => HeldKind::Check {
+                source: v["source"].as_str()?.to_string(),
+                sql: v["sql"].as_str()?.to_string(),
+            },
+            _ => return None,
+        };
+        Some(Held {
+            entity: v["entity"].as_str()?.to_string(),
+            name: v["name"].as_str()?.to_string(),
+            kind,
+        })
+    }
+
+    /// What a written row must hold, as SQL over its own table
+    /// (`"<entity>"`): the guard the host runs on each row a moving version
+    /// writes while the constraint is held.
+    pub fn holds(&self) -> String {
+        let t = ordo_schema::ddl::q(&self.entity);
+        match &self.kind {
+            HeldKind::Unique {
+                columns,
+                distinct_nulls,
+                ..
+            } => {
+                let cols: Vec<String> = columns.iter().map(|c| ordo_schema::ddl::q(c)).collect();
+                let join = |op: &dyn Fn(&str) -> String| {
+                    cols.iter().map(|c| op(c)).collect::<Vec<_>>().join(" AND ")
+                };
+                let other = |same: String| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM {t} AS o WHERE o.\"$space\" = {t}.\"$space\" \
+                         AND o.\"id\" <> {t}.\"id\" AND {same})"
+                    )
+                };
+                // Spelled with `=` so the held index ([`Held::index`]) is
+                // read: `IS NOT DISTINCT FROM`, or an `OR` for the nulls, is
+                // not indexable, and the table would be read for each row.
+                let equal = other(join(&|c| format!("o.{c} = {t}.{c}")));
+                if *distinct_nulls {
+                    format!("NOT {equal}")
+                } else {
+                    // Two nulls collide too. Asked only of a row that holds
+                    // a null there, which a required field never does.
+                    let present = join(&|c| format!("{t}.{c} IS NOT NULL"));
+                    let alike = other(join(&|c| format!("o.{c} IS NOT DISTINCT FROM {t}.{c}")));
+                    format!("NOT {equal} AND ({present} OR NOT {alike})")
+                }
+            }
+            // Postgres passes a check whose result is null.
+            HeldKind::Check { sql, .. } => format!("coalesce(({sql}), true)"),
+        }
+    }
+
+    /// **The plain index a held unique's guard reads** (11b part 5):
+    /// `(index name, CREATE INDEX CONCURRENTLY …)` over the space and the
+    /// unique's columns, made once the expand has made them and dropped at
+    /// the close. Without it the guard reads the whole table for each row
+    /// written. `None` for a check, whose guard reads the row alone.
+    pub fn index(&self) -> Option<(String, String)> {
+        let HeldKind::Unique { columns, .. } = &self.kind else {
+            return None;
+        };
+        let mut name = format!("{}$held", self.name);
+        if name.len() > 63 {
+            let mut cut = 63;
+            while !name.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            name.truncate(cut);
+        }
+        let cols = std::iter::once(ordo_schema::ddl::q(ordo_schema::SPACE_COLUMN))
+            .chain(columns.iter().map(|c| ordo_schema::ddl::q(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({cols});\n",
+            ordo_schema::ddl::q(&name),
+            ordo_schema::ddl::q(&self.entity)
+        );
+        Some((name, sql))
+    }
+
+    /// The guard's rule, and what it asks, in words. `to` is the version
+    /// that adds it.
+    pub fn rule(&self, to: &str) -> (String, String) {
+        match &self.kind {
+            HeldKind::Unique { fields, .. } => (
+                format!("holds the unique `{}` that `{to}` adds", self.name),
+                format!("{} unique in its space", fields.join(", ")),
+            ),
+            HeldKind::Check { source, .. } => (
+                format!("holds the check `{}` that `{to}` adds", self.name),
+                format!("check {source}"),
+            ),
+        }
+    }
+
+    /// The rows that break it, `space/id`, at most `limit`: what a close
+    /// names when the constraint would not land.
+    pub async fn breaking(&self, pool: &Pool, limit: usize) -> Result<Vec<String>, String> {
+        let t = ordo_schema::ddl::q(&self.entity);
+        let sql = match &self.kind {
+            // One pass: the rows of each duplicated key, in a space.
+            HeldKind::Unique {
+                columns,
+                distinct_nulls,
+                ..
+            } => {
+                let cols = columns
+                    .iter()
+                    .map(|c| ordo_schema::ddl::q(c))
+                    .collect::<Vec<_>>();
+                let present = if *distinct_nulls {
+                    format!(
+                        "WHERE {}",
+                        cols.iter()
+                            .map(|c| format!("{c} IS NOT NULL"))
+                            .collect::<Vec<_>>()
+                            .join(" AND ")
+                    )
+                } else {
+                    String::new()
+                };
+                format!(
+                    "SELECT \"$space\", \"id\"::text FROM (SELECT \"$space\", \"id\", \
+                     count(*) OVER (PARTITION BY \"$space\", {k}) AS n FROM {t} {present}) d \
+                     WHERE n > 1 ORDER BY \"$space\", \"id\" LIMIT {limit}",
+                    k = cols.join(", ")
+                )
+            }
+            HeldKind::Check { sql, .. } => format!(
+                "SELECT \"$space\", \"id\"::text FROM {t} WHERE NOT coalesce(({sql}), true) \
+                 ORDER BY \"$space\", \"id\" LIMIT {limit}"
+            ),
+        };
+        let rows = pool.rows(&sql).await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default()
+                )
+            })
+            .collect())
+    }
+}
+
+/// A statement a stored receipt's `after` holds, as [`execute`] runs it: a
+/// `VALIDATE CONSTRAINT` runs after the transaction, on its own (§3.7).
+pub fn after_step(sql: &str) -> Step {
+    let sql = sql.trim_end();
+    let validate = sql
+        .strip_prefix("ALTER TABLE ")
+        .and_then(|rest| rest.split_once(" VALIDATE CONSTRAINT "))
+        .map(|(table, name)| {
+            let unq = |s: &str| {
+                s.trim()
+                    .trim_end_matches(';')
+                    .trim_matches('"')
+                    .replace("\"\"", "\"")
+            };
+            (unq(table), unq(name))
+        });
+    match validate {
+        Some((table, name)) => Step {
+            code: "C9",
+            phase: Phase::Validate,
+            sql: format!("{sql}\n"),
+            index: None,
+            constraint: Some(name),
+            table,
+        },
+        None => Step {
+            code: "B",
+            phase: Phase::Alter,
+            sql: format!("{sql}\n"),
+            index: None,
+            constraint: None,
+            table: String::new(),
+        },
+    }
 }
 
 /// One backfill a step runs, as rendered (`plan-backfill-dual-writes.md`
@@ -3176,6 +3425,19 @@ pub fn triage_counted(
                     }
                 }
             }
+            // A new required field a stored step fills by an expression:
+            // its column arrives empty, and a unique over it is held to the
+            // close and checked against the filled rows then (11b part 4).
+            Change::AddRequiredField { entity, field }
+                if matches!(
+                    choices.fill_for(entity, field).map(|f| &f.mapping),
+                    Some(FillMapping::Expr(_))
+                ) =>
+            {
+                if let Some(f) = schema.native(entity).and_then(|e| e.field(field)) {
+                    arriving.insert((entity.clone(), f.column()));
+                }
+            }
             _ => {}
         }
     }
@@ -3603,12 +3865,86 @@ pub fn triage_counted(
             _ => refused.push(not_built(c)),
         }
     }
+    // **Held to the close** (increment 11b part 4, `plan-backfill-dual-
+    // writes.md` §4): in a step with dual writes the version before keeps
+    // writing until the soaks close, so a unique or a check the new version
+    // adds lands then, once the rows are checked against it.
+    let mut held = Vec::new();
+    let dual = backfills
+        .iter()
+        .any(|b| b.sql.is_some() && b.sealing_from.is_none() && b.indexing_from.is_none());
+    for a in assessed.iter().filter(|a| a.refused.is_empty()) {
+        let Some(e) = schema.native(a.change.entity()) else {
+            continue;
+        };
+        let stated = match &a.change {
+            Change::AddUnique { object, .. }
+            | Change::AddCompositeUnique { object, .. }
+            | Change::AddCheck { object, .. } => choices.held.contains(object),
+            _ => false,
+        };
+        if !dual && !stated {
+            continue;
+        }
+        let h = match &a.change {
+            Change::AddUnique {
+                field,
+                object,
+                column,
+                ..
+            } => Held {
+                entity: e.name.clone(),
+                name: object.clone(),
+                kind: HeldKind::Unique {
+                    fields: vec![field.clone()],
+                    columns: vec![column.clone()],
+                    distinct_nulls: e.field(field).is_some_and(|f| f.indexed),
+                },
+            },
+            Change::AddCompositeUnique { key, object, .. } => Held {
+                entity: e.name.clone(),
+                name: object.clone(),
+                kind: HeldKind::Unique {
+                    fields: key.clone(),
+                    columns: resolve_columns(schema, &e.name, key),
+                    distinct_nulls: false,
+                },
+            },
+            Change::AddCheck {
+                object,
+                source,
+                sql,
+                ..
+            } => Held {
+                entity: e.name.clone(),
+                name: object.clone(),
+                kind: HeldKind::Check {
+                    source: source.clone(),
+                    sql: sql.clone(),
+                },
+            },
+            _ => continue,
+        };
+        // Its statements, when the triage made them, wait for the close.
+        let code = a.change.code();
+        let named = ordo_schema::ddl::q(&h.name);
+        let mine = |s: &Step| s.code == code && s.table == e.name && s.sql.contains(&named);
+        if !steps.iter().any(mine) {
+            continue;
+        }
+        let (moved, kept): (Vec<Step>, Vec<Step>) = steps.into_iter().partition(mine);
+        steps = kept;
+        after.extend(moved);
+        held.push(h);
+    }
     steps.sort_by_key(|s| s.phase);
+    after.sort_by_key(|s| s.phase);
     Ok(Triaged {
         steps,
         refused,
         backfills,
         after,
+        held,
     })
 }
 

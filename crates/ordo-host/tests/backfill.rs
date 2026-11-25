@@ -737,11 +737,10 @@ async fn a_second_worker_is_busy_and_a_done_backfill_does_nothing() {
 }
 
 /// Increment 11a: **a move with dual writes is refused where it cannot keep
-/// both shapes current**, each refusal naming the fix. On the deployment's
-/// own database a move copies a rename only (11b part 2): a fill there has
-/// no dual write for the other spaces, which would write rows it misses. A
-/// step filled by a backend function has no per-row mapping for the write
-/// path (D16's one-way step).
+/// both shapes current**, each refusal naming the fix. A step filled by a
+/// backend function has no per-row mapping for the write path (D16's
+/// one-way step), on a database of its own and on the deployment's own
+/// (where an expression fill moves since 11b part 4: `prev_rename.rs`).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_with_dual_writes_is_refused_where_it_cannot_keep_both_shapes() {
     let choices = fills(
@@ -761,10 +760,9 @@ async fn a_move_with_dual_writes_is_refused_where_it_cannot_keep_both_shapes() {
     };
     let err = ordo_host::dual_writes::run(&cx, "acme", &plan, &ctx, 0, OWNER)
         .await
-        .expect_err("a fill on a shared database");
+        .expect_err("a function fill on a shared database");
     let text = err.to_string();
-    assert!(text.starts_with("shared_fill_not_built"), "{text}");
-    assert!(text.contains("--run"), "{text}");
+    assert!(text.starts_with("one_way_step"), "{text}");
 
     // A database of its own, and a function fill: one way.
     let own = ordo_exec::route::SinglePool::new(tenant.clone());

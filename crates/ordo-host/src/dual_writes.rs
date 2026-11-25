@@ -58,9 +58,10 @@
 //! - The expand and the copy run once for the database, at the first
 //!   tenant's move. Later tenants find them done. `$renames` keeps both
 //!   columns current for every space there, whatever version it serves.
-//! - A step that fills a field is refused (`shared_fill_not_built`): only a
-//!   move's own writes run its mapping, and the other spaces would write
-//!   rows it misses.
+//! - A step that fills a field records each fill in `$fills` there before
+//!   its copy (11b part 4, [`record_fills`]). Every space there, whatever
+//!   version it serves, then sets the column by the mapping while its
+//!   version does not require the field, as `$renames` keeps a rename.
 //! - The soaks of one step there close together ([`close`], [`close_due`]):
 //!   when the last is due, and only once no space there serves the version
 //!   before ([`still_on`]). The close lands the new shape's constraints,
@@ -68,6 +69,19 @@
 //!   grants once, for the whole database. A reader of a table there reads
 //!   the old column until then (Q1). `ordo evolve --run` of the step there
 //!   is refused while such a move is open (`moves_open`).
+//!
+//! # Uniques and checks the new version adds (11b part 4)
+//!
+//! In a step with dual writes the version before keeps writing until the
+//! soaks close, so a unique or a check Y adds leaves the expand
+//! (`schema_apply::Triaged::held`). The move's overlays hold it on every
+//! row the moving tenant writes. The copied rows are checked against it
+//! before the switch, and every row again at the close; one that breaks it
+//! refuses by name (`held_constraint_broken`), naming the rows. A check
+//! lands at the close. A unique lands at the switch ([`land_uniques`]):
+//! Y's writes that converge on its key need its index.
+//! The guard of a unique reads the table for each row written, with no
+//! index over the new column yet.
 //!
 //! # What waits
 //!
@@ -127,6 +141,7 @@ pub fn render(
     step: &str,
     backfills: &[BackfillStep],
     after: &[String],
+    held: &[sa::Held],
 ) -> Option<Value> {
     let mut forward: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
     let mut reverse: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
@@ -188,6 +203,14 @@ pub fn render(
             }));
         }
     }
+    // A unique or a check Y adds is held to the close (11b part 4, §4): the
+    // host holds it on every row either version writes in the move.
+    for h in held {
+        let (rule, asks) = h.rule(&y.version);
+        let guard = json!({ "holds": h.holds(), "field": asks, "rule": rule });
+        slot(&mut forward, &h.entity).2.push(guard.clone());
+        slot(&mut reverse, &h.entity).2.push(guard);
+    }
     let side = |serving: &str, other: &str, list: Vec<(String, Vec<Value>, Vec<Value>)>| {
         json!({
             "step": step, "serving": serving, "other": other,
@@ -202,6 +225,7 @@ pub fn render(
         "backfills": backfills.iter().map(BackfillStep::to_json).collect::<Vec<_>>(),
         "after": after,
         "orphans": orphans,
+        "held": held.iter().map(sa::Held::to_json).collect::<Vec<_>>(),
     }))
 }
 
@@ -427,9 +451,6 @@ pub async fn run(
 ) -> Result<Moved, EvolveRefusal> {
     let v = Versions::on(cx.control);
     let (target, shared) = cx.target(tenant, &plan.from, &plan.to).await?;
-    if shared {
-        shared_step_only_renames(cx, tenant, plan)?;
-    }
     let mut statements = 0usize;
     let mut m = match v.dual_move(tenant).await? {
         Some(m) if m.step != plan.digest => {
@@ -469,7 +490,8 @@ pub async fn run(
                 .flatten()
                 .filter_map(|s| s.as_str().map(String::from))
                 .collect();
-            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after) else {
+            let held = crate::evolve::held_of(&receipt);
+            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after, &held) else {
                 return Err(cx.err(
                     tenant,
                     &plan.from,
@@ -503,6 +525,13 @@ pub async fn run(
     let overlay: Value = serde_json::from_str(&m.overlay)
         .map_err(|e| EvolveRefusal::Store(format!("the move's overlays: {e}")))?;
     let mut reports = Vec::new();
+    if shared && matches!(m.phase, MovePhase::Expanding | MovePhase::Backfilling) {
+        // Every space there keeps a fill's column current, whatever version
+        // it serves: recorded before the expand and the copy (11b part 4).
+        record_fills(&target, &overlay, &plan.from, &plan.to)
+            .await
+            .map_err(|e| cx.err(tenant, &plan.from, &plan.to, "internal", e, true))?;
+    }
     if matches!(m.phase, MovePhase::Expanding | MovePhase::Backfilling) {
         // The expand, once. The database still records X after it. A move
         // stopped after its expand landed and before its phase moved finds
@@ -605,6 +634,32 @@ pub async fn run(
     }
     let mut pinned = None;
     if m.phase == MovePhase::Gated {
+        // A unique or a check Y adds must hold over the copied rows before
+        // Y serves them (11b part 4). One that would not is named, with its
+        // rows, and the move waits here.
+        let fix = format!(
+            "run the move again (`ordo evolve --tenant {tenant} --to {}`). The tenant serves \
+             `{}` meanwhile",
+            plan.to, plan.from
+        );
+        check_held(&target, &overlay, &m.to, &fix)
+            .await
+            .map_err(|why| {
+                cx.err(
+                    tenant,
+                    &plan.from,
+                    &plan.to,
+                    "held_constraint_broken",
+                    why,
+                    false,
+                )
+            })?;
+        // A unique lands now, before Y serves: Y's writes that converge on
+        // its key (`INSERT … ON CONFLICT`) need its index. A check waits for
+        // the close.
+        land_uniques(&target, &overlay)
+            .await
+            .map_err(|why| cx.err(tenant, &plan.from, &plan.to, "execute_failed", why, false))?;
         // The switch (§2.1 step 5).
         let at = crate::runtime::now_secs();
         let until = at.saturating_add(soak).max(at);
@@ -748,25 +803,43 @@ pub async fn close(
     let (x, y) = (crate::evolve::compiled(&a)?, crate::evolve::compiled(&b)?);
     // What waited for the close: each new column's `NOT NULL`. Y has
     // written every row since the switch, and the backfill every row before.
+    // And each unique or check Y adds, once the rows are checked against
+    // it (11b part 4): one that would not land is named, with its rows. A
+    // unique the switch landed is not sent again.
+    let landed = existing_constraints(&target, &overlay)
+        .await
+        .map_err(|e| run_err("internal", e))?;
     let after: Vec<sa::Step> = overlay["after"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|s| s.as_str())
-        .map(|sql| sa::Step {
-            code: "B",
-            phase: sa::Phase::Alter,
-            sql: format!("{sql}\n"),
-            index: None,
-            constraint: None,
-            table: String::new(),
-        })
+        .filter(|sql| !landed.iter().any(|n| sql.contains(&q(n))))
+        .map(sa::after_step)
         .collect();
+    let fix = format!(
+        "close the soak again (`ordo evolve --tenant {tenant} --close-soak`), or revert it \
+         (`--revert`)"
+    );
+    check_held(&target, &overlay, &m.to, &fix)
+        .await
+        .map_err(|why| run_err("held_constraint_broken", why))?;
     if !after.is_empty() {
         sa::execute(&target, &after)
             .await
             .map_err(|f| run_err("execute_failed", f.to_string()))?;
     }
+    // Each fill's `NOT NULL` has landed: no space there writes it by its
+    // mapping any more.
+    let filled: Vec<BackfillStep> = overlay["backfills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(BackfillStep::from_json)
+        .collect();
+    forget_fills(&target, &filled)
+        .await
+        .map_err(|e| run_err("internal", format!("$fills: {e}")))?;
     match sa::schema_state(&target, &y.schema).await {
         Ok(sa::SchemaState::Matches { .. }) => {}
         Ok(other) => {
@@ -886,49 +959,171 @@ pub fn same_database(a: &Pool, b: &Pool) -> bool {
     a.host == b.host && a.port == b.port && a.db == b.db
 }
 
-/// **A move on the deployment's own database copies a rename only.** Every
-/// version writing there keeps both columns of a rename current
-/// (`$renames`, increment 11a), so the spaces still on the version before
-/// write the new column too. A fill has no such dual write outside a move:
-/// a space still on X would write rows the new column misses.
-fn shared_step_only_renames(
-    cx: &MoveContext<'_>,
-    tenant: &str,
-    plan: &StoredPlan,
-) -> Result<(), EvolveRefusal> {
-    let receipt: Value = serde_json::from_str(&plan.receipt).unwrap_or(Value::Null);
-    let fills: Vec<String> = receipt["backfills"]
+/// **A fill on the deployment's own database keeps every space current**
+/// (11b part 4). Each fill of the move's step is recorded in that
+/// database's `$fills`, under `"$renames"` in `EXCLUSIVE` mode, before the
+/// expand and the copy: every write takes that lock in `ROW SHARE` mode
+/// first, so a write that read the table before has committed when the copy
+/// starts, and every write after reads the fill and, while its version
+/// does not require the field, sets the column by the mapping
+/// (`ordo_exec::overlay::MoveOverlay::for_database`). The copy runs once
+/// for the database. Run again, it records the same rows.
+async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> Result<(), String> {
+    let mut sets: Vec<(String, String, String, String)> = Vec::new();
+    for e in overlay["forward"]["entities"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|b| b["code"] != "B4")
-        .map(|b| {
-            format!(
-                "{}.{}",
-                b["entity"].as_str().unwrap_or("?"),
-                b["field"].as_str().unwrap_or("?")
-            )
-        })
-        .collect();
-    if fills.is_empty() {
+    {
+        let entity = e["entity"].as_str().unwrap_or_default();
+        for s in e["sets"].as_array().into_iter().flatten() {
+            let (Some(column), Some(sql)) = (s[0].as_str(), s[1].as_str()) else {
+                continue;
+            };
+            // A rename's copy is `$renames`' already.
+            let fill = overlay["backfills"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(BackfillStep::from_json)
+                .find(|b| b.entity == entity && b.column == column && b.code != "B4");
+            if let Some(b) = fill {
+                sets.push((
+                    entity.to_string(),
+                    b.field,
+                    column.to_string(),
+                    sql.to_string(),
+                ));
+            }
+        }
+    }
+    if sets.is_empty() {
         return Ok(());
     }
-    Err(cx.err(
-        tenant,
-        &plan.from,
-        &plan.to,
-        "shared_fill_not_built",
-        format!(
-            "the tenant's rows are in the deployment's own database, and the step fills {} by \
-             a mapping only a move's own writes run, so the other spaces there would write rows \
-             it misses. Run the step on that database for every space at once with `ordo \
-             evolve --from {} --to {} --run`, or give the tenant a database of its own first",
-            fills.join(", "),
-            plan.from,
-            plan.to,
-        ),
-        false,
-    ))
+    let e = |x: ordo_exec::PoolError| x.to_string();
+    target
+        .rows(ordo_exec::overlay::RENAMES_DDL)
+        .await
+        .map_err(e)?;
+    target
+        .rows(ordo_exec::overlay::FILLS_DDL)
+        .await
+        .map_err(e)?;
+    let tx = target
+        .begin_for(ordo_exec::OpClass::AddressedWrite)
+        .await
+        .map_err(e)?;
+    tx.rows("LOCK TABLE \"$renames\" IN EXCLUSIVE MODE")
+        .await
+        .map_err(e)?;
+    for (entity, field, column, sql) in &sets {
+        tx.rows(&format!(
+            "INSERT INTO \"$fills\" (\"entity\", \"field\", \"column\", \"sql\", \"from\", \"to\") \
+             VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \"field\") DO UPDATE SET \
+             \"column\" = EXCLUDED.\"column\", \"sql\" = EXCLUDED.\"sql\", \
+             \"from\" = EXCLUDED.\"from\", \"to\" = EXCLUDED.\"to\"",
+            sql_lit(entity),
+            sql_lit(field),
+            sql_lit(column),
+            sql_lit(sql),
+            sql_lit(from),
+            sql_lit(to),
+        ))
+        .await
+        .map_err(e)?;
+    }
+    tx.commit().await.map_err(e)
+}
+
+/// **A fill's record leaves `$fills`** once its `NOT NULL` has landed: at
+/// the close of the step's soaks on a shared database, or at the end of the
+/// step run there with `ordo evolve --run`. Nothing when none was recorded.
+pub(crate) async fn forget_fills(
+    target: &Pool,
+    backfills: &[BackfillStep],
+) -> Result<(), ordo_exec::PoolError> {
+    for b in backfills.iter().filter(|b| b.code != "B4") {
+        match target
+            .rows(&format!(
+                "DELETE FROM \"$fills\" WHERE \"entity\" = {} AND \"field\" = {}",
+                sql_lit(&b.entity),
+                sql_lit(&b.field)
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if e.is_missing_table() => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// What the move holds (`$moves.overlay`'s `held`, 11b part 4).
+fn held_in(overlay: &Value) -> Vec<sa::Held> {
+    overlay["held"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(sa::Held::from_json)
+        .collect()
+}
+
+/// The rows checked against each unique or check the move holds.
+async fn check_held(target: &Pool, overlay: &Value, to: &str, fix: &str) -> Result<(), String> {
+    crate::evolve::check_held(target, &held_in(overlay), to, fix).await
+}
+
+/// The held constraints the database already has, by name.
+async fn existing_constraints(target: &Pool, overlay: &Value) -> Result<Vec<String>, String> {
+    let names: Vec<String> = held_in(overlay).into_iter().map(|h| h.name).collect();
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list = names
+        .iter()
+        .map(|n| sql_lit(n))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = target
+        .rows(&format!(
+            "SELECT conname::text FROM pg_constraint WHERE conname IN ({list})"
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect())
+}
+
+/// **A unique lands at the switch** (11b part 4), its rows checked first:
+/// the version after converges on its key (`INSERT … ON CONFLICT`), which
+/// needs its index. Once there, a later switch on the same database finds
+/// it and sends nothing.
+async fn land_uniques(target: &Pool, overlay: &Value) -> Result<(), String> {
+    let landed = existing_constraints(target, overlay).await?;
+    let steps: Vec<sa::Step> = held_in(overlay)
+        .into_iter()
+        .filter(|h| matches!(h.kind, sa::HeldKind::Unique { .. }) && !landed.contains(&h.name))
+        .flat_map(|h| {
+            overlay["after"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.as_str())
+                .filter(|sql| sql.contains(&q(&h.name)))
+                .map(sa::after_step)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if steps.is_empty() {
+        return Ok(());
+    }
+    sa::execute(target, &steps)
+        .await
+        .map(|_| ())
+        .map_err(|f| f.to_string())
 }
 
 /// The tenants in the deployment's own database, with their versions:

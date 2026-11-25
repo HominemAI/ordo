@@ -100,6 +100,71 @@ pub async fn renames_in(tx: &TxConn) -> Result<Vec<Rename>, PoolError> {
         .collect())
 }
 
+/// **`$fills`**: the fills a shared database is in the middle of
+/// (increment 11b part 4). A move on the deployment's own database that
+/// fills a field (B2, a new required field; B5, an optional field made
+/// required) records each fill here, under `"$renames"` in `EXCLUSIVE`
+/// mode, before its copy starts. Every write already holds `"$renames"` in
+/// `ROW SHARE` mode from its first statement, reads this table under the
+/// same fence ([`fills_in`]), and, while its version does not require the
+/// field, sets the column by the fill's mapping on every row it wrote
+/// ([`MoveOverlay::for_database`]). So every space there, whatever version
+/// it serves, keeps the new column current, as `$renames` keeps a rename's.
+///
+/// - `sql`: what the column is set to, over the row's own columns (a B5
+///   fill keeps what the row holds: `coalesce`).
+/// - `from`, `to`: the step's versions, named when a write breaks `to`'s
+///   `required`.
+///
+/// The row leaves when the step's soaks there close together, after its
+/// `NOT NULL` lands.
+pub const FILLS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS \"$fills\" ( \
+  \"entity\" text NOT NULL, \
+  \"field\" text NOT NULL, \
+  \"column\" text NOT NULL, \
+  \"sql\" text NOT NULL, \
+  \"from\" text NOT NULL, \
+  \"to\" text NOT NULL, \
+  PRIMARY KEY (\"entity\", \"field\") \
+)";
+
+/// One row of `$fills`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fill {
+    pub entity: String,
+    pub field: String,
+    pub column: String,
+    pub sql: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Read `$fills`. Run after [`renames_in`], whose lock fences this table
+/// too.
+pub async fn fills_in(tx: &TxConn) -> Result<Vec<Fill>, PoolError> {
+    let rows = tx
+        .rows(
+            "SELECT \"entity\", \"field\", \"column\", \"sql\", \"from\", \"to\" FROM \"$fills\" \
+             ORDER BY \"entity\", \"field\"",
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let mut it = r.into_iter();
+            Some(Fill {
+                entity: it.next()??,
+                field: it.next()??,
+                column: it.next()??,
+                sql: it.next()??,
+                from: it.next()??,
+                to: it.next()??,
+            })
+        })
+        .collect())
+}
+
 /// **`$seals`**: the sealed backfills a database is in the middle of
 /// (increment 13): a field being sealed (B7), or a sealed field gaining its
 /// blind index (B8). Recorded the way a rename is ([`RENAMES_DDL`]): the
@@ -440,6 +505,18 @@ pub struct Refused {
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rule != "is required" {
+            // A unique or a check the new version adds, held by the host
+            // until the soak's close (increment 11b part 4).
+            return write!(
+                f,
+                "check_violation: this tenant is moving between versions `{}` and `{}`, and a \
+                 write must hold under both. `{}` {}, and this write breaks it on row `{}` \
+                 ({}). Nothing was written. Change the value, or finish or revert the move \
+                 (`ordo evolve --tenant <id>`)",
+                self.serving, self.other, self.entity, self.rule, self.row, self.field,
+            );
+        }
         write!(
             f,
             "check_violation: this tenant is moving between versions `{}` and `{}`, and a \
@@ -517,6 +594,51 @@ impl MoveOverlay {
             other: String::new(),
             entities,
         })
+    }
+
+    /// **The overlay a version writes with on a database in the middle of
+    /// renames and fills**: [`MoveOverlay::for_renames`], and each fill
+    /// ([`FILLS_DDL`]) while this version does not require its field. Such
+    /// a version sets the column by the fill's mapping, and the write must
+    /// leave it set: the version after requires it (D10).
+    pub fn for_database(
+        schema: &ordo_schema::Schema,
+        renames: &[Rename],
+        fills: &[Fill],
+    ) -> Option<MoveOverlay> {
+        let mut out = MoveOverlay::for_renames(schema, renames).unwrap_or(MoveOverlay {
+            step: "prev".into(),
+            serving: String::new(),
+            other: String::new(),
+            entities: Vec::new(),
+        });
+        for f in fills {
+            let Some(e) = schema.native(&f.entity) else {
+                continue;
+            };
+            if e.field(&f.field).is_some_and(|x| !x.optional) {
+                continue;
+            }
+            out.serving.clone_from(&f.from);
+            out.other.clone_from(&f.to);
+            let guard = Guard {
+                holds: format!("{} IS NOT NULL", quote(&f.column)),
+                field: f.field.clone(),
+                rule: "is required".into(),
+            };
+            match out.entities.iter_mut().find(|x| x.entity == f.entity) {
+                Some(x) => {
+                    x.sets.push((f.column.clone(), f.sql.clone()));
+                    x.guards.push(guard);
+                }
+                None => out.entities.push(OverlayEntity {
+                    entity: f.entity.clone(),
+                    sets: vec![(f.column.clone(), f.sql.clone())],
+                    guards: vec![guard],
+                }),
+            }
+        }
+        (!out.entities.is_empty()).then_some(out)
     }
 
     /// The entity's part, when the overlay touches it.

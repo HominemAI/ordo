@@ -987,3 +987,393 @@ async fn tenants_on_the_deployments_own_database_move_and_their_soaks_close_toge
         );
     }
 }
+
+/// The deployment's own database with `acme` and `beta` on 1.0.0 (`kind`
+/// only), 30 rows in each of `acme`, `beta` and `home` (the own space), and
+/// the step to `y_src` stored with `fill`.
+async fn shared_with_fill(stem: &str, y_src: &str, fill: &str) -> (Pg, Pool, evolve::StoredPlan) {
+    let (pg, pool) = empty(stem).await;
+    ordo_host::tenants::ensure_table(&pool)
+        .await
+        .expect("$spaces");
+    for t in ["acme", "beta"] {
+        assert!(
+            ordo_host::tenants::reserve(&pool, t, t, "dev:ada", 10, None)
+                .await
+                .expect("reserved")
+        );
+        ordo_host::tenants::activate(&pool, t, 11)
+            .await
+            .expect("active");
+    }
+    let program = Program::compile(&shared_x()).expect("compiles");
+    ordo_host::apply_op::run_program(
+        &pool,
+        &ordo_exec::route::SinglePool::new(pool.clone()),
+        &program,
+        vec![],
+        OWNER,
+        "t",
+        true,
+    )
+    .await
+    .expect("applies");
+    store(&pool, y_src).await;
+    let choices = evolve::typed_options("", fill, "", "").expect("options");
+    let plan = evolve::evolve(&pool, "1.0.0", "1.1.0", &choices, None, OWNER, 1)
+        .await
+        .expect("the step stores")
+        .plan;
+    for s in ["acme", "beta", "home"] {
+        pg.exec(&format!(
+            "INSERT INTO note (\"$space\", id, rev, kind) \
+             SELECT '{s}', '{s}' || i, 1, '{s} ' || i FROM generate_series(1, 30) i"
+        ))
+        .expect("rows");
+    }
+    (pg, pool, plan)
+}
+
+fn shared_x() -> String {
+    notes("1.0.0", "  kind: text = \"\"\n")
+        + "\nop addNote($kind: text) =\n  set note { kind: $kind }\n"
+}
+
+/// 1.1.0: `label`, a new required field the step fills, then `extra`.
+fn labelled(extra: &str) -> String {
+    notes(
+        "1.1.0",
+        &format!("  kind: text = \"\"\n  label: text{extra}\n"),
+    ) + "\nop addNote($kind: text, $label: text) =\n  set note { kind: $kind, label: $label }\n"
+}
+
+fn step_context() -> evolve::StepContext {
+    evolve::StepContext {
+        settings: ordo_host::backfill::BackfillSettings {
+            chunk_rows: 25,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// A node on the version `space` soaks on, with its move's reverse
+/// overlay, as `Spaces` hands it out.
+async fn soaking_node(pool: &Pool, db: &str, source: &str, space: &str) -> Node {
+    moving_node(pool, db, source, space, true).await
+}
+
+/// A node writing `space` in its move: the reverse overlay on the version
+/// it moves to, the forward one on the version it leaves.
+async fn moving_node(pool: &Pool, db: &str, source: &str, space: &str, reverse: bool) -> Node {
+    let m = Versions::on(pool)
+        .dual_move(space)
+        .await
+        .expect("read")
+        .expect("a move");
+    let o = ordo_host::dual_writes::overlays_of(&m).expect("overlays");
+    let mut n = node_in(db, source, space, space).await;
+    let side = if reverse { o.reverse } else { o.forward };
+    n.exec.pool = n.exec.pool.with_overlay(Some(side));
+    n
+}
+
+/// Increment 11b part 4 (`plan-backfill-dual-writes.md` §4): **a fill on
+/// the deployment's own database keeps every space there current, and a
+/// check the new version adds is held to the close.** 1.1.0 adds `label`,
+/// required, filled from `kind`, and `check label != "bad"`. `acme` moves:
+/// the copy runs once for the database and `$fills` records the fill.
+/// `beta` and the own space, still on 1.0.0, write through the real write
+/// path and their rows get the label by the mapping; `acme` on 1.1.0 writes
+/// its own label, which is kept. The check is not in the database: the
+/// host holds it on `acme`'s writes, and a `bad` label is refused by name.
+/// `beta` moves with no second expand. The own space, still on 1.0.0,
+/// writes a row whose mapped label breaks the check. Once every space is
+/// past 1.0.0 the close is refused, naming that row; changed, the soaks
+/// close together: the `NOT NULL` and the check land, `$fills` is empty.
+///
+/// A regression looks like a row a space on 1.0.0 wrote with no label (the
+/// `NOT NULL` would fail at the close), a label of `acme`'s overwritten by
+/// the mapping, a check in the database before the close (a write on 1.0.0
+/// would fail on a rule it never had), or a close that fails on the raw
+/// constraint error instead of naming the row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fill_on_the_deployments_own_database_keeps_every_space_current_and_a_check_waits_for_the_close(
+) {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let y_src = labelled("\n  check label != \"bad\"");
+    let (pg, pool, plan) = shared_with_fill("ordo_shared_fill", &y_src, "note.label=kind").await;
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).expect("receipt");
+    assert_eq!(receipt["held"][0]["kind"], "check", "{receipt}");
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let ctx = step_context();
+    let week = 7 * 86_400;
+    let checks = "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'note$chk%'";
+
+    // `acme` moves: one copy for every space there; the fill is recorded.
+    let moved = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE label IS DISTINCT FROM kind"
+        ),
+        "0",
+        "every space's rows are filled"
+    );
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$fills\""), "1");
+    assert_eq!(is_nullable(&pg, "label"), "YES", "the NOT NULL waits");
+    assert_eq!(one(&pg, checks), "0", "the check waits for the close");
+
+    // `beta` and the own space on 1.0.0, `acme` on 1.1.0, through the real
+    // write path.
+    let beta = node_in(&pg.db, &shared_x(), "b", "beta").await;
+    let home = node_in(&pg.db, &shared_x(), "h", "home").await;
+    let acme = soaking_node(&pool, &pg.db, &y_src, "acme").await;
+    for i in 0..5 {
+        beta.write(format!(r#"addNote($kind: "beta wrote {i}")"#))
+            .await
+            .expect("beta writes as 1.0.0");
+        home.write(format!(r#"addNote($kind: "home wrote {i}")"#))
+            .await
+            .expect("the own space writes as 1.0.0");
+        acme.write(format!(
+            r#"addNote($kind: "acme wrote {i}", $label: "mine {i}")"#
+        ))
+        .await
+        .expect("acme writes as 1.1.0");
+    }
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE \"$space\" IN ('beta', 'home') \
+             AND label IS DISTINCT FROM kind"
+        ),
+        "0",
+        "a write on 1.0.0 gets the label by the mapping"
+    );
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM note WHERE label LIKE 'mine %'"),
+        "5",
+        "a label written on 1.1.0 is kept"
+    );
+    // The check, held by the host on 1.1.0's writes.
+    let err = acme
+        .write(r#"addNote($kind: "acme", $label: "bad")"#.into())
+        .await
+        .expect_err("the held check refuses");
+    assert!(err.contains("check_violation"), "{err}");
+    assert!(err.contains("holds the check"), "{err}");
+    assert!(err.contains("1.1.0"), "{err}");
+    assert_eq!(
+        one(&pg, "SELECT count(*) FROM note WHERE label = 'bad'"),
+        "0"
+    );
+
+    // `beta` moves: its expand and copy are found done.
+    let moved = dual_writes::run(&cx, "beta", &plan, &ctx, week, OWNER)
+        .await
+        .expect("beta moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(moved.statements, 0, "no second expand");
+
+    // The own space, still on 1.0.0, writes a row the check refuses.
+    home.write(r#"addNote($kind: "bad")"#.into())
+        .await
+        .expect("1.0.0 has no such rule");
+    let bad = one(&pg, "SELECT id FROM note WHERE label = 'bad'");
+
+    // Every space past 1.0.0, both soaks due: the close names the row.
+    let v = Versions::on(&pool);
+    v.pin_own("home", "1.1.0", 0, OWNER, 20)
+        .await
+        .expect("the own space moves");
+    pg.exec("UPDATE \"$moves\" SET soak_until = 1")
+        .expect("due");
+    assert!(dual_writes::close_due(&cx).await.is_empty());
+    let err = dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect_err("a row breaks the check");
+    assert_eq!(err.class(), "held_constraint_broken", "{err}");
+    let text = err.to_string();
+    assert!(text.contains(&format!("home/{bad}")), "{text}");
+    assert!(text.contains("--close-soak"), "{text}");
+    assert_eq!(is_nullable(&pg, "label"), "YES", "nothing landed");
+    assert_eq!(one(&pg, checks), "0");
+
+    // Changed, the soaks close together and the check lands.
+    pg.exec("UPDATE note SET label = 'fine' WHERE label = 'bad'")
+        .expect("changed");
+    let mut closed = dual_writes::close_due(&cx).await;
+    closed.sort();
+    assert_eq!(closed, vec!["acme".to_string(), "beta".to_string()]);
+    assert_eq!(is_nullable(&pg, "label"), "NO");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'note$chk%' AND convalidated"
+        ),
+        "1"
+    );
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$fills\""), "0");
+    assert_eq!(one(&pg, "SELECT count(*) FROM \"$moves\""), "0");
+    assert_eq!(
+        ordo_exec::spacedb::recorded_version(&pool)
+            .await
+            .expect("recorded"),
+        ordo_exec::spacedb::TargetVersion::At("1.1.0".into())
+    );
+}
+
+/// Increment 11b part 4: **`ordo evolve --run` of a step that holds a
+/// check lands it at the step's end, after naming the rows that break it.**
+/// The step is run on the deployment's own database with no move open. A
+/// row whose mapped label is `bad` refuses the end by name, the command to
+/// run again in the refusal, and nothing lands. Changed, a run again lands
+/// the `NOT NULL` and the check.
+///
+/// A regression looks like the raw constraint error, or the check landing
+/// in the expand, before the copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_run_with_a_held_check_names_the_rows_that_break_it() {
+    let y_src = labelled("\n  check label != \"bad\"");
+    let (pg, pool, plan) = shared_with_fill("ordo_held_run", &y_src, "note.label=kind").await;
+    pg.exec("UPDATE note SET kind = 'bad' WHERE id = 'beta4'")
+        .expect("a bad row");
+    let err = evolve::run_step(&pool, &pool, "deployment", &plan, OWNER)
+        .await
+        .expect_err("a row breaks the check");
+    assert_eq!(err.class(), "held_constraint_broken", "{err}");
+    let text = err.to_string();
+    for want in ["beta/beta4", "check label", "--run"] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    let checks = "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'note$chk%'";
+    assert_eq!(one(&pg, checks), "0", "nothing landed");
+    assert_eq!(is_nullable(&pg, "label"), "YES");
+
+    pg.exec("UPDATE note SET kind = 'fine', label = 'fine' WHERE id = 'beta4'")
+        .expect("changed");
+    let ran = evolve::run_step(&pool, &pool, "deployment", &plan, OWNER)
+        .await
+        .expect("the step lands");
+    assert!(matches!(ran, evolve::StepRun::Ran { .. }), "{ran:?}");
+    assert_eq!(one(&pg, checks), "1");
+    assert_eq!(is_nullable(&pg, "label"), "NO");
+}
+
+/// Increment 11b part 4: **a unique the new version adds is held by the
+/// host until the switch, checked against the copied rows, and lands with
+/// the switch.** 1.1.0 adds `label`, required and `unique`, filled from
+/// `kind`. 2 of `acme`'s rows share a kind. Its move copies them and is
+/// refused at the switch, naming both rows and the command to run again;
+/// `acme` still serves 1.0.0, with no unique in the database. A write on
+/// 1.0.0 whose mapped label another row of `acme` holds is refused by
+/// name; one another space holds is not. Changed, the move switches and
+/// the unique lands, since 1.1.0's writes converge on its key (`INSERT …
+/// ON CONFLICT` needs the index). The close sends it no second time.
+///
+/// A regression looks like a switch over duplicate labels, a raw `23505`
+/// from the database before the switch, or 1.1.0 failing its first write
+/// with no index for its `ON CONFLICT`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_unique_the_new_version_adds_is_checked_against_the_copy_and_lands_at_the_switch() {
+    use ordo_host::dual_writes::{self, MoveContext};
+    use ordo_host::versions::MovePhase;
+    let y_src = labelled(" unique");
+    let (pg, pool, plan) = shared_with_fill("ordo_shared_unique", &y_src, "note.label=kind").await;
+    let receipt: serde_json::Value = serde_json::from_str(&plan.receipt).expect("receipt");
+    assert_eq!(receipt["held"][0]["kind"], "unique", "{receipt}");
+    pg.exec("UPDATE note SET kind = 'twice' WHERE id IN ('acme3', 'acme7')")
+        .expect("a duplicate");
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let ctx = step_context();
+    let week = 7 * 86_400;
+    let uniques = "SELECT count(*) FROM pg_constraint WHERE conname = 'note$label$uq'";
+
+    let err = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect_err("2 rows share a label");
+    assert_eq!(err.class(), "held_constraint_broken", "{err}");
+    let text = err.to_string();
+    for want in [
+        "acme/acme3",
+        "acme/acme7",
+        "note$label$uq",
+        "ordo evolve --tenant acme",
+    ] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    let v = Versions::on(&pool);
+    assert_eq!(
+        v.pin_of("acme")
+            .await
+            .expect("read")
+            .and_then(|p| p.version),
+        Some("1.0.0".to_string()),
+        "acme still serves 1.0.0"
+    );
+    assert_eq!(one(&pg, uniques), "0");
+
+    // Still on 1.0.0, a write whose mapped label another row of `acme`
+    // holds is refused by name; one another space holds is not.
+    let acme_x = moving_node(&pool, &pg.db, &shared_x(), "acme", false).await;
+    let err = acme_x
+        .write(r#"addNote($kind: "acme 1")"#.into())
+        .await
+        .expect_err("the held unique refuses");
+    assert!(err.contains("check_violation"), "{err}");
+    assert!(err.contains("note$label$uq"), "{err}");
+    acme_x
+        .write(r#"addNote($kind: "beta 1")"#.into())
+        .await
+        .expect("unique within a space");
+
+    // Changed, the move switches, and the unique lands with it: 1.1.0's
+    // writes converge on its key.
+    pg.exec("UPDATE note SET kind = 'once', label = 'once' WHERE id = 'acme7'")
+        .expect("changed");
+    let moved = dual_writes::run(&cx, "acme", &plan, &ctx, week, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(one(&pg, uniques), "1", "the unique lands at the switch");
+    let acme = moving_node(&pool, &pg.db, &y_src, "acme", true).await;
+    acme.write(r#"addNote($kind: "k", $label: "twice")"#.into())
+        .await
+        .expect("converges on the label");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT count(*) FROM note WHERE \"$space\" = 'acme' AND label = 'twice'"
+        ),
+        "1"
+    );
+
+    // `beta` moves, the own space moves, the soaks close: the unique lands.
+    dual_writes::run(&cx, "beta", &plan, &ctx, week, OWNER)
+        .await
+        .expect("beta moves");
+    v.pin_own("home", "1.1.0", 0, OWNER, 20)
+        .await
+        .expect("the own space moves");
+    let closed = dual_writes::close(&cx, "acme", OWNER)
+        .await
+        .expect("the soaks close");
+    assert_eq!(closed.together, vec!["beta".to_string()]);
+    assert_eq!(one(&pg, uniques), "1");
+    assert_eq!(is_nullable(&pg, "label"), "NO");
+}

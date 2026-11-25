@@ -14,14 +14,18 @@ import { noteInList, signIn, signedIn, stack } from '../support.js';
  * The program the move goes to: notes v3 at `version`, as `seal` and
  * `rehearsal` write it when `sealed` (notes.body sealed), always off the
  * reader line, with `title` renamed to `heading`. Made from notes v3's own
- * file so the two never drift, beside v3's `fn` code.
+ * file so the two never drift, beside v3's `fn` code. With `refused`, the
+ * new version also adds `check heading != "<refused>"` (11b part 4).
  */
-export function renamedTitle(version: string, sealed: boolean): string {
+export function renamedTitle(version: string, sealed: boolean, refused?: string): string {
   const v3 = readFileSync(join(stack().programV3, 'notes.ordo'), 'utf8');
   const swaps: [string, string][] = [
     ['domain notes @ 0.3.0', `domain notes @ ${version}`],
     ['reader note_viewer reads notes, notesAccess', 'reader note_viewer reads notesAccess'],
-    ['  title: text\n', '  heading: text = "" prev(title)\n'],
+    [
+      '  title: text\n',
+      `  heading: text = "" prev(title)\n${refused ? `  check heading != "${refused}"\n` : ''}`,
+    ],
     ['set notes { title: $title,', 'set notes { heading: $title,'],
     ['set notes { id: $id, rev: $rev, title: $title', 'set notes { id: $id, rev: $rev, heading: $title'],
     ['[id, rev, title,', '[id, rev, title: heading,'],

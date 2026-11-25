@@ -29,6 +29,10 @@
  * 6. Ann shared a note with Ben before the rollout. Her move killed that
  *    share, and it stays closed after the rollback: Ben's page says so and
  *    holds none of it. Ann shares again and Ben reads it (11b part 3).
+ * 7. The new version also adds `check heading != "<a title>"`. In the soak
+ *    the check is not in the tenants' databases: the host holds it, and
+ *    Cat's save of that title is refused by name, the note unchanged
+ *    (11b part 4).
  *
  * A regression looks like a typed title missing after a reload, a tenant
  * the rollout moves without a copy (never `backfilling`), a failed tenant,
@@ -41,10 +45,13 @@
 import { expect, test } from '@playwright/test';
 import { door, developer } from '../developer.js';
 import { acceptInvitation, invitationFor, owner, sharedList } from '../people.js';
-import { addNote, applyProgram, ensureServing, servingVersion, signedIn, stack, unique } from '../support.js';
+import { addNote, applyProgram, ensureServing, noteInList, servingVersion, signedIn, stack, unique } from '../support.js';
 import { holds, openV2, renamedTitle, retitle, watchTenant } from './moves.js';
 
 test.describe.configure({ mode: 'serial' });
+
+/** A title the new version's check refuses (11b part 4). */
+const REFUSED = 'A title the new version refuses';
 
 test('a rollout moves 3 tenants through a rename under live writes, and a rollback in the soak keeps every write', async ({
   browser,
@@ -88,7 +95,7 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
     });
 
     await test.step(`${to} is stored, and its step runs on the deployment's own database`, () => {
-      expect(ordo(['apply', renamedTitle(to, sealed), '--no-activate'])).toContain(to);
+      expect(ordo(['apply', renamedTitle(to, sealed, REFUSED), '--no-activate'])).toContain(to);
       expect(ordo(['evolve', '--from', from, '--to', to])).toContain('B4');
       ordo(['evolve', '--from', from, '--to', to, '--run']);
       ordo(['versions', 'set', 'backfill.chunk_rows', '1', '--reason', 'one row per turn, to type during it']);
@@ -137,6 +144,20 @@ test('a rollout moves 3 tenants through a rename under live writes, and a rollba
         await holds(p.page, added[i]!);
         await retitle(p.page, titles[i]![0]!, soaked[i]!);
       }
+    });
+
+    await test.step(`in the soak, a title ${to}'s check refuses is refused by name; the check waits for the close`, async () => {
+      const p = people[2]!.page;
+      await noteInList(p, titles[2]![1]!).click();
+      await p.getByRole('textbox', { name: 'Title', exact: true }).fill(REFUSED);
+      await p.getByRole('button', { name: 'Save', exact: true }).click();
+      await expect(p.getByRole('alert')).toContainText('holds the check', { timeout: 30_000 });
+      await expect(p.getByRole('alert')).toContainText(to);
+      await p.getByRole('button', { name: 'Close', exact: true }).click();
+      await p.reload();
+      await signedIn(p);
+      await holds(p, titles[2]![1]!);
+      await expect(noteInList(p, REFUSED)).toHaveCount(0);
     });
 
     await test.step(`the rollout stops; the dry run names each as kept`, () => {

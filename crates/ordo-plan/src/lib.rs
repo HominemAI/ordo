@@ -33,6 +33,7 @@ pub mod blind;
 pub mod cost;
 pub mod download;
 pub mod each;
+pub mod edition;
 pub mod interface;
 pub mod public;
 pub mod whole;
@@ -2695,6 +2696,10 @@ impl Planner {
             // spellings that look equivalent and are not.
             "hash" => hash64_sql(&a[0]),
             "trim" => format!("btrim({})", a[0]),
+            // The part before or after the first separator; null when the
+            // separator is not there, so a split's unparsed rows show.
+            "before" => ordo_schema::check::before_sql(&a[0], &a[1]),
+            "after" => ordo_schema::check::after_sql(&a[0], &a[1]),
             other => {
                 return Err(PlanError {
                     code: "unsupported",

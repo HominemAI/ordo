@@ -142,6 +142,65 @@ async fn applying_a_regenerated_translation_lifts_the_stale_hold() {
     assert!(gate.refusal("std.patrons.list").is_none());
 }
 
+/// **Every served version is checked** (`plan-evolution-federation.md`
+/// step F3). A node serves 2 versions: the active one reads the renamed
+/// column, the one a tenant is pinned to still reads the old name. The
+/// timer holds the pinned version's tenants alone, names the version in
+/// its line, and the active version's tenants are served on. Through the
+/// door, the pinned tenant's read answers `external_changed`.
+#[tokio::test]
+async fn a_hold_found_for_one_served_version_holds_only_its_tenants() {
+    const DB: &str = "ordo_extr_per_version";
+    let old = fixture(PROGRAM, FOREIGN);
+    let (mut state, old, pool) = door_over(old, DB, 50, PoolConfig::from_env(), |k| k).await;
+    let new = fixture(&PROGRAM.replace("\"full_name\"", "\"label\""), FOREIGN);
+    Pg::named(DB)
+        .exec("ALTER TABLE crm.customers RENAME COLUMN full_name TO label")
+        .expect("renames");
+    let pinned = ordo_conformance::fixture_space().0;
+    let gate = {
+        let (active, old2, new2) = (new.clone(), old.clone(), new.clone());
+        let pinned = pinned.clone();
+        ExternalGate::per_version(
+            Arc::new(move || active.clone()),
+            Arc::new(move || {
+                vec![
+                    ("2.0.0".to_string(), new2.clone()),
+                    ("1.0.0".to_string(), old2.clone()),
+                ]
+            }),
+            Arc::new(move |space: &str| {
+                if space == pinned {
+                    old.clone()
+                } else {
+                    new.clone()
+                }
+            }),
+        )
+    };
+    state.executor = Arc::new(ExternalGated::new(state.executor.clone(), gate.clone()));
+
+    let lines = gate.watch_once(&pool).await.expect("reads");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("1.0.0: "),
+        "names the version: {lines:?}"
+    );
+    assert!(
+        gate.refusal_in("std.patrons.list", &pinned).is_some(),
+        "the pinned version's tenant is held"
+    );
+    assert!(
+        gate.refusal_in("std.patrons.list", "spc_on_active")
+            .is_none(),
+        "the active version's tenants are served on"
+    );
+    assert!(gate.refusal("std.patrons.list").is_none(), "the active one");
+    let (status, body) = call(&state, "GET", "/op/mine", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(body.to_string().contains("external_changed"), "{body}");
+}
+
 const REFS: &str = r#"
 external accounts (key: acct) from crm.accounts shared {
   id: uuid <- "account_id"

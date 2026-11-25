@@ -77,7 +77,14 @@ pub fn build_checks(
         .iter()
         .enumerate()
         .map(|(i, d)| {
-            let sql = render_cond(entity, fields, &d.cond)?;
+            let sql = render_cond(
+                entity,
+                &Cx {
+                    fields,
+                    mapping: false,
+                },
+                &d.cond,
+            )?;
             let source = condense(&d.cond);
             Ok(CheckRule {
                 name: constraint_name(entity, i, &source),
@@ -128,6 +135,41 @@ pub fn text_bound_checks(entity: &str, fields: &[Field]) -> Vec<CheckRule> {
         .collect()
 }
 
+/// **A backfill's forward mapping** (`plan-backfill-dual-writes.md` §2):
+/// an Ordo expression over one row's own fields, lowered to the SQL the
+/// backfill worker sets the new column to.
+///
+/// It is the row-local slice a `check` uses, for the same reason: the value
+/// is computed from this row alone, by the database, and the same rendering
+/// rules hold (money read in major units, no division, no clock, no other
+/// row, no sealed field). Every refusal a check would raise is raised here
+/// as `mapping_*` and names the mapping, never a check.
+pub fn render_mapping(entity: &str, fields: &[Field], expr: &Expr) -> Result<String, SchemaError> {
+    render_expr(
+        entity,
+        &Cx {
+            fields,
+            mapping: true,
+        },
+        expr,
+    )
+    .map_err(|e| SchemaError {
+        code: match e.code {
+            "check_beyond_row" => "mapping_beyond_row",
+            "check_time_dependent" => "mapping_time_dependent",
+            "check_unknown_field" => "mapping_unknown_field",
+            "check_sealed_field" => "mapping_sealed_field",
+            "json_opaque" => "mapping_json_opaque",
+            _ => "mapping_unsupported",
+        },
+        message: e
+            .message
+            .replace("a CHECK constraint", "a backfill mapping")
+            .replace("`check` on", "the backfill mapping on"),
+        span: e.span,
+    })
+}
+
 /// `{entity}$chk{i}$<condensed source>`, truncated to Postgres's 63-byte
 /// identifier limit on a UTF-8 boundary. The prefix alone is unique, so
 /// truncation can never collide two checks.
@@ -151,11 +193,34 @@ fn err(code: &'static str, span: ordo_syntax::Span, message: String) -> SchemaEr
     }
 }
 
-fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, SchemaError> {
+/// What an expression is rendered for: a `check` (a predicate the
+/// database enforces) or a backfill's mapping (a value the worker writes).
+/// A mapping also takes the text functions and `+` over text.
+struct Cx<'a> {
+    fields: &'a [Field],
+    mapping: bool,
+}
+
+/// `before(t, sep)`: the part of `t` before the first `sep`, null when
+/// `sep` is not in it (DL §3, Expression functions). One spelling for the
+/// planner and a backfill's mapping.
+pub fn before_sql(t: &str, sep: &str) -> String {
+    format!("(CASE WHEN strpos({t}, {sep}) > 0 THEN left({t}, strpos({t}, {sep}) - 1) END)")
+}
+
+/// `after(t, sep)`: the part of `t` after the first `sep`, null when `sep`
+/// is not in it.
+pub fn after_sql(t: &str, sep: &str) -> String {
+    format!(
+        "(CASE WHEN strpos({t}, {sep}) > 0 THEN substr({t}, strpos({t}, {sep}) + length({sep})) END)"
+    )
+}
+
+fn render_cond(entity: &str, cx: &Cx, c: &Condition) -> Result<String, SchemaError> {
     Ok(match c {
         Condition::Compare { op, lhs, rhs, span } => {
-            let l = render_expr(entity, fields, lhs)?;
-            let r = render_expr(entity, fields, rhs)?;
+            let l = render_expr(entity, cx, lhs)?;
+            let r = render_expr(entity, cx, rhs)?;
             match op {
                 // The distinctness family — total, never UNKNOWN — is the
                 // language's `==`/`!=` table (`null == null` true,
@@ -177,11 +242,9 @@ fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, 
             }
         }
         Condition::In { expr, list, span } => {
-            let e = render_expr(entity, fields, expr)?;
-            let items: Result<Vec<String>, SchemaError> = list
-                .iter()
-                .map(|i| render_expr(entity, fields, i))
-                .collect();
+            let e = render_expr(entity, cx, expr)?;
+            let items: Result<Vec<String>, SchemaError> =
+                list.iter().map(|i| render_expr(entity, cx, i)).collect();
             let _ = span;
             format!("COALESCE({e} IN ({}), false)", items?.join(", "))
         }
@@ -189,8 +252,8 @@ fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, 
             // The planner's shapes exactly: the right side is a VALUE, not
             // a pattern, so `contains` is strpos and never LIKE. All three
             // functions are IMMUTABLE, which a CHECK requires.
-            let l = render_expr(entity, fields, lhs)?;
-            let r = render_expr(entity, fields, rhs)?;
+            let l = render_expr(entity, cx, lhs)?;
+            let r = render_expr(entity, cx, rhs)?;
             match op {
                 TextOp::Contains => format!("(strpos({l}, {r}) > 0)"),
                 TextOp::Starts => format!("(left({l}, length({r})) = {r})"),
@@ -201,30 +264,26 @@ fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, 
             "({} IS {}NULL)",
             // `doc is not null` asks whether a `json` field holds a
             // document, which is the one question a document answers (28b).
-            match json_column(fields, expr) {
+            match json_column(cx.fields, expr) {
                 Some(col) => col,
-                None => render_expr(entity, fields, expr)?,
+                None => render_expr(entity, cx, expr)?,
             },
             if *negated { "NOT " } else { "" }
         ),
         Condition::And { items, .. } => {
-            let parts: Result<Vec<String>, SchemaError> = items
-                .iter()
-                .map(|i| render_cond(entity, fields, i))
-                .collect();
+            let parts: Result<Vec<String>, SchemaError> =
+                items.iter().map(|i| render_cond(entity, cx, i)).collect();
             format!("({})", parts?.join(" AND "))
         }
         Condition::Or { items, .. } => {
-            let parts: Result<Vec<String>, SchemaError> = items
-                .iter()
-                .map(|i| render_cond(entity, fields, i))
-                .collect();
+            let parts: Result<Vec<String>, SchemaError> =
+                items.iter().map(|i| render_cond(entity, cx, i)).collect();
             format!("({})", parts?.join(" OR "))
         }
         Condition::Not { inner, .. } => {
-            format!("(NOT {})", render_cond(entity, fields, inner)?)
+            format!("(NOT {})", render_cond(entity, cx, inner)?)
         }
-        Condition::BareBool(e) => format!("({} IS TRUE)", render_expr(entity, fields, e)?),
+        Condition::BareBool(e) => format!("({} IS TRUE)", render_expr(entity, cx, e)?),
         // `since` is execution-time by definition — the clock is an
         // operand. Same refusal as `today`, stated on the connective.
         Condition::Since { span, .. } => {
@@ -271,7 +330,7 @@ fn json_column(fields: &[Field], e: &Expr) -> Option<String> {
         .map(|f| q(&f.column()))
 }
 
-fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, SchemaError> {
+fn render_expr(entity: &str, cx: &Cx, e: &Expr) -> Result<String, SchemaError> {
     Ok(match e {
         Expr::Path { segments, span } => {
             if segments.len() > 1 {
@@ -296,7 +355,7 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
                 ));
             }
             let name = &segments[0].name;
-            let Some(f) = fields.iter().find(|f| &f.name == name) else {
+            let Some(f) = cx.fields.iter().find(|f| &f.name == name) else {
                 // `today`/`now` parse as bare paths; when no field shadows
                 // them, the author meant the clock — name the real problem
                 // rather than "unknown field".
@@ -381,7 +440,7 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
             ss,
             ..
         } => format!("TIMESTAMP '{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}'"),
-        Expr::Neg { expr, .. } => format!("(-{})", render_expr(entity, fields, expr)?),
+        Expr::Neg { expr, .. } => format!("(-{})", render_expr(entity, cx, expr)?),
         Expr::Binary { op, lhs, rhs, span } => {
             use ordo_syntax::ast::BinOp;
             if matches!(op, BinOp::Div) {
@@ -400,8 +459,14 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
                     ),
                 ));
             }
-            let l = render_expr(entity, fields, lhs)?;
-            let r = render_expr(entity, fields, rhs)?;
+            let l = render_expr(entity, cx, lhs)?;
+            let r = render_expr(entity, cx, rhs)?;
+            // `+` over text concatenates (DL §3, Text), a non-text side in
+            // its canonical text: in a mapping, where `full = first + " " +
+            // last` is the common case.
+            if cx.mapping && matches!(op, BinOp::Add) && (is_text(cx, lhs) || is_text(cx, rhs)) {
+                return Ok(format!("(({l})::text || ({r})::text)"));
+            }
             let sym = match op {
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
@@ -436,6 +501,31 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
                 ),
             ))
         }
+        Expr::FnCall { name, args, span } if cx.mapping => {
+            let a = args
+                .iter()
+                .map(|x| render_expr(entity, cx, x))
+                .collect::<Result<Vec<_>, _>>()?;
+            match (name.name.as_str(), a.as_slice()) {
+                ("lower", [t]) => format!("lower({t})"),
+                ("trim", [t]) => format!("btrim({t})"),
+                ("length", [t]) => format!("char_length({t})::bigint"),
+                ("coalesce", [x, y]) => format!("coalesce({x}, {y})"),
+                ("before", [t, sep]) => before_sql(t, sep),
+                ("after", [t, sep]) => after_sql(t, sep),
+                (other, _) => {
+                    return Err(err(
+                        "check_unsupported",
+                        *span,
+                        format!(
+                            "the backfill mapping on `{entity}` calls `{other}()`; a mapping \
+                             takes `lower`, `trim`, `length`, `coalesce`, `before` and `after`, \
+                             and `+` over text"
+                        ),
+                    ))
+                }
+            }
+        }
         Expr::FnCall { name, span, .. } => {
             return Err(err(
                 "check_unsupported",
@@ -459,6 +549,30 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
             ))
         }
     })
+}
+
+/// Whether `e` is text, for `+` in a mapping: a text field, a string, or
+/// a text function of either.
+fn is_text(cx: &Cx, e: &Expr) -> bool {
+    match e {
+        Expr::StrLit { .. } => true,
+        Expr::Path { segments, .. } => {
+            segments.len() == 1
+                && cx.fields.iter().any(|f| {
+                    f.name == segments[0].name
+                        && f.ty == FieldTy::Scalar(ordo_syntax::ScalarTy::Text)
+                })
+        }
+        Expr::FnCall { name, args, .. } => match name.name.as_str() {
+            "lower" | "trim" | "before" | "after" => true,
+            "coalesce" => args.iter().any(|a| is_text(cx, a)),
+            _ => false,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => {
+            matches!(op, ordo_syntax::ast::BinOp::Add) && (is_text(cx, lhs) || is_text(cx, rhs))
+        }
+        _ => false,
+    }
 }
 
 /// The condition as one condensed line — the author's spelling with

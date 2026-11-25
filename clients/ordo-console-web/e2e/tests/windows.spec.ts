@@ -122,6 +122,11 @@ test('add, refuse, edit, skip and delete maintenance windows; revoke a version a
   const second = versions.getByRole('listitem').filter({ hasText: '#2' });
   await expect(second).toBeVisible();
   await second.getByRole('button', { name: 'Revoke' }).click();
+  // A version that does not serve names where its tenants go: the active
+  // version unless another is chosen (plan-versions.md 1.11).
+  const moveTo = second.getByLabel('Its tenants move to');
+  await expect(moveTo).toBeVisible();
+  await expect(moveTo.locator('option:checked')).toHaveText('The active version');
   await second.getByLabel('Reason').fill('bad build');
   await second.getByRole('button', { name: 'Revoke' }).click();
   await touchIfAsked(page);
@@ -139,6 +144,7 @@ test('add, refuse, edit, skip and delete maintenance windows; revoke a version a
   const serving = versions.getByRole('listitem').filter({ hasText: 'active (new tenants)' });
   await serving.getByRole('button', { name: 'Revoke' }).click();
   await expect(serving.getByLabel('It serves now. Move to')).toBeVisible();
+  await expect(serving.getByLabel('Its tenants move to')).toHaveCount(0);
   await serving.getByRole('button', { name: 'Cancel' }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await fits(page);

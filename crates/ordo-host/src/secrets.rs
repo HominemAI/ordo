@@ -474,6 +474,21 @@ pub fn fn_fetch(
     Arc::new(FnEgress::new(store, roots, deny).with_limits(limits))
 }
 
+/// [`fn_fetch`], with a staging clone's calls sunk (`crate::sinks`): what
+/// the deployment's functions are given.
+pub fn fn_fetch_sinking(
+    store: Arc<SecretStore>,
+    roots: ordo_egress::TlsRoots,
+    deny: ordo_egress::DenyList,
+    limits: FnLimits,
+    control: ordo_exec::Pool,
+) -> Arc<dyn FnFetch> {
+    Arc::new(crate::sinks::SinkFetch::new(
+        FnEgress::new(store, roots, deny).with_limits(limits),
+        control,
+    ))
+}
+
 /// The three ops' specs.
 pub fn specs() -> Vec<OpSpec> {
     let text = |name: &str, max: u32| ParamSpec {

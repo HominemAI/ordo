@@ -3326,6 +3326,7 @@ pub fn engine_from_directory_served(
             ordo_identity::OpPin {
                 manifest_hash: ordo_identity::principal::ManifestHash::of(op.as_bytes()),
                 version: None,
+                contract: false,
                 unguarded: false,
                 entities: Vec::new(),
             },
@@ -3390,6 +3391,7 @@ pub fn engine_from_directory_served(
             ordo_identity::OpPin {
                 manifest_hash: ordo_identity::principal::ManifestHash::of(op.as_bytes()),
                 version: None,
+                contract: false,
                 unguarded: false,
                 entities: Vec::new(),
             },
@@ -3437,6 +3439,7 @@ pub fn engine_from_directory_served(
                     unguarded: false,
                     entities: Vec::new(),
                     version: None,
+                    contract: false,
                 },
             );
             continue;
@@ -3538,6 +3541,7 @@ pub fn engine_from_directory_served(
                 unguarded: false,
                 entities: Vec::new(),
                 version: None,
+                contract: false,
             },
         );
     }
@@ -3609,6 +3613,37 @@ pub fn op_pin(f: &Fixture, op: &str) -> Option<ordo_identity::OpPin> {
                 .iter()
                 .find(|r| r.entity == s.entity)
                 .expect("op_scope and op_row_scope list the same entities");
+            // Sealing and release, for the sharing rule across versions
+            // (`plan-versions.md` §1.7): the entity's fields stored sealed,
+            // read by this op or not (a sealed field may drop out of a
+            // plaintext read), and each field's `release member` effect.
+            let sealed = f
+                .schema
+                .entity(&s.entity)
+                .map(|e| {
+                    e.fields
+                        .iter()
+                        .filter(|x| x.sealed || x.private)
+                        .map(|x| x.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let release = f
+                .schema
+                .release
+                .iter()
+                .flat_map(|r| r.effects.iter())
+                .filter_map(|e| {
+                    let (entity, field) = match e {
+                        ordo_syntax::ReleaseEffect::Remove { entity, field, .. }
+                        | ordo_syntax::ReleaseEffect::Reassign { entity, field, .. } => {
+                            (entity, field)
+                        }
+                    };
+                    (entity.name == s.entity)
+                        .then(|| (field.name.clone(), ordo_schema::render_release_effect(e)))
+                })
+                .collect();
             EntityPin {
                 entity: s.entity.clone(),
                 read: s.read.clone(),
@@ -3617,6 +3652,8 @@ pub fn op_pin(f: &Fixture, op: &str) -> Option<ordo_identity::OpPin> {
                 read_guard: shape(&r.read),
                 write_guard: shape(&r.write),
                 caller_restricted: r.caller_restricted,
+                sealed,
+                release,
             }
         })
         .collect();
@@ -3625,6 +3662,7 @@ pub fn op_pin(f: &Fixture, op: &str) -> Option<ordo_identity::OpPin> {
         version: None,
         unguarded: rows.unguarded,
         entities,
+        contract: true,
     })
 }
 

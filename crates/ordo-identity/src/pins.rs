@@ -107,6 +107,17 @@ pub struct EntityPin {
     pub write_guard: GuardPin,
     /// The op's own body restricts this entity's rows to the caller's.
     pub caller_restricted: bool,
+    /// The entity's fields stored sealed (`sealed`, or a client-sealed
+    /// `blob private`), whether this op reads them or not: a version that
+    /// seals a field may stop reading it in plaintext. Compared only across
+    /// versions, on the fields the pin reached ([`disagreement`]), and only
+    /// when both pins carry it ([`OpPin::contract`]).
+    pub sealed: BTreeSet<String>,
+    /// The program's `release member` effect on each of this entity's
+    /// fields that has one, as source text (`remove`, `reassign to owner`):
+    /// what happens to the rows when a member leaves. Compared as
+    /// [`EntityPin::sealed`] is.
+    pub release: BTreeMap<String, String>,
 }
 
 impl EntityPin {
@@ -121,7 +132,25 @@ impl EntityPin {
             read_guard: GuardPin::Every,
             write_guard: GuardPin::Every,
             caller_restricted: false,
+            sealed: BTreeSet::new(),
+            release: BTreeMap::new(),
         }
+    }
+
+    /// The same columns and rows, sealing and release aside.
+    fn same_reach(&self, other: &EntityPin) -> bool {
+        self.entity == other.entity
+            && self.read == other.read
+            && self.written == other.written
+            && self.structure == other.structure
+            && self.read_guard == other.read_guard
+            && self.write_guard == other.write_guard
+            && self.caller_restricted == other.caller_restricted
+    }
+
+    /// Every field this entity's line reads or writes.
+    fn reached(&self) -> BTreeSet<&String> {
+        self.read.iter().chain(self.written.iter()).collect()
     }
 }
 
@@ -146,6 +175,12 @@ pub struct OpPin {
     /// called in a tenant now on another version is judged by
     /// [`disagreement`], not by [`compare`].
     pub version: Option<String>,
+    /// Whether each entity's [`EntityPin::sealed`] and
+    /// [`EntityPin::release`] were recorded. A pin made by the compiler
+    /// conversion has them; one decoded from `pins.v1` or `pins.v2`, made
+    /// before they were recorded, has not, and its sealing and release are
+    /// not compared.
+    pub contract: bool,
 }
 
 impl OpPin {
@@ -153,11 +188,19 @@ impl OpPin {
         self.entities.iter().find(|e| e.entity == name)
     }
 
-    /// The same manifest, whichever version it was read from.
+    /// The same manifest, whichever version it was read from. Sealing and
+    /// release are left out: within one version the manifest hash already
+    /// moves with them, and a pin made before they were recorded must not
+    /// read as changed.
     fn same_shape(&self, other: &OpPin) -> bool {
         self.manifest_hash == other.manifest_hash
             && self.unguarded == other.unguarded
-            && self.entities == other.entities
+            && self.entities.len() == other.entities.len()
+            && self
+                .entities
+                .iter()
+                .zip(&other.entities)
+                .all(|(a, b)| a.same_reach(b))
     }
 }
 
@@ -185,10 +228,14 @@ pub struct Disagreement {
 ///   narrowing apply silently between one deployment's redeploys: across
 ///   versions the ruling asks the guards to match.
 /// - So does a different `$caller` restriction or `unguarded` mark.
+/// - So does a field both reach that one version seals and the other does
+///   not, or whose `release member` effect differs (review V-10). Compared
+///   only when both pins recorded them ([`OpPin::contract`]).
 ///
 /// `None` when they agree.
 pub fn disagreement(pinned: &OpPin, serving: &OpPin) -> Option<Disagreement> {
-    if pinned.same_shape(serving) {
+    let contract = pinned.contract && serving.contract;
+    if pinned.same_shape(serving) && (!contract || pinned.entities == serving.entities) {
         return None;
     }
     if pinned.unguarded != serving.unguarded {
@@ -230,6 +277,22 @@ pub fn disagreement(pinned: &OpPin, serving: &OpPin) -> Option<Disagreement> {
         }
         if now.structure && !then.structure {
             return differs("is now walked as a tree");
+        }
+        if !contract {
+            continue;
+        }
+        // Every field the pin reached: by here the op reaches no field the
+        // pin did not. A version that seals one may stop reading it in
+        // plaintext, and that is the change to catch.
+        for field in then.reached() {
+            if then.sealed.contains(field) != now.sealed.contains(field) {
+                return differs(&format!(
+                    "`{field}` is sealed in one version and not in the other"
+                ));
+            }
+            if then.release.get(field) != now.release.get(field) {
+                return differs(&format!("`{field}`'s `release member` effect differs"));
+            }
         }
     }
     None
@@ -430,6 +493,10 @@ const VERSION: &str = "pins.v1";
 /// (`plan-versions.md` §1.7). Written only when some pin names a version, so
 /// a pin made without one encodes exactly as before.
 const VERSION_2: &str = "pins.v2";
+/// `pins.v2` with, per op, whether sealing and release were recorded, and
+/// per entity its sealed fields and its release effects
+/// (`plan-versions.md` §1.7). Written whenever some pin names a version.
+const VERSION_3: &str = "pins.v3";
 
 fn put(out: &mut String, s: &str) {
     out.push_str(&s.len().to_string());
@@ -441,8 +508,10 @@ fn put(out: &mut String, s: &str) {
 /// `BTreeSet` iteration order, entity-sorted lists, and a fixed field order.
 pub fn encode_pins(pins: &BTreeMap<String, OpPin>) -> String {
     let mut out = String::new();
+    // A pin with no version never meets the sharing rule, so it encodes
+    // exactly as before, and `pins.v2` is read but no longer written.
     let versioned = pins.values().any(|p| p.version.is_some());
-    put(&mut out, if versioned { VERSION_2 } else { VERSION });
+    put(&mut out, if versioned { VERSION_3 } else { VERSION });
     put(&mut out, &pins.len().to_string());
     for (op, pin) in pins {
         put(&mut out, op);
@@ -450,6 +519,7 @@ pub fn encode_pins(pins: &BTreeMap<String, OpPin>) -> String {
         if versioned {
             // `""` is no version: a declared version is never empty.
             put(&mut out, pin.version.as_deref().unwrap_or(""));
+            put(&mut out, if pin.contract { "1" } else { "0" });
         }
         put(&mut out, if pin.unguarded { "1" } else { "0" });
         put(&mut out, &pin.entities.len().to_string());
@@ -461,6 +531,14 @@ pub fn encode_pins(pins: &BTreeMap<String, OpPin>) -> String {
             put(&mut out, &guard_str(&e.read_guard));
             put(&mut out, &guard_str(&e.write_guard));
             put(&mut out, if e.caller_restricted { "1" } else { "0" });
+            if versioned {
+                put(&mut out, &set_str(&e.sealed));
+                put(&mut out, &e.release.len().to_string());
+                for (field, effect) in &e.release {
+                    put(&mut out, field);
+                    put(&mut out, effect);
+                }
+            }
         }
     }
     out
@@ -472,9 +550,11 @@ pub fn encode_pins(pins: &BTreeMap<String, OpPin>) -> String {
 /// the token.
 pub fn decode_pins(text: &str) -> Option<BTreeMap<String, OpPin>> {
     let mut r = Reader { s: text, i: 0 };
-    let versioned = match r.take()? {
-        VERSION => false,
-        VERSION_2 => true,
+    // (a version per op, sealing and release per entity)
+    let (versioned, contracted) = match r.take()? {
+        VERSION => (false, false),
+        VERSION_2 => (true, false),
+        VERSION_3 => (true, true),
         _ => return None,
     };
     let n: usize = r.take()?.parse().ok()?;
@@ -487,11 +567,12 @@ pub fn decode_pins(text: &str) -> Option<BTreeMap<String, OpPin>> {
         } else {
             None
         };
+        let contract = contracted && flag(r.take()?)?;
         let unguarded = flag(r.take()?)?;
         let en: usize = r.take()?.parse().ok()?;
         let mut entities = Vec::with_capacity(en);
         for _ in 0..en {
-            entities.push(EntityPin {
+            let mut e = EntityPin {
                 entity: r.take()?.to_string(),
                 read: parse_set(r.take()?),
                 written: parse_set(r.take()?),
@@ -499,7 +580,23 @@ pub fn decode_pins(text: &str) -> Option<BTreeMap<String, OpPin>> {
                 read_guard: parse_guard(r.take()?)?,
                 write_guard: parse_guard(r.take()?)?,
                 caller_restricted: flag(r.take()?)?,
-            });
+                sealed: BTreeSet::new(),
+                release: BTreeMap::new(),
+            };
+            if contracted {
+                e.sealed = parse_set(r.take()?);
+                let rn: usize = r.take()?.parse().ok()?;
+                for _ in 0..rn {
+                    let field = r.take()?.to_string();
+                    let effect = r.take()?.to_string();
+                    // One effect per field, in the encoder's order.
+                    if e.release.keys().next_back().is_some_and(|k| *k >= field) {
+                        return None;
+                    }
+                    e.release.insert(field, effect);
+                }
+            }
+            entities.push(e);
         }
         // The encoder writes entity-sorted lists; a token that arrives with
         // them shuffled would compare the same but hash differently, so the
@@ -514,6 +611,7 @@ pub fn decode_pins(text: &str) -> Option<BTreeMap<String, OpPin>> {
                 unguarded,
                 entities,
                 version,
+                contract,
             },
         );
     }

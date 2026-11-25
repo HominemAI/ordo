@@ -283,7 +283,14 @@ The pin this plan adds:
    database against the version.
 7. An in-flight request keeps its own `Arc`, as today.
 
-- The catalog and generated interface are served per version.
+- The catalog and generated interface are served per version. **Built
+  2026-11-24** (f4be01ad, `serve.rs`, `Deployment::manifests_in`):
+  `/catalog` and `/interface` read the version serving the space named,
+  ops and entities both, and carry `x-ordo-tenant-version`. A tenant on a
+  version this node has not loaded is answered `space_unavailable`,
+  naming no version, and only to a live token. A catalog read wakes no
+  evicted version. Test: `versions_loaded.rs`
+  (`each_tenant_reads_its_own_versions_catalog_and_interface`).
 - A pin switch closes the tenant's streams with a reconnect signal.
 - Refusals give version and setting detail to the deployment owner's token
   only. End users get a plain refusal.
@@ -376,6 +383,15 @@ figures are approximate):
   the schema is not yet shared by `Arc`: that changes the public type of
   `ordo_exec::Executor` and every test that builds one, and is left as a
   separate change while 2 other increments work in the same code.
+- **Measured 2026-11-24** (`versions_memory.rs`,
+  `schema_and_registry_share_of_a_view`, release, 1,000 clones held):
+  a schema clone is 16 KB (teamspace), 30 KB (shopfront), 41 KB
+  (notes-v2); a registry clone 92, 129 and 115 KB. So an `Arc` over the
+  schema alone saves 16 to 41 MB per 1,000 spaces per version; over both,
+  most of a view. Not built: the change touches about 170 places that build an `Executor`
+  while PRs 92 and 95 work in the same code, and views are already bounded
+  by `versions.memory_budget`. Do schema and registry together, after
+  those land.
 - What was set from it:
   - `versions.memory_budget` (`ORDO_VERSIONS_MEMORY_BUDGET`, 512MB): a
     view counts as 256 KB, the largest rounded up. Each loaded version
@@ -510,9 +526,18 @@ tenant on X was pinned to the active version's shape.
 - The door says `versions_disagree` (409) to the grant's holder only,
   naming both versions, the op, the entity and the fix (share again, or
   `ordo versions pin`). The security stream records `VersionsDisagree`.
-- Not compared: release and sealing. The pin carries neither, so a
-  version that seals a shared field is not caught here. Left, with the
-  dual-write shape during a move and moving share partners together.
+- **Release and sealing, built 2026-11-24** (346438d5, `pins.rs`,
+  `op_pin`): each entity in a pin records the entity's sealed fields
+  (`sealed` or `blob private`) and each field's `release member` effect
+  as source text. A versioned pin encodes as `pins.v3`; `pins.v2` still
+  decodes, as a pin whose sealing and release are unknown and so are not
+  compared. A field the pin reached that one version seals and the other
+  does not, or whose release effect differs, refuses as
+  `versions_disagree`, naming the field. A sealed field the op never
+  reached is not compared. Tests: `ordo-identity` `tests.rs` (6),
+  `share_contract.rs` (3, compiled programs through the node's engine).
+- Left: the dual-write shape during a move and moving share partners
+  together.
 - Tests: `ordo-identity` `tests.rs` (6); `notes_app.rs`, a share both
   ways between a tenant on notes v2 and one on notes v3, then the refusal.
 
@@ -1983,7 +2008,7 @@ round is about 35 minutes for the full suite.
 | 1 | **Version identity.** Full SHA-256 source identity, build identity recorded apart, edition field, settings outside the hash. Byte-stable across macOS and Linux CI. `ordo dev` serves under the real hash. | M | none | same source gives same digest on both platforms; an Ordo-only change moves no version | 27e |
 | 2 | **`Versions` client and pins.** `$spaces.version`, `$pins`, `$moves`, pin epoch, `VersionRefusal`, labels and `ordo versions list\|show\|diff`, "active" and new-tenant rule. Every tenant pinned to the active version. Session 1 built 2026-11-03: pins, `$pins`, `$moves`, `VersionRefusal`, new-tenant rule, `list\|show`. Session 2 built 2026-11-04: labels, git commits, `#n` names, `label\|diff` locally and over the door. Built. The epoch check and the pin stream moved to increment 3 (asks 16 and 17, 2026-11-04). | L | 1 | pins written with history; `std.deployment.versions` lists tenants per version; suite unchanged | none (core) |
 | 2b | **Revocation and maintenance windows.** Owner-set mark with reason, unrevoke, `--move-to` for the active version, the report of tenants on revoked versions (D8, asks 18 to 20). Per-tenant maintenance windows: range or cron, all, only or except, skips, the 24-month list (asks 22, 24). Built 2026-11-04: backend, door, CLI, and the console's screens and warnings. Moves at a window are increment 3 (ask 21). | M | 2 | a revoked version cannot be pinned, activated or given to new tenants; windows are set, skipped and listed the same through the door and on the host | none |
-| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). The remainder, 2026-11-23 (PR 40): schedules and listeners per version and the cursor hand-over (bf5e6b16), the client contract (3f7171dc), load guards and `loading` health (f40bed05), UTC times and fixed window caps (d8f1fc01), the console's revoke target (d46f2e48), memory measured with view eviction, `max_loaded` and `memory_budget` (95fb3cfb). Then the sharing rule and `versions_disagree` (§1.7) and the SDK's version-changed event (§1.9), d00afde0. ordo-react's header read is built too (2026-11-24). Left, checked 2026-11-24 and each larger than S: the schema shared by `Arc` (`Executor.schema` is held by value and every test that builds one changes), the per-version catalog and generated interface (`/catalog` is deployment wide and scoped to the asker, not to a tenant's version), and release and sealing in the share comparison (a pin holds neither, so `pins.v3` and the manifest builder change). | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); a share both ways between notes v2 and notes v3 tenants, and `versions_disagree` after a move (`notes_app.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
+| 3 | **Multi-version serving, dev first.** Pin epoch checked on write and the pin stream nodes tail (from 2, asks 16 and 17). Map of versions, load guards, digest at load, shape fingerprint, per-version catalog, served and minimum versions, sharing rule, client contract, background work, stream close, per-node health. Moves off a revoked version in a window or on demand (ruled 2026-11-05, §1.11). Session 1 built 2026-11-05: the fence, the stream, the map, per-tenant lookup and access, the shape fingerprint, runs per pin, `pin` and `tenantVersion`, the `new_tenant` check (§1.3, §1.4, §1.10). The remainder, 2026-11-23 (PR 40): schedules and listeners per version and the cursor hand-over (bf5e6b16), the client contract (3f7171dc), load guards and `loading` health (f40bed05), UTC times and fixed window caps (d8f1fc01), the console's revoke target (d46f2e48), memory measured with view eviction, `max_loaded` and `memory_budget` (95fb3cfb). Then the sharing rule and `versions_disagree` (§1.7) and the SDK's version-changed event (§1.9), d00afde0. ordo-react's header read is built too (2026-11-24). Built 2026-11-24 (branch `evo-catalog-share-arc`): the per-version catalog and generated interface (f4be01ad, §1.4), and release and sealing in the share comparison (`pins.v3`, 346438d5, §1.7). Left: the schema shared by `Arc`, measured (§1.5): a schema clone is 16 to 41 KB of a view, the registry 92 to 129 KB; not built while PRs 92 and 95 change the same code, and to be done for both together. | L | 2 | one bundle, 2 tenants on 2 versions, no refusal (`versions_serving.rs`); a share both ways between notes v2 and notes v3 tenants, and `versions_disagree` after a move (`notes_app.rs`); routines run per pin (`routines.rs`); a tenant on a revoked version moves in its next window, not before; memory at 1,000+ spaces recorded here | evolution-plans ask 3 (build) |
 | 4a | **Environments registered.** Declared chain, today's deployment marked production. **Built 2026-11-23, commit 0c62ff1a:** `$environments`, `std.deployment.environments` and `registerEnvironment`, `ordo environments list\|register`. Changing which environment a deployment is, removing and renaming one (owner, 2026-11-23) built in fbc3b4c6: `set-own`, `remove`, `rename`, each with a reason and on the stream; the deployment's own and one a stored promotion names are refused. | S | 1 | a missing environment is refused with the command that creates it | none |
 | | *Owner, 2026-11-23: 4b is built with 4a, and so are changing a deployment's own environment and removing or renaming one ("It's all part of the same plan"). Reading the source from the step before waited on Q11, ruled 2026-11-24 and built in the finish below.* | | | | |
 | 4b | **Promotion gate.** Target enforces it, source from the step before, named deployment owner on the stream, production pins only through the gate. The target's own checks: `requires`, function secrets, externals and readers (§3.1, review 2026-11-23). **Built 2026-11-23, fbc3b4c6:** `promotion.rs`, `std.deployment.promote` and `versionSource`, `ordo promote`, `ordo apply --env`, `$promotions`. **Finished 2026-11-24, c3ac5754 (owner rulings 2026-11-24):** the target reads the version from the step before's door itself, as the person promoting, with their own token for it from the same sign-in (Q11, no machine key; `step_door.rs`, the one client to another deployment's door). The gate no longer takes a source or an "activated" claim from the caller. The step before must answer as the environment the target expects and must have read the same person. `SourceCredential` is the one seam a GitHub workflow's token joins later. Each environment records its door (`ordo environments door`, `std.deployment.setEnvironmentDoor`: address, own space, identity handle). Staging is gated as production is: every step after the first pins only what arrived through the gate. `ordo apply` with no `--env` goes to the first step of the chain (dev; a deployment that registered nothing is its own first step, so it applies as before); a later step is refused naming dev's address and `ordo promote`. The reader check runs on the target (`ordo_exec::peer::check_readers`). `promotion.skip_staging` built (`ordo environments set skip-staging on`, `$promotion_settings`), named in a refusal about a staging step before. `ORDO_PROMOTION_PLAIN_HTTP` allows a plain address to another host. Tests: `crates/ordo-host/tests/promotion.rs` (real doors for dev and staging and one fake identity service; each refusal), `crates/ordo-cli/tests/promote.rs`. **Not built:** the `requires` check. The language has no `requires` yet: the parser refuses it (`ordo_syntax::auth`) and the host derives no needs (`plan-configuration-in-the-file.md` §3, step 2). The gate calls it once that step lands. | M | 4a | staging refuses a version dev has not activated; a caller's edited tree is refused naming the file | 27f |
@@ -2014,7 +2039,8 @@ round is about 35 minutes for the full suite.
   demand, by the tenant when granted, each to the developer's target.
 - Memory at 1,000+ spaces, measured and recorded here; `versions.max_loaded`
   and `versions.memory_budget` set from it; views evicted per space. Done
-  in the remainder (§1.5). Left: sharing the schema by `Arc`.
+  in the remainder (§1.5). Left: sharing the schema by `Arc`, measured
+  2026-11-24 (§1.5) and not built.
 - Load guards: `versions.min_residency`, `versions.idle_evict_after`,
   `versions.max_concurrent_loads` as settings. Built in the remainder
   (§1.4, "Load guards").
@@ -2023,7 +2049,8 @@ round is about 35 minutes for the full suite.
   naming the version (`LoadRefusal::Digest`, §6 conflict 4).
 - Session 3 built functions per version (9acbc2cf): one table per
   served version, and a function's `uses` resolve in its version (§1.10).
-  Left: the per-version catalog and generated interface.
+  The per-version catalog and generated interface, built 2026-11-24
+  (§1.4).
 - Schedules and listeners as the union over served versions; cursor
   hand-over at a switch. Built in the remainder (§1.10).
 - Session 2 built `versions.served` and `versions.minimum` (§1.6).
@@ -2031,7 +2058,8 @@ round is about 35 minutes for the full suite.
   a command that removes a stored version (`--move-to`).
 - Sharing rule (§1.7), `versions_disagree`. Built 2026-11-23 (d00afde0):
   per-version manifests in the access engine, a pin records its version,
-  D7 across versions. Left: release and sealing in the comparison.
+  D7 across versions. Release and sealing in the comparison, built
+  2026-11-24 (`pins.v3`, §1.7).
 - Client contract (§1.9): version on every answer, the distinct refusal for
   an op the version lacks, idempotency across one switch and the tenant
   admin's label are built in the remainder. The SDK's version-changed

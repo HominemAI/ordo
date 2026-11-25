@@ -770,6 +770,7 @@ fn a_grant_for_another_space_is_no_relationship_with_this_one() {
         ordo_identity::OpPin {
             manifest_hash: ManifestHash([1u8; 32]),
             version: None,
+            contract: false,
             unguarded: false,
             entities: Vec::new(),
         },

@@ -1060,6 +1060,7 @@ fn a_capability_token_can_never_step_up() {
         crate::pins::OpPin {
             manifest_hash: ManifestHash([0u8; 32]),
             version: None,
+            contract: false,
             unguarded: false,
             entities: Vec::new(),
         },

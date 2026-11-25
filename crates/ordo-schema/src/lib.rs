@@ -3666,9 +3666,48 @@ pub fn render_release_atom(a: &ordo_syntax::ReleaseAtom) -> String {
     )
 }
 
+/// One `release member` effect as source text: `remove tasks.assignee`,
+/// `reassign tasks.assignee to owner`. What a grant's pin records per field
+/// (`plan-versions.md` §1.7), and one line of [`render_release`].
+pub fn render_release_effect(e: &ordo_syntax::ReleaseEffect) -> String {
+    use ordo_syntax::{ReassignTarget, ReleaseEffect};
+    match e {
+        ReleaseEffect::Remove { entity, field, .. } => {
+            format!("remove {}.{}", entity.name, field.name)
+        }
+        ReleaseEffect::Reassign {
+            entity, field, to, ..
+        } => {
+            let targets: Vec<String> = to
+                .iter()
+                .map(|t| match t {
+                    ReassignTarget::Owner { .. } => "owner".to_string(),
+                    ReassignTarget::Lookup {
+                        entity,
+                        inner,
+                        field,
+                        ..
+                    } => format!(
+                        "{}({}).{}",
+                        entity.name,
+                        render_expr(inner, "", "member"),
+                        field.name
+                    ),
+                })
+                .collect();
+            format!(
+                "reassign {}.{} to {}",
+                entity.name,
+                field.name,
+                targets.join(" or ")
+            )
+        }
+    }
+}
+
 /// A whole `release member` rule as source text, one effect per line.
 pub fn render_release(r: &ordo_syntax::ReleaseDecl) -> String {
-    use ordo_syntax::{ReassignTarget, ReleaseEffect, ReleaseMode};
+    use ordo_syntax::ReleaseMode;
     let mut out = String::from("release member ");
     match &r.mode {
         ReleaseMode::Open { .. } => out.push_str("open"),
@@ -3702,38 +3741,7 @@ pub fn render_release(r: &ordo_syntax::ReleaseDecl) -> String {
         out.push_str(" {");
         for e in &r.effects {
             out.push_str("\n  ");
-            match e {
-                ReleaseEffect::Remove { entity, field, .. } => {
-                    out.push_str(&format!("remove {}.{}", entity.name, field.name))
-                }
-                ReleaseEffect::Reassign {
-                    entity, field, to, ..
-                } => {
-                    let targets: Vec<String> = to
-                        .iter()
-                        .map(|t| match t {
-                            ReassignTarget::Owner { .. } => "owner".to_string(),
-                            ReassignTarget::Lookup {
-                                entity,
-                                inner,
-                                field,
-                                ..
-                            } => format!(
-                                "{}({}).{}",
-                                entity.name,
-                                render_expr(inner, "", "member"),
-                                field.name
-                            ),
-                        })
-                        .collect();
-                    out.push_str(&format!(
-                        "reassign {}.{} to {}",
-                        entity.name,
-                        field.name,
-                        targets.join(" or ")
-                    ))
-                }
-            }
+            out.push_str(&render_release_effect(e));
         }
         out.push_str("\n}");
     }

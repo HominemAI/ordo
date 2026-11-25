@@ -134,3 +134,45 @@ async fn memory_per_version_and_per_space_view() {
     // measure to hold. On Linux the allocator reuses the pages the last
     // program's evicted views gave back, so a later program can show 0.
 }
+
+/// **What sharing the schema by `Arc` would save** (§1.5, 2026-11-24): a
+/// view clones its version's schema and registry. This holds 1,000 clones
+/// of each and prints the resident memory per clone. Run it alone, in
+/// release, so no other measure's freed pages are reused:
+/// `cargo test -p ordo-host --release --test versions_memory schema_and_registry -- --nocapture`.
+#[test]
+fn schema_and_registry_share_of_a_view() {
+    let programs: [(&str, &str); 3] = [
+        (
+            "teamspace",
+            include_str!("../../../examples/teamspace/teamspace.ordo"),
+        ),
+        (
+            "shopfront",
+            include_str!("../../../examples/shopfront/shopfront.ordo"),
+        ),
+        (
+            "notes-v2",
+            include_str!("../../../examples/notes-v2/notes.ordo"),
+        ),
+    ];
+    let compiled: Vec<(&str, Fixture)> = programs
+        .iter()
+        .map(|(n, s)| (*n, Fixture::from_source(s, "").expect("compiles")))
+        .collect();
+    println!("\n| Program | Schema clone | Registry clone |");
+    println!("|---|---|---|");
+    let mut held = Vec::new();
+    for (name, f) in &compiled {
+        let start = resident();
+        let schemas: Vec<_> = (0..SPACES).map(|_| f.schema.clone()).collect();
+        let schema = (resident() - start) / SPACES as i64;
+        let start = resident();
+        let registries: Vec<_> = (0..SPACES).map(|_| f.registry.clone()).collect();
+        let registry = (resident() - start) / SPACES as i64;
+        println!("| {name} | {} KB | {} KB |", schema / 1024, registry / 1024);
+        // Held to the end, so no later clone reuses these pages.
+        held.push((schemas, registries));
+    }
+    assert_eq!(held.len(), compiled.len());
+}

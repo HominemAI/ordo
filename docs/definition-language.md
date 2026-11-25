@@ -1001,9 +1001,25 @@ exclusively `since` or a parameter, so nondeterminism has one keyword.
   expressions are: projections, write RHS (per-row values in bulk writes and
   rules), aggregate arguments, sort keys.
 - Text: `lower(t)`, `length(t)`, `trim(t)` (strips leading/trailing Unicode
-  whitespace), and `+` for concatenation
+  whitespace), `before(t, sep)` and `after(t, sep)` (the part before or
+  after the first `sep`, null when `sep` is not in `t`; built 2026-11-25
+  for field splits, legal anywhere), and `+` for concatenation
   (`"lease ends " + end`; non-text operands render canonically); matching
   stays in operators
+- Conversions (built 2026-11-25 for type casts on a rename, legal
+  anywhere): `text(x)`, the value's canonical text; `int(t)`, the whole
+  number `t` spells, spaces around it allowed; `bool(t)`, `true` or `false`
+  as `t` spells it, in any case. Each is null where the value does not
+  convert, never an error
+- Dates (built 2026-11-25, legal anywhere): `date(t)`, the date `t` spells
+  as `YYYY-MM-DD`; `date(t, "DD/MM/YYYY")`, the date in the format named;
+  `datetime(t)`, the ISO 8601 instant `t` spells (`2026-11-25T09:30`,
+  seconds optional, `T` or a space), at the offset it names or UTC. A
+  format is `YYYY`, `MM` and `DD`, each once, joined by `-`, `/`, `.` or a
+  space; `MM` and `DD` read 1 or 2 digits. Any other format is refused when
+  the program compiles. Each is null where the text spells no date, or a
+  day not in the calendar (`2026-02-30`). Read two formats with
+  `coalesce(date(t), date(t, "DD/MM/YYYY"))`
 
 ### Ownership [settled]
 
@@ -2006,6 +2022,225 @@ Build-time advisors (including LLM analysis of registered query
 patterns) may *suggest* indexes and sealing changes. Suggestions land in the shape
 file for human approval, never at runtime.
 
+### `prev`: renames across versions [ruled 2026-10-04, built 2026-11-23, increment 15]
+
+A `prev` mark says a field or an entity is the same thing as a name in the
+version serving now. The plan then renders a rename, never a drop and an
+add (`plan-syntax-additions.md` §5).
+
+```
+entity customers (key: cust, prev: clients) {
+  fullName: text prev(name)
+  note:     text? prev(orders.shippingNote)
+}
+```
+
+- A field takes `prev(<old>)` in its modifier tail. An entity takes
+  `prev: <old>` in its header's parenthesis, beside `key:`, in either order.
+- `prev` reaches one version back only.
+- `prev` is contextual: a field may still be named `prev`.
+- A field rename (§5 B4 of `plan-schema-evolution.md`) adds the new column,
+  copies every value into it, and keeps the old column with its
+  `NOT NULL`, so the version before still loads over the database. The
+  receipt's reverse copies the values back and drops the new column.
+- No write is lost between the copy and the tenant's pin switch. The
+  host's dual writes (increment 11a) run in each write's own transaction:
+  a write by the version before also sets the new column, and a write by
+  the new version also sets the old one.
+- A required field renamed needs a default (`prev_default_required`). Each
+  version's insert names only its own column, so the other takes its
+  default first, and the dual writes set it in the same write. An old
+  column with no default of its own takes the new field's.
+- `ordo apply` makes a field rename itself, as it makes an additive change.
+  A stored step copies the values with the backfill worker.
+- An entity rename (built 2026-11-24) makes the new table, copies every
+  row into it in chunks with the backfill worker, and keeps the old table
+  whole, so the version before still
+  serves. The rename is recorded in the database's `$renames`, and every
+  write copies what it writes, and deletes what it deletes, into the other
+  name's table in its own transaction. A reference another entity holds
+  into the old table is checked at commit until the rename lands.
+- An entity rename lands at a move's soak close, or when a version drops
+  the mark. Then every reference moves to the new table, the old table is
+  an orphan (§2.7 of `plan-versions.md`), and a reader app loses it. Until
+  then a reader of the new table reads the old one too.
+- Ids keep the key they were minted with. A row the new name writes takes
+  the new name's key.
+- An entity rename keeps its fields in the step that renames it
+  (`rename_entity_reshaped`). Rename in one version, change the fields in
+  the next.
+- **Splits and merges** (built 2026-11-25, increment 15b). Two or more
+  fields each `prev(name)` split `name`; one field `prev(a, b)` merges two.
+  The rule for each value is the stored plan's, never guessed:
+
+  ```
+  entity person {
+    first: text prev(fullName)
+    last:  text prev(fullName)
+  }
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 \
+    --fill 'person.first=before(fullName, " ");person.last=after(fullName, " ")' \
+    --reverse 'person.fullName=first + " " + last'
+  ```
+
+  - `--fill` gives each new field's value, an expression over the old
+    fields and the fields both versions share.
+  - `--reverse` gives each old field's value from the new fields. It keeps
+    the old column current through the soak, so a revert loses nothing.
+    With no reverse the step is one way, and `--one-way` must accept it;
+    its soak then cannot be reverted.
+  - A row a required new field's mapping does not parse (null) is listed
+    by `space/id`, and the move waits for it.
+  - The plan previews the mapping on 3 rows. The values show where
+    `preview.values` is on: off in production, on elsewhere.
+  - It runs as a move (`ordo evolve --tenant`, or a rollout). `ordo apply`
+    and `ordo evolve --run` refuse it.
+- **Type casts** (built 2026-11-25, increment 15c). A rename whose type
+  changes, `qty: int = 0 prev(count)` over `count: text`, is a one-to-one
+  map. Its conversion is the plan's `--fill`, never guessed:
+  `--fill 'item.qty=int(count)' --reverse 'item.count=text(qty)'`.
+  - The conversions are `text(x)`, `int(t)`, `bool(t)`, `date(t)`,
+    `date(t, format)` and `datetime(t)`, and `round(x, n)` for places. Each
+    gives null where a value does not convert, so the pre-check lists the
+    row and the move waits: `--fill 'item.dueOn=date(due, "DD/MM/YYYY")'`.
+  - A mapping that gives another kind than its field holds is refused
+    (`map_cast_required`), naming the conversion. One that loses places
+    names `round`: Ordo never rounds unasked.
+  - A conversion Ordo has no function for (a number to a date) is refused
+    as `map_cast_not_built`.
+  - Money (built 2026-11-25): a mapping reads and gives money in major
+    units, as `check` does, and a `money(p)` column stores minor ones, so
+    `--fill item.price=cost` turns 12.34 into 1234 cents, and the reverse
+    turns them back. A value with more places than `p`, or places Ordo
+    cannot tell, is refused naming `round`. A `money` field carries only its
+    places, so the places are the check.
+- **Entity splits** (built 2026-11-25, increment 15c). An entity marked
+  `(prev: whole)` while `whole` stays declared is a part split off it. It
+  takes the fields it declares from `whole`, as they were declared there:
+
+  ```
+  entity notes { title: text }
+  entity stars (key: star, prev: notes) {
+    note -> notes owned unique
+    starred: bool = false
+  }
+  ```
+
+  ```
+  ordo evolve --from 0.3.4 --to 0.3.10 --correspond stars.note
+  ```
+
+  - `--correspond <part>.<link>` is the rule: one part row per row of
+    `whole`, its link naming that row, its id `<part key>_<whole id>`. The
+    link is `-> whole owned unique` and required, so the part takes the
+    whole's access.
+  - The plan previews the rule on 3 rows: the part row each gives, with
+    values where `preview.values` is on.
+  - The step makes the part's table and copies one row per whole row in
+    chunks. The whole keeps the moved columns. Through `$renames` every
+    write keeps both shapes current: a write of the whole by the version
+    before reaches its part row, and a write of a part row by the new
+    version reaches the whole's old columns. Deleting a part row puts them
+    back to their defaults. A revert in the soak loses nothing.
+  - At the close the moved columns are orphaned and the split leaves
+    `$renames`.
+  - A moved field must be optional or have a default: the new version's
+    inserts of the whole do not name it.
+  - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
+- **Moves and entity merges** (built 2026-11-25, increment 15d). A field
+  marked `prev(other.field)` moves from `other`. Merging an entity is
+  moving every field of it and removing it:
+
+  ```
+  entity person {
+    name:   text
+    street: text? prev(address.street)
+    city:   text = "" prev(address.city)
+  }
+  # `address (key: adr) { person -> person owned unique ... }` is removed
+  ```
+
+  ```
+  ordo evolve --from 1.0.0 --to 1.1.0 --correspond address.person
+  ```
+
+  - `--correspond <other>.<link>` is the rule: each `other` row gives its
+    values to the row its link names. The link is `-> <entity> owned
+    unique` and required, declared in the version serving now, so the rows
+    pair one to one: the shape a split makes, read backwards.
+  - A field keeps its name and its declaration as it moves. A required one
+    needs a default: a row no `other` row names has no value for it.
+  - The plan previews the rule on 3 rows, values where `preview.values` is
+    on.
+  - The step adds the columns and copies in chunks. Through `$renames`
+    every write keeps both shapes current: a write of `other` by the
+    version before reaches the row its link names, and deleting it puts
+    the values back to their defaults. After a merge, a write by the new
+    version reaches `other` too, making its row (`<other key>_<id>`) where
+    there was none, so a revert in the soak loses nothing.
+  - At the close a merged entity is orphaned and its references go; a
+    moved field's old column is orphaned.
+  - A move whose `other` stays is one way: a value the new version gives a
+    row no `other` row names has no place in the version before. It needs
+    `--one-way`, and its soak cannot be reverted.
+  - It runs as a move. `ordo apply` and `ordo evolve --run` refuse it.
+- **Not built:** a move through a link that is not unique, several
+  related rows per row (`move_rule_not_built`; the first, the latest or all
+  are not offered yet); a mapping over two entities, `prev(a.x, b.y)`
+  (`prev_mapping_required`); moving a link field (`move_ref_not_built`); a
+  split whose whole is renamed or gone (`entity_split_needs_whole`); a
+  correspondence rule other than one row per row
+  (`correspond_rule_not_built`).
+- A clean `ordo apply` names each mark whose rename has landed in every
+  environment. `ordo apply --remove-landed-prev` cuts those marks from the
+  source. A mark has landed when this deployment is the last environment of
+  its chain and every tenant is on a version with the new name. The stored
+  plan keeps the rename for any tenant still behind.
+
+Checked at compile time (the parser):
+
+| Class | Refused |
+|---|---|
+| `prev_self` | `prev` naming the field's or entity's own name |
+| `prev_still_declared` | `prev(name)` while `name` is still a field of the entity |
+| `prev_duplicate` | a name a merge or a move claims beside another field, or one name twice in one `prev` (two fields each `prev(name)` alone are a split) |
+| `external_unsupported` | `prev` on an external's field or in its header |
+
+Checked at plan time, against the version serving now. With nothing
+serving, nothing is checked and the program is created as declared:
+
+| Class | Refused |
+|---|---|
+| `prev_unresolved` | the old name is not in the version serving now |
+| `prev_type` | a rename to or from a file: a file's handle is never computed |
+| `prev_mapping_required` | a mapping over two entities, `prev(a.x, b.y)`; a move from the entity itself; moves out of one entity into two; a move into an entity renamed in the same step |
+| `move_renamed` | a field renamed as it moves |
+| `move_rule_required`, `move_link`, `move_rule_not_built` | a move with no `--correspond`; a rule whose link is not `-> <entity> owned unique` and required; a link that is not unique |
+| `move_reshaped`, `move_sealed`, `move_ref_not_built`, `move_default_required`, `move_acl` | a field moved as it was not declared, a merge that leaves a field behind, or one still declared in `other`; a sealed or file field; a link field; a required field with no default; an `other` with `acl` or a tree |
+| `move_column_orphaned` | a moved field whose entity still holds an orphaned column of its name; prune it first (`ordo evolve --prune`) |
+| `map_cast_required`, `map_cast_not_built` | a mapping that gives another kind than its field holds, or loses places (into money too); one Ordo has no conversion for |
+| `split_rule_required` | an entity split with no `--correspond` |
+| `split_entity_link` | a part whose link is not `-> whole owned unique` and required |
+| `split_entity_reshaped` | a part field the whole did not declare the same way, or a moved field the whole still declares |
+| `split_entity_sealed`, `split_entity_acl` | a sealed or file field moved; a part with `acl` or a tree |
+| `split_default_required` | a moved field required with no default |
+| `split_needs_stored_plan`, `split_needs_move` | an entity split through `ordo apply`, or `ordo evolve --run` |
+| `entity_split_needs_whole` | two or more entities `(prev: x)` with `x` gone |
+| `map_fill_required` | a split's or a merge's new field with no `--fill` |
+| `one_way_unconfirmed` | an old field with no `--reverse`, and no `--one-way` |
+| `map_needs_stored_plan`, `map_needs_move` | a split or a merge through `ordo apply`, or `ordo evolve --run` |
+| `prev_sealed` | a sealed field: its ciphertext is bound to the field, so a copy cannot be read under the new name |
+| `rename_entity_sealed` | an entity rename of an entity with a sealed field: its ciphertext is bound to the entity's name |
+| `rename_entity_reshaped` | an entity rename whose new declaration has a column the old table does not hold |
+| `rename_entity_needs_stored_plan` | an entity rename by `ordo apply`: its copy runs only in a stored step (`ordo evolve`), in chunks, so no write waits for it |
+| `rename_entity_acl` | an entity rename of an entity with `acl`: its shares live in an entity named after it |
+| `prev_stale` | a warning, never a refusal: the version serving now already has the new name, so the mark can go |
+
+The CDK spells it `t.text().prev('name')` and `entity(…, { prev: 'clients' })`.
+
 ### `external`: a table another system owns [ruled 2026-11-15, built slices A, B and C]
 
 Another system can keep its own table in the database where Ordo's SQL runs:
@@ -2320,6 +2555,11 @@ holds in this deployment's schema are made equal to the line:
   `principal`, `retired_case`) and `$authconnection` (`name`, `kind`,
   `fingerprint`, `subject_claim`). Naming `members` on the line grants the
   whole table.
+- These columns are a contract between Ordo releases (owner, 2026-11-23).
+  A release that changes one keeps it granted for `editions.load_window`
+  (12 months), so a reader on an older release keeps matching `$caller`.
+- `SELECT` on `$ordorelease` (`release`): the Ordo release this deployment
+  last started under. `ordo release-check` on the reader names it.
 
 A table taken off the line is revoked at the next apply or start. So is
 everything, when the whole line is removed: `$readergrant` remembers which
@@ -3667,6 +3907,31 @@ The page calls a function with `POST /fn/<name>` or the SDK's
 reads at most `ORDO_FN_BLOB_BYTES` (20 MiB) of files. Run history is
 `ordo fn runs` and `ordo fn log`.
 
+### Edition [built 2026-11-23]
+
+One top-level line names the language edition the source is written in:
+
+```
+domain shop @ 0.1.0
+edition 1
+```
+
+- A source with no edition line is edition 1, for good (ruled 2026-11-03).
+- At most one per program. `edition` stays an ordinary name elsewhere, so
+  a field may be called `edition`.
+- What each edition means, its load window and `ordo fix` are in
+  `deploying.md` ("Language editions and `ordo fix`") and
+  `plan-versions.md` §2.8.
+- Only edition 1 is released. Edition 2 is written, unreleased: it would
+  refuse bare `money`, and `ordo fix` would write `money(0)`.
+
+| Class | Refused |
+|---|---|
+| `duplicate_edition` | a second `edition` line |
+| `edition_unknown` | an edition newer than this Ordo release knows |
+| `edition_expired` | an edition outside `editions.load_window`; the refusal names `ordo fix` |
+| `edition_rule` | a construct the named edition refuses; the refusal names `ordo fix` |
+
 ### Domain package
 
 > **Not built yet [2026-10-04]: the compiler refuses the block form today.**
@@ -3738,8 +4003,9 @@ principal ellanor    { kind: agent }
 
 > **Not built yet [2026-10-04]: the compiler refuses `principal` blocks
 > today** ("`principal` is reserved and not implemented"). The same holds for
-> `client`, `auth`, `channel` and `route` below, and for the `policy` blocks
-> further down. The design text stands.
+> `client`, `channel` and `route` below, and for the `policy` blocks
+> further down. The design text stands. `auth` is built: see "Sign-in: the
+> `auth` block" below.
 
 ### Identity clients (OIDC relying parties) [settled]
 One Ordo deployment, one OIDC issuer (horizontally scaled pods are one logical
@@ -3784,13 +4050,113 @@ Methods are pluggable and per-deployment configurable:
   platform email channel)
 - **Configurable:** OAuth providers (Google, Discord, …) per deployment
 
+The app developer chooses the methods in the `auth` block below. The
+deployment owner sets each provider's client id and secret on the instance,
+never in the file.
+
+### Sign-in: the `auth` block [parsed and checked 2026-11-14; the host reads it in a later step]
+
+The block holds the app developer's sign-in choices
+(`plan-configuration-in-the-file.md` §2). The rule (owner, 2026-11-14): the
+file sets the value, the deployment owner's ceiling wins, and the file can
+tighten and never loosen. A value that cannot change once used is set on the
+instance and never here: the deployment handle, the database, the key
+provider, the apex domain, the relying party id and the listen addresses.
+Credentials stay on the instance too.
+
 ```
 auth {
-  methods  passkey, password, email-otp        # defaults
-  method   google  { client: $GOOGLE_CLIENT }  # opt-in per deployment
-  method   discord { client: $DISCORD_CLIENT }
+  methods           passkey, email, google, work
+  provider google   preset google
+  provider work     kind oidc, label "Work account"
+  passkeyName       "Human Agent Link"
+  provisioning      domains example.com, example.org
+  selfServe         off
+  guest             on, keep 7d
+  linking           on, window 5m
+  secondFactor      optional
+  userVerification  required
+  session           token 1h, max 12h, tenants 15m to 4h
+  remember          on, idle 30d, max none
 }
 ```
+
+Grammar. One clause per line, a keyword then values, commas between list
+items. Clauses go in any order. One block per program.
+
+```text
+auth { <clause> ... }
+clause = methods <method>, ...
+       | provider <name> (preset <preset> | kind oauth2 | kind oidc) [, label "<text>"]
+       | passkeyName "<text>"
+       | provisioning invite-only | open | domains <domain>, ...
+       | selfServe on | off
+       | guest off | on [, keep <duration>]
+       | linking off | on [, window <duration>]
+       | secondFactor off | optional | required-without-passkey | required
+       | userVerification required | preferred
+       | session token <duration> [, max <duration>] [, tenants <duration> to <duration>]
+       | remember off | on [, idle <duration>] [, max <duration> | none]
+method = passkey | password | email | <provider name>
+```
+
+- A duration is `s`, `m`, `h`, `d` or `w`: `30s`, `5m`, `1h`, `30d`.
+- A domain with a hyphen or a label that starts with a digit is quoted, and an all-digit domain such as an IP address is refused:
+  `"my-co.example"`.
+- The presets are `discord`, `github`, `google` and `microsoft`.
+
+What holds when a clause is absent. Each default is the secure one.
+
+| Clause | Default |
+|---|---|
+| `methods` | none: nobody signs in |
+| `passkeyName` | the relying party id |
+| `provisioning` | `invite-only` |
+| `selfServe` | `off` |
+| `guest` | `off` |
+| `linking` | `on`, window 5m |
+| `secondFactor` | `optional` |
+| `userVerification` | `required` |
+| `session` | token 1h, max 12h, tenants inside the deployment's ceilings |
+| `remember` | `on`, idle 30d, max none |
+
+Platform ranges. A value outside one is refused and the refusal names the
+range.
+
+| Value | Range |
+|---|---|
+| `linking … window` | 1m to 15m |
+| `guest … keep` | 1m to 400d |
+| `session token`, both ends of `tenants` | 1m to 1d |
+| `session … max` | 1m to 30d, and not below `token` |
+| `remember … idle`, `max` | 1m to 400d |
+
+Refusals:
+
+| Class | Refused |
+|---|---|
+| `parse_error` | a clause the parser cannot read, a clause written twice, or a comma after the last item of a list. It points at the clause, the value or the comma |
+| `duplicate_auth` | a second `auth` block |
+| `auth_unknown_method` | a method that is not built in and names no `provider` |
+| `auth_unused_provider` | a `provider` no `methods` line names |
+| `auth_unknown_preset` | a preset the host does not ship |
+| `auth_duration_range` | a duration outside its platform range |
+| `invalid_auth` | a method listed twice, a provider declared twice or named like a built-in method, an empty provider `label`, a bad or repeated domain, an empty `passkeyName`, a session `max` below its `token`, a `tenants` range that runs backwards or reaches above the session `max`, a remember `max` below its `idle` |
+
+Where the values go:
+
+- The compiled program carries an `auth` section with every default filled
+  in. A program without a block keeps its document and its version.
+- The interface descriptor (`ordo.interface/2`) gains an `auth` key: the
+  methods, each provider's name, preset, kind and label, the provisioning
+  **mode**, and whether guests, linking and self-serve are on, the second
+  factor level and user verification. It never lists the provisioning
+  domains (owner, 2026-11-14). The app developer decides what a person sees.
+- The CDK writes the block with `auth({ … })`.
+
+Not yet: the host still reads sign-in from its settings. Reading the block at
+boot and on apply, the ceilings, and the migration of the old settings are
+the next step of the plan.
 
 ### Access model [settled]
 Definitions declare what exists and what it touches (field-scope manifests,

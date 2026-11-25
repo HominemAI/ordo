@@ -83,6 +83,7 @@ filter = '''
   | (binary_id(ordo-host::teamspace_app) & not test(/^(a_founder_gets_a_team|a_member_cannot_change_roles|the_admin_report_totals|a_tenant_owner_opens_the_report|a_member_adds_tasks_only|an_invited_colleague_is_shown)/))
   | binary_id(ordo-host::tenant_forward)
   | binary_id(ordo-host::upgrade_continuity)
+  | binary_id(ordo-host::versions_background)
 '''
 test-group = 'serial-in-file'
 

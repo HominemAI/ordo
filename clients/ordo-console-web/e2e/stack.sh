@@ -24,7 +24,9 @@
 #      (crates/ordo-console/examples/e2e_door.rs), and the deploy ops over
 #      a fresh database of their own (<db>_app). The console reaches it
 #      through ORDO_CONSOLE_DOOR_URL; its passkeys share the relying party
-#      `localhost`, with the console's origin listed.
+#      `localhost`, with the console's origin listed. Three of the memory
+#      tenants are registered in that database too, so rollouts and tenant
+#      builds have tenants to move (E2E_DOOR_APP_TENANTS).
 #
 # Playwright starts this script itself (playwright.config.ts, `webServer`)
 # and stops it at the end. It writes what tests need to $E2E_STATE/stack.json.
@@ -134,6 +136,7 @@ url="host=$pg_host port=$pg_port user=$pg_user dbname=$db"
 # and holds guest sign-in stored `off`, which wins over the variable.
 E2E_DOOR_ADDR="127.0.0.1:$door_port" E2E_DOOR_ORIGIN="$origin" \
   E2E_DOOR_CHILD_ENV="$state/child.env" E2E_DOOR_STORED="auth_guest=off" \
+  E2E_DOOR_APP_TENANTS="spc_mine,spc_theirs,spc_held" \
   ORDO_PG_HOST="$pg_host" ORDO_PG_PORT="$pg_port" ORDO_PG_USER="$pg_user" ORDO_PG_DB="$app_db" \
   "$door_bin" >"$state/door.log" 2>&1 &
 pids="$pids $!"

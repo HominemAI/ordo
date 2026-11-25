@@ -77,7 +77,14 @@ pub fn build_checks(
         .iter()
         .enumerate()
         .map(|(i, d)| {
-            let sql = render_cond(entity, fields, &d.cond)?;
+            let sql = render_cond(
+                entity,
+                &Cx {
+                    fields,
+                    mapping: false,
+                },
+                &d.cond,
+            )?;
             let source = condense(&d.cond);
             Ok(CheckRule {
                 name: constraint_name(entity, i, &source),
@@ -128,6 +135,41 @@ pub fn text_bound_checks(entity: &str, fields: &[Field]) -> Vec<CheckRule> {
         .collect()
 }
 
+/// **A backfill's forward mapping** (`plan-backfill-dual-writes.md` §2):
+/// an Ordo expression over one row's own fields, lowered to the SQL the
+/// backfill worker sets the new column to.
+///
+/// It is the row-local slice a `check` uses, for the same reason: the value
+/// is computed from this row alone, by the database, and the same rendering
+/// rules hold (money read in major units, no division, no clock, no other
+/// row, no sealed field). Every refusal a check would raise is raised here
+/// as `mapping_*` and names the mapping, never a check.
+pub fn render_mapping(entity: &str, fields: &[Field], expr: &Expr) -> Result<String, SchemaError> {
+    render_expr(
+        entity,
+        &Cx {
+            fields,
+            mapping: true,
+        },
+        expr,
+    )
+    .map_err(|e| SchemaError {
+        code: match e.code {
+            "check_beyond_row" => "mapping_beyond_row",
+            "check_time_dependent" => "mapping_time_dependent",
+            "check_unknown_field" => "mapping_unknown_field",
+            "check_sealed_field" => "mapping_sealed_field",
+            "json_opaque" => "mapping_json_opaque",
+            _ => "mapping_unsupported",
+        },
+        message: e
+            .message
+            .replace("a CHECK constraint", "a backfill mapping")
+            .replace("`check` on", "the backfill mapping on"),
+        span: e.span,
+    })
+}
+
 /// `{entity}$chk{i}$<condensed source>`, truncated to Postgres's 63-byte
 /// identifier limit on a UTF-8 boundary. The prefix alone is unique, so
 /// truncation can never collide two checks.
@@ -151,11 +193,34 @@ fn err(code: &'static str, span: ordo_syntax::Span, message: String) -> SchemaEr
     }
 }
 
-fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, SchemaError> {
+/// What an expression is rendered for: a `check` (a predicate the
+/// database enforces) or a backfill's mapping (a value the worker writes).
+/// A mapping also takes the text functions and `+` over text.
+struct Cx<'a> {
+    fields: &'a [Field],
+    mapping: bool,
+}
+
+/// `before(t, sep)`: the part of `t` before the first `sep`, null when
+/// `sep` is not in it (DL §3, Expression functions). One spelling for the
+/// planner and a backfill's mapping.
+pub fn before_sql(t: &str, sep: &str) -> String {
+    format!("(CASE WHEN strpos({t}, {sep}) > 0 THEN left({t}, strpos({t}, {sep}) - 1) END)")
+}
+
+/// `after(t, sep)`: the part of `t` after the first `sep`, null when `sep`
+/// is not in it.
+pub fn after_sql(t: &str, sep: &str) -> String {
+    format!(
+        "(CASE WHEN strpos({t}, {sep}) > 0 THEN substr({t}, strpos({t}, {sep}) + length({sep})) END)"
+    )
+}
+
+fn render_cond(entity: &str, cx: &Cx, c: &Condition) -> Result<String, SchemaError> {
     Ok(match c {
         Condition::Compare { op, lhs, rhs, span } => {
-            let l = render_expr(entity, fields, lhs)?;
-            let r = render_expr(entity, fields, rhs)?;
+            let l = render_expr(entity, cx, lhs)?;
+            let r = render_expr(entity, cx, rhs)?;
             match op {
                 // The distinctness family — total, never UNKNOWN — is the
                 // language's `==`/`!=` table (`null == null` true,
@@ -177,11 +242,9 @@ fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, 
             }
         }
         Condition::In { expr, list, span } => {
-            let e = render_expr(entity, fields, expr)?;
-            let items: Result<Vec<String>, SchemaError> = list
-                .iter()
-                .map(|i| render_expr(entity, fields, i))
-                .collect();
+            let e = render_expr(entity, cx, expr)?;
+            let items: Result<Vec<String>, SchemaError> =
+                list.iter().map(|i| render_expr(entity, cx, i)).collect();
             let _ = span;
             format!("COALESCE({e} IN ({}), false)", items?.join(", "))
         }
@@ -189,8 +252,8 @@ fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, 
             // The planner's shapes exactly: the right side is a VALUE, not
             // a pattern, so `contains` is strpos and never LIKE. All three
             // functions are IMMUTABLE, which a CHECK requires.
-            let l = render_expr(entity, fields, lhs)?;
-            let r = render_expr(entity, fields, rhs)?;
+            let l = render_expr(entity, cx, lhs)?;
+            let r = render_expr(entity, cx, rhs)?;
             match op {
                 TextOp::Contains => format!("(strpos({l}, {r}) > 0)"),
                 TextOp::Starts => format!("(left({l}, length({r})) = {r})"),
@@ -201,30 +264,26 @@ fn render_cond(entity: &str, fields: &[Field], c: &Condition) -> Result<String, 
             "({} IS {}NULL)",
             // `doc is not null` asks whether a `json` field holds a
             // document, which is the one question a document answers (28b).
-            match json_column(fields, expr) {
+            match json_column(cx.fields, expr) {
                 Some(col) => col,
-                None => render_expr(entity, fields, expr)?,
+                None => render_expr(entity, cx, expr)?,
             },
             if *negated { "NOT " } else { "" }
         ),
         Condition::And { items, .. } => {
-            let parts: Result<Vec<String>, SchemaError> = items
-                .iter()
-                .map(|i| render_cond(entity, fields, i))
-                .collect();
+            let parts: Result<Vec<String>, SchemaError> =
+                items.iter().map(|i| render_cond(entity, cx, i)).collect();
             format!("({})", parts?.join(" AND "))
         }
         Condition::Or { items, .. } => {
-            let parts: Result<Vec<String>, SchemaError> = items
-                .iter()
-                .map(|i| render_cond(entity, fields, i))
-                .collect();
+            let parts: Result<Vec<String>, SchemaError> =
+                items.iter().map(|i| render_cond(entity, cx, i)).collect();
             format!("({})", parts?.join(" OR "))
         }
         Condition::Not { inner, .. } => {
-            format!("(NOT {})", render_cond(entity, fields, inner)?)
+            format!("(NOT {})", render_cond(entity, cx, inner)?)
         }
-        Condition::BareBool(e) => format!("({} IS TRUE)", render_expr(entity, fields, e)?),
+        Condition::BareBool(e) => format!("({} IS TRUE)", render_expr(entity, cx, e)?),
         // `since` is execution-time by definition — the clock is an
         // operand. Same refusal as `today`, stated on the connective.
         Condition::Since { span, .. } => {
@@ -271,7 +330,7 @@ fn json_column(fields: &[Field], e: &Expr) -> Option<String> {
         .map(|f| q(&f.column()))
 }
 
-fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, SchemaError> {
+fn render_expr(entity: &str, cx: &Cx, e: &Expr) -> Result<String, SchemaError> {
     Ok(match e {
         Expr::Path { segments, span } => {
             if segments.len() > 1 {
@@ -296,7 +355,7 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
                 ));
             }
             let name = &segments[0].name;
-            let Some(f) = fields.iter().find(|f| &f.name == name) else {
+            let Some(f) = cx.fields.iter().find(|f| &f.name == name) else {
                 // `today`/`now` parse as bare paths; when no field shadows
                 // them, the author meant the clock — name the real problem
                 // rather than "unknown field".
@@ -381,7 +440,7 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
             ss,
             ..
         } => format!("TIMESTAMP '{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}'"),
-        Expr::Neg { expr, .. } => format!("(-{})", render_expr(entity, fields, expr)?),
+        Expr::Neg { expr, .. } => format!("(-{})", render_expr(entity, cx, expr)?),
         Expr::Binary { op, lhs, rhs, span } => {
             use ordo_syntax::ast::BinOp;
             if matches!(op, BinOp::Div) {
@@ -400,8 +459,14 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
                     ),
                 ));
             }
-            let l = render_expr(entity, fields, lhs)?;
-            let r = render_expr(entity, fields, rhs)?;
+            let l = render_expr(entity, cx, lhs)?;
+            let r = render_expr(entity, cx, rhs)?;
+            // `+` over text concatenates (DL §3, Text), a non-text side in
+            // its canonical text: in a mapping, where `full = first + " " +
+            // last` is the common case.
+            if cx.mapping && matches!(op, BinOp::Add) && (is_text(cx, lhs) || is_text(cx, rhs)) {
+                return Ok(format!("(({l})::text || ({r})::text)"));
+            }
             let sym = match op {
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
@@ -436,6 +501,92 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
                 ),
             ))
         }
+        Expr::FnCall { name, args, span } if cx.mapping => {
+            let a = args
+                .iter()
+                .map(|x| render_expr(entity, cx, x))
+                .collect::<Result<Vec<_>, _>>()?;
+            match (name.name.as_str(), a.as_slice()) {
+                ("lower", [t]) => format!("lower({t})"),
+                ("trim", [t]) => format!("btrim({t})"),
+                ("length", [t]) => format!("char_length({t})::bigint"),
+                ("coalesce", [x, y]) => format!("coalesce({x}, {y})"),
+                ("before", [t, sep]) => before_sql(t, sep),
+                ("after", [t, sep]) => after_sql(t, sep),
+                // The conversions (type casts on a rename, `forward-gaps`
+                // asks 15 and 17): each is null where the value does not
+                // convert, so the pre-check lists the row and never a
+                // chunk fails half way.
+                ("text", [x]) => format!("({x})::text"),
+                ("int", [x]) => match mapping_type(cx.fields, &args[0]) {
+                    Some(MapTy {
+                        family: Family::Number,
+                        places: Some(0),
+                    }) => x.clone(),
+                    Some(MapTy {
+                        family: Family::Text,
+                        ..
+                    }) => int_sql(x),
+                    _ => {
+                        return Err(err(
+                            "check_unsupported",
+                            *span,
+                            format!(
+                                "the backfill mapping on `{entity}` calls `int()` on a value \
+                                 that is not text. A decimal does not become an int without \
+                                 rounding, and Ordo never rounds unasked: write `round(x, 0)`"
+                            ),
+                        ))
+                    }
+                },
+                ("bool", [x]) => bool_sql(x),
+                ("date", [x, ..]) => {
+                    let format = match args.get(1) {
+                        None => ISO_DATE,
+                        Some(Expr::StrLit { value, .. }) => value.as_str(),
+                        Some(_) => {
+                            return Err(err(
+                                "check_unsupported",
+                                *span,
+                                format!(
+                                    "the backfill mapping on `{entity}` gives `date()` a format \
+                                     that is not a string: write `date(t, \"DD/MM/YYYY\")`"
+                                ),
+                            ))
+                        }
+                    };
+                    date_sql(x, format).map_err(|why| err("check_unsupported", *span, why))?
+                }
+                ("datetime", [x]) => datetime_sql(x),
+                ("round", [x, n]) => match &args[1] {
+                    Expr::IntLit { value, .. } if (0..=30).contains(value) => {
+                        format!("round(({x})::numeric, {n})")
+                    }
+                    _ => {
+                        return Err(err(
+                            "check_unsupported",
+                            *span,
+                            format!(
+                                "the backfill mapping on `{entity}` calls `round(x, n)` with an \
+                                 `n` that is not a whole number from 0 to 30"
+                            ),
+                        ))
+                    }
+                },
+                (other, _) => {
+                    return Err(err(
+                        "check_unsupported",
+                        *span,
+                        format!(
+                            "the backfill mapping on `{entity}` calls `{other}()`; a mapping \
+                             takes `lower`, `trim`, `length`, `coalesce`, `before`, `after`, \
+                             the conversions `text`, `int`, `bool`, `date`, `datetime` and \
+                             `round(x, n)`, and `+` over text"
+                        ),
+                    ))
+                }
+            }
+        }
         Expr::FnCall { name, span, .. } => {
             return Err(err(
                 "check_unsupported",
@@ -459,6 +610,218 @@ fn render_expr(entity: &str, fields: &[Field], e: &Expr) -> Result<String, Schem
             ))
         }
     })
+}
+
+/// `int(t)` over text: the whole number `t` spells, spaces around it
+/// allowed, or null. 18 digits at most, so it always fits a `bigint`.
+pub fn int_sql(t: &str) -> String {
+    format!("(CASE WHEN btrim({t}) ~ '^[+-]?[0-9]{{1,18}}$' THEN btrim({t})::bigint END)")
+}
+
+/// `bool(t)`: `true` or `false` as `t` spells it, any case, spaces around
+/// it allowed, or null.
+pub fn bool_sql(t: &str) -> String {
+    format!("(CASE lower(btrim(({t})::text)) WHEN 'true' THEN true WHEN 'false' THEN false END)")
+}
+
+/// The format `date(t)` reads with none named: ISO 8601's.
+pub const ISO_DATE: &str = "YYYY-MM-DD";
+
+/// `date(t, format)`: the date `t` spells in `format`, spaces around it
+/// allowed, or null, also where the day is not in the calendar
+/// (`2026-02-30`). A format is `YYYY`, `MM` and `DD`, each once, in any
+/// order, joined by one of `-`, `/`, `.` or a space, the same each time
+/// (`DD/MM/YYYY`, `MM-DD-YYYY`, `DD.MM.YYYY`). `MM` and `DD` read one or
+/// two digits. Any other format is refused, naming the rule; formats are
+/// added as they are asked for (`forward-gaps` ask 17).
+pub fn date_sql(t: &str, format: &str) -> Result<String, String> {
+    let refuse = || {
+        format!(
+            "`{format}` is not a date format Ordo reads. A format is `YYYY`, `MM` and `DD`, \
+             each once, joined by `-`, `/`, `.` or a space: `YYYY-MM-DD` (the default), \
+             `DD/MM/YYYY`, `MM/DD/YYYY`, `DD.MM.YYYY`"
+        )
+    };
+    let sep = format
+        .chars()
+        .find(|c| matches!(c, '-' | '/' | '.' | ' '))
+        .ok_or_else(refuse)?;
+    let parts: Vec<&str> = format.split(sep).collect();
+    let mut order = Vec::new();
+    for p in &parts {
+        match *p {
+            "YYYY" | "MM" | "DD" if !order.contains(p) => order.push(*p),
+            _ => return Err(refuse()),
+        }
+    }
+    if order.len() != 3 {
+        return Err(refuse());
+    }
+    let sep_re = if sep == '.' {
+        "\\.".to_string()
+    } else {
+        sep.to_string()
+    };
+    let re = order
+        .iter()
+        .map(|p| match *p {
+            "YYYY" => "([0-9]{4})",
+            _ => "([0-9]{1,2})",
+        })
+        .collect::<Vec<_>>()
+        .join(&sep_re);
+    let at = |p: &str| order.iter().position(|x| *x == p).map_or(0, |i| i + 1);
+    let iso = format!(
+        "m[{}] || '-' || lpad(m[{}], 2, '0') || '-' || lpad(m[{}], 2, '0')",
+        at("YYYY"),
+        at("MM"),
+        at("DD")
+    );
+    Ok(format!(
+        "(SELECT CASE WHEN m IS NOT NULL AND pg_input_is_valid({iso}, 'date') \
+         THEN ({iso})::date END FROM regexp_match(btrim(({t})::text), '^{re}$') AS r(m))"
+    ))
+}
+
+/// `datetime(t)`: the ISO 8601 instant `t` spells (`2026-11-25T09:30`,
+/// seconds and a fraction optional, `T` or a space), at the offset it
+/// names (`Z`, `+01:00`) or UTC where it names none; spaces around it
+/// allowed. Null where it spells none.
+pub fn datetime_sql(t: &str) -> String {
+    let re = "^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]{1,6})?)?\
+              (Z|[+-][0-9]{2}(:?[0-9]{2})?)?$";
+    let utc = "CASE WHEN s ~ '(Z|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN s ELSE s || 'Z' END";
+    format!(
+        "(SELECT CASE WHEN s ~ '{re}' AND pg_input_is_valid({utc}, 'timestamptz') \
+         THEN ({utc})::timestamptz END FROM (SELECT btrim(({t})::text) AS s) AS r)"
+    )
+}
+
+/// A mapping value's kind, for the check that it fits the field it fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    Text,
+    Number,
+    Bool,
+    Date,
+    Datetime,
+}
+
+impl Family {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Family::Text => "text",
+            Family::Number => "a number",
+            Family::Bool => "a bool",
+            Family::Date => "a date",
+            Family::Datetime => "a datetime",
+        }
+    }
+}
+
+/// What a mapping gives: its kind, and for a number its places when known
+/// (`0` for an int).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapTy {
+    pub family: Family,
+    pub places: Option<u32>,
+}
+
+/// The kind a field holds, as a mapping reads it. `None` for a kind no
+/// mapping converts (a file, a document, a duration).
+pub fn field_type(f: &Field) -> Option<MapTy> {
+    use ordo_syntax::ScalarTy as S;
+    let t = |family, places| Some(MapTy { family, places });
+    if f.sealed {
+        return None;
+    }
+    match &f.ty {
+        FieldTy::Ref { .. } => t(Family::Text, None),
+        FieldTy::Scalar(s) => match s {
+            S::Text | S::Id | S::Uri => t(Family::Text, None),
+            S::Int => t(Family::Number, Some(0)),
+            S::Money(p) | S::Decimal(p) => t(Family::Number, Some(u32::from(*p))),
+            S::Bool => t(Family::Bool, None),
+            S::Date => t(Family::Date, None),
+            S::Datetime => t(Family::Datetime, None),
+            _ => None,
+        },
+    }
+}
+
+/// What a mapping gives, when it can be told without the database. `None`
+/// when it cannot (a null, a mix).
+pub fn mapping_type(fields: &[Field], e: &Expr) -> Option<MapTy> {
+    let t = |family, places| Some(MapTy { family, places });
+    match e {
+        Expr::Path { segments, .. } if segments.len() == 1 => fields
+            .iter()
+            .find(|f| f.name == segments[0].name)
+            .and_then(field_type),
+        Expr::IntLit { .. } => t(Family::Number, Some(0)),
+        Expr::DecimalLit { digits, .. } => t(
+            Family::Number,
+            Some(digits.split_once('.').map_or(0, |(_, d)| d.len() as u32)),
+        ),
+        Expr::StrLit { .. } => t(Family::Text, None),
+        Expr::BoolLit { .. } => t(Family::Bool, None),
+        Expr::DateLit { .. } => t(Family::Date, None),
+        Expr::DatetimeLit { .. } => t(Family::Datetime, None),
+        Expr::Neg { expr, .. } => mapping_type(fields, expr),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            use ordo_syntax::ast::BinOp;
+            let (l, r) = (mapping_type(fields, lhs)?, mapping_type(fields, rhs)?);
+            if matches!(op, BinOp::Add) && (l.family == Family::Text || r.family == Family::Text) {
+                return t(Family::Text, None);
+            }
+            if l.family != Family::Number || r.family != Family::Number {
+                return None;
+            }
+            let places = match op {
+                BinOp::Mul => Some(l.places? + r.places?),
+                _ => Some(l.places?.max(r.places?)),
+            };
+            t(Family::Number, places)
+        }
+        Expr::FnCall { name, args, .. } => match name.name.as_str() {
+            "lower" | "trim" | "before" | "after" | "text" => t(Family::Text, None),
+            "length" | "int" => t(Family::Number, Some(0)),
+            "bool" => t(Family::Bool, None),
+            "date" => t(Family::Date, None),
+            "datetime" => t(Family::Datetime, None),
+            "round" => match args.get(1) {
+                Some(Expr::IntLit { value, .. }) => t(Family::Number, u32::try_from(*value).ok()),
+                _ => None,
+            },
+            "coalesce" => args.iter().find_map(|a| mapping_type(fields, a)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `e` is text, for `+` in a mapping: a text field, a string, or
+/// a text function of either.
+fn is_text(cx: &Cx, e: &Expr) -> bool {
+    match e {
+        Expr::StrLit { .. } => true,
+        Expr::Path { segments, .. } => {
+            segments.len() == 1
+                && cx.fields.iter().any(|f| {
+                    f.name == segments[0].name
+                        && f.ty == FieldTy::Scalar(ordo_syntax::ScalarTy::Text)
+                })
+        }
+        Expr::FnCall { name, args, .. } => match name.name.as_str() {
+            "lower" | "trim" | "before" | "after" | "text" => true,
+            "coalesce" => args.iter().any(|a| is_text(cx, a)),
+            _ => false,
+        },
+        Expr::Binary { op, lhs, rhs, .. } => {
+            matches!(op, ordo_syntax::ast::BinOp::Add) && (is_text(cx, lhs) || is_text(cx, rhs))
+        }
+        _ => false,
+    }
 }
 
 /// The condition as one condensed line — the author's spelling with

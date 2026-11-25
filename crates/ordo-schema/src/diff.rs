@@ -44,9 +44,10 @@
 //! # What a live shape cannot see, stated rather than discovered
 //!
 //! - **A rename** (§5 B4) is a drop and an add to anything that reads
-//!   columns, and it stays that way here. Distinguishing them needs a
-//!   declared mapping, which is what B4 requires; guessing from a type match
-//!   would silently propose copying one column into another.
+//!   columns. It is told apart only by a declared `prev` mark
+//!   (`plan-syntax-additions.md` §5, [`crate::prev`]), never guessed from a
+//!   type match, which would silently propose copying one column into
+//!   another.
 //! - **`normalize(lower)`** (§5 B10) touches no column and no constraint —
 //!   it changes the plaintext that is HMACed into a blind index. It is
 //!   invisible to `information_schema` and is found in the `prior`
@@ -282,6 +283,61 @@ pub enum Change {
         from: u8,
         to: u8,
     },
+    /// A field declared `prev(from)` (§5 B4): a new column, the old one's
+    /// values copied into it, the old column kept. Never `ALTER … RENAME`,
+    /// which would drift the serving version the instant it landed.
+    RenameField {
+        entity: String,
+        /// The field's name in the version serving now.
+        from: String,
+        /// Its name in the program.
+        field: String,
+    },
+    /// An entity declared `(prev: from)` (§5 B4).
+    RenameEntity {
+        entity: String,
+        from: String,
+    },
+    /// An entity split (B13): `entity (prev: from)` while `from` stays
+    /// declared. A new table, one row per `from` row by the stored plan's
+    /// correspondence rule, with the fields it takes from `from`; those
+    /// columns are kept in `from`, kept current, and orphaned at the close.
+    SplitEntity {
+        entity: String,
+        from: String,
+        /// The fields that move, as the version serving now declares them.
+        fields: Vec<crate::Field>,
+    },
+    /// A move from another entity, or an entity merge (B14): fields of
+    /// `entity` each `prev(from.<field>)`. Each `from` row gives its values
+    /// to the `entity` row its link names, by the stored plan's
+    /// correspondence rule. The new columns are kept current from `from`
+    /// while the version before writes; at the close the old columns, or
+    /// with `merge` the whole of `from`, are orphaned.
+    MoveFields {
+        entity: String,
+        from: String,
+        /// The moved fields, as the version serving now declares them in
+        /// `from`. Each keeps its name.
+        fields: Vec<crate::Field>,
+        /// `from` is gone: every row of it merges into `entity`.
+        merge: bool,
+        /// `from` as the version serving now declares it: its link, its key
+        /// and its other fields are the stored plan's to check.
+        source: Box<crate::Entity>,
+    },
+    /// A field split or merge (B12, `plan-versions.md` increment 15b):
+    /// several new fields each `prev(name)`, or one `prev(a, b)`. Each new
+    /// column is filled by the stored plan's mapping over the old fields;
+    /// the old columns are kept, kept current by its reverse, and orphaned
+    /// at the close.
+    MapFields {
+        entity: String,
+        /// The old fields, as the version serving now declares them.
+        from: Vec<crate::Field>,
+        /// The new fields.
+        to: Vec<String>,
+    },
     // ── C ──
     AddUnique {
         entity: String,
@@ -393,6 +449,10 @@ impl Change {
             Change::MakeTree { .. } => "B9",
             Change::Normalize { .. } => "B10",
             Change::ChangePlaces { .. } => "B11",
+            Change::RenameField { .. } | Change::RenameEntity { .. } => "B4",
+            Change::MapFields { .. } => "B12",
+            Change::SplitEntity { .. } => "B13",
+            Change::MoveFields { .. } => "B14",
             Change::AddUnique { .. } => "C1",
             Change::AddCompositeUnique { .. } => "C2",
             Change::AddEnum { .. } => "C3",
@@ -440,6 +500,11 @@ impl Change {
             | Change::MakeTree { entity }
             | Change::Normalize { entity, .. }
             | Change::ChangePlaces { entity, .. }
+            | Change::RenameField { entity, .. }
+            | Change::RenameEntity { entity, .. }
+            | Change::SplitEntity { entity, .. }
+            | Change::MoveFields { entity, .. }
+            | Change::MapFields { entity, .. }
             | Change::AddUnique { entity, .. }
             | Change::AddCompositeUnique { entity, .. }
             | Change::AddEnum { entity, .. }
@@ -473,6 +538,7 @@ impl Change {
             | Change::IndexSealedField { field, .. }
             | Change::Normalize { field, .. }
             | Change::ChangePlaces { field, .. }
+            | Change::RenameField { field, .. }
             | Change::AddUnique { field, .. }
             | Change::AddEnum { field, .. }
             | Change::AddForeignKey { field, .. }
@@ -533,6 +599,11 @@ impl Change {
             // The serving program reads the stored amounts at its places;
             // a program at other places must wait until they are moved.
             | Change::ChangePlaces { .. }
+            | Change::RenameField { .. }
+            | Change::RenameEntity { .. }
+            | Change::SplitEntity { .. }
+            | Change::MoveFields { .. }
+            | Change::MapFields { .. }
             | Change::AddUnique { .. }
             | Change::AddCompositeUnique { .. }
             | Change::AddEnum { .. }
@@ -618,6 +689,78 @@ impl std::fmt::Display for Change {
                     "`{e}.{field}` changes places: the stored amounts are held at {ty}({from}), \
                      the program declares {ty}({to})"
                 )
+            }
+            Change::RenameField { from, field, .. } => write!(
+                f,
+                "`{e}.{from}` is renamed to `{e}.{field}`: copied into the new column, the \
+                 old one kept"
+            ),
+            Change::RenameEntity { from, .. } => {
+                write!(f, "entity `{from}` is renamed to `{e}`")
+            }
+            Change::SplitEntity { from, fields, .. } => write!(
+                f,
+                "entity `{from}` is split: `{e}` takes {} from it, one row per `{from}` row by \
+                 the plan's rule, the old columns kept",
+                fields
+                    .iter()
+                    .map(|x| format!("`{from}.{}`", x.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Change::MoveFields {
+                from,
+                fields,
+                merge,
+                ..
+            } => {
+                let names = fields
+                    .iter()
+                    .map(|x| format!("`{from}.{}`", x.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if *merge {
+                    write!(
+                        f,
+                        "entity `{from}` is merged into `{e}`: {names} move into the `{e}` row \
+                         each `{from}` row names, by the plan's rule, and `{from}` is kept"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{names} move to `{e}`: into the `{e}` row each `{from}` row names, by \
+                         the plan's rule, the old columns kept"
+                    )
+                }
+            }
+            Change::MapFields { from, to, .. } => {
+                let names = |v: Vec<&str>| {
+                    v.iter()
+                        .map(|n| format!("`{e}.{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let old = names(from.iter().map(|f| f.name.as_str()).collect());
+                let new = names(to.iter().map(String::as_str).collect());
+                if to.len() > 1 {
+                    write!(
+                        f,
+                        "{old} is split into {new}: each filled by the plan's mapping, the old \
+                         column kept"
+                    )
+                } else if from.len() == 1 {
+                    write!(
+                        f,
+                        "{old} is renamed to {new} with a new type: converted by the plan's \
+                         mapping, the old column kept"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{old} are merged into {new}: filled by the plan's mapping, the old \
+                         columns kept"
+                    )
+                }
             }
             Change::AddUnique { field, .. } => write!(f, "`{e}.{field}` becomes unique"),
             Change::AddCompositeUnique { key, .. } => {
@@ -773,9 +916,38 @@ pub fn diff_with(
     declared: &Schema,
 ) -> Vec<Change> {
     let mut out = Vec::new();
+    // The renames a `prev` mark declares, against the version serving now
+    // (or, on a tenant's database, the version its data was written under).
+    let renames = crate::prev::renames(prior.or(written), declared);
 
     for e in &declared.entities {
         let Some(t) = live.table(&e.name) else {
+            if let Some(part) = renames.part_of(&e.name) {
+                if let (Some(_), Some(was)) = (
+                    live.table(&part.whole),
+                    prior.or(written).and_then(|p| p.native(&part.whole)),
+                ) {
+                    out.push(Change::SplitEntity {
+                        entity: e.name.clone(),
+                        from: part.whole.clone(),
+                        fields: part
+                            .fields
+                            .iter()
+                            .filter_map(|f| was.field(f).cloned())
+                            .collect(),
+                    });
+                    continue;
+                }
+            }
+            if let Some(from) = renames.entity_from(&e.name) {
+                if live.table(from).is_some() {
+                    out.push(Change::RenameEntity {
+                        entity: e.name.clone(),
+                        from: from.to_string(),
+                    });
+                    continue;
+                }
+            }
             // The whole table is missing: one line, not one per column.
             // An operator reading "new entity `invoices`" does not also
             // need seventeen "new field" lines about a table that does not
@@ -786,9 +958,20 @@ pub fn diff_with(
             continue;
         };
         let written_as = written.and_then(|w| w.native(&e.name));
-        entity_columns(e, t, written_as, &live.places, &mut out);
+        entity_columns(
+            e,
+            t,
+            written_as,
+            &live.places,
+            &renames,
+            prior.or(written),
+            &mut out,
+        );
         entity_objects(declared, e, t, &mut out);
-        if let Some(p) = prior.and_then(|p| p.native(&e.name)) {
+        // Against the version its data was written under too: a tenant's
+        // database holds no registry, and its blind indexes are computed
+        // under that version's `normalize` (B10).
+        if let Some(p) = prior.or(written).and_then(|p| p.native(&e.name)) {
             declaration_only(p, e, &mut out);
         }
     }
@@ -802,6 +985,14 @@ pub fn diff_with(
     if let Some(prior) = prior {
         for p in &prior.entities {
             if declared.entity(&p.name).is_some() {
+                continue;
+            }
+            if renames.entities.contains_key(&p.name) {
+                continue;
+            }
+            // Merged into another entity: kept, kept current, and orphaned
+            // at the close.
+            if renames.merged_into(&p.name).is_some() {
                 continue;
             }
             if live.table(&p.name).is_some() {
@@ -819,6 +1010,16 @@ pub fn diff_with(
             };
             for f in p.declared() {
                 match d.field(&f.name) {
+                    // Renamed: the old column is kept, and nothing drops.
+                    None if renames.field_to(&p.name, &f.name).is_some() => {}
+                    // Split or merged: kept, and orphaned at the close.
+                    None if renames.map_from(&p.name, &f.name).is_some() => {}
+                    // Moved into a part split off this entity: kept, kept
+                    // current, and orphaned at the close.
+                    None if renames.moved_to(&p.name, &f.name).is_some() => {}
+                    // Moved into another entity: kept, kept current, and
+                    // orphaned at the close.
+                    None if renames.moved_from(&p.name, &f.name).is_some() => {}
                     None => {
                         if t.columns.contains_key(&f.column()) {
                             out.push(Change::DropField {
@@ -881,11 +1082,63 @@ fn entity_columns(
     t: &LiveTable,
     written: Option<&Entity>,
     held: &BTreeMap<(String, String), u8>,
+    renames: &crate::prev::Renames,
+    moved_from: Option<&Schema>,
     out: &mut Vec<Change>,
 ) {
     for f in e.declared() {
+        // A move from another entity, or a merge: one change for the pair
+        // of entities, at its first moved field, while its columns are
+        // missing here.
+        if let Some(m) = renames.move_to(&e.name, &f.name) {
+            // A column the version the data was written under does not
+            // declare is an orphan left by an earlier step: the move is
+            // still rendered, and the plan refuses it by name.
+            let orphan = written.is_some_and(|w| w.field(&f.name).is_none());
+            if !t.columns.contains_key(&f.column()) || orphan {
+                if m.fields.first().map(|(x, _)| x) == Some(&f.name) {
+                    if let Some(was) = moved_from {
+                        if let Some(source) = was.native(&m.from) {
+                            out.push(Change::MoveFields {
+                                entity: e.name.clone(),
+                                from: m.from.clone(),
+                                fields: m
+                                    .fields
+                                    .iter()
+                                    .filter_map(|(_, old)| source.field(old).cloned())
+                                    .collect(),
+                                merge: m.merge,
+                                source: Box::new(source.clone()),
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        // A split's or a merge's new field: one change for the whole map,
+        // at its first new field, while the old columns are there.
+        if let Some(m) = renames.map_to(&e.name, &f.name) {
+            if m.from.iter().all(|x| t.columns.contains_key(&x.column())) {
+                if m.to.first() == Some(&f.name) {
+                    out.push(Change::MapFields {
+                        entity: e.name.clone(),
+                        from: m.from.clone(),
+                        to: m.to.clone(),
+                    });
+                }
+                continue;
+            }
+        }
         match t.columns.get(&f.column()) {
-            None => out.push(added_field(e, f)),
+            None => match renames.field_from(&e.name, &f.name) {
+                Some(from) if t.columns.contains_key(from) => out.push(Change::RenameField {
+                    entity: e.name.clone(),
+                    from: from.to_string(),
+                    field: f.name.clone(),
+                }),
+                _ => out.push(added_field(e, f)),
+            },
             Some(c) => {
                 let declared_ty = ddl::column_ty(f);
                 if same_type(&declared_ty, &c.ty) {

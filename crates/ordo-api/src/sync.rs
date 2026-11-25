@@ -315,7 +315,7 @@ async fn run(
             }
             None => load(&reader, first, &mut held, &tx).await?,
         }
-        let mut tick = crate::router::recheck_ticker(door.recheck());
+        let mut tick = door.ticker();
         loop {
             tokio::select! {
                 heard = signals.recv() => match heard {

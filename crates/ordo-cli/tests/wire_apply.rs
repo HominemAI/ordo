@@ -555,6 +555,84 @@ fn a_label_and_a_commit_travel_and_versions_answer_over_the_wire() {
     assert_ne!(denied.code, 0, "{}", denied.report);
 }
 
+/// `ordo versions remove` and `ordo versions set restore-window` over the
+/// door (`plan-versions.md` §1.6, rows 10 and 17): a version stored and
+/// never served is removed; the active one is refused, naming the fix; a
+/// manager may not remove.
+#[test]
+fn a_version_is_removed_over_the_wire_and_the_active_one_is_refused() {
+    let db = "ordo_wire_remove";
+    empty(db);
+    let path = program("remove", V1);
+    let rt = runtime();
+    let addr = rt.block_on(serve(db));
+    let owner = token(DEP_OWNER);
+    let with_door = |head: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = head.iter().map(|s| s.to_string()).collect();
+        v.extend(door(addr, &owner));
+        v
+    };
+    let first = operator::run("apply", &with_door(&[&path, "--no-wait"]));
+    assert_eq!(first.code, 0, "{}", first.report);
+    std::fs::write(&path, V2).expect("write");
+    operator::run("apply", &with_door(&[&path, "--no-wait"]));
+
+    let bare = operator::run("versions", &with_door(&["remove", "#2"]));
+    assert_ne!(bare.code, 0);
+    assert!(bare.report.contains("--reason"), "{}", bare.report);
+    let active = operator::run(
+        "versions",
+        &with_door(&["remove", "#1", "--reason", "tidy"]),
+    );
+    assert_ne!(active.code, 0);
+    assert!(
+        active.report.contains("remove_active") && active.report.contains("ordo rollback"),
+        "{}",
+        active.report
+    );
+    let manager = token(DEP_MANAGER);
+    let mut m = vec![
+        "remove".to_string(),
+        "#2".into(),
+        "--reason".into(),
+        "x".into(),
+    ];
+    m.extend(door(addr, &manager));
+    assert_ne!(operator::run("versions", &m).code, 0);
+
+    // #2 was stored and never served: no backup can be at it.
+    let gone = operator::run(
+        "versions",
+        &with_door(&["remove", "#2", "--reason", "never used"]),
+    );
+    assert_eq!(gone.code, 0, "{}", gone.report);
+    assert!(
+        gone.report.starts_with("removed    #2 · ") && gone.report.contains("\"never used\""),
+        "{}",
+        gone.report
+    );
+    let list = operator::run("versions", &with_door(&["list"]));
+    assert!(!list.report.contains("#2 · "), "{}", list.report);
+
+    let set = operator::run(
+        "versions",
+        &with_door(&[
+            "set",
+            "restore-window",
+            "30d",
+            "--reason",
+            "backups kept 30 days",
+        ]),
+    );
+    assert_eq!(set.code, 0, "{}", set.report);
+    assert!(set.report.contains("restore window 30d"), "{}", set.report);
+    let bad = operator::run(
+        "versions",
+        &with_door(&["set", "restore-window", "soon", "--reason", "x"]),
+    );
+    assert_ne!(bad.code, 0, "{}", bad.report);
+}
+
 /// `ordo versions revoke|unrevoke|revoked` and `ordo windows` over the door
 /// print what the database path prints (`plan-versions.md` §4 row 2b).
 #[test]

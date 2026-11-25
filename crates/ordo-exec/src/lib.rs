@@ -57,6 +57,8 @@ pub mod metrics;
 pub mod migrate;
 pub mod nfc;
 pub mod nodes;
+pub mod orphans;
+pub mod overlay;
 pub mod peer;
 mod pool_error;
 pub mod prune;
@@ -66,6 +68,7 @@ pub mod route;
 pub mod sealed;
 pub mod secevent;
 pub mod shape;
+pub mod sign_in_contract;
 pub mod spacedb;
 pub mod triggers;
 pub mod undo;
@@ -870,6 +873,11 @@ pub struct Pool {
     /// ([`PIN_FENCE_DDL`]). `None` checks nothing: a boot pass, an operator
     /// command, a test with no pins.
     pin_epoch: Option<i64>,
+    /// The move overlay this handle's writes run (`plan-versions.md`
+    /// increment 11a, [`overlay`]): set by [`Pool::with_overlay`] on a
+    /// tenant's handle while it moves between versions. `None` writes as
+    /// the op says and nothing more.
+    overlay: Option<Arc<overlay::MoveOverlay>>,
 }
 
 /// **The pin fence**, in each tenant's own database (`plan-versions.md`
@@ -1218,6 +1226,19 @@ impl Pool {
             // The pin fence, in every database a write reaches
             // (`plan-versions.md` §1.3).
             PIN_FENCE_DDL,
+            // The renames this database is in the middle of (increment
+            // 11a): every write reads them first ([`overlay::RENAMES_DDL`]).
+            overlay::RENAMES_DDL,
+            // The sealed backfills it is in the middle of (increment 13),
+            // read under the same fence ([`overlay::SEALS_DDL`]).
+            overlay::SEALS_DDL,
+            // The fills a shared database is in the middle of (increment
+            // 11b part 4), read under the same fence ([`overlay::FILLS_DDL`]).
+            overlay::FILLS_DDL,
+            // The checks a shared database holds every space to until a
+            // move's close (increment 11b), under the same fence
+            // ([`overlay::HELD_DDL`]).
+            overlay::HELD_DDL,
         ] {
             let pending = self.pending_statements(ddl).await?;
             if pending.is_empty() {
@@ -1425,6 +1446,7 @@ impl Pool {
             sweep_wait: route::TENANT_DIAL_WAIT_DEFAULT,
             label: None,
             pin_epoch: None,
+            overlay: None,
         })
     }
 
@@ -1444,6 +1466,7 @@ impl Pool {
             sweep_wait: self.sweep_wait,
             label: self.label.clone(),
             pin_epoch: self.pin_epoch,
+            overlay: self.overlay.clone(),
         }
     }
 
@@ -1469,8 +1492,9 @@ impl Pool {
             sweep_wait: self.sweep_wait,
             label: self.label.clone(),
             // An epoch belongs to one tenant's pin; a handle for another
-            // space carries none until it is given one.
+            // space carries none until it is given one. So does an overlay.
             pin_epoch: None,
+            overlay: None,
         }
     }
 
@@ -1487,6 +1511,20 @@ impl Pool {
     /// The pin epoch this handle writes under, if it was given one.
     pub fn pin_epoch(&self) -> Option<i64> {
         self.pin_epoch
+    }
+
+    /// The same handle, with its writes running `overlay` (increment 11a):
+    /// the extra columns and guards of a tenant moving between versions.
+    pub fn with_overlay(&self, overlay: Option<Arc<overlay::MoveOverlay>>) -> Pool {
+        Pool {
+            overlay,
+            ..self.clone()
+        }
+    }
+
+    /// The move overlay this handle's writes run, if any.
+    pub fn overlay(&self) -> Option<&Arc<overlay::MoveOverlay>> {
+        self.overlay.as_ref()
     }
 
     /// A handle onto the same pool for a walker that touches each tenant
@@ -1516,6 +1554,7 @@ impl Pool {
             sweep_wait: wait,
             label: self.label.clone(),
             pin_epoch: self.pin_epoch,
+            overlay: self.overlay.clone(),
         }
     }
 
@@ -1601,6 +1640,11 @@ impl Pool {
         Arc::ptr_eq(&self.shared, &other.shared)
             && self.space == other.space
             && self.pin_epoch == other.pin_epoch
+            && match (&self.overlay, &other.overlay) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
             && self.sweep.is_some() == other.sweep.is_some()
             && match (&self.observer, &other.observer) {
                 (None, None) => true,
@@ -1899,6 +1943,16 @@ impl Pool {
             backoff(attempt, self.shared.limits.write_retry_max).await;
         }
     }
+}
+
+/// Whether try `attempt` of `attempts` takes its turn alone
+/// (`overlay::take_turn`): from the third try, and always the last try
+/// when there is more than one. Two lost tries is the point where losing
+/// again is no longer bad luck: the writes beside it keep winning
+/// (writes during a seal, Reported fix 2026-11-24). A first try never
+/// waits for anyone.
+fn runs_alone(attempt: u32, attempts: u32) -> bool {
+    attempt > 1 && (attempt >= 3 || attempt == attempts)
 }
 
 /// The first pause window, doubled on each try after it. It is the scale of
@@ -2425,10 +2479,34 @@ pub struct BlockingTx {
     /// `is_unique_violation`), for the same reason as `conflict`: a release
     /// rule reads it to tell "rows still stand in the way" from an outage.
     constraint: std::sync::atomic::AtomicBool,
+    /// While a seal runs: what this write's own statements returned for
+    /// the seal overlay (`overlay::RowCapture`).
+    row_capture: std::sync::Mutex<overlay::RowCapture>,
 }
 
 impl ordo_conformance::write::WriteDb for BlockingTx {
     fn rows(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+        let rewritten = self.row_capture.lock().expect("seal capture").rewrite(sql);
+        if let Some((entity, with_returning)) = rewritten {
+            // The statement answered no rows before its `RETURNING`; the
+            // rows returned are the overlay's, and the caller sees none.
+            let rows = self.run(&with_returning)?;
+            self.row_capture
+                .lock()
+                .expect("seal capture")
+                .record(&entity, &rows);
+            return Ok(Vec::new());
+        }
+        self.run(sql)
+    }
+
+    fn refused_by_constraint(&self) -> bool {
+        self.constraint.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl BlockingTx {
+    fn run(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
         self.handle.block_on(self.tx.rows(sql)).map_err(|e| {
             if e.is_retryable() {
                 self.conflict
@@ -2440,10 +2518,6 @@ impl ordo_conformance::write::WriteDb for BlockingTx {
             }
             e.to_string()
         })
-    }
-
-    fn refused_by_constraint(&self) -> bool {
-        self.constraint.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2578,6 +2652,7 @@ impl Executor {
                     log.clone(),
                     lease.clone(),
                     Some(self.chain_space()),
+                    runs_alone(attempt, attempts),
                     move |db, wlog| w(db, wlog),
                 )
                 .await;
@@ -2633,6 +2708,7 @@ impl Executor {
                     agent.clone(),
                     lease.clone(),
                     append_to.clone(),
+                    runs_alone(attempt, attempts),
                 )
                 .await;
             match out {
@@ -2664,8 +2740,9 @@ impl Executor {
         agent: Option<String>,
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
+        alone: bool,
     ) -> Result<Option<serde_json::Value>, ExecFail> {
-        self.attempt(log, lease, append_to, move |db, log| {
+        self.attempt(log, lease, append_to, alone, move |db, log| {
             log.act_for(agent);
             fixture.run_write_on(db, log, &call, Some(&caller))
         })
@@ -2730,6 +2807,7 @@ impl Executor {
         log: std::sync::Arc<std::sync::Mutex<ordo_conformance::WriteLog>>,
         lease: Option<(String, String)>,
         append_to: Option<ordo_commandlog::SpaceId>,
+        alone: bool,
         work: W,
     ) -> Result<Option<serde_json::Value>, ExecFail>
     where
@@ -2756,7 +2834,110 @@ impl Executor {
             .begin_for(OpClass::MultiStatementGroup)
             .await
             .map_err(ExecFail::Pool)?;
-        // The pin fence first: a node whose pin of this tenant is older
+        // **The renames first** (increment 11a), as this transaction's first
+        // statement: its share lock is taken before its snapshot, so a
+        // rename that commits while this write waits is read here, and one
+        // that has not started waits for this write to commit. A write
+        // can therefore never land between a rename's new column and its
+        // dual writes, whatever this node has read.
+        // **A turn alone** for a write that already lost to other writes:
+        // the in-flight writes end first and new ones wait, so this try
+        // cannot be cancelled by them (`overlay::take_turn`).
+        let turn = if alone {
+            overlay::take_turn(&tx).await
+        } else {
+            Ok(())
+        };
+        let renames = match turn {
+            Ok(()) => overlay::renames_in(&tx).await,
+            Err(e) => Err(e),
+        };
+        let renames = match renames {
+            Ok(r) => r,
+            Err(e) if e.is_missing_table() => {
+                // A database no dial of this build reached yet: make the
+                // table and run the write again.
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::RENAMES_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the renames table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
+        // The sealed backfills in progress (increment 13), under the same
+        // lock: a seal's expand records itself under `"$renames"` too.
+        let seals = match overlay::seals_in(&tx).await {
+            Ok(s) => s,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::SEALS_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the seals table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
+        // The fills a shared database is in the middle of (increment 11b
+        // part 4), under the same lock: a fill records itself under
+        // `"$renames"` too.
+        let fills = match overlay::fills_in(&tx).await {
+            Ok(f) => f,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::FILLS_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the fills table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
+        // The checks a move holds every space here to (increment 11b),
+        // under the same lock.
+        let held = match overlay::held_in(&tx).await {
+            Ok(h) => h,
+            Err(e) if e.is_missing_table() => {
+                let _ = tx.rollback().await;
+                self.pool
+                    .rows(overlay::HELD_DDL)
+                    .await
+                    .map_err(ExecFail::Pool)?;
+                return Err(ExecFail::Pool(PoolError::Serialization(
+                    "the held checks table was just made; the write runs again"
+                        .to_string()
+                        .into(),
+                )));
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(ExecFail::Pool(e));
+            }
+        };
+        // The pin fence next: a node whose pin of this tenant is older
         // than one another node already wrote under writes nothing.
         if let Err(e) = self.check_pin_fence(&tx).await {
             let _ = tx.rollback().await;
@@ -2788,15 +2969,33 @@ impl Executor {
         let log_after = log;
         let conflict = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let conflict_seen = conflict.clone();
-        let (result, tx, mut scratch) = tokio::task::spawn_blocking(move || {
+        // The move overlay this write runs (increment 11a): the stored
+        // step's, or outside a move the renames and fills this database is
+        // in the middle of, as this version reads them. Worked out before
+        // the write, so its own statements return what the overlays need.
+        let by_renames = match self.pool.overlay() {
+            Some(_) => None,
+            None => overlay::MoveOverlay::for_database(&self.schema, &renames, &fills, &held),
+        };
+        let pool_overlay = self.pool.overlay();
+        let run = pool_overlay.map(|o| o.as_ref()).or(by_renames.as_ref());
+        let capture = overlay::RowCapture::for_seals(&overlay::seals_for(&self.schema, &seals))
+            .with_move(run);
+        // An entity rename's dual writes (below), worked out here too.
+        let mirrors = overlay::entity_mirrors(&self.schema, &renames);
+        let splits = overlay::split_mirrors(&self.schema, &renames);
+        let capture = capture.with_mirrors(&mirrors).with_splits(&splits);
+        let (result, tx, mut scratch, mut capture) = tokio::task::spawn_blocking(move || {
             let db = BlockingTx {
                 tx,
                 handle,
                 conflict,
                 constraint: std::sync::atomic::AtomicBool::new(false),
+                row_capture: std::sync::Mutex::new(capture),
             };
             let out = work(&db, &mut scratch);
-            (out, db.tx, scratch)
+            let capture = db.row_capture.into_inner().expect("seal capture");
+            (out, db.tx, scratch, capture)
         })
         .await
         .map_err(|e| ExecFail::Compile(format!("write task: {e}")))?;
@@ -2813,6 +3012,167 @@ impl Executor {
         }
         match result {
             Ok(v) => {
+                // The overlays below never scan a table
+                // (`overlay::scans_off`): a scan under SERIALIZABLE reads
+                // every other writer's rows.
+                let scans = if capture.is_empty() {
+                    None
+                } else {
+                    match overlay::scans_off(&tx).await {
+                        Ok(prev) => Some(prev),
+                        Err(e) => {
+                            let _ = tx.rollback().await;
+                            return Err(ExecFail::Pool(e));
+                        }
+                    }
+                };
+                // **The move overlay** (increment 11a): the other version's
+                // columns and guards on every row this write touched, in
+                // this transaction, before the chain append. A row it
+                // refuses refuses the whole write.
+                if let (Some(overlay), Some(group)) = (run, scratch.pending()) {
+                    let written: Vec<(String, String)> = group
+                        .commands
+                        .iter()
+                        .filter(|c| c.kind != ordo_commandlog::CommandKind::Delete)
+                        .map(|c| (c.entity.clone(), c.row_id.clone()))
+                        .collect();
+                    if let Err(e) = overlay
+                        .apply(&tx, &self.space.0, &written, &mut capture)
+                        .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
+                            overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
+                // **An entity rename's dual writes**: every row this
+                // version wrote to a renamed entity is copied whole into
+                // the other name's table, and every row it deleted is
+                // deleted there, in this transaction. Read from `$renames`
+                // whether or not the tenant is in a move: both tables stay
+                // current until the rename lands.
+                if let (false, Some(group)) = (mirrors.is_empty(), scratch.pending()) {
+                    let (deleted, written): (Vec<_>, Vec<_>) = group
+                        .commands
+                        .iter()
+                        .partition(|c| c.kind == ordo_commandlog::CommandKind::Delete);
+                    let pairs = |cs: Vec<&ordo_commandlog::Command>| -> Vec<(String, String)> {
+                        cs.into_iter()
+                            .map(|c| (c.entity.clone(), c.row_id.clone()))
+                            .collect()
+                    };
+                    if let Err(e) = overlay::apply_mirrors(
+                        &tx,
+                        &self.space.0,
+                        &mirrors,
+                        &pairs(written.clone()),
+                        &pairs(deleted),
+                        &pairs(
+                            written
+                                .into_iter()
+                                .filter(|c| c.kind == ordo_commandlog::CommandKind::Create)
+                                .collect(),
+                        ),
+                        &capture,
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
+                            overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
+                // **An entity split's dual writes**: the part kept current
+                // from the whole by the version before, the whole's moved
+                // columns from the part by the version after, in this
+                // transaction, until the split's soak closes.
+                if let (false, Some(group)) = (splits.is_empty(), scratch.pending()) {
+                    let (deleted, written): (Vec<_>, Vec<_>) = group
+                        .commands
+                        .iter()
+                        .partition(|c| c.kind == ordo_commandlog::CommandKind::Delete);
+                    let pairs = |cs: &[&ordo_commandlog::Command]| -> Vec<(String, String)> {
+                        cs.iter()
+                            .map(|c| (c.entity.clone(), c.row_id.clone()))
+                            .collect()
+                    };
+                    // Each deleted part row's link, from its before image.
+                    let links: Vec<(String, String)> = deleted
+                        .iter()
+                        .filter_map(|c| {
+                            let m = splits.iter().find(|m| m.reverse && m.part == c.entity)?;
+                            match c.before.as_ref()?.get(&m.link)? {
+                                ordo_commandlog::Value::Id(s) | ordo_commandlog::Value::Text(s) => {
+                                    Some((c.entity.clone(), s.clone()))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    if let Err(e) = overlay::apply_splits(
+                        &tx,
+                        &self.space.0,
+                        &splits,
+                        &pairs(&written),
+                        &pairs(&deleted),
+                        &links,
+                        &capture,
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::OverlayError::Refused(r) => ExecFail::Compile(r.to_string()),
+                            overlay::OverlayError::Duplicate(d) => ExecFail::Compile(d.to_string()),
+                            overlay::OverlayError::Pool(p) => ExecFail::Pool(p),
+                        });
+                    }
+                }
+                // **The seal overlay** (increment 13): a field this version
+                // writes as plaintext while a stored step seals it, or as
+                // sealed while one indexes it, gets the column the worker
+                // fills, on every row written, in this transaction.
+                let sealing = overlay::seals_for(&self.schema, &seals);
+                if let (false, Some(group)) = (sealing.is_empty(), scratch.pending()) {
+                    let written: Vec<(String, String)> = group
+                        .commands
+                        .iter()
+                        .filter(|c| c.kind != ordo_commandlog::CommandKind::Delete)
+                        .map(|c| (c.entity.clone(), c.row_id.clone()))
+                        .collect();
+                    if let Err(e) = overlay::apply_seals(
+                        &tx,
+                        &self.schema,
+                        self.keys.as_ref(),
+                        &self.space.0,
+                        &sealing,
+                        &written,
+                        &mut capture,
+                    )
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(match e {
+                            overlay::SealOverlayError::Pool(p) => ExecFail::Pool(p),
+                            k @ overlay::SealOverlayError::Keys(_) => {
+                                ExecFail::Compile(k.to_string())
+                            }
+                        });
+                    }
+                }
+                if let Some(prev) = scans {
+                    if let Err(e) = overlay::scans_back(&tx, &prev).await {
+                        let _ = tx.rollback().await;
+                        return Err(ExecFail::Pool(e));
+                    }
+                }
                 // The completion record joins the effect in this
                 // transaction. Commit publishes both or neither.
                 // Invalidation and deferred work ride the SAME transaction
@@ -2972,10 +3332,16 @@ impl Executor {
         // Appended to this executor's own chain, always. Its one caller is
         // the blob door, and an upload is revertible only because the revert
         // applier finds its group in the durable chain.
-        self.attempt(log, None, Some(self.chain_space()), move |db, log| {
-            log.act_for(agent);
-            fixture.run_platform_converge(db, log, value, &caller)
-        })
+        self.attempt(
+            log,
+            None,
+            Some(self.chain_space()),
+            false,
+            move |db, log| {
+                log.act_for(agent);
+                fixture.run_platform_converge(db, log, value, &caller)
+            },
+        )
         .await
         .map(|o| o.unwrap_or_else(|| serde_json::Value::Array(Vec::new())))
     }
@@ -3012,9 +3378,13 @@ impl Executor {
             + Send
             + 'static,
     {
-        self.attempt(log, None, Some(self.chain_space()), move |db, log| {
-            work(db, log)
-        })
+        self.attempt(
+            log,
+            None,
+            Some(self.chain_space()),
+            false,
+            move |db, log| work(db, log),
+        )
         .await
         .map(|o| o.unwrap_or_else(|| serde_json::Value::Array(Vec::new())))
     }
@@ -3504,5 +3874,17 @@ mod backoff_tests {
     fn the_draw_is_random() {
         let draws: std::collections::HashSet<u64> = (0..64).map(|_| random_u64()).collect();
         assert!(draws.len() > 60, "{}", draws.len());
+    }
+
+    /// A first try never runs alone; from the third try every try does, and
+    /// a budget of one retry gives its last try the turn.
+    #[test]
+    fn a_write_that_lost_twice_runs_alone() {
+        let alone = |attempts: u32| -> Vec<bool> {
+            (1..=attempts).map(|a| runs_alone(a, attempts)).collect()
+        };
+        assert_eq!(alone(1), [false]);
+        assert_eq!(alone(2), [false, true]);
+        assert_eq!(alone(6), [false, false, true, true, true, true]);
     }
 }

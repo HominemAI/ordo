@@ -93,6 +93,165 @@ export default defineConfig({
       dependencies: ['upgrade'],
       use: { ...devices['Desktop Chrome'] },
     },
+    // `ordo evolve` from v2 to v3 through the door, as a developer signed in
+    // with `ordo login` (plan-versions.md, increment 8). It stores v3 beside
+    // v2 and runs the step on the deployment's own database, so it runs
+    // after `v2` and before `v3`. Locally, `--project=evolve --no-deps`.
+    {
+      name: 'evolve',
+      testMatch: /evolve\/v2-to-v3\.spec\.ts/,
+      dependencies: ['v2'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Notes v3 over the running notes v2, with the page open (plan-versions.md,
+    // increment 7a). It moves the stack to v3, so it runs after `evolve`.
+    // Locally, `--project=v3 --no-deps` applies v2 itself and runs alone.
+    {
+      name: 'v3',
+      testMatch: /v3\/.*\.spec\.ts/,
+      dependencies: ['evolve'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The pre-checks of `ordo evolve` over bad data in a tenant (increment 9),
+    // from v3 to 0.3.1 (fixtures/notes-v3-1). It needs v3 serving, so it runs
+    // after `v3`, last. Locally, `--project=evolve-checks --no-deps`.
+    // Restore across versions (plan-versions.md increment 17): a tenant's
+    // database restored from a snapshot taken on v2 while v3 serves; its pin
+    // follows the data, then it moves again. It needs v3 active, so it runs
+    // after `v3`. Locally, `--project=restore --no-deps`.
+    {
+      name: 'restore',
+      testMatch: /restore\/.*\.spec\.ts/,
+      dependencies: ['v3'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    {
+      name: 'evolve-checks',
+      testMatch: /evolve\/prechecks\.spec\.ts/,
+      dependencies: ['restore'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // attachments.size, orphaned by v3: exported, erased, then pruned
+    // (plan-versions.md, increment 14). It prunes a column, so it runs last.
+    {
+      name: 'orphans',
+      testMatch: /orphans\/.*\.spec\.ts/,
+      dependencies: ['evolve-checks'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // A staging clone of a production tenant (plan-versions.md increment 12),
+    // into the stack's second deployment. It puts staging in production's
+    // chain while it runs, and `ordo apply` goes to a chain's first step, so
+    // it runs after `orphans`, last. Locally, `--project=clone --no-deps`.
+    {
+      name: 'clone',
+      testMatch: /clone\/.*\.spec\.ts/,
+      dependencies: ['orphans'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // notes.body sealed on live data (plan-versions.md increment 13), from
+    // v3 to 0.3.4 (versions written by the spec). It seals a field for the whole
+    // stack, so it runs after `clone`. Locally, `--project=seal --no-deps`.
+    {
+      name: 'seal',
+      testMatch: /seal\/.*\.spec\.ts/,
+      dependencies: ['clone'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // The signed rehearsal (plan-versions.md increment 12b): staging
+    // rehearses 0.3.4 to 0.3.5 on a clone and signs it; production refuses
+    // the step until it accepts that. Version numbers only rise, so it runs
+    // after `seal`, last. Locally, `--project=rehearsal --no-deps`.
+    {
+      name: 'rehearsal',
+      testMatch: /rehearsal\/.*\.spec\.ts/,
+      dependencies: ['seal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // A rename on one tenant under live writes (plan-versions.md, increment
+    // 11a): the move with dual writes, the soak, a revert and the close, with
+    // the page open. It stores 0.3.6, above
+    // `rehearsal`'s 0.3.5 and below `branch`'s 0.5.x, and version numbers only
+    // rise, so it runs between them. Locally, `--project=moves --no-deps`.
+    {
+      name: 'moves',
+      testMatch: /evolve\/dual-writes\.spec\.ts/,
+      dependencies: ['rehearsal'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // A rename on 3 tenants moved by a rollout, and a rollback in the soak
+    // (plan-versions.md, increment 11b). It stores 0.3.7, above `moves`'
+    // 0.3.6 and below `branch`'s 0.5.x, so it runs between them. Locally,
+    // `--project=rollout-moves --no-deps`.
+    {
+      name: 'rollout-moves',
+      testMatch: /evolve\/every-tenant\.spec\.ts/,
+      dependencies: ['moves'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // A `--fill` backfill on one tenant under live writes (plan-versions.md
+    // increment 10b): the person types while the fill runs, and every row
+    // ends filled. It stores 0.3.8, above `rollout-moves`' 0.3.7 and below
+    // `branch`'s 0.5.x, so it runs between them. Locally,
+    // `--project=fill --no-deps`.
+    {
+      name: 'fill',
+      testMatch: /evolve\/fill\.spec\.ts/,
+      dependencies: ['rollout-moves'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Notes v3 splits a field (plan-versions.md, increment 15b): the
+    // mapping asked for, the move, a revert in the soak and the close. It
+    // stores 0.3.9, above `fill`'s 0.3.8 and below `branch`'s 0.5.x, so it
+    // runs between them. Locally, `--project=split --no-deps`.
+    {
+      name: 'split',
+      testMatch: /evolve\/split\.spec\.ts/,
+      dependencies: ['fill'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Notes v3 splits an entity (plan-versions.md, increment 15c): the
+    // rule asked for, the move, a revert in the soak and the close. It
+    // stores 0.3.10, above `split`'s 0.3.9 and below `branch`'s 0.5.x, so
+    // it runs between them. Locally, `--project=entity-split --no-deps`.
+    {
+      name: 'entity-split',
+      testMatch: /evolve\/entity-split\.spec\.ts/,
+      dependencies: ['split'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Notes v3 merges an entity (plan-versions.md, increment 15d): labels
+    // added beside notes, then merged back with the rule asked for, the
+    // move, a revert in the soak and the close. It stores 0.3.11 and
+    // 0.3.12, above `entity-split`'s 0.3.10 and below `branch`'s 0.5.x, so
+    // it runs between them. Locally, `--project=entity-merge --no-deps`.
+    {
+      name: 'entity-merge',
+      testMatch: /evolve\/entity-merge\.spec\.ts/,
+      dependencies: ['entity-split'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Dev branches as tenants on their own version (plan-versions.md
+    // increment 5): 2 branches served side by side while the stack serves
+    // its own. It applies programs, so it runs after `entity-merge`.
+    // Locally, `--project=branch --no-deps`.
+    {
+      name: 'branch',
+      testMatch: /branch\/.*\.spec\.ts/,
+      dependencies: ['entity-merge'],
+      use: { ...devices['Desktop Chrome'] },
+    },
+    // Tenant builds (plan-versions.md increment 16): a beta tenant serves the
+    // branch while the rest serve main. It stores 0.6.0 and activates 0.6.1,
+    // above `branch`'s 0.5.x, and version numbers only rise, so it runs after
+    // `branch`, last.
+    // Locally, `--project=tenant-build --no-deps`.
+    {
+      name: 'tenant-build',
+      testMatch: /tenant-build\/.*\.spec\.ts/,
+      dependencies: ['branch'],
+      use: { ...devices['Desktop Chrome'] },
+    },
     {
       name: 'screenshots',
       testMatch: /screenshots\/screens\.spec\.ts/,

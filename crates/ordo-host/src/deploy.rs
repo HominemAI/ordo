@@ -1142,6 +1142,10 @@ pub struct Unserved {
     pub version: String,
 }
 
+/// The version serving a tenant, and its catalog source with the
+/// platform's ops ([`Deployment::manifests_in`]).
+pub type TenantManifests = (Arc<Loaded>, Vec<(String, Value)>);
+
 type Others = RwLock<std::collections::HashMap<String, Arc<Loaded>>>;
 
 /// How many dropped versions' op tables a node keeps for
@@ -1420,7 +1424,23 @@ impl Deployment {
     /// platform half does not move at all, which is what it means for it
     /// not to be part of a version.
     pub fn manifests(&self) -> Vec<(String, Value)> {
-        let mut out = self.current().manifests.as_ref().clone();
+        self.manifests_of(&self.current())
+    }
+
+    /// **One tenant's catalog source** (`plan-versions.md` §1.4): the
+    /// manifests of the version serving `space`, plus the platform's, and
+    /// that version. A tenant with no pin gets the active version's. A
+    /// tenant pinned to a version this node has not loaded is
+    /// [`Unserved`], as its ops are. Reading a catalog never counts as a
+    /// use of the version and never wakes an evicted one.
+    pub fn manifests_in(&self, space: &str) -> Result<TenantManifests, Unserved> {
+        let (loaded, _) = self.resolve(space, false)?;
+        let out = self.manifests_of(&loaded);
+        Ok((loaded, out))
+    }
+
+    fn manifests_of(&self, loaded: &Loaded) -> Vec<(String, Value)> {
+        let mut out = loaded.manifests.as_ref().clone();
         out.extend(
             crate::platform_ops::manifests()
                 .into_iter()

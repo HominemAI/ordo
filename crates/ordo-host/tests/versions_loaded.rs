@@ -69,8 +69,8 @@ function stamp in board {
 }
 ";
 
-/// 0.2.0: an optional field added, `stamp` says 0.2.0, and `only2`, which
-/// 0.1.0 does not declare.
+/// 0.2.0: an optional field added, `stamp` says 0.2.0, and `only2` and
+/// `dueCards`, which 0.1.0 does not declare.
 const V020: &str = "domain board @ 0.2.0
 
 entity cards {
@@ -87,6 +87,11 @@ op addCard($title: text) =
 
 op cardList =
   cards[title]
+  sort title
+  take 50
+
+op dueCards =
+  cards[title, due]
   sort title
   take 50
 
@@ -124,6 +129,11 @@ op addCard($title: text) =
 
 op cardList =
   cards[title]
+  sort title
+  take 50
+
+op dueCards =
+  cards[title, due]
   sort title
   take 50
 
@@ -673,4 +683,90 @@ async fn a_live_feed_closes_with_version_changed_when_its_tenants_pin_moves() {
         "the unmoved tenant's feed is still open"
     );
     assert!(!bbuf.contains("version_changed"), "{bbuf}");
+}
+
+/// **The catalog and the generated interface are the tenant's version's**
+/// (§1.4). `spc_a` is pinned to 0.1.0 and `spc_b` stays on 0.2.0, on one
+/// node. Each asks `/catalog` and `/interface` in its own space and is
+/// answered from its own version: 0.1.0 has no `dueCards` and no
+/// `cards.due`, 0.2.0 has both, and each answer names its version.
+/// Then a tenant pinned to a version the node has not loaded is refused
+/// `space_unavailable`, naming no version, and a call with no token is
+/// answered the empty catalog, as everywhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_tenant_reads_its_own_versions_catalog_and_interface() {
+    let node = boot("ordo_vloaded_catalog").await;
+    pin(&node, SPC_A, "0.1.0").await;
+    wait(|| {
+        node.deployment.loaded("0.1.0").is_some()
+            && node.deployment.pin_of(SPC_A).map(|p| p.0).as_deref() == Some("0.1.0")
+    })
+    .await;
+
+    let names = |a: &Answer| -> Vec<String> {
+        a.body
+            .as_array()
+            .unwrap_or_else(|| panic!("a catalog is a list: {}", a.body))
+            .iter()
+            .filter_map(|m| m["op"].as_str().map(str::to_string))
+            .collect()
+    };
+    let a = call(&node, "GET", "/catalog", Some(SPC_A), Some("ada"), None).await;
+    assert_eq!(a.status, 200, "{}", a.body);
+    let b = call(&node, "GET", "/catalog", Some(SPC_B), Some("bo"), None).await;
+    assert_eq!(b.status, 200, "{}", b.body);
+    let (an, bn) = (names(&a), names(&b));
+    assert!(an.contains(&"cardList".to_string()), "{an:?}");
+    assert!(
+        !an.contains(&"dueCards".to_string()),
+        "0.1.0's tenant is not shown an op only 0.2.0 declares: {an:?}"
+    );
+    assert!(bn.contains(&"dueCards".to_string()), "{bn:?}");
+    assert_eq!(a.headers["x-ordo-tenant-version"], "0.1.0");
+    assert_eq!(b.headers["x-ordo-tenant-version"], "0.2.0");
+
+    // The prose rendering is the same list.
+    let prose = call(
+        &node,
+        "GET",
+        "/catalog?format=prose",
+        Some(SPC_A),
+        Some("ada"),
+        None,
+    )
+    .await;
+    assert_eq!(prose.status, 200);
+
+    // The generated interface: ops and entities both the tenant's version's.
+    let ia = call(&node, "GET", "/interface", Some(SPC_A), Some("ada"), None).await;
+    assert_eq!(ia.status, 200, "{}", ia.body);
+    let ib = call(&node, "GET", "/interface", Some(SPC_B), Some("bo"), None).await;
+    assert_eq!(ib.status, 200, "{}", ib.body);
+    let (ta, tb) = (ia.body.to_string(), ib.body.to_string());
+    assert!(!ta.contains("dueCards"), "{ta}");
+    assert!(tb.contains("dueCards"), "{tb}");
+    assert!(
+        !ta.contains("\"due\""),
+        "0.1.0's cards have no `due` in the generated interface: {ta}"
+    );
+    assert!(tb.contains("\"due\""), "{tb}");
+    assert_eq!(ia.headers["x-ordo-tenant-version"], "0.1.0");
+
+    // Refused: a pin to a version this node has not loaded. Told only to a
+    // live token, and naming no version.
+    node.deployment.note_pin(SPC_A, "9.9.9", 99, 0);
+    let closed = call(&node, "GET", "/catalog", Some(SPC_A), Some("ada"), None).await;
+    assert_eq!(closed.status, 503, "{}", closed.body);
+    assert_eq!(closed.body["error"]["code"], "space_unavailable");
+    let text = closed.body.to_string();
+    assert!(!text.contains("9.9.9") && !text.contains("0.1.0"), "{text}");
+    let closed = call(&node, "GET", "/interface", Some(SPC_A), Some("ada"), None).await;
+    assert_eq!(closed.body["error"]["code"], "space_unavailable");
+    let anon = call(&node, "GET", "/catalog", Some(SPC_A), None, None).await;
+    assert_eq!(anon.status, 200);
+    assert_eq!(
+        anon.body,
+        json!([]),
+        "no token lists nothing, and is told nothing"
+    );
 }

@@ -1271,6 +1271,14 @@
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
  },
+ "language-editions-when-to-ship-edition:1": {
+  "mark": "done",
+  "at": "2026-11-25T19:59:57+00:00"
+ },
+ "language-editions-when-to-ship-edition:2": {
+  "mark": "done",
+  "at": "2026-11-25T19:59:56+00:00"
+ },
  "last-boot-refusal:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -1795,6 +1803,10 @@
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
  },
+ "readers-show-the-read-app-which:1": {
+  "mark": "done",
+  "at": "2026-11-25T19:58:08+00:00"
+ },
  "rebuild-ellanor-on-ordo-now-to:10": {
   "mark": "done",
   "at": "2026-11-10T00:19:13+00:00"
@@ -1935,6 +1947,10 @@
   "mark": "done",
   "at": "2026-10-22T07:13:24+00:00"
  },
+ "removing-a-version-how-long-it:1": {
+  "mark": "done",
+  "at": "2026-11-25T19:54:28+00:00"
+ },
  "replica-engine:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
@@ -1946,6 +1962,18 @@
  "restore-witness:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
+ },
+ "rollouts-the-default-strategy-when-none:1": {
+  "mark": "done",
+  "at": "2026-11-25T20:00:05+00:00"
+ },
+ "rollouts-the-default-strategy-when-none:2": {
+  "mark": "done",
+  "at": "2026-11-25T20:00:08+00:00"
+ },
+ "rollouts-the-default-strategy-when-none:3": {
+  "mark": "done",
+  "at": "2026-11-25T20:00:24+00:00"
  },
  "rotation-objects:1": {
   "mark": "done",
@@ -2171,6 +2199,22 @@
   "mark": "done",
   "at": "2026-10-29T07:54:08+00:00"
  },
+ "signed-rehearsals-three-defaults-to-confirm:1": {
+  "mark": "done",
+  "at": "2026-11-25T19:57:10+00:00"
+ },
+ "signed-rehearsals-three-defaults-to-confirm:2": {
+  "mark": "done",
+  "at": "2026-11-25T19:57:26+00:00"
+ },
+ "signed-rehearsals-three-defaults-to-confirm:3": {
+  "mark": "done",
+  "at": "2026-11-25T19:57:33+00:00"
+ },
+ "signed-rehearsals-three-defaults-to-confirm:4": {
+  "mark": "done",
+  "at": "2026-11-25T19:57:37+00:00"
+ },
  "signin-details:1": {
   "mark": "done",
   "at": "2026-10-04T03:37:00+00:00"
@@ -2282,6 +2326,14 @@
  "staged-load:2": {
   "mark": "done",
   "at": "2026-10-11T03:41:12+00:00"
+ },
+ "staging-clones-and-orphaned-data-two:1": {
+  "mark": "done",
+  "at": "2026-11-25T19:58:35+00:00"
+ },
+ "staging-clones-and-orphaned-data-two:2": {
+  "mark": "done",
+  "at": "2026-11-25T19:58:44+00:00"
  },
  "std-library:1": {
   "mark": "done",
@@ -2635,6 +2687,10 @@
   "mark": "done",
   "at": "2026-10-04T03:37:01+00:00"
  },
+ "unique-fields-a-new-version-adds:1": {
+  "mark": "questions",
+  "at": "2026-11-25T19:56:58+00:00"
+ },
  "upgrading-with-an-old-compose-file:1": {
   "mark": "done",
   "at": "2026-10-30T08:55:52+00:00"
@@ -2686,6 +2742,18 @@
  "versions-increment-3-session-2-three:4": {
   "mark": "done",
   "at": "2026-11-06T02:40:03+00:00"
+ },
+ "versions-increment-3-three-defaults-for:1": {
+  "mark": "done",
+  "at": "2026-11-25T20:00:36+00:00"
+ },
+ "versions-increment-3-three-defaults-for:2": {
+  "mark": "done",
+  "at": "2026-11-25T20:00:39+00:00"
+ },
+ "versions-increment-3-three-defaults-for:3": {
+  "mark": "done",
+  "at": "2026-11-25T20:02:13+00:00"
  },
  "versions-increment-4a-three-small-choices:2": {
   "mark": "done",
@@ -2762,6 +2830,18 @@
  "versions-plan-review-serving-sharing-and:5": {
   "mark": "done",
   "at": "2026-11-03T03:47:07+00:00"
+ },
+ "versions-three-design-choices-left-after:1": {
+  "mark": "questions",
+  "at": "2026-11-25T19:56:17+00:00"
+ },
+ "versions-three-design-choices-left-after:2": {
+  "mark": "questions",
+  "at": "2026-11-25T19:55:17+00:00"
+ },
+ "versions-three-design-choices-left-after:3": {
+  "mark": "questions",
+  "at": "2026-11-25T19:56:10+00:00"
  },
  "vscode-extension:1": {
   "mark": "done",

@@ -1692,3 +1692,41 @@
 {"seq": 1694, "item": "evolution-review-release-check-promotion-staging", "ask": 2, "at": "2026-11-24", "status": "decided", "text": "Yes", "source": "record", "read": true}
 {"seq": 1695, "item": "versions-increment-4a-three-small-choices", "ask": 4, "at": "2026-11-24", "status": "decided", "text": "Yes", "source": "record", "read": true}
 {"seq": 1696, "item": "versions-increment-4a-three-small-choices", "ask": 5, "at": "2026-11-24", "status": "decided", "text": "I believe it should go to dev by default but this should go in hand with the other changes so don't create a temporary dependency.", "source": "record", "read": true}
+{"seq": 1697, "item": "removing-a-version-how-long-it", "ask": 1, "at": "2026-11-25T19:54:28Z", "status": "open", "text": "sounds good. And document in user docs.", "source": "page", "read": true}
+{"seq": 1698, "item": "removing-a-version-how-long-it", "ask": 0, "at": "2026-11-25T19:54:31Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1699, "item": "versions-three-design-choices-left-after", "ask": 1, "at": "2026-11-25T19:56:16Z", "status": "open", "text": "eli5 personal?", "source": "page", "read": true}
+{"seq": 1700, "item": "versions-three-design-choices-left-after", "ask": 2, "at": "2026-11-25T19:55:14Z", "status": "open", "text": "eli5", "source": "page", "read": true}
+{"seq": 1701, "item": "versions-three-design-choices-left-after", "ask": 3, "at": "2026-11-25T19:56:09Z", "status": "open", "text": "eli5 -is this for revert plan logic?", "source": "page", "read": true}
+{"seq": 1702, "item": "unique-fields-a-new-version-adds", "ask": 1, "at": "2026-11-25T19:56:57Z", "status": "open", "text": "what is the switch?", "source": "page", "read": true}
+{"seq": 1703, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 1, "at": "2026-11-25T19:57:07Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1704, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 2, "at": "2026-11-25T19:57:25Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1705, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 3, "at": "2026-11-25T19:57:33Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1706, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 4, "at": "2026-11-25T19:57:40Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1707, "item": "readers-show-the-read-app-which", "ask": 1, "at": "2026-11-25T19:58:08Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1708, "item": "staging-clones-and-orphaned-data-two", "ask": 1, "at": "2026-11-25T19:58:37Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1709, "item": "staging-clones-and-orphaned-data-two", "ask": 2, "at": "2026-11-25T19:59:10Z", "status": "open", "text": "agreed", "source": "page", "read": true}
+{"seq": 1710, "item": "language-editions-when-to-ship-edition", "ask": 1, "at": "2026-11-25T19:59:43Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1711, "item": "language-editions-when-to-ship-edition", "ask": 2, "at": "2026-11-25T19:59:55Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1712, "item": "rollouts-the-default-strategy-when-none", "ask": 1, "at": "2026-11-25T20:00:05Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1713, "item": "rollouts-the-default-strategy-when-none", "ask": 2, "at": "2026-11-25T20:00:07Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1714, "item": "rollouts-the-default-strategy-when-none", "ask": 3, "at": "2026-11-25T20:00:23Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1715, "item": "rollouts-the-default-strategy-when-none", "ask": 0, "at": "2026-11-25T20:00:28Z", "status": "decided", "text": "", "source": "page", "read": true}
+{"seq": 1716, "item": "versions-increment-3-three-defaults-for", "ask": 1, "at": "2026-11-25T20:00:36Z", "status": "open", "text": "ok", "source": "page", "read": true}
+{"seq": 1717, "item": "versions-increment-3-three-defaults-for", "ask": 2, "at": "2026-11-25T20:01:32Z", "status": "open", "text": "these values should be configurable as should n(8) and n+1", "source": "page", "read": true}
+{"seq": 1718, "item": "versions-increment-3-three-defaults-for", "ask": 3, "at": "2026-11-25T20:02:12Z", "status": "open", "text": "add the knob. Keep default as is. Not number should be hard coded, we've been over this.", "source": "page", "read": true}
+{"seq": 1719, "item": "versions-increment-3-three-defaults-for", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "ok: a version stays loaded at least 10 minutes after its last tenant leaves, as a setting.", "source": "record", "read": true}
+{"seq": 1720, "item": "versions-increment-3-three-defaults-for", "ask": 2, "at": "2026-11-25", "status": "decided", "text": "these values should be configurable as should n(8) and n+1: the cap of 8 and what happens to a 9th (evict the least-used idle one, refuse if none idle) are both settings.", "source": "record", "read": true}
+{"seq": 1721, "item": "versions-increment-3-three-defaults-for", "ask": 3, "at": "2026-11-25", "status": "decided", "text": "add the knob. Keep default as is. Not number should be hard coded, we've been over this.", "source": "record", "read": true}
+{"seq": 1722, "item": "rollouts-the-default-strategy-when-none", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1723, "item": "rollouts-the-default-strategy-when-none", "ask": 2, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1724, "item": "rollouts-the-default-strategy-when-none", "ask": 3, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1725, "item": "language-editions-when-to-ship-edition", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1726, "item": "language-editions-when-to-ship-edition", "ask": 2, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1727, "item": "staging-clones-and-orphaned-data-two", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "ok: sinks catch all of staging", "source": "record", "read": true}
+{"seq": 1728, "item": "staging-clones-and-orphaned-data-two", "ask": 2, "at": "2026-11-25", "status": "decided", "text": "agreed: orphaned personal data waits for the owner to prune it", "source": "record", "read": true}
+{"seq": 1729, "item": "readers-show-the-read-app-which", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "ok: a reader grants its $ordorelease.release column to the read app schema owner", "source": "record", "read": true}
+{"seq": 1730, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1731, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 2, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1732, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 3, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1733, "item": "signed-rehearsals-three-defaults-to-confirm", "ask": 4, "at": "2026-11-25", "status": "decided", "text": "ok (the recommendation)", "source": "record", "read": true}
+{"seq": 1734, "item": "removing-a-version-how-long-it", "ask": 1, "at": "2026-11-25", "status": "decided", "text": "sounds good. And document in user docs: default is the backup retention, 30 days if unknown.", "source": "record", "read": true}

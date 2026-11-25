@@ -181,6 +181,21 @@ pub trait GrantRegistry: Send + Sync {
         ))
     }
 
+    /// Write one op's pin of a grant again, in place: a `pins.v2` pin
+    /// re-recorded with its version's sealing and release
+    /// ([`crate::AccessEngine::record_contract`]). Nothing else about the
+    /// grant changes. A registry that cannot re-record keeps the old pin,
+    /// which the door re-records on every use all the same.
+    async fn repin(
+        &self,
+        _space: &SpaceId,
+        _id: &GrantId,
+        _op: &str,
+        _pin: &OpPin,
+    ) -> Result<(), GrantError> {
+        Ok(())
+    }
+
     /// Is this grant still live? The one query a door would make if a
     /// deployment chooses to enforce revocation in the request path.
     async fn is_live(

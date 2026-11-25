@@ -69,11 +69,14 @@ const VERSION_OPS: [&str; 3] = [
     ordo_host::deploy_ops::UNREVOKE,
     REVOKED,
 ];
-/// The moves' read and soak ops (increments 7 and 11a).
-const MOVE_OPS: [&str; 3] = [
+/// The moves' read and soak ops (increments 7 and 11a), and the settings
+/// the Rollouts screen changes through the version settings op (Q15).
+const MOVE_OPS: [&str; 5] = [
     ordo_host::deploy_ops::ROLLBACK_CHECK,
     ordo_host::deploy_ops::REVERT_SOAK,
     ordo_host::deploy_ops::CLOSE_SOAK,
+    ordo_host::deploy_ops::VERSION_SETTINGS,
+    ordo_host::deploy_ops::SET_VERSION_SETTING,
 ];
 use ordo_host::node_status::NodeStatus;
 use ordo_identity::directory::{Directory, Provisioning};
@@ -185,6 +188,7 @@ impl Door {
             REVOKED,
             window_ops::WINDOWS,
             ordo_host::deploy_ops::ROLLBACK_CHECK,
+            ordo_host::deploy_ops::VERSION_SETTINGS,
             rollouts::STATUS,
             tenant_builds::BUILDS,
         ];

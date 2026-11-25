@@ -30,7 +30,7 @@ export interface Stack {
   readonly program: string;
   readonly pg: { readonly host: string; readonly port: string; readonly user: string; readonly db: string };
   readonly ordo: string;
-  /** The previous Ordo release's tag when the stack runs 2 images (tests/ordo-upgrade); empty otherwise. */
+  /** The previous Ordo release's tag when the stack runs 2 images (tests/two-images); empty otherwise. */
   readonly previousRelease: string;
   readonly logs: string;
 }

@@ -26,7 +26,7 @@ export default defineConfig({
   projects: [
     {
       name: 'ordo-upgrade',
-      testMatch: /ordo-upgrade\/.*\.spec\.ts/,
+      testMatch: /two-images\/.*\.spec\.ts/,
       use: { ...devices['Desktop Chrome'] },
     },
   ],

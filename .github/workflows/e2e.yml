@@ -220,7 +220,7 @@ jobs:
 
       # The release-to-release case: the stack runs the previous Ordo
       # release (built from its tag, no secret, no registry), then swaps this
-      # build in under a signed-in person (tests/ordo-upgrade). Its own
+      # build in under a signed-in person (tests/two-images). Its own
       # stack and report. Needs a Chromium, so it follows BROWSERS.
       - name: Build the previous Ordo release
         if: ${{ env.REACHED == 'true' && env.BROWSERS == 'on' }}

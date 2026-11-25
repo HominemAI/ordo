@@ -2100,8 +2100,13 @@ entity customers (key: cust, prev: clients) {
     (`map_cast_required`), naming the conversion. One that loses places
     names `round`: Ordo never rounds unasked.
   - A conversion Ordo has no function for (text to a date) is refused as
-    `map_cast_not_built`. A `money` field is not filled by a mapping yet
-    (`map_type_not_built`).
+    `map_cast_not_built`.
+  - Money (built 2026-11-25): a mapping reads and gives money in major
+    units, as `check` does, and a `money(p)` column stores minor ones, so
+    `--fill item.price=cost` turns 12.34 into 1234 cents, and the reverse
+    turns them back. A value with more places than `p`, or places Ordo
+    cannot tell, is refused naming `round`. A `money` field carries only its
+    places, so the places are the check.
 - **Entity splits** (built 2026-11-25, increment 15c). An entity marked
   `(prev: whole)` while `whole` stays declared is a part split off it. It
   takes the fields it declares from `whole`, as they were declared there:
@@ -2163,7 +2168,7 @@ serving, nothing is checked and the program is created as declared:
 | `prev_unresolved` | the old name is not in the version serving now |
 | `prev_type` | a rename to or from a file: a file's handle is never computed |
 | `prev_mapping_required` | a move `prev(orders.note)`, or an entity merge spelled with moves; no rule for which related row gives the value exists yet |
-| `map_cast_required`, `map_cast_not_built`, `map_type_not_built` | a mapping that gives another kind than its field holds, or loses places; one Ordo has no conversion for; a `money` field filled by a mapping |
+| `map_cast_required`, `map_cast_not_built` | a mapping that gives another kind than its field holds, or loses places (into money too); one Ordo has no conversion for |
 | `split_rule_required` | an entity split with no `--correspond` |
 | `split_entity_link` | a part whose link is not `-> whole owned unique` and required |
 | `split_entity_reshaped` | a part field the whole did not declare the same way, or a moved field the whole still declares |

@@ -949,3 +949,120 @@ async fn a_rename_with_a_new_type_is_converted_by_a_stated_cast() {
         "9"
     );
 }
+
+/// 1.0.0: a price held as a decimal, in dollars.
+fn priced_as_decimal() -> String {
+    items(
+        "1.0.0",
+        "  cost: decimal(2) = 0\n  fine: decimal(3) = 0\n",
+        "\nop addItem($name: text, $cost: decimal(2)) =\n  set item { name: $name, cost: $cost }\n",
+    )
+}
+
+/// 1.1.0: `cost` renamed to `price` and made `money(2)`, stored in cents.
+fn priced_as_money() -> String {
+    items(
+        "1.1.0",
+        "  price: money(2) = 0 prev(cost)\n  fine: decimal(3) = 0\n",
+        "\nop addItem($name: text, $price: money(2)) =\n  set item { name: $name, price: $price }\n",
+    )
+}
+
+/// **A mapping into or out of money converts major and minor units.** A
+/// mapping reads and gives money in major units, and a `money(2)` column
+/// stores cents: `cost` 12.34 is filled as `price` 1234, and the reverse
+/// writes 5.25 back for a price of 525 cents. A mapping with more places
+/// than the money keeps (`decimal(3)` into `money(2)`), or with places Ordo
+/// cannot tell, is refused naming `round`. The preview shows dollars. Both
+/// versions write through the real path, each shape in its own units.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mapping_into_or_out_of_money_converts_its_units() {
+    let (pg, pool) = deployment("ordo_maps_money", &priced_as_decimal(), &priced_as_money()).await;
+    pg.exec(
+        "INSERT INTO item (\"$space\", id, rev, name, cost) VALUES \
+         ('acme', 'a0', 1, 'bolt', 12.34), ('home', 'h0', 1, 'nut', 0.05)",
+    )
+    .expect("rows");
+    let render = |fill: &'static str, reverse: &'static str| {
+        let pool = pool.clone();
+        async move {
+            evolve::evolve(
+                &pool,
+                "1.0.0",
+                "1.1.0",
+                &options(fill, reverse, false),
+                None,
+                OWNER,
+                1,
+            )
+            .await
+        }
+    };
+    let errs = errors_of(
+        render("item.price=fine", "item.cost=price")
+            .await
+            .expect_err("three places into two"),
+    );
+    assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
+    assert!(errs[0].1.contains("round"), "{errs:?}");
+    let errs = errors_of(
+        render("item.price=cost + null", "item.cost=price")
+            .await
+            .expect_err("places Ordo cannot tell"),
+    );
+    assert_eq!(errs[0].0, "map_cast_required", "{errs:?}");
+    assert!(errs[0].1.contains("round(cost + null, 2)"), "{errs:?}");
+
+    let plan = render("item.price=cost", "item.cost=price")
+        .await
+        .expect("the conversion stores")
+        .plan;
+    let shared = ordo_exec::route::SinglePool::new(pool.clone());
+    ordo_host::environments::Environments::on(&pool)
+        .set_preview_values("on", OWNER, "a test shows the rows", 5)
+        .await
+        .expect("set");
+    let checks = ordo_host::precheck::precheck(&pool, &shared, &plan)
+        .await
+        .expect("checked");
+    assert!(
+        checks.preview[0].rows[0].contains("price \"12.34\""),
+        "{:?}",
+        checks.preview
+    );
+    let cx = MoveContext {
+        control: &pool,
+        pools: &shared,
+        spaces: None,
+    };
+    let moved = dual_writes::run(&cx, "acme", &plan, &step_context(), 7 * 86_400, OWNER)
+        .await
+        .expect("acme moves");
+    assert_eq!(moved.phase, MovePhase::Soaking, "{moved:?}");
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT string_agg(price::text, ',' ORDER BY id) FROM item"
+        ),
+        "1234,5"
+    );
+    let on_x = node(&pg.db, &priced_as_decimal(), "beta").await;
+    let on_y = node(&pg.db, &priced_as_money(), "acme").await;
+    on_x.write(r#"addItem($name: "washer", $cost: 1.50)"#)
+        .await
+        .expect("1.0.0 writes dollars");
+    on_y.write(r#"addItem($name: "screw", $price: 5.25)"#)
+        .await
+        .expect("1.1.0 writes money");
+    assert_eq!(
+        one(&pg, "SELECT price::text FROM item WHERE name = 'washer'"),
+        "150"
+    );
+    assert_eq!(
+        one(
+            &pg,
+            "SELECT price::text || '|' || cost::text FROM item WHERE name = 'screw'"
+        ),
+        "525|5.25"
+    );
+}

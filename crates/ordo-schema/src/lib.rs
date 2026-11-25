@@ -32,12 +32,14 @@ use ordo_syntax::decl::{
 use ordo_syntax::span::Span;
 use ordo_syntax::Expr;
 
+pub mod auth;
 pub mod check;
 pub mod ddl;
 pub mod diff;
 pub mod function;
 pub mod image;
 pub mod json;
+pub mod prev;
 pub mod routine;
 
 pub use ddl::{ddl_for, SPACE_COLUMN};
@@ -435,6 +437,9 @@ pub struct Schema {
     /// The program's backend functions, checked by [`function::check`].
     /// Called through `POST /v1/fn/<name>`, never as ops.
     pub functions: Vec<ordo_syntax::FunctionDecl>,
+    /// The program's `auth` block, checked by [`auth::check`]. `None`:
+    /// the deployment's settings decide sign-in, as before the block.
+    pub auth: Option<ordo_syntax::AuthDecl>,
     /// The nicknames of the program's `peer` lines, in the order written.
     /// Each is read by at least one external.
     pub peers: Vec<String>,
@@ -443,6 +448,34 @@ pub struct Schema {
     /// may read this one, and the tables each may read. Each table is one of
     /// this program's own entities.
     pub readers: Vec<Reader>,
+    /// The program's `prev` marks (`plan-syntax-additions.md` §5), in
+    /// declaration order: each entity's, then its fields'. Read by the plan
+    /// ([`prev::check`]), never by the DDL or an op.
+    pub prev: Vec<prev::PrevMark>,
+}
+
+/// Every `prev` mark of the program's native entities.
+fn prev_marks(program: &Program) -> Vec<prev::PrevMark> {
+    let mut out = Vec::new();
+    for e in &program.entities {
+        if let Some(p) = &e.prev {
+            out.push(prev::PrevMark {
+                entity: e.name.name.clone(),
+                field: None,
+                prev: vec![p.name.clone()],
+                line: p.span.line,
+            });
+        }
+        for f in e.fields.iter().filter(|f| !f.prev.is_empty()) {
+            out.push(prev::PrevMark {
+                entity: e.name.name.clone(),
+                field: Some(f.name.name.clone()),
+                prev: f.prev.iter().map(|n| n.text()).collect(),
+                line: f.prev_span.map(|s| s.line).unwrap_or(f.name.span.line),
+            });
+        }
+    }
+    out
 }
 
 /// One `reader <name> reads <table>, …` line.
@@ -1117,6 +1150,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
         routines: program.routines.clone(),
         secrets: program.secrets.clone(),
         functions: program.functions.clone(),
+        auth: program.auth.clone(),
         peers: program.peers.iter().map(|p| p.name.name.clone()).collect(),
         readers: program
             .readers
@@ -1126,6 +1160,7 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 tables: r.tables.iter().map(|t| t.name.clone()).collect(),
             })
             .collect(),
+        prev: prev_marks(program),
     };
     // Every table a `reader` line names is one of this program's own
     // entities: an external is another system's table, and Ordo grants
@@ -1157,6 +1192,9 @@ pub fn build_with_keys(program: &Program, keys: &KeyTable) -> Result<Schema, Sch
                 });
             }
         }
+    }
+    if let Some(a) = &program.auth {
+        auth::check(a)?;
     }
     routine::check(&schema, program)?;
     function::check(&schema, program)?;
@@ -2302,12 +2340,14 @@ pub fn acl_admin_ops(schema: &Schema) -> Program {
     }
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),
@@ -2885,12 +2925,14 @@ pub fn std_ops(schema: &Schema) -> Program {
 
     Program {
         domain: None,
+        edition: None,
         entities: Vec::new(),
         ops,
         release: None,
         routines: Vec::new(),
         secrets: Vec::new(),
         functions: Vec::new(),
+        auth: None,
         externals: Vec::new(),
         peers: Vec::new(),
         readers: Vec::new(),

@@ -1855,7 +1855,9 @@ partners, health by error rate, the alert channel.
   resumes, finishes and aborts; skips, retries and holds a tenant. Every
   control is a door op, the refusal shown as given. There is no pause op:
   a rollout pauses by its threshold or its health, and a hold pauses one
-  tenant. The rollout settings are still set with `ordo rollout set`.
+  tenant. Its Settings section changes the `rollout.*` and `backfill.*`
+  settings through `setVersionSetting`, as `ordo rollout set` does (branch
+  `console-rollout-settings`).
   Routes `crates/ordo-console/src/server/rollouts.rs`; screen
   `clients/ordo-console-web/src/screens/Rollouts.tsx`; console e2e
   project `versions`.

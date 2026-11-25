@@ -20,6 +20,7 @@ import {
   type Strategy,
   type TenantState,
 } from '../rollouts';
+import { RolloutSettings } from './RolloutSettings';
 import { useDeploymentTouch } from './useDeploymentTouch';
 import { versionName, when } from './versionNames';
 import './rollouts.css';
@@ -475,7 +476,7 @@ export function Rollouts(props: { onSignedOut: () => void }) {
                 ))}
               </select>
               <p id="rollout-strategy-help" className="muted small">
-                Set the default with <span className="mono">ordo rollout set rollout.strategy</span>.
+                Set the default under Settings below (<span className="mono">rollout.strategy</span>).
               </p>
 
               {(draft.strategy === 'canary' || draft.strategy === 'group' || draft.strategy === 'query') && (
@@ -635,6 +636,14 @@ export function Rollouts(props: { onSignedOut: () => void }) {
               </div>
             </form>
           )}
+
+          <h2>Settings</h2>
+          <p className="muted small">
+            What a rollout takes when its start leaves a field blank, and what a backfill runs with. Each change says
+            why. The same as <span className="mono">ordo rollout set</span> and{' '}
+            <span className="mono">ordo versions set backfill.&lt;name&gt;</span>.
+          </p>
+          <RolloutSettings atDeployment={atDeployment} act={act} busy={busy} onDone={setDone} />
         </>
       )}
       {prompt}

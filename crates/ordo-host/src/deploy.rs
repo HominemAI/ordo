@@ -1553,7 +1553,14 @@ impl Deployment {
     /// counting it as a use of its version (the door asks this of a
     /// refused caller, who keeps no version loaded).
     pub fn serves(&self, space: &str) -> bool {
-        self.resolve(space, false).is_ok()
+        self.serving(space).is_some()
+    }
+
+    /// The version [`Self::for_space`] would serve `space` now, without
+    /// counting it as a use. The door asks it of a refused caller, to tell
+    /// whether it was built before that version loaded.
+    pub fn serving(&self, space: &str) -> Option<Arc<Loaded>> {
+        self.resolve(space, false).ok().map(|(l, _)| l)
     }
 
     fn resolve(&self, space: &str, touch: bool) -> Result<(Arc<Loaded>, Option<i64>), Unserved> {

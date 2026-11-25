@@ -133,6 +133,11 @@ fn pg_cfg(db: &str) -> PoolConfig {
 }
 
 async fn apply(pool: &Pool, source: &str) {
+    store(pool, source, true).await;
+}
+
+/// Store `source`, and make it the active version when `activate`.
+async fn store(pool: &Pool, source: &str, activate: bool) {
     let program = Program::compile(source).expect("compiles");
     ordo_host::apply_op::run_program(
         pool,
@@ -141,7 +146,7 @@ async fn apply(pool: &Pool, source: &str) {
         vec![],
         "dev:ada",
         "t",
-        true,
+        activate,
     )
     .await
     .expect("applies");
@@ -217,6 +222,7 @@ struct Node {
     app: axum::Router,
     pool: Pool,
     deployment: std::sync::Arc<ordo_host::deploy::Deployment>,
+    access: std::sync::Arc<ordo_host::runtime::SwappableAccess>,
     serving: tokio::task::JoinHandle<()>,
 }
 
@@ -283,6 +289,7 @@ async fn boot_with(stem: &str, residency: Option<&str>) -> Node {
     }
     let app = runtime::door(&rt);
     let deployment = rt.deployment.clone();
+    let access = rt.access.clone();
     let serving = tokio::spawn(async move {
         let _ = runtime::serve(rt).await;
     });
@@ -291,6 +298,7 @@ async fn boot_with(stem: &str, residency: Option<&str>) -> Node {
         app,
         pool,
         deployment,
+        access,
         serving,
     };
     wait(|| node.deployment.loaded("0.1.0").is_some()).await;
@@ -824,4 +832,81 @@ async fn a_node_says_which_versions_it_is_still_loading() {
     })
     .await;
     assert!(landed, "{:?}", ordo_exec::nodes::live(&node.pool).await);
+}
+
+// ── a version's new ops while the door rebuilds ──────────────────────────
+
+/// 0.3.0: 0.2.0 and `onlyThree`, an op no earlier version declares.
+fn v030() -> String {
+    V020.replace("domain board @ 0.2.0", "domain board @ 0.3.0")
+        + "\nop onlyThree =\n  cards[title]\n  sort title\n  take 5\n"
+}
+
+/// `spc_a` served 0.3.0 by this node.
+fn on_v030(node: &Node) -> bool {
+    node.deployment
+        .serving(SPC_A)
+        .is_some_and(|l| l.version == "0.3.0")
+}
+
+/// **A version's new op is never denied while the door rebuilds**
+/// (reported fix new-ops-denied-during-rebuild). `spc_a` moves to 0.3.0,
+/// which adds `onlyThree`. Every rebuild is held, so the door serving is
+/// the one built before 0.3.0 loaded: `ada`, the tenant's owner, is told
+/// `server_busy` with a `Retry-After`, never `access_denied`. Once the
+/// rebuild installs she is answered, and `bo`, no member, is denied.
+///
+/// A regression looks like `access_denied` for `ada` while the rebuild is
+/// held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_versions_op_is_busy_not_denied_until_the_door_rebuilds() {
+    let node = boot("ordo_vbg_newop").await;
+    store(&node.pool, &v030(), false).await;
+    let held = node.access.hold_rebuilds().await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.3.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    wait(|| on_v030(&node)).await;
+
+    let busy = call(&node, "GET", "/op/onlyThree", SPC_A, "ada", None).await;
+    assert_eq!(busy.code(), "server_busy", "{}", busy.body);
+    assert_eq!(busy.status, 503, "{}", busy.body);
+    assert!(busy.header("retry-after").is_some(), "{:?}", busy.headers);
+
+    drop(held);
+    let answered = eventually(30, || async {
+        call(&node, "GET", "/op/onlyThree", SPC_A, "ada", None)
+            .await
+            .status
+            == 200
+    })
+    .await;
+    assert!(answered, "the rebuild installed and ada was answered");
+    let stranger = call(&node, "GET", "/op/onlyThree", SPC_A, "bo", None).await;
+    assert_eq!(stranger.code(), "access_denied", "{}", stranger.body);
+}
+
+/// The same move with nothing held: the first call after 0.3.0 loads, and
+/// every call after it until one is answered, is answered or busy, and
+/// never denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_versions_op_called_the_moment_it_loads_is_never_denied() {
+    let node = boot("ordo_vbg_newop_now").await;
+    store(&node.pool, &v030(), false).await;
+    Versions::on(&node.pool)
+        .pin(SPC_A, "0.3.0", "deployment-owner:ada", 60)
+        .await
+        .expect("moved");
+    wait(|| on_v030(&node)).await;
+    let until = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let a = call(&node, "GET", "/op/onlyThree", SPC_A, "ada", None).await;
+        if a.status == 200 {
+            break;
+        }
+        assert_eq!(a.code(), "server_busy", "{}", a.body);
+        assert!(std::time::Instant::now() < until, "never answered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

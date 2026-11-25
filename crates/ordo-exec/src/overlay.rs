@@ -127,19 +127,28 @@ pub fn entity_mirrors(schema: &ordo_schema::Schema, renames: &[Rename]) -> Vec<E
 }
 
 /// Run each mirror over the rows this write wrote (`written`) and deleted
-/// (`deleted`), `(entity, row id)`, in `space`, inside `tx`.
+/// (`deleted`), `(entity, row id)`, in `space`, inside `tx`. `created`
+/// names the written rows this write created.
 ///
 /// A written row is copied whole (`INSERT … ON CONFLICT DO UPDATE`), so the
 /// worker's copy and a live write cannot disagree: whichever runs second
 /// writes the row as it stands. A deleted row leaves the other table too.
 /// A key a unique there already holds is refused by name
 /// ([`OverlayError::Duplicate`]).
+///
+/// A row the write's own statements returned ([`RowCapture`]) is read by
+/// `ctid`, with no read by key of this table. A row this write created is
+/// new in both tables, so it is inserted there plainly, with no
+/// `ON CONFLICT` read of the other table's key either. Any other row is
+/// read by key.
 pub async fn apply_mirrors(
     tx: &TxConn,
     space: &str,
     mirrors: &[EntityMirror],
     written: &[(String, String)],
     deleted: &[(String, String)],
+    created: &[(String, String)],
+    captured: &RowCapture,
 ) -> Result<(), OverlayError> {
     for m in mirrors {
         let ids = |list: &[(String, String)]| {
@@ -165,37 +174,68 @@ pub async fn apply_mirrors(
             .map(|c| format!("{} = EXCLUDED.{}", quote(c), quote(c)))
             .collect::<Vec<_>>()
             .join(", ");
+        let upsert = if sets.is_empty() {
+            " ON CONFLICT (\"$space\", \"id\") DO NOTHING".to_string()
+        } else {
+            format!(" ON CONFLICT (\"$space\", \"id\") DO UPDATE SET {sets}")
+        };
+        let copy = |at: &str, conflict: &str| {
+            format!(
+                "INSERT INTO {other} ({cols}) SELECT {cols} FROM {t} WHERE {at}{conflict} \
+                 RETURNING \"id\"::text",
+                other = quote(&m.other),
+                t = quote(&m.table),
+            )
+        };
+        let run = |sql: String, rows: Vec<String>| async move {
+            match tx.rows(&sql).await {
+                Ok(back) => Ok(back
+                    .into_iter()
+                    .filter_map(|r| r.into_iter().next().flatten())
+                    .collect::<std::collections::BTreeSet<String>>()),
+                Err(err) if err.is_unique_violation() => {
+                    Err(OverlayError::Duplicate(Box::new(Duplicate {
+                        entity: m.other.clone(),
+                        columns: Vec::new(),
+                        rows,
+                    })))
+                }
+                Err(err) => Err(OverlayError::from(err)),
+            }
+        };
         let written = ids(written);
-        for chunk in written.chunks(IDS_PER_STATEMENT) {
+        let created: std::collections::BTreeSet<String> = ids(created).into_iter().collect();
+        let refs: Vec<&str> = written.iter().map(String::as_str).collect();
+        let (by_ctid, by_key) = captured.split(&m.table, space, &refs);
+        let mut by_key: Vec<String> = by_key.into_iter().map(str::to_string).collect();
+        for fresh in [true, false] {
+            let group: Vec<&(&str, String)> = by_ctid
+                .iter()
+                .filter(|(id, _)| created.contains(*id) == fresh)
+                .collect();
+            for chunk in group.chunks(IDS_PER_STATEMENT) {
+                let tids = chunk
+                    .iter()
+                    .map(|(_, t)| sql_lit(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rows: Vec<String> = chunk.iter().map(|(id, _)| id.to_string()).collect();
+                let conflict = if fresh { "" } else { upsert.as_str() };
+                let at = format!("ctid = ANY(ARRAY[{tids}]::tid[])");
+                let back = run(copy(&at, conflict), rows.clone()).await?;
+                // A row whose `ctid` moved since it was returned is read by
+                // key.
+                by_key.extend(rows.into_iter().filter(|id| !back.contains(id)));
+            }
+        }
+        for chunk in by_key.chunks(IDS_PER_STATEMENT) {
             let list = chunk
                 .iter()
                 .map(|i| sql_lit(i))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let conflict = if sets.is_empty() {
-                "DO NOTHING".to_string()
-            } else {
-                format!("DO UPDATE SET {sets}")
-            };
-            let sql = format!(
-                "INSERT INTO {other} ({cols}) SELECT {cols} FROM {t} \
-                 WHERE \"$space\" = {} AND \"id\" IN ({list}) \
-                 ON CONFLICT (\"$space\", \"id\") {conflict}",
-                sql_lit(space),
-                other = quote(&m.other),
-                t = quote(&m.table),
-            );
-            match tx.rows(&sql).await {
-                Ok(_) => {}
-                Err(err) if err.is_unique_violation() => {
-                    return Err(OverlayError::Duplicate(Box::new(Duplicate {
-                        entity: m.other.clone(),
-                        columns: Vec::new(),
-                        rows: chunk.to_vec(),
-                    })));
-                }
-                Err(err) => return Err(err.into()),
-            }
+            let at = format!("\"$space\" = {} AND \"id\" IN ({list})", sql_lit(space));
+            run(copy(&at, &upsert), chunk.to_vec()).await?;
         }
         let deleted = ids(deleted);
         for chunk in deleted.chunks(IDS_PER_STATEMENT) {
@@ -587,22 +627,25 @@ pub fn seals_for<'a>(schema: &ordo_schema::Schema, seals: &'a [Seal]) -> Vec<&'a
         .collect()
 }
 
-/// **What a write's own statements returned, for the seal overlay**
-/// (Reported fix, 2026-11-24, part 2).
+/// **What a write's own statements returned, for the overlays** (Reported
+/// fixes, 2026-11-24).
 ///
-/// While a seal runs, each `INSERT` or `UPDATE` the write sends to an
-/// entity being sealed also returns `ctid`, `$space`, `id` and the seal's
-/// source columns ([`SealCapture::rewrite`]). The overlay then seals from
-/// those values and writes the target by `ctid` ([`apply_seals`]).
+/// While a seal or a move runs, each `INSERT` or `UPDATE` the write sends
+/// to an entity an overlay touches also returns `ctid`, `$space`, `id` and
+/// the seals' source columns ([`RowCapture::rewrite`]). The overlays then
+/// write those rows by `ctid` ([`apply_seals`], [`MoveOverlay::apply`]),
+/// and every overlay statement returns the row's new `ctid` in turn.
 ///
-/// Why: reading the row back by primary key under SERIALIZABLE locks the
-/// index page, and every other write to the table touches that page. Two
-/// concurrent writers then each depend on the other, and one is cancelled.
-/// A fetch by `ctid` of a row this transaction wrote takes no predicate
-/// lock. A row not captured (a statement shape this does not rewrite)
-/// falls back to the read by key.
+/// Why: a read by primary key under SERIALIZABLE locks the index page,
+/// which every other write to the table touches. Once the table is
+/// analyzed while it is small, the planner reads it by a sequential scan
+/// instead, which locks the whole table and reads every other writer's
+/// rows. Either way two concurrent writers each depend on the other, and
+/// one is cancelled. A fetch by `ctid` of a row this transaction wrote
+/// takes no predicate lock. A row not captured (a statement shape this does
+/// not rewrite) falls back to the read by key.
 #[derive(Debug, Default)]
-pub struct SealCapture {
+pub struct RowCapture {
     /// Entity to the source columns returned for it.
     entities: std::collections::BTreeMap<String, Vec<String>>,
     /// `(entity, id)` to the row as last returned.
@@ -617,9 +660,9 @@ struct CapturedRow {
     values: std::collections::BTreeMap<String, Option<String>>,
 }
 
-impl SealCapture {
+impl RowCapture {
     /// The capture for the seals this version writes into. Empty when none.
-    pub fn for_seals(seals: &[&Seal]) -> SealCapture {
+    pub fn for_seals(seals: &[&Seal]) -> RowCapture {
         let mut entities: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         for s in seals {
             let cols = entities.entry(s.entity.clone()).or_default();
@@ -627,10 +670,59 @@ impl SealCapture {
                 cols.push(s.source.clone());
             }
         }
-        SealCapture {
+        RowCapture {
             entities,
             rows: Default::default(),
         }
+    }
+
+    /// Also capture the entities a move overlay writes.
+    pub fn with_move(mut self, overlay: Option<&MoveOverlay>) -> RowCapture {
+        for e in overlay.map(|o| o.entities.as_slice()).unwrap_or_default() {
+            self.entities.entry(e.entity.clone()).or_default();
+        }
+        self
+    }
+
+    /// Also capture the tables entity-rename mirrors copy from.
+    pub fn with_mirrors(mut self, mirrors: &[EntityMirror]) -> RowCapture {
+        for m in mirrors {
+            self.entities.entry(m.table.clone()).or_default();
+        }
+        self
+    }
+
+    /// The `RETURNING` clause [`RowCapture::record`] reads for `entity`.
+    fn returning(&self, entity: &str) -> String {
+        let mut ret = format!(
+            " RETURNING ctid::text, {}::text, \"id\"::text",
+            quote(ordo_schema::SPACE_COLUMN)
+        );
+        for c in self.entities.get(entity).into_iter().flatten() {
+            ret.push_str(&format!(", {}::text", quote(c)));
+        }
+        ret
+    }
+
+    /// The captured `ctid` of each of `ids` in `space`; the rest by key.
+    fn split<'a>(
+        &self,
+        entity: &str,
+        space: &str,
+        ids: &[&'a str],
+    ) -> (Vec<(&'a str, String)>, Vec<&'a str>) {
+        let (mut by_ctid, mut by_key) = (Vec::new(), Vec::new());
+        for id in ids {
+            match self
+                .rows
+                .get(&(entity.to_string(), id.to_string()))
+                .filter(|r| r.space == space)
+            {
+                Some(r) => by_ctid.push((*id, r.ctid.clone())),
+                None => by_key.push(*id),
+            }
+        }
+        (by_ctid, by_key)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -650,19 +742,12 @@ impl SealCapture {
             return None;
         }
         let body = single_statement(sql)?;
-        let (entity, cols) = self.entities.iter().find(|(e, _)| {
+        let entity = self.entities.keys().find(|e| {
             let t = quote(e);
             body.starts_with(&format!("INSERT INTO {t} "))
                 || body.starts_with(&format!("UPDATE {t} "))
         })?;
-        let mut ret = format!(
-            "{body} RETURNING ctid::text, {}::text, \"id\"::text",
-            quote(ordo_schema::SPACE_COLUMN)
-        );
-        for c in cols {
-            ret.push_str(&format!(", {}::text", quote(c)));
-        }
-        Some((entity.clone(), ret))
+        Some((entity.clone(), format!("{body}{}", self.returning(entity))))
     }
 
     /// Record what a rewritten statement returned.
@@ -804,7 +889,7 @@ impl SealValue<'_> {
 /// transaction. One `Purpose::Write` lease per write. A column the
 /// database does not hold yet is skipped under a savepoint.
 ///
-/// A row the write's own statements returned ([`SealCapture`]) is sealed
+/// A row the write's own statements returned ([`RowCapture`]) is sealed
 /// from those values and written by `ctid`, with no read by key. Any other
 /// row is read by key.
 ///
@@ -818,7 +903,7 @@ pub async fn apply_seals(
     space: &str,
     seals: &[&Seal],
     written: &[(String, String)],
-    captured: &mut SealCapture,
+    captured: &mut RowCapture,
 ) -> Result<(), SealOverlayError> {
     let mut sealer = SealValue {
         keys,
@@ -1224,6 +1309,10 @@ impl MoveOverlay {
     /// Run the overlay over the rows `written` names, `(entity, row id)`,
     /// in `space`, inside `tx`. Rows deleted are not named by the caller.
     ///
+    /// A row the write's own statements returned ([`RowCapture`]) is
+    /// written and checked by `ctid`, with no read by key; any other row
+    /// by key. Each update returns the row's new `ctid` into `captured`.
+    ///
     /// A column the database does not hold yet (a node that read the move
     /// before the step's expand landed) is skipped under a savepoint: the
     /// backfill fills the row later.
@@ -1232,6 +1321,7 @@ impl MoveOverlay {
         tx: &TxConn,
         space: &str,
         written: &[(String, String)],
+        captured: &mut RowCapture,
     ) -> Result<(), OverlayError> {
         for e in &self.entities {
             let mut ids: Vec<&str> = written
@@ -1241,57 +1331,121 @@ impl MoveOverlay {
                 .collect();
             ids.sort_unstable();
             ids.dedup();
-            for chunk in ids.chunks(IDS_PER_STATEMENT) {
+            let (by_ctid, mut by_key) = captured.split(&e.entity, space, &ids);
+            for chunk in by_ctid.chunks(IDS_PER_STATEMENT) {
+                let mut rows: Vec<&str> = chunk.iter().map(|(id, _)| *id).collect();
+                if !e.sets.is_empty() {
+                    let tids = chunk
+                        .iter()
+                        .map(|(_, t)| sql_lit(t))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let at = format!("ctid = ANY(ARRAY[{tids}]::tid[])");
+                    let Some(back) = self.set(tx, e, &at, &rows, captured).await? else {
+                        // The expand has not landed: nothing to keep current.
+                        break;
+                    };
+                    // A row whose `ctid` moved since it was returned is
+                    // written by key.
+                    let returned: std::collections::BTreeSet<String> = back
+                        .iter()
+                        .filter_map(|r| r.get(2).cloned().flatten())
+                        .collect();
+                    rows.retain(|id| {
+                        let kept = returned.contains(*id);
+                        if !kept {
+                            by_key.push(id);
+                        }
+                        kept
+                    });
+                }
+                let (now, _) = captured.split(&e.entity, space, &rows);
+                let tids = now
+                    .iter()
+                    .map(|(_, t)| sql_lit(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !tids.is_empty() {
+                    self.check(tx, e, &format!("ctid = ANY(ARRAY[{tids}]::tid[])"))
+                        .await?;
+                }
+            }
+            for chunk in by_key.chunks(IDS_PER_STATEMENT) {
                 let list = chunk
                     .iter()
                     .map(|i| sql_lit(i))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let rows = format!("\"$space\" = {} AND \"id\" IN ({list})", sql_lit(space));
-                if !e.sets.is_empty() {
-                    let sets = e
-                        .sets
-                        .iter()
-                        .map(|(c, sql)| format!("{} = ({sql})", quote(c)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let sql = format!("UPDATE {} SET {sets} WHERE {rows}", quote(&e.entity));
-                    match guarded(tx, &sql).await {
-                        Ok(true) => {}
-                        // The expand has not landed: nothing to keep current.
-                        Ok(false) => continue,
-                        Err(err) if err.is_unique_violation() => {
-                            return Err(OverlayError::Duplicate(Box::new(Duplicate {
-                                entity: e.entity.clone(),
-                                columns: e.sets.iter().map(|(c, _)| c.clone()).collect(),
-                                rows: chunk.iter().map(|i| i.to_string()).collect(),
-                            })));
-                        }
-                        Err(err) => return Err(err.into()),
-                    }
+                let at = format!("\"$space\" = {} AND \"id\" IN ({list})", sql_lit(space));
+                if !e.sets.is_empty() && self.set(tx, e, &at, chunk, captured).await?.is_none() {
+                    continue;
                 }
-                for g in &e.guards {
-                    let sql = format!(
-                        "SELECT \"id\"::text FROM {} WHERE {rows} AND NOT coalesce(({}), false) \
-                         ORDER BY \"id\" LIMIT 1",
-                        quote(&e.entity),
-                        g.holds
-                    );
-                    let Some(found) = tx.rows(&sql).await?.into_iter().next() else {
-                        continue;
-                    };
-                    return Err(OverlayError::Refused(Box::new(Refused {
-                        serving: self.serving.clone(),
-                        other: self.other.clone(),
-                        entity: e.entity.clone(),
-                        field: g.field.clone(),
-                        rule: g.rule.clone(),
-                        row: found.into_iter().next().flatten().unwrap_or_default(),
-                        // The database's own overlays are named `prev`.
-                        moving: self.step != "prev",
-                    })));
-                }
+                self.check(tx, e, &at).await?;
             }
+        }
+        Ok(())
+    }
+
+    /// The entity's extra columns on the rows `at` selects. `None` when the
+    /// database lacks a column, which leaves the transaction as it was.
+    async fn set(
+        &self,
+        tx: &TxConn,
+        e: &OverlayEntity,
+        at: &str,
+        rows: &[&str],
+        captured: &mut RowCapture,
+    ) -> Result<Option<Vec<Vec<Option<String>>>>, OverlayError> {
+        let sets = e
+            .sets
+            .iter()
+            .map(|(c, sql)| format!("{} = ({sql})", quote(c)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "UPDATE {} SET {sets} WHERE {at}{}",
+            quote(&e.entity),
+            captured.returning(&e.entity)
+        );
+        match guarded_rows(tx, &sql).await {
+            Ok(Some(back)) => {
+                captured.record(&e.entity, &back);
+                Ok(Some(back))
+            }
+            Ok(None) => Ok(None),
+            Err(err) if err.is_unique_violation() => {
+                Err(OverlayError::Duplicate(Box::new(Duplicate {
+                    entity: e.entity.clone(),
+                    columns: e.sets.iter().map(|(c, _)| c.clone()).collect(),
+                    rows: rows.iter().map(|i| i.to_string()).collect(),
+                })))
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// The other version's guards on the rows `at` selects.
+    async fn check(&self, tx: &TxConn, e: &OverlayEntity, at: &str) -> Result<(), OverlayError> {
+        for g in &e.guards {
+            let sql = format!(
+                "SELECT \"id\"::text FROM {} WHERE {at} AND NOT coalesce(({}), false) \
+                 ORDER BY \"id\" LIMIT 1",
+                quote(&e.entity),
+                g.holds
+            );
+            let Some(found) = tx.rows(&sql).await?.into_iter().next() else {
+                continue;
+            };
+            return Err(OverlayError::Refused(Box::new(Refused {
+                serving: self.serving.clone(),
+                other: self.other.clone(),
+                entity: e.entity.clone(),
+                field: g.field.clone(),
+                rule: g.rule.clone(),
+                row: found.into_iter().next().flatten().unwrap_or_default(),
+                // The database's own overlays are named `prev`.
+                moving: self.step != "prev",
+            })));
         }
         Ok(())
     }
@@ -1300,17 +1454,25 @@ impl MoveOverlay {
 /// Run `sql` under a savepoint. `false` when the database lacks a column
 /// it names, which leaves the transaction as it was.
 async fn guarded(tx: &TxConn, sql: &str) -> Result<bool, PoolError> {
+    Ok(guarded_rows(tx, sql).await?.is_some())
+}
+
+/// [`guarded`], with the rows the statement returned.
+async fn guarded_rows(
+    tx: &TxConn,
+    sql: &str,
+) -> Result<Option<Vec<Vec<Option<String>>>>, PoolError> {
     tx.rows(&format!("SAVEPOINT {SAVEPOINT}")).await?;
     match tx.rows(sql).await {
-        Ok(_) => {
+        Ok(rows) => {
             tx.rows(&format!("RELEASE SAVEPOINT {SAVEPOINT}")).await?;
-            Ok(true)
+            Ok(Some(rows))
         }
         Err(e) if e.is_missing_column() => {
             tx.rows(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}"))
                 .await?;
             tx.rows(&format!("RELEASE SAVEPOINT {SAVEPOINT}")).await?;
-            Ok(false)
+            Ok(None)
         }
         Err(e) => Err(e),
     }
@@ -1411,7 +1573,7 @@ mod tests {
             target: "body$seal".into(),
             normalize: None,
         };
-        let c = SealCapture::for_seals(&[&seal]);
+        let c = RowCapture::for_seals(&[&seal]);
         let (e, sql) = c
             .rewrite("INSERT INTO \"note\" (\"id\", \"body\") VALUES ('n1', 'a;b');")
             .expect("rewritten");
@@ -1435,7 +1597,7 @@ mod tests {
             assert_eq!(c.rewrite(left), None, "{left}");
         }
         assert_eq!(
-            SealCapture::default().rewrite("UPDATE \"note\" SET x = 1;"),
+            RowCapture::default().rewrite("UPDATE \"note\" SET x = 1;"),
             None
         );
     }

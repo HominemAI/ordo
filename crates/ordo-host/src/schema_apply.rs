@@ -639,6 +639,16 @@ pub struct Choices {
     /// index column arrive, and a `unique` over it still lands at the
     /// backfill's end. Never stated by a person; not in the options.
     pub indexing_live: std::collections::BTreeSet<(String, String)>,
+    /// `--reverse <entity>.<old field>=<expression>` (increment 15b): for a
+    /// split or a merge (B12), each old field's value from the new
+    /// version's fields. With one for every old field, the step is two-way:
+    /// the soak keeps the old columns current and a revert loses nothing.
+    pub reverses: BTreeMap<(String, String), String>,
+    /// `--one-way`: the developer accepts a split or a merge with an old
+    /// field that has no reverse (`forward-gaps` ask 18). Its soak cannot
+    /// be reverted; the old columns are kept, orphaned, for a revert by
+    /// hand.
+    pub one_way: bool,
 }
 
 /// One backfill as the plan states it (`plan-backfill-dual-writes.md` §2,
@@ -778,6 +788,31 @@ impl Choices {
                 format!("`{target}` has no fill; images are chosen for a field the step fills")
             })?;
             fill.audit = ordo_commandlog::BackfillAudit::Images;
+        }
+        Ok(())
+    }
+
+    /// Parse `person.fullName=first + " " + last;...` into
+    /// [`Choices::reverses`] (increment 15b).
+    pub fn parse_reverses(&mut self, spec: &str) -> Result<(), String> {
+        for part in spec.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let (target, mapping) = part
+                .split_once('=')
+                .ok_or_else(|| format!("`{part}`: write `<entity>.<old field>=<expression>`"))?;
+            let (entity, field) = target
+                .trim()
+                .split_once('.')
+                .ok_or_else(|| format!("`{target}`: name the field as `<entity>.<field>`"))?;
+            let mapping = mapping.trim();
+            if mapping.is_empty() || mapping.contains('\n') {
+                return Err(format!(
+                    "`{part}`: the reverse is one expression on one line"
+                ));
+            }
+            self.reverses.insert(
+                (entity.trim().to_string(), field.trim().to_string()),
+                mapping.to_string(),
+            );
         }
         Ok(())
     }
@@ -1083,6 +1118,25 @@ pub async fn assess_with(
                 out.push(a);
                 continue;
             }
+        }
+        // A split or a merge in a stored plan (15b): every row the mapping
+        // of a required new field does not parse is listed, by row, and the
+        // step waits for them (`forward-gaps` ask 18).
+        if let (Change::MapFields { entity, from, to }, true) = (&a.change, choices.stored) {
+            if let Some(e) = schema.native(entity) {
+                if let Ok((_, bfs, _, _)) = map_step(&a.change, e, live, from, to, choices) {
+                    let probed = unparsed(pool, schema, &bfs).await;
+                    if matches!(probed, Ok(Probe::Dirty { .. })) {
+                        a.refused.push("probe_not_empty".into());
+                    }
+                    if let Err(e) = &probed {
+                        a.refused.push(format!("probe_unavailable — {e}"));
+                    }
+                    a.probe = Some(probed.map_err(|e| e.to_string()));
+                }
+            }
+            out.push(a);
+            continue;
         }
         // B8 in a stored plan (increment 13): the worker opens every sealed
         // value under custody, so a destroyed epoch refuses the backfill
@@ -2168,6 +2222,94 @@ pub struct Triaged {
     /// hold them yet. The host holds them on the moving versions' writes,
     /// and the rows are checked against them before they land.
     pub held: Vec<Held>,
+    /// The splits and merges (B12, increment 15b): what keeps each old
+    /// column current while the new version writes, and whether the step
+    /// is one way.
+    pub maps: Vec<MapStep>,
+}
+
+/// **A split or merge in a stored step** (B12, `plan-versions.md`
+/// increment 15b). Its new fields are backfills ([`BackfillStep`], code
+/// `B12`); this is the rest: the old fields, and the reverse rule for each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapStep {
+    pub entity: String,
+    /// The old fields.
+    pub from: Vec<String>,
+    /// The new fields.
+    pub to: Vec<String>,
+    /// Each old field's reverse, where one was given.
+    pub reverse: Vec<ReverseSet>,
+    /// An old field has no reverse, and `--one-way` accepted it.
+    pub one_way: bool,
+}
+
+/// One old field kept current from the new ones while the new version
+/// writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReverseSet {
+    pub field: String,
+    pub column: String,
+    /// The expression as written.
+    pub mapping: String,
+    /// It lowered to SQL over the new version's columns.
+    pub sql: String,
+    /// The version before requires it, so a write the reverse leaves
+    /// empty is refused by name.
+    pub required: bool,
+}
+
+impl MapStep {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity": self.entity,
+            "from": self.from,
+            "to": self.to,
+            "reverse": self.reverse.iter().map(|r| serde_json::json!({
+                "field": r.field, "column": r.column, "mapping": r.mapping,
+                "sql": r.sql, "required": r.required,
+            })).collect::<Vec<_>>(),
+            "oneWay": self.one_way,
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Option<MapStep> {
+        let names = |k: &str| -> Option<Vec<String>> {
+            v[k].as_array()?
+                .iter()
+                .map(|x| x.as_str().map(String::from))
+                .collect()
+        };
+        Some(MapStep {
+            entity: v["entity"].as_str()?.to_string(),
+            from: names("from")?,
+            to: names("to")?,
+            reverse: v["reverse"]
+                .as_array()?
+                .iter()
+                .map(|r| {
+                    Some(ReverseSet {
+                        field: r["field"].as_str()?.to_string(),
+                        column: r["column"].as_str()?.to_string(),
+                        mapping: r["mapping"].as_str()?.to_string(),
+                        sql: r["sql"].as_str()?.to_string(),
+                        required: r["required"].as_bool()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+            one_way: v["oneWay"].as_bool()?,
+        })
+    }
+
+    /// Every map of a stored receipt.
+    pub fn all_of(receipt: &serde_json::Value) -> Vec<MapStep> {
+        receipt["maps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(MapStep::from_json)
+            .collect()
+    }
 }
 
 /// One unique or check held to a step's close ([`Triaged::held`]).
@@ -2471,6 +2613,7 @@ impl BackfillStep {
             "B2" => "B2",
             "B4" => "B4",
             "B5" => "B5",
+            "B12" => "B12",
             "B7" => "B7",
             "B8" => "B8",
             "B10" => "B10",
@@ -3253,6 +3396,16 @@ pub fn triage_counted(
             // A new required field a stored step fills by an expression:
             // its column arrives empty, and a unique over it is held to the
             // close and checked against the filled rows then (11b part 4).
+            // A split's or a merge's new columns arrive empty too.
+            Change::MapFields { entity, to, .. } => {
+                if let Some(e) = schema.native(entity) {
+                    for t in to {
+                        if let Some(f) = e.field(t) {
+                            arriving.insert((entity.clone(), f.column()));
+                        }
+                    }
+                }
+            }
             Change::AddRequiredField { entity, field }
                 if matches!(
                     choices.fill_for(entity, field).map(|f| &f.mapping),
@@ -3274,6 +3427,7 @@ pub fn triage_counted(
     let mut refused = Vec::new();
     let mut backfills = Vec::new();
     let mut after = Vec::new();
+    let mut maps = Vec::new();
     let ddl_err = |x: ordo_schema::SchemaError| format!("{}: {}", x.code, x.message);
 
     for a in assessed {
@@ -3497,6 +3651,24 @@ pub fn triage_counted(
                         .map(alter),
                 );
             }
+            Change::MapFields { from, to, .. } => match map_step(c, e, live, from, to, choices) {
+                Err(r) => refused.push(*r),
+                Ok((expand, bfs, close, m)) => {
+                    steps.extend(expand.into_iter().map(alter));
+                    for sql in close {
+                        after.push(Step {
+                            code: c.code(),
+                            phase: Phase::Alter,
+                            sql,
+                            index: None,
+                            constraint: None,
+                            table: e.name.clone(),
+                        });
+                    }
+                    backfills.extend(bfs);
+                    maps.push(m);
+                }
+            },
             Change::RenameEntity { from, .. } => refused.push(Refused {
                 change: c.clone(),
                 class: "rename_entity_not_built",
@@ -3770,6 +3942,7 @@ pub fn triage_counted(
         backfills,
         after,
         held,
+        maps,
     })
 }
 
@@ -3893,6 +4066,311 @@ fn rename_old_default(
             e.name, e.name, f.name, f.name
         )),
     }
+}
+
+/// **The rows a split's or a merge's mapping does not parse** (15b): for
+/// each new field the program requires, the rows whose mapping is null,
+/// listed as `space/id` (never their values), up to [`SAMPLE`] per field,
+/// with the count.
+pub async fn unparsed(
+    pool: &Pool,
+    schema: &Schema,
+    backfills: &[BackfillStep],
+) -> Result<Probe, ordo_exec::PoolError> {
+    let mut lines = Vec::new();
+    let mut asked = Vec::new();
+    for b in backfills.iter().filter(|b| b.code == "B12") {
+        let required = schema
+            .native(&b.entity)
+            .and_then(|e| e.field(&b.field))
+            .is_some_and(|f| !f.optional);
+        let Some(sql) = b.sql.as_ref().filter(|_| required) else {
+            continue;
+        };
+        asked.push(format!("`{}.{}`", b.entity, b.field));
+        let t = ordo_schema::ddl::q(&b.entity);
+        let count = pool
+            .rows(&format!(
+                "SELECT count(*)::text FROM {t} WHERE ({sql}) IS NULL"
+            ))
+            .await?
+            .first()
+            .and_then(|r| r.first().cloned().flatten())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        let rows = pool
+            .rows(&format!(
+                "SELECT \"$space\", \"id\"::text FROM {t} WHERE ({sql}) IS NULL \
+                 ORDER BY \"$space\", \"id\" LIMIT {SAMPLE}"
+            ))
+            .await?;
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}/{}",
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default()
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "`{}.{}`: {count} row(s) the mapping `{}` does not parse: {}{}",
+            b.entity,
+            b.field,
+            b.mapping.text(),
+            ids.join(", "),
+            if count as usize > ids.len() {
+                ", ..."
+            } else {
+                ""
+            }
+        ));
+    }
+    let what = format!(
+        "rows the split or merge does not parse, under {}",
+        asked.join(", ")
+    );
+    Ok(if lines.is_empty() {
+        Probe::Clean(what)
+    } else {
+        Probe::Dirty { what, lines }
+    })
+}
+
+/// The parts of a split or merge in a stored plan: the expand, one
+/// backfill per new field, the `NOT NULL`s that land at the close, and the
+/// map.
+pub type MapParts = (Vec<String>, Vec<BackfillStep>, Vec<String>, MapStep);
+
+/// **A split or merge in a stored plan** (B12, increment 15b; `forward-gaps`
+/// asks 8 and 18, owner: *"expand on prev"*).
+///
+/// - Each new field is added open to nulls and filled by the backfill
+///   worker with its `--fill` expression, which reads the old fields. A
+///   required one gets its `NOT NULL` at the close. A row the expression
+///   does not parse (null) under a required field is listed by the
+///   pre-check, and the step waits for it.
+/// - Each old column is kept with its `NOT NULL`, so the version before
+///   still loads. Its `--reverse` expression, over the new fields, keeps it
+///   current while the new version writes; a required one with no default
+///   takes a placeholder default its type's zero, which the reverse
+///   replaces in the same write.
+/// - An old field with no `--reverse` makes the step one way: refused
+///   unless `--one-way` accepts it.
+/// - Without a stored plan (`ordo apply`) it is refused: the mapping is a
+///   plan option, never guessed.
+pub fn map_step(
+    c: &Change,
+    e: &ordo_schema::Entity,
+    live: &LiveShape,
+    from: &[ordo_schema::Field],
+    to: &[String],
+    choices: &Choices,
+) -> Result<MapParts, Box<Refused>> {
+    let refuse = |class: &'static str, why: String| -> Box<Refused> {
+        Box::new(Refused {
+            change: c.clone(),
+            class,
+            why,
+            run: None,
+        })
+    };
+    let old_names = from
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !choices.stored {
+        return Err(refuse(
+            "map_needs_stored_plan",
+            format!(
+                "a split or a merge needs a mapping for each new field, which is a stored \
+                 plan's option. Render it with `ordo evolve --from <version> --to <version> \
+                 --fill {}.{}=<expression over {old_names}>`",
+                e.name, to[0]
+            ),
+        ));
+    }
+    let t = ordo_schema::ddl::q(&e.name);
+    // The new fields' mappings read the old fields and every field the
+    // two versions share, never another new one.
+    let mut over: Vec<ordo_schema::Field> = e
+        .fields
+        .iter()
+        .filter(|x| !to.contains(&x.name))
+        .cloned()
+        .collect();
+    over.extend(from.iter().cloned());
+    let mut expand = Vec::new();
+    let mut close = Vec::new();
+    let mut bfs = Vec::new();
+    for name in to {
+        let Some(f) = e.field(name) else {
+            return Err(refuse(
+                "mapping_invalid",
+                format!("`{}.{name}` is not declared", e.name),
+            ));
+        };
+        let example = if from.len() == 1 {
+            format!("before({}, \" \")", from[0].name)
+        } else {
+            from.iter()
+                .map(|x| x.name.clone())
+                .collect::<Vec<_>>()
+                .join(" + \" \" + ")
+        };
+        let Some(fill) = choices.fill_for(&e.name, name) else {
+            return Err(refuse(
+                "map_fill_required",
+                format!(
+                    "`{}.{name}` takes its value from {old_names}, and Ordo does not guess how. \
+                     State it: `--fill {}.{name}=<expression>`, for example \
+                     `--fill {}.{name}={example}`",
+                    e.name, e.name, e.name
+                ),
+            ));
+        };
+        let FillMapping::Expr(src) = &fill.mapping else {
+            return Err(refuse(
+                "map_function_not_built",
+                format!(
+                    "`{}.{name}` is filled by a backend function, which has no per-row rule \
+                     for the write path. Write it as an expression over {old_names}",
+                    e.name
+                ),
+            ));
+        };
+        let expr = ordo_syntax::parse_expr(src).map_err(|err| {
+            refuse(
+                "mapping_invalid",
+                format!("the mapping `{src}` does not parse: {err}"),
+            )
+        })?;
+        let sql = ordo_schema::check::render_mapping(&e.name, &over, &expr)
+            .map_err(|err| refuse("mapping_invalid", format!("{}: {}", err.code, err.message)))?;
+        let col = f.column();
+        let ty = ordo_schema::ddl::column_ty(f);
+        expand.push(format!(
+            "ALTER TABLE {t} ADD COLUMN IF NOT EXISTS {} {ty};\n",
+            ordo_schema::ddl::q(&col)
+        ));
+        if !f.optional {
+            close.push(format!(
+                "ALTER TABLE {t} ALTER COLUMN {} SET NOT NULL;\n",
+                ordo_schema::ddl::q(&col)
+            ));
+        }
+        bfs.push(BackfillStep {
+            code: c.code(),
+            entity: e.name.clone(),
+            field: name.clone(),
+            column: col,
+            column_ty: ty,
+            mapping: fill.mapping.clone(),
+            sql: Some(sql),
+            audit: fill.audit,
+            sealing_from: None,
+            kept_plaintext: None,
+            indexing_from: None,
+        });
+    }
+    // The reverses read the new version's fields.
+    let mut reverse = Vec::new();
+    let mut missing = Vec::new();
+    for old in from {
+        let Some(src) = choices.reverses.get(&(e.name.clone(), old.name.clone())) else {
+            missing.push(old.name.clone());
+            continue;
+        };
+        let expr = ordo_syntax::parse_expr(src).map_err(|err| {
+            refuse(
+                "mapping_invalid",
+                format!("the reverse `{src}` does not parse: {err}"),
+            )
+        })?;
+        let sql = ordo_schema::check::render_mapping(&e.name, &e.fields, &expr).map_err(|err| {
+            refuse(
+                "mapping_invalid",
+                format!(
+                    "the reverse of `{}.{}`: {}: {}",
+                    e.name, old.name, err.code, err.message
+                ),
+            )
+        })?;
+        reverse.push(ReverseSet {
+            field: old.name.clone(),
+            column: old.column(),
+            mapping: src.clone(),
+            sql,
+            required: !old.optional,
+        });
+    }
+    if !missing.is_empty() && !choices.one_way {
+        let join = if to.len() > 1 {
+            to.join(" + \" \" + ")
+        } else {
+            format!("before({}, \" \")", to[0])
+        };
+        return Err(refuse(
+            "one_way_unconfirmed",
+            format!(
+                "no reverse is given for {}, so a revert in the soak could not give the \
+                 version before its values. Give one: `--reverse {}.{}={join}`, or accept this \
+                 one way change with `--one-way`; revert then requires this or manual \
+                 intervention",
+                missing
+                    .iter()
+                    .map(|m| format!("`{}.{m}`", e.name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                e.name,
+                missing[0]
+            ),
+        ));
+    }
+    // An old required column the new version's inserts do not name takes
+    // a placeholder its type's zero; the reverse sets the real value in
+    // the same write, and a one way step leaves it to the orphan.
+    for old in from.iter().filter(|o| !o.optional) {
+        let held = live
+            .table(&e.name)
+            .and_then(|lt| lt.columns.get(&old.column()));
+        if !held.is_some_and(|c| !c.nullable && !c.has_default) {
+            continue;
+        }
+        let zero = match ordo_schema::ddl::column_ty(old).as_str() {
+            "text" => "''",
+            "bigint" | "integer" | "smallint" | "numeric" => "0",
+            "boolean" => "false",
+            other => {
+                return Err(refuse(
+                    "map_type_not_built",
+                    format!(
+                        "`{}.{}` is a required `{other}` with no default, and the new version's \
+                         inserts do not name it. Give it a default in a version before this \
+                         one, or make it optional there",
+                        e.name, old.name
+                    ),
+                ))
+            }
+        };
+        expand.push(format!(
+            "ALTER TABLE {t} ALTER COLUMN {} SET DEFAULT {zero};\n",
+            ordo_schema::ddl::q(&old.column())
+        ));
+    }
+    let m = MapStep {
+        entity: e.name.clone(),
+        from: from.iter().map(|f| f.name.clone()).collect(),
+        to: to.to_vec(),
+        reverse,
+        one_way: !missing.is_empty(),
+    };
+    Ok((expand, bfs, close, m))
 }
 
 /// A declared rename in a stored plan (increment 11a): the statements of
@@ -4717,7 +5195,7 @@ pub enum ApplyRefusal {
     /// measured against a baseline that is not there.
     ServingDrifted { serving: String, drift: Vec<Change> },
     /// The triage refused some change; nothing was sent.
-    NotApplied(Triaged),
+    NotApplied(Box<Triaged>),
     /// Creating the schema failed.
     CreateFailed(String),
     /// Executing failed. `recorded` says whether the failure was written.
@@ -5011,7 +5489,7 @@ async fn apply_planned_tables(
     .await
     .map_err(ApplyRefusal::Internal)?;
     if !triaged.refused.is_empty() {
-        return Err(ApplyRefusal::NotApplied(triaged));
+        return Err(ApplyRefusal::NotApplied(Box::new(triaged)));
     }
 
     let changes = plan

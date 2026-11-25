@@ -142,6 +142,7 @@ pub fn render(
     backfills: &[BackfillStep],
     after: &[String],
     held: &[sa::Held],
+    maps: &[sa::MapStep],
 ) -> Option<Value> {
     let mut forward: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
     let mut reverse: Vec<(String, Vec<Value>, Vec<Value>)> = Vec::new();
@@ -203,6 +204,34 @@ pub fn render(
             }));
         }
     }
+    // A split or a merge (15b): each old column set from the new ones by
+    // its reverse while Y writes, guarded when X requires it, and orphaned
+    // at the close. An old field with no reverse (one way) is left to its
+    // placeholder default, and the soak cannot be reverted.
+    for m in maps {
+        for r in &m.reverse {
+            let e = slot(&mut reverse, &m.entity);
+            if r.required {
+                e.1.push(json!([
+                    r.column,
+                    format!("coalesce(({}), {})", r.sql, q(&r.column))
+                ]));
+                e.2.push(json!({
+                    "holds": format!("({}) IS NOT NULL", r.sql),
+                    "field": r.field, "rule": "is required",
+                }));
+            } else {
+                e.1.push(json!([r.column, format!("({})", r.sql)]));
+            }
+        }
+        for f in &m.from {
+            let old = x.schema.native(&m.entity).and_then(|e| e.field(f))?;
+            orphans.push(json!({
+                "entity": m.entity, "field": f, "columns": [old.column()],
+                "sealed": old.sealed || old.private,
+            }));
+        }
+    }
     // A unique or a check Y adds is held to the close (11b part 4, §4): the
     // host holds it on every row either version writes in the move.
     for h in held {
@@ -226,6 +255,8 @@ pub fn render(
         "after": after,
         "orphans": orphans,
         "held": held.iter().map(sa::Held::to_json).collect::<Vec<_>>(),
+        "maps": maps.iter().map(sa::MapStep::to_json).collect::<Vec<_>>(),
+        "oneWay": maps.iter().any(|m| m.one_way),
     }))
 }
 
@@ -491,7 +522,41 @@ pub async fn run(
                 .filter_map(|s| s.as_str().map(String::from))
                 .collect();
             let held = crate::evolve::held_of(&receipt);
-            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after, &held) else {
+            let maps = sa::MapStep::all_of(&receipt);
+            // A split or a merge (15b): a row whose required new field the
+            // mapping does not parse stops the move before it opens.
+            if !maps.is_empty() {
+                let probed = sa::unparsed(&target, &y.schema, &backfills)
+                    .await
+                    .map_err(|e| {
+                        cx.err(
+                            tenant,
+                            &plan.from,
+                            &plan.to,
+                            "internal",
+                            e.to_string(),
+                            true,
+                        )
+                    })?;
+                if let sa::Probe::Dirty { lines, .. } = probed {
+                    return Err(cx.err(
+                        tenant,
+                        &plan.from,
+                        &plan.to,
+                        "map_unparsed",
+                        format!(
+                            "{}. Nothing moved. Change those rows so the mapping parses them, \
+                             or render the step with another `--fill`, then run the move \
+                             again (`ordo evolve --tenant {tenant} --to {}`)",
+                            lines.join("; "),
+                            plan.to
+                        ),
+                        false,
+                    ));
+                }
+            }
+            let Some(overlay) = render(&x, &y, &plan.digest, &backfills, &after, &held, &maps)
+            else {
                 return Err(cx.err(
                     tenant,
                     &plan.from,
@@ -705,9 +770,19 @@ pub async fn run(
     })
 }
 
+/// Whether a move's step is a split or merge accepted as one way (15b):
+/// its soak cannot be reverted.
+pub fn is_one_way(m: &Move) -> bool {
+    serde_json::from_str::<Value>(&m.overlay)
+        .ok()
+        .and_then(|o| o["oneWay"].as_bool())
+        .unwrap_or(false)
+}
+
 /// **Revert in the soak**: the pin back to the move's `from`. Every write
 /// made on `to` also wrote `from`'s columns, so nothing is lost. The move
 /// returns to `gated`, both shapes current; [`run`] switches it again.
+/// A one way split or merge is refused (`one_way_step`).
 pub async fn revert(
     cx: &MoveContext<'_>,
     tenant: &str,
@@ -720,6 +795,26 @@ pub async fn revert(
         }
         .into());
     };
+    // A split or a merge with an old field that has no reverse (15b): the
+    // version before would read that field's placeholder on every row the
+    // new version wrote.
+    if is_one_way(&m) {
+        return Err(cx.err(
+            tenant,
+            &m.from,
+            &m.to,
+            "one_way_step",
+            format!(
+                "the step from `{}` to `{}` splits or merges a field with no reverse, accepted \
+                 as one way (`--one-way`), so `{}` would not read what `{}` wrote. Close the \
+                 soak (`ordo evolve --tenant {tenant} --close-soak`), or render the step again \
+                 with a `--reverse` for each old field; revert requires this or manual \
+                 intervention",
+                m.from, m.to, m.from, m.to
+            ),
+            false,
+        ));
+    }
     let (target, _) = cx.target(tenant, &m.from, &m.to).await?;
     let change = v
         .revert_dual_move(tenant, actor, crate::runtime::now_secs())
@@ -845,6 +940,29 @@ pub async fn close(
     forget_fills(&target, &filled)
         .await
         .map_err(|e| run_err("internal", format!("$fills: {e}")))?;
+    // A split's or a merge's old fields (15b): orphaned now, never kept
+    // current again.
+    for m in overlay["maps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(sa::MapStep::from_json)
+    {
+        for f in &m.from {
+            match target
+                .rows(&format!(
+                    "DELETE FROM \"$fills\" WHERE \"entity\" = {} AND \"field\" = {}",
+                    sql_lit(&m.entity),
+                    sql_lit(f)
+                ))
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if e.is_missing_table() => {}
+                Err(e) => return Err(run_err("internal", format!("$fills: {e}"))),
+            }
+        }
+    }
     // The guards end with the move: their plain indexes go (11b part 5).
     drop_held_indexes(&target, &overlay)
         .await
@@ -978,7 +1096,14 @@ pub fn same_database(a: &Pool, b: &Pool) -> bool {
 /// (`ordo_exec::overlay::MoveOverlay::for_database`). The copy runs once
 /// for the database. Run again, it records the same rows.
 async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> Result<(), String> {
-    let mut sets: Vec<(String, String, String, String)> = Vec::new();
+    // `(entity, field, column, sql, required, absent)`.
+    let mut sets: Vec<(String, String, String, String, bool, bool)> = Vec::new();
+    let maps: Vec<sa::MapStep> = overlay["maps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(sa::MapStep::from_json)
+        .collect();
     for e in overlay["forward"]["entities"]
         .as_array()
         .into_iter()
@@ -997,13 +1122,47 @@ async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> R
                 .filter_map(BackfillStep::from_json)
                 .find(|b| b.entity == entity && b.column == column && b.code != "B4");
             if let Some(b) = fill {
+                // A split's or a merge's new field (15b) is set by a version
+                // that does not declare it, and required only when the new
+                // version requires it (its guard in the forward overlay).
+                let (required, absent) = if b.code == "B12" {
+                    let guarded = e["guards"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|g| g["field"] == b.field.as_str() && g["rule"] == "is required");
+                    (guarded, true)
+                } else {
+                    (true, false)
+                };
                 sets.push((
                     entity.to_string(),
                     b.field,
                     column.to_string(),
                     sql.to_string(),
+                    required,
+                    absent,
                 ));
             }
+        }
+    }
+    // Each old field a split or a merge keeps current: set by the new
+    // version, which does not declare it, by its reverse.
+    for m in &maps {
+        for r in &m.reverse {
+            let sql = if r.required {
+                format!("coalesce(({}), {})", r.sql, q(&r.column))
+            } else {
+                format!("({})", r.sql)
+            };
+            sets.push((
+                m.entity.clone(),
+                r.field.clone(),
+                r.column.clone(),
+                sql,
+                r.required,
+                true,
+            ));
         }
     }
     if sets.is_empty() {
@@ -1018,6 +1177,10 @@ async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> R
         .rows(ordo_exec::overlay::FILLS_DDL)
         .await
         .map_err(e)?;
+    target
+        .rows(ordo_exec::overlay::FILLS_MAP_DDL)
+        .await
+        .map_err(e)?;
     let tx = target
         .begin_for(ordo_exec::OpClass::AddressedWrite)
         .await
@@ -1025,12 +1188,15 @@ async fn record_fills(target: &Pool, overlay: &Value, from: &str, to: &str) -> R
     tx.rows("LOCK TABLE \"$renames\" IN EXCLUSIVE MODE")
         .await
         .map_err(e)?;
-    for (entity, field, column, sql) in &sets {
+    for (entity, field, column, sql, required, absent) in &sets {
         tx.rows(&format!(
-            "INSERT INTO \"$fills\" (\"entity\", \"field\", \"column\", \"sql\", \"from\", \"to\") \
-             VALUES ({}, {}, {}, {}, {}, {}) ON CONFLICT (\"entity\", \"field\") DO UPDATE SET \
+            "INSERT INTO \"$fills\" (\"entity\", \"field\", \"column\", \"sql\", \"from\", \"to\", \
+             \"required\", \"absent\") \
+             VALUES ({}, {}, {}, {}, {}, {}, {required}, {absent}) ON CONFLICT (\"entity\", \"field\") \
+             DO UPDATE SET \
              \"column\" = EXCLUDED.\"column\", \"sql\" = EXCLUDED.\"sql\", \
-             \"from\" = EXCLUDED.\"from\", \"to\" = EXCLUDED.\"to\"",
+             \"from\" = EXCLUDED.\"from\", \"to\" = EXCLUDED.\"to\", \
+             \"required\" = EXCLUDED.\"required\", \"absent\" = EXCLUDED.\"absent\"",
             sql_lit(entity),
             sql_lit(field),
             sql_lit(column),

@@ -431,6 +431,29 @@ pub async fn revert_soaks_from(
         Err(e) if e.is_missing_table() => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
+    // A one way split or merge (15b) cannot be put back: refused before
+    // any tenant moves, naming each.
+    let one_way: Vec<String> = soaking
+        .iter()
+        .filter(|m| crate::dual_writes::is_one_way(m))
+        .map(|m| m.space.clone())
+        .collect();
+    if !one_way.is_empty() {
+        return Err(EvolveRefusal::Run {
+            database: one_way.join(", "),
+            from: version.to_string(),
+            to: soaking[0].to.clone(),
+            class: "one_way_step",
+            why: format!(
+                "{} soak(s) on a split or merge accepted as one way (`--one-way`): `{version}` \
+                 would not read what the new version wrote to the old field. Close those soaks \
+                 (`ordo evolve --tenant <id> --close-soak`), or render the step again with a \
+                 `--reverse` for each old field; revert requires this or manual intervention",
+                one_way.len()
+            ),
+            transient: false,
+        });
+    }
     let mut back = Vec::new();
     for m in soaking {
         match pools {

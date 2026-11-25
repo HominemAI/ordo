@@ -56,14 +56,26 @@ fn prev_naming_a_field_still_declared_is_refused() {
 }
 
 #[test]
-fn two_fields_claiming_one_previous_name_are_refused() {
+fn two_fields_each_naming_one_previous_name_are_a_split() {
+    let p = parse_program("entity a {\n  first: text prev(name)\n  last: text prev(name)\n}\n")
+        .unwrap();
+    let f = &p.entities[0].fields;
+    assert_eq!(f[0].prev[0].text(), "name");
+    assert_eq!(f[1].prev[0].text(), "name");
+}
+
+#[test]
+fn a_name_a_merge_also_claims_is_refused() {
     let (code, msg) =
-        refused("entity a {\n  first: text prev(name)\n  fullName: text prev(name)\n}\n");
+        refused("entity a {\n  first: text prev(name)\n  fullName: text prev(name, title)\n}\n");
     assert_eq!(code, PREV_DUPLICATE);
     assert!(
         msg.contains("both `first` and `fullName` claim `name`"),
         "{msg}"
     );
+    let (code, msg) = refused("entity a {\n  x: text prev(name, name)\n}\n");
+    assert_eq!(code, PREV_DUPLICATE);
+    assert!(msg.contains("names `name` twice"), "{msg}");
 }
 
 #[test]

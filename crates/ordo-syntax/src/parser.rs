@@ -202,6 +202,11 @@ const FUNCTIONS: &[(&str, usize, usize)] = &[
     ("lower", 1, 1),
     ("length", 1, 1),
     ("trim", 1, 1),
+    // A text's part before or after the first separator, null when the
+    // separator is not in it: a field split's mapping (`plan-versions.md`
+    // increment 15b), and legal anywhere fields are.
+    ("before", 2, 2),
+    ("after", 2, 2),
 ];
 
 /// The expression-function *names*, for readers outside the parser that must

@@ -74,6 +74,25 @@ pub fn is_prune_setting(name: &str) -> bool {
     )
 }
 
+/// `preview.values` (`plan-versions.md` increment 15b, §7): whether a
+/// split's or a merge's preview in `ordo evolve` shows sample rows' values.
+/// It shows tenant data in a plan's output, so it is off in production and
+/// on elsewhere unless set, as `forward-gaps` ask 24 rules for the values a
+/// refusal suggests.
+pub const PREVIEW_VALUES: &str = "preview.values";
+
+/// The command that sets it, for the preview to name.
+pub const PREVIEW_COMMAND: &str = "ordo environments set preview on --reason \"...\"";
+
+/// Whether a setting name given to `ordo environments set` is
+/// `preview.values`.
+pub fn is_preview_setting(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "preview" | "preview.values" | "preview_values" | "preview-values"
+    )
+}
+
 /// The environment `promotion.skip_staging` skips.
 pub const STAGING: &str = "staging";
 
@@ -601,10 +620,34 @@ impl<'a> Environments<'a> {
     /// `prune.enabled`: its latest value, or off in production and on
     /// elsewhere when never set. Answers the value and whether it was set.
     pub async fn prune_enabled(&self) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.flag(PRUNE_ENABLED).await
+    }
+
+    /// `preview.values` (15b): its latest value, or off in production and
+    /// on elsewhere when never set. Answers the value and whether it was
+    /// set.
+    pub async fn preview_values(&self) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.flag(PREVIEW_VALUES).await
+    }
+
+    /// **Set `preview.values`**, `on` or `off`, with a reason.
+    pub async fn set_preview_values(
+        &self,
+        value: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.set_flag(PREVIEW_VALUES, value, actor, reason, at)
+            .await
+    }
+
+    /// An on-or-off setting: off in production and on elsewhere unless set.
+    async fn flag(&self, name: &str) -> Result<(bool, bool), EnvironmentRefusal> {
         let sql = format!(
             "SELECT \"value\" FROM \"$promotion_settings\" WHERE \"setting\" = {} \
              ORDER BY \"seq\" DESC LIMIT 1",
-            sql_lit(PRUNE_ENABLED)
+            sql_lit(name)
         );
         let set = match self.pool.rows(&sql).await {
             Ok(rows) => rows.first().and_then(|r| r.first().cloned().flatten()),
@@ -626,18 +669,29 @@ impl<'a> Environments<'a> {
         reason: &str,
         at: u64,
     ) -> Result<(bool, bool), EnvironmentRefusal> {
+        self.set_flag(PRUNE_ENABLED, value, actor, reason, at).await
+    }
+
+    async fn set_flag(
+        &self,
+        name: &str,
+        value: &str,
+        actor: &str,
+        reason: &str,
+        at: u64,
+    ) -> Result<(bool, bool), EnvironmentRefusal> {
         let on = match value.trim() {
             "on" => true,
             "off" => false,
             other => {
                 return Err(EnvironmentRefusal::Setting(format!(
-                    "{PRUNE_ENABLED} takes `on` or `off`, not `{other}`"
+                    "{name} takes `on` or `off`, not `{other}`"
                 )))
             }
         };
         let reason = crate::versions::check_reason(reason)
             .map_err(|e| EnvironmentRefusal::Reason(e.to_string()))?;
-        let (now, set) = self.prune_enabled().await?;
+        let (now, set) = self.flag(name).await?;
         if set && now == on {
             return Ok((on, false));
         }
@@ -646,7 +700,7 @@ impl<'a> Environments<'a> {
             .rows(&format!(
                 "INSERT INTO \"$promotion_settings\" (\"setting\", \"value\", \"actor\", \
                  \"reason\", \"at\") VALUES ({}, {}, {}, {}, {at})",
-                sql_lit(PRUNE_ENABLED),
+                sql_lit(name),
                 sql_lit(if on { "on" } else { "off" }),
                 sql_lit(actor),
                 sql_lit(&reason)

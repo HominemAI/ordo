@@ -94,6 +94,7 @@ impl Issue {
 /// survives, so every fix is the developer's act on their own data, or a
 /// change to the version.
 pub fn data_fix(c: &Change, to: &str) -> String {
+    let to_version = to;
     match c {
         Change::AddUnique { entity, field, .. } => format!(
             "make `{entity}`.`{field}` distinct in each space listed, through the app's own \
@@ -139,6 +140,16 @@ pub fn data_fix(c: &Change, to: &str) -> String {
         Change::ChangePlaces { entity, field, .. } => format!(
             "correct the listed `{entity}`.`{field}` amounts, or state the other choice: \
              `--places {entity}.{field}=rescale` or `--places {entity}.{field}=keep`"
+        ),
+        Change::MapFields { entity, to, .. } => format!(
+            "change the listed `{entity}` rows so the mapping parses them, through the app's \
+             own ops; or state another mapping (`--fill {entity}.<field>=<expression>`), or \
+             declare {} optional in `{to}`. Ordo does not guess a value",
+            to.iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            to = to_version
         ),
         _ => "correct the listed rows, or render the change in two versions".into(),
     }
@@ -391,6 +402,37 @@ pub struct PreChecks {
     pub issues: Vec<Issue>,
     /// Checks that did not run, each with why.
     pub not_run: Vec<String>,
+    /// A split's or a merge's mapping on sample rows (15b), by database.
+    pub preview: Vec<Preview>,
+}
+
+/// **A split's or a merge's preview** (15b; `forward-gaps` ask 8): its
+/// mapping on up to [`PREVIEW_ROWS`] rows of one database. The values are
+/// tenant data, so they are shown only where `preview.values` is on (off in
+/// production unless set); elsewhere each row says only whether it parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub database: String,
+    pub change: String,
+    /// One line per row: `space/id: fullName "Ada Lovelace" -> first
+    /// "Ada", last "Lovelace"`.
+    pub rows: Vec<String>,
+    /// Whether the values are shown.
+    pub values: bool,
+    /// Set when they are not: the setting that shows them.
+    pub hidden: Option<String>,
+}
+
+/// How many rows a preview shows.
+pub const PREVIEW_ROWS: usize = 3;
+
+impl Preview {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "database": self.database, "change": self.change, "rows": self.rows,
+            "values": self.values, "hidden": self.hidden,
+        })
+    }
 }
 
 impl PreChecks {
@@ -402,6 +444,7 @@ impl PreChecks {
             })).collect::<Vec<_>>(),
             "issues": self.issues.iter().map(Issue::to_json).collect::<Vec<_>>(),
             "notRun": self.not_run,
+            "preview": self.preview.iter().map(Preview::to_json).collect::<Vec<_>>(),
             "ok": self.issues.is_empty(),
         })
     }
@@ -409,8 +452,97 @@ impl PreChecks {
 
 /// What one database answered.
 enum Answer {
-    Checked(Vec<Issue>),
+    Checked(Vec<Issue>, Vec<Preview>),
     NotProbed(String),
+}
+
+/// The preview of each split or merge the plan holds, on this database.
+async fn previews(pool: &Pool, label: &str, p: &sa::Plan, show: bool) -> Vec<Preview> {
+    let mut out = Vec::new();
+    for a in &p.assessed {
+        let Change::MapFields { entity, from, to } = &a.change else {
+            continue;
+        };
+        let Some(e) = p.program.schema.native(entity) else {
+            continue;
+        };
+        let Ok((_, bfs, _, _)) = sa::map_step(&a.change, e, &p.live, from, to, &p.choices) else {
+            continue;
+        };
+        let q = ordo_schema::ddl::q;
+        let mut cols: Vec<String> = from
+            .iter()
+            .map(|f| format!("{}::text", q(&f.column())))
+            .collect();
+        cols.extend(
+            bfs.iter()
+                .map(|b| format!("({})::text", b.sql.clone().unwrap_or_else(|| "NULL".into()))),
+        );
+        let sql = format!(
+            "SELECT \"$space\", \"id\"::text, {} FROM {} ORDER BY \"$space\", \"id\" LIMIT {PREVIEW_ROWS}",
+            cols.join(", "),
+            q(entity)
+        );
+        let rows = match pool.rows(&sql).await {
+            Ok(r) => r,
+            Err(e) => vec![vec![Some(format!("the preview could not be read: {e}"))]],
+        };
+        let lit = |v: &Option<String>| match v {
+            Some(v) => format!("{v:?}"),
+            None => "null".to_string(),
+        };
+        let lines = rows
+            .iter()
+            .map(|r| {
+                let at = format!(
+                    "{}/{}",
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default()
+                );
+                let old = &r[2.min(r.len())..(2 + from.len()).min(r.len())];
+                let new = &r[(2 + from.len()).min(r.len())..];
+                let news = to
+                    .iter()
+                    .zip(new.iter())
+                    .map(|(t, v)| {
+                        if show {
+                            format!("{t} {}", lit(v))
+                        } else if v.is_some() {
+                            format!("{t} parses")
+                        } else {
+                            format!("{t} does not parse")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if show {
+                    let olds = from
+                        .iter()
+                        .zip(old.iter())
+                        .map(|(f, v)| format!("{} {}", f.name, lit(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{at}: {olds} -> {news}")
+                } else {
+                    format!("{at}: {news}")
+                }
+            })
+            .collect();
+        out.push(Preview {
+            database: label.to_string(),
+            change: a.change.to_string(),
+            rows: lines,
+            values: show,
+            hidden: (!show).then(|| {
+                format!(
+                    "the values are tenant data, hidden here: `{}` is off. To show them: `{}`",
+                    crate::environments::PREVIEW_VALUES,
+                    crate::environments::PREVIEW_COMMAND
+                )
+            }),
+        });
+    }
+    out
 }
 
 async fn check_one(
@@ -420,6 +552,7 @@ async fn check_one(
     y: &Program,
     options: &sa::Choices,
     plan: &StoredPlan,
+    show: bool,
 ) -> (String, Answer) {
     let pool = match pool {
         Ok(p) => p,
@@ -433,7 +566,7 @@ async fn check_one(
                 lines: Vec::new(),
                 fix: "bring the database back and run the step's `ordo evolve` again".into(),
             };
-            return (label, Answer::Checked(vec![issue]));
+            return (label, Answer::Checked(vec![issue], Vec::new()));
         }
     };
     let recorded = match ordo_exec::spacedb::recorded_version(&pool).await {
@@ -449,7 +582,7 @@ async fn check_one(
                 lines: Vec::new(),
                 fix: "bring the database back and run the step's `ordo evolve` again".into(),
             };
-            return (label, Answer::Checked(vec![issue]));
+            return (label, Answer::Checked(vec![issue], Vec::new()));
         }
     };
     match recorded.as_deref() {
@@ -483,7 +616,8 @@ async fn check_one(
                 crate::evolve::release_held(a, &options.held);
             }
             let issues = issues_of(&label, &p, &plan.to);
-            (label, Answer::Checked(issues))
+            let preview = previews(&pool, &label, &p, show).await;
+            (label, Answer::Checked(issues, preview))
         }
         Err(why) => {
             let issue = Issue {
@@ -495,7 +629,7 @@ async fn check_one(
                 lines: Vec::new(),
                 fix: "bring the database back and run the step's `ordo evolve` again".into(),
             };
-            (label, Answer::Checked(vec![issue]))
+            (label, Answer::Checked(vec![issue], Vec::new()))
         }
     }
 }
@@ -523,12 +657,19 @@ pub async fn precheck(
         .into_iter()
         .map(|h| h.name)
         .collect();
+    // A split's or a merge's preview shows values where `preview.values`
+    // is on: off in production unless set (15b).
+    let show = crate::environments::Environments::on(registry)
+        .preview_values()
+        .await
+        .map(|(on, _)| on)
+        .unwrap_or(false);
     let targets = resolver
         .targets()
         .await
         .map_err(|e| EvolveRefusal::Store(format!("could not list the databases: {e}")))?;
     let mut answers: Vec<(String, Answer)> = futures::stream::iter(targets)
-        .map(|t| check_one(t.label, t.pool, &x, &y, &options, plan))
+        .map(|t| check_one(t.label, t.pool, &x, &y, &options, plan, show))
         .buffer_unordered(resolver.walk_concurrency().max(1))
         .collect()
         .await;
@@ -542,9 +683,10 @@ pub async fn precheck(
     };
     for (label, answer) in answers {
         match answer {
-            Answer::Checked(issues) => {
+            Answer::Checked(issues, preview) => {
                 out.checked.push(label);
                 out.issues.extend(issues);
+                out.preview.extend(preview);
             }
             Answer::NotProbed(why) => out.not_probed.push(NotProbed {
                 database: label,

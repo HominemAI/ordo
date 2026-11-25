@@ -40,6 +40,7 @@ pub(crate) const USAGE: &str = "\
 ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=rescale|keep[,...]]
             [--fill <entity>.<field>=<expression>|fn <name> [secrets a,b] [hosts h,i][;...]]
             [--audit-images <entity>.<field>[,...]] [--keep-plaintext <entity>.<field>[,...]]
+            [--reverse <entity>.<old field>=<expression>[;...]] [--one-way]
             [--digest <sha256:...>] [--run]
             [--approve-sign-in-removal <count>]  --host <h> ...
     render the step, refuse it if it has errors, store it; print the receipt and its digest,
@@ -55,6 +56,10 @@ ordo evolve [<dir>] --from <version> --to <version> [--places <entity>.<field>=r
     A step that seals a field drops its plaintext column once every row is sealed;
     --keep-plaintext keeps it, orphaned, until pruned. Its values stay readable until then,
     and in WAL and backups for good.
+    A split (two fields each `prev(name)`) or a merge (`prev(first, last)`) takes a --fill
+    for each new field, over the old ones, and a --reverse for each old field, over the new
+    ones, which keeps it current through the soak. With no reverse it is one way, and needs
+    --one-way. The pre-checks list the rows a mapping does not parse, and preview it on 3 rows.
 ordo evolve --tenant <id> [--to <version>] [--budget <chunks>] [--chunk-rows <n>] [--soak <7d|0>]  --host <h> ...
     replay the stored path on the tenant's database, one step at a time, then pin it
     (to the active version when --to is absent). A step that rewrites data moves the tenant
@@ -81,6 +86,8 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
         "--fill",
         "--audit-images",
         "--keep-plaintext",
+        "--reverse",
+        "--one-way",
         "--digest",
         "--run",
         "--list",
@@ -135,6 +142,8 @@ pub(crate) async fn run(flags: Flags) -> Outcome {
             "fill": flags.named_value("--fill"),
             "auditImages": flags.named_value("--audit-images"),
             "keepPlaintext": flags.named_value("--keep-plaintext"),
+            "reverse": flags.named_value("--reverse"),
+            "oneWay": flags.has("--one-way"),
             "expectDigest": flags.named_value("--digest"),
             "run": flags.has("--run"),
             "approveSignInRemoval": flags.named_value("--approve-sign-in-removal"),
@@ -291,6 +300,19 @@ fn precheck_lines(p: &serde_json::Value) -> String {
     }
     for n in p["notRun"].as_array().into_iter().flatten() {
         out.push_str(&format!("not run    {}\n", n.as_str().unwrap_or("?")));
+    }
+    for v in p["preview"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "PREVIEW    database `{}`: {}\n",
+            v["database"].as_str().unwrap_or("?"),
+            v["change"].as_str().unwrap_or("?")
+        ));
+        for r in v["rows"].as_array().into_iter().flatten() {
+            out.push_str(&format!("             {}\n", r.as_str().unwrap_or("?")));
+        }
+        if let Some(h) = v["hidden"].as_str() {
+            out.push_str(&format!("             {h}\n"));
+        }
     }
     out
 }

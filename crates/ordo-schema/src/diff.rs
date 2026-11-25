@@ -298,6 +298,18 @@ pub enum Change {
         entity: String,
         from: String,
     },
+    /// A field split or merge (B12, `plan-versions.md` increment 15b):
+    /// several new fields each `prev(name)`, or one `prev(a, b)`. Each new
+    /// column is filled by the stored plan's mapping over the old fields;
+    /// the old columns are kept, kept current by its reverse, and orphaned
+    /// at the close.
+    MapFields {
+        entity: String,
+        /// The old fields, as the version serving now declares them.
+        from: Vec<crate::Field>,
+        /// The new fields.
+        to: Vec<String>,
+    },
     // ── C ──
     AddUnique {
         entity: String,
@@ -410,6 +422,7 @@ impl Change {
             Change::Normalize { .. } => "B10",
             Change::ChangePlaces { .. } => "B11",
             Change::RenameField { .. } | Change::RenameEntity { .. } => "B4",
+            Change::MapFields { .. } => "B12",
             Change::AddUnique { .. } => "C1",
             Change::AddCompositeUnique { .. } => "C2",
             Change::AddEnum { .. } => "C3",
@@ -459,6 +472,7 @@ impl Change {
             | Change::ChangePlaces { entity, .. }
             | Change::RenameField { entity, .. }
             | Change::RenameEntity { entity, .. }
+            | Change::MapFields { entity, .. }
             | Change::AddUnique { entity, .. }
             | Change::AddCompositeUnique { entity, .. }
             | Change::AddEnum { entity, .. }
@@ -555,6 +569,7 @@ impl Change {
             | Change::ChangePlaces { .. }
             | Change::RenameField { .. }
             | Change::RenameEntity { .. }
+            | Change::MapFields { .. }
             | Change::AddUnique { .. }
             | Change::AddCompositeUnique { .. }
             | Change::AddEnum { .. }
@@ -648,6 +663,29 @@ impl std::fmt::Display for Change {
             ),
             Change::RenameEntity { from, .. } => {
                 write!(f, "entity `{from}` is renamed to `{e}`")
+            }
+            Change::MapFields { from, to, .. } => {
+                let names = |v: Vec<&str>| {
+                    v.iter()
+                        .map(|n| format!("`{e}.{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let old = names(from.iter().map(|f| f.name.as_str()).collect());
+                let new = names(to.iter().map(String::as_str).collect());
+                if to.len() > 1 {
+                    write!(
+                        f,
+                        "{old} is split into {new}: each filled by the plan's mapping, the old \
+                         column kept"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{old} are merged into {new}: filled by the plan's mapping, the old \
+                         columns kept"
+                    )
+                }
             }
             Change::AddUnique { field, .. } => write!(f, "`{e}.{field}` becomes unique"),
             Change::AddCompositeUnique { key, .. } => {
@@ -869,6 +907,8 @@ pub fn diff_with(
                 match d.field(&f.name) {
                     // Renamed: the old column is kept, and nothing drops.
                     None if renames.field_to(&p.name, &f.name).is_some() => {}
+                    // Split or merged: kept, and orphaned at the close.
+                    None if renames.map_from(&p.name, &f.name).is_some() => {}
                     None => {
                         if t.columns.contains_key(&f.column()) {
                             out.push(Change::DropField {
@@ -935,6 +975,20 @@ fn entity_columns(
     out: &mut Vec<Change>,
 ) {
     for f in e.declared() {
+        // A split's or a merge's new field: one change for the whole map,
+        // at its first new field, while the old columns are there.
+        if let Some(m) = renames.map_to(&e.name, &f.name) {
+            if m.from.iter().all(|x| t.columns.contains_key(&x.column())) {
+                if m.to.first() == Some(&f.name) {
+                    out.push(Change::MapFields {
+                        entity: e.name.clone(),
+                        from: m.from.clone(),
+                        to: m.to.clone(),
+                    });
+                }
+                continue;
+            }
+        }
         match t.columns.get(&f.column()) {
             None => match renames.field_from(&e.name, &f.name) {
                 Some(from) if t.columns.contains_key(from) => out.push(Change::RenameField {

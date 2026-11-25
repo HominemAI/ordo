@@ -13,9 +13,13 @@
 //!   `prev` reaches one version back only.
 //! - `prev_type`: a rename whose type differs. No cast option exists yet, so
 //!   it is refused, naming the two types.
-//! - `prev_mapping_required`: a merge (`prev(first, last)`) or a move
-//!   (`prev(orders.note)`). Each needs a mapping the plan does not offer
-//!   yet.
+//! - `prev_mapping_required`: a move (`prev(orders.note)`), which needs a
+//!   rule the plan does not offer yet.
+//! - **Splits and merges** (increment 15b): several fields each
+//!   `prev(name)` split `name`; one field `prev(first, last)` merges two.
+//!   Each resolves to a [`FieldMap`]. Its mapping is the stored plan's
+//!   (`--fill` for each new field, `--reverse` for each old one), checked
+//!   by the triage, not here.
 //! - `prev_sealed`: a sealed field's ciphertext is bound to its field, so
 //!   a copy cannot be read under the new name. Re-sealing is the backfill
 //!   worker's (increment 10b).
@@ -84,6 +88,32 @@ pub struct PrevReport {
 pub struct Renames {
     pub fields: BTreeMap<(String, String), String>,
     pub entities: BTreeMap<String, String>,
+    /// The splits and merges.
+    pub maps: Vec<FieldMap>,
+}
+
+/// **A field split or merge** (increment 15b): the old fields of `entity`
+/// in the version serving now, and the new fields that take their values.
+/// A split has one `from` and several `to`; a merge several `from` and one
+/// `to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldMap {
+    pub entity: String,
+    /// The old fields, as the version serving now declares them.
+    pub from: Vec<crate::Field>,
+    /// The new fields, in declaration order.
+    pub to: Vec<String>,
+}
+
+impl FieldMap {
+    pub fn is_split(&self) -> bool {
+        self.to.len() > 1
+    }
+
+    /// The old fields' names.
+    pub fn from_names(&self) -> Vec<String> {
+        self.from.iter().map(|f| f.name.clone()).collect()
+    }
 }
 
 impl Renames {
@@ -100,6 +130,20 @@ impl Renames {
             .iter()
             .find(|((e, _), to)| e == entity && to.as_str() == field)
             .map(|((_, from), _)| from.as_str())
+    }
+
+    /// The split or merge `entity.field` is a new field of.
+    pub fn map_to(&self, entity: &str, field: &str) -> Option<&FieldMap> {
+        self.maps
+            .iter()
+            .find(|m| m.entity == entity && m.to.iter().any(|t| t == field))
+    }
+
+    /// The split or merge `entity.field` is an old field of.
+    pub fn map_from(&self, entity: &str, field: &str) -> Option<&FieldMap> {
+        self.maps
+            .iter()
+            .find(|m| m.entity == entity && m.from.iter().any(|f| f.name == field))
     }
 
     /// The old name of `entity`, when the step renames it from one.
@@ -160,14 +204,53 @@ pub fn renames(prior: Option<&Schema>, declared: &Schema) -> Renames {
                 let from_entity = entity_in_prior(prior, declared, &m.entity)
                     .map(|e| e.name.clone())
                     .unwrap_or_else(|| m.entity.clone());
-                if from_entity == m.entity {
-                    r.fields
-                        .insert((m.entity.clone(), m.prev[0].clone()), f.clone());
+                if from_entity != m.entity {
+                    continue;
                 }
+                let Some(was) = prior.native(&m.entity) else {
+                    continue;
+                };
+                let split = split_of(declared, m);
+                if m.prev.len() > 1 || split.len() > 1 {
+                    if r.map_to(&m.entity, f).is_some() {
+                        continue;
+                    }
+                    let to = if split.len() > 1 {
+                        split.iter().filter_map(|x| x.field.clone()).collect()
+                    } else {
+                        vec![f.clone()]
+                    };
+                    r.maps.push(FieldMap {
+                        entity: m.entity.clone(),
+                        from: m
+                            .prev
+                            .iter()
+                            .filter_map(|p| was.field(p).cloned())
+                            .collect(),
+                        to,
+                    });
+                    continue;
+                }
+                r.fields
+                    .insert((m.entity.clone(), m.prev[0].clone()), f.clone());
             }
         }
     }
     r
+}
+
+/// The field marks of `m`'s entity that split the same old name as `m`,
+/// `m` among them, in declaration order. One mark is a rename; a merge or a
+/// move is never a split.
+fn split_of<'a>(declared: &'a Schema, m: &PrevMark) -> Vec<&'a PrevMark> {
+    if m.field.is_none() || m.prev.len() != 1 || m.prev[0].contains('.') {
+        return Vec::new();
+    }
+    declared
+        .prev
+        .iter()
+        .filter(|x| x.entity == m.entity && x.field.is_some() && x.prev == m.prev)
+        .collect()
 }
 
 /// The entity in `prior` that `declared`'s `name` was: itself, or its
@@ -251,26 +334,25 @@ fn field_mark(
         });
         return;
     }
-    if m.prev.len() > 1 || m.prev[0].contains('.') {
-        let what = if m.prev.len() > 1 {
-            "a merge"
-        } else {
-            "a move from another entity"
-        };
+    if m.prev.iter().any(|p| p.contains('.')) {
         out.errors.push(PrevIssue {
             class: "prev_mapping_required",
             mark: m.clone(),
             message: format!(
-                "`{}.{f} prev({})` is {what}, which needs a mapping the plan does not offer \
-                 yet",
+                "`{}.{f} prev({})` is a move from another entity, which needs a rule for \
+                 which related row gives the value, and the plan does not offer one yet",
                 e.name,
                 m.prev.join(", ")
             ),
             fix: format!(
                 "add `{f}` as a new field and fill it with an op, then remove the old \
-                 field(s) in a later version"
+                 field in a later version"
             ),
         });
+        return;
+    }
+    if m.prev.len() > 1 || split_of(declared, m).len() > 1 {
+        map_mark(was, e, f, m, out);
         return;
     }
     let old = &m.prev[0];
@@ -347,6 +429,55 @@ fn field_mark(
                 type_text(to)
             ),
         });
+    }
+}
+
+/// A split's or a merge's mark: each old field is served now, and no old
+/// or new field is sealed or a file. Its mapping is the plan's.
+fn map_mark(was: &Entity, e: &Entity, f: &str, m: &PrevMark, out: &mut PrevReport) {
+    for old in &m.prev {
+        let Some(from) = was.field(old) else {
+            out.errors.push(PrevIssue {
+                class: "prev_unresolved",
+                mark: m.clone(),
+                message: format!(
+                    "the version serving now has no `{}.{old}`. `prev` reaches one version \
+                     back only",
+                    was.name
+                ),
+                fix: format!(
+                    "name fields of `{}` that are served now, or remove `prev({})`",
+                    was.name,
+                    m.prev.join(", ")
+                ),
+            });
+            return;
+        };
+        let to = e.field(f);
+        let sealed = from.sealed || to.is_some_and(|t| t.sealed);
+        let file = from.is_content() || to.is_some_and(|t| t.is_content());
+        if sealed || file {
+            out.errors.push(PrevIssue {
+                class: if sealed { "prev_sealed" } else { "prev_type" },
+                mark: m.clone(),
+                message: format!(
+                    "`{}.{f} prev({})` maps {}: a split or a merge computes values with an \
+                     expression over the row, and {}",
+                    e.name,
+                    m.prev.join(", "),
+                    if sealed { "a sealed field" } else { "a file" },
+                    if sealed {
+                        "the database holds only ciphertext"
+                    } else {
+                        "a file's handle is minted by an upload, never computed"
+                    }
+                ),
+                fix: "keep the fields as they are, or split them in a version before the \
+                      one that seals them"
+                    .into(),
+            });
+            return;
+        }
     }
 }
 

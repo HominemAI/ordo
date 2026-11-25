@@ -21,6 +21,11 @@ use crate::trigger::{ListenerPattern, Modifiers, Schedule};
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Program {
     pub domain: Option<DomainDecl>,
+    /// `edition 2`: the language edition the source is written in
+    /// (`plan-versions.md` §2.6). Absent is edition 1, for good (board
+    /// `program-versions-the-core-under-schema` ask 5). What each edition
+    /// means is the release's, in `ordo_plan::edition`.
+    pub edition: Option<EditionDecl>,
     pub entities: Vec<EntityDecl>,
     pub ops: Vec<OpDecl>,
     /// `release member …`: whether a member may leave the tenant on their
@@ -40,6 +45,10 @@ pub struct Program {
     /// sets, and the hosts a function may send it to
     /// (`plan-backend-functions.md` §5).
     pub secrets: Vec<SecretDecl>,
+    /// `auth { … }`: how people sign in to the app
+    /// (`plan-configuration-in-the-file.md` §2). At most one per program.
+    /// Absent, the deployment's settings decide, as before the block.
+    pub auth: Option<crate::auth::AuthDecl>,
     /// `external customers from crm.customers shared { … }`: a table
     /// another system owns, read through a translation inside Ordo's SQL
     /// (ruled 2026-11-15, `external-entities`). Never an entity: the schema
@@ -158,6 +167,14 @@ pub struct SecretDecl {
     /// one subdomain may receive the key. Empty for a signing key
     /// (`secret hookKey`), which is sent nowhere.
     pub hosts: Vec<String>,
+    pub span: Span,
+}
+
+/// `edition <n>`: one line, at most once per program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditionDecl {
+    pub number: u32,
+    /// The whole line, `edition` to the number.
     pub span: Span,
 }
 
@@ -438,7 +455,33 @@ pub struct FieldDecl {
     /// what was written here; the entity line's `public` and an owner's
     /// `public*` are resolved by the schema.
     pub public: bool,
+    /// `fullName: text prev(name)` — the field's names in the version
+    /// serving now (`plan-syntax-additions.md` §5): one for a rename, two
+    /// for a merge, `entity.field` for a move. Empty when not written.
+    pub prev: Vec<PrevName>,
+    /// The whole `prev(…)` clause, which the offer to remove a landed
+    /// `prev` cuts out of the source.
+    pub prev_span: Option<Span>,
     pub span: Span,
+}
+
+/// One name in a `prev(…)`: `name`, or `orders.shippingNote` for a field
+/// that moved here from a related entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrevName {
+    /// The entity it moved from, for `entity.field`.
+    pub entity: Option<Ident>,
+    pub field: Ident,
+}
+
+impl PrevName {
+    /// As written: `name` or `orders.shippingNote`.
+    pub fn text(&self) -> String {
+        match &self.entity {
+            Some(e) => format!("{}.{}", e.name, self.field.name),
+            None => self.field.name.clone(),
+        }
+    }
 }
 
 /// The entity line `public` or `public*` (`plan-syntax-additions.md` §1).
@@ -606,6 +649,13 @@ pub struct EntityDecl {
     /// Absent, the key derives from the name (4-char words, hyphenated,
     /// common-word abbreviations); collisions fail at compile time.
     pub key: Option<Ident>,
+    /// `entity customers (prev: clients) { … }` — the entity's name in the
+    /// version serving now (`plan-syntax-additions.md` §5).
+    pub prev: Option<Ident>,
+    /// The `prev: clients` entry, with its comma, which the offer to remove
+    /// a landed `prev` cuts out; the whole parenthesis when it is the only
+    /// entry.
+    pub prev_span: Option<Span>,
     pub fields: Vec<FieldDecl>,
     /// `access read <walk>` — G9: declaring one verb without the other is
     /// the schema's `incomplete_access_clause`, not a parse error.

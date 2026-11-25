@@ -25,7 +25,7 @@
  */
 
 import type { OrdoClient, Params } from '../core/client.js';
-import { RECONNECT_CLASSES, reconnectDelayMs } from '../core/busy.js';
+import { OrdoVersionChanged, RECONNECT_CLASSES, reconnectDelayMs } from '../core/busy.js';
 import { OrdoNetworkError } from '../core/network.js';
 import { OrdoRefusal } from '../core/refusal.js';
 import type { RefusalClass } from '../core/refusal.js';
@@ -97,6 +97,15 @@ export interface SyncManagerOptions {
    * resume. The device keeps what it holds.
    */
   readonly onPaused?: (refusal: OrdoRefusal) => void;
+  /**
+   * Called when the tenant's program version changed under the device
+   * copy (`plan-versions.md` §1.4, §1.9), after the manager dropped the copy
+   * to fill it again. Heard from a feed's `version_changed` frame or from an
+   * answer whose `x-ordo-tenant-version` names another version than the
+   * copy was filled under; `to` is `null` when the frame said it and no
+   * answer has named the new version yet.
+   */
+  readonly onVersionChanged?: (change: { readonly from: string | null; readonly to: string | null }) => void;
   /** How long to wait before a reconnect, given the consecutive failures. */
   readonly backoff?: (attempts: number) => number;
   /** How the manager waits. Replaced in tests; defaults to a timer. */
@@ -151,10 +160,15 @@ export interface ManagerLink {
   frame(key: string, state: SyncState, delta: SyncDelta): void;
   /** This manager's own feed for `key` was refused for good. */
   stopped(key: string, refusal: OrdoRefusal): void;
+  /** This manager dropped the tenant's device copy: the version changed. */
+  versionChanged(): void;
 }
 
 /** {@link SyncManagerOptions.touchEveryMs} when the app sets none: one hour. */
 export const DEFAULT_TOUCH_EVERY_MS = 3_600_000;
+
+/** {@link SyncManager}'s mark for a copy dropped on a feed's frame, before an answer names the new version. */
+const MOVED = '\u0000moved';
 
 /**
  * The rows one observed handle holds, and where it stands, taken together:
@@ -227,7 +241,7 @@ const RETRYABLE: ReadonlySet<string> = RECONNECT_CLASSES;
  *
  * Deliberately narrow. `not_found` and `unknown_op` are not here: an op
  * renamed in a deploy would otherwise throw away rows the caller is still
- * entitled to. These three are the door's own answers to "you may not have
+ * entitled to. These are the door's own answers to "you may not have
  * this", and `access_denied` is the one revocation itself arrives as, since
  * the door answers uniformly so a token cannot enumerate.
  */
@@ -235,6 +249,9 @@ const REVOKING: ReadonlySet<string> = new Set<RefusalClass>([
   'access_denied',
   'access_guard',
   'delegation_required',
+  // A share whose version no longer agrees with the tenant's (`plan-versions.md`
+  // §1.7): the guest may not hold its rows until the sharer shares again.
+  'versions_disagree',
 ]);
 
 /** 0, then 250 ms doubling to 30 s: the one reconnect backoff. A clean end reconnects at once. */
@@ -264,6 +281,13 @@ interface Entry {
    * be asked in a loop.
    */
   renewed: boolean;
+  /**
+   * The tenant's version changed and no frame has arrived since. The door
+   * may answer `space_unavailable` for a moment while it brings the
+   * tenant's data to the new version; until a frame arrives that is a wait,
+   * not a standing answer.
+   */
+  moving: boolean;
   task: Promise<void>;
   /** Connections begun so far, counting from 1 for the first. */
   connections: number;
@@ -301,6 +325,16 @@ export class SyncManager {
   #reconnecting: Promise<void> | null = null;
   /** The refusal that paused the tenant, while it is paused. */
   #paused: OrdoRefusal | null = null;
+  /** The drop of the device copy under way after a version change. */
+  #dropping: Promise<void> | null = null;
+  /**
+   * The version the device copy is of: the last one an answer named. `MOVED`
+   * after a feed's `version_changed` frame dropped the copy, until an answer
+   * names the new version, so that answer is not taken for a second move.
+   */
+  #filledUnder: string | null = null;
+  #offVersion: (() => void) | null = null;
+  readonly #onVersionChanged: ((change: { readonly from: string | null; readonly to: string | null }) => void) | null;
   /** Resolved by `resumed()`, so every held feed reopens together. */
   #resume: (() => void) | null = null;
   #whenResumed: Promise<void> = Promise.resolve();
@@ -318,6 +352,11 @@ export class SyncManager {
     this.#wait = options.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#publishMs = options.publishMs ?? 100;
     this.#onPaused = options.onPaused ?? null;
+    this.#onVersionChanged = options.onVersionChanged ?? null;
+    // An answer naming another version than the copy was filled under is a
+    // move, as the feed's frame is (`plan-versions.md` §1.9).
+    this.#filledUnder = client.tenantVersion();
+    this.#offVersion = client._onTenantVersion((version) => this.#heardVersion(version));
     if (options.onView) this.#watchers.add(options.onView);
     const target =
       options.online === undefined
@@ -386,6 +425,7 @@ export class SyncManager {
       stopped: null,
       network: null,
       renewed: false,
+      moving: false,
       task: Promise.resolve(),
       connections: 0,
       waiters: [],
@@ -476,6 +516,17 @@ export class SyncManager {
     }
     this.#absorb(key, delta);
     this.#flush(false);
+  }
+
+  /**
+   * The leading tab dropped the tenant's device copy because its program
+   * version changed (owner ruling Q7, 2026-11-23). The shared store is
+   * empty already; this tab's rows in memory go, and the leader's refill
+   * reaches it as frames. @internal
+   */
+  _remoteVersionChanged(): void {
+    if (!this.#running) return;
+    this.#poisoned();
   }
 
   /** Where the device stands now. */
@@ -613,6 +664,8 @@ export class SyncManager {
     this.#running = false;
     this.#offOnline?.();
     this.#offOnline = null;
+    this.#offVersion?.();
+    this.#offVersion = null;
     if (this.#touchTimer !== null) clearInterval(this.#touchTimer);
     this.#touchTimer = null;
     this.#stopped();
@@ -661,6 +714,7 @@ export class SyncManager {
               applied = true;
               entry.network = null;
               entry.renewed = false;
+              entry.moving = false;
               this.#applied(entry, state, delta);
               answered(entry, connection);
               this.#link?.frame(entry.key, state, delta);
@@ -691,6 +745,23 @@ export class SyncManager {
           nudged = true;
           entry.attempts = 0;
           if (renewal === 'renewed') entry.renewed = true;
+        } else if (error instanceof OrdoVersionChanged) {
+          // The tenant moved to another program version (`plan-versions.md`
+          // §1.4). The device copy is the old version's shape, so it goes
+          // and every feed fills it again (owner ruling Q7, 2026-11-23).
+          // This feed reconnects at once, on the normal backoff.
+          const from = this.#filledUnder === MOVED ? null : this.#filledUnder;
+          this.#filledUnder = MOVED;
+          await this.#versionChanged(entry);
+          this.#onVersionChanged?.({ from, to: null });
+          if (!this.#running || entry.controller.signal.aborted) return;
+          entry.attempts = 0;
+          entry.moving = true;
+        } else if (entry.moving && error instanceof OrdoRefusal && error.detail.class === 'space_unavailable') {
+          // The door is bringing the tenant's data to the new version
+          // ("closed for a moment"): wait on the backoff and try again.
+          entry.retryAfterMs = error.retryAfterMs;
+          entry.attempts += 1;
         } else if (error instanceof OrdoRefusal && error.detail.class === 'space_paused') {
           // The tenant is paused (`plan-tenant-pause.md` §5). Not a standing
           // refusal of this op and not a fault to retry: the op holds where
@@ -751,6 +822,52 @@ export class SyncManager {
       entry.retryAfterMs = null;
       if (!nudged) await this.#pause(entry, Math.max(this.#backoff(entry.attempts), asked));
     }
+  }
+
+  /**
+   * The tenant's program version changed: drop the device copy, in memory
+   * and on disk, and reopen every other feed so each fills it again. Feeds
+   * hear it together, so the first one drops and the rest wait for it.
+   */
+  #versionChanged(heard: Entry | null): Promise<void> {
+    if (this.#dropping) return this.#dropping;
+    const drop = (async () => {
+      this.#poisoned();
+      try {
+        await this.#replica.clear();
+      } catch {
+        // A copy that could not be cleared is refilled over: every row the
+        // new load sends replaces the old one, by position.
+      }
+      // Other tabs on this replica drop their rows in memory too; the
+      // store they share is already empty.
+      this.#link?.versionChanged();
+      for (const entry of this.#entries.values()) {
+        if (entry.stopped !== null) continue;
+        entry.moving = true;
+        if (entry === heard) continue;
+        if (entry.wake) entry.wake();
+        else entry.attempt.abort(new DOMException('version changed', 'AbortError'));
+      }
+    })();
+    this.#dropping = drop.finally(() => {
+      if (this.#dropping === guarded) this.#dropping = null;
+    });
+    const guarded = this.#dropping;
+    return guarded;
+  }
+
+  /**
+   * An answer named `version`. The first one names what the copy is of. One
+   * after a frame's drop names the version the copy now fills under. Any
+   * other that differs is a move nobody told a feed of yet: the copy is
+   * dropped and every feed fills it again, as on the frame.
+   */
+  #heardVersion(version: string): void {
+    const was = this.#filledUnder;
+    this.#filledUnder = version;
+    if (was === null || was === MOVED || was === version || !this.#running) return;
+    void this.#versionChanged(null).then(() => this.#onVersionChanged?.({ from: was, to: version }));
   }
 
   /** Hold every feed: the tenant is paused. The first to hear it tells the app. */

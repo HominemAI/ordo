@@ -72,6 +72,11 @@ export function useLive(
   const paceMs = effectivePaceMs(runtime.paceMs, options.livePaceMs);
 
   const [tick, setTick] = useState(0);
+  // The door names the tenant's program version on every answer. Another
+  // version than the last means every read on screen may be of the old
+  // shape: each hook refetches, whether or not it follows the feed.
+  const [versionTick, setVersionTick] = useState(0);
+  useEffect(() => runtime.client.onVersionChange(() => setVersionTick((t) => t + 1)), [runtime.client]);
   const key = useMemo(
     () => `${op.op}?${JSON.stringify(params ?? null)}#${JSON.stringify(refine ?? null)}`,
     [op.op, params, refine],
@@ -111,14 +116,14 @@ export function useLive(
     };
   }, [runtime.hub, op.op, key, following, paceMs]);
 
-  if (!following) return OFF;
+  if (!following) return versionTick === 0 ? OFF : { ...OFF, tick: versionTick };
   // `ready` only informs; no hook holds a fetch for it. A stream that is slow,
   // unsupported or failed must not stall the read it was meant to keep fresh.
   return {
     following,
     ready: status !== null && status.state !== 'connecting',
     opened: openedFor === key,
-    tick,
+    tick: tick + versionTick,
     status,
   };
 }

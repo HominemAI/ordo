@@ -114,6 +114,32 @@ async function op(request: APIRequestContext, who: Who, name: string, body?: obj
   return body === undefined ? ((JSON.parse(text) as { rows: Row[] }).rows ?? []) : [];
 }
 
+/**
+ * The first call of an op a version adds: the node rebuilds its door over
+ * every tenant once it loads a version, and until then refuses the new op.
+ * Asked again until it answers, for up to 90 seconds.
+ */
+async function firstCall(request: APIRequestContext, who: () => Who, name: string, body: object): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const w = who();
+        const r = await request.post(`${stack().door}/op/${name}`, {
+          data: body,
+          headers: {
+            'X-Ordo-Space': w.space,
+            Authorization: `Bearer ${w.token}`,
+            Origin: stack().page,
+            'Idempotency-Key': `e2e-${Date.now()}-${Math.random()}`,
+          },
+        });
+        return r.status();
+      },
+      { timeout: 90_000, intervals: [1_000, 2_000, 5_000] },
+    )
+    .toBe(200);
+}
+
 /** `note=label` for each labelled note, on either version. */
 async function labels(request: APIRequestContext, who: Who): Promise<string[]> {
   const rows = await op(request, who, 'labelledNotes');
@@ -163,7 +189,7 @@ test('notes v3 merges an entity: the rule is asked for, every label reads, and a
       await page.reload();
       await signedIn(page);
       for (const t of titles) await holds(page, t);
-      await op(request, session(), 'labelNote', { id: first.id, label: 'travel' });
+      await firstCall(request, session, 'labelNote', { id: first.id, label: 'travel' });
       expect(await labels(request, session())).toEqual([`${first.id}=travel`]);
     });
 
@@ -196,9 +222,13 @@ test('notes v3 merges an entity: the rule is asked for, every label reads, and a
       await page.reload();
       await signedIn(page);
       for (const t of titles) await holds(page, t);
-      expect(await labels(request, session())).toEqual([`${first.id}=travel`]);
+      // The first read of the version the tenant now serves waits for the
+      // node's door, as the first call does.
+      await expect
+        .poll(() => labels(request, session()).catch(() => []), { timeout: 90_000 })
+        .toEqual([`${first.id}=travel`]);
       const now = (await op(request, session(), 'allNotes')).find((x) => x.id === second.id);
-      await op(request, session(), 'labelNote', { id: second.id, rev: now?.rev, label: 'shopping' });
+      await firstCall(request, session, 'labelNote', { id: second.id, rev: now?.rev, label: 'shopping' });
       expect(await labels(request, session())).toEqual([`${first.id}=travel`, `${second.id}=shopping`].sort());
       await addNote(page, added, 'Added on the merged version.');
       await holds(page, added);

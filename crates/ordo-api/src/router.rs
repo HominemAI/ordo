@@ -2057,6 +2057,17 @@ async fn run_call(
     let space = gate.approved_space(op)?.to_string();
     let refinement = parse_refinement(op, gate.refine_raw.take(), &state.refine_limits)?;
     let keyed_as = gate.keyed_as();
+    let sorted = refinement.as_ref().is_some_and(|r| r.sort.is_some());
+    if sorted && gate.page_raw.is_some() {
+        // A cursor's keys are the op's own order (`page.rs`, point 2), so a
+        // read in another order is answered once, to its `limit`.
+        return Err(ApiError::for_op(
+            ErrorCode::InvalidRefinement,
+            op,
+            "a refinement with `sort` is read in one answer and never paged: drop `$page`, \
+             or drop `sort` and page in the op's own order",
+        ));
+    }
     let cursor = parse_cursor(state, &space, op, &keyed_as, gate.page_raw.take())?;
     let bound = bind::bind_params(op, &gate.params)?;
 
@@ -2160,12 +2171,17 @@ async fn run_call(
         .join("\u{1f}"),
         fingerprint: f.hex(),
     });
+    // A refinement's `limit` is the rows of this one answer.
+    let limit = refinement.as_ref().and_then(|r| r.limit);
     match state
         .executor
-        .execute(op, &space, bound, refinement, cursor, lease)
+        .execute_sized(op, &space, bound, refinement, cursor, lease, limit)
         .await
     {
-        Ok(ExecOutcome::Ran(result)) => {
+        Ok(ExecOutcome::Ran(mut result)) => {
+            if sorted {
+                result.next_cursor = None;
+            }
             let position = result.position;
             let body = success_envelope(state, &space, op, &keyed_as, result);
             if let Some((replay_key, fingerprint)) = slot {

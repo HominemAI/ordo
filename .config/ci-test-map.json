@@ -465,10 +465,15 @@
     "crates/ordo-host/src/passkeys.rs": "all",
     "crates/ordo-host/src/pause.rs": "all",
     "crates/ordo-host/src/peer_client.rs": [
-      "peer_consumer"
+      "peer_consumer",
+      "peer_reads"
     ],
     "crates/ordo-host/src/peer_door.rs": "all",
     "crates/ordo-host/src/peer_ops.rs": "all",
+    "crates/ordo-host/src/peer_reads.rs": [
+      "peer_consumer",
+      "peer_reads"
+    ],
     "crates/ordo-host/src/people_ops.rs": "all",
     "crates/ordo-host/src/pgsync.rs": "all",
     "crates/ordo-host/src/pin_stream.rs": "all",

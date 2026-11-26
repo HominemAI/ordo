@@ -1172,6 +1172,10 @@ pub struct Deployment {
     /// artifact's. Putting it in `Loaded` would make it *look* swappable,
     /// and something that looks swappable eventually gets swapped.
     platform: Vec<OpSpec>,
+    /// The client that serves a peer read through its door (step G5,
+    /// `ordo_exec::peer_reads`), set once at boot when any `peer` has an
+    /// `ORDO_PEER_<NAME>_URL`. Unset, no read reaches another deployment.
+    peer_reads: std::sync::OnceLock<Arc<dyn ordo_exec::peer_reads::PeerFetch>>,
 }
 
 /// A tenant's move with dual writes, as a node serves it (increment 11a,
@@ -1235,11 +1239,23 @@ fn others_empty() -> Others {
 }
 
 impl Deployment {
+    /// Serve peer reads through their doors with `fetch` (step G5). Set
+    /// once; a second call changes nothing.
+    pub fn set_peer_reads(&self, fetch: Arc<dyn ordo_exec::peer_reads::PeerFetch>) {
+        let _ = self.peer_reads.set(fetch);
+    }
+
+    /// The client serving peer reads through their doors, when set.
+    pub fn peer_reads(&self) -> Option<&dyn ordo_exec::peer_reads::PeerFetch> {
+        self.peer_reads.get().map(|f| &**f)
+    }
+
     /// Boot on a gated version.
     pub fn boot(verified: Verified) -> Arc<Deployment> {
         Arc::new(Deployment {
             current: RwLock::new(Arc::new(verified.0)),
             platform: Vec::new(),
+            peer_reads: Default::default(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
@@ -1269,6 +1285,7 @@ impl Deployment {
     ) -> Result<Arc<Deployment>, LoadRefusal> {
         Ok(Arc::new(Deployment {
             platform: Self::vet_platform(&verified.0, platform)?,
+            peer_reads: Default::default(),
             current: RwLock::new(Arc::new(verified.0)),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
@@ -1412,6 +1429,7 @@ impl Deployment {
         Ok(Arc::new(Deployment {
             current: RwLock::new(Arc::new(loaded)),
             platform,
+            peer_reads: Default::default(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
@@ -1454,6 +1472,7 @@ impl Deployment {
                 clock: LoadClock::default(),
             })),
             platform: Vec::new(),
+            peer_reads: Default::default(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),
@@ -1481,6 +1500,7 @@ impl Deployment {
         Ok(Arc::new(Deployment {
             current: RwLock::new(d.current()),
             platform,
+            peer_reads: Default::default(),
             others: others_empty(),
             pins: RwLock::new(PinMap::default()),
             following: RwLock::new(None),

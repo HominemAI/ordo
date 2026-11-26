@@ -62,6 +62,13 @@ pub fn schema_env(peer: &str) -> String {
     format!("ORDO_PEER_{}_SCHEMA", peer.to_ascii_uppercase())
 }
 
+/// `ORDO_PEER_<NAME>_URL`: where the peer's door answers. Set, the peer's
+/// tables are read through its door and `ORDO_PEER_<NAME>_SCHEMA` is not
+/// read (step G5). The host's `peer_client::url_env` is the same name.
+pub fn door_url_env(peer: &str) -> String {
+    format!("ORDO_PEER_{}_URL", peer.to_ascii_uppercase())
+}
+
 /// The optional setting that swaps a plain external's schema:
 /// `ORDO_EXTERNAL_<SCHEMA>_SCHEMA`, the schema as the file writes it,
 /// upper-cased (owner, 2026-11-17, ask 12). `None` when the written name has
@@ -375,6 +382,34 @@ pub fn resolve_with(
     own: &str,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<(), SchemaRefusal> {
+    // A peer with `ORDO_PEER_<NAME>_URL` is read through its door (step G5,
+    // `plan-federation-grants.md` §4): its schema is never read, so its
+    // setting is not asked for, and it leaves `schema.peers`, which every
+    // shared-database check, link and grant walks.
+    let door: Vec<String> = schema
+        .peers
+        .iter()
+        .filter(|p| {
+            lookup(&door_url_env(p))
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    for peer in &door {
+        for e in &mut schema.externals {
+            if let Some(p) = e
+                .external
+                .as_mut()
+                .and_then(|src| src.peer.as_mut())
+                .filter(|p| &p.name == peer)
+            {
+                p.door = true;
+                p.schema = None;
+            }
+        }
+    }
+    schema.peers.retain(|p| !door.contains(p));
     for peer in schema.peers.clone() {
         let var = schema_env(&peer);
         let Some(value) = lookup(&var) else {

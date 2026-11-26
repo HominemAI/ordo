@@ -55,7 +55,7 @@ use ordo_exec::sql_lit;
 use ordo_identity::jose::{self, Alg, Jwk, Jwks};
 use ordo_identity::peer_token::{
     self, ASSERTION_TYPE, CHAIN_PARAM, KIND_CLIENT, KIND_PERSON, TOKEN_TYPE_ACCESS_TOKEN,
-    TOKEN_TYPE_ID_TOKEN, TYP_AS_ITSELF, TYP_ON_BEHALF,
+    TOKEN_TYPE_ID_TOKEN, TOKEN_TYPE_JWT, TYP_AS_ITSELF, TYP_ON_BEHALF, TYP_SESSION,
 };
 use ordo_identity::webauthn::{b64url_decode, b64url_encode};
 use serde_json::{json, Map, Value};
@@ -123,11 +123,17 @@ impl Service {
         let client = consumer.handle.as_str();
         let audience = need(f, "audience")?;
         let subject = need(f, "subject_token")?;
-        if get(f, "subject_token_type") != Some(TOKEN_TYPE_ID_TOKEN) {
-            return Err(IdentityError::BadRequest(format!(
-                "`subject_token_type` must be `{TOKEN_TYPE_ID_TOKEN}`: the person's ID token"
-            )));
-        }
+        let session = match get(f, "subject_token_type") {
+            Some(TOKEN_TYPE_ID_TOKEN) => false,
+            Some(TOKEN_TYPE_JWT) => true,
+            _ => {
+                return Err(IdentityError::BadRequest(format!(
+                    "`subject_token_type` must be `{TOKEN_TYPE_ID_TOKEN}`, the person's ID \
+                     token, or `{TOKEN_TYPE_JWT}`, the consumer's own session statement \
+                     (`typ` `{TYP_SESSION}`)"
+                )))
+            }
+        };
         no_extras(f)?;
         let chain = chain_of(f, client)?;
         let now = self.now();
@@ -145,7 +151,12 @@ impl Service {
                 return Err(e);
             }
         };
-        let (person, subject_exp) = match self.subject(client, subject, now).await? {
+        let checked = if session {
+            self.session_subject(&consumer, subject, now).await?
+        } else {
+            self.subject(client, subject, now).await?
+        };
+        let (person, subject_exp) = match checked {
             Ok(p) => p,
             Err((person, why)) => {
                 self.record(
@@ -159,7 +170,14 @@ impl Service {
                 return Err(IdentityError::SubjectRefused);
             }
         };
-        let exp = (now + self.config().peer_token_secs).min(subject_exp);
+        // A token on behalf of a person never outlives the ID token it was
+        // exchanged for. A session statement lives a minute; the token it
+        // buys lives its own span.
+        let exp = if session {
+            now + self.config().peer_token_secs
+        } else {
+            (now + self.config().peer_token_secs).min(subject_exp)
+        };
         let claims = json!({
             "iss": self.oidc_issuer(),
             "sub": person,
@@ -365,6 +383,71 @@ impl Service {
         }
         let exp = c.get("exp").and_then(Value::as_u64).unwrap_or(now);
         Ok(Ok((person, exp)))
+    }
+
+    /// The person a consumer's session statement names (`typ`
+    /// `ordo-session+jwt`, step G5), or the person and why it is refused.
+    ///
+    /// Signed with the presenting consumer's own registered key, `iss` that
+    /// consumer, `aud` this service's issuer, live for at most
+    /// `ORDO_IDENTITY_CLIENT_ASSERTION_SECS`, and the person still a member
+    /// of the consumer. The consumer says it holds a live session for them;
+    /// the holder still decides what the person may do.
+    async fn session_subject(
+        &self,
+        consumer: &Registered,
+        token: &str,
+        now: u64,
+    ) -> Result<Result<(String, u64), (String, &'static str)>, IdentityError> {
+        let Some(public) = consumer.consumer_key else {
+            return Ok(Err((String::new(), "no consumer key")));
+        };
+        let Ok(jwk) = Jwk::parse(&json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": b64url_encode(&public),
+        })) else {
+            return Ok(Err((String::new(), "no consumer key")));
+        };
+        let Ok(verified) = jose::verify_with_key(token, &jwk, &[Alg::EdDSA]) else {
+            return Ok(Err((String::new(), "not signed by the consumer")));
+        };
+        let Ok(c) = verified.claims() else {
+            return Ok(Err((String::new(), "not a claim set")));
+        };
+        let person = c
+            .get("sub")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let exp = c.get("exp").and_then(Value::as_u64);
+        let why = if header_typ(token).as_deref() != Some(TYP_SESSION) {
+            "not a session statement"
+        } else if c.get("iss").and_then(Value::as_str) != Some(consumer.handle.as_str()) {
+            "issued by another deployment"
+        } else if c.get("aud").and_then(Value::as_str) != Some(self.oidc_issuer().as_str()) {
+            "addressed to another service"
+        } else if person.is_empty() {
+            "no subject"
+        } else if exp.is_none_or(|e| e <= now || e > now + self.config().client_assertion_secs) {
+            "expired, or living too long"
+        } else if deployments::role_of(
+            self.store().pool(),
+            self.handle(),
+            &consumer.handle,
+            &person,
+        )
+        .await?
+        .is_none()
+        {
+            "not a member"
+        } else {
+            ""
+        };
+        if !why.is_empty() {
+            return Ok(Err((person, why)));
+        }
+        Ok(Ok((person, exp.unwrap_or(now))))
     }
 
     /// Sign `claims` with the active token key under header `typ`.

@@ -111,6 +111,7 @@ pub mod pause;
 pub mod peer_client;
 pub mod peer_door;
 pub mod peer_ops;
+pub mod peer_reads;
 pub mod people_ops;
 pub mod pgsync;
 pub mod pin_stream;
@@ -1249,7 +1250,7 @@ impl OpExecutor for FixtureExecutor {
                     let correlation = ordo_secevent::correlation::mint();
                     let mut page = view
                         .exec
-                        .read_page_pipeline(
+                        .read_page_served(
                             &built.pipeline,
                             &built.row_key,
                             &call,
@@ -1257,6 +1258,7 @@ impl OpExecutor for FixtureExecutor {
                             page_rows.map_or(self.page_size, |n| n as i64),
                             after.as_deref(),
                             &correlation.0,
+                            self.spaces.deployment().peer_reads(),
                         )
                         .await
                         .map_err(|e| {

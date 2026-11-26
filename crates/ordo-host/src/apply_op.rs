@@ -2249,9 +2249,31 @@ impl ApplyOps {
         let Ok(program) = Program::compile(source) else {
             return Ok(Vec::new());
         };
+        // Step G5: an external read through a peer's door calls the
+        // holder's `std.<table>.list`, so that op is checked and recorded
+        // as if its `peer` block listed it.
+        let mut uses = program.schema.peer_uses.clone();
+        if let Some(client) = self.peer_client.get() {
+            for e in &program.schema.externals {
+                let Some(src) = &e.external else { continue };
+                let Some(p) = &src.peer else { continue };
+                if client.holder(&p.name).is_err() {
+                    continue;
+                }
+                let op = format!("std.{}.list", src.table);
+                match uses.iter_mut().find(|u| u.name == p.name) {
+                    Some(u) if u.ops.contains(&op) => {}
+                    Some(u) => u.ops.push(op),
+                    None => uses.push(ordo_schema::PeerUses {
+                        name: p.name.clone(),
+                        ops: vec![op],
+                    }),
+                }
+            }
+        }
         let found = crate::peer_ops::check_uses(
             self.peer_client.get().map(|c| c.as_ref()),
-            &program.schema.peer_uses,
+            &uses,
             &program.version,
             record,
         )

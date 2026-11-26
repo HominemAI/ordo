@@ -3578,10 +3578,10 @@ async fn a_share_across_a_version_that_seals_a_field_it_reads_is_refused_naming_
     // Ada's tenant alone moves to a version that seals `body`.
     let sealed = ordo_plan::artifact::with_declared(
         &base.replace("  body:  text = \"\"\n", "  body:  text sealed\n"),
-        "0.2.0",
         "0.2.1",
+        "0.2.2",
     )
-    .expect("notes v2 declares @ 0.2.0");
+    .expect("notes v2 declares @ 0.2.1");
     assert!(sealed.contains("text sealed"), "the body line moved");
     ordo_host::schema_apply::record(
         &control,

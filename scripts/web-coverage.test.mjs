@@ -80,3 +80,15 @@ test('checked-in inventory and review ledger match current source', () => {
   assert.deepEqual(found, JSON.parse(readFileSync('coverage/web-inventory.json')));
   validateScope(JSON.parse(readFileSync('coverage/web-scope.json')), found);
 });
+
+
+test('zero-hit ranges preserve uncovered islands, source hashes and unresolved scope', () => {
+  const s = scope(); s.ranges = [range('reachable', 5, 6)];
+  const result = summarize(source, s, [lcov([[8, 0], [1, 0], [2, 0], [3, 1], [5, 0], [6, 0], [7, 0]])]);
+  assert.deepEqual(result.uncoveredRanges, [
+    { file, sha256: 'abc', start: 1, end: 2, classification: 'unresolved', outcomeReview: 'pending' },
+    { file, sha256: 'abc', start: 5, end: 6, classification: 'reachable', outcomeReview: 'pending' },
+    { file, sha256: 'abc', start: 7, end: 8, classification: 'unresolved', outcomeReview: 'pending' },
+  ]);
+  assert.equal(result.webPercent, null);
+});

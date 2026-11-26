@@ -137,3 +137,33 @@ window, adds/removes its skip, and deletes only its own windows. Requests go
 through the existing console UI to the actual host. Window configuration alone
 does not prove that a scheduled deployment or promotion ran. No such outcome
 is credited here.
+
+## Owner, quota and portability extensions, awaiting execution
+
+- Real console owners: invite, enrol a second passkey, reject invite reuse,
+  remove the second owner, reject their old session/passkey/recovery code,
+  and retain the original owner's access. Last-owner removal stays unavailable.
+- Real quota gate: enable metering workers in the fixture; observe durable use,
+  allow use within grace, refuse unsupported quantity and invalid bounds,
+  exhaust the quota on both replicas, preserve authorization-first refusal,
+  raise the limit and read the unchanged campaign. Only a disposable tenant's
+  quota changes; home-space access remains available throughout.
+- Portability: export an attached file and import its bytes and remapped parent
+  relationship; reject anonymous file reads, incomplete and unsupported-format
+  staged bundles; retain acknowledged data after each refusal. Import mints
+  destination IDs, so the fixture compares values and references, not source IDs.
+
+These tests typecheck; runtime validation is pending. No coverage gains or
+release acceptance are claimed. The coverage reporter now emits exact zero-hit
+ranges with source hashes and unresolved outcome-review status to support the
+remaining per-range work. This is accounting tooling, not product unit coverage.
+
+## File download extension, awaiting execution
+
+`api/file-downloads.spec.ts` uploads private text, HTML and SVG through the
+application's asset operation and blob endpoint. Both replicas must preserve
+metadata and bytes, support bounded/open-ended/first-of-multiple ranges,
+fall back for unsupported ranges, refuse out-of-bounds reads, and retain
+private-cache and stored-content security headers. HTML/SVG must download as
+binary attachments. Anonymous metadata and partial reads remain refused.
+This proves HTTP contracts when executed, not browser script isolation by itself.

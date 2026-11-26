@@ -79,6 +79,9 @@ No existing example report is reclassified as web-only by this change.
 - `conservativeMeasured` includes unresolved lines, but does not include unknown
   executable lines in unmeasured files. It is not a complete web denominator.
 - `gaps` lists missing and unresolved counts per measured source file.
+- `uncoveredRanges` lists exact adjacent zero-hit lines, source hashes and scope
+  classifications. Covered/unmeasured lines split ranges. Every range starts
+  with `outcomeReview: pending`; a line hit never proves a decision outcome.
 - `unmeasuredFiles` and `unreviewedEntries` prevent absence from becoming an exclusion.
 - A hit in an excluded range fails: the exclusion contradicts observed usage.
 - `webPercent` stays null pending runtime and outcome reconciliation.

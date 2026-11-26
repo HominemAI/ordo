@@ -55,17 +55,29 @@ export function summarize(source, scope, reports) {
   const files = lcovLines(reports), known = new Set(source.files.map(f => f.file));
   const groups = { reachable: { lines: 0, hit: 0 }, unresolved: { lines: 0, hit: 0 }, excluded: { lines: 0, hit: 0 } };
   const gaps = [];
+  const uncoveredRanges = [];
   for (const [file, lines] of files) {
     insist(known.has(file), `Coverage contains unknown source file: ${file}`);
     const ranges = scope.ranges.filter(r => r.file === file);
     const maxLine = source.files.find(f => f.file === file).lines;
     let missing = 0, unresolved = 0;
-    for (const [n, hit] of lines) {
+    let lastGap;
+    for (const [n, hit] of [...lines].sort(([a], [b]) => a - b)) {
       insist(n <= maxLine, `Coverage line outside source: ${file}:${n}`);
       const r = ranges.find(r => r.start <= n && n <= r.end);
       const group = !r ? 'unresolved' : r.classification === 'reachable' ? 'reachable' : 'excluded';
       groups[group].lines++; groups[group].hit += Number(hit);
-      if (group !== 'excluded' && !hit) missing++;
+      if (group !== 'excluded' && !hit) {
+        missing++;
+        // Only adjacent measured zero-hit lines coalesce. Do not bridge a
+        // covered line, an unmeasured line, or a different scope classification.
+        if (lastGap && lastGap.end + 1 === n && lastGap.classification === group) lastGap.end = n;
+        else {
+          lastGap = { file, sha256: source.files.find(f => f.file === file).sha256,
+            start: n, end: n, classification: group, outcomeReview: 'pending' };
+          uncoveredRanges.push(lastGap);
+        }
+      } else lastGap = undefined;
       if (group === 'unresolved') unresolved++;
       insist(!(hit && group === 'excluded'), `Observed web hit contradicts exclusion: ${file}:${n}`);
     }
@@ -83,6 +95,7 @@ export function summarize(source, scope, reports) {
     webPercent: null, // Requires runtime registration and outcome reconciliation, not yet implemented.
     runtimeReconciliation: 'pending',
     scopeComplete: complete, unmeasuredFiles: unmeasured, unreviewedEntries: pending,
+    uncoveredRanges,
     gaps: gaps.sort((a, b) => b.uncovered - a.uncovered || a.file.localeCompare(b.file)),
     branchCoverage: { status: 'not-measured', percent: null },
   };

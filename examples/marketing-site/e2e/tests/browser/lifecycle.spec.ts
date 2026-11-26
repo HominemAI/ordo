@@ -153,3 +153,55 @@ test('operational reads disclose data to the owner and refuse anonymous callers'
     await refused(await request.get(`${door}/security/events`, { headers, params: { space: 'system', limit: '-1' } }), 400, 'invalid_param');
   }
 });
+
+
+test('live quota changes warn, refuse, recover and preserve tenant isolation on both replicas', async ({ ownerPage, request }) => {
+  const saved = await ownerPage.evaluate(() => JSON.parse(sessionStorage.getItem('lumen.studio')!));
+  const headers = { Origin: stack().page, Authorization: `Bearer ${saved.token}`, 'X-Ordo-Space': 'system' };
+  const principal = readFileSync(`${state}/browser-owner-principal`, 'utf8').trim();
+  const tenant = (await rows(await request.post(`${stack().door}/op/std.space.create`, {
+    headers: { ...headers, 'Idempotency-Key': randomUUID() }, data: { name: `Quota ${randomUUID()}`, owner: principal },
+  })))[0].space;
+  const scoped = { ...headers, 'X-Ordo-Space': tenant };
+  const doors = [stack().door, stack().doorB];
+  const set = (limit: number, grace: number, extra: Record<string, unknown> = {}) => request.post(`${doors[0]}/op/std.deployment.setQuota`, {
+    headers, data: { space: tenant, quantity: 'requests', limit, grace, periodSecs: 86400, ...extra },
+  });
+  const read = (door: string) => request.get(`${door}/op/campaignList`, { headers: scoped });
+  try {
+    const campaign = (await rows(await request.post(`${doors[0]}/op/createCampaign`, { headers: scoped, data: {
+      title: 'Retained through quota refusal', brief: 'Acknowledged before the limit', tags: [], budget: '2.00', due: null,
+      created: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    } })))[0].created;
+    // Above the limit but within its grace still serves. Observe durable use,
+    // not only a setter response, before testing the warning branch.
+    expect((await rows(await set(0, 100000)))[0]).toMatchObject({ enforced: true, limit: 0, grace: 100000 });
+    for (const door of doors) await rows(await read(door));
+    await expect.poll(async () => (await rows(await request.get(`${doors[0]}/op/std.deployment.quotas`, {
+      headers, params: { space: tenant },
+    })))[0].used, { timeout: 30_000 }).toBeGreaterThan(0);
+    for (const door of doors) expect((await rows(await read(door)))[0]).toMatchObject({ id: campaign });
+    for (const extra of [{ quantity: 'writes' }, { periodSecs: 0 }, { limit: -1 }]) {
+      await refused(await set(0, 100000, extra), 400, 'tenant_refused');
+    }
+    expect((await rows(await request.get(`${doors[1]}/op/std.deployment.quotas`, { headers, params: { space: tenant } })))[0])
+      .toMatchObject({ limit: 0, grace: 100000, periodSecs: 86400 });
+    await rows(await set(0, 0));
+    for (const door of doors) {
+      await expect.poll(async () => (await read(door)).status(), { timeout: 30_000 }).toBe(429);
+      await refused(await read(door), 429, 'quota_exceeded');
+      await refused(await request.get(`${door}/op/campaignList`, { headers: { 'X-Ordo-Space': tenant } }), 403, 'access_denied');
+      await rows(await request.get(`${door}/op/campaignList`, { headers }));
+    }
+    await rows(await set(100000, 0));
+    for (const door of doors) {
+      await expect.poll(async () => (await read(door)).status(), { timeout: 30_000 }).toBe(200);
+      expect((await rows(await read(door)))[0]).toMatchObject({ id: campaign, title: 'Retained through quota refusal' });
+    }
+  } finally {
+    // Lift the test limit before tenant deletion; never alter another tenant.
+    await rows(await set(100000, 0));
+    for (const door of doors) await expect.poll(async () => (await read(door)).status(), { timeout: 30_000 }).toBe(200);
+    await rows(await request.delete(`${doors[0]}/op/std.space.delete`, { headers: scoped, params: { confirm: tenant } }));
+  }
+});

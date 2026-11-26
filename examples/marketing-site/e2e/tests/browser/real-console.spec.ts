@@ -78,6 +78,26 @@ test('the real console sets up, links, rotates its key and manages a disposable 
     await expect(row).toContainText('Paused');
     await page.getByRole('button', { name: `Resume ${name}`, exact: true }).click();
     await expect(row).toContainText('Active');
+    await open('Usage');
+    await page.getByRole('button', { name: 'Set a quota', exact: true }).click();
+    const quota = page.getByRole('dialog', { name: 'Set a quota', exact: true });
+    await quota.getByLabel('Tenant', { exact: true }).selectOption({ label: name });
+    await quota.getByLabel('Counts', { exact: true }).selectOption({ label: 'Requests' });
+    await quota.getByLabel('Limit', { exact: true }).fill('100000');
+    await quota.getByLabel('Per', { exact: true }).selectOption({ label: 'A day' });
+    await quota.getByRole('button', { name: 'Save quota' }).click();
+    await deploymentOnly(async () => {
+      const touch = page.getByRole('dialog', { name: 'Touch your passkey for the deployment' });
+      const saved = page.getByRole('status').filter({ hasText: `Saved: ${name}` });
+      await expect(touch.or(saved)).toBeVisible();
+      if (await touch.isVisible()) await touch.getByRole('button', { name: 'Use my passkey' }).click();
+      await expect(saved).toBeVisible();
+    });
+    await page.reload();
+    const quotaRow = page.getByRole('region', { name: 'Quotas' }).getByRole('row').filter({ hasText: name });
+    await expect(quotaRow).toContainText('100,000');
+    await expect(quotaRow).toContainText('a day');
+    await open('Tenants');
     await page.getByRole('button', { name: `Delete ${name}`, exact: true }).click();
     const del = page.getByRole('dialog', { name: `Delete ${name}` });
     const tenant = await del.locator('label .mono').innerText();
@@ -241,5 +261,75 @@ test('real console maintenance windows persist, reject invalid ranges, edit and 
   } finally {
     const updated = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials;
     writeFileSync(`${state}/browser-owner-credentials.json`, JSON.stringify(updated), { mode: 0o600 });
+  }
+});
+
+test('real console invitation is single-use and owner removal revokes session, passkey and recovery', async ({ page, context, browser }) => {
+  const consoleState = JSON.parse(readFileSync(`${state}/console.json`, 'utf8'));
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('WebAuthn.enable');
+  const options = { protocol: 'ctap2' as const, transport: 'internal' as const, hasResidentKey: true,
+    hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true };
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options });
+  for (const credential of JSON.parse(readFileSync(`${state}/console-owner-credentials.json`, 'utf8'))) {
+    await cdp.send('WebAuthn.addCredential', { authenticatorId, credential });
+  }
+  const second = await browser.newContext();
+  const invited = await second.newPage();
+  const device = await second.newCDPSession(invited);
+  await device.send('WebAuthn.enable');
+  await device.send('WebAuthn.addVirtualAuthenticator', { options });
+  try {
+    await page.goto(consoleState.url);
+    await page.getByRole('button', { name: 'Sign in with a passkey' }).click();
+    await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
+    await page.getByRole('navigation', { name: 'Console', exact: true }).getByRole('link', { name: 'Deployment', exact: true }).click();
+    await page.getByRole('navigation', { name: 'Deployment pages' }).getByRole('link', { name: 'Owners', exact: true }).click();
+    // The UI refuses to remove its only owner.
+    await expect(page.getByRole('button', { name: 'Remove', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Make an invite code' }).click();
+    const code = (await page.getByLabel('Invite code').innerText()).trim();
+    await invited.goto(consoleState.url);
+    await invited.getByRole('button', { name: 'Have an invite code?' }).click();
+    await invited.getByLabel('Code').fill(code);
+    const label = `Invited ${randomUUID()}`;
+    await invited.getByLabel(/Name for this passkey/).fill(label);
+    await invited.getByRole('button', { name: 'Continue with a passkey' }).click();
+    await expect(invited.getByRole('heading', { name: 'You are now a console owner' })).toBeVisible();
+    const codes = await invited.getByRole('list', { name: 'Recovery codes' }).getByRole('listitem').allInnerTexts();
+    expect(codes).toHaveLength(10);
+    await invited.getByLabel('I saved these codes').check();
+    await invited.getByRole('button', { name: 'Continue', exact: true }).click();
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    const row = page.getByRole('listitem').filter({ hasText: label });
+    await expect(row).toBeVisible();
+    await invited.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await invited.getByRole('button', { name: 'Have an invite code?' }).click();
+    await invited.getByLabel('Code').fill(code);
+    await invited.getByRole('button', { name: 'Continue with a passkey' }).click();
+    await expect(invited.getByRole('alert')).toContainText('That code did not work');
+    // Return to a real active session before the original owner removes it.
+    await invited.goto(consoleState.url);
+    await invited.getByRole('button', { name: 'Sign in with a passkey' }).click();
+    await expect(invited.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible();
+    await row.getByRole('button', { name: 'Remove', exact: true }).click();
+    await row.getByRole('button', { name: 'Yes, remove' }).click();
+    await expect(page.getByRole('status')).toContainText('Owner removed.');
+    await expect(row).toHaveCount(0);
+    await invited.reload();
+    await expect(invited.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+    await invited.getByRole('button', { name: 'Sign in with a passkey' }).click();
+    await expect(invited.getByRole('alert')).toBeVisible();
+    await expect(invited.getByRole('button', { name: 'Sign out', exact: true })).toHaveCount(0);
+    await invited.getByRole('button', { name: /Use a recovery code/ }).click();
+    await invited.getByLabel('Recovery code').fill(codes[0]!);
+    await invited.getByRole('button', { name: 'Use this code' }).click();
+    await expect(invited.getByRole('alert')).toContainText('That code did not work');
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Owners', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Remove', exact: true })).toHaveCount(0);
+  } finally {
+    writeFileSync(`${state}/console-owner-credentials.json`, JSON.stringify((await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials), { mode: 0o600 });
+    await second.close();
   }
 });

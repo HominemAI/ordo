@@ -49,6 +49,7 @@ pub mod keys;
 pub mod migrate;
 pub mod operator;
 pub mod ops;
+pub mod peers;
 pub mod people;
 pub mod prev;
 pub mod release_check;

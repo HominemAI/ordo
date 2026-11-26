@@ -5322,6 +5322,26 @@ async fn assemble_program(
                     Arc::new(|k: &str| std::env::var(k).ok()),
                     Arc::new(now_secs),
                 ));
+                // The key's version is kept in the control database, so a
+                // rotation lasts across restarts and reaches every node.
+                {
+                    let keys = keys.clone();
+                    let home = space.0.clone();
+                    let handle = handle.clone();
+                    let derive: crate::peer_client::Derive = Arc::new(move |version| {
+                        crate::peer_client::consumer_key_version(
+                            keys.as_ref(),
+                            &home,
+                            &handle,
+                            version,
+                        )
+                        .map_err(|e| e.to_string())
+                    });
+                    let store = Arc::new(crate::peer_key::KeyStore::new(peer_ops.pool.clone()));
+                    if let Err(e) = client.with_custody(store, derive).await {
+                        eprintln!("  the consumer key's version could not be read ({e})");
+                    }
+                }
                 let _ = peer_ops.client.set(client.clone());
                 // Step G5: a peer with `ORDO_PEER_<NAME>_URL` is read
                 // through its door with the same client.

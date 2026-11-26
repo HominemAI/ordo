@@ -2506,9 +2506,26 @@ peer notes {
 - `ordo plan` (`std.deployment.plan`) checks the same, recording nothing.
 - A block needs no external. The one-line form below keeps working until the
   shared-database path is removed (G8).
-- This deployment registers its consumer key at the identity service once,
-  with a token for its own admin: `std.peer.registerKey($token)`. Until then
-  the apply is refused naming that op.
+- This deployment registers its consumer key at the identity service once.
+  `ordo apply --host` does it by itself the first time the file has a `peer`
+  block, with the owner's token it already holds (`std.peer.registerKey`).
+  A later apply, and every plan, only ask whether it is registered
+  (`std.peer.keyStatus`). The plan says which: `peer key    consumer key v1
+  (3fA9xQ2k) is registered at the identity service`, or `is not registered`.
+  Registered once, it stays so across plans, applies and restarts. Without
+  the CLI, the apply is refused naming `std.peer.registerKey`.
+- The key is never permanent. `ordo peers rotate-key` moves to the next key
+  version (`v1` to `v2`), registers the new public key, and keeps the old one
+  accepted for a short overlap, `ORDO_IDENTITY_CONSUMER_KEY_OVERLAP_SECS`
+  (3600 by default; `--overlap-secs <n>` asks for less, 0 drops it at once).
+  After the overlap a call signed with the old key is refused. Every node of
+  the deployment takes the new version up from the control database within
+  15 seconds. `ordo peers key` shows the version and whether it is
+  registered.
+- Rotating the home space's blind-index key rotates the consumer key too,
+  because the key is derived from it. The plan then says `is not registered`;
+  run `ordo apply` (or `ordo peers rotate-key`) and the new key is registered.
+  The old key is dropped at once, so calls fail until it is.
 
 #### A peer's entities through its door [built in G5]
 

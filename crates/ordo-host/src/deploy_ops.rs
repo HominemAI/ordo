@@ -1012,6 +1012,7 @@ pub async fn execute(
                 .map_err(|refusal| ExecError::new(refusal.code(), refusal.to_string()))?;
             // The holders this program calls, checked as the apply checks
             // them, recording nothing (step G4).
+            preview.notes.extend(ops.peer_key_note(source).await);
             match ops.check_peers(source, false).await {
                 Ok(notes) => preview.notes.extend(notes),
                 Err(refusal) => {

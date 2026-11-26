@@ -280,7 +280,7 @@ async fn run_inner(svc: &Service, args: &[String], unix_user: &str) -> Result<St
                 } else {
                     Some(crate::deployments::parse_consumer_key(given).map_err(|e| e.to_string())?)
                 };
-                svc.set_consumer_key(actor, handle, key.as_ref())
+                svc.set_consumer_key(actor, handle, key.as_ref(), None)
                     .await
                     .map_err(|e| e.to_string())?;
                 Ok(match key {

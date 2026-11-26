@@ -29,7 +29,7 @@
 //! | `GET /deployments`, `POST /deployments`, `POST /deployments/{handle}/end` | bearer, the service's own | the deployments registered here ([`crate::deployments`]) |
 //! | `POST /deployments/{handle}/sign-up` | bearer, the service's own | `{signUp: "invite" \| "open"}`: how people join it |
 //! | `POST /deployments/{handle}/addresses` | bearer, the service's own | `{clientOrigins?, returnUrls?}`: replace either list |
-//! | `POST /deployments/{handle}/consumer-key` | bearer, the service's own or that deployment's | `{consumerKey: "<base64url>" \| null}`: set, replace or remove the public half of its consumer key ([`crate::exchange`]) |
+//! | `POST /deployments/{handle}/consumer-key` | bearer, the service's own or that deployment's | `{consumerKey: "<base64url>" \| null, overlapSecs?}`: set, replace or remove the public half of its consumer key ([`crate::exchange`]); a replaced key stays accepted for `overlapSecs` (at most `ORDO_IDENTITY_CONSUMER_KEY_OVERLAP_SECS`, 3600 by default) |
 //! | `GET /deployments/{handle}/members`, `POST /deployments/{handle}/members`, `POST /deployments/{handle}/members/{person}/end` | bearer | a deployment's members |
 //!
 //! A bearer token for a registered deployment reaches that deployment's
@@ -1146,10 +1146,30 @@ async fn deployment_consumer_key(
                     ))
                 }
             };
-            s.set_consumer_key(c.actor(), &handle, key.as_ref()).await?;
+            let overlap = match b.get("overlapSecs") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_u64().ok_or_else(|| {
+                    IdentityError::BadRequest(
+                        "`overlapSecs` is a whole number of seconds: how long the key this \
+                         replaces stays accepted, at most \
+                         ORDO_IDENTITY_CONSUMER_KEY_OVERLAP_SECS"
+                            .into(),
+                    )
+                })?),
+            };
+            s.set_consumer_key(c.actor(), &handle, key.as_ref(), overlap)
+                .await?;
+            let now = s.now();
+            let kept = s.deployment(&handle).await?;
             Ok(Reply::json(json!({
                 "handle": handle,
                 "consumerKey": key.as_ref().map(|k| ordo_identity::webauthn::b64url_encode(k)),
+                "previousConsumerKey": kept.as_ref().and_then(|d| d.previous_key)
+                    .filter(|(_, until)| now < *until)
+                    .map(|(k, _)| ordo_identity::webauthn::b64url_encode(&k)),
+                "previousConsumerKeyUntil": kept.as_ref().and_then(|d| d.previous_key)
+                    .filter(|(_, until)| now < *until)
+                    .map(|(_, until)| until),
             })))
         }
         .await,

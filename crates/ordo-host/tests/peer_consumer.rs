@@ -150,6 +150,8 @@ struct Ids {
     svc: Service,
     issuer: String,
     url: String,
+    /// The one clock of the service, the holder and the consumer.
+    clock: Clock,
 }
 
 fn callback(issuer: &str, handle: &str) -> String {
@@ -185,10 +187,11 @@ impl Ids {
             (DATA_DIR_ENV, dir.display().to_string()),
         ]);
         let cfg = IdentityConfig::from_vars(&|k| vars.get(k).cloned()).expect("settings");
+        let clock = Clock::manual(NOW);
         let svc = Service::boot(
             cfg,
             BootOptions {
-                clock: Clock::manual(NOW),
+                clock: clock.clone(),
                 hasher: Arc::new(Argon2idHasher::weak_for_tests()),
             },
         )
@@ -219,6 +222,7 @@ impl Ids {
             svc,
             issuer,
             url: format!("http://127.0.0.1:{port}"),
+            clock,
         }
     }
 
@@ -500,7 +504,10 @@ impl Holder {
         ))
         .expect("seed");
 
-        let now: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(|| NOW);
+        let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+            let clock = ids.clock.clone();
+            Arc::new(move || clock.now())
+        };
         let keys = Arc::new(IdentityKeys::new(
             IdentitySettings {
                 url: ServiceUrl::parse(&ids.url, false).unwrap(),
@@ -608,6 +615,51 @@ fn holder_vars(ids: &Ids) -> HashMap<String, String> {
 
 // ─────────────────────────────── the consumer ───────────────────────────────
 
+/// The settings a consumer node reads.
+fn consumer_vars(ids: &Ids, holder: &Holder, handle: &str) -> HashMap<String, String> {
+    HashMap::from([
+        ("ORDO_IDENTITY_URL".into(), ids.url.clone()),
+        ("ORDO_IDENTITY_ORIGIN".into(), ids.issuer.clone()),
+        ("ORDO_IDENTITY_DEPLOYMENT".into(), handle.into()),
+        ("ORDO_PEER_NOTES_URL".into(), holder.address.clone()),
+        ("ORDO_PEER_NOTES_SPACE".into(), DEFAULT_SPACE.into()),
+    ])
+}
+
+/// The consumer key of label version `version`: the first is `key_of`.
+fn key_version_of(handle: &str, version: u32) -> SigningKey {
+    let mut seed = MASTER;
+    seed[0] = seed[0].wrapping_add(version as u8 - 1);
+    peer_token::consumer_key(&seed, handle)
+}
+
+/// One node of the consumer: a client that keeps its key's version in
+/// `pool`, as the runtime wires it. Several nodes over one pool are
+/// several nodes of one deployment.
+async fn node(
+    ids: &Ids,
+    holder: &Holder,
+    handle: &str,
+    pool: &Pool,
+    now: &Arc<dyn Fn() -> u64 + Send + Sync>,
+) -> Arc<PeerClient> {
+    let vars = consumer_vars(ids, holder, handle);
+    let client = Arc::new(PeerClient::new(
+        key_of(handle),
+        Arc::new(move |k: &str| vars.get(k).cloned()),
+        now.clone(),
+    ));
+    let name = handle.to_string();
+    client
+        .with_custody(
+            Arc::new(ordo_host::peer_key::KeyStore::new(pool.clone())),
+            Arc::new(move |v| Ok(key_version_of(&name, v))),
+        )
+        .await
+        .expect("the key's version is read");
+    client
+}
+
 struct Consumer {
     apply: Arc<ApplyOps>,
     peer: Arc<PeerOps>,
@@ -634,19 +686,11 @@ impl Consumer {
             .set_setting("rollout.strategy", Some("all"), "test", "at once", 0)
             .await
             .expect("rollout.strategy all");
-        let vars: HashMap<String, String> = HashMap::from([
-            ("ORDO_IDENTITY_URL".into(), ids.url.clone()),
-            ("ORDO_IDENTITY_ORIGIN".into(), ids.issuer.clone()),
-            ("ORDO_IDENTITY_DEPLOYMENT".into(), handle.into()),
-            ("ORDO_PEER_NOTES_URL".into(), holder.address.clone()),
-            ("ORDO_PEER_NOTES_SPACE".into(), DEFAULT_SPACE.into()),
-        ]);
-        let now: Arc<dyn Fn() -> u64 + Send + Sync> = Arc::new(|| NOW);
-        let client = Arc::new(PeerClient::new(
-            key_of(handle),
-            Arc::new(move |k: &str| vars.get(k).cloned()),
-            now.clone(),
-        ));
+        let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+            let clock = ids.clock.clone();
+            Arc::new(move || clock.now())
+        };
+        let client = node(ids, holder, handle, &pool, &now).await;
         let apply = ApplyOps::new(pool.clone(), Arc::new(SinglePool::new(pool.clone())), HOME);
         let _ = apply.peer_client.set(client.clone());
         let peer = PeerOps::new(pool.clone(), HOME, now);
@@ -1047,4 +1091,217 @@ async fn a_provider_grant_covers_an_unnamed_consumer_for_a_person_and_never_as_i
         "{}",
         warned[0]
     );
+}
+
+// ─────────────────────────── the key's lifecycle (G9) ───────────────────────────
+
+fn empty() -> BoundParams {
+    BoundParams(serde_json::Map::new())
+}
+
+async fn status(viewer: &Consumer) -> Value {
+    viewer
+        .peer
+        .execute(peer_ops::KEY_STATUS, HOME, &empty(), "ann")
+        .await
+        .expect("the key's status")
+        .rows[0]
+        .clone()
+}
+
+async fn rotate(
+    ids: &Ids,
+    viewer: &Consumer,
+    deployment: &str,
+    overlap: u64,
+) -> Result<Value, String> {
+    let token = ids.admin_token(deployment).await;
+    let b = BoundParams(
+        json!({ "token": token, "overlapSecs": overlap })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    viewer
+        .peer
+        .execute(peer_ops::ROTATE_KEY, HOME, &b, "ann")
+        .await
+        .map(|r| r.rows[0].clone())
+        .map_err(|e| e.message)
+}
+
+/// A read as itself through `client`: the grant opens `std.journal.list`.
+async fn read_as_itself(client: &PeerClient) -> Result<Value, PeerClientError> {
+    client
+        .call(
+            "notes",
+            "std.journal.list",
+            Method::Read,
+            &json!({}),
+            Acting::AsItself,
+            &[],
+        )
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_key_is_registered_once_and_the_plan_says_so_across_restarts() {
+    let (ids, holder, viewer, _cookie) = stage("keyonce").await;
+    let source = consumer_source("1.0.0", &["std.journal.list"]);
+
+    // A file with no `peer` block says nothing of the key.
+    assert_eq!(
+        viewer
+            .apply
+            .peer_key_note("domain viewer @ 1.0.0\n\nentity bookmark {\n  title: text\n}\n")
+            .await,
+        None
+    );
+
+    // Before: not registered, in the plan and in the status op. What
+    // `ordo apply` then does is register it with the token it holds.
+    let note = viewer.apply.peer_key_note(&source).await.expect("a note");
+    assert!(note.contains("consumer key v1"), "{note}");
+    assert!(note.contains("is not registered"), "{note}");
+    assert!(note.contains("ordo apply"), "{note}");
+    let before = status(&viewer).await;
+    assert_eq!(before["registered"], false, "{before}");
+    assert_eq!(before["version"], 1, "{before}");
+    register(&ids, &viewer).await;
+
+    // After: registered, the plan says so, and the apply goes through.
+    let note = viewer.apply.peer_key_note(&source).await.expect("a note");
+    assert!(
+        note.contains("is registered at the identity service"),
+        "{note}"
+    );
+    let after = status(&viewer).await;
+    assert_eq!(after["registered"], true, "{after}");
+    assert_eq!(after["consumerKey"], viewer.client.public_key());
+    viewer.apply(&source).await.expect("applies");
+
+    // A restart: a new node over the same database knows it, and signs
+    // with the same key, with nothing registered again.
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+        let clock = ids.clock.clone();
+        Arc::new(move || clock.now())
+    };
+    let vars = consumer_vars(&ids, &holder, "viewer");
+    let restarted = Arc::new(PeerClient::new(
+        key_of("viewer"),
+        Arc::new(move |k: &str| vars.get(k).cloned()),
+        now,
+    ));
+    restarted
+        .with_custody(
+            Arc::new(ordo_host::peer_key::KeyStore::new(viewer.pool.clone())),
+            Arc::new(|v| Ok(key_version_of("viewer", v))),
+        )
+        .await
+        .expect("reads the version");
+    let state = restarted.key_state().await.expect("the state");
+    assert!(state.registered, "{state:?}");
+    assert_eq!(state.public, viewer.client.public_key());
+    read_as_itself(&restarted).await.expect("signs as before");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotated_key_signs_the_old_one_works_for_the_overlap_and_is_refused_after() {
+    let (ids, holder, viewer, _cookie) = stage("rotate").await;
+    register(&ids, &viewer).await;
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+        let clock = ids.clock.clone();
+        Arc::new(move || clock.now())
+    };
+    // A second node of the deployment, not yet told of the rotation by
+    // anything but the stored version.
+    let other = node(&ids, &holder, "viewer", &viewer.pool, &now).await;
+    // A node that never looks at the stored version again signs with the
+    // key it had: what an old node does.
+    let vars = consumer_vars(&ids, &holder, "viewer");
+    let stale = PeerClient::new(
+        key_of("viewer"),
+        Arc::new(move |k: &str| vars.get(k).cloned()),
+        now.clone(),
+    );
+    let v1 = viewer.client.public_key();
+    read_as_itself(&stale).await.expect("v1 signs");
+
+    // A token for another deployment's admin does not rotate it, and
+    // nothing moves.
+    let e = rotate(&ids, &viewer, "notes", 30)
+        .await
+        .expect_err("not viewer's admin");
+    assert!(e.contains("did not register the consumer key"), "{e}");
+    let kept = status(&viewer).await;
+    assert_eq!(kept["version"], 1, "{kept}");
+    assert_eq!(viewer.client.public_key(), v1);
+
+    // Rotated: version 2, a new key, the old one named.
+    let done = rotate(&ids, &viewer, "viewer", 30).await.expect("rotated");
+    assert_eq!(done["version"], 2, "{done}");
+    assert_eq!(done["previousConsumerKey"], v1, "{done}");
+    assert_ne!(done["consumerKey"], v1, "{done}");
+    assert_eq!(done["registered"], true, "{done}");
+    let now_key = viewer.client.public_key();
+    assert_eq!(done["consumerKey"], now_key);
+    let s = status(&viewer).await;
+    assert_eq!(
+        (s["version"].clone(), s["registered"].clone()),
+        (json!(2), json!(true))
+    );
+
+    // Inside the overlap both keys are taken: the rotated node, the node
+    // that reads the stored version (no further than 15 seconds on), and
+    // the node still on v1.
+    read_as_itself(&viewer.client).await.expect("v2 signs");
+    ids.clock.advance(20);
+    read_as_itself(&other)
+        .await
+        .expect("the other node took v2");
+    assert_eq!(other.public_key(), now_key);
+    read_as_itself(&stale)
+        .await
+        .expect("v1 still signs in the overlap");
+
+    // After it, v1 is refused by name, and v2 goes on.
+    ids.clock.advance(20);
+    let e = read_as_itself(&stale)
+        .await
+        .expect_err("v1 is dropped after the overlap");
+    let PeerClientError::KeyNotRegistered { handle, message } = &e else {
+        panic!("{e}")
+    };
+    assert_eq!(handle, "viewer", "{e}");
+    assert!(message.contains("viewer"), "{e}");
+    assert!(e.to_string().contains("std.peer.registerKey"), "{e}");
+    read_as_itself(&viewer.client).await.expect("v2 goes on");
+    read_as_itself(&other).await.expect("v2 goes on");
+
+    // Persisted: a restart derives v2 from the stored version.
+    let restarted = node(&ids, &holder, "viewer", &viewer.pool, &now).await;
+    assert_eq!(restarted.key_version(), 2);
+    assert_eq!(restarted.public_key(), now_key);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotating_with_no_overlap_drops_the_old_key_at_once() {
+    let (ids, holder, viewer, _cookie) = stage("rotate0").await;
+    register(&ids, &viewer).await;
+    let now: Arc<dyn Fn() -> u64 + Send + Sync> = {
+        let clock = ids.clock.clone();
+        Arc::new(move || clock.now())
+    };
+    let vars = consumer_vars(&ids, &holder, "viewer");
+    let stale = PeerClient::new(
+        key_of("viewer"),
+        Arc::new(move |k: &str| vars.get(k).cloned()),
+        now,
+    );
+    rotate(&ids, &viewer, "viewer", 0).await.expect("rotated");
+    let e = read_as_itself(&stale)
+        .await
+        .expect_err("no overlap was asked for");
+    assert!(matches!(e, PeerClientError::KeyNotRegistered { .. }), "{e}");
+    read_as_itself(&viewer.client).await.expect("v2 signs");
 }

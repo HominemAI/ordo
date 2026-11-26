@@ -2237,6 +2237,23 @@ impl ApplyOps {
         })
     }
 
+    /// What the plan says of the consumer key when the program calls
+    /// another deployment: whether the identity service has it. Shown
+    /// whether or not the holders then answer (G9).
+    pub async fn peer_key_note(&self, source: &str) -> Option<String> {
+        let program = Program::compile(source).ok()?;
+        if program.schema.peer_uses.is_empty() && program.schema.peers.is_empty() {
+            return None;
+        }
+        let client = self.peer_client.get()?;
+        Some(match client.key_state().await {
+            Ok(state) => state.line(),
+            Err(e) => {
+                format!("peer key    whether the consumer key is registered could not be read: {e}")
+            }
+        })
+    }
+
     /// Check the `peer` blocks of `source` against each holder
     /// (`crate::peer_ops::check_uses`), recording the use with each when
     /// `record` is set. A program that does not compile, or has no block,

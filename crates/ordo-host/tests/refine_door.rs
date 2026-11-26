@@ -356,6 +356,77 @@ async fn a_sealed_unindexed_condition_is_refused_at_the_door() {
 
 /// A value the door would once have passed to the binder, where it was a
 /// 500, is a 400 naming the field.
+/// Step G5 (`plan-federation-grants.md` §4): another deployment sends a
+/// read whole. `limit` is the rows of one answer, past the page size;
+/// `sort` replaces the op's order and is never paged; `caller` is this
+/// deployment's own `$caller`.
+#[tokio::test]
+async fn sort_limit_and_caller_read_one_window_as_this_deployment_says() {
+    let (state, _f) = door("ordo_refine_window", 2).await;
+    let get = |refine: Value, page: Option<String>| {
+        let state = &state;
+        async move {
+            call(
+                state,
+                "GET",
+                &path("extraRows", "", Some(&refine), page.as_deref()),
+                None,
+            )
+            .await
+        }
+    };
+
+    // A page of 2 has a next; a sorted window of 3 is one answer.
+    let (s, plain) = get(json!({}), None).await;
+    assert_eq!(s, StatusCode::OK, "{plain}");
+    assert!(plain["next"].is_string(), "{plain}");
+    let (s, body) = get(
+        json!({"sort": [{"field": "label", "desc": true}], "limit": 3}),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        labels(body["rows"].as_array().unwrap()),
+        ["c", "b", "a"],
+        "{body}"
+    );
+    assert!(body.get("next").is_none(), "a sorted read is never paged");
+    let (_, body) = get(
+        json!({"sort": [{"field": "label", "desc": false}], "limit": 1}),
+        None,
+    )
+    .await;
+    assert_eq!(labels(body["rows"].as_array().unwrap()), ["a"]);
+
+    // A sorted read with a cursor is refused, and so is a limit past
+    // ORDO_REFINE_MAX_LIMIT or of nothing.
+    let next = plain["next"].as_str().unwrap().to_string();
+    let (s, body) = get(json!({"sort": [{"field": "label"}]}), Some(next)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_refinement");
+    assert!(body.to_string().contains("never paged"), "{body}");
+    for limit in [0, 201] {
+        let (s, body) = get(json!({ "limit": limit }), None).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("ORDO_REFINE_MAX_LIMIT"), "{body}");
+    }
+    let (s, body) = get(json!({"sort": [{"field": "nope"}]}), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+
+    // `caller` compares with this door's own `$caller`, and takes no value.
+    let (s, body) = get(json!({"where": [{"field": "label", "op": "caller"}]}), None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body["rows"].as_array().unwrap().is_empty(), "{body}");
+    let (s, body) = get(
+        json!({"where": [{"field": "label", "op": "caller", "value": "a"}]}),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("takes no value"), "{body}");
+}
+
 #[tokio::test]
 async fn a_mistyped_value_is_a_400_and_never_a_500() {
     let (state, _f) = door("ordo_refine_mistyped", 50).await;

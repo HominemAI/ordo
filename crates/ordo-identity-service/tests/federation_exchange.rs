@@ -41,6 +41,7 @@ use ordo_identity::jose::{self, Alg};
 use ordo_identity::oidc::{check_id_token, IdTokenRules};
 use ordo_identity::peer_token::{
     self, ASSERTION_TYPE, GRANT_CLIENT_CREDENTIALS, GRANT_TOKEN_EXCHANGE, TOKEN_TYPE_ID_TOKEN,
+    TOKEN_TYPE_JWT,
 };
 use ordo_identity::software_authenticator::TestAuthenticator;
 use ordo_identity::webauthn::b64url_encode;
@@ -875,4 +876,102 @@ async fn the_call_chain_is_carried_in_the_token_with_the_consumer_last() {
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     assert!(v.to_string().contains("ordo_chain"), "{v}");
+}
+
+async fn session_exchange(
+    h: &H,
+    assertion: &str,
+    statement: &str,
+    audience: &str,
+) -> (StatusCode, Value) {
+    token(
+        h,
+        &[
+            ("grant_type", GRANT_TOKEN_EXCHANGE),
+            ("client_assertion_type", ASSERTION_TYPE),
+            ("client_assertion", assertion),
+            ("subject_token", statement),
+            ("subject_token_type", TOKEN_TYPE_JWT),
+            ("audience", audience),
+        ],
+    )
+    .await
+}
+
+/// Step G5, board `federation-build-5-choices-from-steps` ask 2: past the
+/// person's 10-minute ID token, the consumer exchanges its own session
+/// statement about them, signed with its consumer key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_consumer_keeps_acting_for_a_person_with_its_own_session_statement() {
+    let h = three("fed-session", &[]).await;
+    let (_, dana, id_token) = dana(&h).await;
+
+    // 20 minutes on, the ID token is spent.
+    h.clock.advance(20 * 60);
+    refused(
+        exchange(
+            &h,
+            &assertion(&h, "notes", &key_of("notes"), "s-0"),
+            &id_token,
+            "viewer",
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "invalid_grant",
+    );
+
+    // The session statement still buys a token for her.
+    let now = h.now();
+    let statement = |iss: &str, sub: &str, key: &SigningKey, exp: u64| {
+        peer_token::session_subject(iss, ORIGIN, sub, key, now, exp)
+    };
+    let (s, v) = session_exchange(
+        &h,
+        &assertion(&h, "notes", &key_of("notes"), "s-1"),
+        &statement("notes", &dana, &key_of("notes"), now + 60),
+        "viewer",
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let t = v["access_token"].as_str().unwrap();
+    assert_eq!(header_of(t)["typ"], "ordo-peer+jwt");
+    let c = verified(&h, t).await;
+    assert_eq!(c["sub"], dana.as_str());
+    assert_eq!(c["act"], json!({ "sub": "notes" }));
+    assert_eq!(c["kind"], "person");
+    assert_eq!(c["exp"], now + 300, "its own span, not the statement's");
+
+    // Each one that is not the consumer's own, live, for its own member is
+    // refused.
+    let cases = [
+        (
+            "signed with another key",
+            statement("notes", &dana, &key_of("viewer"), now + 60),
+        ),
+        (
+            "issued by another deployment",
+            statement("viewer", &dana, &key_of("notes"), now + 60),
+        ),
+        ("expired", statement("notes", &dana, &key_of("notes"), now)),
+        (
+            "living too long",
+            statement("notes", &dana, &key_of("notes"), now + 3600),
+        ),
+        (
+            "not a member",
+            statement("notes", "p_nobody", &key_of("notes"), now + 60),
+        ),
+        ("an ID token is not a statement", id_token.clone()),
+    ];
+    for (i, (why, st)) in cases.iter().enumerate() {
+        let got = session_exchange(
+            &h,
+            &assertion(&h, "notes", &key_of("notes"), &format!("s-x{i}")),
+            st,
+            "viewer",
+        )
+        .await;
+        assert_eq!(got.0, StatusCode::BAD_REQUEST, "{why}: {}", got.1);
+        assert_eq!(got.1["error"], "invalid_grant", "{why}: {}", got.1);
+    }
 }

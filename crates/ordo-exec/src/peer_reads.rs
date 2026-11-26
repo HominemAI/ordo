@@ -356,10 +356,16 @@ fn collect(
 ) {
     let door = |entity: &str| externals.get(entity).filter(|r| r.door.is_some()).cloned();
     let level = conjuncts(&q.filters);
+    // A joined alias is null where its row was not served, so of the
+    // level's conditions on it only those false on null may narrow what the
+    // holder sends: `note.title != "x"` holds for a row it did not send.
+    // Its join guard is in the `ON`, and narrows like any guard.
     let site = |alias: &str, read: ExternalRead, place: Place, guard: Option<&BCond>| {
+        let joined = !is_level_source(q, alias);
         let mut own: Vec<BCond> = level
             .iter()
             .filter(|c| only_reads(c, alias))
+            .filter(|c| !joined || false_on_null(c))
             .map(|c| (*c).clone())
             .collect();
         if let Some(g) = guard {
@@ -428,6 +434,21 @@ fn collect(
     }
     for c in &q.ctes {
         collect(&c.query, externals, false, out);
+    }
+}
+
+/// Is `alias` the source `q` reads from, never null-extended?
+fn is_level_source(q: &Query, alias: &str) -> bool {
+    matches!(&q.from, Src::Table { alias: a, .. } if a == alias)
+}
+
+/// Is `c` false whenever the field it reads is null? `!=` and `is null`
+/// are not; neither is anything not sent to the holder.
+fn false_on_null(c: &BCond) -> bool {
+    match c {
+        BCond::Cmp { op, .. } => *op != CmpOp::Ne,
+        BCond::In { .. } | BCond::PeerCaller { .. } => true,
+        _ => false,
     }
 }
 

@@ -136,6 +136,11 @@ op marks =
   sort label
   take 100
 
+op marksNotFirst =
+  bookmark(note.title != "memo 001")[label]
+  sort label
+  take 100
+
 op allSecrets =
   secrets[id, body]
   take 10
@@ -718,6 +723,18 @@ async fn a_join_of_100_native_rows_to_the_peer_is_one_call() {
     assert_eq!(sent["where"][0]["op"], "in", "{sent}");
     assert_eq!(refs.len(), 100);
     assert_eq!(sent["limit"], 100);
+
+    // A condition through the ref that holds on null (`!=`) stays here:
+    // sent to the holder, the row it left out would join as null and pass.
+    let rows = viewer
+        .read("marksNotFirst", "mem_ann")
+        .await
+        .expect("the marks");
+    assert_eq!(rows.len(), 99, "{rows:?}");
+    assert_eq!(rows[0]["label"], "mark 002");
+    assert_eq!(holder.calls(), 2);
+    let sent = &holder.refines()[1];
+    assert_eq!(sent["where"].as_array().unwrap().len(), 1, "{sent}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

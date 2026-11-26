@@ -87,6 +87,8 @@ export const REFUSAL_CLASSES = [
   'function_oom',
   'function_busy',
   'space_unavailable',
+  'peer_unavailable',
+  'peer_refused',
   'statement_timeout',
   'tenant_refused',
   'tenant_not_ready',
@@ -217,12 +219,16 @@ const DISPOSITIONS: Partial<Record<DoorCode, Disposition>> = {
   // Nothing ran; the client already waited out its retries.
   server_busy: 'retry',
   tenant_not_ready: 'retry',
+  // Another deployment this read reaches through its door did not answer.
+  peer_unavailable: 'retry',
 
   idempotency_applied: 'terminal',
   idempotency_mismatch: 'terminal',
 
   access_denied: 'denied',
   access_guard: 'denied',
+  // The other deployment refused the read; it decides what it opens.
+  peer_refused: 'denied',
   delegation_required: 'denied',
   caller_supplied: 'denied',
   // The app developer requires a verified email address and the person has

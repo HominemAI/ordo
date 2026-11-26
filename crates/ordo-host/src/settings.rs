@@ -1415,6 +1415,24 @@ pub static REGISTRY: &[Setting] = &[
         r#""#,
     ),
     s(
+        "ORDO_PEER_TIMEOUT_SECS",
+        "Databases and pools",
+        r#"10 s"#,
+        r#"1 or more"#,
+    ),
+    s(
+        "ORDO_PEER_READ_MAX_ROWS",
+        "Databases and pools",
+        r#"1000"#,
+        r#""#,
+    ),
+    s(
+        "ORDO_PEER_BATCH_KEYS",
+        "Databases and pools",
+        r#"200"#,
+        r#""#,
+    ),
+    s(
         "ORDO_CONSUMER_<NAME>_CLIENT",
         "Databases and pools",
         r#"none"#,

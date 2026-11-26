@@ -974,6 +974,25 @@ mod tests {
     }
 
     #[test]
+    fn the_timeout_is_a_setting_with_a_default() {
+        assert_eq!(
+            client(SERVICE).timeout().unwrap(),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
+        let mut set = SERVICE.to_vec();
+        set.push((TIMEOUT_ENV, "3"));
+        assert_eq!(client(&set).timeout().unwrap(), Duration::from_secs(3));
+        set.pop();
+        set.push((TIMEOUT_ENV, "0"));
+        let e = client(&set).timeout().unwrap_err();
+        assert!(
+            e.to_string().starts_with("ORDO_PEER_TIMEOUT_SECS is `0`"),
+            "{e}"
+        );
+        assert_eq!(e.action(), Action::FixInput);
+    }
+
+    #[test]
     fn the_error_says_what_a_caller_can_do() {
         let busy = PeerClientError::Unreachable {
             what: "x".into(),
